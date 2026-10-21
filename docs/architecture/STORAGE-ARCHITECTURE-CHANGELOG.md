@@ -872,3 +872,534 @@ destructive `rebuild_all()`; a re-capture must neither advance nor drop it; the
 keyless lane's full key set is pinned; and the pre-fix Source shape is pinned
 against the literal set. Registered on the `core` surface with a `durations:`
 weight, because a guard no CI leg selects is a guard that does not run.
+
+## §13's `aboutObject` read-site table — the fourth correction, and the end of the hand audit (2026-10-20, `#7948`)
+
+The design document's §13 table is the **whole evidence base** for the KEEP ruling on
+`aboutObject` (owner, 2026-09-23), and the document says so itself: *"⚠️ The count is the whole
+argument — the table must name every customer-callable surface"*. It has now been corrected
+**four** times, each by hand, each finding a different part of it wrong:
+
+1. the issue body (`#7948`) — the first eleven-site envelope;
+2. review finding `B2.7` (`REVIEW-CONSOLIDATED-2026-09-23.md`) — three further readers, two of
+   them under-classed as non-customer-callable;
+3. the `#7956` erratum on `B2.7` — that finding was itself incomplete (the customer-callable
+   count was four, not two);
+4. **this one** — two rows cited symbols that exist but **do not read the edge**, one row named
+   no symbol at all, and two readers were absent entirely.
+
+What moved, and why it is the last hand pass: the table is now **executable**
+(`tests/test_7948_about_edge_read_sites.py`). It derives the census from the source's AST and reds
+when a reader under `tortoise/` is undeclared or a declared symbol does not perform the read, so
+the fifth correction is a red test rather than a fifth audit.
+
+- **Row 8 cited `collect_slices`** — which orchestrates the connected-assembly read and never
+  traverses the edge. The reads are in **`spine_rows`** (Object→Points and Object→Events, both inside
+  `docker_walker_port`) — the symbol is what the arm resolves; no line number is offered here, per the
+  rule stated below. A re-verifier following the row found no
+  traversal and could only conclude the row was wrong.
+- **Row 9 cited `build_subgraph`** — the Cypher is the module constants `_CYPHER_ABOUT` /
+  `_CYPHER_SIBLINGS`, executed by **`_collect_raw`** at `subgraph.py:439`/`:440`.
+- **Row 4 named no symbol at all** (`search(order_by="graph")` is a door, not a site), so its two
+  degree-centrality readers could not be re-verified by anyone. They are
+  **`GraphRanker._fetch_event_signals`** (`ranking.py:703`) and
+  **`StateRanker._fetch_point_signals`** (`ranking.py:1018`).
+- **New row 12 — `_EdgeHandlers._count_about_out`** (`projection/edges.py:1871`). It is the
+  link-verification predicate: `resolve_about_link` asks "did this record leave the Event joined to
+  anything". ⚠️ Reachable only on the **DEFENSIVE** `how: "name"` replay path — no released version
+  and no `origin/main` writes that form — so it cannot fire on data written today.
+- **New row 13 — `session_schema.audit_session_retrofit`** (`session_schema.py:663`), the retrofit
+  audit's recorded-vs-live edge counter, split across two `WITH` stages so the session-origin and
+  turn-Point-origin counts do not cross-multiply.
+- **Row 2's symbol was the SDK door, not the reader.** `topic_summarize` is the entry point; the
+  read is in **`_retrieve_topic_neighborhood`** (`topic_summarization.py:141`, `edge_type` at
+  `:185`).
+- **The count moved eleven → fifteen, and the customer-callable count did not move: four.** The
+  correction is entirely in the non-callable tail, which is where three hand audits kept losing
+  sites.
+- **Line numbers are gone from the table, deliberately.** They were pinned to `c79ba1cf2` and every
+  one of them had rotted; the documents' own rule is *"the symbol name is authoritative, the line
+  number is a convenience"*. Dropping the convenience removes a whole rot class instead of
+  re-pinning it. The test asserts symbols and census membership, never line numbers — a line
+  assertion would red on every unrelated edit, which is a different way to be dead.
+- **The test-file count was restated with its measurement.** `rg -l aboutObject tests/` → **59**
+  at `26aff163c` (36 at the pin; 41 recorded by the `#7956` pass at `1e5fc00ca`). All three count
+  files that **mention** the edge, which is the only thing a grep can measure — the sentence said
+  *"assert"*, which overstated what was behind the number.
+- **The sibling passage in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 was corrected in the same pass** (its
+  `assembly.py:573`/`:789`/`:809` pointer, its `:NNNN` citations and its test-file count), because
+  a repair that fixes one copy and leaves the other is how this drift survived the previous three.
+
+### Follow-up, same day — the FIFTH correction, and the first one the census could not have made (`PR #9398` review)
+
+The section above called itself "the last hand pass" and was **wrong within hours**: the review of
+that PR found the newly-written census blind in a whole class, and the claim it guards therefore
+still false. The review is the reason the count below moved in the direction that matters.
+
+- **The census could only see a string LITERAL.** It parsed `ast.Constant` and nothing else, so a
+  reader that builds the relationship name at runtime was invisible — and five of them exist:
+  `StateRanker._fetch_object_signals` (`ranking.py:1066`, `"|".join(ABOUT_EDGE_TYPES)`),
+  `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py`, no line hint — it
+  builds `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`, and the numbers this entry originally
+  shipped with were already wrong by a few lines when written), `supersede_point`
+  (`sdk.py:13559`) and `_preview_supersede` (`mcp_server.py:6804`), both looping over
+  `SUPERSEDE_STRUCTURAL_RELS`.
+  Worse, the table and the census **agreed perfectly** on the 13 sites the literal scan could see,
+  and that agreement was circular: both were blind in the same place. Adding rows alone would have
+  left a sixth hand pass guaranteed, so the fix is the derivation, not the list.
+- **The derivation is now one level through the expression**: `+`-concatenation, `JoinedStr`
+  (f-strings, including ones with no placeholders — the old scan skipped those outright),
+  `"|".join(CONSTANT)`, `for rel in CONSTANT` loop variables, class attributes (`self._ABOUT_TYPES`),
+  and constants **imported** from another module (resolved only when the name is unique package-wide,
+  so an ambiguous name is a reported gap rather than a guess).
+- **That un-blinded a site the earlier table had written off as un-derivable.**
+  `_retrieve_topic_neighborhood` (`topic_summarization.py:211`) builds `edge_type` from a conditional
+  and interpolates it into an f-string; the literal scan could not follow it and the row was listed
+  as one of "the two no census can find". It is now derived, so `UN_DERIVABLE` is down to **one**
+  entry: `SubgraphExpander._neighbors`, whose `MATCH (n)-[r]->(m)` names no type anywhere.
+- **The count moved fifteen → twenty, and the customer-callable count moved four → SIX.** New row 14
+  (`_state_related_objects`, `_state_related_points` — MCP `tortoise_recall` through `recall_state`)
+  and new row 16 (`_preview_supersede` — the `tortoise_supersede` dry-run preview) are both
+  **customer-callable**; row 15 (`supersede_point`) is the read on the write path that row 12's
+  precedent already admits. Row 4 gains its third reader, `_fetch_object_signals`. ⚠️ **The
+  customer-callable number is the one the KEEP ruling rests on, so a correction that raises it (and
+  was invisible to four hand passes) is the most important line in this entry.**
+- **The completeness arm now pairs files with symbols POSITIONALLY.** It used to build a
+  cross-product of a row's backticked files × its symbols, so a row citing files A,B and symbols
+  X,Y "declared" all four pairs — harmless while every row is single-file, and exactly wrong the
+  moment a row cites two files (the shape the table invites). Pairing symbols to the file token that
+  precedes them is mechanical and exact.
+- **The anti-vacuity floors were lowered, deliberately.** They sat at today's exact census (13 sites
+  / 13 rows), so deleting a reader *and* its row — a legitimate contraction — failed with a message
+  claiming the parser had broken. They are now floors (~10) that only catch "found nothing".
+- **The guard is registered in `config/ci-surfaces.yml`** (`core`, with a `durations` row). Without
+  that it was invisible to `tools/ci_selection.py --integrity` (a required, merge-gating job) AND
+  selected into no CI leg at all — the instrument that exists because nothing executable checked the
+  table would itself have run nowhere.
+- **A mechanism test pins the derivation** on synthetic sources (literal, `+`-concat, f-string,
+  `"|".join(TUPLE)`, `for rel in TUPLE`, and a `MERGE` writer that must NOT count), so the resolver
+  cannot regress to literal-only without a red.
+
+### Follow-up, same day — the SIXTH correction: the counts are now asserted, and the coverage claim stopped overreaching (`PR #9398`, second review)
+
+Two findings, both in what §13 **asserts about** the guard rather than in the guard's derivation. The
+fifth-correction entry above calls the customer-callable number *"the most important line in this
+entry"* — and that line was the one thing in §13 nothing checked.
+
+- **§13 claimed the guard's coverage was complete except for ONE shape; the guard documents two.**
+  The document said *"The one shape it cannot see is an empty relationship pattern"*, while the guard's
+  own `WHAT THE CENSUS CANNOT SEE` lists a second blind class: a relationship name **assembled entirely
+  at call time** (a function argument, a dict lookup, a value stored on an instance at construction),
+  which the resolver follows one level deep and then leaves as a gap. Such a reader derives nothing and
+  the table can stay short with five tests green — the same silent-omission class this whole entry
+  exists to end, sitting one paragraph away from a claim that the guard would have caught it. §13 now
+  states both shapes and states the guarantee as what it is: *a reader that NAMES the edge — literally,
+  or through a constant the resolver can follow*.
+- **⚠️ The count was guarded by a `>= 4` floor while the table declares SIX.** §13 calls the number
+  *"the whole argument"* and the ruling rests on it, yet a demotion of two `reach` cells — the `#7956`
+  erratum's exact direction, and the one that matters — left every arm green while the headline still
+  said SIX. Worse, §13 contained the contradiction already: a later sentence listed four customer-callable
+  surfaces and said *"are four of them"*, three paragraphs under a headline saying SIX. The new
+  `test_the_prose_counts_match_the_table` reads the numerals **out of the sentences that state them**
+  (`TWENTY read sites`, `SIX of them are CUSTOMER-CALLABLE`, and any later *"are N of them"* restatement)
+  and compares each to the table — the `reach`-column count for the customer-callable numerals, and
+  `census ∪ UN_DERIVABLE` for the site count (as the mechanism stood then — the seventh entry below
+  splits the units, because those two numerals counted different things). Only the numeral is read, never the prose around it, so the
+  sentences stay free to be rewritten as long as they stay true. Non-vacuity is measured, not assumed:
+  the arm reds on the previous revision of §13 (it reads `four` against six declared rows) and reds again
+  when a `reach` cell is demoted with the prose left alone.
+- **The two sentences were corrected to match**: the customer-callable enumeration now names all six
+  (`belief_timeline`, `topic_summarize`, `recall_subgraph`, `search(order_by="graph")`, `recall_state`,
+  the `tortoise_supersede` dry-run preview) and says *six*, and the customer-callable count is no longer
+  described in the guard's docstring as "not asserted beyond a floor" — that paragraph is what permitted
+  the stale headline in the first place.
+
+### Follow-up, same day — the SEVENTH correction: the class was ONE example, and the headline mixed two units (`PR #9398`, third review)
+
+The sixth entry closed the blind classes it knew about and asserted the counts they produced. The
+review of *that* state found both halves still wrong in the same direction — a reader the table did
+not name, and a number that read as a count of something it did not count.
+
+- **⚠️ The empty-pattern shape was declared as ONE example, and the class had three further
+  members.** §13 said *"an empty relationship pattern (`MATCH (n)-[r]->(m)`, row 3)"*, and
+  `UN_DERIVABLE` held a single entry (`SubgraphExpander._neighbors`). But the shape is not a
+  symbol — it is a **class**: any query whose relationship pattern names no type walks every type,
+  `aboutObject` included. Three live members were absent, one of them **customer-callable**:
+  `navigation._hop_query` — the per-hop query behind `entityProfile` and `tortoise_traverse` (MCP
+  `tortoise_entity_profile`, and `tortoise_traverse`), which emits `-[r]->` and `<-[r]-` and returns
+  `type(r)` verbatim — and the backfill census `CENSUS_QUERY`
+  (`definite_description_backfill.census_rows`, diagnostic), while `_preview_supersede` was a row
+  for a different reason entirely. **The guard could not see any of them**: `navigation.py` carries
+  no `aboutObject` literal and no rel constant, so no derivation parsed it, and the single
+  hand-declared entry covered only `_neighbors`. Six arms stayed green over a customer-callable
+  reader — a PASS about a false artifact, which is the failure mode this whole instrument exists to
+  end.
+- **The class is now derived by its own shape walk** (`_is_empty_pattern_read`: a bracketed
+  traversal with no `:` under a reading clause, docstrings excluded because they only quote Cypher),
+  and every derived member must be either a §13 row or a named `EMPTY_PATTERN` entry saying why it
+  is not an `aboutObject` read for a referent (eighteen such members today, from graph export and
+  edge counts to delete/repoint sweeps). A **new** member of the class now reds instead of shipping:
+  declaring one example by name was how this survived four passes. New rows **17** (`_hop_query`,
+  customer-callable) and **18** (`census_rows`, diagnostic).
+- **⚠️ The headline's numerals were compared against the wrong units.** *"TWENTY read sites, and SIX
+  of them are CUSTOMER-CALLABLE"*: TWENTY counted backticked **symbols**, SIX counted **rows**, and
+  the six customer-callable rows carried **nine** symbols — so "of them" was false by three, and the
+  arm baked the mismatch in by comparing each numeral to a different set. §13 now states
+  **TWENTY-TWO read sites across EIGHTEEN rows, and SEVEN of those rows (ten sites) are
+  CUSTOMER-CALLABLE**, and `test_the_prose_counts_match_the_table` checks four numerals, each
+  against the set its own noun names.
+- **The sibling copy in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 stopped restating the counts.** It
+  asserted an unguarded *"SIX sites are customer-callable"* and *"four customer-callable sites DO"*,
+  plus a "TWENTY-site table" pointer, and nothing executed any of them (the citation guard resolves
+  symbols, not counts) — so the two documents agreed on numbers neither checked, which is the
+  circular agreement this changelog diagnoses one level down. Both numerals and the table-size
+  pointer are now a reference to §13, and the name-invisible enumeration gained
+  `navigation._hop_query`.
+- **A rotted `file.py:NNNN` citation was fixed in the passage this PR already rewrote.**
+  `_connect_issue_objects` was cited as `sdk.py:20154` — a line inside `_cross_lens_pool`'s Cypher.
+  It sat three paragraphs below the sentence explaining that line numbers were dropped *because*
+  they had rotted. ⚠️ **The first fix of that citation shipped a new number, and the number was
+  wrong too** (`34896`, which is a different function at every head it was checked against) — the
+  fix for a rotten line number was a rotten line number, which is the argument for the rule rather
+  than an exception to it. The citation is now **symbol-only** (`sdk.py`, no `:NNNN`), the same form
+  §13's headline states, and the third review's remaining line hints in `EXTRACTOR-V4-ARCHITECTURE.md`
+  were dropped the same way — see the ninth entry below.
+- **`_MIN_CUSTOMER_CALLABLE`'s comment stated a wrong delta** (*"the table now declares three
+  more"*: four → six is two). A comment making a numeric claim inside a file whose whole subject is
+  numeric claims is not cosmetic.
+
+### Follow-up, same day — the EIGHTH correction: the shape that can only be DECLARED now has its members (`PR #9398`, third review, remaining half)
+
+The seventh entry below turned the empty-pattern shape into a derived class and closed it. The
+review's other half was still open, and it is the half no derivation can reach:
+
+- **§13 said the call-time-name class was covered — and then said it had *"no member today"*, which
+  was false.** A relationship name assembled entirely from a value computed at call time (a dict
+  lookup, an instance attribute) resolves to nothing, so no census can find it; the document
+  therefore has to name it. Two about\*-specific readers of exactly that shape are live:
+  `session_link.link_entity` — the **existence pre-probe** before minting an `about*` edge, whose
+  `edge_type` **defaults to `"aboutObject"` and whose every capture-path caller takes the default** —
+  and `subject_binding.bind_point_subjects`, the **re-probe** after a refused link, whose
+  `edge_type` comes from `_ROLE_TARGET["object"]`. Both read the edge on the write path, which row
+  12's precedent (`_count_about_out`) already admits as a row.
+- **One of the two was resolvable all along.** The resolver now follows **function-parameter
+  defaults**, so `link_entity`'s pre-probe is DERIVED (row 19) instead of hand-declared and the
+  class statement is no longer a matter of trust for that member. The other is a genuine dict lookup
+  and stays un-derivable: `bind_point_subjects` is **row 20** and is registered in the guard's
+  `UNDERIVABLE_CALL_TIME`.
+- **The declaration is now checked in both directions**, which is what makes it a class rather than
+  an example: every registered member must be a §13 row (the previous revision declared the class
+  and named nobody) and must still be un-derivable (if the resolver learns to follow it, the entry is
+  stale and reds). The mechanism arm gained the parameter-default case, so the new derivation shape
+  is pinned on synthetic sources like the other five.
+- **The count moved twenty-two → TWENTY-FOUR sites on eighteen → TWENTY rows.** The
+  customer-callable count is unchanged (**seven rows, ten sites**) — both new readers are on the
+  default-ON write path, not customer doors. The headline's four numerals and their units are
+  asserted, so the count and the table cannot drift apart.
+
+### Also corrected: "no `aboutObject` edge carries ANY property" was false (`#1370`)
+
+The §13 sentence that closes the *structural door* argument — *"no `aboutObject` edge carries any
+property, so we lose nothing semantically by deriving later"* — has been false since `#1370`:
+`session_link.link_entity` sets `r.confidence` when a binding confidence is supplied, and
+`projection/entities.py`'s replay fold restores it (a test asserts it on an `aboutObject` edge). The
+supporting measurement was a literal grep (`rg 'aboutObject \{'` → 0), and it was blind in exactly
+the class the census exists to fix: the relationship name there is a **variable**. The claim is now
+scoped to what the code actually does — the binding confidence rides the edge — in §13 and in
+`EXTRACTOR-V4-ARCHITECTURE.md` §13.8; `#9403` later refined it again (the record projection also
+stamps `idx`, and the census sees properties without being a proof of absence), and §11's ruling
+wording is flagged as predating `#1370` rather than silently rewritten — reopening a ruling is a
+decision, not a copy-edit. (Surfaced by the earlier reviews of this PR; the third review's scope did
+not include it.)
+
+### Follow-up, same day — the NINTH correction: the line-number hints are gone, and three prose claims are now checked (`PR #9398`, fourth review)
+
+The fourth review found nothing wrong with the census or the KEEP ruling. All three of its findings
+were **prose that a machine could have caught and no machine was catching**, which is this PR's own
+subject one level up:
+
+- **The line hints were still there, in the one paragraph that says they are not the authority.** The
+  §13.8 passage in `EXTRACTOR-V4-ARCHITECTURE.md` opened with *"These line numbers are the convenience,
+  not the authority"* while carrying fifteen `file.py:NNNN` hints — and six of them pointed at
+  unrelated code **at the PR head and at `origin/main`** (the reviewer measured each as a symbol
+  grep vs a `sed -n 'Np'`, the two-command comparison the paragraph itself invites). §13 had already
+  dropped its line numbers for exactly this reason, and the passage is inside the same argument, so
+  the numbers are now **gone, not re-measured**: the paragraph resolves **symbols** only, and the
+  sentence says why. The re-measure route was rejected because the last time this set was "fixed"
+  by re-measuring, the new number was wrong too (the `_connect_issue_objects` entry above).
+- **§13's empty-pattern class named two rows and has three.** *"an empty relationship pattern
+  (`MATCH (n)-[r]->(m)`, rows 3 and 17)"* — row 18 (`definite_description_backfill.census_rows`,
+  `OPTIONAL MATCH (o)<-[r]-()`) is the same class, and the guard's own docstring says so. Now
+  *rows 3, 17 and 18*, and **the sentence is asserted against the derived class**: a new member, or
+  a row dropped from the sentence, reds.
+- **Row 7's `reach` cell cited a symbol that does not exist.** `QueryOptions` appears nowhere in the
+  package (`grep -rn --include=*.py QueryOptions tortoise/` → 0 hits); the flag is a keyword
+  parameter of `tortoise_fts_query`. Corrected, and the `reach` column gained an arm: every
+  CamelCase symbol it backtick-quotes must exist in the package, so a reach cell can no longer cite
+  a name that was never there.
+
+**The three new arms, and why each is non-vacuous.** `tests/test_7948_about_edge_read_sites.py`
+gained `test_the_census_prose_carries_no_line_citations` (reds on the pre-fix document, which
+carried twenty hints across the two passages — four in §13's bullet and sixteen in the sibling
+paragraph, measured with the arm's own `_LINE_HINT`), `test_the_prose_names_every_row_in_the_empty_pattern_class`
+(reds on *rows 3 and 17*, naming the missing row 18 by deriving it), and
+`test_the_reach_column_names_only_symbols_that_exist` (reds on `QueryOptions`). The lesson the three
+share: the guard resolved the `site` column and nothing else, so the prose around the table could
+carry a stale number, an under-counted class and a non-existent symbol while every arm stayed green
+— a **PASS about a false artifact**, which is the failure mode this whole instrument exists to end.
+
+### Follow-up, same day — the TENTH correction: the chronology now arrives at the headline, and a digit rewrite stays checkable (`PR #9398`, fifth review)
+
+The fifth review again found no defect in the census, the derivation or the KEEP ruling: the rows,
+the four numerals and the declared classes all reconciled at that head. Its three findings were the
+narrower kind — **a claim that disagreed with a claim next to it, a citation that had already
+rotted, and a documented capability that could not be reached** — and the first two share a shape
+worth naming: both were **prose asserting a fact about prose**, which no arm was reading.
+
+- **§13's chronology stopped two sites short of its own headline.** The headline stated
+  **TWENTY-FOUR read sites across TWENTY rows**; the three paragraphs explaining *why* the count
+  moved ended at **twenty → twenty-two sites**, the state before rows 19 (`session_link.link_entity`)
+  and 20 (`subject_binding.bind_point_subjects`) were added. The increment existed in this changelog
+  and **nowhere in the document being narrated**, so the passage a re-verifier reads to understand
+  the number answered with a smaller one. The closing increment is now stated (twenty-two →
+  twenty-four sites, eighteen → twenty rows, and **neither new row is customer-callable**, so the
+  numeral the ruling rests on — seven rows, ten sites — is unchanged), and the chain is **asserted**:
+  `test_the_change_chain_ends_at_the_headline_counts` compares the LAST `<from> → <to> <unit>`
+  increment of each unit to the table, so a chain that stops short reds instead of reading as
+  history. Non-vacuity is measured: on the pre-fix document it reds on
+  *"stops at `twenty-two` sites while its table has 24"* **and** on the missing rows increment.
+- **Two `file.py:NNNN` citations in the fifth-correction entry were already rotten when written.**
+  `_state_related_objects` / `_state_related_points` were cited at lines 28773 and 28790 of
+  `sdk.py`; at the head those lines are a validity-window helper and a sort-key comparison, while
+  the readers themselves sit **over 600 lines** further down (measured for this entry: 619 at the
+  head, and 5 lines off already at the commit that wrote the citation). The entry now uses
+  **`sdk.py`, symbol-only** — the same form the same block adopts for `_connect_issue_objects` —
+  because re-measuring is what produced the wrong number in the first place, and the rotten numbers
+  are named here as numbers in prose rather than as a `file.py:NNNN` hint, so the passage that says
+  they rot does not hand a re-verifier a fresh one to copy. ⚠️ **This block is deliberately not
+  guarded by a no-hints arm**, and the reason is structural rather than an omission: two of its
+  hints exist **as examples of rot** (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §13.8
+  pointer the fourth correction replaced, and `sdk.py:20154`, the `_connect_issue_objects` citation
+  that was wrong when written), so a blanket arm would red on the passage that *documents* the
+  defect. What the arm enforces — *the symbols are authoritative, the line number is a
+  convenience* — therefore applies here in the smaller form this block can actually keep: **no hint
+  is written as a re-verification aid**, and the four that remain across these two entries
+  (`ranking.py:1066`, `sdk.py:13559`, `mcp_server.py:6804` in the fifth-correction bullet, plus
+  `topic_summarization.py:211` a paragraph below it) are dated record rather than pointers into the
+  live table.
+- **`_numeral` advertised digits it could not receive.** Its docstring promised *"digits are
+  accepted as well, so a rewrite that writes `6` instead of `SIX` stays checkable"*, while all five
+  `_PROSE_*` captures were `([A-Za-z][A-Za-z-]*)` — so `token.isdigit()` was unreachable and a
+  digit rewrite of the headline matched **nothing**, redding the count arm with *"§13 no longer
+  states its site count … restore the sentence"*: a false diagnosis telling a fixer to restore a
+  sentence that is present. The captures now accept `[A-Za-z][A-Za-z-]*|\d+` through one shared
+  `_NUMERAL` body, the parsing was split into `_parse_prose_counts()` so the sentence forms have a
+  seam, and `test_the_numeral_parsing_accepts_digits` feeds **both spellings of the same claim**
+  through all four units plus the chain form. It reds if the captures go back to words-only.
+
+### Follow-up, same day — the ELEVENTH correction: the call-time class is DERIVED, and it found two customer doors the census was missing (`PR #9398`, sixth review)
+
+The sixth review found no defect in the derivation, the table or the KEEP ruling either. Both of its
+findings were about the **third class** — the one whose relationship type is an expression rather
+than a name — and both are the same defect seen from two sides: the class was **declared, not
+derived**, so its completeness was a matter of trust.
+
+- **A hand list can only validate the entries it is handed.** `UNDERIVABLE_CALL_TIME` was a
+  one-entry list (`bind_point_subjects`) and the arm checked it in both directions — but nothing
+  enumerated a *new* member, so a reader of the shape shipped green **by construction**. The
+  reviewer measured it on six synthetic probes: a parameter, a dict lookup, a `for rel in` loop over
+  a rel-family `frozenset`, and so on, all invisible. That is exactly the defect the third review
+  found for the empty-pattern shape (declared as ONE example instead of derived as a class), one
+  class over.
+- **§13 therefore overstated both the class and the resolver.** It said the resolver follows
+  `for rel in CONSTANT` "in the module that defines the constant" — true for a tuple, **false for a
+  frozenset**, which is the idiomatic shape here (`DERIVABLE_STRUCTURAL_RELS`,
+  `_ABOUT_REPLAY_RELS`, `ENTITY_LINKED_RELS`). `_resolve` handled `ast.Tuple`/`ast.List` only and
+  fell through to the gap for `ast.Set` and `frozenset({...})`. It also said the class had
+  "one dict-lookup member", which was false at that head: the six probes above were live readers,
+  and two of them are customer doors.
+
+**The fix, in three moves.** (1) `_resolve` follows `ast.Set` and the collection constructors, so a
+rel-family frozenset is a named site like a tuple. (2) An empty **type slot** on a resolved candidate
+is a SHAPE (`-[:{rel}]->` resolves to `-[:]->`), so the class is walked like the empty-pattern one —
+`_call_time_sites()` — and every member must be a §13 row or a `CALL_TIME_REL` register entry saying
+why its gap cannot carry `aboutObject` for a referent. The register is not the class: the derivable
+members are rows, and the floor is on the derived set, so an empty register cannot make the arm
+vacuous. (3) The class walk's file filter must be a strict SUPERSET of the class or a filtered-out
+reader is an invisible one; it is verified exhaustively (a full 242-module walk derives the same
+eleven members, so nothing is missed by the 68-file filter).
+
+**What the derivation found — and what it moved.** Two undeclared **customer-callable** readers:
+`TortoiseSDK.traverse` (type is caller-supplied; `validate_rel_type` allowlists it against
+`KNOWN_REL_TYPES`, which carries the about\* family) and `TortoiseSDK.ingest`'s connection duplicate
+probe (`relation` allowlisted through `_VALID_EDGE_PREDICATES`). They are **rows 21 and 22**, and
+unlike every previous increment **this one moves the numeral the KEEP ruling rests on: seven → nine
+customer-callable rows, ten → twelve sites** — the direction an under-counted census fails in, since
+it understates the surface that ruling defends. The remaining members are register entries with
+their reasons: the five operator-rel legs (`_bfs_select_operators`, `apply_payload_operators`,
+`_fold_edge_message_changed`, `_find_operator`, `create_direct_edge`), the fixed `COMPLETED_STEP`
+onboarding edge (`_capture_onboarding_snapshot`), and `_rebuild_all_replay` — the reviewer's named
+miss, which deletes and rewrites replayed edges **by type** from a journal field and so reads the
+edge as data, not for a referent. Counts: **twenty-four → twenty-six sites, twenty → twenty-two
+rows**; the chain's closing increment is stated and asserted, as the tenth correction requires.
+
+**Measured, not asserted.** Non-vacuity for each new arm: against the pre-fix document **11 of 23
+arms red** (the derivation arms stay green by design — they pin the mechanism, not the prose); with
+the call-time walk removed, three arms red including the floor and the synthetic-new-member arm;
+with the frozenset branch removed, `test_the_resolver_follows_a_frozenset_rel_family` reds. The
+mechanism cases also pin the two near-misses that must NOT count (a named type, a `MERGE` writer)
+and the neighbouring class's shapes (an empty pattern belongs to the empty-pattern walk), so the two
+shape walks cannot double-count one site and then each re-declare it. `_type_slot` is shared by both
+walks, which also closes a hole the fourth review named: `-[r {idx:$i}]->` names **no** type, because
+that colon is a property-map key, not a type.
+
+⚠️ **The two figures in this entry were re-read at the head that closed the round after it.** They
+were written at `9b5d14b10`, when the file held 17 arms; five arms arrived with this very round
+(17 → 22) and one more in the twelfth, so "10 of 17" described an artifact that no longer existed.
+A record that stops at the head it was written against is the same rot this section exists to end,
+one level up — hence the re-read, not a footnote.
+
+### Follow-up, same day — the TWELFTH correction: the empty-pattern class was walked in ONE of its two spellings (`PR #9398`, seventh review)
+
+The seventh review found no defect in the derivation the eleventh correction added, the table, the
+CI registration or the numerals the KEEP ruling rests on. It found one **live reader the whole
+census could not see**, and one promise that was in prose only.
+
+- **A traversal that names no type has TWO legal spellings, and only one was walked.**
+  `_EMPTY_TRAVERSAL` required brackets, so `-[r]->` derived and `(n)--()` did not — but the
+  bracket-less form is the same traversal: no type is written, so it walks every relationship type,
+  `aboutObject` included. There was a live member: `domain_validators.validate_chain_integrity`,
+  inside the `orphaned_draft` rule (`#131`), runs `MATCH (n:Point {status:'draft'}) … AND NOT
+  (n)--()` — a degree count over every edge type, the same read `session_source_migration._degree`
+  is already registered for. The module carries no `aboutObject` literal and no rel-family constant,
+  so the file filter skipped it and no walk ever reached it. §13's *"every such reader is enumerated
+  by its own shape walk"* was therefore **false at that head**, and the shape a new orphan/degree
+  rule is idiomaticly written in was the one that shipped green.
+- **The "numbering of record" omitted two arms.** The docstring's `WHAT THIS PINS` list held 19
+  entries for 22 arms; the two with no entry were the call-time class's mechanism arm and its
+  synthetic-new-member arm — the latter being the arm the PR body advertised as the sixth review's
+  headline fix. The list says of itself that it is the numbering of record, and three places in the
+  file cite arms *by number*, so an omission there is not cosmetic.
+
+**The fix, in three moves.** (1) `_BARE_TRAVERSAL` derives the bracket-less form — `<-->`, `<--`,
+`-->`, `--`, anchored between two node patterns (`)` … `(`) so a bare `--` in prose, a CLI flag or a
+`->` in a log message is not a traversal — and both shape predicates (`_may_traverse_every_type`,
+`_is_empty_pattern_read`) use it, so the file FILTER and the walk cannot disagree. (2)
+`validate_chain_integrity` is a named `EMPTY_PATTERN` entry with its reason (a degree count, not a
+read for a referent), taking the register from eighteen to nineteen members, and `_EMPTY_PATTERN_CASES`
+gains five bracket-less cases plus the two near-misses that must NOT derive (`--` inside a string
+literal, a `MERGE (n)-->(m)` writer) — the mechanism arm has the new direction on sources that are
+not today's tree. (3) `test_the_docstring_names_every_arm` makes the numbering of record executable:
+every `test_` function is a numbered entry or a declared collapse (`_COLLAPSED_ARMS`), the numbers are
+contiguous with no duplicates (an *"arm N"* reference must not silently resolve to the wrong arm),
+and every collapsed name is a real arm the prose still names.
+
+**Measured.** With the bracket-less spelling un-walked, three arms red — `test_the_empty_pattern_class_is_declared`
+(the new register entry stops deriving), `test_the_empty_pattern_class_derivation_holds` (the five
+new cases) and `test_a_new_call_time_reader_cannot_ship_green` (an `EMPTY_PATTERN` entry that no
+longer resolves into the walk keyspace). Removing entries 20/21 from `WHAT THIS PINS` reds
+`test_the_docstring_names_every_arm` naming both, and a duplicated entry number reds it on the
+duplicate. Counts are unchanged: **twenty-six sites, twenty-two rows, nine customer-callable rows
+(twelve sites)** — this round added no reader to the table, which is the point: the member it found
+is not one.
+
+### The eighth review — the walk's own gate, and a promise the prose made
+
+The eighth review found no defect in the derivation, the table, the CI registration or the four
+asserted numerals. Every finding was in the surface *around* the instrument: a text gate inside the
+named census, and prose claims nothing read.
+
+- **The named census re-imposed on itself the blindness `_files()` exists to refute.** `_sites_in()`
+  kept only two of the four predicates its own file filter admits on, so a module admitted *because
+  of its shape* was parsed and then deliberately not walked. A constant FRAGMENT interpolated into
+  the type slot — `_REL = "about"` then `f"…[:{_REL}Object]…"`, which the resolver follows and which
+  §13 promises *"reds the guard until it gets a row here"* — derived nothing. It also made the
+  superset arm unfalsifiable: that arm re-uses this walk as its own proof, so a narrowing here was
+  invisible to the arm written to catch narrowings.
+- **§13.8 lost a question.** The rewrite of `EXTRACTOR-V4-ARCHITECTURE.md` §13.8's question 2 removed the
+  newline before question 3, which became the tail of the paragraph above it (`…cheap to keep.**3.
+  **Should every expansion…`). The list rendered one item short while the sentence that introduces
+  it still said *"The three questions below"*, and §15 still cross-references *"question 3"*.
+  Nothing saw it: the line-citation arm scans that line for `file.py:NNNN` and the sibling arm reads
+  backticked symbols, and both survive a missing newline.
+- **Three present-tense copies of the register's size, one numeral stale.** The arm that polices that
+  numeral reads it out of this document, so the register could grow past the number three comments
+  quoted and red nothing — the file that exists to make counts executable carried unread copies of
+  one. `_MIN_CALL_TIME`'s comment carried the same kind of copy for the call-time walk's member
+  count, a numeral behind the derivation.
+
+**The fix.** The gate goes: `_files()` admits a module, so the named census walks it — and a
+docstring is skipped there as it already is in the other two walks (prose that QUOTES a pattern is
+not an executed read; a docstring naming the edge would otherwise have demanded a §13 row for a
+comment). Two cases are added: a `{_REL}Object` fragment to `_MECHANISM_CASES` and to
+`_NEW_READER_CASES`, and a docstring case to `_MECHANISM_CASES`, all asserted *through the walk*
+rather than through the resolver alone — `_resolve` was already correct, which is why the gate hid
+the member. §13.8's newline is restored, and the copy in each stale comment is replaced by the property
+plus a pointer at the arm that measures it. Two arms make both prose defects executable:
+`test_the_extractor_section_keeps_its_three_questions` compares the count the sentence states to the
+items that start their own line (its predicate is run on a glued sample and a clean one, so the
+detector is measured, not trusted), and `test_the_file_states_no_count_it_does_not_measure` bans a
+restated census numeral in this test file altogether.
+
+**Measured.** Restoring the gate reds two arms (`test_the_census_derives_a_relationship_name_built_at_runtime`
+on the fragment case and `test_a_new_call_time_reader_cannot_ship_green` on the new reader); dropping
+the docstring exclusion reds the mechanism arm; re-gluing §13.8's item 3 reds the new list arm; putting
+the stale count back in a comment reds the count-copy arm. Counts are unchanged — **twenty-six sites,
+twenty-two rows, nine customer-callable rows (twelve sites)** — the gate was hiding no member at
+this head, which is the point: it would have hidden the next one.
+
+### The ninth review — the clause detector was case-sensitive, and a numeral nothing claimed
+
+The ninth review found no defect in the table, the three derivations, the CI registration or the four
+asserted numerals. Both of its findings were in the instrument's own handling.
+
+- **The governing-clause detector was case-SENSITIVE.** `_CLAUSE` carried no `re.IGNORECASE` while
+  both of its consumers `.upper()`ed the capture — the normalization a regex that can only yield
+  upper case makes dead code. A reader written `match (n)-[:aboutObject]->(m)` therefore derived into
+  NO class: not the named census, not the empty-pattern walk, not the call-time walk. The
+  completeness arm stayed green while §13 shipped a row short. No reader in the tree is written that
+  way today, so nothing was missed at that head — the failure was latent, not shipped.
+- **The flag alone was not the fix, and that was measured rather than reasoned.** With
+  `re.IGNORECASE` and no anchor, the completeness arm derived a FALSE site in
+  `value_extractor.GROUNDING_SYSTEM`: an LLM prompt whose prose says *"match summary items"* and
+  whose JSON schema then carries an example naming the edge, so the English verb governed a bracket.
+  The clause is now anchored on the `(` a real Cypher clause always carries, and both directions are
+  pinned in `_MECHANISM_CASES` / `_EMPTY_PATTERN_CASES`: a lowercase clause that must derive, a
+  lowercase `merge` and a prose sentence that must not.
+- **The docstring stated an envelope site count that nothing claimed.** The issue body names no
+  count; the issue's owner-decision comment and this changelog state the real one, and the docstring
+  disagreed with both. The numeral is removed rather than corrected — a count restated in a file that
+  does not measure it is the rot this guard polices — and the restated-count ban was widened to the
+  two spellings it could not see (the hyphenated `-site envelope` form and the `sites claimed` form).
+
+**Measured.** Restoring the case-sensitive detector reds two arms (both lowercase cases); taking the
+flag but dropping the anchor reds two (the prose near-miss and the false `value_extractor` site).
+Counts are unchanged.
+
+### The tenth review — two more restated counts, and the ban stops listing spellings
+
+The tenth review found the four asserted numerals, the three derived sets and the CI registration
+sound, and one defect left: two present-tense copies of census counts inside the guard itself, in
+spellings the restated-count ban could not see.
+
+- **The anti-vacuity floors' comment stated a pair the table never carried.** It read *"deliberately
+  BELOW today's census (20 named sites / 22 rows at the time of writing)"*, and those two numerals
+  never coexisted — the row count and the site count arrived in different corrections — so the
+  comment paired a symbol count with a row count, the units error the guard exists to stop. It also
+  contradicted this changelog's own record of the floors.
+- **The customer-callable floor's comment stated the row count one increment behind the table**, in a
+  present-tense `the table declares <N> today`.
+
+Neither was seen because the ban was a fixed list of four spellings, and this was the third round of
+widening it after the fact. It now states the PROPERTY: a COUNT with a census UNIT, scoped as current
+(`today`, `currently`) or as a dated reading (`at the time of writing`), in either order — plus a
+numeral-last alternative for the spelling that carries no unit word. It also scans the UNWRAPPED text
+(start-of-line comment markers are blanked to spaces, so every reported line number still points at
+the line the author sees), because the wrapped pair is precisely how one of the copies survived a
+per-line scan.
+
+Both comments are now property-only and point at `test_the_prose_counts_match_the_table`, the arm
+that measures the table. **Measured.** Restoring the two pre-fix comments reds
+`test_the_file_states_no_count_it_does_not_measure` on both, and each pre-fix line is a control
+sample inside that arm, so the shapes cannot silently fall out of coverage. Counts are unchanged —
+**twenty-six sites, twenty-two rows, nine customer-callable rows (twelve sites)**.
