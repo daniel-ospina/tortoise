@@ -1271,6 +1271,63 @@ def test_a_denominator_below_the_frozen_floor_is_refused_not_failed(monkeypatch)
     assert findings == [], findings
 
 
+@pytest.mark.parametrize("floor", ["30", 30.0, True, [30]])
+def test_a_declared_but_unreadable_floor_is_refused_not_read_as_absent(
+        monkeypatch, floor):
+    """A floor the probe cannot read is a floor it cannot honour (#9513 review P2).
+
+    `_declared_floor` used to return `None` for ANY non-int value, so an artifact
+    that declared the floor as `"30"` (a JSON typo), `30.0`, or `true` lost the
+    gate silently: the binding came back MATCHED, the threshold parsed, and the
+    25-Object run scored RED/GREEN against a bar whose author had refused it —
+    the same mismatch #9076 exists to refuse, through the one field read
+    permissively. "Absent" and "present but unreadable" are different states.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": floor}})
+    assert code == 3, text
+    assert "prereg-binding status=UNREADABLE" in text, text
+    assert "reason=floor-unreadable" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_declared_floor_that_is_met_still_scores(monkeypatch):
+    """The refusal is about non-INTEGER floors, not about declaring one."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "status=MATCHED" in binding and binding.endswith("reason=n/a"), binding
+    assert "declared_floor=20 objects=25" in binding, binding
+
+
+def test_checker_refuses_a_matched_binding_carrying_a_reason(monkeypatch):
+    """A MATCHED binding with a refusal reason beside it is a contradiction."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    tampered = text.replace("status=MATCHED", "status=MATCHED", 1).replace(
+        "declared_floor=20 objects=25 reason=n/a",
+        "declared_floor=20 objects=25 reason=floor-unreadable", 1)
+    assert "reason=floor-unreadable" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "nothing to refuse" in f for f in findings), findings
+
+
+def test_checker_refuses_an_unreadable_binding_with_no_attribution(monkeypatch):
+    """`UNREADABLE` must say which declared value it could not read."""
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": "30"}})
+    assert code == 3, text
+    tampered = text.replace("reason=floor-unreadable", "reason=n/a", 1)
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "could not be read" in f for f in findings), findings
+
+
 def test_a_corpus_sha_pin_that_is_not_this_corpus_never_scores(monkeypatch):
     """An exact-bytes pin is the stronger identity, and a wrong one is refused."""
     code, text = _run_with_prereg(

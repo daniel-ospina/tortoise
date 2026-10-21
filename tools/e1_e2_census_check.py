@@ -850,7 +850,8 @@ def check(text: str) -> tuple[list[str], dict]:
     # (#9076 — the numerator/denominator mismatch the issue refuses one level up).
     bind = log.kv(log.one("prereg-binding "))
     if bind:
-        statuses = ("MATCHED", "MISMATCH", "UNPINNED", "BELOW_FLOOR")
+        statuses = ("MATCHED", "MISMATCH", "UNPINNED", "BELOW_FLOOR",
+                    "UNREADABLE")
         if bind.get("status") not in statuses:
             findings.append(f"[V15] the prereg-binding status is "
                             f"{bind.get('status')!r}, not one of {statuses}")
@@ -867,12 +868,24 @@ def check(text: str) -> tuple[list[str], dict]:
                 f"but the run measured {measured_sha} — the binding is about a "
                 f"corpus this log did not run")
         if bind.get("status") == "MATCHED":
+            # A MATCHED binding is the only shape a scored log may carry, so it
+            # must carry NO refusal reason — otherwise a log could print a
+            # refusal beside a verdict (#9513 review P2: a declared-but-
+            # unreadable floor used to read as "no floor", i.e. MATCHED).
+            if bind.get("reason", "n/a") not in ("n/a", ""):
+                findings.append(
+                    f"[V15] the binding is MATCHED but states reason="
+                    f"{bind.get('reason')!r} — a matched bar has nothing to refuse")
             nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
             if all(n.isdigit() for n in nums) and int(nums[0]) < int(nums[1]):
                 findings.append(
                     f"[V15] the binding is MATCHED while objects={nums[0]} is "
                     f"under declared_floor={nums[1]} — a below-floor run cannot be "
                     f"bound-ready")
+        if bind.get("status") == "UNREADABLE" and \
+                "floor-unreadable" not in bind.get("reason", ""):
+            findings.append("[V15] an UNREADABLE binding does not attribute it to "
+                            "a floor that could not be read")
         if bind.get("status") == "BELOW_FLOOR":
             nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
             if not all(n.isdigit() for n in nums):

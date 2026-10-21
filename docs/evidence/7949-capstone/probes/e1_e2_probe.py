@@ -95,7 +95,10 @@ over** (#9076). A pre-registration binds a number to a corpus, so reading
 ``e1.min_share_reduction`` and ignoring ``corpus.path`` lets this probe score a
 run over ``e1e2_corpus.json`` against a bar argued on ``tests/eval/write_path`` —
 the numerator/denominator mismatch the issue's own Research Needed §1.2 refuses
-one level up. ``prereg_binding`` therefore compares the artifact's corpus pin
+one level up. A *declared* denominator floor the probe cannot read as an integer is REFUSED
+too (``UNREADABLE``), never read as "no floor stated" — the same fail-closed rule
+the threshold gets, because a bar whose floor is silently dropped is a bar the
+author did not write. ``prereg_binding`` therefore compares the artifact's corpus pin
 (path and/or sha256) and its ``denominator_floors.e1_objects`` against THIS run,
 prints the comparison on ``prereg-binding``, and refuses to score when they do
 not agree or the denominator is under the frozen floor (the artifact's own rule:
@@ -579,15 +582,33 @@ def _declared_corpus_path(prereg: Mapping) -> str:
     return path if isinstance(path, str) else ""
 
 
-def _declared_floor(prereg: Mapping) -> int | None:
+def _declared_floor(prereg: Mapping) -> tuple[bool, int | None, object]:
+    """``(declared, value, raw)`` — DECLARED, not merely readable.
+
+    "Absent" and "present but unreadable" are different states, and collapsing
+    them into ``None`` is a fail-open (#9513 review P2): an artifact that writes
+    the floor as ``"30"`` (a JSON typo) or ``30.0`` would lose the floor gate
+    silently, and a below-floor run would then be scored against a bar whose
+    author explicitly refused it — the very mismatch this module exists to
+    refuse. So a *declared* floor that is not a plain ``int`` raises, exactly as a
+    malformed threshold does in ``prereg_threshold``; ``(False, None, None)``
+    means the artifact states no floor at all, which is what makes the run
+    ``MATCHED`` on the corpus half alone.
+    """
     floors = prereg.get("denominator_floors")
+    if floors is None:
+        return (False, None, None)
     if not isinstance(floors, Mapping):
-        return None
-    floor = floors.get("e1_objects")
+        raise TypeError(
+            f"`denominator_floors` is a {type(floors).__name__}, not an object")
+    if "e1_objects" not in floors:
+        return (False, None, None)
+    floor = floors["e1_objects"]
     # `bool` is an `int` in Python; `true` is not a floor.
     if isinstance(floor, bool) or not isinstance(floor, int):
-        return None
-    return floor
+        raise TypeError(
+            f"`denominator_floors.e1_objects` is {floor!r}, not an integer")
+    return (True, floor, floor)
 
 
 def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
@@ -620,7 +641,16 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     declared_sha = ""
     if isinstance(corpus, Mapping) and corpus.get("sha256"):
         declared_sha = _normalise_sha(corpus["sha256"])
-    floor = _declared_floor(prereg if isinstance(prereg, Mapping) else {})
+    floor = None
+    floor_error = ""
+    try:
+        _declared, floor, floor_raw = _declared_floor(
+            prereg if isinstance(prereg, Mapping) else {})
+    except (TypeError, ValueError) as e:
+        # REFUSED, never "no floor": a floor the probe cannot read is a floor it
+        # cannot honour, and honouring nothing is how a below-floor run gets a
+        # verdict (#9513 review P2).
+        floor, floor_raw, floor_error = None, None, f"{type(e).__name__}: {e}"
 
     reasons: list[str] = []
     if declared_sha:
@@ -640,6 +670,8 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
             reasons.append("corpus-path")
     else:
         reasons.append("corpus-unpinned")
+    if floor_error:
+        reasons.append("floor-unreadable")
     if floor is not None and objects < floor:
         reasons.append("below-floor")
 
@@ -647,12 +679,15 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
         status = "MATCHED"
     elif "corpus-unpinned" in reasons:
         status = "UNPINNED"
+    elif "floor-unreadable" in reasons:
+        status = "UNREADABLE"
     elif "below-floor" in reasons and len(reasons) == 1:
         status = "BELOW_FLOOR"
     else:
         status = "MISMATCH"
     return {"status": status, "reasons": reasons, "declared_path": declared_path,
             "declared_sha256": declared_sha, "floor": floor,
+            "floor_error": floor_error, "floor_raw": floor_raw,
             "corpus": corpus_path.name, "corpus_sha256": corpus_sha256,
             "objects": objects}
 
@@ -663,7 +698,7 @@ def binding_line(bind: dict) -> str:
             f"corpus_sha256={bind['corpus_sha256']} "
             f"declared_path={bind['declared_path'] or 'n/a'} "
             f"declared_sha256={bind['declared_sha256'] or 'n/a'} "
-            f"declared_floor={bind['floor'] if bind['floor'] is not None else 'n/a'} "
+            f"declared_floor={bind['floor'] if bind['floor'] is not None else ('n/a' if bind['floor_raw'] is None else json.dumps(bind['floor_raw']))} "
             f"objects={bind['objects']} "
             f"reason={','.join(bind['reasons']) or 'n/a'}")
 
