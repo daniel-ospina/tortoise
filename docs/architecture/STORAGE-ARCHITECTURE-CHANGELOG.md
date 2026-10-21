@@ -873,7 +873,6 @@ keyless lane's full key set is pinned; and the pre-fix Source shape is pinned
 against the literal set. Registered on the `core` surface with a `durations:`
 weight, because a guard no CI leg selects is a guard that does not run.
 
-
 ## §13's `aboutObject` read-site table — the fourth correction, and the end of the hand audit (2026-10-20, `#7948`)
 
 The design document's §13 table is the **whole evidence base** for the KEEP ruling on
@@ -1105,7 +1104,9 @@ property, so we lose nothing semantically by deriving later"* — has been false
 `projection/entities.py`'s replay fold restores it (a test asserts it on an `aboutObject` edge). The
 supporting measurement was a literal grep (`rg 'aboutObject \{'` → 0), and it was blind in exactly
 the class the census exists to fix: the relationship name there is a **variable**. The claim is now
-scoped to *no semantic payload, except the binding confidence*, in §13 and in §16, and §11's ruling
+scoped to what the code actually does — the binding confidence rides the edge — in §13 and in
+`EXTRACTOR-V4-ARCHITECTURE.md` §13.8; `#9403` later refined it again (the record projection also
+stamps `idx`, and the census sees properties without being a proof of absence), and §11's ruling
 wording is flagged as predating `#1370` rather than silently rewritten — reopening a ruling is a
 decision, not a copy-edit. (Surfaced by the earlier reviews of this PR; the third review's scope did
 not include it.)
@@ -1301,8 +1302,6 @@ duplicate. Counts are unchanged: **twenty-six sites, twenty-two rows, nine custo
 (twelve sites)** — this round added no reader to the table, which is the point: the member it found
 is not one.
 
-
-
 ### The eighth review — the walk's own gate, and a promise the prose made
 
 The eighth review found no defect in the derivation, the table, the CI registration or the four
@@ -1403,26 +1402,3 @@ that measures the table. **Measured.** Restoring the two pre-fix comments reds
 `test_the_file_states_no_count_it_does_not_measure` on both, and each pre-fix line is a control
 sample inside that arm, so the shapes cannot silently fall out of coverage. Counts are unchanged —
 **twenty-six sites, twenty-two rows, nine customer-callable rows (twelve sites)**.
-
-## §13 — the `aboutObject` headline claim is SCOPED to the files it measured (`#9399`)
-
-The removed sentence and why it went. §13's evidence for the KEEP ruling opened
-with an unqualified claim about *"the primary search path"*, but the command it
-quotes as proof measures exactly three modules — and `tortoise/ranking.py`, which
-holds both product ranking read paths and therefore the reads behind the default
-recall door (`tortoise_recall` → `sdk_method="recall_state"`), is not one of them.
-
-**Removed (verbatim):**
-
-> **The primary search path does NOT read it.** `rg -n 'aboutObject'
-> tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py`
-> → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for
-> this path.**
-
-The measurement was never wrong; the **scope** was unstated, so the sentence read
-as a whole-product claim and a reader checking only the quoted command concluded
-the opposite of what the section rules on. The design document now states the
-lane the three files bound and names the module and the door outside it;
-`tests/test_9399_search_path_claim_scope.py` holds it there by parsing the file
-list OUT of the sentence and re-running the scan over it, so widening the list or
-reverting the qualification reds.

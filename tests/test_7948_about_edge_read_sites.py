@@ -172,7 +172,7 @@ WHAT THIS PINS
    exact defect class the arms below exist for, in the one place nobody read it —
    so the count is gone rather than re-stated; arm 19 pins the corpus instead.
 15. **`test_the_sibling_paragraph_names_every_customer_callable_row`** — the SIBLING
-   SET. `EXTRACTOR-V4-ARCHITECTURE.md` §16 question 2 enumerates the
+   SET. `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 question 2 enumerates the
    customer-callable surfaces, and at the head that added rows 21/22 it was two
    rows short of §13 — the two customer doors whose addition is what moved the
    numeral the KEEP ruling rests on. Every customer-callable row's symbol must
@@ -227,7 +227,7 @@ WHAT THIS PINS
    named in the prose. A count in a comment is exactly the claim class this file
    exists to stop being unread.
 23. **`test_the_extractor_section_keeps_its_three_questions`** — the SIBLING
-   DOCUMENT'S OWN LIST. `EXTRACTOR-V4-ARCHITECTURE.md` §16 prefaces its list with
+   DOCUMENT'S OWN LIST. `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 prefaces its list with
    *"The three questions below"* and §15 cross-references *"question 3"*, and this
    PR's rewrite of item 2 removed the newline before item 3 — the question became
    the tail of the paragraph above it (`…cheap to keep.**3. **Should every
@@ -3196,7 +3196,7 @@ def test_the_case_corpora_are_not_vacuous():
     )
 
 
-#: The §16 intro sentence that states HOW MANY questions the list holds, and the
+#: The §13.8 intro sentence that states HOW MANY questions the list holds, and the
 #: item form itself. The document promises three questions and enumerates them; a
 #: rewrite that glues item 3 onto the tail of item 2's paragraph (`keep.**3. **…`)
 #: leaves the promise false and nothing in this file could see it — the arms that
@@ -3206,7 +3206,7 @@ _QUESTION_ITEM = re.compile(r"(\d+)\.\s+\*\*")
 
 
 def _question_list_problems(lines: list[str]) -> list[str]:
-    """What is wrong with the numbered list the §16 intro sentence introduces.
+    """What is wrong with the numbered list the §13.8 intro sentence introduces.
 
     Separated from the document so the SAME predicate can be run on a synthetic
     sample — the control is what proves it can see an item that is not on its own
@@ -3257,12 +3257,12 @@ def _question_list_problems(lines: list[str]) -> list[str]:
 
 
 def test_the_extractor_section_keeps_its_three_questions():
-    r"""§16's numbered list must still BE a list, item per line, as promised.
+    r"""§13.8's numbered list must still BE a list, item per line, as promised.
 
     The paragraph prefaces its list with *"The three questions below"* and §15
     cross-references *"question 3"*. This PR's own rewrite of item 2 removed the
     newline before item 3, so the question was appended to the end of the
-    paragraph (`…cheap to keep.**3. **Should every expansion…`) and §16's list
+    paragraph (`…cheap to keep.**3. **Should every expansion…`) and §13.8's list
     visibly held two items where the sentence above it claims three. Nothing saw
     it: `test_the_census_prose_carries_no_line_citations` scans that line for
     `file.py:NNNN`, and the sibling arm reads backticked SYMBOLS out of it — both
@@ -3306,7 +3306,7 @@ def test_the_extractor_section_keeps_its_three_questions():
     )
 
     assert not problems, (
-        "`EXTRACTOR-V4-ARCHITECTURE.md` §16 no longer renders the list its own "
+        "`EXTRACTOR-V4-ARCHITECTURE.md` §13.8 no longer renders the list its own "
         "sentence promises:\n  - " + "\n  - ".join(problems)
     )
 
