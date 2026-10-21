@@ -290,7 +290,8 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 
 ### R7 — Raw text and the S1 narrative in Postgres (§9.1) · **L** · schema + code · **BLOCKER**
 
-**What:** **there is no table for it.** `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
+**What:** **there is no dedicated table for it** — the only carrier today is the `point.content`
+column (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
 65 migrations returns **0**; `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
@@ -387,7 +388,7 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 | `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 MiB figure is §1's block of 2026-09-25, mirrored in §17.4.2) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
-| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph). ⚠️ These belong to §2.2's ~141 MB reading; §1/§17.4.2 give **46 MiB of 143 MiB** and §2.2 says to use those | §2.2 / §12.1b (2026-09-24) | **MEASURED** |
+| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph). ⚠️ These belong to §2.2's ~141 MB reading; §1/§17.4.2 give **46 MiB of 143 MiB** and their cost block (§7, `STORAGE-ARCHITECTURE.md:460`) says to use those | §2.2 / §12.1b (2026-09-24) | **MEASURED** |
 | stored vectors, by label | **12,657** (`:Object` 7,859 + `:Event` 4,798, ≈19 MB) — and only `Point.embedding` is indexed | `CALL db.indexes()`, §13 | **MEASURED** |
 | Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `§17.4.6` / `graph-content-census.json`, 2026-10-17 | **MEASURED** |
 | Points carrying a vector | **39.96%** (4,145 / 10,374) | same census; `§17.4.6`, 2026-10-17 | **MEASURED** |
