@@ -121,6 +121,19 @@ def test_seal_changes_on_answer_key_edit():
         s1["digest"]
 
 
+from tools.longmem_eval import measurement_posture
+
+
+def _posture(ingest_mode: str = "v2", *, activated: bool = False) -> dict:
+    """#8486: the posture block a completed receipt now requires."""
+    return measurement_posture.build(ingest_mode=ingest_mode, activation={
+        "requested": activated,
+        "questions": 1,
+        "ep_ran": 1 if activated else 0,
+        "failed": 0,
+    })
+
+
 def test_receipt_valid_when_completed_with_all_pins():
     receipt = build_receipt(
         run_id="w7a-500q-abc123", date="2026-09-04T12:00:00Z",
@@ -133,7 +146,7 @@ def test_receipt_valid_when_completed_with_all_pins():
         cost_usd=2.0, metrics={"official_recall_all@5": 0.9,
                                "official_recall_all@5_by_category":
                                    _by_category({"multi-session": [1.0]})},
-        notes=["n"])
+        measurement_posture=_posture("deterministic"), notes=["n"])
     assert validate_receipt(receipt) == []
 
 
@@ -161,6 +174,7 @@ def test_receipt_completed_requires_the_per_category_rows():
         reader_model_spec="s", reader_pinned=True, ingest_mode="det",
         run_status="completed", verdict="pass", failure_origin=None,
         cost_usd=1.0, metrics={"official_recall_all@5": 0.5},
+        measurement_posture=_posture("det"),
         resolved_config={}, notes=[])
     issues = validate_receipt(base)
     assert any("per-category" in i for i in issues)
@@ -198,6 +212,7 @@ def test_receipt_completed_requires_pins():
         reader_model_spec="s", reader_pinned=True, ingest_mode="det",
         run_status="completed", verdict="pass", failure_origin=None,
         cost_usd=1.0, metrics=_base_receipt_metrics(),
+        measurement_posture=_posture("det"),
         resolved_config={}, notes=[])
     issues = validate_receipt(dict(base, judge_pin=""))
     assert any("judge_pin" in i for i in issues)
@@ -227,6 +242,9 @@ def test_cli_emits_valid_artifact(tmp_path):
                                              "deepseek-v4-flash",
                         "reader_pinned": True, "ingest_mode": "deterministic",
                         "run_at_utc": "2026-09-04T12:00:00Z",
+                        # #8486: the posture the runner records — a completed
+                        # receipt cannot publish without it.
+                        "measurement_posture": _posture("deterministic"),
                         "dataset_semantics_audit": {"verdict": "trusted"}},
         "integrity": {"valid": True}, "accuracy": {"overall": 1.0},
         "split": "s", "updated_at_utc": "2026-09-04T12:00:00Z",

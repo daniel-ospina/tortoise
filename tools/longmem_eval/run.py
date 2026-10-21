@@ -101,6 +101,7 @@ from tortoise.shared_state.concurrency import flock_exclusive
 from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
 from . import encode_cache
+from . import measurement_posture
 from . import usage as lme_usage
 from .dataset_audit import audit_dataset
 from .errors import (
@@ -1454,6 +1455,23 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # can never cross.
                        session_reinjection: bool = False,
                        session_reinjection_guard: bool = True,
+                       # #8486: the BELIEF-LAYER arm — ALWAYS present (the
+                       # retry-constant / session_workers precedent). It is
+                       # graph-content-affecting by construction: activation
+                       # promotes every draft extraction point/operator to
+                       # ``live`` and persists real posteriors, so a checkpoint
+                       # written WITHOUT the arm resumed WITH it (or the
+                       # reverse) would blend EP-inert and EP-measured
+                       # questions into one published number — the resumed
+                       # outcomes carry no activation manifest, so the run's
+                       # posture could only read ``partial``. Refused up front
+                       # (CheckpointStaleError, the safe direction) instead.
+                       # The per-question INGEST cache is deliberately NOT
+                       # affected: it is keyed by ``ingest_cache_fingerprint``,
+                       # and activation runs on the cache-HIT path too, so a
+                       # pre-#8486 cached graph is activated rather than
+                       # re-ingested.
+                       activate_beliefs: bool = False,
                        # C4 (#2513, delta-review P1): the RESOLVED injection
                        # total budget — conditional presence (None when the
                        # arm is OFF: an inert knob never gates a checkpoint,
@@ -1608,6 +1626,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         # the guard flipped either way.
         "session_reinjection": session_reinjection,
         "session_reinjection_guard": session_reinjection_guard,
+        # #8486: ALWAYS present, so a fingerprint-bearing pre-arm checkpoint
+        # refuses on resume under the new defaults (safe direction) and an
+        # armed checkpoint can never be resumed without the arm.
+        "activate_beliefs": activate_beliefs,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -2975,14 +2997,29 @@ def ingest_cache_fingerprint(*, question: dict, extractor_model: Any,
 
 
 def cache_hit_decision(*, marker_fp: str | None, graph_present: bool,
-                       current_fp: str) -> bool:
+                       current_fp: str, marker_activated: bool = False,
+                       activate_beliefs: bool = False) -> bool:
     """Pure cache decision (#2080 design 2/4): a graph is cached+valid iff
     a stored marker carries the matching ingest fingerprint AND the graph
     exists (contains its Session/points). A partial graph WITHOUT the
     marker (a crash mid-ingest, or a peer mid-write) is treated as absent
     → miss → re-ingest. The marker is written ONLY after an ingest
     completes, so mid-write vs complete is distinguishable by
-    construction."""
+    construction.
+
+    #8486 BELIEF-LAYER STATE: the ingest fingerprint says nothing about
+    whether an earlier run PROMOTED the cached graph's draft points/
+    operators to ``live`` and persisted posteriors, so it cannot be the
+    only reuse gate. Serving a belief-activated graph to an arm-OFF run
+    would publish a number measured on a live/EP-measured graph while its
+    posture says ``inert`` — a false disclosure, the one thing this issue
+    is about. The marker therefore records the arm's mutation and an
+    arm-OFF run re-ingests instead. The MIRROR direction stays a hit: an
+    arm-ON run may reuse an inert cached graph and activate it (promotion +
+    EP are idempotent), which is exactly why the arm is not part of
+    ``ingest_cache_fingerprint``."""
+    if marker_activated and not activate_beliefs:
+        return False
     return bool(marker_fp == current_fp and graph_present)
 
 
@@ -3033,13 +3070,17 @@ def _cache_marker_read(proj: Any, namespace: str) -> dict | None:
     try:
         rows = proj.g.query(
             "MATCH (m:" + INGEST_CACHE_MARKER_LABEL + " {namespace:$ns}) "
-            "RETURN m.fp, m.snapshot",
+            "RETURN m.fp, m.snapshot, m.belief_activated",
             params={"ns": namespace}).result_set
     except Exception:  # noqa: BLE001, RUF100 — missing graph / hiccup = miss
         return None
     if not rows or rows[0][0] is None:
         return None
-    return {"fp": str(rows[0][0]), "snapshot": rows[0][1]}
+    # #8486: a pre-arm marker carries no flag — absent reads as NOT
+    # activated, which is the truth for every graph written before the arm
+    # existed (and the value the arm-OFF reuse gate wants).
+    return {"fp": str(rows[0][0]), "snapshot": rows[0][1],
+            "activated": _marker_activated(rows[0][2])}
 
 
 def _cache_graph_present(proj: Any, qid: str) -> bool:
@@ -3059,18 +3100,70 @@ def _cache_graph_present(proj: Any, qid: str) -> bool:
     return False
 
 
+def _marker_activated(value: Any) -> bool:
+    """Boolean from a stored marker flag: a graph DB returns a real bool,
+    but a string ('true'/'false') must not read TRUE (``bool('false')``
+    is True) — that would let an arm-OFF run reuse an activated graph."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUTHY
+    return bool(value)
+
+
 def _cache_marker_write(proj: Any, *, namespace: str, qid: str, fp: str,
-                        snapshot: str) -> None:
+                        snapshot: str, activated: bool = False) -> None:
     """Write/refresh the namespace's cache marker node AFTER a clean ingest
     completes (the ONLY writer; callers hold the run marker, so no
     concurrent writer races the MERGE). Carries lme_question_id so the
-    fresh-run targeted wipe removes it together with stale content."""
+    fresh-run targeted wipe removes it together with stale content.
+
+    #8486: ``activated`` records that the BELIEF LAYER ran against this
+    graph (draft points/operators promoted to ``live`` + EP posteriors
+    persisted), a mutation the ingest fingerprint cannot see — the value
+    ``cache_hit_decision`` needs to refuse serving it to an arm-OFF run.
+    """
     proj.g.query(
         "MERGE (m:" + INGEST_CACHE_MARKER_LABEL + " {namespace:$ns}) "
         "SET m.lme_question_id=$q, m.fp=$fp, m.snapshot=$snapshot, "
-        "    m.ingested_utc=$utc",
+        "    m.belief_activated=$activated, m.ingested_utc=$utc",
         params={"ns": namespace, "q": qid, "fp": fp,
-                "snapshot": snapshot, "utc": _utc_now().isoformat()})
+                "snapshot": snapshot, "activated": bool(activated),
+                "utc": _utc_now().isoformat()})
+
+
+def _cache_marker_activate(proj: Any, *, namespace: str) -> None:
+    """#8486: record that a CACHED graph has been belief-activated in place.
+
+    ``_cache_marker_write`` only runs on the FRESH-ingest path, so an arm-ON
+    run that reuses an inert cached graph and then activates it (idempotent
+    promotion + EP) leaves the marker claiming ``belief_activated=false`` —
+    and a subsequent arm-OFF run would hit that marker and reuse a live/
+    EP-measured graph while its ``measurement_posture`` says ``inert`` (an
+    unmeasured 0.50 that is not the truth). Only the one flag is touched: the
+    fingerprint and the ingest snapshot still describe the ingest that built
+    the graph.
+    """
+    try:
+        proj.g.query(
+            "MERGE (m:" + INGEST_CACHE_MARKER_LABEL + " {namespace:$ns}) "
+            "SET m.belief_activated=$activated",
+            params={"ns": namespace, "activated": True})
+    except Exception as exc:  # noqa: BLE001, RUF100
+        # #8486: this one flag is the ONLY thing between an already-activated
+        # graph and a later arm-OFF run reusing it under an `inert` posture, so
+        # a failed refresh must NOT be swallowed into a stale `false` (the
+        # sibling `_cache_marker_write` is best-effort precisely because a
+        # missing marker is a MISS). Drop the marker instead: the graph then
+        # misses and re-ingests — the safe direction — and this question's own
+        # run continues (its posture is already truthful: the arm ran).
+        with contextlib.suppress(Exception):
+            proj.g.query(
+                "MATCH (m:" + INGEST_CACHE_MARKER_LABEL + " {namespace:$ns}) "
+                "DETACH DELETE m", params={"ns": namespace})
+        print(f"  [cache] belief-activation marker refresh FAILED ({exc}) — "
+              f"the cache marker was DROPPED so a later run re-ingests rather "
+              f"than reusing this activated graph (#8486)", file=sys.stderr)
 
 
 # ── live-run markers (plan cycle4-P1-13 / cycle4-P2-37) ────────────────────
@@ -3601,6 +3694,41 @@ def _hard_gate_red(outcome: dict) -> list[str]:
     return [r for r in _gate_red(outcome) if r in HARD_GATE_REASONS]
 
 
+def _activate_beliefs_for_question(
+    sdk, *, namespace: str | None, qid: str,
+) -> dict[str, Any]:
+    """#8486: run the #3011 belief activation on ONE question's eval graph.
+
+    ``ep_activation.activate_beliefs`` promotes the draft extraction points +
+    their draft operators to ``live`` and then runs ``dream(mode="full")`` so
+    real posteriors are persisted. Without it a ``v2`` graph is EP-INERT: the
+    draft points are invisible to ``tortoise/ep.py``'s ``_live_only`` filter,
+    so every claim reads the neutral 0.50 of a Beta(1,1) prior that was never
+    measured (#2598), while the graph HAS the IMPL/NAND structure.
+
+    Fail-open by design (matching ``ep_activation``'s own posture on the EP
+    call): a failure is recorded on the outcome as ``{"error": …, "ep_ran":
+    False}`` so the run's posture reads ``partial`` and the number can never be
+    published as belief-activated. A hard failure here must NOT abort a
+    500-question run that is otherwise mid-flight — but it must never be
+    silent either.
+
+    The import is lazy (the arm is OFF by default): importing the module pulls
+    in the SDK's ``dream`` surface, which the byte-identical default path must
+    not pay for.
+    """
+    from .ep_activation import activate_beliefs
+
+    try:
+        return activate_beliefs(sdk, namespace=namespace)
+    except Exception as exc:  # noqa: BLE001, RUF100
+        print(f"  [beliefs] activation FAILED for {qid} — the belief layer is "
+              f"EP-inert for this question (the run's posture reads partial): "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return {"ep_ran": False,
+                "error": f"{type(exc).__name__}: {exc}"}
+
+
 def run_evaluation(
     instances: list[dict],
     *,
@@ -3787,6 +3915,18 @@ def run_evaluation(
     # resumes a no-cache checkpoint and vice versa).
     cache_ingest: bool = False,
     sweep_cache: bool = False,
+    # #8486: the BELIEF LAYER arm — after each question's ingest (fresh OR a
+    # #2080 cache hit: the graph is present and promotion/EP are idempotent),
+    # promote the draft extraction points/operators to ``live`` and run a real
+    # EP pass (``ep_activation.activate_beliefs``, #3011) so the graph's
+    # posteriors are MEASURED. Without this the v2 graph is EP-INERT (#2598),
+    # so the run's number silently describes a Tortoise whose belief layer
+    # contributes nothing — #8486 requires the arm AND the disclosure.
+    # OFF by default (byte-identical default path); requires ``ingest_mode
+    # == "v2"`` (a deterministic graph has no operators to activate — the
+    # CLI refuses the combination, and this guard mirrors it for programmatic
+    # callers). Recorded in the methodology as ``measurement_posture``.
+    activate_beliefs: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Run the full per-question pipeline over ``instances``.
 
@@ -3885,6 +4025,17 @@ def run_evaluation(
             "coverage_loop (C3-1) and session_reinjection (C4) both re-order "
             "the retrieval pool — arm them separately (this run refuses the "
             "combination at arm resolution)")
+    # #8486: the BELIEF LAYER arm. Refused on a deterministic graph for the
+    # same reason the CLI refuses it — a deterministic ingest writes turn
+    # points + raw chunks and NO operators, so there is nothing to promote
+    # and nothing for EP to traverse: an "activated" deterministic run would
+    # be a posture claim about a graph that cannot carry a belief layer.
+    # Refused HERE (arm resolution, before the loop and outside every
+    # fail-open region) so it aborts instead of degrading per question.
+    if activate_beliefs and ingest_mode != "v2":
+        raise ValueError(
+            "activate_beliefs requires ingest_mode='v2' (a deterministic "
+            "graph has no operators/EP structure to activate — #8486)")
     # C5 (#2521, #2513): resolve the aggregative-intent coverage-check arm
     # tri-state ONCE, before the loop — same contract as the C2 knobs: a
     # None with the TORTOISE_LME_AGGREGATIVE_FLAG env set must not record
@@ -4011,6 +4162,10 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # #8486: the resolved belief-layer arm — an armed checkpoint can never
+        # be resumed without it (the resumed outcomes would carry no activation
+        # manifest and the run would be EP-inert for exactly those questions).
+        activate_beliefs=bool(activate_beliefs),
         # C6 (#2520, #2513): the resolved time-aware arm rides the
         # fingerprint — an armed checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
@@ -4246,6 +4401,10 @@ def run_evaluation(
                         _cache_hit = False
                         _cache_wipe_ok = False
                         _cache_marker: dict | None = None
+                        # #8486: this attempt's belief-activation manifest
+                        # (None when the arm is OFF) — recorded on the outcome
+                        # and aggregated into the run's measurement posture.
+                        belief_activation: dict[str, Any] | None = None
                         if _cache_armed:
                             _cache_marker = _cache_marker_read(
                                 sdk._get_proj(), namespace)
@@ -4254,7 +4413,15 @@ def run_evaluation(
                                            if _cache_marker else None),
                                 graph_present=_cache_graph_present(
                                     sdk._get_proj(), qid),
-                                current_fp=_cache_fp or "")
+                                current_fp=_cache_fp or "",
+                                # #8486: a graph a prior arm-ON run already
+                                # promoted/EP'd is not the inert graph this
+                                # run's posture would claim — never serve it
+                                # to an arm-OFF run.
+                                marker_activated=bool(
+                                    _cache_marker.get("activated")
+                                    if _cache_marker else False),
+                                activate_beliefs=activate_beliefs)
                             if _cache_hit:
                                 # we reuse the namespace for the question's
                                 # duration — hold it against a peer's wipe
@@ -4398,6 +4565,31 @@ def run_evaluation(
                                 ingest_stats = _run_ingest(sdk)
                             ingest_latency_ms = round(
                                 (time.monotonic() - t_ingest) * 1000.0, 2)
+                        # #8486: the BELIEF LAYER, part of the OFFICIAL
+                        # configuration (v2 + EP activation). Runs BEFORE the
+                        # pool census/integrity gate so the graph measured by
+                        # those gates is the graph the reader sees, and on the
+                        # cache-HIT path too: the persisted graph is present
+                        # and promotion/EP are idempotent, so a graph built by
+                        # a pre-#8486 run is activated rather than silently
+                        # measured EP-inert. Pure graph writes
+                        # (status/posteriors) — no new nodes or edges, so the
+                        # census denominators are unchanged.
+                        if activate_beliefs:
+                            belief_activation = _activate_beliefs_for_question(
+                                sdk, namespace=namespace, qid=qid)
+                            # #8486: on a cache HIT the activation mutates the
+                            # PERSISTED graph in place, so the marker must be
+                            # refreshed here — the fresh-ingest path records it
+                            # at the marker write below, and a stale `false`
+                            # marker would let a later arm-OFF run reuse a
+                            # live/EP-measured graph under an `inert` posture.
+                            # (Promotion is a write even when the EP pass then
+                            # fails, so the refresh keys on the arm having RUN,
+                            # not on `ep_ran`.)
+                            if _cache_armed and _cache_hit:
+                                _cache_marker_activate(
+                                    sdk._get_proj(), namespace=namespace)
                         # M7 (D3): the authoritative live graph pool size — the
                         # retrieval-pool denominator the methodology documents.
                         # #1785: FOLDED pool_rows (plan P2-2/P2-5) — a single
@@ -4469,7 +4661,13 @@ def run_evaluation(
                                 _cache_marker_write(
                                     sdk._get_proj(), namespace=namespace,
                                     qid=qid, fp=_cache_fp or "",
-                                    snapshot=_cache_snapshot(ingest_stats))
+                                    snapshot=_cache_snapshot(ingest_stats),
+                                    # #8486: did the belief layer mutate this
+                                    # graph (promotion happens even if the EP
+                                    # pass then failed)? ``belief_activation``
+                                    # is non-None exactly when the arm RAN for
+                                    # this question.
+                                    activated=belief_activation is not None)
                         _gate_ratio = _gate.get("ratio")
                         _consec_census = (0 if GATE_REASON_CENSUS_ERROR
                                           not in gate_reasons
@@ -4646,6 +4844,11 @@ def run_evaluation(
                         "label": label,
                         "hypothesis": hypothesis,
                         "ingest": ingest_stats,
+                        # #8486: the belief-layer manifest for THIS question
+                        # (present only under the arm — the default path's
+                        # outcome shape is unchanged).
+                        **({"belief_activation": belief_activation}
+                           if belief_activation is not None else {}),
                         "n_ingest_errors": len(ingest_errors),
                         "ingest_error_text": (ingest_errors or [None])[0],
                         # #1746 (D7): the per-question LLM telemetry + recovery
@@ -5169,8 +5372,17 @@ def run_evaluation(
     except Exception:
         usage_overhead = None
 
+    # #8486: the run's MEASUREMENT POSTURE, derived ONCE from the
+    # per-question manifests — the report and the published receipt both read
+    # this, so a number can never be published with an implied posture.
+    belief_activation_summary = (
+        measurement_posture.summarize_belief_activation(
+            outcomes, requested=bool(activate_beliefs)))
+
     return outcomes, outcomes_to_report(
         outcomes,
+        # #8486: ingest mode + belief-layer activation ride the methodology.
+        belief_activation=belief_activation_summary,
         # #1349 vector arm: retriever/model/query_prompt/mode/run_key.
         retriever=retriever, model=model, query_prompt=query_prompt,
         retrieval_only=retrieval_only, surface=surface, run_key=run_key,
@@ -5336,6 +5548,12 @@ def outcomes_to_report(
     split: str,
     dataset_id: str = "xiaowu0162/longmemeval-cleaned",
     ingest_mode: str = "deterministic",
+    # #8486: the run's belief-activation summary (from
+    # ``measurement_posture.summarize_belief_activation``). ``None`` = no arm
+    # decision reached this report — the methodology then carries the UNKNOWN
+    # posture, which ``w7_publish.validate_receipt`` refuses on a completed
+    # run (the disclosure can never be silently absent).
+    belief_activation: dict[str, Any] | None = None,
     failures: list[dict[str, Any]] | None = None,
     reader_model_spec: str = "",
     reader_provider: str | None = None,
@@ -5582,6 +5800,10 @@ def outcomes_to_report(
         extraction_approach=(EXTRACTION_APPROACH_V2 if ingest_mode == "v2"
                             else EXTRACTION_APPROACH),
         ingest_mode=ingest_mode,
+        # #8486: the measurement posture — ingest mode + whether the belief
+        # layer was activated — ALWAYS recorded, derived in one place.
+        measurement_posture_block=measurement_posture.build(
+            ingest_mode=ingest_mode, activation=belief_activation),
         ks=ks,
         top_k=top_k,
         failures=failures,
@@ -6091,6 +6313,22 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="ingestion: deterministic (turn points + raw transcripts) "
                         "or v2 (the production 5-stage extractor, #1369; raw "
                         "transcripts retained)")
+    # #8486: the belief layer is part of the OFFICIAL configuration (v2 + EP
+    # activation) — without it the v2 graph is EP-INERT (#2598: every claim
+    # reads the Beta(1,1) 0.50 of a prior that was never measured) and a
+    # published number would describe a Tortoise whose epistemic layer
+    # contributes nothing. OFF by default so the default path stays
+    # byte-identical; the run-protocol step-5 command arms it.
+    p.add_argument("--activate-beliefs", action="store_true",
+                   help="#8486: after each question's ingest, promote the "
+                        "draft extraction points/operators to live and run a "
+                        "real EP pass (ep_activation, #3011) so posteriors "
+                        "are MEASURED rather than an unmeasured 0.50 "
+                        "placeholder. Requires --ingest-mode v2 (a "
+                        "deterministic graph has no operators/EP structure). "
+                        "The report's methodology records the posture "
+                        "(ingest_mode + beliefs_activated) and the sealed "
+                        "receipt refuses a completed run without it")
     p.add_argument("--extractor-model", default=None,
                    help="extractor model spec for --ingest-mode v2 "
                         "(default: the production router — TORTOISE_EXTRACTOR_"
@@ -6472,6 +6710,16 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
         parser.error("--session-workers > 1 requires --ingest-mode v2 "
                      "(session-parallel extraction exists only on the v2 "
                      "path)")
+    # #8486: the belief layer lives on the v2 graph (the extractor writes the
+    # statement points + IMPL/NAND operators EP traverses). A deterministic
+    # graph has neither, so arming activation there would record a posture
+    # claim about a graph that cannot carry a belief layer — reject it
+    # loudly instead of running an inert pass.
+    if args.activate_beliefs and args.ingest_mode != "v2" \
+            and not args.compare:
+        parser.error("--activate-beliefs requires --ingest-mode v2 "
+                     "(a deterministic graph writes no operators/EP "
+                     "structure to activate — #8486)")
 
     # --db: FalkorDB URI handling mirroring tests/eval/retrieval/run.py:549
     # (URI → TORTOISE_DB_URI → TortoiseSDK()). Non-URI --db is rejected —
@@ -6868,6 +7116,9 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 work_dir=args.work_dir, split=args.split,
                 checkpoint=args.checkpoint, max_retries=args.max_retries,
                 ingest_mode=args.ingest_mode, extractor_model=extractor_model,
+                # #8486: arm the belief layer (post-ingest promotion + a real
+                # EP pass) — the run protocol's step-5 command passes it.
+                activate_beliefs=args.activate_beliefs,
                 workers=max(1, args.workers), preflight=preflight,
                 # M7 #1739 / #1742: wire the session-parallel path (the flag was
                 # parsed but never threaded — a silent no-op) and give the worker
