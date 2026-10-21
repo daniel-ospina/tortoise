@@ -676,3 +676,37 @@ that, which is why two had drifted there too: `_state_related_objects` cited `sd
 `_state_related_points` `sdk.py:29378`, both landing inside `_state_mitigations` (a `mitigated_by` reader)
 while their `def`s sit at `29392`/`29409`. Non-vacuity measured: under the pre-fix text both new tests red,
 naming the offending line and the span the cited symbol actually occupies.
+
+## §13.8 symbol-keyed (no line pinned), and its count made to hold its own enumeration (2026-10-21, `#7948`)
+
+**The §13.8 line guard was over-blocking and under-detecting at the same time.** Ten of its eleven
+`file.py:NNNN` citations named a reader's `def` line, so inserting ONE line above
+`def _preview_supersede` in `mcp_server.py` moved the symbol's span and reddened a `core`-registered
+test on a PR that touched nothing in this document — and the one mid-body citation
+(`_preview_delete_edges`) was only bounded by "somewhere inside the symbol", so it could point at a
+different statement and stay green. That is the rot `STORAGE-ARCHITECTURE.md` §13 retired in this same
+PR, so §13.8 now takes the same resolution: **every reader is cited as `module.py::symbol`, and no line
+is pinned anywhere in the document.** `tests/test_extractor_v4_citation_rot.py::test_section_13_8_carries_no_line_citations_and_its_symbols_resolve`
+replaces the line-span test and asserts both halves (none present, each name resolves), and the
+whole-document quoted-symbol floor drops 10 → 6 because §13.8's eleven citations no longer match that
+form. Non-vacuity measured: restoring one citation as ``(`mcp_server.py:6529`)`` reds the new test.
+
+**The count and the enumeration under it had also come apart.** §13.8 read *"TWELVE sites are
+customer-callable"* and then listed thirteen, the thirteenth being `sdk.TortoiseSDK.supersede_point` —
+which `STORAGE-ARCHITECTURE.md` §13 classes `write path` (row 20), its read half being
+`mcp_server._preview_supersede` (row 21). The numeral therefore agreed with §13 while the list under it
+did not, and nothing could see it: the agreement guard compared only the number. Two fixes:
+
+- §13.8 now enumerates exactly the twelve customer-callable readers, and states the write half
+  separately — `supersede_point` IS reachable from `tortoise_supersede(dry_run=False)` and is a public
+  SDK method, so it is a door into the edge, but it MOVES the edges rather than reading them to answer
+  a customer, which is why the count stays twelve;
+- `tests/test_7948_about_object_read_sites.py::test_the_extractor_document_agrees_on_the_count` now
+  asserts **membership in both directions** (every customer-callable row named, no reader of another
+  reach named) and reads BOTH word orders the document states the count in — `N sites are
+  customer-callable` (§13.8) and `N *customer-callable* sites` (§13.6), the second of which the old
+  pattern never matched, so one copy could be edited while the other stayed stale and green.
+
+Measured non-vacuity: putting `supersede_point` back in the enumeration reds the membership arm naming
+it and §13 row 20; editing §13.6's `TWELVE` to `THIRTEEN` reds the word-order arm (under the pre-fix
+pattern it stayed green).
