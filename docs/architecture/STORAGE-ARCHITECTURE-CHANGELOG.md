@@ -1300,3 +1300,73 @@ longer resolves into the walk keyspace). Removing entries 20/21 from `WHAT THIS 
 duplicate. Counts are unchanged: **twenty-six sites, twenty-two rows, nine customer-callable rows
 (twelve sites)** — this round added no reader to the table, which is the point: the member it found
 is not one.
+
+
+
+### The eighth review — the walk's own gate, and a promise the prose made
+
+The eighth review found no defect in the derivation, the table, the CI registration or the four
+asserted numerals. Every finding was in the surface *around* the instrument: a text gate inside the
+named census, and prose claims nothing read.
+
+- **The named census re-imposed on itself the blindness `_files()` exists to refute.** `_sites_in()`
+  kept only two of the four predicates its own file filter admits on, so a module admitted *because
+  of its shape* was parsed and then deliberately not walked. A constant FRAGMENT interpolated into
+  the type slot — `_REL = "about"` then `f"…[:{_REL}Object]…"`, which the resolver follows and which
+  §13 promises *"reds the guard until it gets a row here"* — derived nothing. It also made the
+  superset arm unfalsifiable: that arm re-uses this walk as its own proof, so a narrowing here was
+  invisible to the arm written to catch narrowings.
+- **§16 lost a question.** The rewrite of `EXTRACTOR-V4-ARCHITECTURE.md` §16's question 2 removed the
+  newline before question 3, which became the tail of the paragraph above it (`…cheap to keep.**3.
+  **Should every expansion…`). The list rendered one item short while the sentence that introduces
+  it still said *"The three questions below"*, and §15 still cross-references *"question 3"*.
+  Nothing saw it: the line-citation arm scans that line for `file.py:NNNN` and the sibling arm reads
+  backticked symbols, and both survive a missing newline.
+- **Three present-tense copies of the register's size, one numeral stale.** The arm that polices that
+  numeral reads it out of this document, so the register could grow past the number three comments
+  quoted and red nothing — the file that exists to make counts executable carried unread copies of
+  one. `_MIN_CALL_TIME`'s comment carried the same kind of copy for the call-time walk's member
+  count, a numeral behind the derivation.
+
+**The fix.** The gate goes: `_files()` admits a module, so the named census walks it — and a
+docstring is skipped there as it already is in the other two walks (prose that QUOTES a pattern is
+not an executed read; a docstring naming the edge would otherwise have demanded a §13 row for a
+comment). Two cases are added: a `{_REL}Object` fragment to `_MECHANISM_CASES` and to
+`_NEW_READER_CASES`, and a docstring case to `_MECHANISM_CASES`, all asserted *through the walk*
+rather than through the resolver alone — `_resolve` was already correct, which is why the gate hid
+the member. §16's newline is restored, and the copy in each stale comment is replaced by the property
+plus a pointer at the arm that measures it. Two arms make both prose defects executable:
+`test_the_extractor_section_keeps_its_three_questions` compares the count the sentence states to the
+items that start their own line (its predicate is run on a glued sample and a clean one, so the
+detector is measured, not trusted), and `test_the_file_states_no_count_it_does_not_measure` bans a
+restated census numeral in this test file altogether.
+
+**Measured.** Restoring the gate reds two arms (`test_the_census_derives_a_relationship_name_built_at_runtime`
+on the fragment case and `test_a_new_call_time_reader_cannot_ship_green` on the new reader); dropping
+the docstring exclusion reds the mechanism arm; re-gluing §16's item 3 reds the new list arm; putting
+the stale count back in a comment reds the count-copy arm. Counts are unchanged — **twenty-six sites,
+twenty-two rows, nine customer-callable rows (twelve sites)** — the gate was hiding no member at
+this head, which is the point: it would have hidden the next one.
+
+## §13 — the `aboutObject` headline claim is SCOPED to the files it measured (`#9399`)
+
+The removed sentence and why it went. §13's evidence for the KEEP ruling opened
+with an unqualified claim about *"the primary search path"*, but the command it
+quotes as proof measures exactly three modules — and `tortoise/ranking.py`, which
+holds both product ranking read paths and therefore the reads behind the default
+recall door (`tortoise_recall` → `sdk_method="recall_state"`), is not one of them.
+
+**Removed (verbatim):**
+
+> **The primary search path does NOT read it.** `rg -n 'aboutObject'
+> tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py`
+> → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for
+> this path.**
+
+The measurement was never wrong; the **scope** was unstated, so the sentence read
+as a whole-product claim and a reader checking only the quoted command concluded
+the opposite of what the section rules on. The design document now states the
+lane the three files bound and names the module and the door outside it;
+`tests/test_9399_search_path_claim_scope.py` holds it there by parsing the file
+list OUT of the sentence and re-running the scan over it, so widening the list or
+reverting the qualification reds.

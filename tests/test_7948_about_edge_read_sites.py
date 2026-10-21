@@ -85,8 +85,10 @@ WHAT THIS PINS
    nothing.
 5. **`test_the_census_derives_a_relationship_name_built_at_runtime`** — the
    MECHANISM, on synthetic sources (`_MECHANISM_CASES`): a literal, a
-   `+`-concatenation, an f-string, `"|".join(TUPLE)`, a `for rel in TUPLE` loop
-   and a parameter default must each derive; a `MERGE` writer must not. The
+   `+`-concatenation, an f-string, a constant FRAGMENT interpolated into the type
+   slot (`{_REL}Object`), `"|".join(TUPLE)`, a `for rel in TUPLE` loop and a
+   parameter default must each derive; a `MERGE` writer and a docstring that only
+   QUOTES the pattern must not. The
    rel-FAMILY constructors (`ast.Set`, `frozenset({...})`, `set({...})`,
    `tuple([...])`, `list([...])`) are the same resolver one branch further on and
    are pinned by their own arm and corpus (`_FROZENSET_CASES`,
@@ -148,10 +150,11 @@ WHAT THIS PINS
    cause. Both spellings of the same claim are now fed through every unit and
    through the chain form, so the arm reds if the captures regress.
 13. **`test_the_empty_pattern_register_count_matches_the_prose`** — the SIZE of the
-   `EMPTY_PATTERN` register. §13 states *"eighteen members today"* in the same
-   sentence that declares the class, and nothing read that numeral: the register
-   was only floor-checked, so adding or removing a member falsified the sentence
-   silently — the same rot class the arms above close for the headline counts.
+   `EMPTY_PATTERN` register. §13 states its size in the same sentence that
+   declares the class (`(<N> members today`), and nothing read that numeral: the
+   register was only floor-checked, so adding or removing a member falsified the
+   sentence silently — the same rot class the arms above close for the headline
+   counts.
 14. **`test_the_empty_pattern_class_derivation_holds`** — the MECHANISM for arm 3,
    on the synthetic sources in `_EMPTY_PATTERN_CASES`: a bracketed traversal with
    no type must derive, and the near-misses must NOT (a named type, a `MERGE`
@@ -215,6 +218,26 @@ WHAT THIS PINS
    contiguous with no duplicates, and every collapsed name is a real arm still
    named in the prose. A count in a comment is exactly the claim class this file
    exists to stop being unread.
+23. **`test_the_extractor_section_keeps_its_three_questions`** — the SIBLING
+   DOCUMENT'S OWN LIST. `EXTRACTOR-V4-ARCHITECTURE.md` §16 prefaces its list with
+   *"The three questions below"* and §15 cross-references *"question 3"*, and this
+   PR's rewrite of item 2 removed the newline before item 3 — the question became
+   the tail of the paragraph above it (`…cheap to keep.**3. **Should every
+   expansion…`), so the list rendered one item short while the sentence above it
+   still claimed three. Nothing here could see it: the line-citation arm scans
+   that line for `file.py:NNNN` and the sibling arm reads backticked symbols,
+   and both survive a missing newline. So the count the sentence states, the
+   items that start their own line and their numbering are compared — and the
+   predicate is run on a glued sample and a clean one, so it is measured rather
+   than trusted.
+24. **`test_the_file_states_no_count_it_does_not_measure`** — this FILE'S OWN
+   NUMERALS. The register's size lives in §13's sentence and in the
+   `EMPTY_PATTERN` tuple, and the arm above reads it from the DOCUMENT — so three
+   present-tense copies of the old number sat in this file's comments while the
+   arm stayed green, and `_MIN_CALL_TIME` carried the same kind of copy for the
+   call-time walk's member count, one numeral behind. Both are now stated as
+   properties that point at the arm which measures them, and this arm bans the
+   copies so they cannot come back: a count is asserted, or it is rot.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -334,7 +357,10 @@ _UNKNOWN = ""
 _SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?\Z")
 
 #: Floor for the empty-pattern class walk, so the class arm cannot pass by
-#: deriving nothing (today's census: 24 members).
+#: deriving nothing. The exact size is asserted by the class arm, never here: a
+#: floor is not a count, and a numeral restated in a comment is the claim class
+#: this file exists to stop being unread
+#: (`test_the_file_states_no_count_it_does_not_measure`).
 _MIN_EMPTY_PATTERN = 5
 
 #: Floor arms: deliberately BELOW today's census (20 named sites / 22 rows at the
@@ -352,9 +378,9 @@ _MIN_ROWS = 10
 #: arm below reads the numeral itself; the table declares seven today.
 _MIN_CUSTOMER_CALLABLE = 4
 
-#: Floor for the call-time class walk (today's census: ten members), for the same
-#: reason as `_MIN_EMPTY_PATTERN`: the shape detector breaking is a failure, a
-#: legitimate contraction is not.
+#: Floor for the call-time class walk, for the same reason as
+#: `_MIN_EMPTY_PATTERN`: the shape detector breaking is a failure, a legitimate
+#: contraction is not. No numeral here — the class arm measures the size.
 _MIN_CALL_TIME = 4
 
 #: The empty-pattern readers that are NOT an `aboutObject` read for a referent,
@@ -596,7 +622,9 @@ _PROSE_CHAIN = re.compile(
 #: in the same bullet as its other numerals. It was the one census-adjacent
 #: numeral in that sentence nothing read: the register is floor-checked
 #: (`assert EMPTY_PATTERN`) but a member added to or removed from it would falsify
-#: "eighteen members today" without reding anything.
+#: the sentence's numeral without reding anything. This module quotes that
+#: sentence with its numeral NOWHERE — only this reader may state it, which
+#: `test_the_file_states_no_count_it_does_not_measure` enforces.
 _PROSE_EMPTY_PATTERN = re.compile(rf"\(({_NUMERAL})\s+members today\b", re.IGNORECASE)
 
 #: The number words §13 states its counts in. Digits are accepted as well, so
@@ -1161,13 +1189,31 @@ def _site_symbol(node: ast.AST, file: _File) -> list[str]:
 
 
 def _sites_in(file: _File) -> set[tuple[str, int]]:
-    """`{(symbol, line)}` — every READ site this file derives."""
-    if EDGE not in file.source and not any(
-        name in file.source for name in _rel_constant_names()
-    ):
-        return set()
+    """`{(symbol, line)}` — every READ site this file derives.
+
+    NO text gate of its own. `_files()` already admitted this module — on the
+    edge's name, a rel-family constant, an every-type pattern, or a gap type —
+    and re-testing the first two predicates here re-imposed on the walk exactly
+    the blindness `_files()` exists to refute: a module admitted BECAUSE OF ITS
+    SHAPE was parsed and then deliberately not walked. The live shape such a gate
+    drops is a constant FRAGMENT interpolated into the type slot
+    (`_REL = "about"` -> `f"...[:{_REL}Object]..."`), which `_resolve` follows
+    and the gate hid — against §13's own promise that a reader *"that names the
+    edge — literally, or through a constant the resolver can follow — reds the
+    guard"*. It also made the superset arm unfalsifiable: `test_the_file_filter_
+    un_sees_nothing` re-uses THIS walk as its proof, so a gate narrowing here was
+    invisible to it as well.
+
+    Docstrings are skipped for the reason `_docstrings()` states — prose that
+    QUOTES a pattern is not an executed read. The empty-pattern and call-time
+    walks both apply that rule; this one did not, so a docstring quoting
+    `MATCH (n)-[:aboutObject]->(m)` would have demanded a §13 row for a comment.
+    """
+    docstrings = _docstrings(file)
     sites: set[tuple[str, int]] = set()
     for node in _roots(file):
+        if id(node) in docstrings:
+            continue
         candidates = _resolve(node, _scope(file, node), file)
         if not any(EDGE in text and _is_read(text) for text in candidates):
             continue
@@ -1687,8 +1733,11 @@ def test_the_empty_pattern_register_count_matches_the_prose():
     r"""`(<N> members today` is a numeral like the rest, so it is asserted.
 
     §13 states the size of the guard's `EMPTY_PATTERN` register in the sentence
-    that declares the empty-pattern class *"(eighteen members today, with the
-    reason each is not an `aboutObject` read for a referent)"*. That was the ONE
+    that declares the empty-pattern class — `(<N> members today, with the reason
+    each is not an `aboutObject` read for a referent)` — and THAT sentence is the
+    only place the number lives: this docstring quoted its own copy, which went
+    stale the moment the register grew, while the arm went on asserting the
+    document's. That was the ONE
     census-adjacent numeral in the bullet nothing read: `test_the_table_is_not_vacuous`
     only floors the register (`assert EMPTY_PATTERN`), so adding or removing a
     member — the hand-maintained list this file's other arms exist to keep honest
@@ -1873,6 +1922,12 @@ _MECHANISM_CASES: tuple[tuple[str, str, bool], ...] = (
         True,
     ),
     (
+        "constant FRAGMENT interpolated into the type slot",
+        '_REL = "about"\n\n\ndef read(g):\n'
+        '    g.query(f"MATCH (n)-[:{_REL}Object]->(m) RETURN n")\n',
+        True,
+    ),
+    (
         '`"|".join(TUPLE)`',
         'RELS = ("x", "aboutObject")\n\n\ndef read(g):\n'
         '    pattern = "|".join(RELS)\n'
@@ -1895,6 +1950,12 @@ _MECHANISM_CASES: tuple[tuple[str, str, bool], ...] = (
     (
         "MERGE writer",
         'def write(g):\n    g.query("MERGE (n)-[:aboutObject]->(m) RETURN n")\n',
+        False,
+    ),
+    (
+        "a docstring quoting the named pattern is not a site",
+        'def read(g):\n    """Tried `MATCH (n)-[:aboutObject]->(m)`; it works."""\n'
+        "    return None\n",
         False,
     ),
 )
@@ -2080,6 +2141,11 @@ _NEW_READER_CASES: tuple[tuple[str, str], ...] = (
         "RELS = frozenset({'x', 'aboutObject'})\n\n\n"
         "def read_family(g):\n    for rel in RELS:\n"
         '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+    ),
+    (
+        "a constant FRAGMENT interpolated into the type slot",
+        '_REL = "about"\n\n\ndef read_fragment(g):\n'
+        '    g.query(f"MATCH (n)-[:{_REL}Object]->(m) RETURN n")\n',
     ),
 )
 
@@ -3073,6 +3139,178 @@ def test_the_case_corpora_are_not_vacuous():
     assert not problems, (
         "a synthetic corpus the mechanism arms depend on is no longer able to "
         "pin the shape it is cited for:\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: The §16 intro sentence that states HOW MANY questions the list holds, and the
+#: item form itself. The document promises three questions and enumerates them; a
+#: rewrite that glues item 3 onto the tail of item 2's paragraph (`keep.**3. **…`)
+#: leaves the promise false and nothing in this file could see it — the arms that
+#: read this passage match its opening line and backticked symbols only.
+_QUESTIONS_INTRO = re.compile(rf"the\s+({_NUMERAL})\s+questions below", re.IGNORECASE)
+_QUESTION_ITEM = re.compile(r"(\d+)\.\s+\*\*")
+
+
+def _question_list_problems(lines: list[str]) -> list[str]:
+    """What is wrong with the numbered list the §16 intro sentence introduces.
+
+    Separated from the document so the SAME predicate can be run on a synthetic
+    sample — the control is what proves it can see an item that is not on its own
+    line, rather than asserting that it can.
+    """
+    problems: list[str] = []
+    start = next((i for i, line in enumerate(lines) if _QUESTIONS_INTRO.search(line)), None)
+    if start is None:
+        return [
+            "the sentence that states how many questions follow it was not found, "
+            "so this arm would measure an empty list"
+        ]
+    claimed = _numeral(_QUESTIONS_INTRO.search(lines[start]).group(1))  # type: ignore[union-attr]
+
+    own_line: list[int] = []
+    for offset, line in enumerate(lines[start + 1 :], start=start + 2):
+        if line.startswith("---") or line.startswith("#"):
+            break
+        for match in _QUESTION_ITEM.finditer(line):
+            number = int(match.group(1))
+            if match.start() == 0:
+                own_line.append(number)
+            else:
+                problems.append(
+                    f"line {offset}: item {number} does not start a line — it is "
+                    "glued to the tail of the paragraph above it, so the list "
+                    "renders one item short and the glued question reads as prose"
+                )
+
+    if not own_line:
+        problems.append(
+            "no numbered item was found on its own line, so the list the sentence "
+            "introduces is gone — the intro's marker moved, or the items did"
+        )
+        return problems
+    if claimed is not None and len(own_line) != claimed:
+        problems.append(
+            f"the sentence says {claimed} question(s) and {len(own_line)} item(s) "
+            f"start their own line: {own_line}"
+        )
+    if own_line != list(range(1, len(own_line) + 1)):
+        problems.append(
+            f"the items are not numbered contiguously from 1: {own_line} — a "
+            "renumbering makes every cross-reference to *\"question N\"* point at "
+            "a different question"
+        )
+    return problems
+
+
+def test_the_extractor_section_keeps_its_three_questions():
+    r"""§16's numbered list must still BE a list, item per line, as promised.
+
+    The paragraph prefaces its list with *"The three questions below"* and §15
+    cross-references *"question 3"*. This PR's own rewrite of item 2 removed the
+    newline before item 3, so the question was appended to the end of the
+    paragraph (`…cheap to keep.**3. **Should every expansion…`) and §16's list
+    visibly held two items where the sentence above it claims three. Nothing saw
+    it: `test_the_census_prose_carries_no_line_citations` scans that line for
+    `file.py:NNNN`, and the sibling arm reads backticked SYMBOLS out of it — both
+    survive a missing newline.
+
+    A document that numbers what it promises is exactly this file's subject, one
+    document over, so the promise is read: the count the sentence states, the
+    items that start their own line, and their numbering must agree. The control
+    runs the same predicate on a glued sample and on a clean one, so the arm
+    measures a detector rather than trusting one.
+    """
+    lines = EXTRACTOR.read_text(encoding="utf-8").splitlines()
+    problems = _question_list_problems(lines)
+
+    clean = [
+        "**⇒ The three questions below: 1 is OPEN.**",
+        "",
+        "1. **First?**",
+        "2. **Second?**",
+        "3. **Third?**",
+        "",
+        "---",
+    ]
+    glued = [
+        "**⇒ The three questions below: 1 is OPEN.**",
+        "",
+        "2. **Second?** and then the tail:**3. **Third?**",
+        "",
+        "---",
+    ]
+    assert not _question_list_problems(clean), (
+        "the control sample of three own-line items was reported as broken, so "
+        "this arm's predicate cannot pass the shape it requires and the check "
+        "below measures nothing: " + repr(_question_list_problems(clean))
+    )
+    control = _question_list_problems(glued)
+    assert any("does not start a line" in problem for problem in control), (
+        "the control sample with item 3 glued onto item 2's paragraph was NOT "
+        "reported, so this arm cannot see the regression it was written for: got "
+        + repr(control)
+    )
+
+    assert not problems, (
+        "`EXTRACTOR-V4-ARCHITECTURE.md` §16 no longer renders the list its own "
+        "sentence promises:\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: A count stated in THIS file's prose about a set this file does not measure
+#: there: the `EMPTY_PATTERN` register's size (which belongs to §13 and to
+#: `test_the_empty_pattern_register_count_matches_the_prose`, the one reader of it)
+#: and a walk's member count (which the class arm asserts against the derived set).
+#: Both were restated here and both went stale — the register one in three places
+#: while the arm went on asserting the document's numeral, which is why the copy a
+#: reader trusts was the unread one.
+_SELF_COUNT_CLAIM = re.compile(
+    rf"(?:{_NUMERAL})\s+members today|today's census:\s*(?:{_NUMERAL})\s+members",
+    re.IGNORECASE,
+)
+
+
+def test_the_file_states_no_count_it_does_not_measure():
+    r"""This file may not restate a census numeral it does not itself assert.
+
+    The register's size lives in three places at once: §13's sentence, the
+    `EMPTY_PATTERN` tuple, and — before this arm — three comments here that quoted
+    the sentence. The arm that polices the numeral reads the DOCUMENT
+    (`test_the_empty_pattern_register_count_matches_the_prose`), so the register
+    could grow from the numeral it used to state to the next one, red nothing, and
+    leave three present-tense copies of the old number in the file whose subject is
+    that a count is a claim. `_MIN_CALL_TIME`'s comment carried the same kind of
+    copy for the call-time walk's member count, one numeral behind the derivation.
+
+    The durable form the rest of this file already uses is to state the PROPERTY
+    and point at the arm that measures it (`entry 14` in `WHAT THIS PINS` deleted
+    its own count for exactly this reason). So the copies are banned rather than
+    corrected: a count here is either asserted, or it is rot with a decoder ring.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    offenders = [
+        f"line {number}: `{match.group(0)}`"
+        for number, line in enumerate(source.splitlines(), start=1)
+        for match in _SELF_COUNT_CLAIM.finditer(line)
+    ]
+
+    # CONTROL: the pattern must still match a restated count, or this arm is a
+    # PASS about nothing. Assembled from parts so the sample cannot itself be the
+    # match the arm reports.
+    sample = "today's census: " + "seven" + " members"
+    assert _SELF_COUNT_CLAIM.search(sample), (
+        "the banned-count pattern no longer matches `today's census: <N> members`, "
+        "so this arm would stay green over exactly the copies it exists to stop"
+    )
+    assert _SELF_COUNT_CLAIM.search("(" + "seven" + " members today"), (
+        "the banned-count pattern no longer matches `(<N> members today`, so half "
+        "of this arm asserts nothing"
+    )
+    assert not offenders, (
+        "this file restates a census count it does not assert, so the copy will "
+        "rot silently while the arm that owns the number stays green — state the "
+        "property and point at the arm, or assert the numeral against the set it "
+        "counts:\n  - " + "\n  - ".join(offenders)
     )
 
 
