@@ -25,9 +25,13 @@ It demonstrates, against the shipped modules:
      residuals) prints `RAW HANDLE LANE (proj.g.query): SUCCEEDED` with that
      door measuring. What is reachable is a generic engine/transport failure
      with the node still present: RARE, and why the ordering is argued from the
-     DIRECTION of the divergence rather than its frequency. (⚠️ Once part 2 arms
-     the handle, this apply-first door is REFUSED: it holds no journal-first
-     lane since #9207 — see `_APPLY_FIRST_DOORS`.) (A ZERO-ROW write is
+     DIRECTION of the divergence rather than its frequency. (⚠️ This door
+     COMPLETES under an armed handle: #9206 declares its apply-first lane
+     (`@_declares_apply_first_write_lane("delete_point")`) — #9207's decision
+     put the `DETACH DELETE` first, so the door holds no journal-first lane and
+     is NOT inventoried in `_APPLY_FIRST_DOORS` any more. The
+     `RAW HANDLE LANE` lines section 4 prints below are the RAW-QUERY
+     residuals, never this door.) (A ZERO-ROW write is
      different, and IS recorded: the node is absent either way, so the record is
      true of the cache — see the door's own comment and
      `tests/test_7405_remaining_writes.py`.)
@@ -39,7 +43,8 @@ It demonstrates, against the shipped modules:
   4. The RECORDED RESIDUALS are shown, not hidden: the write handle
      (`proj.g.query`) is DETECTED but not yet REFUSING (#9124 part 1 —
      measure mode, `_HANDLE_GUARD_ENFORCES` is `False`), and `delete_entity`
-     (the generic entity delete) is still apply-first — both recorded on #7951
+     (the generic entity delete) holds the apply-first DECLARATION since #9206
+     (so it completes under an armed handle) — both recorded on #7951
      and in plan §7 increment 4.
 
 Instrumenting the door means swapping `query` on the GUARDED GRAPH CLASS

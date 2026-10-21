@@ -3329,6 +3329,18 @@ def _journal_safe_params(params, cypher=None):
 #         writer" is NOT this leg's evidence, because its writer says the
 #         reverse.
 #     See the obligations it states at `_prewipe_restore_write_scope`.
+#   * `_prewipe_synthetic_write_scope(...)` — the PRE-WIPE SYNTHETIC lane: the
+#     `#548` graph-only `:Point`/operator rows `rebuild_all` carries back by
+#     building SYNTHETIC `PointAdded`/`OperatorAdded` events from the same
+#     pre-wipe capture and FOLDING them through the ordinary handle. It is the
+#     restore lane's sibling in CLAIM ("the payload came from THIS graph's own
+#     pre-wipe capture") and its opposite in MECHANISM (a fold, not a restore
+#     statement), which is why it is its own name: "which writes are authorized
+#     by replay" has to be answerable, and a payload synthesized from the cache
+#     is not a record (`#9210`). It is selected PER EVENT from the fold's own
+#     provenance marker (`_fold_lane_for_event` reads `event_source[seq] is
+#     None`), in both passes that write for a creation. See the claims it makes
+#     and the residual it states at the scope itself.
 #   * `onboarding.metadata` (`tortoise/onboarding/state.py`, #9121) — the
 #     onboarding FLOW metadata (`:OnboardingState`, `:OnboardingStep`, the
 #     `COMPLETED_STEP` edges) is graph-resident org-level metadata, not a
@@ -3413,8 +3425,14 @@ def _journal_safe_params(params, cypher=None):
 #     declares its own, and `_HANDLE_GUARD_ENFORCES` is **False** — the handle
 #     MEASURES an undeclared write (counter + one WARNING naming the statement)
 #     instead of refusing it, which breaks nothing and prints the census;
-#   * PART 2 (blocked on those declarations): flip `_HANDLE_GUARD_ENFORCES` to
-#     True, so an undeclared write RAISES. Until then this door is a loud
+#   * PART 1b (#9206, landed): the SDK's apply-first doors DECLARE the order they
+#     actually use (`_apply_first_write_scope` / `_declares_apply_first_write_
+#     lane`) instead of leaving their writes undeclared. That lane is a
+#     declaration, not a bypass: it authorizes only a write for which a record
+#     IS still appended, and its census pin fails for a door that appends none
+#     (the #9068 defect) or that is not genuinely apply-first;
+#   * PART 2 (blocked on the rest of the surface): flip `_HANDLE_GUARD_ENFORCES`
+#     to True, so an undeclared write RAISES. Until then this door is a loud
 #     detector, NOT an enforcement point — do not read the guard's presence as
 #     "§17.1 is enforced here".
 #
@@ -3686,6 +3704,18 @@ def _replay_write_scope():
 #: that renames itself silently is a lane the next reader cannot find.
 _PREWIPE_RESTORE_LANE = "pre-wipe-restore"
 
+#: The reason every `#548` SYNTHETIC-fold write carries. Same pinning reason as
+#: its restore sibling: a test reads it back AT THE WRITE HANDLE, so a lane
+#: that renames itself silently is a lane the next reader cannot find.
+_PREWIPE_SYNTHETIC_LANE = "pre-wipe-synthetic"
+
+#: The one reason TEMPLATE inside that lane. One template, not one per id: the
+#: synthetic fold is ONE code site per pass (`_upsert_point_props` in pass 1a,
+#: `_upsert_point_edges` in pass 2) driven per captured Point, exactly like the
+#: restore lane's per-class template — an id in the reason would make the lane
+#: unenumerable the moment a graph holds many graph-only Points.
+_PREWIPE_SYNTHETIC_REASON = "#548 graph-only :Point folds"
+
 
 def _prewipe_restore_write_scope(reason: str):
     """The PRE-WIPE RESTORE lane: state copied from THIS graph, not replayed.
@@ -3746,12 +3776,18 @@ def _prewipe_restore_write_scope(reason: str):
       gap (`tortoise/backup.py`'s JSONL path) and the `#4664` unrestored
       `:GraphEvent` rows are unchanged by this lane; naming a gap is not
       closing it;
-    * **it covers the DIRECT restore writes only.** `rebuild_all` also carries
-      graph-only Points back by building `synthetic_events` from the same
-      pre-wipe capture and FOLDING them (`events = list(synthetic_events) +
-      journal_events`), so that half is authorized by whatever permit the
-      caller opened over the engine (`"replay"` under the `#9124`/`#9213`
-      shape), not by this lane. Disclosed, not claimed;
+    * **it covers the DIRECT restore writes only** — the second half of the
+      `#548` capture is NOT this lane and no longer rides `"replay"` either:
+      `rebuild_all` carries graph-only Points back by building
+      `synthetic_events` from the same pre-wipe capture and FOLDING them
+      (`events = list(synthetic_events) + journal_events`), and that half
+      declares `_prewipe_synthetic_write_scope` (`#9210`) — the same claim
+      ("the payload came from THIS graph's pre-wipe capture"), a different
+      mechanism. The split is `_fold_lane_for_event`'s: a `None` source
+      ordinal is synthetic, anything else is a record and keeps
+      `"replay"`. ⚠️ An earlier revision of this docstring disclosed that half
+      as riding whatever permit the caller opened; it does not any more, and
+      the pin asserts it at the write handle in both fold passes;
     * **one write in the SAME engine is not a restore and keeps `"replay"`,
       correctly — so it is disclosed here instead of being declared.** On the
       post-restore config-verification FAILURE branch `_rebuild_all_replay`
@@ -3809,6 +3845,164 @@ def _prewipe_restore_write_scope(reason: str):
     return _cache_write_authorized(f"{_PREWIPE_RESTORE_LANE}: {reason}")
 
 
+#: The reason prefix every DERIVED-RECOMPUTE write carries. Pinned as a literal
+#: because a test reads it back AT THE WRITE HANDLE (#9206): a lane that renames
+#: itself silently is a lane the next reader cannot find.
+_DERIVED_RECOMPUTE_LANE = "derived-recompute"
+
+
+@contextlib.contextmanager
+def _derived_recompute_write_scope(reason: str):
+    """The DERIVED-RECOMPUTE lane: a value RE-DERIVED, never remembered (#9206).
+
+    §17.1's authorization classes are stated elsewhere in this module as two
+    ("the record came first" — live; "the record came FROM the journal" —
+    replay) plus the restore lanes for state that rides no record. This is a
+    DIFFERENT and honest class: the write stores a **pure function of
+    journal-carried input**, so it needs no record of its own — replaying the
+    same input through the same code RE-DERIVES it. Calling it live would claim
+    an append that does not happen; calling it replay would claim a record that
+    does not exist. `#9068` is the defect this must not become — a declaration
+    that blesses a cache write of RECOVERABLE state — and the distinguishing
+    property is the recomputability, so it is stated per writer:
+
+    * the TWO writers on this lane today are
+      `tortoise/source_identity.py::resolve_source_key`'s adopt-on-touch, and the
+      operator repair path `tools/source_dedup_report.py --backfill` (which issues
+      the SAME statement against a legacy corpus). The resolver stamps
+      ``canonicalUrl``/``urlAliases`` onto a PRE-canonical ``:Source``
+      it found by ``url``. ``canonicalUrl`` is
+      ``normalize_source_url(url)`` — a pure function of the ``url`` that is
+      the node's own journaled MERGE key — and the REPLAY lane re-derives both
+      fields from that url with no record: `_mint_source_stub` writes
+      ``canonicalUrl=$cu, urlAliases=[$raw_url]`` on CREATE and
+      coalesce-extends on MATCH, and `_upsert_source` carries the same two
+      props from ``SourceCreated``. That parity is already pinned where the
+      class lives — ``tests/test_source_rematerialisation_5024.py`` asserts the
+      rebuilt Point's ``canonicalUrl`` equals the live node's — so this lane
+      names a property a rebuild test relies on rather than promising one
+      nothing measures;
+    * it is one IDEMPOTENT statement (the ``canonicalUrl IS NULL`` predicate
+      makes a re-run a no-op), so it can never advance state the journal has
+      not already named;
+    * ``urlAliases`` accumulates the raw spellings the resolver has SEEN, so a
+      variant seen ONLY live is not restored by replay. Disclosed here rather
+      than claimed away: the alias list is a dedup aid re-derived from each ref
+      the journal carries, not a fact ``canonicalUrl`` depends on, and
+      ``tools/source_dedup_report.py --backfill`` is the path that repairs a
+      corpus whose aliases matter (#5012 S0a) — and it is a DECLARED writer of
+      this lane for that reason, not a mention: undeclared, §17.1's handle would
+      refuse the repair the disclosure recommends.
+
+    ⛔ It is NOT a scope to open around a mutating write generally: its honest
+    use is a single recompute statement whose inputs are ALL journal-carried.
+    It is deliberately a NESTED-NO-OP — when a lane is already in flight (a
+    fold, a replay engine, a live door) it yields WITHOUT changing the reason,
+    so this fallback can never rebrand an outer claim. The pre-wipe lane
+    shadows on purpose (an inner restore must not pass as a replay); this one
+    defers on purpose, because the outer claim is already true and a recompute
+    label would be the weaker description of the same statement.
+
+    The reason is what the declaration PINS — the value a test reads back at the
+    write handle — not a string any refusal prints.
+    """
+    if _CACHE_WRITE_AUTHORIZED.get() is not None:
+        yield
+        return
+    with _cache_write_authorized(f"{_DERIVED_RECOMPUTE_LANE}: {reason}"):
+        yield
+
+
+def _prewipe_synthetic_write_scope(reason: str):
+    """The PRE-WIPE SYNTHETIC lane: graph-only Points carried back by FOLDING.
+
+    `rebuild_all`'s replay permit is the SECOND over-authorization `#9210`
+    names, and it is a different mechanism from the restore legs rather than a
+    different claim. The restore legs put captured state back with their own
+    statements; the SYNTHETIC legs put it back as `PointAdded`/`OperatorAdded`
+    events the engine BUILDS from the same `#548` pre-wipe capture
+    ("SDK-created points written via Cypher may have no corresponding event in
+    the JSONL log. Snapshot them now so they survive the wipe+replay cycle"),
+    prepends to the replay stream and folds through the ordinary handle.
+
+    **No journal record describes those events either** — their source is the
+    DERIVED CACHE — so a fold write they drive is not a projection of a record
+    and the replay lane's contract ("this content came FROM the record") is
+    false for it in exactly the way it is false for the restore legs. They are
+    the only carrier of `:Point` writes made by the writers §17.1's inventory
+    lists as STILL UNDECLARED (`#9206`'s `:Point` writers, `#9207`'s
+    `delete_point`, `hosted_api`'s commit path) across a wipe+replay, so they
+    are load-bearing and cannot simply be dropped.
+
+    What it claims, and what it does NOT:
+
+    * the content came from THIS GRAPH's own pre-wipe capture, not from the
+      record — the same claim the restore lane makes, stated as its own lane
+      because the WIDTH has to be answerable: "which writes are authorized by
+      replay" must not include a write whose payload was synthesized;
+    * it is **not** a restore leg and does not touch `_restore_write`: the
+      synthetic fold runs through the ORDINARY fold helpers
+      (`_upsert_point_props` in pass 1a, `_upsert_point_edges` in pass 2), so
+      the lane is opened by the fold at the event whose `event_source` ordinal
+      is `None` (see `_fold_lane_for_event`) — not by a caller, and not by a
+      funnel a future edit could bypass;
+    * it is bounded by the fold's own provenance marker, and that bound is
+      exact: `event_source[seq] is None` marks a synthetic event (`#4042` built
+      the array for that purpose and `#8018` already reads it at the
+      `from_prewipe_snapshot` argument), so a journal record's fold can never
+      be claimed by this lane — pinned, in the OTHER direction, by the same
+      `#9210` file (its mirror assertion needs a journaled Point's PASS-2
+      write, because a pass-1a-only check is satisfied by the record's own
+      creation and would let a blanket lane pass at pass 2's call site);
+    * ⚠️ **the SELECTION is automatic; the APPLICATION is two hand-placed
+      `with`s.** Each wrapper covers one call (`_upsert_point_props` in pass 1a,
+      `_upsert_point_edges` in pass 2), so a THIRD write added to either arm as
+      a bare `self.g.query(...)` inherits the enclosing `"replay"` silently —
+      the same residual the restore funnel carries, in a narrower surface. One
+      such write exists in the pass-1a arm today: the `#4042` re-create wipe
+      (`MATCH (n:Point {id:$id}) SET n.embedding = NULL, content_hash = NULL, …`,
+      gated on `is_recreate`). It is unreachable for a synthetic event only by
+      list POSITION — synthetic events are the prefix of `events` while
+      `pending_deleted` is filled by journal deletes later — not by a guarantee;
+      a future fold pass that reorders that stream would put it back on this
+      lane's blind side. Closing the class needs `#9124`'s handle guard armed,
+      which is the same unbounded guarantee the restore lane defers to;
+
+    NESTING is the same property the restore lane relies on: the reason is a
+    `ContextVar`, so this declaration SHADOWS the engine's method-wide
+    `_replay_write_scope()` for the write it wraps, and an outer replay permit
+    cannot authorize a synthetic fold even when a caller opened one.
+    """
+    return _cache_write_authorized(f"{_PREWIPE_SYNTHETIC_LANE}: {reason}")
+
+
+#: The no-declaration arm of `_fold_lane_for_event`, shared rather than
+#: re-created per event: `nullcontext` is re-entrant and does nothing on exit,
+#: and a rebuild iterates every record in the journal — one allocation per
+#: record is real work for a state that carries no claim.
+_NO_FOLD_LANE = contextlib.nullcontext()
+
+
+def _fold_lane_for_event(seq: int, event_source):
+    """The declaration a FOLD write runs under, chosen by event PROVENANCE.
+
+    `#9210`: an event whose `event_source` ordinal is `None` was not read from a
+    journal file — it is one of the `#548` synthetic events built from the
+    pre-wipe graph capture — so the writes it drives declare
+    `_prewipe_synthetic_write_scope`. Every other event is a journal record and
+    keeps the engine's `_replay_write_scope()` (i.e. the null context here, so
+    the enclosing permit stays in force untouched).
+
+    This lives at the fold rather than at the caller because BOTH passes that
+    write for a `PointAdded`/`OperatorAdded` event must agree: pass 1a's
+    `_upsert_point_props` and pass 2's `_upsert_point_edges`. A lane opened
+    around the whole method cannot tell them apart, which is the defect.
+    """
+    if event_source is not None and event_source[seq] is None:
+        return _prewipe_synthetic_write_scope(_PREWIPE_SYNTHETIC_REASON)
+    return _NO_FOLD_LANE
+
+
 def _declares_live_write_lane(reason: str):
     """Declare a WHOLE entry point as a journal-first live lane (§17.1, #9124).
 
@@ -3834,9 +4028,10 @@ def _declares_live_write_lane(reason: str):
     `supersede_point` each call `_mark_dirty`, and `_mark_dirty` writes through
     the handle while appending no record — those writes are covered by the
     door's lane, and a per-FUNCTION census cannot see the call edge. (`delete_point`
-    was a fourth until #9207 made it apply-first; it holds no lane now, so its
-    `_mark_dirty` and `DETACH DELETE` are measured as undeclared instead of
-    being blessed.) The
+    was a fourth until #9207 made it apply-first; it now carries the apply-first
+    lane instead — `_declares_apply_first_write_lane`, #9206 — so its
+    `DETACH DELETE` and `_mark_dirty` are declared as what they are, not blessed
+    as journal-first.) The
     measured set is pinned in
     `tests/test_9124_declared_live_doors.py::test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes`,
     so it can only change with a reviewed line there. That pin records the set;
@@ -3867,6 +4062,174 @@ def _declares_live_write_lane(reason: str):
         return _declared
 
     return _declare
+
+
+#: The reason prefix every APPLY-FIRST declaration carries. Pinned as a literal
+#: because a test reads it back AT THE WRITE HANDLE (#9206): a lane that renames
+#: itself silently is a lane the next reader cannot find, and it is the one
+#: string that separates "the record comes first" from "the record comes
+#: after, by decision".
+_APPLY_FIRST_LANE = "apply-first"
+
+
+def _apply_first_write_scope(reason: str):
+    """The APPLY-FIRST, by decision lane: the cache write IS the commit point.
+
+    §17.1's rule is "every write goes to the truth store first" and its live
+    lane (`_live_write_scope`) claims exactly that. A few SDK doors cannot make
+    that claim, and saying nothing instead leaves their writes undeclared — so
+    an armed handle refuses the product's own write path (#9206). This lane is
+    the declaration that lets those doors state the order they actually use:
+
+    **the mutating statement runs FIRST and the journal record that describes it
+    is appended AFTER it, BY DECISION — because the write's OUTCOME is an input
+    to the record.** Three doors justify it, each with the reason recorded where
+    it lives:
+
+    * `TortoiseSDK.delete_point` — #9207 chose cache-first on measured
+      direction: an append-first record commits a destruction the cache may
+      never have performed (the pre-#9207 shape), while the window this order
+      leaves (a landed destroy whose append failed) is REPORTED
+      (`record_committed=False`).
+    * `TortoiseSDK.update_point`'s PROMOTE arm — its `SET` is guarded by a
+      `WHERE` that can legitimately match nothing and the door then RAISES, so
+      an append-first record would claim a promotion the graph refused. The
+      SAME write region serves the non-promote arm, which IS journal-first and
+      aborts when its append fails (`WriteNotLandedError`); a whole-door lane
+      can only state the weaker claim, so it states the weaker claim.
+    * the mechanical apply-first doors (#9206) — `create_operator`,
+      `create_direct_edge`, `_update_entity`, `_delete_entity`,
+      `_write_capture_turns` and `_materialize_session_source` build their
+      record from the node they just wrote (the snapshot, the landed row count,
+      the emitted id), and moving the record above the write changes each
+      door's commit contract — the decision #9124 part 2 defers per door, not a
+      reordering a lane may take on its own. ⚠️ `_write_session_and_turns` is NOT
+      in that group: it declares the STRONGER `_declares_live_write_lane` (it
+      appends `SessionRecorded` before its `:Session` MERGE, #9206), and only its
+      nested turn store is apply-first.
+
+    ⛔ WHAT THIS LANE MAY NEVER COVER — the #9068 defect, and the reason this
+    is a DECLARATION and not a bypass. The lane authorizes writes for which a
+    record IS appended; it says NOTHING about a write that is journalled by
+    nothing. A door that writes the cache and appends no record must **journal
+    it** or **retire the path**; wrapping it here would bless an unjournalled
+    cache write. That is checked, not stated: the census pin
+    (`tests/test_9124_declared_live_doors.py::
+    test_every_apply_first_declared_door_states_an_order_and_a_record`) fails
+    for a door carrying this lane that appends no record, or that is not
+    actually apply-first (a journal-first door must carry the STRONGER
+    `_live_write_scope` claim).
+
+    **What the lane claims, stated so it cannot be over-read:** the record is
+    appended AFTER the write and before the door returns; the divergence window
+    it leaves is cache-ahead-of-journal (the `extra_in_cache` direction §17.1
+    names), and a door takes it only where that direction is the one it wants —
+    a record can then never describe a cache state that was never written. It
+    does not make the write replayable, and it is not a permit for a record
+    whose append outcome the door ignores: `delete_point` reports the failed
+    append, and the doors that cannot report it say so where they live.
+
+    The value is what a test reads back at the write handle (the reason string
+    carries `_APPLY_FIRST_LANE` as its prefix), never a string any refusal
+    prints: a refusal fires when NO scope is in flight, so there is no reason to
+    render.
+    """
+    return _cache_write_authorized(f"{_APPLY_FIRST_LANE}: {reason}")
+
+
+def _declares_apply_first_write_lane(reason: str):
+    """Declare a WHOLE entry point as an apply-first lane (§17.1, #9206).
+
+    The decorator form of `_apply_first_write_scope`, for the doors whose write
+    region IS the body (`update_point`, `delete_point`, `create_operator`,
+    `create_direct_edge`, `_update_entity`, `_delete_entity`,
+    `_write_capture_turns`, `_materialize_session_source`) — a hand-placed
+    ``with`` would reindent hundreds of lines and bury the semantic change (the
+    declaration) in a mechanical one. The `ep.py` and `hosted_api.py` doors
+    (`invalidate_messages`, `invalidate_factor_messages`,
+    `_delete_session_sync`) take it the same way.
+
+    ⛔ IT IS ONLY HONEST FOR A DOOR THAT APPENDS A RECORD AND IS GENUINELY
+    APPLY-FIRST, and both halves are checked rather than described:
+    `tests/test_9124_declared_live_doors.py::
+    test_every_apply_first_declared_door_states_an_order_and_a_record` fails for
+    a door carrying this lane that appends nothing (the #9068 defect) and for a
+    journal-first door that took this lane instead of the stronger
+    `_declares_live_write_lane`. The lane's membership is pinned there too, so
+    the set can only change with a reviewed line.
+
+    ⛔ IT ALSO AUTHORIZES EVERY NESTED CALL, exactly like the journal-first
+    decorator: `update_point` reaches `_mark_dirty`, and the capture writer
+    reaches `_write_capture_turns`. Those edges are pinned by the same
+    nested-writes test (`_DECLARED_DOOR_NESTED_INVENTORIED`), which derives its
+    population from the DECLARED doors (both lane families, every module), so a
+    new no-journal write reached from a declared door must be reviewed instead
+    of being assumed blessed.
+
+    A per-call ContextVar scope, released in a ``finally`` (the ``with``), so a
+    raising door cannot leak its authorization into the caller's next write. An
+    async door raises `TypeError` for the same reason the journal-first
+    decorator does: the wrapper would open the scope, return the coroutine and
+    close it — authorizing NOTHING while looking like it did.
+    """
+    def _declare(fn):
+        if inspect.iscoroutinefunction(fn):
+            raise TypeError(
+                "_declares_apply_first_write_lane wraps a synchronous door: "
+                "for an async door open `with _apply_first_write_scope(...)` "
+                "INSIDE the coroutine body instead")
+
+        @functools.wraps(fn)
+        def _declared(*args, **kwargs):
+            with _apply_first_write_scope(reason):
+                return fn(*args, **kwargs)
+
+        return _declared
+
+    return _declare
+
+
+#: The reason prefix a TEST FIXTURE write carries. A literal for the same
+#: reason as the product lanes: a fixture's declaration is read back at the write
+#: handle, and it must be visibly NOT a product claim (see
+#: `_test_fixture_write_scope`).
+_TEST_FIXTURE_LANE = "test-fixture"
+
+
+@contextlib.contextmanager
+def _test_fixture_write_scope(reason: str):
+    """The TEST-FIXTURE lane: setup a suite seeds, claiming NOTHING about the product.
+
+    A suite that binds a journal arms §17.1's write handle for its whole run
+    (`#9124`), so a FIXTURE write — seeding a `:Source` hash so a transit map is
+    non-empty, minting the `:Point:Object` label pair no production writer
+    produces, planting a PRE-canonical Source so an adopt-on-touch fires — needs
+    a lane too. Before this, those three sites reached for `_live_write_scope`,
+    whose docstring says the opposite of what they do: **that lane's whole claim
+    is "the record is appended FIRST, then the cache"**, and each of these
+    statements appends nothing.
+
+    ⛔ Why that mattered even though all three are test-only: `#9206`'s own rule
+    is "never reach for the nearest existing lane" (giving
+    `resolve_source_key` the live lane would have claimed a record that does not
+    exist — `#9068`). A fixture spelled with a product lane's name is the
+    copyable template a future product writer finds first, and the census cannot
+    catch it (`enumerate_handle_surface` runs over `tortoise/*.py` and
+    `tools/*.py`). Naming it `test-fixture: <site>` states the truth at no cost.
+
+    ⛔ IT IS NOT A PRODUCT LANE AND MUST NOT BE USED BY ONE. Its scope is the
+    truth "this write exists only to set up a test"; nothing about it is a claim
+    that a product path may make. Pinned by the census
+    (`tests/test_9124_declared_live_doors.py::
+    test_the_fixture_lane_is_used_only_by_tests`), so a `tortoise/` or `tools/`
+    caller reds instead of quietly taking a fixture's name.
+
+    It SHADOWS rather than defers (unlike `_derived_recompute_write_scope`): the
+    reason is what a caller of a fixture wants to read at the handle, and a
+    fixture never wraps a product lane whose claim it would then have to keep.
+    """
+    with _cache_write_authorized(f"{_TEST_FIXTURE_LANE}: {reason}"):
+        yield
 
 
 def _graph_metadata_write_scope(reason: str = "graph-metadata"):
@@ -4320,14 +4683,25 @@ class _GuardedGraph:
         `test_7951_update_point_outbox.py`, `test_7951_delete_point_outbox.py`,
         `test_5048_retract_instant_recorded.py` and
         `test_6239_promote_after_supersede.py`. The reason is a census, not a
-        hunch: the product's own write path is still largely undeclared — the 10
-        apply-first public doors (`delete_point` joined them in #9207: the
-        `DETACH DELETE` is issued FIRST, so its #9124 live-lane declaration was
-        withdrawn — see `_APPLY_FIRST_DOORS`), the 2 mixed-arm doors
-        (`update_point`, `capture_session`) and every writer that appends no
-        record at all, all inventoried in
+        hunch: the product's own write path is still largely undeclared — the
+        apply-first doors inventoried in `_APPLY_FIRST_DOORS` (`approve_merge`,
+        `assess_source`, `compute_confidence`, `mitigate_operator`,
+        `promote_point`, `record_calibration`, `set_point_baseline`), the
+        helpers inventoried beside them, `capture_session`'s remaining
+        provenance stamps (inventoried where a writer appends NO record of its
+        own — they are owed a record, #9350), and every other writer that
+        appends no record at all, all inventoried in
         `tests/test_9124_declared_live_doors.py`, which also REFUSES the flip
-        while any module has an undeclared entry point. The
+        while any module has an undeclared entry point. The doors #9206 DID
+        declare hold the apply-first lane
+        (`_declares_apply_first_write_lane`), so an ARMED handle COMPLETES them
+        — `delete_point` and `update_point` among them (their cache write IS the
+        commit point, by decision: #9207 and #8830), as are `create_operator`,
+        `create_direct_edge`, `_update_entity`, `_delete_entity`,
+        `_write_capture_turns`, `_materialize_session_source` and the capture
+        door's two state stamps — membership pinned as
+        `_APPLY_FIRST_DECLARED_DOORS` / `_APPLY_FIRST_DECLARED_DOORS_BY_MODULE`.
+        The
         detection itself is complete and identical in both modes; only the
         refusal is gated. Do not read this method's presence as "§17.1 is
         enforced at the handle".
@@ -5639,6 +6013,28 @@ _ANNOTATOR_SHORT_ALIASES: dict[str, str] = {
     "consistency": "annotator_consistency",
     "directness": "annotator_directness",
 }
+
+# #9350: the capture provenance stamp's four fields (W5 Phase F, #2104).
+#
+# ``capture_session`` writes them onto the ids a capture MINTED, and until
+# #9350 it did so with a raw write at the projection's handle and NO record —
+# so a journal-only rebuild lost them for every minted Point that is never
+# promoted (``_apply_capture_ingest_ep``'s ``PointPromoted`` snapshot is a full
+# ``get_point`` and is what accidentally carried them for the promoted ones).
+# The W2 benchmark grades ``provenance_accuracy`` over exactly these fields.
+#
+# The write is now journalled as one ``PointRevised`` per minted id, so BOTH
+# fold engines have to carry the fields or the record would be a carrier with
+# no fold — the #3299 class (a live mutation replay silently reverts). Declared
+# HERE, beside the other declared prop groups, because the two arms below must
+# spell the same set: the graph fold (``_revise_point``) and the pure fold
+# (``_apply_one``'s ``PointRevised`` arm).
+_REVISION_PROVENANCE_PROPS: tuple[str, ...] = (
+    "eventId",
+    "source_session",
+    "source_harness",
+    "ingested_at",
+)
 
 
 def _annotator_value_ok(val) -> bool:
@@ -7708,6 +8104,38 @@ def _apply_one(points: dict[str, dict], ev: dict,
                 prev = points.get(p["id"])
                 if isinstance(prev, dict) and "tags" in prev:
                     p = {**p, "tags": prev["tags"]}
+            # #9350: the SAME omitted-key carry-forward, one prop group wider.
+            # The graph fold MERGEs and `_persist_extra_props` writes only the
+            # keys the payload states (and skips a key stated as `None`), so a
+            # later creation that restates only `content` KEEPS the stored
+            # provenance. Replacing the entry outright below would drop it, and
+            # `fold()` / `rebuild_all` would disagree on the same journal — the
+            # exact asymmetry the `tags` clause above exists to prevent. Gated
+            # on the same `journal_recreate` boundary so a re-created node does
+            # not inherit a dead incarnation's `eventId`.
+            _prev = points.get(p["id"])
+            if isinstance(_prev, dict):
+                _carried: dict = {}
+                _dropped: set = set()
+                for _pk in _REVISION_PROVENANCE_PROPS:
+                    if _pk not in _prev:
+                        continue
+                    if p.get(_pk) is None or not _is_persistable_prop_value(p[_pk]):
+                        # The writer's OUTCOME, not the key's presence: an absent
+                        # key, an explicit `None` and a value
+                        # `_is_persistable_prop_value` rejects all write NO
+                        # property on a MERGE'd node, so the stored value
+                        # survives — the same split `_stated_tags` spells.
+                        _carried[_pk] = _prev[_pk]
+                    elif not _store_holds_prop_value(p[_pk]):
+                        # ... while a value the writer CAN pass but the store
+                        # cannot hold is degraded to `SET n.<k> = NULL` at
+                        # dispatch (#7369), which REMOVES the property. Folding
+                        # the raw value would keep it.
+                        _dropped.add(_pk)
+                if _carried or _dropped:
+                    p = {**{_k: _v for _k, _v in p.items() if _k not in _dropped},
+                         **_carried}
         points[p["id"]] = p
         # Flatten speaker from point's provenance into node data
         # #331: non-dict provenance (null/string) must not crash flattening.
@@ -7792,6 +8220,28 @@ def _apply_one(points: dict[str, dict], ev: dict,
             # non-persistable value must DROP, never strand the rebuild.
             for _pk in ("validFromPrecision", "validToPrecision"):
                 if _pk in ev and _annotator_value_ok(ev[_pk]):
+                    p[_pk] = ev[_pk]
+            # #9350: fold the capture provenance stamp's four fields. The
+            # live write is the capture's own ``PointRevised`` carrier (one
+            # per minted id, appended BEFORE the cache write), so the pure
+            # fold must restore them or ``fold()`` and ``rebuild_all``
+            # disagree on the same journal (the #330 parity contract this
+            # function owns) — and a minted Point that is never promoted has
+            # no other record carrying them. Presence-conditional and gated
+            # by the store-EXACTNESS bar the `tags` clause above uses
+            # (``_store_holds_prop_value``, which IMPLIES
+            # ``_annotator_value_ok``): an absent key never clears a value the
+            # revision did not speak about, and a corrupt journal's
+            # non-writable value DROPS rather than stranding the recovery.
+            # ⛔ NOT ``_annotator_value_ok`` alone (#9350 review, P2): these
+            # four are free-form scalars, so an ``int`` outside INT64 passes
+            # that predicate while the STORE either CLAMPS it (4.16-4.20) or
+            # refuses to parse it (6.x) — the fold would then hold a value no
+            # engine stores, and the graph half would abort the rebuild after
+            # the wipe. One bar for all three sites (creation carry-forward,
+            # this arm, ``_revise_point``).
+            for _pk in _REVISION_PROVENANCE_PROPS:
+                if _pk in ev and _store_holds_prop_value(ev[_pk]):
                     p[_pk] = ev[_pk]
     elif t == "OperatorAnnotated":
         # #3689: the explicit annotation record — parity with apply() /
@@ -10920,12 +11370,25 @@ class FalkorProjection(
         The replay lane's contract ("this content came FROM the record") is
         false for them, and #9210 is what stopped them from claiming it.
 
-        DISCLOSED RESIDUALS of that split, so this docstring does not read as a
-        claim it cannot keep: the graph-only ``:Point`` rows carried back through
-        ``synthetic_events`` ARE folded, so that half stays on this permit, and a
-        twelfth restore written as a bare ``self.g.query(...)`` tomorrow still
-        inherits ``"replay"`` — the funnel is voluntary until #9124's handle
-        guard is armed.
+        The SECOND over-authorized leg is the ``#548`` SYNTHETIC fold, and it is
+        declared too rather than merely disclosed: the graph-only ``:Point`` /
+        operator rows the capture turns into ``synthetic_events`` are folded
+        through the ordinary handle, but their payload came from the SAME
+        pre-wipe capture, not from a record — so the fold opens
+        ``_prewipe_synthetic_write_scope`` for the event whose
+        ``event_source`` ordinal is ``None`` (``_fold_lane_for_event``), in BOTH
+        passes that write for a creation (pass 1a's ``_upsert_point_props`` and
+        pass 2's ``_upsert_point_edges``). Journal records keep this permit.
+
+        DISCLOSED RESIDUAL of that split, so this docstring does not read as a
+        claim it cannot keep: a twelfth restore written as a bare
+        ``self.g.query(...)`` tomorrow still inherits ``"replay"`` — the
+        restore funnel is voluntary until #9124's handle guard is armed. The
+        synthetic half selects its lane automatically from the fold's own
+        provenance marker rather than from a call a writer must remember, but
+        it is still APPLIED by two hand-placed ``with``s, so a third write added
+        to either fold arm inherits this permit — stated, not denied, at
+        ``_prewipe_synthetic_write_scope``.
 
         Without the replay lane, the guard refuses the replay of the first
         ``PointAdded`` record (measured: ``MERGE (n:Point {id:$id}) …
@@ -11978,6 +12441,14 @@ class FalkorProjection(
         # over-suppress the revision's value for the prop nobody restated).
         last_vfp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
         last_vtp_write_by_source: dict[tuple[tuple[str, str], int], int] = {}
+        # #9350: the same open-set conditional-write class, per PROP, for the
+        # four capture provenance fields — an open-set prop the creation's
+        # ``_persist_extra_props`` writes only when the payload carries a
+        # non-None value. Keyed ``((kind, id), ordinal) -> {prop: seq}`` so a
+        # creation that restated ONE of the four suppresses only that one
+        # (the #2350 per-end rule, applied to the four-field group).
+        last_prov_write_by_source: dict[
+            tuple[tuple[tuple[str, str], int], str], int] = {}
         # #4305: id-WIDE (cross-file) journal-owned derived markers for the
         # pass-1b restore tail. The per-source anchors above are a WITHIN-file
         # chronology boundary; the restore tail runs AFTER every journal file,
@@ -12175,12 +12646,26 @@ class FalkorProjection(
                     # needs an explicit rule for state the journal never
                     # authored"), and it is the same premise as the sibling
                     # fields: a re-creation is a FRESH node live.
+                    #
+                    # #9350: the four capture-provenance props are wiped for the
+                    # SAME reason, and they need it HERE because the pure fold's
+                    # creation arm mirrors this wipe (`_apply_one`'s
+                    # `journal_recreate` gate): pass 1a never folds the delete,
+                    # so the re-create MERGEs onto the still-present dead node
+                    # and `_upsert_point_props` writes only the keys the payload
+                    # states — without this, a re-creation that omits them
+                    # inherits the dead incarnation's `eventId`/`source_session`
+                    # and the rebuilt node diverges from live AND from `fold()`.
+                    # The wipe runs BEFORE `_upsert_point_props`, so a
+                    # re-creation that DOES restate them still writes them.
                     self.g.query(
                         "MATCH (n:Point {id:$id}) "
                         "SET n.embedding = NULL, n.content_hash = NULL, "
                         "    n.embedding_verbatim = NULL, "
                         "    n.sourceVersionTransit = NULL, "
-                        "    n.tags = NULL",
+                        "    n.tags = NULL, "
+                        "    n.eventId = NULL, n.source_session = NULL, "
+                        "    n.source_harness = NULL, n.ingested_at = NULL",
                         params={"id": p["id"]})
                 # Property parity with apply()/apply_one (#330): the shared
                 # helper writes ALL node properties incl. authoredBy,
@@ -12199,9 +12684,15 @@ class FalkorProjection(
                 # instead of denying the journal. #8018 review round 3: it does
                 # NOT prove the id lacks a journal record, so the report must
                 # not say so.
-                wrote_embedding, wrote_content_hash, persisted_extras = (
-                    self._upsert_point_props(
-                        p, from_prewipe_snapshot=event_source[seq] is None))
+                # #9210: the SYNTHETIC fold declares its own lane. When
+                # `event_source[seq]` is None this payload was built from the
+                # `#548` pre-wipe capture, so the writes it drives are not a
+                # projection of any record — the replay permit's contract is
+                # false for them (see `_prewipe_synthetic_write_scope`).
+                with _fold_lane_for_event(seq, event_source):
+                    wrote_embedding, wrote_content_hash, persisted_extras = (
+                        self._upsert_point_props(
+                            p, from_prewipe_snapshot=event_source[seq] is None))
                 # #4042: record this creation's per-source-file chronology
                 # anchors (see their declaration above). A synthetic event
                 # has `src is None` and never forms a boundary. #3860
@@ -12228,6 +12719,13 @@ class FalkorProjection(
                     # test would wrongly count as a write).
                     if "mitigation_strength" in persisted_extras:
                         last_ms_write_by_source[key] = seq
+                    # #9350: the capture provenance fields are the same
+                    # open-set conditional-write class — the boundary is the
+                    # creation that actually WROTE each prop (the writer's own
+                    # reported key set), never a second copy of its condition.
+                    for _prov in _REVISION_PROVENANCE_PROPS:
+                        if _prov in persisted_extras:
+                            last_prov_write_by_source[(key, _prov)] = seq
                     # #2897: `tags` rides the same reported set (its own
                     # explicit clause placed it there) — the pass-1b boundary
                     # for a tag EDIT.
@@ -12722,6 +13220,7 @@ class FalkorProjection(
                 skip_tags = False
                 skip_valid_from_precision = False
                 skip_valid_to_precision = False
+                skip_provenance: frozenset[str] = frozenset()
                 if isinstance(rid, str) and src is not None:
                     # #3860 composition: a PointRevised revises a ``:Point``,
                     # so its anchor key carries the same kind-scoped inner key
@@ -12776,6 +13275,15 @@ class FalkorProjection(
                         skip_valid_to_precision = (
                             last_recreate_seq_by_source.get(key, -1) > seq
                             or last_vtp_write_by_source.get(key, -1) > seq)
+                        # #9350: one boundary per provenance prop, on the
+                        # SAME rule — the creation that actually restated it
+                        # (read from the writer's reported key set), or a hard
+                        # delete→recreate for the revision half.
+                        skip_provenance = frozenset(
+                            _prov for _prov in _REVISION_PROVENANCE_PROPS
+                            if (last_recreate_seq_by_source.get(key, -1) > seq
+                                or last_prov_write_by_source.get(
+                                    (key, _prov), -1) > seq))
                 wrote_embedding, wrote_content_hash = self._revise_point(
                     ev, set_updated_at=True,
                     skip_annotator_dims=(
@@ -12794,7 +13302,8 @@ class FalkorProjection(
                     skip_mitigation_strength=skip_mitigation_strength,
                     skip_tags=skip_tags,
                     skip_valid_from_precision=skip_valid_from_precision,
-                    skip_valid_to_precision=skip_valid_to_precision)
+                    skip_valid_to_precision=skip_valid_to_precision,
+                    skip_provenance=skip_provenance)
                 if isinstance(rid, str):
                     # #4305: id-wide journal-owned derived marks — the revision
                     # wrote (or explicitly wiped) each field it was not told
@@ -14147,7 +14656,14 @@ class FalkorProjection(
                     # unsequenced (None → always re-point), silently
                     # disabling the guard for that class (review P2-1).
                     operator_created_seq.setdefault(p["id"], seq)
-                self._upsert_point_edges(p, contains_session=raw_contains_session)
+                # #9210: pass 2 is the OTHER write a synthetic event drives
+                # (the operator's IMPL/NAND edges and the provenance wiring are
+                # re-derived from the captured payload), so it declares the
+                # same lane pass 1a does — otherwise the half a `PointAdded`
+                # payload reaches here would still ride the replay permit.
+                with _fold_lane_for_event(seq, event_source):
+                    self._upsert_point_edges(
+                        p, contains_session=raw_contains_session)
 
         # ── Pass 2 entity-link sweep (#3664) ──────────────────────────────
         # Fold each deferred EntityLinked record into its idempotent about*
@@ -16991,7 +17507,8 @@ class FalkorProjection(
                       skip_mitigation_strength: bool = False,
                       skip_tags: bool = False,
                       skip_valid_from_precision: bool = False,
-                      skip_valid_to_precision: bool = False
+                      skip_valid_to_precision: bool = False,
+                      skip_provenance: frozenset[str] = frozenset()
                       ) -> tuple[bool, bool]:
         """Apply PointRevised event — update content, context, and re-compute embedding.
 
@@ -17055,6 +17572,17 @@ class FalkorProjection(
         written through the update door was dropped by replay and
         `end_state` flipped `unknown` -> `open` (fabricated coverage,
         #2349) while `check_consistency` red the healthy live graph.
+
+        ``skip_provenance`` (#9350) is the same class again, one entry per
+        CAPTURE PROVENANCE prop (`_REVISION_PROVENANCE_PROPS`: ``eventId``,
+        ``source_session``, ``source_harness``, ``ingested_at``). The capture
+        path journals one ``PointRevised`` per minted id carrying those four
+        fields ahead of its cache write, and this fold is what makes a
+        journal-only rebuild restore them for a minted Point that is never
+        promoted. The boundary is per prop — a later same-file creation that
+        restated one of the four did not clear the others live — and it is
+        read from the creation's reported ``persisted_extra_keys``, exactly
+        as ``mitigation_strength``'s anchor is.
 
         Returns ``(embedding_written, content_hash_written)`` (#4305) — the
         same conditional-write outcome ``_upsert_point_props`` reports, and
@@ -17192,6 +17720,35 @@ class FalkorProjection(
                 and _annotator_value_ok(ev["validToPrecision"])):
             set_clauses.append("n.validToPrecision = $validToPrecision")
             params["validToPrecision"] = ev["validToPrecision"]
+
+        # #9350: fold the capture provenance stamp (``eventId``,
+        # ``source_session``, ``source_harness``, ``ingested_at``). The
+        # capture journals one ``PointRevised`` per minted id BEFORE the cache
+        # write, so this clause is what makes ``rebuild()``/``rebuild_all()``
+        # restore provenance for a minted Point that is never promoted — the
+        # ONLY record that carries it. `skip_provenance` is per-PROP and not a
+        # single shared anchor, for the reason #2350 states for the two
+        # precision ends: a later same-file creation that restated only one of
+        # the four did not clear the other three live, so one shared anchor
+        # would over-suppress a revision's value for the props nobody
+        # restated. Presence-conditional, mirroring the live ``SET`` (an
+        # explicit value is a write; an absent key means the revision did not
+        # speak about it) and gated by the store-EXACTNESS predicate, so a
+        # corrupt record DROPS instead of stranding the recovery.
+        # ⛔ ``_store_holds_prop_value``, not ``_annotator_value_ok`` alone
+        # (#9350 review, P2): an ``int`` outside INT64 passes the latter, and
+        # emitting the clause for it either CLAMPS the property (4.16-4.20) or
+        # RAISES at parameter parse (6.x) — the second ABORTS `rebuild_all`
+        # after the wipe (#325/#3689), and the first disagrees with the pure
+        # fold forever. The same bar the `tags` clause above and the
+        # ``PointAdded`` carry-forward use, so all three sites cannot disagree.
+        for _pk in _REVISION_PROVENANCE_PROPS:
+            if _pk in skip_provenance or _pk not in ev:
+                continue
+            if not _store_holds_prop_value(ev[_pk]):
+                continue
+            set_clauses.append(f"n.{_pk} = ${_pk}")
+            params[_pk] = ev[_pk]
 
         if new_content is not None:
             # Re-compute embedding when content changes (even to empty — wipe

@@ -44,6 +44,7 @@ import re
 import pytest
 
 from tortoise.exceptions import WriteNotLandedError
+from tortoise.projection import _test_fixture_write_scope
 
 
 @pytest.fixture
@@ -243,7 +244,16 @@ def test_the_promote_arm_stays_apply_first_a_recorded_deviation(env, monkeypatch
     proj = sdk._get_proj()
     if arm == "object":
         # No production path mints a `:Point:Object`; build the shape by hand.
-        proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": pid})
+        # #9206: §17.1's write handle is ARMED in this suite (the fixture binds a
+        # journal), so a FIXTURE write needs a lane too. `_test_fixture_write_scope`
+        # is the test-fixture declaration, not a product claim: this statement is
+        # setup for the arm under test, appends no record, and exists only to
+        # mint a label pair no production writer produces. ⚠️ It used to be
+        # spelled `_live_write_scope`, whose claim is the OPPOSITE ("record
+        # first") — the copyable template #9206 review P2 rules out.
+        with _test_fixture_write_scope("update_point_object_arm"):
+            proj.g.query("MATCH (n:Point {id:$id}) SET n:Object",
+                         params={"id": pid})
         labels = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN labels(n)",
             params={"id": pid}).result_set
