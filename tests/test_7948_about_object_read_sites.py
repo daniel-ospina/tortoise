@@ -126,6 +126,14 @@ WHAT THIS PINS
    had rotted: 785 is inside `_connector_content_hash`'s docstring, and
    373-403 is the unjournalled-`Document` drop, not the `aboutObject` count.
    A claim a document makes about itself is one a guard can hold it to.
+11. `test_the_stated_door_count_matches_the_table` — the blast-radius DOOR
+   figure is DERIVED from the customer-callable reach cells (and its per-kind
+   breakdown stated), in both documents. It was `twelve` while the table named
+   sixteen, and nothing read it.
+12. `test_the_edge_pattern_sees_the_whole_about_family` — the census pattern
+   must see a LONG `about*` alternation, not only one that fits a
+   character window. The pattern decides the census, the row check and the
+   module pre-filter at once, so a narrow window was a three-way false PASS.
 
 ⚠️ **What this deliberately does NOT claim.** The census is a LOWER BOUND: it
 sees a literal relationship pattern naming the edge, so a reader that
@@ -154,7 +162,54 @@ PKG = ROOT / "tortoise"
 
 #: The edge named inside a Cypher relationship bracket — `[:aboutObject]`,
 #: `[r:aboutObject]`, `[:aboutSubject|aboutObject]`, `[r1:aboutObject]`.
-_EDGE_PATTERN = re.compile(r"\[[^\]\n]{0,60}aboutObject[^\]\n]{0,60}\]")
+#:
+#: ⚠️ **The bracket is bounded by the STRING, not by a character count.** The
+#: first form of this pattern allowed 60 characters on each side of the edge
+#: name, which matched a short alternation and missed a long one: measured,
+#: `[r:aboutSubject|aboutAction|aboutEvent|aboutPoint|aboutDocument|aboutObject]`
+#: (63 characters before the name — the full six-member `about*` family in the
+#: order `ranking.ABOUT_EDGE_TYPES` uses) was invisible to EVERY consumer of
+#: this pattern. Because the same pattern decides both the census
+#: (`_literal_read_sites`) and whether a row's symbol reads the edge
+#: (`_reads_naming_the_edge`), a reader written in the repo's own established
+#: alternation style was in neither — a false PASS of the file's completeness
+#: claim, and exactly the class this guard exists to close. Cypher relationship
+#: brackets do not contain `]`, so bounding on that is both sufficient and
+#: exact; the newline exclusion keeps the match inside one folded string.
+#:
+#: ⚠️ **And a bracket alone is not enough — it must be a RELATIONSHIP bracket.**
+#: Bounding by `]` alone made a JSON array a false positive: measured, the
+#: grounding prompt in `tortoise/value_extractor.py` carries
+#: `"connections": [{"to": …, "edge": "aboutObject|IMPL|…"}]` inside ONE Python
+#: string, which the bare form read as a Cypher read site. Cypher delimits a
+#: relationship with `-` on either side (`(n)-[r]->(o)`, `(n)<-[r]-(o)`,
+#: `(n)-[r]-(o)`), so the pattern anchors on that and the prompt string drops
+#: out.
+_EDGE_PATTERN = re.compile(r"(?:<-|-)\s*\[[^\]\n]*aboutObject[^\]\n]*\]")
+
+#: Literal Cypher brackets the census MUST see. The last one is the case the
+#: old 60-character window missed; the short forms are the regression floor, so
+#: the pattern cannot be narrowed again without reddening here first.
+_EDGE_PATTERN_MUST_MATCH: tuple[str, ...] = (
+    "MATCH (n)-[:aboutObject]->(o:Object)",
+    "MATCH (n)-[r:aboutObject]->(o)",
+    "OPTIONAL MATCH (n)-[:aboutSubject|aboutObject]->(o)",
+    "MATCH (n)-[r1:aboutObject]->(o)",
+    "MATCH (n)<-[:aboutObject]-(o)",
+    "MATCH (n)-[r:aboutSubject|aboutAction|aboutEvent|aboutPoint|aboutDocument|"
+    "aboutObject]->(o)",
+)
+
+#: Strings the census must NOT read as a Cypher site. The first is real: it is
+#: the grounding prompt's JSON example in `tortoise/value_extractor.py`, where
+#: the `aboutObject|…` alternation is a payload VALUE inside a JSON array and
+#: not a relationship at all.
+_EDGE_PATTERN_MUST_NOT_MATCH: tuple[str, ...] = (
+    '"connections": [{"to": "existing-id", "edge": "aboutObject|IMPL|NAND|MITIGATES", '
+    '"note": null}]',
+    "aboutObject is load-bearing, and this sentence is not a query",
+    "MATCH (n)-[\n:aboutObject]->(o)",
+)
 
 #: Clauses that decide whether the pattern is read or written.
 _CLAUSE = re.compile(
@@ -247,10 +302,27 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     "hosted_api.py::_export_graph_snapshot": (
         '"MATCH (a)-[r]->(b) RETURN labels(a), coalesce(a.id, a.name), "',
     ),
+    # The third all-edge walk in `subgraph.py` — the module rows 13 and 14 come
+    # from. `MATCH (o)-[r]-()` counts EVERY incident edge of a hub `:Object`
+    # with no rel-type filter, and every edge incident to an `:Object` is an
+    # `about*` edge, so a `SET`-free derive would silently change `hub_degree`
+    # and with it the hub-mediated damping. Found by applying §13's own declared
+    # rule (*"the class is enumerated, not excluded"*) to the module the table
+    # already enumerates twice — it named no edge, so the literal census could
+    # not see it, and it had no pin, so neither could the row checks.
+    "subgraph.py::_CYPHER_HUB_DEGREE": (
+        '"MATCH (o)-[r]-() "',
+    ),
 }
 
 #: Facts outside the symbol that make the two computed-name readers complete
 #: reads: the empty `rel_pattern` for the default completeness mode.
+#:
+#: ⚠️ The KEY is the row the pin belongs to — `_neighbors` is the reader §13
+#: enumerates — while the FACTS are set in `SubgraphExpander.expand`, where
+#: `rel_pattern` is computed; `_neighbors` only receives it. Pinned here rather
+#: than re-keyed because `_NON_LITERAL_SIBLINGS` keys must own a row (see
+#: `test_every_computed_name_pin_owns_a_row`), and `expand` is not a row.
 _NON_LITERAL_SIBLINGS: dict[str, tuple[str, ...]] = {
     "ranking.py::SubgraphExpander._neighbors": (
         'rel_pattern = ":IMPL|NAND" if completeness == "core" else ""',
@@ -320,6 +392,27 @@ def _rows() -> list[dict[str, object]]:
         "§13 carries no `module.py::symbol` read-site rows. The table's rows are "
         "the ruling's evidence and the guard parses them; restoring them in the "
         "old `file.py:NNNN` form silently disables this guard."
+    )
+    # Hand-maintained numbering is this table's documented drift class, and these
+    # two directions were the only ones left unpinned: a COPY-PASTE duplicate
+    # (same number, or a fresh number with the same reader) raised `len(rows)` —
+    # the figure the ruling turns on — while every other test stayed green,
+    # because a duplicated row still resolves, still reads, and still satisfies
+    # its door. Uniqueness is what makes the count a count of READERS.
+    numbers = [int(row["n"]) for row in rows]
+    repeated_numbers = sorted({n for n in numbers if numbers.count(n) > 1})
+    assert not repeated_numbers, (
+        "§13's table re-uses these row numbers: "
+        f"{repeated_numbers} — the numeral is what `test_the_prose_counts_match_"
+        "the_table` compares its total to, so a copy-pasted row would inflate the "
+        "stated count without adding a reader."
+    )
+    keys = [f"{row['module']}::{row['symbol']}" for row in rows]
+    repeated_readers = sorted({key for key in keys if keys.count(key) > 1})
+    assert not repeated_readers, (
+        "§13 carries more than one row for these readers: "
+        f"{repeated_readers} — one reader is one row, or the site count stops "
+        "being a count of distinct places the edge is read."
     )
     return rows
 
@@ -651,6 +744,53 @@ def _words(cell: str) -> int:
     return _NUMBER_WORDS[cell]
 
 
+# ── 1a. the pattern that decides everything else ──────────────────────────
+
+
+def test_the_edge_pattern_sees_the_whole_about_family():
+    """The census pattern must see a LONG relationship alternation.
+
+    ⚠️ **This was a false PASS, and it was the sharpest one in the guard.**
+    `_EDGE_PATTERN` is not a detail: the same pattern decides the census
+    (`_literal_read_sites`), whether a row's symbol reads the edge
+    (`_reads_naming_the_edge`) and whether a module is worth parsing at all. A
+    60-character window on each side of the edge name matched
+    `[:aboutSubject|aboutObject]` (15 characters before it) and did NOT match
+    the six-member `about*` family `ranking.ABOUT_EDGE_TYPES` actually uses
+    (63 before it) — so a reader written in this repo's own established
+    alternation style was in neither the census nor any row check, while every
+    test stayed green. The docstring's "lower bound" disclaimer covers readers
+    that COMPUTE or CARRY the name; this one spells it out, late in the
+    bracket.
+    """
+    unseen = [
+        sample
+        for sample in _EDGE_PATTERN_MUST_MATCH
+        if _EDGE_PATTERN.search(sample) is None
+    ]
+    assert not unseen, (
+        "the census pattern no longer sees these literal Cypher brackets:\n  - "
+        + "\n  - ".join(unseen)
+        + "\nA relationship bracket is bounded by `]`; do not bound it by a "
+        "character count — a long `about*` alternation is a literal read that "
+        "nothing else in this file can see."
+    )
+    # ...and the widening must not become a wildcard: a bare mention is not a
+    # bracket, a JSON array is not a relationship, and a bracket cannot span a
+    # newline inside a folded query.
+    overreach = [
+        sample
+        for sample in _EDGE_PATTERN_MUST_NOT_MATCH
+        if _EDGE_PATTERN.search(sample) is not None
+    ]
+    assert not overreach, (
+        "the census pattern matches strings that are NOT Cypher read sites:\n  - "
+        + "\n  - ".join(overreach)
+        + "\nA relationship bracket is dash-delimited; without that anchor a "
+        "JSON payload or a prose mention becomes a phantom read site."
+    )
+
+
 # ── 1. every row names a symbol that exists ────────────────────────────────
 
 
@@ -838,6 +978,57 @@ def test_the_prose_counts_match_the_table():
 
 # ── 5. every customer-callable row reaches a declared door ─────────────────
 
+#: A door, as a customer-callable reach cell declares one. The three forms are
+#: the three shapes counted, and each is INDEPENDENTLY CALLABLE: an MCP tool, a
+#: public SDK method, or a served REST route.
+_DOOR_SDK = re.compile(r"SDK `([A-Za-z_]\w*)`")
+_DOOR_MCP = re.compile(r"MCP `([A-Za-z_]\w*)`")
+_DOOR_REST = re.compile(r"REST `((?:GET|POST|PUT|PATCH|DELETE) ([^`]+))`")
+
+#: Any backticked span that LOOKS like a hosted REST path. Used to refuse a door
+#: written so loosely that the resolver cannot check it (the shape row 5 had:
+#: *"hosted REST (`/v1/…/topic`)"*, which no route check ever saw).
+_REST_LOOKING = re.compile(r"`([^`]*/v1/[^`]*)`")
+
+
+def _doors(cell: str) -> dict[str, str]:
+    """The doors a reach cell declares: `identifier -> kind`.
+
+    ⚠️ **Each door is counted SEPARATELY, and that rule is stated in both
+    documents** — because the alternative is a hand-count nobody can reproduce.
+    An MCP tool and the SDK method it forwards to are two independently
+    callable entry points (a customer may call either), and the three `dry_run`
+    delete tools are three. Folding some pairs and not others is how *"TWELVE
+    distinct doors"* came to describe a table that names sixteen: nothing
+    derived it, so nothing could disagree with it.
+    """
+    doors = {f"MCP {name}": "mcp" for name in _DOOR_MCP.findall(cell)}
+    doors |= {f"SDK {name}": "sdk" for name in _DOOR_SDK.findall(cell)}
+    doors |= {f"REST {match.group(2)}": "rest" for match in _DOOR_REST.finditer(cell)}
+    return doors
+
+
+def _loose_rest_doors(cell: str) -> list[str]:
+    """Backticked `/v1/…` paths NOT written in the strict ``REST `VERB path` `` form."""
+    strict = [match.span(1) for match in _DOOR_REST.finditer(cell)]
+    return [
+        match.group(1)
+        for match in _REST_LOOKING.finditer(cell)
+        if not any(lo <= match.start(1) and match.end(1) <= hi for lo, hi in strict)
+    ]
+
+
+def _customer_callable_doors() -> dict[str, list[int]]:
+    """Door identifier -> the row numbers that reach the edge through it."""
+    doors: dict[str, list[int]] = {}
+    for row in _rows():
+        if _reach(row) != "customer-callable":
+            continue
+        for door in sorted(_doors(str(row["reach"]))):
+            doors.setdefault(door, []).append(int(row["n"]))
+    return doors
+
+
 
 def _public_sdk_methods() -> set[str]:
     tree = _module_tree(PKG / "sdk.py")
@@ -911,33 +1102,166 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         if _reach(row) != "customer-callable":
             continue
         label = f"row {row['n']} ({row['module']}::{row['symbol']})"
-        sdk = re.findall(r"SDK `([A-Za-z_][\w]*)`", str(row["reach"]))
-        mcp = re.findall(r"MCP `([A-Za-z_][\w]*)`", str(row["reach"]))
-        rest = re.findall(
-            r"REST `(?:GET|POST|PUT|PATCH|DELETE) ([^`]+)`", str(row["reach"])
+        cell = str(row["reach"])
+        doors = _doors(cell)
+        # ⚠️ FAIL CLOSED on a REST door written in no form this test can resolve.
+        # Measured before this arm existed: rewriting row 5's *"hosted REST
+        # (`/v1/…/topic`)"* to `/v1/…/nonexistent` left ALL ten tests green,
+        # because the strict form was the only one parsed and the loose one was
+        # silently skipped — the "weaker form that let row 1 name a door that
+        # could not reach its reader" this arm exists to prevent, one shape over.
+        broken.extend(
+            f"{label} — `{span}` is a REST path in NO form this test can "
+            "resolve: write the door as REST `GET /v1/…` so it is checked "
+            "against the routes in hosted_api.py"
+            for span in _loose_rest_doors(cell)
         )
-        if not sdk and not mcp and not rest:
-            broken.append(f"{label} — names no door (SDK/MCP/REST backticked name)")
+        if not doors:
+            if not _loose_rest_doors(cell):
+                broken.append(
+                    f"{label} — names no door (SDK/MCP/REST backticked name)"
+                )
             continue
-        broken.extend(
-            f"{label} — SDK `{name}` is not a public TortoiseSDK method"
-            for name in sdk
-            if name not in sdk_methods
-        )
-        broken.extend(
-            f"{label} — MCP `{name}` is not a registered tool"
-            for name in mcp
-            if name not in tools
-        )
-        broken.extend(
-            f"{label} — REST `{path}` is not a route in hosted_api.py"
-            for path in rest
-            if path not in routes
-        )
+        for door in sorted(doors):
+            kind, name = door.split(" ", 1)
+            if kind == "SDK" and name not in sdk_methods:
+                broken.append(
+                    f"{label} — SDK `{name}` is not a public TortoiseSDK method"
+                )
+            elif kind == "MCP" and name not in tools:
+                broken.append(f"{label} — MCP `{name}` is not a registered tool")
+            elif kind == "REST" and name not in routes:
+                broken.append(
+                    f"{label} — REST `{name}` is not a route in hosted_api.py"
+                )
 
     assert not broken, (
         "§13 classes these rows customer-callable without naming a door that "
         "exists:\n  " + "\n  ".join(broken)
+    )
+
+
+#: A stated door count: `SIXTEEN distinct doors`, `sixteen doors`, `SIXTEEN
+#: doors`. A HISTORICAL figure ("`#7956` corrected it to four *doors*") is
+#: deliberately not matched — it carries emphasis between the numeral and the
+#: noun, and it describes a past state rather than the table in front of it.
+_STATED_DOOR_COUNT = re.compile(r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:distinct )?doors?\b")
+
+
+def _as_count(token: str) -> int | None:
+    """`SIXTEEN` / `16` / `TWENTY-SIX` -> int; anything else (a NOUN that
+    happens to precede the word "door" — *"no MCP door exists"*) -> None."""
+    cell = token.strip().upper()
+    if cell.isdigit():
+        return int(cell)
+    if "-" in cell:
+        tens, _, units = cell.partition("-")
+        if tens in _TENS and units in _NUMBER_WORDS and _NUMBER_WORDS[units] < 10:
+            return _TENS[tens] + _NUMBER_WORDS[units]
+        return None
+    return _NUMBER_WORDS.get(cell)
+
+
+def _stated_door_counts(section: str) -> set[int]:
+    counts = {
+        count
+        for match in _STATED_DOOR_COUNT.finditer(section)
+        if (count := _as_count(match.group(1))) is not None
+    }
+    return counts
+
+
+def _spelled(value: int) -> str:
+    for word, number in _NUMBER_WORDS.items():
+        if number == value:
+            return word
+    raise AssertionError(f"{value} has no spelled form this guard knows")
+
+
+def _section_13_8() -> str:
+    """`EXTRACTOR-V4-ARCHITECTURE.md` §13.8 — the sibling that carries §13's fact."""
+    text = (ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md").read_text(
+        encoding="utf-8"
+    )
+    start = text.index("### 13.8 What this does to our design")
+    return text[start : text.index("## 14. Not established", start)]
+
+
+def test_the_stated_door_count_matches_the_table():
+    """The blast-radius DOOR figure must be derived from the table, or it is prose.
+
+    ⚠️ **"TWELVE distinct doors" did not reconcile with the table it certifies,
+    and nothing guarded it.** The 12 customer-callable reach cells name SIXTEEN
+    distinct door identifiers; the folding rule was applied inconsistently
+    (`search`/`tortoise_fts_query` folded into one door, the three `dry_run`
+    delete tools left as three); and `§13`'s own justification — *"TWELVE sites
+    behind those twelve doors, because `recall_state` alone reads the edge on
+    FOUR code paths"* — requires doors < sites and then asserts doors == sites.
+    Measured: rewriting the figure to `four` (STORAGE) or `TEN` (EXTRACTOR) in
+    both documents left all ten tests green, which is exactly the class of
+    unguarded hand-count this file exists to end.
+
+    So the rule is now STATED in both documents — *a door is one independently
+    callable entry point: an MCP tool, a public SDK method, or a served REST
+    route; counted once per site that reaches it* — and both documents' stated
+    total, and the per-kind breakdown, are asserted against the table.
+    """
+    doors = _customer_callable_doors()
+    kinds: dict[str, int] = {}
+    for door in doors:
+        kind = door.split(" ", 1)[0].lower()
+        kinds[kind] = kinds.get(kind, 0) + 1
+    total = len(doors)
+    spelled = _spelled(total)
+
+    section = _section_13()
+    stated = _stated_door_counts(section)
+    assert stated, (
+        "§13 no longer states a door count — the blast-radius argument rests on "
+        "it: restore the figure (derived from this table), or delete this test "
+        "with a reason."
+    )
+    assert stated == {total}, (
+        f"§13 states {sorted(stated)} distinct door(s) and its customer-callable "
+        f"reach cells name {total} ({spelled}): "
+        + ", ".join(f"{len(rows)}× {door}" for door, rows in sorted(doors.items()))
+        + "\nThe figure is the ruling's blast-radius argument, so it is derived "
+        "from the table, not hand-counted."
+    )
+    # The breakdown must sit in the SAME sentence as the total: a bare "SIXTEEN
+    # doors" with no fold stated is the hand-count this replaced.
+    tails = [
+        section[match.end() : match.end() + 320].lower()
+        for match in re.finditer(rf"{spelled} distinct doors", section, re.I)
+    ]
+    assert tails, (
+        f"§13 states no `{spelled} distinct doors` sentence — the total must be "
+        "stated in prose a reader can find, not only asserted here."
+    )
+    missing = [
+        f"{_spelled(kinds.get(kind, 0))} {noun}"
+        for kind, noun in (
+            ("mcp", "MCP tools"),
+            ("sdk", "SDK methods"),
+            ("rest", "REST routes"),
+        )
+        if not any(
+            f"{_spelled(kinds.get(kind, 0))} {noun}".lower() in tail for tail in tails
+        )
+    ]
+    assert not missing, (
+        "§13 must state the door breakdown beside the total — "
+        + ", ".join(f"`{phrase}`" for phrase in missing)
+        + " is missing from every sentence carrying the count. The breakdown is "
+        "what STATES the folding rule (MCP tool and SDK twin counted separately, "
+        "the three `dry_run` delete tools counted as three); without it the total "
+        "is not reproducible from the table."
+    )
+    sibling = _stated_door_counts(_section_13_8())
+    assert sibling == {total}, (
+        f"EXTRACTOR-V4-ARCHITECTURE.md §13.8 states {sorted(sibling)} distinct "
+        f"door(s) and §13's table derives {total} ({spelled}) — the two "
+        "documents must state ONE fact."
     )
 
 
@@ -1006,21 +1330,31 @@ def test_the_extractor_document_agrees_on_the_count():
     number re-creates exactly the contradiction `#7956` had to correct. The
     sibling must therefore state the §13 count, and must name the state-recall
     readers that the four-site census missed.
+
+    ⚠️ **Three holes were measured shut here.** (i) The count pattern matched
+    only ONE word order — `TWELVE sites are customer-callable` — so editing
+    §13.8 and leaving §13.6's `TWELVE *customer-callable* sites DO` stale left
+    this test green; both orders are now read. (ii) Nothing cross-checked
+    MEMBERSHIP, so §13.8 enumerated THIRTEEN readers under a stated TWELVE, the
+    extra one being `supersede_point` — a row §13 classes `write path`. Both
+    halves are asserted below: every customer-callable reader is NAMED, and no
+    citation in the section may be bound to a reader §13 does not class
+    customer-callable.
     """
     extractor = (
         ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
     ).read_text(encoding="utf-8")
-    counted = sum(1 for row in _rows() if _reach(row) == "customer-callable")
-    word = next(word for word, value in _NUMBER_WORDS.items() if value == counted)
+    section = _section_13_8()
+    callable_rows = [row for row in _rows() if _reach(row) == "customer-callable"]
+    counted = len(callable_rows)
+    word = _spelled(counted)
 
-    stated = {
-        _words(m.group(1))
-        for m in re.finditer(
-            r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:sites?|of them) (?:are|is) \*?customer-callable",
-            extractor,
-            re.I,
-        )
-    }
+    stated: set[int] = set()
+    for pattern in (
+        r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:sites?|of them) (?:are|is) \*?customer-callable",
+        r"\b([A-Z]+(?:-[A-Z]+)?|\d+) \*?customer-callable\*? sites?\b",
+    ):
+        stated |= {_words(m.group(1)) for m in re.finditer(pattern, extractor, re.I)}
     assert stated == {counted}, (
         f"EXTRACTOR-V4-ARCHITECTURE.md states customer-callable counts {sorted(stated)} "
         f"and §13's table counts {counted} ({word}) — the two documents must state "
@@ -1031,6 +1365,45 @@ def test_the_extractor_document_agrees_on_the_count():
             f"EXTRACTOR-V4-ARCHITECTURE.md does not name `{reader}` — a "
             "`recall_state` read the four-site census missed"
         )
+
+    # MEMBERSHIP, both directions.
+    readers = {str(row["symbol"]).rsplit(".", 1)[-1]: row for row in _rows()}
+    unnamed = sorted(
+        base
+        for base, row in readers.items()
+        if _reach(row) == "customer-callable" and base not in section
+    )
+    assert not unnamed, (
+        "EXTRACTOR-V4-ARCHITECTURE.md §13.8 does not name these customer-callable "
+        "readers, so its enumeration is smaller than the count it states:\n  - "
+        + "\n  - ".join(f"{base} (row {readers[base]['n']})" for base in unnamed)
+        + "\nName every customer-callable reader, or the sibling repeats the "
+        "under-count it exists to prevent."
+    )
+    cited = {
+        match.group(1).rsplit(".", 1)[-1]
+        for match in re.finditer(
+            r"`([A-Za-z_][\w.]*)`\s*\(`?[A-Za-z0-9_./-]+\.py:\d+`?\)", section
+        )
+    }
+    assert len(cited) >= 8, (
+        f"only {len(cited)} line-bound reader citations parsed in §13.8 — the "
+        "sentence's citation shape changed and the membership check below would "
+        "pass vacuously."
+    )
+    misclassified = sorted(
+        f"{base} (row {readers[base]['n']}, reach {_reach(readers[base])!r})"
+        for base in cited
+        if base in readers and _reach(readers[base]) != "customer-callable"
+    )
+    assert not misclassified, (
+        "EXTRACTOR-V4-ARCHITECTURE.md §13.8 cites these readers as members of its "
+        "customer-callable enumeration, and §13's table classes them otherwise:\n  - "
+        + "\n  - ".join(misclassified)
+        + "\nA row's reach class is decided in ONE place (§13's table); name a "
+        "write path or a replay reader as CONTEXT (no line-bound citation), not "
+        "as one of the twelve."
+    )
 
 
 # ── 9. §13 carries the line numbers its own sentence says it does not ───────

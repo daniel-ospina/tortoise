@@ -676,3 +676,28 @@ that, which is why two had drifted there too: `_state_related_objects` cited `sd
 `_state_related_points` `sdk.py:29378`, both landing inside `_state_mitigations` (a `mitigated_by` reader)
 while their `def`s sit at `29392`/`29409`. Non-vacuity measured: under the pre-fix text both new tests red,
 naming the offending line and the span the cited symbol actually occupies.
+
+## §13.8 question 2 — the door figure derived, and the enumeration held to its own count (2026-10-21, `#7948`)
+
+Three figures in this section were stated but never derived, and two of them were wrong.
+
+**The door count was a hand-count that contradicted the table it certifies.** It said *"TWELVE distinct
+doors"* while the 12 customer-callable reach cells in `STORAGE-ARCHITECTURE.md` §13 name **sixteen** distinct
+door identifiers; the folding rule was applied inconsistently (graph-ordered `search` and `tortoise_fts_query`
+folded into one door, the three `dry_run` delete tools left as three); and the sentence justifying it —
+*"TWELVE sites behind those twelve doors, because `recall_state` alone reads the edge on FOUR code paths"* —
+requires doors to be FEWER than sites while asserting they are equal. Both documents now state SIXTEEN, the
+rule is stated (*a door is one independently callable entry point — an MCP tool, a public SDK method, or a
+served REST route — counted once per site that reaches it*), and
+`test_the_stated_door_count_matches_the_table` derives the total and the per-kind breakdown (nine MCP tools,
+five SDK methods, two REST routes) from the reach cells and asserts it in BOTH documents. Measured before the
+fix: rewriting the figure to `four` here, or `TEN` in the sibling, left all ten tests green.
+
+**The enumeration was thirteen readers under a stated TWELVE, and the extra one is a WRITE.**
+`supersede_point` (§13's row 20, reach `write path`) was listed as one of the customer-callable sites; its
+customer-callable half is `_preview_supersede`, the dry run that reports the transfer. It is now named as
+context — the write half of that pair — and `test_the_extractor_document_agrees_on_the_count` asserts MEMBERSHIP
+in both directions: every customer-callable reader must be named here, and no reader bound to a line citation in
+this section may be one §13 classes otherwise. The same test now reads both word orders of the count
+(`TWELVE sites are customer-callable` AND `TWELVE *customer-callable* sites DO`), because the second form is
+elsewhere in this document and the old pattern never saw it.
