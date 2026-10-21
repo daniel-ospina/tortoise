@@ -51,6 +51,23 @@ kind** — the customer-callable count was **8 sites across 5 doors, not 4**:
   * the counts the document states elsewhere had drifted too: *"36 test files
     assert the edge at the pin"* measured 59 at `26aff163c`.
 
+**A second re-derivation found three MORE readers, all inside modules the
+census already named** — which is why the census below is keyed on
+`module.py::symbol` and not on the module:
+
+  * `navigation._hop_query` — the SECOND all-edge walk (`MATCH (n)-[r]->(m)`,
+    no rel-type filter), behind MCP `tortoise_entity_profile` and
+    `tortoise_traverse`. Exactly the rule that makes row 3 a row, so it is
+    either a row or row 3 is not;
+  * `mcp_server._preview_supersede` — the supersede DRY RUN matches every
+    `SUPERSEDE_STRUCTURAL_RELS` member (MCP `tortoise_supersede`);
+  * `projection.FalkorProjection._rebuild_all_replay` — the replay delete-leg matches
+    `[r:{etype}]` where `etype` is a RUN-TIME name gated on
+    `DERIVABLE_STRUCTURAL_RELS`.
+
+A module-level census cannot see any of them: each module was already named by
+a row, and no row count changes when a reader is added beside it.
+
 The two documents that carry this census (§13 and `EXTRACTOR-V4-ARCHITECTURE.md`
 §13.8) also disagreed with each other — the sibling still said FOUR — which is
 how an under-count survives a review: each copy looks confirmed by the other.
@@ -63,23 +80,33 @@ WHAT THIS PINS
 2. `test_every_named_reader_still_reads_the_edge` — the named symbol really
    reads the edge, by any of the three ways a reader can name it: a Cypher
    **read** clause (`MATCH`/`OPTIONAL MATCH`) naming it literally; a carrier
-   CONSTANT whose value names it; or — for the two readers that COMPUTE the
-   edge name — the code fact that makes them reads (`rel_pattern` empty for
+   CONSTANT whose value names it; or — for the readers that COMPUTE the
+   edge name, and for the supersede/replay rows — the CONSUMING line, which
+   is the code fact that makes them reads (`rel_pattern` empty for
    `completeness="full"`; `` -[:{edge_type}]-> `` with `edge_type`'s
    else-branch `"aboutObject"`).
 3. `test_the_computed_name_readers_are_still_complete_reads` — the
    every-relationship walk keeps its empty-pattern default, which is what
    makes `recall_subgraph` a reader at all.
-4. `test_no_module_reads_the_edge_without_a_row` — the census half. Every
-   module under `tortoise/` containing a read clause that names the edge must
-   be named by some row.
-5. `test_the_prose_counts_match_the_table` — the arithmetic ("TWENTY read
-   sites … EIGHT of them are CUSTOMER-CALLABLE") equals the table. This is
+4. `test_no_read_site_lacks_a_row` — the census half, keyed on
+   `module.py::symbol`. Every read clause under `tortoise/` that names the edge
+   must be absorbed by a row naming the symbol it sits in. ⚠️ **Module
+   granularity is not enough, and that was the second false PASS**: the
+   historical under-count lived INSIDE already-named modules (`ranking.py`,
+   `sdk.py`), and a new `MATCH (n)-[:aboutObject]->(o)` appended to either one
+   moved no module set and no row count.
+5. `test_the_prose_counts_match_the_table` — the arithmetic (§13's stated site
+   count, and its stated customer-callable count) equals the table. This is
    the figure that was wrong twice, and it is the figure the ruling turns on.
 6. `test_every_carrier_constant_a_row_reads_through_still_names_the_edge` —
-   the constant IS the read for rows 17–20: if `aboutObject` leaves
-   `ABOUT_EDGE_TYPES` / `_ABOUT_TYPES` / `SUPERSEDE_STRUCTURAL_RELS`, the row
-   still resolves while the site stops reading the edge.
+   the constant IS the read for the carrier rows: if `aboutObject` leaves
+   `ABOUT_EDGE_TYPES` / `_ABOUT_TYPES` / `SUPERSEDE_STRUCTURAL_RELS` /
+   `DERIVABLE_STRUCTURAL_RELS`, the row still resolves while the site stops
+   reading the edge. The constant is resolved through the reader's IMPORT too
+   (`mcp_server.py` takes `SUPERSEDE_STRUCTURAL_RELS` from `sdk.py`;
+   `projection/__init__.py` takes `DERIVABLE_STRUCTURAL_RELS` from
+   `projection/edges.py`), because a same-module scan would leave those rows
+   unasserted.
 7. `test_every_customer_callable_row_reaches_a_declared_door` — each
    customer-callable row names a door that exists: ``SDK `<method>` `` must be
    a public `TortoiseSDK` method, ``MCP `<tool>` `` a registered
@@ -91,8 +118,10 @@ WHAT THIS PINS
 
 ⚠️ **What this deliberately does NOT claim.** The census is a LOWER BOUND: it
 sees a literal relationship pattern naming the edge, so a reader that
-computes or carries the name (`_neighbors`, `_retrieve_topic_neighborhood`,
-rows 17–20) is invisible to it and is pinned by (2)/(6) instead. Line NUMBERS
+computes or carries the name (`_neighbors`, `_hop_query`,
+`_retrieve_topic_neighborhood`, `_preview_supersede`, `_rebuild_all_replay`,
+`supersede_point`, the `recall_state` constant readers) is invisible to it and
+is pinned by (2)/(6) instead. Line NUMBERS
 are not asserted — the symbol is authoritative and a symbol that merely moved
 passes. And the enumeration is of READERS of the edge as data; writers that
 MERGE it are not rows here.
@@ -151,6 +180,34 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
         'edge_type = "aboutSubject" if entity_label == "Subject" else "aboutObject"',
         "MATCH (p:Point)-[:{edge_type}]->",
     ),
+    # The supersede path on BOTH sides — the SDK write and the MCP dry-run
+    # preview — plus the replay delete-leg. All three consume the rel family
+    # through a constant or a run-time name, so none of them spells the edge;
+    # the LOOP THAT CONSUMES IT is what makes each one a read. Row 20 was the
+    # last row decided by the carrier fallback alone (a bare constant MENTION
+    # plus any `MATCH` in a 350-line span), which is the same false PASS the
+    # `_fetch_object_signals` ordering fix closed for row 17.
+    "sdk.py::TortoiseSDK.supersede_point": (
+        'structural_rels = SUPERSEDE_STRUCTURAL_RELS',
+        'f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "',
+    ),
+    "mcp_server.py::_preview_supersede": (
+        'for rel in SUPERSEDE_STRUCTURAL_RELS:',
+        'f"MATCH (o:Point {{id:$old}})-[r:{rel}]->(t) "',
+    ),
+    "projection/__init__.py::FalkorProjection._rebuild_all_replay": (
+        'if (isinstance(etype, str) and etype in DERIVABLE_STRUCTURAL_RELS',
+        'or etype not in DERIVABLE_STRUCTURAL_RELS',
+        'f"MATCH (old:Point {{id:$old}})-[r:{etype}]->(t) "',
+    ),
+    # An ALL-EDGE walk: no rel-type filter anywhere, so the edge is read
+    # without ever being named. Same rule as `SubgraphExpander._neighbors`
+    # (row 3), one module further out — and the reason that row's inclusion
+    # cannot be a one-off.
+    "navigation.py::_hop_query": (
+        'f"MATCH (n:{label} {{{key}:$eid}})-[r]->(m) "',
+        'f"MATCH (n:{label} {{{key}:$eid}})<-[r]-(m) "',
+    ),
     # The `tortoise_recall(mode="state")` readers: the predicate is the `about*`
     # ALTERNATION, so `aboutObject` is read as one member and the literal string
     # never appears at the site. This is the form that under-counted the
@@ -176,34 +233,39 @@ _NON_LITERAL_SIBLINGS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-_NUMBER_WORDS = {
-    word: value
-    for value, word in enumerate(
-        (
-            "ZERO",
-            "ONE",
-            "TWO",
-            "THREE",
-            "FOUR",
-            "FIVE",
-            "SIX",
-            "SEVEN",
-            "EIGHT",
-            "NINE",
-            "TEN",
-            "ELEVEN",
-            "TWELVE",
-            "THIRTEEN",
-            "FOURTEEN",
-            "FIFTEEN",
-            "SIXTEEN",
-            "SEVENTEEN",
-            "EIGHTEEN",
-            "NINETEEN",
-            "TWENTY",
-        )
-    )
-}
+_UNITS = (
+    "ZERO",
+    "ONE",
+    "TWO",
+    "THREE",
+    "FOUR",
+    "FIVE",
+    "SIX",
+    "SEVEN",
+    "EIGHT",
+    "NINE",
+    "TEN",
+    "ELEVEN",
+    "TWELVE",
+    "THIRTEEN",
+    "FOURTEEN",
+    "FIFTEEN",
+    "SIXTEEN",
+    "SEVENTEEN",
+    "EIGHTEEN",
+    "NINETEEN",
+)
+
+#: Tens, so a count above nineteen can be spelled rather than counted out
+#: one word at a time — `_words()` assembles `TWENTY-THREE`, which the table's
+#: own prose now needs. A guard that tops out at TWENTY does not fail silently
+#: (it asserts), but it would force the document into digits to be readable by
+#: its own instrument, which is the wrong way round.
+_TENS = {"TWENTY": 20, "THIRTY": 30, "FORTY": 40}
+
+_NUMBER_WORDS: dict[str, int] = {
+    word: value for value, word in enumerate(_UNITS)
+} | dict(_TENS)
 
 
 def _doc() -> str:
@@ -410,6 +472,15 @@ def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     """
 
     def splices(node: ast.AST | None) -> tuple[str, ...] | None:
+        # `frozenset({...})` / `set({...})` counts too: `DERIVABLE_STRUCTURAL_RELS`
+        # is the replay's rel filter and is spelled that way.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"frozenset", "set", "tuple", "list"}
+            and len(node.args) == 1
+        ):
+            return splices(node.args[0])
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return tuple(node.value.split("|")) if "|" in node.value else None
         if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
@@ -443,7 +514,52 @@ def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     return carriers
 
 
-def _modules_reading_the_edge() -> dict[str, list[int]]:
+def _imported_module(rel: str, node: ast.ImportFrom) -> str | None:
+    """The `tortoise/`-relative module an `from … import` reads from, or None."""
+    module = (node.module or "").replace(".", "/")
+    base = Path(rel).parent
+    if node.level:
+        for _ in range(node.level - 1):
+            base = base.parent
+    elif module.startswith("tortoise/"):
+        module = module[len("tortoise/") :]
+    for candidate in (PKG / base / f"{module}.py", PKG / base / module / "__init__.py"):
+        if candidate.exists():
+            return str(candidate.relative_to(PKG))
+    return None
+
+
+def _carrier_declarations(rel: str) -> dict[str, tuple[str, str]]:
+    """Names in scope that carry a spliced rel family, and where they are DECLARED.
+
+    `bare name in this module -> (module that declares it, qualified name)`.
+    The import half is not a nicety: `mcp_server.py` takes
+    `SUPERSEDE_STRUCTURAL_RELS` from `sdk.py` and `projection/__init__.py`
+    takes `DERIVABLE_STRUCTURAL_RELS` from `projection/edges.py`, so a
+    same-module scan finds no carrier for those rows and their "the constant IS
+    the read" claim goes unasserted — the exact shape of gap this module
+    exists to close.
+    """
+    declarations: dict[str, tuple[str, str]] = {
+        qualified.split(".")[-1]: (rel, qualified)
+        for qualified in _carrier_shaped_constants(rel)
+    }
+    for node in ast.walk(_parsed(str(_module_path(rel)))):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        origin = _imported_module(rel, node)
+        if origin is None:
+            continue
+        for alias in node.names:
+            if alias.name not in _carrier_shaped_constants(origin):
+                continue
+            declarations.setdefault(
+                alias.asname or alias.name, (origin, alias.name)
+            )
+    return declarations
+
+
+def _literal_read_sites() -> dict[str, list[int]]:
     """Census: module → line numbers of each literal Cypher READ of the edge."""
     found: dict[str, list[int]] = {}
     for path in sorted(PKG.rglob("*.py")):
@@ -467,10 +583,45 @@ def _modules_reading_the_edge() -> dict[str, list[int]]:
     return found
 
 
+def _row_symbols(tree: ast.Module) -> list[tuple[str, int, int]]:
+    """Every symbol a row may name, with its span: top level plus one class level.
+
+    `Class.attr` is included because that is how rows are keyed; a read inside a
+    NESTED function resolves to its enclosing top-level symbol as well (any
+    candidate in `named` is enough), which is what keeps
+    `assembly.py::docker_resolver_port` a legitimate key for a read inside its
+    `alias_objects` closure.
+    """
+    symbols: list[tuple[str, int, int]] = []
+    for node in tree.body:
+        name = _bound_name(node)
+        if name is None:
+            continue
+        symbols.append((name, node.lineno, node.end_lineno or node.lineno))
+        if isinstance(node, ast.ClassDef):
+            for inner in node.body:
+                inner_name = _bound_name(inner)
+                if inner_name is not None:
+                    symbols.append(
+                        (
+                            f"{name}.{inner_name}",
+                            inner.lineno,
+                            inner.end_lineno or inner.lineno,
+                        )
+                    )
+    return symbols
+
+
 def _words(cell: str) -> int:
     cell = cell.strip().upper()
     if cell.isdigit():
         return int(cell)
+    if "-" in cell:  # TWENTY-THREE
+        tens, _, units = cell.partition("-")
+        assert (
+            tens in _TENS and units in _NUMBER_WORDS and _NUMBER_WORDS[units] < 10
+        ), f"{cell!r} is not a spelled number this guard knows"
+        return _TENS[tens] + _NUMBER_WORDS[units]
     assert cell in _NUMBER_WORDS, f"{cell!r} is not a spelled number this guard knows"
     return _NUMBER_WORDS[cell]
 
@@ -560,20 +711,42 @@ def test_the_computed_name_readers_are_still_complete_reads():
 # ── 3. no module reads the edge without a row ──────────────────────────────
 
 
-def test_no_module_reads_the_edge_without_a_row():
-    named = {str(row["module"]) for row in _rows()}
-    census = _modules_reading_the_edge()
+def test_no_read_site_lacks_a_row():
+    """Every literal READ of the edge is absorbed by a row — BY SYMBOL.
+
+    ⚠️ **Module granularity was a false PASS and this is the fix.** The
+    historical under-count lived INSIDE already-named modules: `ranking.py` and
+    `sdk.py` were both named by the pre-fix table while four `recall_state`
+    readers were missing from them. A module-level census is blind to exactly
+    that shape — appending a `MATCH (p:Point)-[:aboutObject]->(o:Object)` method
+    to `sdk.py` adds a line to `census["sdk.py"]`, `sdk.py` is already named,
+    `len(rows)` is unchanged, and every test stayed green while §13's decisive
+    figure (the pre-fix “TWENTY read sites”) was wrong. Keyed on `module.py::symbol`, the
+    same edit is red until a row names the new symbol.
+    """
+    named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
+    census = _literal_read_sites()
     assert census, (
         "the census found NO literal Cypher read of `aboutObject` anywhere under "
         "tortoise/ — the pattern or the clause rule was changed, and this guard "
         "has stopped measuring anything."
     )
-    unnamed = sorted(set(census) - named)
+    unnamed: list[str] = []
+    for module, lines in sorted(census.items()):
+        symbols = _row_symbols(_module_tree(_module_path(module)))
+        for line in lines:
+            candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
+            if any(f"{module}::{name}" in named for name in candidates):
+                continue
+            unnamed.append(
+                f"{module}:{line}  (inside {', '.join(candidates) or 'module level'})"
+            )
     assert not unnamed, (
-        "these modules READ the `aboutObject` edge and are named by no §13 row:\n  "
-        + "\n  ".join(f"{module}  (lines {census[module]})" for module in unnamed)
-        + "\n§13's list is the evidence the KEEP ruling rests on; an unnamed "
-        "reader is the drift B2.7 and #7956 both under-reported."
+        "these READ sites of the `aboutObject` edge are absorbed by no §13 row:\n  "
+        + "\n  ".join(unnamed)
+        + "\n§13's list is the evidence the KEEP ruling rests on. A reader added "
+        "beside an existing row is the drift B2.7 and #7956 both under-reported, "
+        "and it is invisible to a module-level census."
     )
 
 
@@ -583,10 +756,10 @@ def test_no_module_reads_the_edge_without_a_row():
 def test_the_prose_counts_match_the_table():
     section = _section_13()
     rows = _rows()
-    sites = re.search(r"\b([A-Z]+|\d+) read sites\b", section)
+    sites = re.search(r"\b([A-Z]+(?:-[A-Z]+)?|\d+) read sites\b", section)
     assert sites, "§13 must state how many read sites it enumerates"
     callable_sites = re.search(
-        r"\b([A-Z]+|\d+) of them are CUSTOMER-CALLABLE\b", section
+        r"\b([A-Z]+(?:-[A-Z]+)?|\d+) of them are CUSTOMER-CALLABLE\b", section
     )
     assert callable_sites, "§13 must state how many of those are customer-callable"
 
@@ -672,12 +845,12 @@ def test_every_customer_callable_row_reaches_a_declared_door():
 def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
     """The constant IS the edge name — its membership is the read, not a detail.
 
-    Three `recall_state` readers and the supersede path name `aboutObject` in a
-    constant, never in a query, so a literal census (and any grep) misses them.
-    That is how the customer-callable count stayed at four through three
-    reviews. If the edge leaves one of these constants, the §13 row keeps
-    resolving while the site stops reading the edge — an under-count in the
-    direction that matters.
+    Three `recall_state` helpers, the supersede path (SDK and its MCP dry
+    run) and the replay delete-leg name `aboutObject` in a constant, never in a
+    query, so a literal census (and any grep) misses them. That is how the
+    customer-callable count stayed at four through three reviews. If the edge
+    leaves one of these constants, the §13 row keeps resolving while the site
+    stops reading the edge — an under-count in the direction that matters.
 
     The candidates come from `_carrier_shaped_constants()` (shape + `about*`
     family), NOT from `_carrier_constants()` (which filters on the very name
@@ -696,21 +869,24 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
         source = "\n".join(
             _module_path(module).read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
         )
-        carriers = sorted(
-            qualified
-            for qualified in _carrier_shaped_constants(module)
-            if re.search(rf"\b{re.escape(qualified.split('.')[-1])}\b", source)
-        )
-        for carrier in carriers:
-            declaration = _span(tree, carrier)
-            assert declaration is not None, f"{module}::{carrier} does not resolve"
+        for bare, (declaring, qualified) in sorted(
+            _carrier_declarations(module).items()
+        ):
+            if not re.search(rf"\b{re.escape(bare)}\b", source):
+                continue
+            declared_tree = _module_tree(_module_path(declaring))
+            declaration = _span(declared_tree, qualified)
+            assert declaration is not None, f"{declaring}::{qualified} does not resolve"
             declared = "\n".join(
-                _module_path(module)
+                _module_path(declaring)
                 .read_text(encoding="utf-8")
                 .splitlines()[declaration[0] - 1 : declaration[1]]
             )
             if "aboutObject" not in declared:
-                broken.append(f"row {row['n']}: {module}::{row['symbol']} reads through {carrier}")
+                broken.append(
+                    f"row {row['n']}: {module}::{row['symbol']} reads through "
+                    f"{declaring}::{qualified}"
+                )
     assert not broken, (
         "these readers name the edge through a constant that NO LONGER contains "
         "`aboutObject`:\n  " + "\n  ".join(broken)
@@ -738,7 +914,7 @@ def test_the_extractor_document_agrees_on_the_count():
     stated = {
         _words(m.group(1))
         for m in re.finditer(
-            r"\b([A-Z]+|\d+) (?:sites?|of them) (?:are|is) \*?customer-callable",
+            r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:sites?|of them) (?:are|is) \*?customer-callable",
             extractor,
             re.I,
         )
