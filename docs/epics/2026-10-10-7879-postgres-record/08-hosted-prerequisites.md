@@ -296,8 +296,8 @@ that *"the narrative is not something we're suggesting to store in the graph (sa
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
 text, not the extracted claim"* — measured 15.9 / 22.0 pts).
 **What it blocks:** §9.1's placement rule, the verbatim-evidence fetch path, **and the destroy-the-
-graph acceptance itself** — today destroying FalkorDB loses the raw text, because the graph is where
-it went. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
+graph acceptance itself** — the **record** has no copy: the raw text lives in the graph and, since
+`#3947` (CLOSED), in the journal a `rebuild_all` replays, so a *record*-sourced rebuild cannot reproduce it. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
 the finding (see §E).
 **Decision needed:** none — §9.1 and the 2026-09-23 owner quote already place it. Only *which table
 shape* is open, and that is an engineering choice inside the existing schema discipline.
@@ -381,11 +381,11 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 | input | value | basis | status |
 |---|---|---|---|
 | resident nodes (dogfood/prod graph) | **89,701** | `MATCH (n)`, 2026-09-25 (§17.4.2) | **MEASURED** |
-| quota-counted nodes | **24,978** | the quota predicate, same date | **MEASURED** |
+| quota-counted nodes | **24,978** | the quota predicate; `§17.4.2`, 2026-09-25 | **MEASURED** |
 | `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 MiB figure is §1's block of 2026-09-25, mirrored in §17.4.2) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
-| in-graph embeddings | **51.6 MB** stored vectors; **45 MB** of indices | §2.2 / §12.1b | **MEASURED** |
+| in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph) | §2.2 / §12.1b | **MEASURED** |
 | stored vectors, by label | **12,657** (`:Object` 7,859 + `:Event` 4,798, ≈19 MB) — and only `Point.embedding` is indexed | `CALL db.indexes()`, §13 | **MEASURED** |
 | Points carrying any content | **49.0%**; **1,121.4 B** mean over those, **549.1 B** over all (5,696,946 B over 10,374) | `§17.4.6` / `graph-content-census.json`, 2026-10-17 | **MEASURED** |
 | Points carrying a vector | **39.96%** (4,145 / 10,374) | same census; `§17.4.6`, 2026-10-17 | **MEASURED** |
@@ -458,8 +458,8 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   pooler connection limits and their interaction with session-level `SET` (R6 makes the GUC
   session-scoped, and a transaction-mode pooler is where that breaks), PITR retention by plan tier
   (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
-- **No product code changed.** No migration, no module, no test. The **three runs in §G** (three pytest
-  invocations) were run and reported; none of their files was modified.
+- **No product code changed.** No migration, no module, no test. The **three runs in §G** (two pytest runs plus the
+  PGlite validation) were run and reported; none of their files was modified.
 - **No issue filed.** Every finding above names the issue it belongs to, with that issue's state
   measured on 2026-10-21: **#9264** OPEN, **#7970** OPEN, **#5089** CLOSED COMPLETED
   (2026-10-12), **#4495** CLOSED (2026-10-19), **#4997** CLOSED (2026-10-05), **#7951** CLOSED
