@@ -199,7 +199,7 @@ The mint requires the browser to reach the session origin even though the consen
 
 `authorization_server_metadata(base)` (`oauth.py:2100-2119`) emits `"authorization_endpoint": base +
 "/oauth/authorize"`, where `base = _oauth_base(request) = str(request.base_url).rstrip("/")`
-(`_oauth_base`, `hosted_api.py:39021`), served at both `/.well-known/oauth-authorization-server`
+(`_oauth_base`, `hosted_api.py:39047`), served at both `/.well-known/oauth-authorization-server`
 and `/.well-known/oauth-authorization-server/mcp`.
 
 - **Same-origin:** the endpoint is built from the *serving* origin, so it is never cross-origin to the
@@ -302,7 +302,7 @@ bearer path untouched); step 4 is where the flow changes.
 | **Signing** | HMAC-SHA256, dedicated `CONSENT_TOKEN_SECRET`, `kid`-scoped rotation. Never the service-role key; never the anon key (public: the page embeds it). |
 | **TTL / replay** | `exp = iat + 120 s` (leeway ≤30 s) **and** a single-use `jti`; neither substitutes for the `bind` set. |
 | **Redemption** | `POST /oauth/consent` — currently `verify_session_jwt` only, `session_auth.py:588`. |
-| **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2100`); `_oauth_base(request)` (`hosted_api.py:39021`). Guarded. |
+| **Endpoint stability** | `authorization_server_metadata` (`oauth.py:2100`); `_oauth_base(request)` (`hosted_api.py:39047`). Guarded. |
 | **CORS** | new, exact-origin to the AS origin, on the mint route only. The BFF carries none today; `/oauth/token` must never become reachable through it (`SCOPE.md` §9 class 3). |
 | **Bindings to declare** | `CONSENT_TOKEN_SECRET` (`config/required-bindings.yml`, `tortoise-dashboard`), checked pre-deploy by `tools/check_pages_bindings.py` (the #3616 gate). |
 | **Verified by execution** | `tests/test_oauth_consent_bridge.py` (RFC 8414 stability + the allowlist record). |
