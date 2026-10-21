@@ -988,8 +988,10 @@ def _narrow_gate_walk_sites() -> tuple[
     empty: set[tuple[str, str]] = set()
     call_time: set[tuple[str, str]] = set()
     # `_literal_files()` is already parsed and cached; re-reading `_sources()` and
-    # rebuilding the same 29 `_File`s measured 10.36 s of the control's 10.85 s for
-    # byte-identical output.
+    # rebuilding the same 29 `_File`s is redundant work for byte-identical output —
+    # the same `_File` values over the same `_sources().items()` order, so only object
+    # identity changes. No magnitude is pinned: the rebuild is a small fraction of this
+    # arm's cost, and a wall-clock number in a comment is the claim that rots.
     for file in _literal_files():
         source = file.source
         for symbol, _line in _sites_in(file):
