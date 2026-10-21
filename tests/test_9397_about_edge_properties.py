@@ -19,7 +19,10 @@ the same NAMED form but REPRODUCE it on replay, so the causal and the write-form
 axes are not the same axis (round 10 of the changelog records the confusion this
 caused). The COUNTS are deliberately not restated here: a number in this header
 is prose nothing compares, so the populations are pinned against the documents
-by `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
+by `test_the_document_population_counts_match_the_census` (which compares them to
+`RECORDED_WRITERS` / `MAP_WRITERS`, so a change there forces a document fix) and,
+for the causal composition alone, by
+`test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
 — the same reason `RECORDED_WRITERS` states no split.
 The ingestion path reaches one of the originators by default:
 
