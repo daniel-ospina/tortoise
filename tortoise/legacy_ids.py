@@ -13,16 +13,26 @@ mechanises.
 §17.5 and #8607 both describe **~9,700 legacy ids** as ``8,700 <hex>-<hex>`` +
 ``1,000 p-NNNNNNN`` + ``~30 EV-*``. ``<hex>-<hex12>`` is **the form
 ``tortoise/ids.py::ulid()`` mints** (``sdk._ULID_RE``), so those 8,700 are
-already canonical: the census counted two *formats*, and only one of them is
-non-conforming. :func:`census` reports the split instead of inheriting the
-label.
+already canonical — **one group on the minted form, two off it** (``p-NNNNNNN``
+and ``EV-*``; both ``shape() == LEGACY``), not "two formats, one violation".
+:func:`census` reports the split instead of inheriting the label.
+
+⚠️ **The label attribution is an inference, not a measurement.** §17.5 records
+the three COUNTS without naming labels; that ``p-NNNNNNN`` sits on ``:Point``
+and ``EV-*`` on ``:Event`` is read from the prefixes and from #8607's scoping
+census, and it is **load-bearing** — an ``EV-*`` on a ``:Point`` would be in
+scope and the rename population would be larger. :func:`census`'s
+``legacy_shapes`` per label is what confirms or refutes it on a real dump, and
+that is the first thing to read when one is available.
 
 **Scope is a declared decision, not a property name.** Only ``:Point`` is
 re-keyed here, and the reason is on the label, in :data:`REKEY_SCOPE`.
 :data:`DECLARED_OUT_OF_SCOPE` carries the reason for every other label —
 ``:Event`` in particular, whose ``eventId`` is the journal-keyed identity with
-**no sanctioned re-keying path** (``sdk.update_entity`` refuses it: *"No
-sanctioned internal re-keying path exists"*), and whose ``id`` **mirrors**
+**no sanctioned re-keying path** — ``sdk.py`` says so in the guard's own
+comment, and the refusal it raises is *"'eventId' is server-managed (Event
+identity) and cannot be set via props."* (:data:`DECLARED_OUT_OF_SCOPE` cites
+both) — and whose ``id`` **mirrors**
 ``eventId`` (§1.1), so renaming one of them half-way leaves the legacy id
 addressable. Those labels are **counted and reported, never rewritten**, and a
 label the record's contract does not key at all (``:GraphEvent``,
@@ -197,10 +207,11 @@ REKEY_SCOPE: dict[str, str] = {
 DECLARED_OUT_OF_SCOPE: dict[str, str] = {
     "Event": (
         "`eventId` is the journal-keyed Event identity and there is NO "
-        "sanctioned re-keying path (sdk.update_entity refuses it: 'No "
-        "sanctioned internal re-keying path exists'), and `id` MIRRORS "
-        "`eventId` (§1.1) so a one-sided rename leaves the legacy id "
-        "addressable — the journaled pass (#7951) must own it"
+        "sanctioned re-keying path — `sdk.py` states it in the guard's comment "
+        "and the guard raises “'eventId' is server-managed (Event identity) "
+        "and cannot be set via props.” — and `id` MIRRORS `eventId` (§1.1) so "
+        "a one-sided rename leaves the legacy id addressable; the journaled "
+        "pass (#7951) must own it"
     ),
     "Session": (
         "`id` is the caller-supplied MERGE key (`session_<hex12>` when the SDK "

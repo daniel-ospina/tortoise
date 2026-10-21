@@ -33,15 +33,23 @@ one a ``sha256`` cannot undo.
 Exit codes — ``2`` is the REFUSAL and nothing else, so a wrapper can key on it:
 
 * ``0`` — planned (dry run), applied, or reverted;
-* ``2`` — **refused**: the plan, the revert or an artifact path was not provably
-  safe. Every problem is on stderr and **nothing was written**;
-* ``1`` — usage or IO: a bad invocation, a missing/unreadable dump or report,
-  or a report that is not one this tool wrote.
+* ``2`` — **refused**: the SNAPSHOT was not provably safe to rewrite (the plan's
+  fingerprint does not match, a legacy id maps twice, a target collides …).
+  Every problem is on stderr and **nothing was written**;
+* ``1`` — usage or IO: a bad invocation (**including two artifacts named on one
+  file** — that is a wrong command line, found before anything is read), a
+  missing/unreadable dump or report, or a report that is not one this tool
+  wrote.
 
 ⚠️ ``argparse``'s own status for a usage error is ``2`` — the code this contract
 reserves for a REFUSAL — so :class:`_Parser` overrides it to ``1``. Without
 that, a caller keying on ``2 == refused`` cannot tell a bad snapshot from a bad
 invocation, and both write nothing, so no other signal distinguishes them.
+
+⚠️ The read path's failure handling is the only copy of it: `tools/graph_census.py`
+and `tools/retype_snapshot.py` traceback on the same input class because their
+`_load_json` catches only `json.JSONDecodeError` — filed as **#9534**, which is
+where the shared loader belongs.
 """
 
 from __future__ import annotations
@@ -100,6 +108,10 @@ def _load_json(path: Path, what: str) -> object:
         # IsADirectoryError, PermissionError, ENOSPC on a network mount …: the
         # same class of failure as "not found", and it must not traceback.
         raise SystemExit(f"could not read {what} at {path}: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        # This tool is pointed at `tortoise export` artifacts, which are
+        # encrypted binary: "not UTF-8" is an EXPECTED refusal, not a crash.
+        raise SystemExit(f"{what} is not UTF-8 text ({path}): {exc}") from exc
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
@@ -158,12 +170,24 @@ def _load_revert_plan(path: Path, dump: dict) -> LegacyIdPlan:
 
 
 def _summary(report: dict) -> str:
+    found = report["census"]
+    # ⛔ `legacy 1002 → 0` is NOT "no non-canonical ids remain": the pass is
+    # scoped to the labels REKEY_SCOPE names, so a declared-out-of-scope label
+    # keeps its ids and still fails `shape()`. Printing the residual with the
+    # headline is what stops the pass being read as total — #8607's indicator
+    # (1) names the `EV-*` group too, and those wait on the journaled re-key.
+    # Only the keyed-but-declared-out labels count as ids this pass leaves
+    # alone; an out-of-contract node has no contract key at all, so it is
+    # reported as its own bucket rather than folded into that number.
+    residual = sum(found["out_of_scope"].values())
     return (
         f"nodes {report['nodes_in']} in · {report['nodes_out']} out · "
         f"renamed {report['renamed']} · canonical "
         f"{report['canonical_before']} → {report['canonical_after']} · legacy "
         f"{report['legacy_before']} → {report['legacy_after']} · edges "
-        f"{report['edges_in']} in · {report['edges_out']} out"
+        f"{report['edges_in']} in · {report['edges_out']} out · "
+        f"outside this pass {residual} ({found['out_of_scope']} · "
+        f"out of contract {found['uncontracted']})"
     )
 
 
@@ -213,6 +237,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.apply and args.revert:
         parser.error("--apply and --revert are different modes")
+    if args.out is not None and not (args.apply or args.revert):
+        # The mirror of `--apply` without `--out`: a wrapper that names the
+        # artifact but forgets the mode gets exit 0 and no snapshot, and the
+        # next phase loads a stale same-named file from an earlier run.
+        parser.error("--out requires --apply or --revert (the dry run writes no snapshot)")
     if (args.apply or args.revert) and not args.out:
         # The rewritten dump IS the artifact. Without --out the run validates
         # the plan, prints the report and exits 0 having written nothing — which
@@ -233,18 +262,37 @@ def main(argv: list[str] | None = None) -> int:
     #                        overwrites it, so the plan that undoes the pass is
     #                        gone and --revert can never run
     targets = [("--dump", args.dump), ("--out", args.out), ("--report", args.report)]
-    seen: dict[Path, str] = {}
+    seen: dict[object, str] = {}
     for flag, path in targets:
         if path is None:
             continue
-        resolved = path.resolve()
-        if resolved in seen:
+        try:
+            # ⛔ IDENTITY, NOT PATH TEXT. Two names for one file — a hardlink, a
+            # bind mount, a symlink, a case-folding filesystem — all pass a
+            # `resolve()` comparison, and then the dry run's report REPLACES the
+            # snapshot it was reading and exits 0 (measured: `ln snapshot.json
+            # plan.json`). A path that does not exist yet is keyed by its
+            # resolved text, because its identity is the one it will be created
+            # with.
+            if path.exists():
+                st = path.stat()
+                identity: object = ("inode", st.st_dev, st.st_ino)
+            else:
+                identity = ("path", path.resolve())
+        except (OSError, RuntimeError) as exc:
+            # A symlink loop raises RuntimeError out of resolve(); an
+            # unreadable parent raises OSError. Both are the same user error as
+            # a collision and must not traceback.
+            parser.error(f"{flag} cannot be resolved ({path}): {exc}")
+            raise  # unreachable — parser.error exits; keeps type checkers honest
+        if identity in seen:
             parser.error(
-                f"{flag} and {seen[resolved]} are the same file ({resolved}): each "
-                "is a distinct artifact and overwriting one destroys it — use "
-                "separate paths"
+                f"{flag} and {seen[identity]} are the same file ({path}): each is a "
+                "distinct artifact and overwriting one destroys it — use separate "
+                "paths (a hardlink, a symlink or a case-folding filesystem is the "
+                "same file too)"
             )
-        seen[resolved] = flag
+        seen[identity] = flag
 
     dump = _load_json(args.dump, "dump")
     if not isinstance(dump, dict):

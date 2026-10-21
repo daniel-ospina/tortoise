@@ -27,6 +27,11 @@ Pure functions over a plain dict: no graph, no database, no clock. Registered
 in `core` (docker fast legs) — **not** the embedded carve-out: every input is a
 `tortoise-logical-dump-v1` dict built in-process, so there is no URI, no graph
 and no fixture to place.
+
+⚠️ **`TORTOISE_TEST_CARVE_OUT=1` is needed to RUN it locally**, and that is not a
+membership claim: the flag is the session-wide "no URI" opt-in (`epic #1647`), while
+`config/ci-surfaces.yml`'s `carve_out:` list is a per-file routing list this file is NOT on
+— the embedded carve-out leg runs exactly that list.
 """
 
 from __future__ import annotations
@@ -831,3 +836,98 @@ def test_the_fingerprint_is_order_insensitive_over_edges():
     first = build_plan(dump).dump_sha256
     dump["edges"] = [{"dst": 3, "src": 2}, {"dst": 2, "src": 1}]
     assert build_plan(dump).dump_sha256 == first
+
+
+# ──────────── the artifacts are files, not names: identity beats text ─────────
+def test_cli_refuses_a_hardlink_to_the_dump_as_the_report(tmp_path):
+    """Two names, one inode — the dry run would replace the snapshot it reads.
+
+    A `resolve()` comparison passes this (`/p/a.json` != `/p/b.json`), and the
+    report then lands ON the dump while the run exits 0 saying only "wrote
+    report": the documented step 1 destroys its own input, and `--revert` has
+    no plan to read because the plan IS the file that got overwritten.
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "snapshot.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    hardlink = tmp_path / "plan.json"
+    os.link(dump_path, hardlink)
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path), "--report", str(hardlink)])
+    # A bad invocation, discovered before anything is read: exit 1 (usage), not
+    # the 2 this tool reserves for a REFUSED snapshot.
+    assert "are the same file" in str(exc.value.code)
+    assert json.loads(dump_path.read_text(encoding="utf-8"))["nodes"], "the snapshot survived"
+
+
+def test_cli_refuses_an_unresolvable_path_instead_of_tracebacking(tmp_path, capsys):
+    """A symlink loop raises RuntimeError out of `resolve()`, not OSError."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    loop = tmp_path / "loop.json"
+    loop.symlink_to(loop)
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path), "--report", str(loop)])
+    assert "cannot be resolved" in str(exc.value.code)  # not a RuntimeError
+
+
+def test_cli_refuses_a_non_utf8_dump_with_a_message(tmp_path):
+    """The docstring points at the encrypted `tortoise export` artifact — i.e.
+    at a file that is NOT UTF-8. A decode error must be the same usage/IO exit
+    as a missing file, not a traceback."""
+    from tools.legacy_id_normalise import main
+
+    binary = tmp_path / "export.bin"
+    binary.write_bytes(b"\xff\xfe\x00\x80 binary")
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(binary)])
+    assert "not UTF-8 text" in str(exc.value.code)
+
+
+def test_cli_refuses_out_without_a_mode(tmp_path):
+    """`--apply` without `--out` is refused; so is its mirror — a wrapper that
+    names the artifact, forgets the mode, gets exit 0 and no snapshot, and the
+    next phase loads a stale same-named file from an earlier run."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path), "--out", str(tmp_path / "o.json")])
+    assert "--out requires --apply or --revert" in str(exc.value.code)
+    assert not (tmp_path / "o.json").exists()
+
+
+def test_the_apply_headline_shows_what_the_pass_left_behind(tmp_path, capsys):
+    """`legacy 0` is scoped to the labels the pass renames.
+
+    #8607's indicator (1) asks for `0` ids in ALL THREE legacy shapes
+    (`<hex>-<hex>` non-canonical · `p-NNNNNNN` · `EV-*`), and `:Event` is
+    declared out of scope, so 30 `EV-*` ids survive the pass. A headline that
+    prints only `legacy 1002 → 0` reads as "no legacy ids remain".
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    assert (
+        main(
+            [
+                "--dump",
+                str(dump_path),
+                "--apply",
+                "--out",
+                str(tmp_path / "o.json"),
+                "--report",
+                str(tmp_path / "r.json"),
+            ]
+        )
+        == 0
+    )
+    err = capsys.readouterr().err
+    assert "legacy 1002 → 0" in err
+    assert "outside this pass 34" in err, err
+    assert "'Event': 30" in err, err
