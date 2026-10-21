@@ -190,9 +190,12 @@ class _Index:
                 for target in stmt.targets:
                     if isinstance(target, ast.Name):
                         into.setdefault(target.id, stmt.value)
-            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
-                if isinstance(stmt.target, ast.Name):
-                    into.setdefault(stmt.target.id, stmt.value)
+            elif (
+                isinstance(stmt, ast.AnnAssign)
+                and stmt.value is not None
+                and isinstance(stmt.target, ast.Name)
+            ):
+                into.setdefault(stmt.target.id, stmt.value)
 
 
 class _File:
@@ -321,9 +324,12 @@ def _own_assigns(fn: ast.AST) -> dict[str, ast.AST]:
                 for target in stmt.targets:
                     if isinstance(target, ast.Name):
                         out.setdefault(target.id, stmt.value)
-            elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
-                if isinstance(stmt.target, ast.Name):
-                    out.setdefault(stmt.target.id, stmt.value)
+            elif (
+                isinstance(stmt, ast.AnnAssign)
+                and stmt.value is not None
+                and isinstance(stmt.target, ast.Name)
+            ):
+                out.setdefault(stmt.target.id, stmt.value)
             for _field, value in ast.iter_fields(stmt):
                 if isinstance(value, list) and value and all(
                     isinstance(item, ast.stmt) for item in value
@@ -479,9 +485,10 @@ def _roots(file: _File) -> list[ast.AST]:
             if isinstance(parent, (ast.JoinedStr, ast.FormattedValue)) or inside_concat:
                 continue
             roots.append(node)
-        elif isinstance(node, ast.JoinedStr) and not inside_concat:
-            roots.append(node)
-        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add) and not inside_concat:
+        elif (
+            isinstance(node, ast.JoinedStr)
+            or (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add))
+        ) and not inside_concat:
             roots.append(node)
     return roots
 
