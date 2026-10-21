@@ -88,17 +88,21 @@ WHAT THIS PINS
 3. `test_the_computed_name_readers_are_still_complete_reads` — the
    every-relationship walk keeps its empty-pattern default, which is what
    makes `recall_subgraph` a reader at all.
-4. `test_no_read_site_lacks_a_row` — the census half, keyed on
+4. `test_every_computed_name_pin_owns_a_row` — the other half of the census,
+   and the one that was FAIL-OPEN: a `_NON_LITERAL` pin with no §13 row was
+   never read, so dropping a computed-name row (row 3, row 22) and lowering
+   the stated counts left every test green. Pins must be carried by rows.
+5. `test_no_read_site_lacks_a_row` — the census half, keyed on
    `module.py::symbol`. Every read clause under `tortoise/` that names the edge
    must be absorbed by a row naming the symbol it sits in. ⚠️ **Module
    granularity is not enough, and that was the second false PASS**: the
    historical under-count lived INSIDE already-named modules (`ranking.py`,
    `sdk.py`), and a new `MATCH (n)-[:aboutObject]->(o)` appended to either one
    moved no module set and no row count.
-5. `test_the_prose_counts_match_the_table` — the arithmetic (§13's stated site
+6. `test_the_prose_counts_match_the_table` — the arithmetic (§13's stated site
    count, and its stated customer-callable count) equals the table. This is
    the figure that was wrong twice, and it is the figure the ruling turns on.
-6. `test_every_carrier_constant_a_row_reads_through_still_names_the_edge` —
+7. `test_every_carrier_constant_a_row_reads_through_still_names_the_edge` —
    the constant IS the read for the carrier rows: if `aboutObject` leaves
    `ABOUT_EDGE_TYPES` / `_ABOUT_TYPES` / `SUPERSEDE_STRUCTURAL_RELS` /
    `DERIVABLE_STRUCTURAL_RELS`, the row still resolves while the site stops
@@ -107,15 +111,15 @@ WHAT THIS PINS
    `projection/__init__.py` takes `DERIVABLE_STRUCTURAL_RELS` from
    `projection/edges.py`), because a same-module scan would leave those rows
    unasserted.
-7. `test_every_customer_callable_row_reaches_a_declared_door` — each
+8. `test_every_customer_callable_row_reaches_a_declared_door` — each
    customer-callable row names a door that exists: ``SDK `<method>` `` must be
    a public `TortoiseSDK` method, ``MCP `<tool>` `` a registered
    `ToolDefinition`. That is what makes "customer-callable" a claim about the
    product surface rather than an adjective.
-8. `test_the_extractor_document_agrees_on_the_count` — the sibling document
+9. `test_the_extractor_document_agrees_on_the_count` — the sibling document
    states the SAME count and names the state-recall readers; the two copies
    cannot diverge again.
-9. `test_section_13_carries_no_line_citations` — §13 says *"Line numbers are
+10. `test_section_13_carries_no_line_citations` — §13 says *"Line numbers are
    deliberately **not** carried any more … the lines had all rotted"*, so it
    must carry none. Two survived underneath that sentence
    (`projection/entities.py:785+`, `test_index_restore.py:373-403`) and BOTH
@@ -128,7 +132,8 @@ sees a literal relationship pattern naming the edge, so a reader that
 computes or carries the name (`_neighbors`, `_hop_query`,
 `_retrieve_topic_neighborhood`, `_preview_supersede`, `_rebuild_all_replay`,
 `supersede_point`, the `recall_state` constant readers) is invisible to it and
-is pinned by (2)/(6) instead. Line NUMBERS
+is pinned by (2)/(7) instead, and (4) keeps a dropped row for one of them
+from going unnoticed (its pin would dangle). Line NUMBERS
 are not asserted — the symbol is authoritative and a symbol that merely moved
 passes. And the enumeration is of READERS of the edge as data; writers that
 MERGE it are not rows here.
@@ -726,6 +731,41 @@ def test_the_computed_name_readers_are_still_complete_reads():
             "`SubgraphExpander._neighbors` read `aboutObject` without naming it. "
             f"{fact!r} is gone, so the row's reach claim must be re-derived."
         )
+
+
+def test_every_computed_name_pin_owns_a_row():
+    """A pinned computed-name reader with NO row is silently IGNORED.
+
+    ⚠️ **This direction was the fail-open half of the guard, and it was found by
+    mutation.** The census (`test_no_read_site_lacks_a_row`) holds the
+    code→row direction for *literal* readers only — it cannot see the readers
+    that make up `_NON_LITERAL` at all, which is the entire reason that table
+    exists. Nothing held the reverse for them: `_NON_LITERAL` was read only
+    WHILE visiting a row, so a key with no row was never looked at. Delete row
+    3 (`SubgraphExpander._neighbors`) and row 22 (`_hop_query`) from §13, lower
+    the two stated counts to match, and every other test stayed GREEN — the
+    table then omits two customer-callable read sites, including both all-edge
+    walks that stayed invisible through three manual passes. That is the exact
+    under-count this file exists to end, reachable through the guard itself.
+
+    So: every pin must name a row that carries it. Deleting a row without
+    deleting its pin now reds HERE instead of quietly shrinking the census.
+    """
+    named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
+    pins = set(_NON_LITERAL) | set(_NON_LITERAL_SIBLINGS)
+    assert pins, (
+        "both computed-name pin tables are empty — the guard has stopped "
+        "pinning the readers no grep can find, and this direction now measures "
+        "nothing."
+    )
+    orphans = sorted(pins - named)
+    assert not orphans, (
+        "these computed-name pins name readers that no §13 row carries:\n  "
+        + "\n  ".join(orphans)
+        + "\nA pin with no row pins nothing: the census is blind to these "
+        "readers (they never spell the edge), so a dropped row is otherwise "
+        "silent. Restore the row, or delete the pin if the reader is gone."
+    )
 
 
 # ── 3. no module reads the edge without a row ──────────────────────────────
