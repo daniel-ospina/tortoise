@@ -401,6 +401,11 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
 
 DURATION_RE = re.compile(r"^(\d+\.\d+)s\s+(call|setup|teardown)\s+(\S+)")
 COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
+# A parametrized id can EMBED another nodeid, and then an INNER verdict word is the first
+# one on the line: `...t[tests/x.py::...::test_y FAILED [ 86%]` ends `PASSED [ 75%]`, and
+# reading the inner FAILED published a failure for a test that passed (#9134 review, P1).
+# Such an id is malformed (a `[` with no `]` before the verdict), so it is skipped rather
+# than guessed at.
 V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
 # The session-summary line reports how long the session took, and it must also NAME
 # what happened — see `_is_summary_line`. Matching any line that merely mentions a
@@ -563,6 +568,8 @@ def parse_log(path: Path) -> dict:
         if m:
             outcomes[m.group(1)] = m.group(2)
             continue
+        if "[" in line and "]" not in line.split(" ", 1)[0]:
+            continue          # malformed/embedded id — do not guess its verdict
         m = R_SUMMARY_RE.match(line)
         if m:
             outcomes[m.group(2)] = m.group(1)
@@ -2716,8 +2723,12 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                 total_counts[key] += sum(
                     1 for st in parsed["outcomes"].values() if st == state)
         killed_any = killed_any or parsed["killed"]
+        # An id with unbalanced brackets embeds another nodeid and is not a name pytest
+        # ever reports; publishing it made the failure list disagree with the banners
+        # (#9134 review, P1).
         failed_tests.update(n for n, st in parsed["outcomes"].items()
-                            if st in ("FAILED", "ERROR"))
+                            if st in ("FAILED", "ERROR")
+                            and n.count("[") == n.count("]"))
         _states.update(parsed["outcomes"])
         # The LEG is the artifact directory (`pytest-log-test-d`), not the file: 15 of
         # the shipped sample's 17 sources are all named `pytest.log`, so a basename
@@ -2731,8 +2742,9 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
     # summed total can sit below the list beside it. Never claim fewer than we list.
     # Reconcile against FAILED ids only: failed_tests also collects ERROR ids, and
     # pytest keeps failed and error as separate columns (#9134 review, P2).
-    total_counts["failed"] = max(total_counts["failed"],
-                                 sum(1 for st in _states.values() if st == "FAILED"))
+    # No up-reconcile: it was masking a phantom FAILED read out of a parametrized id, and
+    # a banner that says 5 failures is the measurement. A genuinely truncated leg still
+    # contributes its progress-line failures through the summary-less path above.
 
     return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
             "failed_tests": failed_tests, "log_sources": log_sources}

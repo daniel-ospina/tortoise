@@ -33,7 +33,6 @@
     "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses",
     "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed",
     "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
-    "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running[tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
     "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
     "tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared"
   ],
@@ -605,7 +604,7 @@
       "conclusion": "failure",
       "counts": {
         "error": 0,
-        "failed": 6,
+        "failed": 5,
         "passed": 35291,
         "skipped": 146,
         "xfailed": 10,
@@ -617,7 +616,6 @@
         "tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses",
         "tests/test_markers.py::test_namespace_literals_guard_passing_or_routed",
         "tests/test_onboarding_endpoints.py::TestOnboardingTeam::test_create_team_then_session_key_mint_registry",
-        "tests/test_pytest_attribution.py::test_killed_leg_names_the_test_it_was_running",
         "tests/test_session_key_http.py::TestSessionKeyMintConcurrency::test_registry_mint_blocks_while_team_lock_held",
         "tests/test_uri_env_mutations_declared.py::test_uri_env_mutations_declared"
       ],
@@ -979,7 +977,7 @@
   ],
   "outcome": {
     "error": 0,
-    "failed": 6,
+    "failed": 5,
     "killed": false,
     "passed": 35291,
     "skipped": 146,
