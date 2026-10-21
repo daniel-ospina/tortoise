@@ -1194,8 +1194,16 @@ def test_no_two_census_entries_share_a_bare_function_name():
 #: leaves `7k`, which fails the same lookahead), so neither `sdk.py ~37k lines`
 #: nor `sdk.py ~ 37k lines` matches, while every digit-final spelling above still
 #: does. Both spellings are in `must_not_match`.
+#: ⛔ THE SEPARATOR CLASS IS ENUMERATED, NOT "NOISE" (round 6, measured): an
+#: earlier comment here reasoned as if any separator were admitted — a class only
+#: admits what it lists. The em/en dash is this file's own dominant prose
+#: separator (`sdk.py — 23508`) and `near line` / `near <n>` are ordinary
+#: citation prose; both missed. Any FURTHER separator is a one-character change
+#: in the class below, and this line is the reminder that it is not a rule.
+
 _SDK_LINE_ANCHOR = re.compile(
-    r"sdk\.py[\s,:`@#()~]*(?:(?:at\s+)?line[\s:,#~]*)?(?:at\s+)?[Ll]?#?\d+"
+    r"sdk\.py[\s,:`@#()~\u2014\u2013-]*"
+    r"(?:(?:near\s+)?(?:at\s+)?line[\s:,#~]*)?(?:near\s+)?(?:at\s+)?[Ll]?#?\d+"
     r"(?![\dkK])",
     re.IGNORECASE)
 
@@ -2150,6 +2158,13 @@ def test_the_line_anchor_matches_every_spelling():
         "sdk.py (line ~23508)",
         "`sdk.py` ~23508",
         "sdk.py~23508",
+        # Seventh family (round 6, measured): the dash (this file's own prose
+        # separator) and `near` — the class is an enumeration, so both were out.
+        "sdk.py — 23508",
+        "sdk.py – 23508",
+        "sdk.py - 23508",
+        "sdk.py near line 23508",
+        "sdk.py near 23508",
     ]
     for variant in must_match:
         assert _SDK_LINE_ANCHOR.search(variant), (
@@ -3330,6 +3345,24 @@ _ACCUMULATOR_SHAPES: dict[str, tuple[str, str, str]] = {
         '\n'
         'def _fill(out):\n    _forward(out)\n',
         "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    # ⛔ …and the closure's OWN declared sub-shapes (round 6, measured): with only
+    # the single-hop row, `a = b = out` fell to `node.targets[:1]`, the
+    # REVERSE-ordered two-hop fell to a one-pass loop, and `cls` could drop out of
+    # the receiver tuple — all three with the whole file green.
+    "chained_alias": (
+        'def _fill(out):\n    a = b = out\n    b.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "reverse_two_hop_alias": (
+        'def _fill(out):\n    b = a\n    a = out\n'
+        '    b.append(" SET n.poked = 1")\n',
+        "        _fill(parts)\n",
+        '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
+    "classmethod_callee": (
+        'class Door:\n    @classmethod\n    def _fill(cls, out):\n'
+        '        out.append(" SET n.poked = 1")\n',
+        "        cls._fill(parts)\n",
         '        query = "MATCH (n:Point) RETURN n.id " + "".join(parts)\n'),
     # …and the closure: `parts` reaches the statement only through an AUGMENTED
     # local, which is what `_names_feeding`'s aug-assign arm adds.
