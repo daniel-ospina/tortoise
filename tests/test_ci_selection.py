@@ -1810,6 +1810,38 @@ def test_socket_bound_2969_guard_runs_on_every_spread_site():
             core_source, r)
 
 
+def test_7357_note_guard_runs_on_every_surface_its_subjects_select():
+    # PR #9393 review (three cycles, P2): `tests/test_7357_transport_legibility.py`
+    # pins the instance-outage NOTE on the two in-package raw clients
+    # (`hosted_backup._restore_copy_client`, `acl_graph_users._admin_client`) and
+    # the classifier arms behind it (`tortoise/retry.py`). Its registration was
+    # `core`-only — but `tortoise/acl_graph_users.py` is an exact
+    # SOURCE_PATTERNS["api"] entry and is deliberately NOT in `CORE_ALSO`, so an
+    # `acl_graph_users.py`-only diff selected `api`, REPLACED the `core` fallback,
+    # and never ran the only test that pins what the seam SAYS on that channel —
+    # the #1349/#2938/#9190 silent-drop class. The anti-REVERT half
+    # (`test_bounded_raw_clients_3065.py`) is an AST inventory: it pins THAT the
+    # client goes through the seam, not WHAT the seam emits.
+    # Mutation check: deleting the `api` arm fails the first loop; deleting the
+    # `core` row fails the second.
+    for api_source in ("tortoise/acl_graph_users.py",):
+        r = _sel([api_source])
+        assert r["full"] is False, (api_source, r)
+        assert r["surfaces"] == ["api"], (api_source, r)
+        assert "test_7357_transport_legibility.py" in r["test_files"], (
+            api_source, r)
+    # `hosted_backup.py` is a `CORE_ALSO` entry, so it selects BOTH; the two
+    # modules that match no named pattern fall through to the `core` fallback.
+    for name, expected in (
+            ("tortoise/hosted_backup.py", ["api", "core"]),
+            ("tortoise/retry.py", ["core"]),
+            ("tortoise/cypher_guard.py", ["core"])):
+        r = _sel([name])
+        assert r["full"] is False, (name, r)
+        assert r["surfaces"] == expected, (name, r)
+        assert "test_7357_transport_legibility.py" in r["test_files"], (name, r)
+
+
 def test_record_schema_pin_runs_on_migration_or_doc_change():
     # #7968 / PR #8179 review P2: `tests/test_record_schema_placement.py` pins
     # the record migrations against the placement table in
