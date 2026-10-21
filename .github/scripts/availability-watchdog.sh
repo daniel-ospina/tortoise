@@ -2027,7 +2027,7 @@ main() {
               # still means the monitor cannot read its own state and still fails
               # loudly below.
               if grep -qiE 'rate limit|too many requests|abuse detection' "$RUN_TMP/search.err" 2>/dev/null; then
-                warn "issue search was RATE LIMITED on the recovery path — leaving the ${kind_loop} incident OPEN (not closing it). The service is UP; the next pass retries. This is NOT a monitor failure."
+                warn "issue search was RATE LIMITED on the recovery path — leaving any ${kind_loop} incident OPEN (nothing was closed; the search could not even confirm one exists). The service is UP; the next pass retries. This is NOT a monitor failure."
                 continue
               fi
               # A monitor that cannot read its own incident state is broken; the

@@ -82,6 +82,13 @@
 #        unreadable source ledger cannot be silently replaced by an empty budget)
 #    70b. an unreadable previous ledger persists `ledger_state=unreadable` and
 #        the next run RETRIES the lookup instead of arming with an empty budget
+#    Round 5 (#9480) — the recovery-path search carve-out, and its NARROWNESS:
+#    46b. a RATE-LIMITED search on the recovery path is not a monitor failure:
+#        the incident stays OPEN, nothing is closed or duplicated, run is GREEN
+#    46c. the SAME path with a non-throttle error (401) stays RED
+#    46d. a 502 whose text carries the DECOY words `error`/`limit` stays RED —
+#         the case that fails if the regex is widened, so the carve-out's
+#         narrowness is pinned by the suite and not by a one-off human check
 #
 # Fixtures are simulated; the real watchdog is the script under test.
 
@@ -291,7 +298,12 @@ fi
 
 case "$path" in
   search/issues*)
-    [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { echo "gh: search failed" >&2; exit 1; }
+    # #9480: the FAILURE TEXT is a knob, not a literal. The recovery path now
+    # distinguishes a SECONDARY RATE LIMIT (tolerated: the incident stays open)
+    # from every other search error (still fatal), so a case must be able to
+    # pick which shape it feeds. Default stays the original generic text —
+    # every pre-existing case therefore keeps its fail-closed path.
+    [ "${STUB_SEARCH_FAIL:-0}" = "1" ] && { printf '%s\n' "${STUB_SEARCH_FAIL_TEXT:-gh: search failed}" >&2; exit 1; }
     # #4573: the LIVENESS heartbeat search is a THIRD search shape (the incident
     # dedupe and the cross-incident ledger are the other two). Answer it from its
     # OWN fixture and log it under its own prefix so no incident assertion is
@@ -459,7 +471,7 @@ reset_case() {
         "$STUB_TMP/comments.log" "$STUB_TMP/issue.json" "$STUB_TMP"/issue.*.json \
         "$STUB_TMP/heartbeat-created.json" "$STUB_TMP/heartbeat-patched.log" "$STUB_TMP/heartbeat-issue.json"
   unset STUB_PROBE_CODES STUB_PROBE_BODY STUB_PROBE_TIME STUB_SEARCH_JSON \
-        STUB_SEARCH_FAIL STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
+        STUB_SEARCH_FAIL STUB_SEARCH_FAIL_TEXT STUB_SEARCH_MARKER STUB_CREATE_FAIL STUB_NEW_ISSUE \
         STUB_HEARTBEAT_SEARCH_JSON STUB_HEARTBEAT_SEARCH_FAIL STUB_HEARTBEAT_CREATE_FAIL \
         STUB_HEARTBEAT_PATCH_FAIL STUB_HEARTBEAT_ISSUE GITHUB_EVENT_NAME HEARTBEAT_ENABLED \
         HEARTBEAT_EMIT \
@@ -1198,6 +1210,57 @@ export STUB_SEARCH_FAIL=1
 run_watchdog
 assert_eq "$RC" "1" "UP + search failure → exit 1 (cannot confirm incident state)"
 assert_contains "$OUT" "search failed on the recovery path" "UP + search failure → says exactly why"
+
+# 46b (#9480): a SECONDARY RATE LIMIT on the recovery path is NOT a monitor
+# failure. The incident stays OPEN (the safe state), nothing is closed, no
+# duplicate is filed, and the run is GREEN — a red `probe` surface is
+# indistinguishable from a real outage, and a throttle is a function of OUR
+# request rate, not the service's health. This case FAILS on the pre-#9480
+# code, which reached `fail … exit 1` here.
+reset_case
+seed_issue down "$((NOW - 600))" 2 0 ""
+export STUB_PROBE_CODES="200"
+export STUB_SEARCH_FAIL=1
+export STUB_SEARCH_FAIL_TEXT="gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again."
+run_watchdog
+assert_eq "$RC" "0" "UP + RATE-LIMITED search → exit 0 (a throttle is not an outage)"
+assert_contains "$OUT" "RATE LIMITED" "UP + rate-limited search → the log names the throttle"
+assert_contains "$OUT" "OPEN" "UP + rate-limited search → the log states the incident is left open"
+assert_eq "$(count_calls 'GH PATCH')" "0" "UP + rate-limited search → nothing is closed (a failed search cannot verify state)"
+assert_eq "$(count_calls 'GH POST .*/issues$')" "0" "UP + rate-limited search → no duplicate incident is filed"
+
+# 46c (#9480): the carve-out is NARROW. The SAME path with a non-throttle error
+# (`gh: Bad credentials (HTTP 401)`) must stay fatal — this is the boundary no
+# case could distinguish while the stub's failure text was a literal. This case
+# alone does NOT fail on the pre-#9480 code (pre-fix reached the same `fail`),
+# so it is the PAIR 46b + 46c that pins the discriminator in both directions.
+reset_case
+seed_issue down "$((NOW - 600))" 2 0 ""
+export STUB_PROBE_CODES="200"
+export STUB_SEARCH_FAIL=1
+export STUB_SEARCH_FAIL_TEXT="gh: Bad credentials (HTTP 401)"
+run_watchdog
+assert_eq "$RC" "1" "UP + auth-failed search → exit 1 (still the fail-closed path)"
+assert_contains "$OUT" "search failed on the recovery path" "UP + auth-failed search → says exactly why"
+assert_eq "$(count_calls 'GH PATCH')" "0" "UP + auth-failed search → nothing is closed"
+
+# 46d (#9480): the DECOY case — a genuine 5xx whose stderr contains the generic
+# words a careless loosening would key on (`error`, `limit`) but NOT the throttle
+# signature. Verified to fail when the regex is widened to `error|limit` (the
+# loosening this carve-out's safety depends on nobody making): that edit turns
+# 46d into a false pass on a real server error, which is exactly the "monitor
+# goes green on a genuine failure" direction. Pre-#9480 code passes this case
+# too — it is 46b that carries the delta.
+reset_case
+seed_issue down "$((NOW - 600))" 2 0 ""
+export STUB_PROBE_CODES="200"
+export STUB_SEARCH_FAIL=1
+export STUB_SEARCH_FAIL_TEXT="gh: HTTP 502 error: upstream connect error — connection limit reached on the search backend"
+run_watchdog
+assert_eq "$RC" "1" "UP + 502 'error/limit' decoy → exit 1 (a generic error is NOT a throttle)"
+assert_contains "$OUT" "search failed on the recovery path" "UP + 502 decoy → says exactly why"
+assert_not_contains "$OUT" "RATE LIMITED" "UP + 502 decoy → never claims a throttle"
+assert_eq "$(count_calls 'GH PATCH')" "0" "UP + 502 decoy → nothing is closed"
 
 reset_case
 seed_issue down "$((NOW - 600))" 2 0 ""
