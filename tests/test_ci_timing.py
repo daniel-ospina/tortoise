@@ -4715,12 +4715,16 @@ def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
     # to remove. The fixture's manifest lives in <tmp>/elsewhere, so the derived root is
     # <tmp> and it has no `tests/` — both facts are asserted, and the retired guess cannot
     # come back.
-    assert str(moved.resolve().parent.parent) in proc.stderr, proc.stderr[-400:]
-    assert "has NO tests/" in proc.stderr, proc.stderr[-400:]
+    root = moved.resolve().parent.parent
+    # Anchor the rendered CLAUSE: an unanchored substring also accepts a WRONG root that is a
+    # descendant of the true one, and `parent`-instead-of-grandparent is the plausible
+    # off-by-one in this very derivation (measured: that mutant stayed green).
+    assert f"resolves to {root}; that directory has NO tests/" in proc.stderr, proc.stderr[-400:]
     assert "probably outside" not in proc.stderr, proc.stderr[-400:]
-    # The consequence is scoped to the rows the render re-bases: equal-valued rows carry
-    # their note forward, so "every note" was false by 49 of 112 measured files (measured).
-    assert "RE-BASES" in proc.stderr, proc.stderr[-400:]
+    # The rewritten notes belong to rows the render HOLDS, not rows it re-bases: re-basing is
+    # the value-changed branch and no value moves here, so naming that class bounded the damage
+    # to an EMPTY set while 47 notes changed (measured). Pin the class the code actually takes.
+    assert "HOLDS" in proc.stderr and "RE-BASES" not in proc.stderr, proc.stderr[-400:]
 
 
 @pytest.mark.parametrize("body,label", [

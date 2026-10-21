@@ -2858,11 +2858,19 @@ def main() -> int:
             # the repo root or in a subdirectory, and its advice ("re-run inside the tree")
             # is then already satisfied (#9134 review, P2). Skipped when the manifest does
             # not exist, because that path fails closed on its own and writes nothing.
+            #
+            # Name the rows correctly: the note that gets rewritten here belongs to a row the
+            # render HOLDS (`kept N`, equal value — `_strip_prior_held_basis` strips its prior
+            # counted witness and re-derives it), NOT a row it re-bases. "Re-base" in this
+            # file means the value-changed branch (`new_value != previous`), which re-bases
+            # NOTHING in this scenario — so scoping the damage to "re-based" rows named an
+            # empty set while 47 notes changed (#9134 review, P1).
             root = manifest_path.resolve().parent.parent
             print(
                 "::warning::ci_timing: no declared testcase count resolved for any of the "
-                f"{len(weights)} measured files — the notes this refresh RE-BASES will be "
-                "written as (UNKNOWN). "
+                f"{len(weights)} measured files — the notes on the rows this refresh HOLDS "
+                "whose prior counted witness is replaced will be written as (UNKNOWN), losing "
+                "a witness that is true of the tree. "
                 f"The root is the manifest's grandparent, which resolves to {root}; that "
                 f"directory {'has' if (root / 'tests').is_dir() else 'has NO'} tests/ in it. "
                 "The expected layout is <repo-root>/config/ci-surfaces.yml "
