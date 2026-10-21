@@ -844,6 +844,114 @@ def explain_instance_unavailable(
     return text + _LEGIBLE_OPENER + explains
 
 
+#: The engine's own MEMORY-CEILING sentence, as served on the wire (#7357).
+#:
+#: MEASURED on the pinned engine (falkordb 4.20.6, `CONFIG SET maxmemory 1mb`
+#: + `noeviction`): a `GRAPH.QUERY` is answered
+#: ``-OOM command not allowed when used memory > 'maxmemory'.`` and the vendor
+#: parser maps the ``OOM `` half to ``redis.exceptions.OutOfMemoryError`` — so
+#: the note below normally arrives with that CLASS, and the text arm exists for
+#: the two shapes where it does not: a `ResponseError` rebuilt by hand, and the
+#: engine's variant spelling without the `OOM` prefix. Only the distinctive
+#: clause is matched (never a bare `maxmemory`, which a `CONFIG GET` reply or a
+#: caller's own message can carry).
+_MEMORY_CEILING_RE = re.compile(
+    r"command not allowed when used memory\s*>\s*['\"]?maxmemory", re.IGNORECASE)
+
+
+def is_memory_ceiling_refusal(exc: BaseException) -> bool:
+    """True when *exc* is the instance REFUSING at its dataset ceiling (#7357).
+
+    The mirror of :func:`is_instance_unavailable`, and deliberately exclusive of
+    it: a ceiling refusal is an ANSWERED reply (the instance is healthy and
+    talking), while an instance outage is the absence of one. A caller that
+    confused them would either chase a container restart that never happened or
+    retry a capacity refusal forever.
+
+    Class first, text second: ``OutOfMemoryError`` is the class the vendor
+    parser mints for the engine's own ``OOM …`` reply on the pinned redis, and
+    the text arm catches a `ResponseError` that reached the seam without passing
+    through that table. The text test reads the message HEAD (`.partition`), the
+    same rule :func:`is_dead_reader` follows, so an already-explained message is
+    still classified and never double-noted.
+    """
+    import redis.exceptions as _re
+
+    oom = getattr(_re, "OutOfMemoryError", None)
+    if oom is not None and isinstance(exc, oom):
+        return True
+    if isinstance(exc, _re.ResponseError):
+        return bool(_MEMORY_CEILING_RE.search(
+            str(exc).partition(_LEGIBLE_OPENER)[0]))
+    return False
+
+
+def explain_memory_ceiling(exc: BaseException) -> str | None:
+    """Return *exc*'s message with a memory-ceiling diagnosis appended (#7357).
+
+    **The defect this closes.** #7357 is about a memory failure that
+    MISDESCRIBES itself. Its original shape was a container SIGKILLed by an
+    uncapped host, whose death reached the caller as ``Timeout reading from
+    socket`` (#9352) or ``graph was deleted or replaced`` (#8954). #9204 then
+    capped every container this repo starts and #9506 gave the lane's own
+    instance a Redis-side ``--maxmemory`` BELOW that cap with
+    ``--maxmemory-policy noeviction``, so an overshoot is an ANSWERED refusal
+    instead of a kill. That conversion is right — and it created the third
+    shape of the same misdescription:
+
+        redis.exceptions.OutOfMemoryError:
+            command not allowed when used memory > 'maxmemory'.
+
+    MEASURED on this checkout 2026-10-21 (lane container, `maxmemory 1mb`): that
+    sentence is what a caller receives, through the guarded channel as well as
+    raw. It names no cause, no next action and no owner of the limit; read at
+    face value it is indistinguishable from a broken query, a bad write or
+    graph damage — the exact failure mode this issue was filed about. Nothing
+    in the tree said "memory" (the grep for a ceiling diagnosis was empty).
+
+    **What this says, and what it refuses to claim.** Three facts, all measured:
+
+    - it is a CAPACITY refusal, answered by a HEALTHY instance — not the
+      engine's graph-swap abort, not a dead container, not data loss (the
+      ceiling and `noeviction` exist precisely so the dataset survives);
+    - the command was refused BEFORE it ran, so nothing was applied. `GRAPH.*`
+      commands are registered ``denyoom`` (measured: a refused `CREATE` left the
+      graph at 0 nodes), which is why the note does not hand the caller the
+      transport arm's "OUTCOME IS UNKNOWN, read back first";
+    - re-issuing is NOT the next action. The refusal is deterministic while the
+      instance is at its ceiling, so the note names the two real remedies (free
+      graph data, or raise the ceiling) instead of inviting a retry loop.
+
+    It deliberately does NOT say "your data is at risk" or "raise `--memory`":
+    the kernel cap is the backstop, and moving it does not move the refusal —
+    only ``maxmemory`` does. Returns ``None`` for anything outside the family,
+    keeps the engine sentence at position 0, leaves the exception TYPE alone (a
+    wrapper would re-bucket it in ``_classify_db_failure``), and is idempotent
+    through :data:`_LEGIBLE_OPENER`.
+    """
+    if not is_memory_ceiling_refusal(exc):
+        return None
+    text = str(exc)
+    if _LEGIBLE_OPENER in text:
+        return None
+    explains = (
+        "the INSTANCE ANSWERED, and what it answered was a MEMORY-CEILING "
+        "refusal: it has reached its configured dataset limit (`maxmemory`) and "
+        "refused the command instead of running it. This is a CAPACITY "
+        "refusal, not the engine's 'graph was deleted or replaced' abort, not a "
+        "dead or restarting instance, and not evidence that the graph or its "
+        "data was lost — the ceiling with `noeviction` exists so an overshoot "
+        "is refused while the instance and its data stay present. Nothing was "
+        "applied: a `denyoom` command (every `GRAPH.*` verb) is rejected BEFORE "
+        "it runs. Re-issuing it now will be refused the same way — the next "
+        "action is to free memory (delete graphs this instance no longer "
+        "needs) or to raise the ceiling (`--maxmemory`; a container this repo "
+        "starts derives it from `FALKORDB_CONTAINER_MEMORY`, whose kernel cap "
+        "is only the backstop), then re-issue."
+    )
+    return text + _LEGIBLE_OPENER + explains
+
+
 class WriteStageRetriesExhausted(Exception):
     """Write-stage retry sentinel (R1, #1786/#1806).
 

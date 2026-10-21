@@ -151,7 +151,7 @@ from tortoise.numeric_domain import (
     _INT64_MIN,
     numeric_alteration_reason,
 )
-from tortoise.retry import explain_instance_unavailable
+from tortoise.retry import explain_instance_unavailable, explain_memory_ceiling
 
 #: The #7357 note's own failure channel. A note that cannot be built is
 #: DEBUG-only: the caller is about to re-raise the ORIGINAL exception, and a
@@ -1817,11 +1817,28 @@ def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
     guaranteed writable on every exception type. Each of those is a raise on
     the error path, which without this belt would REPLACE the original error
     with the applier's — the exact swap this function exists to prevent.
+
+    TWO families reach here, and they are mutually exclusive (#7357): the
+    instance going AWAY (:func:`explain_instance_unavailable` — a transport
+    failure, no reply at all) and the instance REFUSING at its dataset ceiling
+    (:func:`explain_memory_ceiling` — an answered ``OutOfMemoryError``). Only
+    the second is an answer, so the second call is a fallback: one message can
+    never carry both suffixes.
     """
     try:
         if len(getattr(exc, "args", ())) != 1 or not isinstance(exc.args[0], str):
             return
         explained = explain_instance_unavailable(exc, mutating=mutating)
+        if explained is None:
+            # #7357: the OTHER way a memory failure reaches a caller on this
+            # repository's own containers. #9506 gave the lane's instance a
+            # Redis-side `--maxmemory` BELOW its cgroup cap, so an overshoot is
+            # now an ANSWERED `OutOfMemoryError` instead of a SIGKILL — a shape
+            # this seam must explain too, or the issue's defect has merely
+            # moved. The two families are mutually exclusive (that one is an
+            # answered refusal, this one is not), so the second call is a
+            # fallback, never a second suffix.
+            explained = explain_memory_ceiling(exc)
         if explained is not None:
             exc.args = (explained,)
     except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
