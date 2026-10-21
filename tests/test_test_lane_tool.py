@@ -2036,8 +2036,8 @@ def test_the_lane_also_sets_a_dataset_ceiling_below_its_kernel_cap(
     )
     ceiling = redis_args.split("--maxmemory ", 1)[1].split()[0]
     cap = run_args[run_args.index("--memory") + 1]
-    cap_bytes = tl._spec_bytes(cap)
-    ceiling_bytes = tl._spec_bytes(ceiling)
+    cap_bytes = tl._spec_bytes(cap)          # a DOCKER spec
+    ceiling_bytes = tl._redis_spec_bytes(ceiling)   # a REDIS spec — different grammar
     assert ceiling_bytes is not None and cap_bytes is not None, redis_args
     assert 0 < ceiling_bytes < cap_bytes, (
         f"the dataset ceiling must fire BEFORE the cgroup cap — at or above "
@@ -2213,10 +2213,6 @@ def test_a_ceiling_spelled_the_way_REDIS_accepts_it_is_not_unreadable(
     Parsing the creation env with a lowercase-only grammar reported a perfectly
     good `1GB` ceiling as "unreadable" and prescribed `down`.
     """
-    monkeypatch.setattr(
-        tl, "_docker",
-        _exec_fake("0", env='["REDIS_ARGS=--maxmemory 1GB"]'),
-    )
     # Live is unreadable (`0` is a legitimate value, so force the fallback path
     # by making `exec` fail) — the case under test is the ENV parser.
     monkeypatch.setattr(tl, "_docker", lambda *a, **k: (
@@ -2227,6 +2223,137 @@ def test_a_ceiling_spelled_the_way_REDIS_accepts_it_is_not_unreadable(
     err = capsys.readouterr().err
     assert "unreadable" not in err, err
     assert err == "", err
+
+
+def test_the_redis_spec_parser_maps_bare_units_decimally():
+    """#7357 review round 5 (P2) — Redis's `memtoull`, pinned value by value.
+
+    redis.conf §Memory units: the bare `k`/`m`/`g` are DECIMAL and the
+    `b`-suffixed forms are binary, which is NOT docker's table (1024-based for
+    both). MEASURED on the pinned engine: `CONFIG SET maxmemory 2g` then
+    `CONFIG GET maxmemory` answers 2000000000, not 2147483648.
+    """
+    assert tl._redis_spec_bytes("2g") == 2_000_000_000
+    assert tl._redis_spec_bytes("2048m") == 2_048_000_000
+    assert tl._redis_spec_bytes("1g") == 1_000_000_000
+    assert tl._redis_spec_bytes("1k") == 1_000
+    assert tl._redis_spec_bytes("1gb") == 1 << 30
+    assert tl._redis_spec_bytes("1536mb") == 1536 << 20
+    assert tl._redis_spec_bytes("1GB") == 1 << 30       # case-insensitive
+    assert tl._redis_spec_bytes("0") == 0               # NO LIMIT, not unreadable
+    # `REDIS_ARGS` reaches Redis through a word split, so quotes are a plausible
+    # spelling that Redis's own `sdssplitargs` strips.
+    assert tl._redis_spec_bytes("'1536mb'") == 1536 << 20
+    assert tl._redis_spec_bytes('"1gb"') == 1 << 30
+    # What Redis REFUSES stays unreadable rather than being guessed at:
+    # `memtoull` reads digits then a unit, so a fraction or an unknown unit (`t`,
+    # `kib`) is an error to Redis too.
+    for not_redis in ("1.5g", "+2g", "1t", "1kib", "2 gigs", ""):
+        assert tl._redis_spec_bytes(not_redis) is None, not_redis
+    # …and the two grammars really do disagree on the spelling that matters,
+    # which is the whole reason the Redis table exists.
+    assert tl._redis_spec_bytes("2g") != tl._spec_bytes("2g")
+
+
+def test_a_reuse_ceiling_is_judged_with_REDIS_grammar_not_dockers(
+        monkeypatch, capsys):
+    """#7357 review round 5 (P2) — the grammars differ in UNITS, not only case.
+
+    `--memory 2g --maxmemory 2g` is a CORRECTLY bounded pair: Redis reads the
+    bare `g` as DECIMAL, so its 2,000,000,000 ceiling fires ~147 MiB BEFORE the
+    2,147,483,648 cgroup cap. Judged with docker's 1024-based table the same
+    token computes 2,147,483,648, the comparison flips (`>=`), and this note told
+    the operator the ceiling "never fires" and to run `down` — which DELETES that
+    healthy container's graphs.
+    """
+    def docker_grammar_trap(*a, **k):
+        if a[0] == "exec":
+            return _R(1, "", "redis wedged")   # force the creation-env fallback
+        if a[0] == "inspect" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--appendonly no --maxmemory 2g"]\n', "")
+        return _R(0, "2147483648\n", "")        # the 2g cap docker actually set
+
+    monkeypatch.setattr(tl, "_docker", docker_grammar_trap)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef13")
+    assert capsys.readouterr().err == ""
+
+
+def test_an_env_ceiling_that_really_cannot_fire_is_still_reported(
+        monkeypatch, capsys):
+    """The unit fix must not swallow a genuinely unfireable ceiling.
+
+    `3g` is 3,000,000,000 to Redis — still at or above a 2,147,483,648 cap, so
+    it can never fire and the operator has to be told (the remedy `down` is
+    destructive, which is why the warning may only fire on a broken container).
+    """
+    def over_cap(*a, **k):
+        if a[0] == "exec":
+            return _R(1, "", "redis wedged")
+        if a[0] == "inspect" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--maxmemory 3g"]\n', "")
+        return _R(0, "2147483648\n", "")
+
+    monkeypatch.setattr(tl, "_docker", over_cap)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef17")
+    err = capsys.readouterr().err
+    assert "at or ABOVE its own cgroup cap" in err, err
+
+
+def test_a_quoted_reuse_ceiling_is_read_not_called_unreadable(
+        monkeypatch, capsys):
+    """A quote is Redis's to strip, not a parser failure (#7357 review, round 5).
+
+    `REDIS_ARGS` reaches Redis through a word split, so `--maxmemory '1536mb'`
+    is a real ceiling that Redis's own `sdssplitargs` strips the quotes from. The
+    note answered "has an unreadable `--maxmemory '1536mb'`" and prescribed
+    `down`, which deletes that correctly bounded container's graphs.
+    """
+    def quoted(*a, **k):
+        if a[0] == "exec":
+            return _R(1, "", "redis wedged")
+        if a[0] == "inspect" and "Config.Env" in a[2]:
+            return _R(0, '["REDIS_ARGS=--maxmemory \'1536mb\'"]\n', "")
+        return _R(0, "2147483648\n", "")
+
+    monkeypatch.setattr(tl, "_docker", quoted)
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef14")
+    err = capsys.readouterr().err
+    assert "unreadable" not in err, err
+    assert err == "", err
+
+
+def test_the_docker_spec_parser_reads_a_padded_spec():
+    """The unit is sliced from the SAME normalised string the regex matched.
+
+    Slicing the RAW spec made `" 2g"` match the grammar and then miss the unit
+    table, so a readable spec was reported as "unreadable" — the same class of
+    defect that prescribes `down` for a healthy container (#7357 review).
+    """
+    assert tl._spec_bytes(" 2g ") == 2 << 30
+    assert tl._spec_bytes("2G") == 2 << 30
+    assert tl._spec_bytes("2g") == 2 << 30
+
+
+def test_an_unbounded_ceiling_does_not_invent_a_cgroup_cap_to_blame(
+        monkeypatch, capsys):
+    """`live < 1` used to end "SIGKILLed by the cgroup cap" unconditionally.
+
+    When the SAME container has no cap (`HostConfig.Memory=0`, which
+    `_note_uncapped_existing` reports beside this note) or the cap read failed,
+    there is no cgroup limit for a SIGKILL to come from — the note asserted one
+    anyway (#7357 review, round 5).
+    """
+    monkeypatch.setattr(tl, "_docker", _exec_fake("0", limit="0"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef15")
+    err = capsys.readouterr().err
+    assert "NO dataset ceiling in effect" in err, err
+    assert "SIGKILLed by the cgroup cap" not in err, err
+
+    # …and where a cap WAS read, the claim is true and stays.
+    monkeypatch.setattr(tl, "_docker", _exec_fake("0"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef16")
+    err = capsys.readouterr().err
+    assert "SIGKILLed by the cgroup cap" in err, err
 
 
 def test_an_unreadable_reuse_ceiling_is_named_rather_than_assumed(monkeypatch,

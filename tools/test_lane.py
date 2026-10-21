@@ -447,6 +447,34 @@ _MEMORY_UNIT_BYTES = {
     "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
 }
 
+#: Redis's spec grammar — a DIFFERENT grammar from docker's, and not only in
+#: case. Group 1 is the number, group 2 the optional unit; there is NO fraction
+#: and no leading `+`, because `memtoull` reads digits and then treats the rest as
+#: a unit, so Redis itself refuses `1.5g` and `+2g`. Matching runs on the
+#: normalised (stripped, unquoted, lowercased) token, so the unit can be sliced
+#: from that same string.
+_REDIS_SPEC_RE = re.compile(r"([0-9]+)(b|k|kb|m|mb|g|gb)?\Z")
+
+#: Byte multipliers for the units Redis's `memtoull` honours (redis.conf
+#: §Memory units): `1k` = **1000**, `1kb` = 1024, `1m` = 1000000, `1mb` =
+#: 1024*1024, `1g` = 1000000000, `1gb` = 1024*1024*1024. The BARE letters are
+#: DECIMAL; only the `b`-suffixed forms are binary. There is no `t` and no
+#: `kib`/`mib`/`gib` — Redis refuses those, so they stay unreadable here.
+#:
+#: ⛔ THIS TABLE EXISTS because `_spec_bytes` (docker's grammar, 1024-based for
+#: BOTH spellings) was reading a value out of a container's `REDIS_ARGS`
+#: (#7357 review, round 5). `--memory 2g --maxmemory 2g` is CORRECTLY bounded —
+#: Redis's 2,000,000,000 ceiling fires ~147 MiB before the 2,147,483,648 cgroup
+#: cap — but docker's multipliers made that token 2,147,483,648, so the note
+#: declared it "at or ABOVE its own cgroup cap" and prescribed `down`, which
+#: DELETES that healthy container's graphs.
+_REDIS_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1000, "kb": 1 << 10,
+    "m": 1000 ** 2, "mb": 1 << 20,
+    "g": 1000 ** 3, "gb": 1 << 30,
+}
+
 def _spec_is_positive(spec: str) -> bool:
     """Whether *spec* is a POSITIVE byte count.
 
@@ -467,22 +495,54 @@ def _spec_is_positive(spec: str) -> bool:
 
 
 def _spec_bytes(spec: str) -> int | None:
-    """The BYTE count a docker memory spec denotes, or None if it is not one.
+    """The BYTE count a DOCKER memory spec denotes, or None if it is not one.
 
-    CASE-INSENSITIVE on purpose (#7357 review): docker's grammar is lowercase,
-    but **Redis's `memtoull` accepts `1GB`** — MEASURED on the pinned engine
-    (`CONFIG SET maxmemory 1GB` → 1073741824). This function reads a ceiling
-    back out of a container's own `REDIS_ARGS`, so a lowercase-only regex would
-    report a perfectly good `1GB` ceiling as "unreadable" and send the operator
-    after `down` — deleting a correctly bounded container's graphs.
+    ⛔ DOCKER'S GRAMMAR ONLY. Every spelling is 1024-based to docker, but to
+    Redis the bare `k`/`m`/`g` are DECIMAL — so a value read out of a
+    container's `REDIS_ARGS` belongs in `_redis_spec_bytes`, not here (#7357
+    review, round 5). All three call sites here pass docker specs:
+    `container_dataset_ceiling`, `_memory_cap_args`/`container_memory_cap`, and
+    `_termination_report`'s `wanted`.
+
+    CASE-INSENSITIVE on purpose: docker's grammar is lowercase, and the cap is
+    normalised before it gets here (`container_memory_cap`), so a permissive
+    read costs nothing and keeps a caller from re-deriving the rule.
+
+    The unit is sliced from the SAME normalised string the regex matched —
+    slicing the raw spec made every padded spelling (`" 2g"`) match the grammar
+    and then miss the unit table, reporting a readable spec as "unreadable"
+    (#7357 review).
     """
-    m = _MEMORY_SPEC_RE.match(spec.strip().lower())
+    normalised = spec.strip().lower()
+    m = _MEMORY_SPEC_RE.match(normalised)
     if not m:
         return None
-    try:
-        return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[spec[m.end(1):].lower()])
-    except KeyError:  # pragma: no cover - the regex constrains the unit
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[normalised[m.end(1):]])
+
+
+def _redis_spec_bytes(spec: str) -> int | None:
+    """The BYTE count REDIS reads *spec* as, or None if it is not a Redis spec.
+
+    This is what a `--maxmemory` token in a container's `REDIS_ARGS` must be
+    judged with, and it is deliberately NOT `_spec_bytes`: docker's multipliers
+    are 1024-based for both spellings, Redis's bare letters are decimal, so the
+    two disagree by ~4.9% (`m`) / 7.4% (`g`) on the very spelling a human writes
+    when making the numbers match (`--memory 2g --maxmemory 2g`). Read with
+    docker's table, that healthy container computes a "ceiling" equal to its own
+    cgroup cap and is reported as "the ceiling never fires … run `down`" — a
+    false statement whose remedy DELETES its graphs (#7357 review, round 5).
+
+    Case-INSENSITIVE (MEASURED on the pinned engine: `CONFIG SET maxmemory 1GB`
+    → 1073741824) and QUOTE-TOLERANT: `REDIS_ARGS` reaches Redis through a word
+    split, so `--maxmemory '1536mb'` is a plausible spelling whose quotes Redis's
+    own `sdssplitargs` strips. Reporting either as "unreadable" is what sends an
+    operator after `down` on a correctly bounded container.
+    """
+    normalised = spec.strip().strip("'\"").strip().lower()
+    m = _REDIS_SPEC_RE.match(normalised)
+    if not m:
         return None
+    return int(m.group(1)) * _REDIS_UNIT_BYTES[m.group(2) or ""]
 
 
 def container_memory_cap() -> str:
@@ -703,6 +763,13 @@ def _note_missing_dataset_ceiling(name: str) -> None:
     which in one direction invents a ceiling the instance no longer has and in
     the other stays silent about a runtime `CONFIG SET maxmemory 0`.
 
+    ⛔ THE CEILING TOKEN IS READ WITH REDIS'S GRAMMAR (`_redis_spec_bytes`),
+    never docker's: the bare `k`/`m`/`g` are DECIMAL to Redis and 1024-based to
+    docker, so `--memory 2g --maxmemory 2g` is a HEALTHY pair (the 2,000,000,000
+    ceiling fires ~147 MiB before the 2,147,483,648 cap) that docker's table
+    computed as "at or ABOVE its own cgroup cap" — with `down`, which deletes
+    the graphs, as the remedy (#7357 review, round 5).
+
     Prints to STDERR and never raises: this is a warning on a reuse path that
     must still hand back a working container.
     """
@@ -729,10 +796,17 @@ def _note_missing_dataset_ceiling(name: str) -> None:
             if live >= 1 and cap_bytes is not None and 0 < live < cap_bytes:
                 return
             if live < 1:
+                # ⛔ The SIGKILL claim needs a cap to make it true: when the
+                # cgroup cap is unreadable or ABSENT (`_note_uncapped_existing`
+                # prints that beside this note), saying "SIGKILLed by the cgroup
+                # cap" asserts a limit this branch did not read (#7357 review).
+                fate = ("an overshoot is SIGKILLed by the cgroup cap"
+                        if cap_bytes is not None else
+                        "an overshoot goes uncaught")
                 reason = (
                     "has NO dataset ceiling in effect (`CONFIG GET maxmemory` "
-                    f"answers `{live}`, i.e. unbounded, so an overshoot is "
-                    "SIGKILLed by the cgroup cap and the caller is told nothing)"
+                    f"answers `{live}`, i.e. unbounded, so {fate} and the caller "
+                    "is told nothing)"
                 )
             elif cap_bytes is None:
                 # A ceiling EXISTS — that is this note's whole question, and it
@@ -768,12 +842,11 @@ def _note_missing_dataset_ceiling(name: str) -> None:
                     "and the caller is told nothing)"
                 )
             else:
-                ceiling_bytes = _spec_bytes(m.group(1))
-                known_zero = (
-                    ceiling_bytes == 0
-                    or str(m.group(1)).strip().strip("'\"").lower()
-                    in {"0", "0b", "0k", "0kb", "0m", "0mb", "0g", "0gb"}
-                )
+                # ⛔ REDIS's grammar, not docker's: this token is Redis's to
+                # interpret, and the two grammars disagree on the bare units
+                # (#7357 review, round 5).
+                ceiling_bytes = _redis_spec_bytes(m.group(1))
+                known_zero = ceiling_bytes == 0
                 if known_zero:
                     # ``--maxmemory 0`` is NOT unreadable: it is Redis's spelling
                     # for NO LIMIT, the one value this note exists to catch, and
