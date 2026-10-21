@@ -368,9 +368,14 @@ def _about_family_dominates(elements: tuple[str, ...]) -> bool:
     6/6, `SUPERSEDE_STRUCTURAL_RELS` 6/8, `TortoiseSDK._ABOUT_TYPES` 6/6).
     A payload-key tuple or an English regex that merely happens to contain the
     word "about" is not (`_RESERVED_EMIT_CALL_PROPS` 1/4 — `aboutLinks`;
-    `_BOUND_PHRASES` 1/27; `_RANGE_FILLER` 1/18). A prefix hit on ANY element
-    admits those as candidates, and then the first §13 row whose span mentions
-    one reds on a constant that carries no edge at all.
+    `_BOUND_PHRASES` 1/52; `_RANGE_FILLER` 1/19). A prefix hit on ANY element
+    admits those as carrier-shaped candidates; that is a semantic wrongness in
+    the candidate set, and it WOULD red the first §13 row whose span mentioned
+    one, on a constant that carries no edge at all. ⚠️ Measured: no row's span
+    mentions any of the three today, so the red is latent, not observed —
+    reverting to the prefix rule keeps the suite at 8 passed. The narrowing is
+    therefore a correctness fix for the candidate set, not a repair of a
+    currently red test.
 
     ⚠️ The threshold is measured against `aboutObject` REMOVED, which is the
     state the caller must still detect: dropping it leaves 5/6 of
