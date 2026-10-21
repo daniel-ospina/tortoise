@@ -1328,6 +1328,27 @@ def test_checker_refuses_an_unreadable_binding_with_no_attribution(monkeypatch):
     assert any("[V15]" in f and "could not be read" in f for f in findings), findings
 
 
+@pytest.mark.parametrize("artifact", [None, [], "", 0, False])
+def test_a_non_object_artifact_is_reported_as_malformed(monkeypatch, artifact):
+    """A committed `null` must not read as "no --prereg was given" (#9513 P3).
+
+    `json.loads("null")` returns None without raising, so the pre-fix guard
+    (`if prereg is not None`) skipped the binding, the threshold AND the
+    `prereg-error=` line — an operator passing `--prereg <sha>` saw a bare
+    UNPREREGISTERED indistinguishable from passing nothing, while the module
+    docstring promises the unconsumable case is reported. Every non-object shape
+    now says so.
+    """
+    code, text = _run_with_prereg(monkeypatch, artifact)
+    assert code == 3, text
+    assert "prereg-error=TypeError:" in text, text
+    assert "not an object" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "prereg-binding" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
 def test_a_matched_corpus_with_an_unreadable_bar_is_not_named_as_preregistered(
         monkeypatch):
     """A bound corpus does not make a malformed BAR a scored bar (#9513 review P2).

@@ -908,11 +908,23 @@ def _run(argv: list[str] | None = None) -> int:
     declared_line = None
     bind_line = None
     if args.prereg:
+        loaded = False
         try:
             prereg = load_prereg(args.prereg)
+            loaded = True
         except (subprocess.CalledProcessError, json.JSONDecodeError,
                 TypeError, KeyError, ValueError) as e:
             lines.append(f"prereg-error={type(e).__name__}: {e} "
+                         f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
+            prereg = None
+        if loaded and not isinstance(prereg, Mapping):
+            # A COMMITTED `null` (or any non-object) artifact loads without
+            # raising, so it has to be refused as malformed HERE: skipping it
+            # silently would print a bare UNPREREGISTERED that reads exactly like
+            # "no --prereg was given", and the module docstring promises the
+            # unconsumable case on `prereg-error=` (#9513 review P3).
+            lines.append(f"prereg-error=TypeError: the artifact is "
+                         f"{type(prereg).__name__}, not an object "
                          f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
             prereg = None
         if prereg is not None:
