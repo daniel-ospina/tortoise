@@ -45,10 +45,12 @@ below: one entry per document, every arm runs over all of them.
 WHAT THIS PINS
 --------------
 1. `test_the_quoted_command_is_true_over_the_files_it_names` — the claim is not
-   merely asserted: the file list is parsed OUT of each document's sentence, each
-   file must exist, and the scan is re-run over exactly those files (zero
-   matches, case-insensitive). If a future edit widens the list to a module that
-   does read the edge, the claim reds here instead of quietly becoming false.
+   merely asserted: the file list is parsed OUT of each document's sentence, it
+   must still contain the three modules the prose calls "the whole of what was
+   measured" (`EXPECTED_FILES`), each file must exist, and the scan is re-run over
+   exactly those files (zero matches, case-insensitive). A widened list reds here
+   (a module that does read the edge) and a NARROWED one reds too (the sentence
+   would then claim the lane over a smaller measurement than the one it states).
 2. `test_the_claim_names_the_module_it_excludes` — each sentence must state the
    scope it was measured over: `ranking.py` named as OUTSIDE the file list, the
    recall door named as the reading path, and the LANE named. This is the arm
@@ -60,9 +62,10 @@ WHAT THIS PINS
    answer). So the unscoped assertion is pinned as an ABSENCE, over every line of
    every document in `CLAIMS`. RED at the pre-fix head on both extractor lines.
 4. `test_the_excluded_module_really_reads_the_edge` — non-vacuity for arms 2 and
-   3: the named exclusions must actually read the edge, at HEAD, so the scoping is
-   load-bearing rather than decoration. If `ranking.py` stops reading it, the
-   qualifier reds here rather than surviving as a stale claim of its own.
+   3: the named exclusions must actually read the edge, at HEAD, and must do it
+   the WAY the sentences say (`ABOUT_EDGE_TYPES` joined into the query;
+   `_ABOUT_TYPES` used inside each `recall_state` reader). Names alone would let a
+   dead constant stand behind a citation.
 
 NOT promised:
 - No count is asserted here. The #7948 census table is #7948's to pin
@@ -73,8 +76,12 @@ NOT promised:
   the surrounding numerals.
 - The presence arms assert PRESENCE only, so an edit that says more than the
   minimum (a fuller citation, a re-derived count) stays green. The absence arm is
-  deliberately narrow: it fires on the unscoped assertion, not on the phrase
-  "primary search path" in general, which remains legitimate design vocabulary.
+  deliberately narrow: it fires on the unscoped assertion ABOUT THIS EDGE (the
+  read object is pinned to `it` / `the edge`), not on the phrase "primary search
+  path" in general, and not on a sentence about a different object — that remains
+  legitimate design vocabulary.
+- The count of customer-callable reads is not asserted, so the sibling lanes that
+  re-cut it do not have to re-cut this file.
 - No absence assertion on other documents: the census table's siblings may
   legitimately restate the premise while their rows are being re-derived, and
   this file must not red on a PR whose subject is elsewhere. The documents it
@@ -137,12 +144,34 @@ CLAIMS: tuple[Claim, ...] = (
 
 #: The assertion this issue is about: "the primary search path" — the whole
 #: product — does not read the edge. `does`/`not`/`read` tolerate the markdown
-#: emphasis the documents use (`does **not** read`). Matched case-insensitively
-#: and over EVERY line, because the same document may carry the sentence more
-#: than once (the extractor document did, at §13.6 and §13.8).
+#: emphasis the documents use (`does **not** read`), and every separator is `\s*`
+#: / `\s+`, so the pattern spans a LINE WRAP: the documents are reflowed prose, so
+#: a hard-wrapped copy of the sentence is the ORDINARY rendering, not a contrived
+#: evasion — and it is matched against the whole document text for that reason.
+#:
+#: The read OBJECT is pinned (`it`, `the edge`, `the aboutObject edge`) so the arm
+#: does not fire on ordinary design prose about a different object — *"the primary
+#: search path does not read their mapping table"* is a legitimate sentence about
+#: the comparable's mechanism, and a guard that reds on design prose is a guard
+#: that gets deleted (the standard `tests/test_extractor_v4_citation_rot.py`
+#: states for its own arms).
 UNSCOPED_CLAIM_RE = re.compile(
-    r"the\s+primary\s+search\s+path\s+does\s*\*{0,2}\s*not\s*\*{0,2}\s*read",
+    r"the\s+primary\s+search\s+path\s+does\s*\*{0,2}\s*not\s*\*{0,2}\s*read\s+"
+    r"(?:it\b|the\s+(?:`?aboutObject`?\s+)?edge\b)",
     re.IGNORECASE,
+)
+
+#: The three modules every copy of the claim quotes as the WHOLE of what was
+#: measured (the prose says so: *"the three files quoted below are the whole of
+#: what was measured"*). Parsing the list out of the sentence (arm 1) is what
+#: keeps the claim re-runnable; this constant is what keeps it the SAME
+#: measurement — a list narrowed to one module would still re-run cleanly and
+#: still assert the lane, so nothing else here would notice that the sentence had
+#: stopped being true of the product.
+EXPECTED_FILES: tuple[str, ...] = (
+    "tortoise/retrieval.py",
+    "tortoise/search_engine.py",
+    "tortoise/session_reinjection.py",
 )
 
 
@@ -181,6 +210,15 @@ def test_the_quoted_command_is_true_over_the_files_it_names() -> None:
     for claim in CLAIMS:
         files = _quoted_files(claim, _claim_line(claim))
         assert files, f"{claim.label}: the claim quotes a command with no file list"
+
+        missing = [rel for rel in EXPECTED_FILES if rel not in files]
+        assert not missing, (
+            f"{claim.label}: the quoted file list no longer contains {missing} — "
+            "that list is the scope the sentence claims to state ('the three "
+            "files ... are the whole of what was measured'), so NARROWING it "
+            "while the sentence still names the lane makes the claim wider than "
+            "its own measurement (#9399)"
+        )
 
         hits: list[str] = []
         for rel in files:
@@ -250,14 +288,20 @@ def test_no_document_asserts_the_unscoped_claim() -> None:
     claim line alone would leave the other asserting the removed premise. Both
     pre-fix lines contain "The primary search path does(...** not **)read", so
     this arm is RED at the pre-fix head (2 offenders) and GREEN after.
+
+    Scanned over the WHOLE DOCUMENT TEXT rather than line by line: the documents
+    are reflowed prose, so a later copy of the sentence can be wrapped mid-phrase
+    (`the primary search path\ndoes not read the edge`), and a per-line scan —
+    which is how this arm first shipped — reports that wrapped copy as clean
+    while the sentence is right there on screen (review round 5, P2).
     """
     offenders: list[str] = []
     for claim in CLAIMS:
-        for lineno, line in enumerate(
-            claim.doc.read_text(encoding="utf-8").splitlines(), 1
-        ):
-            if UNSCOPED_CLAIM_RE.search(line):
-                offenders.append(f"{claim.doc.name}:{lineno}: {line.strip()[:200]}")
+        text = claim.doc.read_text(encoding="utf-8")
+        for match in UNSCOPED_CLAIM_RE.finditer(text):
+            lineno = text.count("\n", 0, match.start()) + 1
+            line = text.splitlines()[lineno - 1].strip()
+            offenders.append(f"{claim.doc.name}:{lineno}: {line[:200]}")
 
     assert not offenders, (
         "a design document asserts that THE PRIMARY SEARCH PATH does not read the "
@@ -267,6 +311,13 @@ def test_no_document_asserts_the_unscoped_claim() -> None:
         "lane the measurement bounds and name the door outside it (#9399):\n  - "
         + "\n  - ".join(offenders)
     )
+
+
+def _method_body(text: str, symbol: str) -> str:
+    """One method's source text, from its `def` to the next method at that depth."""
+    start = text.index(f"def {symbol}(")
+    end = text.find("\n    def ", start)
+    return text[start:] if end == -1 else text[start:end]
 
 
 def test_the_excluded_module_really_reads_the_edge() -> None:
@@ -281,6 +332,14 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
         "`ABOUT_EDGE_TYPES` no longer carries `aboutObject`; the alternation the "
         "claim cites as the reason a literal grep misses the ranking reads is gone"
     )
+    # …and it must be USED, not merely defined: the claim is that ranking reads
+    # the edge *through* the alternation, so a dead constant would leave the
+    # document's justification false while the assertion above stayed green.
+    assert '"|".join(ABOUT_EDGE_TYPES)' in ranking, (
+        "`ABOUT_EDGE_TYPES` is no longer joined into a Cypher alternation, so "
+        "`ranking.py` no longer reads the edge THROUGH it — the reason the claim "
+        "gives for a literal grep missing these reads no longer holds"
+    )
 
     sdk = SDK_PATH.read_text(encoding="utf-8")
     assert re.search(r'_ABOUT_TYPES\s*=\s*"[^"]*aboutObject', sdk), (
@@ -291,4 +350,13 @@ def test_the_excluded_module_really_reads_the_edge() -> None:
         assert f"def {symbol}(" in sdk, (
             f"`{symbol}` — the `recall_state` enrichment reader the claim names as "
             "reaching the edge through `_ABOUT_TYPES` — no longer exists"
+        )
+        # The LINKAGE, not just the two names: the claim is that `_ABOUT_TYPES`
+        # *carries the type into* these readers. If one of them built its own
+        # predicate (or delegated), the document would assert a connection that
+        # no longer exists while every assertion above stayed green.
+        assert "self._ABOUT_TYPES" in _method_body(sdk, symbol), (
+            f"`{symbol}` no longer builds its predicate from `self._ABOUT_TYPES`, "
+            "so the claim that the recall door reads the edge through that "
+            "constant is false — re-derive the claim, do not keep the citation"
         )
