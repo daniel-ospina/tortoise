@@ -359,6 +359,12 @@ WHAT IS PINNED (one entry per test, in file order)
    docstrings (`sdk.link_source_to_entity`, `search_engine.
    read_reference_currency_links`, `tools/source_currency.py`) still called those
    links "property-free" and now scope the claim to the anchor.
+31. `test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree`
+   — leg 30's six literals are pinned as retracted, and an absence check on a
+   literal that was never there is permanently green: one mistyped character
+   would unpin all six sites without a red. Each literal is measured PRESENT at
+   `_RETRACTED_PRODUCTION_REV` (a `main` commit whose content stays immutable
+   once this lands), skipping only where the history is unreachable.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -367,9 +373,9 @@ that the rule keeps stating the measured set and keeps carrying the tension
 record, test 5). Line numbers are not
 asserted — the SYMBOL is authoritative, per the documents' own rule.
 
-Static and stdlib-only, with one non-static corner: the provenance leg measures a
-claim about HISTORY, so it shells out. Exactly what it runs, because an earlier
-revision of this paragraph said "ONE exception: `git show` … no network" and was
+Static and stdlib-only, with one non-static corner: the provenance legs measure
+claims about HISTORY, so they shell out. Exactly what each runs, because an
+earlier revision of this paragraph said "ONE exception: `git show` … no network" and was
 wrong on both halves: `git cat-file -e` (via `_has_commit`, on every `_git_show`
 call) to test reachability, `git show <rev>:<path>` for the text, and — where the
 rev is not already in the checkout — `git fetch --quiet
@@ -3440,9 +3446,24 @@ def test_the_pin_index_entry_for_the_9_6_retraction_states_no_measured_distance(
     )
 
 
+#: The revision the six production literals below are MEASURED against: the
+#: `main` commit that carries all six (the `#9484` merge, i.e. the tree the
+#: `#9450` review measured them in) and that IMMUTABLY keeps carrying them once
+#: this PR lands — a commit's content does not change when a later one edits the
+#: file, so the pin cannot invert the way `git merge-base HEAD origin/main`
+#: would. On `main`'s first-parent history, so `_ensure_commit`'s bounded fetch
+#: of `main` can reach it while it is recent; the leg SKIPS (never passes) where
+#: it has fallen out of that bound. TO RE-MEASURE: pick another `main` commit
+#: that still carries all six literals under `_flat`, confirm with
+#: `git show <rev>:<path>`, and swap it here.
+_RETRACTED_PRODUCTION_REV = "8767b1c8b"
+
 #: The six production docstrings that carried the retracted absolute (`#9450`
 #: review, P2), as (file, retracted literal). Pre-fix literals verbatim, so each
-#: pair is measurable against the revision it was removed from.
+#: pair is measurable against the revision it was removed from — and MEASURED by
+#: `test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree`,
+#: because "measurable" is not "measured": a mistyped literal here would be a
+#: permanently green dead pin, inside the guard whose subject is dead pins.
 _RETRACTED_PRODUCTION_ABSOLUTES = (
     (
         "tortoise/sdk.py",
@@ -3509,4 +3530,57 @@ def test_the_retracted_references_absolute_is_gone_from_production_docstrings():
     assert not unstated, (
         "these production sources dropped the absolute without stating the scoped "
         f"fact (they do not say \"carries no `sourceVersion`\"): {unstated}"
+    )
+
+
+def test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree():
+    """The table above is only a pin if each literal can MATCH the text it was
+    removed from — and this file's own discipline (legs 24/25, and leg 29's
+    `_PIN_INDEX_PRE_FIX_PROBE`) is that a provenance claim nothing compares
+    against history is exactly the defect the guard exists to stop.
+
+    Leg 30 asserts each literal is ABSENT at HEAD. That is unfalsifiable against
+    a literal that was never there: change one character and the assertion is
+    permanently green, and the six production sites it is supposed to keep
+    scoped lose their pin silently — inside the guard whose subject is dead
+    pins, which is the shape the `#9450` review named ("measurable" is not
+    "measured"). So each literal is measured PRESENT at
+    `_RETRACTED_PRODUCTION_REV`: the `main` commit the six were live at, whose
+    content is immutable once this PR lands.
+
+    SCOPE: presence at that revision only — it cannot prove the literal was
+    there for EVERY earlier revision, and it does not re-measure leg 30's HEAD
+    side. Skips, never passes, where this checkout cannot supply the history
+    (`_ensure_commit` is bounded, and a non-shallow clone missing the rev is
+    never shallow-ified to reach it).
+    """
+    assert _RETRACTED_PRODUCTION_ABSOLUTES, "the table is empty — nothing is pinned"
+    paths = sorted({path for path, _ in _RETRACTED_PRODUCTION_ABSOLUTES})
+    texts: dict[str, str] = {}
+    missing: list[str] = []
+    for path in paths:
+        text = _git_show(_RETRACTED_PRODUCTION_REV, path)
+        if text is None:
+            missing.append(path)
+        else:
+            texts[path] = _flat(text)
+    if missing:
+        pytest.skip(
+            f"`git show {_RETRACTED_PRODUCTION_REV}:<path>` is not reachable even "
+            f"after a bounded fetch of `origin main` (depths {_SHALLOW_DEPTHS}) "
+            f"for {missing} — no git, an unreachable remote, or the rev is older "
+            "than the deepest bound, so the pre-fix presence cannot be measured "
+            "here. The leg SKIPS, it never passes on history it could not read"
+        )
+    dead = [
+        f"{path}: {literal!r}"
+        for path, literal in _RETRACTED_PRODUCTION_ABSOLUTES
+        if _flat(literal) not in texts[path]
+    ]
+    assert not dead, (
+        "these literals are pinned as retracted but do NOT match the text at "
+        f"{_RETRACTED_PRODUCTION_REV} — so leg 30's absence check cannot red on a "
+        "re-introduction of the real wording, and the six production sites are "
+        "unpinned:\n  " + "\n  ".join(dead) + "\nRe-quote the literal from "
+        f"`git show {_RETRACTED_PRODUCTION_REV}:<path>` (or re-pin the revision)"
     )
