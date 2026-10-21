@@ -747,3 +747,51 @@ the fifth correction is a red test rather than a fifth audit.
 - **The sibling passage in `EXTRACTOR-V4-ARCHITECTURE.md` §16 was corrected in the same pass** (its
   `assembly.py:573`/`:789`/`:809` pointer, its `:NNNN` citations and its test-file count), because
   a repair that fixes one copy and leaves the other is how this drift survived the previous three.
+
+### Follow-up, same day — the FIFTH correction, and the first one the census could not have made (`PR #9398` review)
+
+The section above called itself "the last hand pass" and was **wrong within hours**: the review of
+that PR found the newly-written census blind in a whole class, and the claim it guards therefore
+still false. The review is the reason the count below moved in the direction that matters.
+
+- **The census could only see a string LITERAL.** It parsed `ast.Constant` and nothing else, so a
+  reader that builds the relationship name at runtime was invisible — and five of them exist:
+  `StateRanker._fetch_object_signals` (`ranking.py:1066`, `"|".join(ABOUT_EDGE_TYPES)`),
+  `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py:28773`/`:28790`,
+  `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`), `supersede_point` (`sdk.py:13559`) and
+  `_preview_supersede` (`mcp_server.py:6804`), both looping over `SUPERSEDE_STRUCTURAL_RELS`.
+  Worse, the table and the census **agreed perfectly** on the 13 sites the literal scan could see,
+  and that agreement was circular: both were blind in the same place. Adding rows alone would have
+  left a sixth hand pass guaranteed, so the fix is the derivation, not the list.
+- **The derivation is now one level through the expression**: `+`-concatenation, `JoinedStr`
+  (f-strings, including ones with no placeholders — the old scan skipped those outright),
+  `"|".join(CONSTANT)`, `for rel in CONSTANT` loop variables, class attributes (`self._ABOUT_TYPES`),
+  and constants **imported** from another module (resolved only when the name is unique package-wide,
+  so an ambiguous name is a reported gap rather than a guess).
+- **That un-blinded a site the earlier table had written off as un-derivable.**
+  `_retrieve_topic_neighborhood` (`topic_summarization.py:211`) builds `edge_type` from a conditional
+  and interpolates it into an f-string; the literal scan could not follow it and the row was listed
+  as one of "the two no census can find". It is now derived, so `UN_DERIVABLE` is down to **one**
+  entry: `SubgraphExpander._neighbors`, whose `MATCH (n)-[r]->(m)` names no type anywhere.
+- **The count moved fifteen → twenty, and the customer-callable count moved four → SIX.** New row 14
+  (`_state_related_objects`, `_state_related_points` — MCP `tortoise_recall` through `recall_state`)
+  and new row 16 (`_preview_supersede` — the `tortoise_supersede` dry-run preview) are both
+  **customer-callable**; row 15 (`supersede_point`) is the read on the write path that row 12's
+  precedent already admits. Row 4 gains its third reader, `_fetch_object_signals`. ⚠️ **The
+  customer-callable number is the one the KEEP ruling rests on, so a correction that raises it (and
+  was invisible to four hand passes) is the most important line in this entry.**
+- **The completeness arm now pairs files with symbols POSITIONALLY.** It used to build a
+  cross-product of a row's backticked files × its symbols, so a row citing files A,B and symbols
+  X,Y "declared" all four pairs — harmless while every row is single-file, and exactly wrong the
+  moment a row cites two files (the shape the table invites). Pairing symbols to the file token that
+  precedes them is mechanical and exact.
+- **The anti-vacuity floors were lowered, deliberately.** They sat at today's exact census (13 sites
+  / 13 rows), so deleting a reader *and* its row — a legitimate contraction — failed with a message
+  claiming the parser had broken. They are now floors (~10) that only catch "found nothing".
+- **The guard is registered in `config/ci-surfaces.yml`** (`core`, with a `durations` row). Without
+  that it was invisible to `tools/ci_selection.py --integrity` (a required, merge-gating job) AND
+  selected into no CI leg at all — the instrument that exists because nothing executable checked the
+  table would itself have run nowhere.
+- **A mechanism test pins the derivation** on synthetic sources (literal, `+`-concat, f-string,
+  `"|".join(TUPLE)`, `for rel in TUPLE`, and a `MERGE` writer that must NOT count), so the resolver
+  cannot regress to literal-only without a red.
