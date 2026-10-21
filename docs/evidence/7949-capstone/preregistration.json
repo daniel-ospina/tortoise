@@ -16,6 +16,7 @@
     "seed": 42,
     "schema_version": 1,
     "planted_units": 90,
+    "planted_operator_edges": 15,
     "value_bearing_units": 14,
     "hedge_scope_sentences": 29,
     "hedge_scope_sentences_total": 343

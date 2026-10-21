@@ -49,6 +49,12 @@ not scored`**: its own line 5 records `prereg=UNPREREGISTERED`, every criterion 
 No number in it was ever compared to a bar. `tools/e1_e2_census_check.py` (V9/V10) pins that: an
 `UNPREREGISTERED` log is *refused* if it carries a scored criterion verdict or exits non-3.
 
+One flag in that log reads `scored=yes` on the `after-vet-shipped` arm, and it should not be read as
+a verdict: `scored=` marks which arm the run *reports as its scored arm* (the "what-if" arm the doc
+above describes), not that anything was scored against a threshold. Every `verdict=` and `result=` in
+the file is `UNPREREGISTERED` and the file exits 3 — which is what §7's whitelist checks, and why
+`scored=` is not in that whitelist.
+
 **⇒ The consequence, stated plainly and not softened: the author of §3.2 had seen the 60.0% before
 writing `after_share <= 0.50 x before_share`.** That is a real discount on E1's threshold and a
 reader should apply it. What can be offered against it is not innocence but **the derivation**: the

@@ -424,7 +424,14 @@ def _record(**over) -> dict:
         "written_before_any_scored_run_basis": f"no scored run exists; the {check.UNSCORED} log predates it",
         "unscored_runs_before_this_registration": sorted(
             pins["pre_existing_unscored_logs"]),
-        "corpus": {"fixtures_hash": pins["corpus"]["fixtures_hash"]},
+        "corpus": {
+            k: pins["corpus"][k]
+            for k in ("fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
+                      "value_bearing_units", "hedge_scope_sentences", "planted_operator_edges")
+        },
+        "split": {"tune": list(pins["split"]["tune"]),
+                  "held_out": list(pins["split"]["held_out"])},
+        "e4_denominator": pins["e4_denominator"],
         "criteria": [{"id": r["id"], "threshold": r["threshold"]} for r in rows],
     }
     base.update(over)
@@ -722,3 +729,88 @@ def test_the_acceptance_report_states_the_claim_provenance(capsys):
     assert check.main(["--dir", str(PREREG_DIR)]) == 0
     out = capsys.readouterr().out
     assert "run-order claim: verified" in out
+
+
+# ── round-3 review regressions ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("old,new,bad", [
+    ("result=UNPREREGISTERED", "RESULT=PASS", "RESULT=PASS"),
+    ("verdict=UNPREREGISTERED", "VERDICT=FAIL", "VERDICT=FAIL"),
+    ("result=UNPREREGISTERED", "Result = GREEN", "Result=GREEN"),
+])
+def test_an_uppercase_scored_marker_also_voids_the_exemption(
+        tmp_path, monkeypatch, old, new, bad):
+    """REGRESSION (#9075 review r3 P2): the whitelist was case-sensitive.
+
+    `RESULT=PASS` / `VERDICT=FAIL` escaped it — case is the last member of the same class of gap the
+    r2 fixes closed for spacing and punctuation.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000, body=UNSCORED_LOG.replace(old, new))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and bad in failures[0], (bad, failures)
+
+
+def test_an_uppercase_exit_is_not_accepted_as_three(tmp_path, monkeypatch):
+    """`EXIT=0` escaped both regexes; case-insensitivity closes it and still requires the value 3."""
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000,
+                     body=UNSCORED_LOG.replace("exit=3", "EXIT=0"))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and "must exit 3" in failures[0], failures
+
+
+@pytest.mark.parametrize("path,value", [
+    (("corpus", "planted_units"), 900),
+    (("corpus", "value_bearing_units"), 99),
+    (("corpus", "hedge_scope_sentences"), 999),
+    (("corpus", "sessions"), 70),
+    (("corpus", "seed"), 7),
+    (("corpus", "planted_operator_edges"), 4),
+])
+def test_a_record_denominator_that_disagrees_with_the_pins_fails(tmp_path, path, value):
+    """REGRESSION (#9075 review r3 P1): the record restated denominators nothing cross-checked.
+
+    The pins are tree-verified; the record is not. A record can therefore disagree with the pins on
+    the very denominators the run probe consumes — and `planted_operator_edges = 4` would smuggle the
+    forbidden four-edge denominator back in while the gate stayed green.
+    """
+    rec = _record()
+    rec[path[0]] = dict(rec[path[0]])
+    rec[path[0]][path[1]] = value
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any(f"{path[0]}.{path[1]}" in f for f in failures), failures
+
+
+def test_a_record_split_that_disagrees_with_the_pins_fails(tmp_path):
+    """The split is a READ discipline; a record that moves a session has changed the protocol."""
+    rec = _record()
+    rec["split"] = {"tune": ["wp01_quarry_debug"], "held_out": ["wp02_lumen_refactor"]}
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("split.tune" in f for f in failures), failures
+
+
+def test_a_record_with_the_four_edge_denominator_fails(tmp_path):
+    """The sharpest case: the record is what the run probe freezes, so 4 must never reach it."""
+    rec = _record(e4_denominator=4)
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("e4_denominator" in f for f in failures), failures
+
+
+def test_the_real_record_restates_every_pinned_denominator():
+    """The record must carry the denominators it is checked against — not silently omit them."""
+    import json as _json
+    record = _json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    pins = check.parse_pins(PREREG.read_text())
+    for key in ("fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
+                "value_bearing_units", "hedge_scope_sentences", "planted_operator_edges"):
+        assert record["corpus"][key] == pins["corpus"][key], key
+    assert record["e4_denominator"] == pins["e4_denominator"] == 15
+    assert sorted(record["split"]["tune"]) == sorted(pins["split"]["tune"])
+    assert sorted(record["split"]["held_out"]) == sorted(pins["split"]["held_out"])

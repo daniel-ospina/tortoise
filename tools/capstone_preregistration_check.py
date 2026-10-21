@@ -101,11 +101,15 @@ UNSCORED = "UNPREREGISTERED"
 #: of four known-bad strings: a closed bad-list silently admits the next scored vocabulary, which is
 #: the inverse of the gap the exemption exists to close (#9075 review P2).
 #:
-#: ``\s*=\s*`` and the trailing-punctuation strip are both needed: a spaced assignment
-#: (``verdict = PASS``) was a false NEGATIVE, and a punctuated one (``result=UNPREREGISTERED,``) was a
-#: false POSITIVE that refused a harmless formatting variation with a misleading diagnosis.
-SCORED_KEYS = re.compile(r"(?:^|\s)(verdict|result)\s*=\s*(\S+)", re.MULTILINE)
-EXIT_KEY = re.compile(r"(?:^|\s)exit\s*=\s*(\S+)", re.MULTILINE)
+#: Three widenings, each found by a review and each the same CLASS of gap — a marker the whitelist
+#: could not see:
+#:   * ``\s*=\s*`` — a spaced ``verdict = PASS`` was a false NEGATIVE (r2);
+#:   * ``VALUE_TRAILING`` — a punctuated ``result=UNPREREGISTERED,`` was a false POSITIVE that
+#:     refused a harmless formatting variation with a misleading diagnosis (r2);
+#:   * ``re.IGNORECASE`` — an uppercase ``RESULT=PASS`` escaped entirely (r3).
+#: The ``prereg=`` line check stays case-SENSITIVE on purpose: it fails closed on ``PREREG=``.
+SCORED_KEYS = re.compile(r"(?:^|\s)(verdict|result)\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+EXIT_KEY = re.compile(r"(?:^|\s)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 
 #: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
 VALUE_TRAILING = ",;."
@@ -562,11 +566,35 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
 
     corpus = record.get("corpus") or {}
     pins_corpus = pins.get("corpus") or {}
-    if corpus.get("fixtures_hash") != pins_corpus.get("fixtures_hash"):
-        failures.append(
-            f"{MACHINE_RECORD} corpus.fixtures_hash is {corpus.get('fixtures_hash')!r} but the pins "
-            f"block says {pins_corpus.get('fixtures_hash')!r} — two copies of the corpus pin"
-        )
+
+    def cmp(label: str, want, got) -> None:
+        """The record may not disagree with the pins on a number it RESTATES.
+
+        The pins are tree-verified (`check_pins`); the record is not. A record that restates a
+        denominator is a second copy that a reader — and the run probe — will trust, so a corpus
+        change that updates `fixtures_hash` and forgets `planted_units` must not pass green while
+        the probe freezes a stale denominator (#9075 review r3 P1). `e4_denominator` is the sharp
+        case: the record could otherwise smuggle the forbidden four-edge denominator back into the
+        artefact the probe consumes while this gate stayed green.
+        """
+        if got != want:
+            failures.append(
+                f"{MACHINE_RECORD} {label} is {got!r} but the pins block says {want!r} — "
+                "two copies of a denominator that can disagree"
+            )
+
+    for key in ("fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
+                "value_bearing_units", "hedge_scope_sentences", "planted_operator_edges"):
+        if key in pins_corpus:
+            cmp(f"corpus.{key}", pins_corpus[key], corpus.get(key))
+
+    pins_split = pins.get("split") or {}
+    rec_split = record.get("split") or {}
+    for half in ("tune", "held_out"):
+        cmp(f"split.{half}", sorted(pins_split.get(half) or []), sorted(rec_split.get(half) or []))
+
+    if "e4_denominator" in pins:
+        cmp("e4_denominator", pins["e4_denominator"], record.get("e4_denominator"))
 
     # Each criterion row's threshold in the record must match the table's, character for character.
     rows = parse_criteria_rows((directory / PREREG_NAME).read_text())
