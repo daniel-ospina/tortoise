@@ -177,7 +177,7 @@ idempotent, total, and stores no EP scalar`.
 | **the `session` record** | ⚠️ **`capture_redactions` lands NULL** — the column is `jsonb` and the producer emits an integer. Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
-| **the record's durability** | ⛔ **NOTHING BACKS UP POSTGRES.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record. | §17.1/O1: *"DURABILITY = the store's backup"*; R9 |
+| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record, and nothing in the tree records the Supabase project's plan or its PITR state — that is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
 ---
 
@@ -204,9 +204,11 @@ rows** — so this is the existing project, and *"one database per team"* is ref
 
 ### R2 — Land the schema on the hosted project, and keep the name gate honest · **S** · ops · **BLOCKER**
 
-**What:** apply the migrations. `supabase-deploy` is `workflow_dispatch`-only and runs
-`supabase db push --linked --include-all` (`.github/workflows/supabase-deploy.yml:243`), so the record
-tables will land on the next dispatch
+**What:** apply the migrations. `supabase-deploy` **applies** them only on `workflow_dispatch` —
+`supabase db push --linked --include-all`, gated on
+`github.event_name == 'workflow_dispatch'` (`.github/workflows/supabase-deploy.yml:239-243`); its
+`push` trigger on `supabase/**` runs the drift checks, not the apply — so the record tables will
+land on the next dispatch
 whether or not R1 has happened. Two couplings to respect: the record reader is **name-gated** on
 `RECORD_MIGRATIONS` (`record_projection.py:164`, no glob) so a **new** `.sql` is invisible to the
 image until its name is added there; and `deploy-hosted.yml` deliberately does **not** trigger on
@@ -255,9 +257,12 @@ operator topology non-negotiable (a fused claim cannot be `NAND`ed).
 (`…01_record_event_stream.sql:115` ff. — every table, and each one `REVOKE ALL … FROM anon,
 authenticated, public` + `GRANT SELECT … TO authenticated`). **No code sets that GUC** — so today RLS is
 `service_role`/owner-bypassed and the tenancy boundary is the writer's `org_id` value plus the
-`node_identity` FK, not RLS. The `#669` research brief already settled the mechanism: *"a shared
-non-bypass app role + `current_setting('app.current_org_id')` GUC … gives RLS-enforced isolation for
-backend queries without per-user connections"* (`docs/plans/2026-08-08-669-research.md` §2.1).
+`node_identity` FK, not RLS. The `#669` research brief documents the mechanism — *"a shared non-bypass app role +
+`current_setting('app.current_org_id')` GUC … gives RLS-enforced isolation for backend queries
+without per-user connections"* (`docs/plans/2026-08-08-669-research.md` §2, item 1) — but its own
+§4 leaves the **access path** open and recommends `service_role` plus defence-in-depth at cutover,
+i.e. exactly the bypass this item exists to ask about. The mechanism is documented; the decision
+is not taken.
 **What it blocks:** §4's tenancy decision being **provable** for hosted. §4's bypass rule asks
 exactly this question and the tree cannot answer it today.
 **Decision needed:** the role the record connects as, and whether RLS is defence-in-depth or the
@@ -286,7 +291,7 @@ COMPLETED, 2026-09-25) is the drill that restored **9,687 / 10,000** edges, and 
 its logical dump filtered the **node** export but not the **edge** export, so **313** edges
 referenced export-skipped nodes and the artifact was unrestorable by construction — not because
 the graph was the only durable store.
-Also add the **`cache-reachable`/`not-hot`** path to the runbook — a declared-partial projection makes
+Also add the **`cache_reachable=False` (`cache-unreachable`)** and **`not-hot`** paths to the runbook — a declared-partial projection makes
 `hits == 0` no longer establish `empty` (§17.3).
 **What it blocks:** the epic's acceptance, and the ability to answer *"the graph is gone, restore it"*
 at 03:00.
@@ -295,7 +300,7 @@ at 03:00.
 
 **What:** nothing backs up Postgres. `tortoise/backup.py` (module docstring: *"JSONL archiver +
 FalkorDB BGSAVE"*), `hosted_backup.py` (R2), `backup_sweep.py` (the cron driver) are all graph-only.
-§17.1/O1 is a recorded decision: **durability = the store's backup; rebuildability = the journal** —
+§3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
 so promoting Postgres to the record **moves the durability obligation onto Postgres**, and it is
 currently unheld. Two halves: Supabase's PITR (a plan-tier fact, and therefore an owner decision on
 cost) **plus** an off-box logical dump to R2 on the existing sweep, **plus** a drill that proves it.
@@ -359,7 +364,7 @@ calibrates after beta from measured consumption.
 | record row width | **1,263–1,266 B** median, **1,421–1,423 B** mean | n = 2,000 × 2 runs | **MEASURED** |
 | keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples | **MEASURED** |
 | full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total | **MEASURED** |
-| **edge count** | — | the only population figure in the tree is the restore drill's **10,000** edges (`#3895`); no live `MATCH ()-[r]->()` count is recorded | ⛔ **ESTIMATED / UNMEASURED** |
+| **edge count** | — | per-type populations ARE recorded — **27,310** `aboutObject`, **4,748** operator-joining, **14,567** `extractedFrom`, measured on the live graph 2026-09-23 (§5.1). What is missing is the **total**: `tools/edge_census.py:224` runs the per-type `MATCH ()-[r]->()` census, but no in-tree record keeps its output, and the drill's **10,000** edges (`#3895`) is a fixture, not a population | ⛔ **ESTIMATED / UNMEASURED** (the total) |
 | journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; **8.6–9.2 GB** at 1,000,000) | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
 | **writes/day** | — | **hosted capture is off by owner ruling 2026-10-14**, so the hosted write rate is **zero today and no historical rate exists**. The per-record size above is the only measured input. | ⛔ **UNMEASURED** |
 | **reads/day** | — | no tenant serves a workload. `tortoise/read_ledger.py` is the instrument; its one exercise (**f = 8.64%**, 200 proxy queries over 10,457 keys, one graph, one date) is explicitly *"NOT `f` FOR THE COST MODEL"* (§17.4.6) | ⛔ **UNMEASURED** |
