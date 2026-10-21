@@ -525,3 +525,47 @@ def test_the_unmeasured_dimensions_are_still_named():
             f"docs/capacity.md no longer names the unmeasured dimension "
             f"'{gap}'"
         )
+
+
+#: The pages that quote `docs/capacity.md`'s figures to the public. §8 of the
+#: page is titled "Explicitly unmeasured", so the disclosure travels with the
+#: numbers: a page that publishes the measured figures while dropping the caveat
+#: turns a truncation into a design property (#3329's failure class, restated
+#: for the copy by #9510).
+_QUOTING_PAGES = (ROOT / "website" / "faq.html", SELF_HOSTED_HTML)
+
+
+def test_pages_quoting_the_figures_keep_the_unmeasured_disclosure():
+    """Quoting the capacity figures includes §8's caveat, not just the numbers."""
+    for page in _QUOTING_PAGES:
+        text = re.sub(r"\s+", " ", _read(page))
+        assert "unmeasured rather than estimated" in text, (
+            f"{page.name} publishes capacity figures without the disclosure that "
+            f"the unmeasured dimensions 'are listed as unmeasured rather than "
+            f"estimated' — the clause docs/capacity.md §8 ('Explicitly "
+            f"unmeasured') publishes and tests/test_capacity_page.py exists to keep."
+        )
+
+
+def test_the_faq_scale_answer_keeps_the_truncation_caveat():
+    """The bounded read is a truncation of a full computation — say so.
+
+    #9510 narrowed this answer to the hop caps and the exact dirty-root closure,
+    which are true, but a reader then learned nothing about the approximation.
+    `docs/capacity.md` §7/§8 still publish both caveats — the guard that divergence
+    "is exactly what isn't yet measured" (#6211) and "No corpus-scaling curve is
+    published" (§5) — so the page may not present the caps as the whole story.
+    """
+    text = re.sub(r"\s+", " ", _read(ROOT / "website" / "faq.html"))
+    assert "the result is an approximation" in text, (
+        "website/faq.html dropped the caveat that bounded-hop belief is an "
+        "approximation of a full computation (docs/capacity.md §7/§8, #6211)."
+    )
+    assert "isn't yet measured" in text, (
+        "website/faq.html dropped the statement that large-scale divergence from a "
+        "full computation is unmeasured — docs/capacity.md §8 lists it explicitly."
+    )
+    assert "not published corpus-scaling curves" in text, (
+        "website/faq.html dropped 'we have not published corpus-scaling curves', "
+        "which docs/capacity.md §5 still says word for word."
+    )

@@ -227,10 +227,11 @@
       <ul>
         <li>Adding a claim costs work proportional to how many things it connects to — not to the size of the store. Unrelated claims don't interact.</li>
         <li>Belief is computed over a bounded neighbourhood around each claim, capped by default at a small number of hops (one for an anchored confidence read, two on the propagation path), and a dirty-root pass expands the exact affected closure instead of the whole graph — which is what keeps the common read local. Operator selection is capped too, truncated deterministically by id, and the result reports it (<code>truncated</code>), so a capped pass is visible rather than silent.</li>
+        <li>Those caps also mean the result is an approximation of a full computation, and how far it diverges from one at large scale is exactly what isn't yet measured. We have not published corpus-scaling curves either: the retrieval path has a benchmark harness with scaling arms for larger corpora, but no curve is published.</li>
         <li>Concurrent writers are supported on the Docker and hosted paths — that is the deployment built for teams.</li>
       </ul>
       <div class="callout">
-        <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names the committed artifact or code symbol it comes from.</p>
+        <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names the committed artifact or code symbol it comes from, and the dimensions we have not measured (corpus-scaling curves, per-tier memory footprint, EP cost at scale) are listed as unmeasured rather than estimated.</p>
       </div>
 
       <h2>How belief works</h2>
