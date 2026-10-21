@@ -697,14 +697,16 @@ symbol-keyed, so the sentence is true and a line that MOVES cannot falsify it.
 
 Two guards, so neither class survives a later edit.
 `tests/test_7948_about_object_read_sites.py::test_section_13_carries_no_line_citations` holds §13 to its own
-sentence — the document states it carries no line numbers, so carrying one reds. And because §13.8 question 2
-is the one place that DOES keep a line (it was re-derived at `26aff163c`),
-`tests/test_extractor_v4_citation_rot.py::test_the_rederived_read_site_citations_land_inside_their_own_symbol`
-asserts each of its citations resolves INSIDE the symbol it is attached to — symbol-exists-in-file cannot see
-that, which is why two had drifted there too: `_state_related_objects` cited `sdk.py:29361` and
-`_state_related_points` `sdk.py:29378`, both landing inside `_state_mitigations` (a `mitigated_by` reader)
-while their `def`s sit at `29392`/`29409`. Non-vacuity measured: under the pre-fix text both new tests red,
-naming the offending line and the span the cited symbol actually occupies.
+sentence — the document states it carries no line numbers, so carrying one reds. §13.8 was symbol-keyed as
+well, in the entry below, which is the guard that SHIPS: no line is pinned anywhere in either section, and
+`tests/test_extractor_v4_citation_rot.py::test_section_13_8_carries_no_line_citations_and_its_symbols_resolve`
+asserts both halves (none present, each name resolves). The intermediate span assertion
+(`test_the_rederived_read_site_citations_land_inside_their_own_symbol`, which required each §13.8 citation to
+resolve *inside* the symbol it was attached to) was replaced in that same pass because it was over-blocking
+and under-detecting at once: one inserted line above a reader's `def` moved the span and reddened a `core`
+test on a PR that touched no reader, while a mid-body citation only had to sit somewhere inside the symbol.
+That is why the two citations that had drifted — `_state_related_objects` and `_state_related_points`, both
+landing in a `mitigated_by` reader instead of their own bodies — are now symbol-keyed rather than re-pointed.
 
 ## §13.8 symbol-keyed (no line pinned), its count made to hold its own enumeration, and the door figure derived (2026-10-21, `#7948`)
 

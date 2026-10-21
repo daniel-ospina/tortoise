@@ -517,24 +517,40 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
     return None
 
 
-def _reads_naming_the_edge(tree: ast.Module, lo: int, hi: int) -> bool:
-    """True when a Cypher READ clause inside [lo, hi] names the edge literally.
+def _reads_literally(value: str) -> bool:
+    """True when ANY `aboutObject` bracket in this literal belongs to a READ.
 
-    Read vs write is decided by the LAST clause preceding the pattern inside
+    Read vs write is decided by the LAST clause preceding each bracket inside
     the same string literal, so `MATCH … MERGE (p)-[:aboutObject]->(o)` is a
-    WRITE (the MERGE is what the pattern belongs to) and
+    WRITE (the MERGE is what the bracket belongs to) and
     `MATCH (e) OPTIONAL MATCH (e)-[:aboutObject]->(o)` is a READ.
+
+    ⚠️ **EVERY bracket is classified, not just the first.** A single
+    `_EDGE_PATTERN.search` per literal was a fail-open in both directions this
+    file exists to close: in a query shaped write-then-read —
+    `MATCH … MERGE (p)-[:aboutObject]->(o) WITH p MATCH (x)-[:aboutObject]->(y)`
+    — the first bracket's `MERGE` decided for the whole string, so the genuine
+    READ after it entered neither the census nor any row check, and
+    `test_no_read_site_lacks_a_row`'s "every read clause that names the edge"
+    over-promised. Measured on the pre-fix rule: a new method returning only
+    the FRAGMENT `"(n)-[:aboutObject]->(o)"` — the shape
+    `SubgraphExpander._neighbors` already builds — kept all thirteen arms green.
     """
+    for match in _EDGE_PATTERN.finditer(value):
+        clauses = _CLAUSE.findall(value[: match.start()])
+        if clauses and " ".join(clauses[-1].upper().split()) in _READ_CLAUSES:
+            return True
+    return False
+
+
+def _reads_naming_the_edge(tree: ast.Module, lo: int, hi: int) -> bool:
+    """True when a Cypher READ clause inside [lo, hi] names the edge literally."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
             continue
         if not lo <= getattr(node, "lineno", 0) <= hi:
             continue
-        match = _EDGE_PATTERN.search(node.value)
-        if match is None:
-            continue
-        clauses = _CLAUSE.findall(node.value[: match.start()])
-        if clauses and " ".join(clauses[-1].upper().split()) in _READ_CLAUSES:
+        if _reads_literally(node.value):
             return True
     return False
 
@@ -688,14 +704,11 @@ def _literal_read_sites() -> dict[str, list[int]]:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
                 continue
-            match = _EDGE_PATTERN.search(node.value)
-            if match is None:
+            if not _reads_literally(node.value):
                 continue
-            clauses = _CLAUSE.findall(node.value[: match.start()])
-            if clauses and " ".join(clauses[-1].upper().split()) in _READ_CLAUSES:
-                found.setdefault(str(path.relative_to(PKG)), []).append(
-                    getattr(node, "lineno", 0)
-                )
+            found.setdefault(str(path.relative_to(PKG)), []).append(
+                getattr(node, "lineno", 0)
+            )
     return found
 
 
@@ -786,6 +799,43 @@ def test_the_edge_pattern_sees_the_whole_about_family():
         + "\n  - ".join(overreach)
         + "\nA relationship bracket is dash-delimited; without that anchor a "
         "JSON payload or a prose mention becomes a phantom read site."
+    )
+
+
+def test_every_literal_bracket_is_classified_not_just_the_first():
+    """A WRITE followed by a READ in one literal is a READ site.
+
+    ⚠️ **Non-vacuity for `_reads_literally`, settled without touching
+    `tortoise/`.** The classifier used to `search` once per literal, so the
+    FIRST bracket's clause decided for the whole string: in a query shaped
+    write-then-read the `MERGE` won, the later `MATCH … [:aboutObject]` entered
+    neither the census nor any row check, and a new reader written that way
+    needed no §13 row. The cases below are the four orderings the arm must get
+    right; the first one is red under the pre-fix rule.
+    """
+    cases = {
+        # write FIRST, read SECOND — the shape a first-bracket-only reader drops.
+        "MATCH (p:Point {id:$id}) MERGE (p)-[:aboutObject]->(o:Object) "
+        "WITH p MATCH (x)-[:aboutObject]->(y:Point) RETURN count(y)": True,
+        # read first, write second — already a read, and it must stay one.
+        "MATCH (n)-[:aboutObject]->(o:Object) SET o.seen = true": True,
+        # write only: a MERGE is not a read, however many brackets there are.
+        "MATCH (p:Point {id:$id}) MERGE (p)-[:aboutObject]->(o:Object)": False,
+        "MERGE (p)-[:aboutObject]->(o:Object) "
+        "MERGE (q)-[:aboutObject]->(r:Object)": False,
+    }
+    wrong = [
+        f"{value!r} -> {_reads_literally(value)!r} (expected {expected!r})"
+        for value, expected in cases.items()
+        if _reads_literally(value) is not expected
+    ]
+    assert not wrong, (
+        "the literal classifier mis-classified these queries:\n  - "
+        + "\n  - ".join(wrong)
+        + "\nRead vs write is the LAST clause before EACH bracket. Searching "
+        "only the first bracket lets a `MERGE` decide for a literal whose read "
+        "comes later in the same query, which is how a real read site stays "
+        "out of the census and out of every §13 row."
     )
 
 
@@ -976,27 +1026,98 @@ def test_no_read_site_lacks_a_row():
 
 # ── 4. the prose counts equal the table ────────────────────────────────────
 
+#: Every form §13 states the READ-SITE count in. Deliberately case-sensitive:
+#: `customer-callable read sites` must fall to `_CALLABLE_SITE_COUNT` below and
+#: NOT be read as a site count, because that sentence states the callable
+#: figure (TWELVE), not the total (TWENTY-SEVEN).
+_SITE_COUNT = re.compile(r"\b([A-Z]+(?:-[A-Z]+)?|\d+) read sites\b")
+
+#: Every form §13 states the CUSTOMER-CALLABLE count in. The section states it
+#: TWICE — derived once at its head (`TWELVE of them are CUSTOMER-CALLABLE`) and
+#: quoted again in the blast-radius sentence (`TWELVE customer-callable read
+#: sites`) — and BOTH are read. ⚠️ **`re.search` was a false PASS here**: it
+#: binds the first statement only, so the blast-radius sentence could say
+#: `FIFTEEN customer-callable read sites` while §13's table carried twelve and
+#: all thirteen arms stayed green — the same "hand copy with no reader" shape
+#: the door figure in that very sentence was fixed for. The sibling
+#: `test_the_extractor_document_agrees_on_the_count` reads its document the same
+#: way (`stated == {counted}`), so the two arms now agree on the rule too.
+_CALLABLE_SITE_COUNT = re.compile(
+    r"\b([A-Z]+(?:-[A-Z]+)?|\d+) "
+    r"(?:of them are CUSTOMER-CALLABLE|customer-callable read sites)\b"
+)
+
+
+def _stated_counts(section: str) -> tuple[set[int], set[int]]:
+    """(site counts, customer-callable counts) — EVERY statement in `section`.
+
+    A set, not a first match: a section that states one figure twice must agree
+    with the table twice, or the unread copy is how the number rotted.
+    """
+    sites = {_words(match.group(1)) for match in _SITE_COUNT.finditer(section)}
+    callable_sites = {
+        _words(match.group(1)) for match in _CALLABLE_SITE_COUNT.finditer(section)
+    }
+    return sites, callable_sites
+
+
+def test_the_count_reader_sees_every_statement_not_just_the_first():
+    """The count arms must read EVERY statement, not the one `re.search` binds.
+
+    ⚠️ **Non-vacuity for the arm above, independent of the document's current
+    wording.** §13 states the customer-callable figure twice in two different
+    shapes, so a reader that binds only the first (`re.search`) leaves the
+    second unguarded — measured on the pre-fix guard: rewriting the
+    blast-radius sentence to `FIFTEEN customer-callable read sites` left all
+    thirteen arms green. This fixture states the same figure twice, in both
+    shapes, and requires both to be seen.
+    """
+    fixture = (
+        "TWENTY-SEVEN read sites, and TWELVE of them are CUSTOMER-CALLABLE."
+        " Deleting the edge would break **TWELVE customer-callable read sites**."
+    )
+    sites, callable_sites = _stated_counts(fixture)
+    assert sites == {27}, (
+        f"the site-count arm read {sorted(sites)} from a section that states "
+        "TWENTY-SEVEN read sites — a first-match reader cannot see a second "
+        "statement, and §13 states this figure twice."
+    )
+    assert callable_sites == {12}, (
+        f"the customer-callable arm read {sorted(callable_sites)} from a "
+        "section that states TWELVE twice (once as `TWELVE of them are "
+        "CUSTOMER-CALLABLE`, once as `TWELVE customer-callable read sites`) — "
+        "the second shape is the blast-radius sentence's hand copy, and it is "
+        "read by nothing when this arm binds only the first match."
+    )
+    # ...and the two figures must not be confused for one another: the callable
+    # sentence says "TWELVE … read sites", which is NOT the site total.
+    assert 12 not in sites, (
+        "the site-count arm read the CUSTOMER-CALLABLE figure (TWELVE) as a "
+        "site count — `TWELVE customer-callable read sites` states the "
+        "callable figure, so the site arm must not bind it."
+    )
+
 
 def test_the_prose_counts_match_the_table():
     section = _section_13()
     rows = _rows()
-    sites = re.search(r"\b([A-Z]+(?:-[A-Z]+)?|\d+) read sites\b", section)
+    sites, callable_sites = _stated_counts(section)
     assert sites, "§13 must state how many read sites it enumerates"
-    callable_sites = re.search(
-        r"\b([A-Z]+(?:-[A-Z]+)?|\d+) of them are CUSTOMER-CALLABLE\b", section
-    )
     assert callable_sites, "§13 must state how many of those are customer-callable"
 
-    assert _words(sites.group(1)) == len(rows), (
-        f"§13 says {sites.group(1)} read sites and its table carries {len(rows)} "
-        "rows — the count is the ruling's argument, so it is asserted, not "
-        "prose (it was wrong twice: B2.7 said two customer-callable sites, "
-        "#7956 corrected it to four)."
+    assert sites == {len(rows)}, (
+        f"§13 states the read-site count as {sorted(sites)} and its table "
+        f"carries {len(rows)} rows — the count is the ruling's argument, so it "
+        "is asserted, not prose (it was wrong twice: B2.7 said two "
+        "customer-callable sites, #7956 corrected it to four). Every "
+        "statement is read, so a second copy cannot drift unguarded."
     )
     counted = sum(1 for row in rows if _reach(row) == "customer-callable")
-    assert _words(callable_sites.group(1)) == counted, (
-        f"§13 says {callable_sites.group(1)} customer-callable read sites and "
-        f"{counted} rows are classed customer-callable"
+    assert callable_sites == {counted}, (
+        f"§13 states the customer-callable count as {sorted(callable_sites)} "
+        f"and {counted} rows are classed customer-callable — §13 states this "
+        "figure more than once, and every statement has to agree with the "
+        "table or the unread copy is how it rots."
     )
 
 
