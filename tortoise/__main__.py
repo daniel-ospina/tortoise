@@ -8480,19 +8480,17 @@ RESERVED_STARTER_NAMESPACES = frozenset(
 def _cmd_pack_new(args) -> int:
     """tortoise pack new <namespace> — scaffold from the template.
 
-    Validates the namespace BEFORE writing (camelCase, no colons, not a
-    canonical kind, not a reserved starter name) so a broken pack is never
-    created. Writes <dir>/<namespace>/manifest.yaml filled with the
-    namespace + name + version.
+    Validates the namespace BEFORE writing (camelCase, no colons, no whitespace,
+    not a canonical kind, not a reserved starter name) so a broken pack is never
+    created. The rule set is a SUPERSET of `PackRegistry._validate`'s namespace
+    checks (`:` and whitespace only — the validator does not know about reserved
+    starter packs or canonical words), so nothing the scaffolder accepts can be a
+    manifest the validator refuses. A scaffolder that writes such a manifest is
+    worse than no scaffold at all. Writes <dir>/<namespace>/manifest.yaml filled
+    with the namespace + name + version.
     """
 
-    from tortoise.pack_registry import (
-        CANONICAL_DOCUMENT_KINDS,
-        CANONICAL_EVENT_KINDS,
-        CANONICAL_OBJECT_KINDS,
-        CANONICAL_POINT_KINDS,
-        registered_source_types,
-    )
+    from tortoise.pack_registry import canonical_kind_words
 
     ns = (args.namespace or "").strip()
     errors: list[str] = []
@@ -8500,6 +8498,10 @@ def _cmd_pack_new(args) -> int:
         errors.append("namespace is required")
     if ns and ":" in ns:
         errors.append(f"namespace '{ns}' must not contain ':'")
+    # #2786: the validator refuses a whitespace namespace (it composes the kind
+    # form `f"{ns}:{kind}"`), so the scaffold must refuse it too.
+    if ns and any(ch.isspace() for ch in ns):
+        errors.append(f"namespace '{ns}' must not contain whitespace")
     if ns and ns[0].isupper():
         errors.append(f"namespace '{ns}' should be camelCase (lowercase first letter)")
     if ns and ns in RESERVED_STARTER_NAMESPACES:
@@ -8510,9 +8512,12 @@ def _cmd_pack_new(args) -> int:
     # incidentally, as an objectKind. The property is unchanged — a pack
     # namespace must not collide with ANY canonical ontology word, whichever
     # axis carries it.
-    _canon = CANONICAL_OBJECT_KINDS | CANONICAL_POINT_KINDS | CANONICAL_EVENT_KINDS \
-        | CANONICAL_DOCUMENT_KINDS | registered_source_types()
-    if ns and ns in {k.lower() for k in _canon}:
+    # #2786: the word set comes from `canonical_kind_words()` — the SAME owner map
+    # the manifest validator refuses declarations against, including the action
+    # axis (`CANONICAL_ACTION_KINDS`, which `CANONICAL_KINDS` deliberately omits)
+    # and the live source registry. Hand-rolling the union here is what let the
+    # two checks disagree.
+    if ns and ns in canonical_kind_words():
         errors.append(f"namespace '{ns}' collides with a canonical kind — pick a different name")
     if errors:
         for e in errors:
@@ -11076,7 +11081,7 @@ def main(argv: list[str] | None = None) -> int:
     pk = sp.add_parser("pack", help="Expansion-pack authoring (scaffold + validate)")
     pack_sp = pk.add_subparsers(dest="pack_cmd")
     pn = pack_sp.add_parser("new", help="Scaffold a new expansion pack from the template")
-    pn.add_argument("namespace", help="Pack namespace (camelCase, no colons, not a reserved starter name)")
+    pn.add_argument("namespace", help="Pack namespace (camelCase, no colons, no whitespace, not a reserved starter name)")
     pn.add_argument("--dir", default=None,
                     help="Output dir for <dir>/<namespace>/manifest.yaml (default: repo packs/ dir)")
     pv = pack_sp.add_parser("validate", help="Validate a pack directory against the registry schema")

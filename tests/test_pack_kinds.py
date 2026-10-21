@@ -1365,7 +1365,7 @@ class TestCanonicalObjectKindAlignment:
         validates as a parent while `Document` still expands.
         """
         manifests = {
-            "tranche": "target", "northStar": "goal", "roadmap": "plan",
+            "tranche": "target", "northStar": "goal", "roadmapItem": "plan",
             "playbook": "strategy", "label": "tag", "upperDoc": "Document",
         }
         pack_dir = tmp_path / "alignment"
@@ -1405,14 +1405,17 @@ class TestCanonicalObjectKindAlignment:
     def test_a_pack_cannot_re_register_the_retired_kind(self, tmp_path):
         """D10 must hold on the pack-manifest WRITE side too.
 
-        `_validate`'s collision check reads the SAME axis
-        (`CANONICAL_KINDS[kind_field]`) — so once `document` left
-        ``CANONICAL_OBJECT_KINDS`` a pack could declare ``objectKinds: [document]``
-        and validate clean. That is not inert: ``pack.object_kinds`` is unioned
-        into ``extractor_v2``'s writable kind forms and the classification index,
-        so the retirement became bypassable through the manifest path. The check
-        therefore also reads ``registered_source_types()`` — the axis D10 moved
-        the word TO. Declaring it THERE stays legal.
+        Once `document` left ``CANONICAL_OBJECT_KINDS`` a pack could declare
+        ``objectKinds: [document]`` and validate clean. That is not inert:
+        ``pack.object_kinds`` is unioned into ``extractor_v2``'s writable kind
+        forms and the classification index, so the retirement became bypassable
+        through the manifest path. The check therefore also reads
+        ``registered_source_types()`` — the axis D10 moved the word TO. Declaring
+        it THERE stays legal.
+
+        Since #2786 the collision check reads EVERY category (not just the one
+        being declared), so this leg is now the source-axis half of a guard that
+        also covers `objectKinds` → `eventKinds` deformation.
 
         This pins the invariant for real. The module's ``__main__`` self-check
         asserts the same thing, but nothing executes it (no test and no workflow
@@ -1475,34 +1478,43 @@ class TestMilestoneCanonicalEventKind:
     without the others.
     """
 
-    def test_cross_pack_reference_with_a_declaring_pack_resolves(self, tmp_path):
-        """#2767 indicator (2): a fixture that *declares* `milestone` on a pack
-        axis, plus a second pack that references it in `nearMisses`, must load
-        cleanly. This is the half the reported failure needed: pre-fix the bare
-        name was simultaneously a pm `objectKind`, a legacy base point/event
-        kind and the miner's event kind, so once a second pack declared it the
-        reference became ambiguous. Post-fix core owns `milestone` on the EVENT
-        axis, so the referencing pack resolves without an ambiguity error.
+    def test_two_packs_declaring_one_name_in_one_category_still_load(
+            self, tmp_path):
+        """Cross-pack POSITIVE control for the per-manifest scope of #2786.
 
-        Pinned separately from `test_cross_pack_bare_reference_resolves_to_core`
-        so that BOTH shapes stay covered: that test pins the no-declaration
-        shape (`pm`'s `sprint`), this one pins the declaring shape."""
+        The new one-name-one-category rule is per MANIFEST, not global: two packs
+        declaring the same bare name in the SAME category is the §7 `equivalentTo`
+        bridge and must stay legal, and a bare reference to a CORE name still
+        resolves to core while they do. A future widening that keys on "the name
+        is declared elsewhere" (rather than "this manifest declares it twice")
+        reds this.
+
+        ⚠️ UPDATED by #2786's cross-axis guard. This fixture used to have alpha and
+        delta DECLARE `milestone` as an `objectKind`, which is the deformation the
+        same class's `test_milestone_is_canonical_event_not_object` and
+        `test_repo_pack_catalog_declares_no_milestone` forbid: core owns the bare
+        name on the EVENT axis, so a pack cannot declare it on any axis at all now
+        (the declaration is refused, naming `eventKinds`). The *declaring-pack*
+        half of the #2767 shape is pinned end-to-end by
+        `test_a_declaring_pack_is_refused_while_a_bare_reference_still_resolves`
+        below; the no-declaration shape by
+        `test_cross_pack_bare_reference_resolves_to_core`.
+        """
+        # Two packs declaring the same pack-owned bare name in one category.
         _write_pack(str(tmp_path), "alpha", {
             "namespace": "alpha", "name": "Alpha", "version": "0.1.0",
             "tier": "free",
             "ontology": {
-                "extends": "core", "objectKinds": ["milestone"],
-                "kindDefs": {"milestone": {"description": "m"}},
+                "extends": "core", "objectKinds": ["milestoneNote"],
+                "kindDefs": {"milestoneNote": {"description": "m"}},
             },
         })
-        # a SECOND declaring pack is what made the pre-fix reference ambiguous
-        # ("is ambiguous — declared by multiple packs") — the reported failure.
         _write_pack(str(tmp_path), "delta", {
             "namespace": "delta", "name": "Delta", "version": "0.1.0",
             "tier": "free",
             "ontology": {
-                "extends": "core", "objectKinds": ["milestone"],
-                "kindDefs": {"milestone": {"description": "m"}},
+                "extends": "core", "objectKinds": ["milestoneNote"],
+                "kindDefs": {"milestoneNote": {"description": "m"}},
             },
         })
         _write_pack(str(tmp_path), "beta", {
@@ -1515,8 +1527,50 @@ class TestMilestoneCanonicalEventKind:
             },
         })
         registry = PackRegistry(tmp_path)
-        registry.load_all()
+        loaded = registry.load_all()
+        assert loaded == 3, registry.errors
         assert not registry.errors, registry.errors
+
+    def test_a_declaring_pack_is_refused_while_a_bare_reference_still_resolves(
+            self, tmp_path):
+        """#2767 indicator (2), both halves, one fixture.
+
+        The reported failure needed BOTH sides at once: a pack DECLARING the bare
+        name (the shape that made the reference ambiguous) and another pack
+        REFERENCING it in `nearMisses`. #2786 refuses the declaration — core owns
+        `milestone` on the EVENT axis, so it cannot be declared on any axis — but
+        refusing it must not break the reference: a bare `milestone` still
+        resolves, to core, for the pack that merely references it.
+
+        One assertion alone cannot pin this shape: the refusing half is a
+        declaration and the resolving half is a reference in a DIFFERENT pack, so
+        the fixture has to carry both, and the two asserts have to land on
+        different packs.
+        """
+        _write_pack(str(tmp_path), "alpha_declares", {
+            "namespace": "alpha_declares", "name": "Alpha Declares",
+            "version": "0.1.0", "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": ["milestone"]},
+        })
+        _write_pack(str(tmp_path), "beta_references", {
+            "namespace": "beta_references", "name": "Beta References",
+            "version": "0.1.0", "tier": "free",
+            "ontology": {
+                "extends": "core", "objectKinds": ["widget"],
+                "kindDefs": {"widget": {"description": "w",
+                                        "nearMisses": ["milestone"]}},
+            },
+        })
+        registry = PackRegistry(tmp_path)
+        loaded = registry.load_all()
+        # The declaring pack is DROPPED, and the reason names the owner axis.
+        assert "alpha_declares" in registry.errors, registry.errors
+        assert loaded == 1, (loaded, registry.errors)
+        declaration_msg = " ".join(registry.errors["alpha_declares"])
+        assert "core owns it as eventKinds" in declaration_msg, declaration_msg
+        # …and the REFERENCING pack still resolves the bare name against core.
+        assert "beta_references" in registry.packs, registry.errors
+        assert "beta_references" not in registry.errors, registry.errors
 
     def test_both_kind_paths_agree_on_the_removed_set(self):
         """`known_kinds('pointKind')` (the hosted write validator) and
@@ -1600,10 +1654,10 @@ class TestPackKindDeclarations7848:
     """`#7848` — the shipped packs declare core's vocabulary correctly.
 
     The durable runtime guard (a pack declaring a core kind under a different
-    category, or one bare name in two categories, becomes a load error) belongs
-    with the root, **#2786**. These assertions pin the three fixed declarations
-    AND the two confirmed false positives, so a re-introduction reds the suite
-    without waiting on that guard.
+    category, or one bare name in two categories, becomes a load error) landed
+    with the root, **#2786** — see `TestCoreKindCategoryDeformation2786` below.
+    These assertions pin the three fixed declarations AND the two confirmed
+    false positives, so a re-introduction reds the suite independently of it.
     """
 
     @pytest.fixture
@@ -1613,11 +1667,10 @@ class TestPackKindDeclarations7848:
         return registry
 
     def test_shipped_packs_load_clean(self, shipped):
-        # NOT a regression test for the deformation itself: nothing on this tree
-        # turns a core kind declared under another category into a load error
-        # (that guard is the root #2786). What it does protect is the RELATION
-        # ref — leaving `toKind: dev:deployment` while removing `deployment`
-        # from `objectKinds` makes it dangling and reds this.
+        # The deformation guard itself lives with the root (#2786) —
+        # `TestCoreKindCategoryDeformation2786`. What this protects in addition is
+        # the RELATION ref — leaving `toKind: dev:deployment` while removing
+        # `deployment` from `objectKinds` makes it dangling and reds this.
         assert not shipped.errors, shipped.errors
 
     def test_deployment_is_core_event_not_a_pack_object(self, shipped):
@@ -1751,3 +1804,241 @@ class TestPackKindDeclarations7848:
                 "product-strategy", "objectKind")
         finally:
             dl._BASE_KINDS.discard("requirement")
+
+
+# ── #2786: the cross-axis category-deformation guard ───────────────────────
+
+class TestCoreKindCategoryDeformation2786:
+    """The durable guard `#7848`'s class docstring defers to the root, **#2786**.
+
+    A pack that declares a CORE kind under a DIFFERENT category validated clean
+    before this guard: the canonical-collision check read only the axis being
+    declared (``CANONICAL_KINDS[kind_field]``), so `deployment` — an ONTOLOGY §5
+    **eventKind** — was accepted in `objectKinds` (exactly the deformation #7848
+    had to fix by hand in the shipped `dev` pack, with nothing to stop the next
+    one). The declaration is not inert: `pack.object_kinds` is unioned into
+    `extractor_v2`'s writable kind forms and the classification index, and
+    `_build_kind_expansions` keys expansion on the literal string — so a deformed
+    kind is writable, and expandable, under the wrong axis.
+
+    The second half is the same defect one layer in: one bare kind name declared
+    in TWO categories inside one pack, which `store_as()` would then resolve by
+    precedence (a `:Point` for a kind the manifest also declared an `:Object`).
+
+    The owner map is `KIND_OWNER_AXES`, which is `CANONICAL_KINDS` PLUS the action
+    axis — `CANONICAL_KINDS` deliberately has no `actionKinds` key (#122 retired
+    the axis's canonical status) while `CORE_KINDS` and the expansion roots still
+    treat those names as core, so reading `CANONICAL_KINDS` alone left
+    `objectKinds: [implement]` validating clean.
+    """
+
+    @staticmethod
+    def _load(tmp_path, packs: dict[str, dict]):
+        for ns, data in packs.items():
+            _write_pack(str(tmp_path), ns, data)
+        registry = PackRegistry(str(tmp_path))
+        return registry, registry.load_all()
+
+    @pytest.mark.parametrize("kind_field,core_kind,owner_axis", [
+        ("objectKinds", "deployment", "eventKinds"),     # the shipped #7848 drift
+        ("objectKinds", "milestone", "eventKinds"),
+        ("objectKinds", "goal", "objectKinds"),          # control: same-axis leg
+        ("objectKinds", "implement", "actionKinds"),     # the #122 carve-out
+        ("documentKinds", "hypothesis", "pointKinds"),
+        ("actionKinds", "transcript", "documentKinds"),
+        ("pointKinds", "occurrence", "eventKinds"),
+    ])
+    def test_core_kind_declared_under_another_category_is_a_load_error(
+            self, tmp_path, kind_field, core_kind, owner_axis):
+        registry, loaded = self._load(tmp_path, {"deform": {
+            "namespace": "deform", "name": "Deform", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", kind_field: [core_kind]},
+        }})
+        # A dropped pack is the outcome, not just a logged error: nothing
+        # downstream (extractor writable forms, classification index) sees it.
+        assert loaded == 0
+        assert "deform" in registry.errors, registry.errors
+        assert isinstance(registry.errors["deform"], list)
+        message = " ".join(registry.errors["deform"])
+        assert "canonical" in message, message
+        # Assert the OWNER CLAUSE, not the axis word: `kind_field` is printed in the
+        # message prefix, so a bare `owner_axis in message` is satisfied for the
+        # same-axis control even when the owner list is dropped entirely.
+        assert f"core owns it as {owner_axis}" in message, message
+
+    def test_message_names_every_axis_that_owns_an_ambiguous_name(self, tmp_path):
+        """`decision` is canonical in TWO axes — the error must not pick one.
+
+        Naming only the first axis would send a pack author to "declare it as an
+        eventKind" for a name that is already a core pointKind too.
+        """
+        registry, loaded = self._load(tmp_path, {"ambiguous": {
+            "namespace": "ambiguous", "name": "Ambiguous", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": ["decision"]},
+        }})
+        assert loaded == 0
+        message = " ".join(registry.errors["ambiguous"])
+        assert "core owns it as" in message, message
+        assert "eventKinds" in message and "pointKinds" in message, message
+
+    @pytest.mark.parametrize("pairs", [
+        ("objectKinds", "pointKinds"),
+        ("objectKinds", "actionKinds"),
+        ("documentKinds", "eventKinds"),
+    ])
+    def test_one_bare_name_in_two_categories_is_a_load_error(self, tmp_path, pairs):
+        """Parametrized over axis PAIRS, including the action axis.
+
+        The leg reads `KIND_FIELDS`, so an axis silently dropped from that tuple
+        loses the rule; a single `objectKinds`×`pointKinds` case could not see it.
+        """
+        first, second = pairs
+        registry, loaded = self._load(tmp_path, {"twocat": {
+            "namespace": "twocat", "name": "Two Cat", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", first: ["sprint"], second: ["sprint"]},
+        }})
+        assert loaded == 0
+        message = " ".join(registry.errors["twocat"])
+        assert "sprint" in message, message
+        assert first in message and second in message, message
+
+    @pytest.mark.parametrize("kind_field", [
+        "objectKinds", "eventKinds", "pointKinds", "documentKinds", "actionKinds",
+    ])
+    def test_a_source_axis_name_is_refused_in_every_kind_field(self, tmp_path,
+                                                               kind_field):
+        """The D10 leg (#7848) must survive the widening.
+
+        `document` left the object-kind axis for the SOURCE axis, so it is owned by
+        `registered_source_types()` — a LIVE registry read, not a canonical
+        frozenset — and the guard is field-independent, so every axis refuses it.
+        """
+        registry, loaded = self._load(tmp_path, {"srckind": {
+            "namespace": "srckind", "name": "Src Kind", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", kind_field: ["document"]},
+        }})
+        assert loaded == 0
+        message = " ".join(registry.errors["srckind"])
+        assert "core owns it as sourceKinds" in message, message
+
+    def test_a_pack_owned_action_kind_still_loads(self, tmp_path):
+        """Positive control for the axis the guard widened onto.
+
+        #122 left action kinds to packs (`CANONICAL_ACTION_KINDS` is DEPRECATED and
+        "packs declare their own"). Only the 17 retained names are core-owned, so a
+        pack-declared action kind must still load — otherwise the guard silently
+        makes the whole axis undeclarable.
+        """
+        registry, loaded = self._load(tmp_path, {"acts": {
+            "namespace": "acts", "name": "Actions", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": ["widget"],
+                          "actionKinds": ["triage"]},
+        }})
+        assert loaded == 1, registry.errors
+        assert not registry.errors, registry.errors
+
+    def test_a_kind_listed_twice_in_one_category_still_loads(self, tmp_path):
+        """A redundant duplicate is not a deformation.
+
+        Pins the occurrence-vs-category distinction: `objectKinds: [sprint, sprint]`
+        appends `objectKinds` twice, which a `len(fields) > 1` check would read as
+        "declared in more than one category" and drop the pack — naming one category
+        in a message that claims two. Every consumer dedupes through a set, so the
+        declaration is legal.
+        """
+        registry, loaded = self._load(tmp_path, {"dup": {
+            "namespace": "dup", "name": "Dup", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": ["sprint", "sprint"]},
+        }})
+        assert loaded == 1, registry.errors
+        assert not registry.errors, registry.errors
+
+    @pytest.mark.parametrize("declared", [" deployment", "milestone ", "dev:deployment"])
+    def test_a_kind_name_must_be_a_bare_identifier(self, tmp_path, declared):
+        """Whitespace or a `:` defeats the owner check, so the shape check runs first.
+
+        Without it `objectKinds: [" deployment"]` validated clean and the deformed
+        spelling reached `extractor_v2`'s writable forms — the guard would have been
+        defeated by a typo.
+        """
+        registry, loaded = self._load(tmp_path, {"shape": {
+            "namespace": "shape", "name": "Shape", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": [declared]},
+        }})
+        assert loaded == 0
+        message = " ".join(registry.errors["shape"])
+        assert "bare kind name" in message, message
+
+    def test_a_namespace_with_whitespace_is_a_load_error(self, tmp_path):
+        """The other half of the composed kind form `f"{ns}:{kind}"`.
+
+        The shape check refuses whitespace in a KIND; nothing refused it in the
+        NAMESPACE, so `namespace: "my domain"` still produced the whitespace-bearing
+        kind form (`my domain:foo`) and reached the expansion table — the same harm,
+        one field over. The hosted path already refuses it
+        (`pack_manifest_store._safe_namespace`); the filesystem path did not.
+        """
+        registry, loaded = self._load(tmp_path, {"my domain": {
+            "namespace": "my domain", "name": "My Domain", "version": "0.1.0",
+            "tier": "free",
+            "ontology": {"extends": "core", "objectKinds": ["foo"]},
+        }})
+        assert loaded == 0
+        assert "whitespace" in " ".join(registry.errors["my domain"])
+
+    def test_a_runtime_registered_source_kind_is_owned_live(self, tmp_path):
+        """The source axis is READ live, not snapshotted (#2742's defect shape).
+
+        `document` (the other source-axis case) is in the static
+        `KNOWN_SOURCE_TYPES`, so a `frozenset(SOURCE_KIND_DEFAULTS)` snapshot inside
+        `canonical_kind_axes` would leave that leg green. A kind registered at
+        runtime must be owned immediately, in the same process.
+        """
+        from tortoise.source_credibility import (
+            SOURCE_KIND_DEFAULTS,
+            register_source_kind_default,
+        )
+
+        kind = "runtimeOwnedKind"
+        register_source_kind_default(kind, None)
+        try:
+            registry, loaded = self._load(tmp_path, {"live": {
+                "namespace": "live", "name": "Live", "version": "0.1.0",
+                "tier": "free",
+                "ontology": {"extends": "core", "objectKinds": [kind]},
+            }})
+            assert loaded == 0
+            assert "sourceKinds" in " ".join(registry.errors["live"])
+        finally:
+            SOURCE_KIND_DEFAULTS.pop(kind, None)
+
+    def test_the_pinned_false_positives_still_load(self, tmp_path):
+        """The two #7848 false positives must not be swept up by the guard.
+
+        * `incident` is not in the §5 object-kind BLOCK (its §5 prose makes a
+          *materialized* dev `bug`/`incident` an Object), so core does not own the
+          name — the guard may only refuse names core owns.
+        * the same bare name in the SAME category across two packs is the
+          `equivalentTo` bridge (§7) — legal, and covered by the shipped-pack
+          test; pinned here on a fixture so a future widening that keys on
+          "declared elsewhere" reds this.
+        """
+        registry, loaded = self._load(tmp_path, {
+            "dev": {"namespace": "dev", "name": "Dev", "version": "0.1.0",
+                     "tier": "free",
+                     "ontology": {"extends": "core",
+                                  "objectKinds": ["incident", "issue"]}},
+            "pm": {"namespace": "pm", "name": "PM", "version": "0.1.0",
+                    "tier": "free",
+                    "ontology": {"extends": "core", "objectKinds": ["issue"],
+                                 "equivalentTo": {"issue": ["dev:issue"]}}},
+        })
+        assert loaded == 2, registry.errors
+        assert not registry.errors, registry.errors
