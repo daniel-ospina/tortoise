@@ -227,8 +227,7 @@
       <p>What we can tell you concretely today:</p>
       <ul>
         <li>Adding a claim costs work proportional to how many things it connects to. Unrelated claims don't interact, and belief work stays inside each claim's neighbourhood rather than the whole store.</li>
-        <li>Belief is computed over a bounded neighbourhood around each claim, which is what keeps reads local.</li>
-        <li>Concurrent writers run on the Docker path — integration-tested to five — and on the hosted service. That is the deployment built for teams.</li>
+                <li>Concurrent writers run on the Docker path — integration-tested to five — and on the hosted service. That is the deployment built for teams.</li>
       </ul>
       <div class="callout open">
         <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names its source — a committed artifact, a code symbol, or the tracker issue holding the measurement.</p>
@@ -252,12 +251,12 @@
 
       <h3 id="missed">What happens if extraction misses something?</h3>
       <p>If a relationship is missed when it is observable, it is gone — no later search recovers it, because the relationship was never inside either document — which is why extraction quality is what the write path spends its effort on.</p>
-      <p>That is why the source text is kept as the authoritative record, and why the graph is positioned as an index over the evidence rather than a replacement for it. A missed relationship makes the graph incomplete; it does not make the underlying record wrong, and the stored text is still there to search directly — within the capture window described above, where a turn over 5,000 characters is kept with a marker that names its original length.</p>
+      <p>That is why the source text is kept as the authoritative record, and why the graph is positioned as an index over the evidence rather than a replacement for it. A missed relationship makes the graph incomplete; it does not make the underlying record wrong, and the stored text is still there to search directly — within the capture window, where a turn over 5,000 characters is kept with a marker that names its original length.</p>
 
       <h3 id="different">How is this different from other memory systems?</h3>
       <p>One specific thing: <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once. A graph <em>stores</em> relationships; Tortoise <em>computes</em> over them, propagating belief across the weighted ones so a claim's score reflects the evidence that actually bears on it.</p>
-      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, one has a formal revision theory, and <strong>no surveyed agent-memory product propagates credence</strong> — the single exception being an alpha, single-maintainer reimplementation that is not a competitor product.</p>
-      <p>We keep a mechanism-named comparison in the public repo — what each system actually does, not what it claims — where every Tortoise row that carries a number is drawn from a run of ours, every vendor row is labelled as the vendor's own, and anything we have not run is marked PENDING with no number. The capability survey behind those counts is <a href="https://github.com/daniel-ospina/tortoise/blob/main/product/competition/_analysis.md">product/competition/_analysis.md</a>; the benchmark-by-benchmark numbers are in <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/benchmarks/comparison-systems.md">docs/benchmarks/comparison-systems.md</a>.</p>
+      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, one has a formal revision theory, and <strong>no agent-memory product propagates credence</strong>.</p>
+      <p>We keep a mechanism-named comparison in the public repo — what each system actually does, not what it claims — where every Tortoise row that carries a number is drawn from a run of ours, every vendor row is labelled as a vendor or third-party measurement, and anything of ours we have not run is marked PENDING with no number. The capability survey behind those counts is <a href="https://github.com/daniel-ospina/tortoise/blob/main/product/competition/_analysis.md">product/competition/_analysis.md</a>; the benchmark-by-benchmark numbers are in <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/benchmarks/comparison-systems.md">docs/benchmarks/comparison-systems.md</a>.</p>
 
       <h2>Using Tortoise</h2>
 

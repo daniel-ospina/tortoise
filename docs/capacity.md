@@ -178,8 +178,9 @@ Read the caveats with the number, because they decide whether it applies to you:
 - **The E2E-8 row is environment-bound, and it reads as a comparison.** Its
   **345–460 ms p95 across runs** was measured on the contended benchmark laptop
   under full-suite contention, beside a MiniLM control arm at **418–464 ms on the
-  same box** — the two ranges overlap, which is what makes the 460 ms reading
-  "inconclusive" rather than a verdict on this hardware.
+  same box**. The ADR labels the 460 ms reading "inconclusive" *under full-suite
+  contention* — the environment is what it declines to generalise from, not the
+  comparison, which it reads in bge-small's favour.
   `docs/adr/ADR-009-embedder-selection.md` records the 2026-08-21 post-swap
   re-run, reads the split as the shipped bge-small model being 15–25% faster than
   the predecessor under identical conditions, and re-validates the ≤ 300 ms band
