@@ -1441,12 +1441,26 @@ def _code(step: dict) -> str:
 
 
 def _loose_pin_holds(workflow: dict) -> bool:
-    """The PRE-FIX pin (#9075 review, ISSUE 1): a membership test over the joined `run:` scalars.
+    """The PRE-FIX pin (#9075 review, ISSUE 1) — the four assertions at `origin/main` verbatim.
 
-    Kept only so the tests below can prove each silencing mutation really was invisible to it —
-    the point of the rewrite is that this predicate is green on a gate that can never fail a PR.
+    It was: the `changes` job checks out, every checkout uses `fetch-depth: 0`, and the joined
+    `run:` scalars mention the tool and the `--dir`. Kept only so the tests below can prove each
+    silencing mutation really was invisible to it — the point of the rewrite is that this
+    predicate is green on a gate that can never fail a PR.
+
+    The `fetch-depth` half is reproduced faithfully on purpose: a shallow checkout WAS caught
+    before this rewrite, so modelling it here as unpinned would overstate the pre-fix gap. That
+    mutation is therefore a separate still-caught case (`test_the_ci_pin_still_catches_*`), not
+    one of the `_mutations()` cases whose whole premise is "the old pin stayed green".
     """
     steps = workflow["jobs"]["changes"]["steps"]
+    checkouts = [
+        s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")
+    ]
+    if not checkouts:
+        return False
+    if any((s.get("with") or {}).get("fetch-depth") != 0 for s in checkouts):
+        return False
     runs = " ".join(str(s.get("run", "")) for s in steps)
     return (
         "tools/capstone_preregistration_check.py" in runs
@@ -1578,6 +1592,15 @@ def test_ci_runs_the_ordering_half_on_full_history():
     assert ci_ordering_half_violations(workflow) == []
 
 
+#: Per-label substrings the violation MESSAGE must carry. A branch that starts reporting some
+#: other defect — or stops naming the idiom it exists to refuse — stays red instead of quietly
+#: passing on "some violation".
+_EXPECTED_MESSAGE = {
+    "a sibling `$GITHUB_PATH` writer": "$GITHUB_PATH",
+    "a sibling `$GITHUB_ENV` writer": "$GITHUB_ENV",
+}
+
+
 def _mutations():
     """(label, mutate) pairs — each leaves the command in place and silences it."""
 
@@ -1607,10 +1630,10 @@ def _mutations():
         "a job-level `if:`": lambda w: w["jobs"]["changes"].__setitem__("if", "false"),
         "a second decoy gate step": lambda w: w["jobs"]["changes"]["steps"].append(
             {"name": "decoy", "run": ORDERING_HALF_INVOCATION}),
-        "a shallow checkout": lambda w: next(
-            s for s in w["jobs"]["changes"]["steps"]
-            if str(s.get("uses", "")).startswith("actions/checkout")
-        ).__setitem__("with", {"fetch-depth": 1}),
+        "a sibling `$GITHUB_PATH` writer": lambda w: w["jobs"]["changes"]["steps"].insert(
+            0, {"name": "shim", "run": "echo /tmp/shim >> $GITHUB_PATH"}),
+        "a sibling `$GITHUB_ENV` writer": lambda w: w["jobs"]["changes"]["steps"].append(
+            {"name": "shim", "run": "echo PATH=/tmp/shim >> $GITHUB_ENV"}),
         "dropping it from the required aggregate": lambda w: w["jobs"][
             "python-ci-gate"]["needs"].remove("changes"),
     }
@@ -1636,4 +1659,39 @@ def test_the_ci_pin_rejects_every_silencing_idiom(label):
     )
     violations = ci_ordering_half_violations(mutated)
     assert violations, f"`{label}` silences the gate and the strict pin missed it"
+    needle = _EXPECTED_MESSAGE.get(label)
+    if needle:
+        assert needle in " ".join(violations), (
+            f"`{label}` must be refused BY NAME (expected {needle!r} in the message); got "
+            f"{violations}"
+        )
     assert ci_ordering_half_violations(workflow) == [], "the unmutated workflow must stay clean"
+
+
+def test_the_ci_pin_still_catches_a_shallow_checkout():
+    """The one idiom the PRE-FIX pin already refused — modelled honestly, not as a new gap.
+
+    `origin/main`'s pin asserted `fetch-depth == 0` on every checkout, so this mutation was RED
+    before the rewrite. Keeping it inside `_mutations()` (whose every case asserts the old pin was
+    green) would have claimed a hole that never existed; the strict pin must still catch it, and
+    say so by name.
+    """
+    import copy
+
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text())
+    mutated = copy.deepcopy(workflow)
+    next(
+        s for s in mutated["jobs"]["changes"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/checkout")
+    ).__setitem__("with", {"fetch-depth": 1})
+    assert not _loose_pin_holds(mutated), (
+        "a shallow checkout was ALREADY caught by the pre-fix pin (`fetch-depth == 0`); if the "
+        "pre-fix model says otherwise it no longer models `origin/main`"
+    )
+    violations = ci_ordering_half_violations(mutated)
+    assert "fetch-depth" in " ".join(violations), (
+        f"the strict pin must refuse a shallow checkout by name; got {violations}"
+    )
