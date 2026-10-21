@@ -68,7 +68,10 @@ def _post_mutation_oracle(ids: dict[str, str]) -> dict[str, float]:
         clone_ids, clone_ops = _build_f4_graph(clone)  # noqa: RUF059
         clone.set_point_baseline(clone_ids["r1"], 1.0, 8.0)  # same mutation
         random.seed(FIXED_SEED)
-        clone.dream(mode="full", warm_start=False)
+        # Hermetic posture, matching ``fresh_sdk`` and ``capture_f4_oracle``:
+        # the fixture is synthetic, so it must not depend on the ambient
+        # TORTOISE_EP_REQUIRE_CALIBRATION another lane left in the process.
+        clone.dream(mode="full", warm_start=False, require_calibration=False)
         proj = clone._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.confidence",
@@ -116,7 +119,8 @@ class TestDe2e9StalenessError:
             coverages = []
             for _ in range(6):
                 random.seed(FIXED_SEED)
-                r = sdk.dream(mode="stale-first", budget=budget)
+                r = sdk.dream(mode="stale-first", budget=budget,
+                               require_calibration=False)
                 assert r["converged_all"] is True
                 conf = _conf_by_key(sdk, f.ids)
                 errors.append(_stale_error(conf, truth))
@@ -147,7 +151,8 @@ class TestDe2e9StalenessError:
         try:
             assert _coverage(f.sdk, f.ids) == 0.0
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first", budget=2)
+            r = f.sdk.dream(mode="stale-first", budget=2,
+                            require_calibration=False)
             assert r["converged_all"] is True
             assert _coverage(f.sdk, f.ids) > 0.0
         finally:
