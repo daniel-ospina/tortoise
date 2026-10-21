@@ -5735,3 +5735,221 @@ def test_connected_never_consults_the_class_walk_for_another_shape(
         "latest?", question_date="2026-09-10")
     assert block.fired is False
     assert port.calls == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #9406 — the window pre-filter's ends must be a SUPERSET of the ladder
+#
+# ``docker_walker_port.window_rows`` pushes a COARSE pre-filter into Cypher and
+# lets the R2 ladder (``_norm_date`` + ``collect_window_slices``) decide the
+# window in Python. That split is only sound while the pre-filter admits every
+# row the ladder would keep — and because both sides are STRING comparisons
+# against free text, "one day of slack" is not what it looks like: a date-only
+# string is a PREFIX of every full timestamp of that same day, so it sorts
+# BEFORE all of them.
+# ══════════════════════════════════════════════════════════════════════════
+
+from datetime import date as _w_date  # noqa: E402
+from datetime import timedelta as _w_td  # noqa: E402
+
+from tortoise.assembly import _norm_date as _w_norm  # noqa: E402
+from tortoise.assembly import _window_bounds  # noqa: E402
+
+_W_LO = _w_date(2026, 10, 20)
+_W_HI = _w_date(2026, 10, 20)
+
+#: The shapes the WRITE PATHS actually emit, which is the coverage this guard
+#: claims: the projection stamps ``createdAt`` as an aware UTC timestamp, the v2
+#: lane leaves a DATE-ONLY ``YYYY-MM-DD`` ``when``, and ``when`` is free text —
+#: including the OFFSET forms whose raw date differs from the UTC date the
+#: ladder reads. (``_created_sort_key``'s #3982 note: a date-only value is UTC
+#: midnight; an aware instant truncates in UTC.)
+#:
+#: ⚠ NOT the whole grammar ``_norm_date`` parses, and the difference is a
+#: RECORDED RESIDUAL, not a blind spot: the ladder also accepts the COMPACT
+#: (``20261020``) and ISO-WEEK (``2026-W43-2``) date-only spellings, plus a
+#: whitespace-padded value, and none of those is lexicographically inside a
+#: dashed range — so such a row is fetched by neither bound. No in-repo writer
+#: emits them (this is why the residual is recorded rather than fixed: the
+#: predicate cannot normalize a free-text value inside Cypher). Recorded on
+#: #9406 with the measurement; do not read this corpus as the full grammar.
+_W_SHAPES_FREE_TEXT = (
+    "2026-10-20",                        # date-only (ladder: UTC midnight)
+    "2026-10-20T00:00:00+00:00",         # UTC midnight, the boundary instant
+    "2026-10-20T23:59:59.999999+00:00",  # last instant of the day
+    "2026-10-20T12:00:00Z",              # the projection's Z spelling
+    "2026-10-21T02:00:00+09:00",         # +09: raw date hi+1, UTC day hi  <- #9406
+    "2026-10-21T00:30:00+09:00",         # +09, earliest skew on the day
+    "2026-10-20T03:00:00-05:00",         # -05: raw date hi, UTC day hi
+    "2026-10-19T22:00:00-05:00",         # -05: raw date lo-1, UTC day lo
+    # controls the ladder places OUTSIDE [lo, hi] — no admission is required
+    "2026-10-21",                        # the day after
+    "2026-10-21T12:00:00+00:00",
+    "2026-10-21T23:59:59+09:00",         # UTC day 10-21, i.e. out
+    "2026-10-19",                        # the day before
+    "garbage",                           # junk ``when`` — falls through the ladder
+    "",
+)
+
+#: The narrower corpus for the ``createdAt`` end. Every IN-REPO writer stamps
+#: that field with ``datetime.now(UTC)`` (verified below by a live write, not
+#: asserted here), so an offset-bearing value is not one of its shapes — and
+#: that matters, because the UTC end is one day narrower than the free-text end
+#: (#9406: the extra day would spend cap slots, at the head of a newest-first
+#: fetch, on rows the ladder drops). A date-only legacy value IS included: it
+#: anchors to UTC midnight, so it is in-band exactly when its day is.
+#: ⚠ ``createdAt`` is also a CALLER prop (``create_point(**props)``), and a
+#: caller-supplied offset is the RECORDED RESIDUAL of the narrow end — pinned
+#: by test in ``tests/test_2350_validity_precision.py``, recorded on #9406.
+_W_SHAPES_UTC_STAMP = tuple(
+    s for s in _W_SHAPES_FREE_TEXT
+    if not (s[10:11] == "T" and not s.endswith("Z")
+            and not s.endswith("+00:00")))
+
+
+def test_window_pre_filter_admits_every_row_the_ladder_keeps():
+    """THE superset invariant, checked per field against the shapes that field
+    can hold.
+
+    Non-vacuous by construction: the shapes the ladder places inside
+    ``[lo, hi]`` are asserted to be non-empty first, so a corpus that drifted
+    out of the window cannot pass by admitting nothing. Checked against BOTH
+    ends — the free-text one (``when``/``startedAt``) and the UTC-stamped one
+    (``createdAt``), which are deliberately different (#9406 review: the wider
+    end belongs only on the field that can carry a zone offset).
+    """
+    for label, shapes, stamp in (
+            ("free text (when/startedAt)", _W_SHAPES_FREE_TEXT, False),
+            ("UTC stamp (createdAt)", _W_SHAPES_UTC_STAMP, True)):
+        kept = [s for s in shapes
+                if _w_norm(s) is not None and _W_LO <= _w_norm(s) <= _W_HI]
+        assert len(kept) >= 4, (label, kept)
+        b = _window_bounds(_W_LO, _W_HI, utc_stamped=stamp)
+        assert b.lo is not None and b.hi is not None
+        # the predicate as Cypher evaluates it: a plain lexicographic compare
+        # over the range PLUS the date-only literals the call site excludes
+        dropped = [s for s in kept
+                   if not (b.lo < s <= b.hi and s not in b.excluded)]
+        assert dropped == [], (
+            f"the pre-filter ({label}) drops rows the ladder keeps "
+            f"(a silent empty answer): {dropped} against [{b.lo}, {b.hi}] "
+            f"minus {b.excluded}")
+
+
+def test_window_pre_filter_admits_no_date_only_value_past_the_window():
+    """The excluded literals are the whole of the DATE-ONLY over-admission.
+
+    A date-only value anchors to UTC midnight (``_norm_date``), so ANY date-only
+    day above ``hi`` is out of window — yet a dashed range compare admits it,
+    and a backfilled population LARGER THAN THE CAP starves the walk (measured:
+    250 such rows + 3 in-window rows at the production ``cap=200`` → 0/3
+    in-window rows kept; 3/3 with the exclusion). The population must exceed the
+    cap for the LIMIT to bind — a 50-row dose at cap 200 keeps all 3 rows and
+    proves nothing. The exclusion is per DATE-ONLY literal, so no timestamp is
+    ever excluded (no timestamp equals a date-only string) — asserted here,
+    because that is the property that makes the exclusion free.
+    """
+    for stamp in (False, True):
+        b = _window_bounds(_W_LO, _W_HI, utc_stamped=stamp)
+        assert b.hi is not None
+        # every date-only day in (hi, hi_end] is excluded ...
+        for day in ("2026-10-21", "2026-10-22"):
+            if day <= b.hi:
+                assert day in b.excluded, (stamp, day, b.excluded)
+        # ... and NO timestamp is, including every time-of-day on those days
+        assert not [x for x in b.excluded if "T" in x]
+        for ts in ("2026-10-21T00:00:00+00:00", "2026-10-21T02:00:00+09:00",
+                   "2026-10-21T23:59:59.999999-11:00"):
+            assert ts not in b.excluded, ts
+    # the free end over-admits two date-only days, the stamped end one — and
+    # the LOWER end over-admits exactly one, which is why it is rendered as a
+    # STRICT ``>`` rather than as a third exclusion
+    assert _window_bounds(_W_LO, _W_HI).excluded == ("2026-10-21", "2026-10-22")
+    assert _window_bounds(_W_LO, _W_HI, utc_stamped=True).excluded == (
+        "2026-10-21",)
+    b = _window_bounds(_W_LO, _W_HI)
+    assert "2026-10-19" not in b.excluded
+    assert not (b.lo < "2026-10-19")        # the date-only lo-1 is excluded
+    assert b.lo < "2026-10-19T22:00:00-05:00"   # the offset-bearing one is kept
+
+
+def test_window_clause_renders_the_exclusions_for_both_legs():
+    """The EMITTED clause — not just the bound — is pinned for the points and
+    the events leg, so a leg cannot lose its exclusion silently.
+
+    Both legs go through ``_window_clause``; this asserts the rendered Cypher
+    and its params for each, which is what ``window_rows`` sends. A mutation
+    that drops the events leg's ``<>`` (or swaps its end to the narrow one)
+    fails here.
+    """
+    from tortoise.assembly import _window_clause
+
+    for field, pref in (("p.when", "w"), ("p.createdAt", "c"),
+                        ("e.startedAt", "e")):
+        params: dict = {"cap": 10}
+        stamp = field.endswith("createdAt")
+        clause = _window_clause(field, pref,
+                                _window_bounds(_W_LO, _W_HI, utc_stamped=stamp),
+                                params)
+        assert clause is not None
+        assert clause.startswith(f"({field} > ${pref}_lo")
+        assert f"{field} <= ${pref}_hi" in clause
+        assert params[f"{pref}_lo"] == "2026-10-19"
+        assert params[f"{pref}_hi"] == ("2026-10-21" if stamp else "2026-10-22")
+        # the exclusions, rendered and bound
+        n_excl = 1 if stamp else 2
+        assert clause.count(f"{field} <> ${pref}_x") == n_excl, clause
+        assert [params[f"{pref}_x{i}"] for i in range(n_excl)] == list(
+            _window_bounds(_W_LO, _W_HI, utc_stamped=stamp).excluded)
+    # an OPEN bound renders no clause at all (and binds nothing)
+    open_params: dict = {"cap": 10}
+    assert _window_clause("p.when", "w", _window_bounds(None, None),
+                          open_params) is None
+    assert open_params == {"cap": 10}
+
+
+def test_window_pre_filter_fetches_a_positive_offset_when_at_the_upper_edge():
+    """#9406, the measured false negative, pinned on its own.
+
+    ``when="2026-10-21T02:00:00+09:00"`` is the instant ``2026-10-20T17:00Z``,
+    so the ladder places it on the window's OWN upper day — and the pre-fix
+    ``hi + 1 day`` end (``"2026-10-21"``) is a PREFIX of the row's raw string,
+    so ``value <= "2026-10-21"`` was FALSE and the row was never fetched. The
+    walk reported an empty window for a fact it holds.
+    """
+    when = "2026-10-21T02:00:00+09:00"
+    assert _w_norm(when) == _W_HI, "the ladder must read it as the window day"
+    b = _window_bounds(_W_LO, _W_HI)            # the free-text (``when``) bounds
+    assert b.lo <= when <= b.hi
+    assert when not in b.excluded
+    # ... and the pre-fix end genuinely refused it — so this test cannot pass
+    # on the bound it replaced
+    assert when > (_W_HI + _w_td(days=1)).isoformat()
+
+
+def test_window_pre_filter_ends_are_chosen_per_field_and_pinned():
+    """The ends stay DATE-ONLY strings (the statement's parameter shapes are
+    unchanged by #9406) and the TWO upper ends are deliberately different:
+
+    * free text (``when``/``startedAt``) — 2 days of slack at the top, because
+      a raw date may run up to one day ahead of its UTC date when the value
+      carries a positive offset;
+    * the graph's own UTC stamp (``createdAt``) — 1 day, because its raw date
+      is its UTC date for every in-repo writer, and extra slack at the head of
+      an ``ORDER BY createdAt DESC`` fetch spends cap slots on rows the ladder
+      drops (measured: 3/3 in-window rows kept at ``hi + 1``, 0/3 at
+      ``hi + 2``).
+
+    1 day at the bottom suffices for both: a NEGATIVE offset needs
+    ``"<lo-1>" <= "<lo-1>T…"``, which already holds.
+    """
+    free = _window_bounds(_W_LO, _W_HI)
+    stamped = _window_bounds(_W_LO, _W_HI, utc_stamped=True)
+    assert (free.lo, free.hi) == ("2026-10-19", "2026-10-22")
+    assert (stamped.lo, stamped.hi) == ("2026-10-19", "2026-10-21")
+    # an absent end stays absent — an open window is not widened into a closed
+    # one, and it excludes nothing
+    assert _window_bounds(None, None) == (None, None, ())
+    assert _window_bounds(None, _W_HI).lo is None
+    assert _window_bounds(_W_LO, None).hi is None
+    assert _window_bounds(_W_LO, None).excluded == ()
