@@ -380,6 +380,46 @@ def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
         )
 
 
+def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
+    """#9524 review I1/I3: a dependency-manifest diff must run the override guard.
+
+    `tests/test_spa_dependency_overrides.py` reads six files — the
+    `package.json` + `package-lock.json` of the three SPAs — and two of those
+    apps' manifests match NO `SOURCE_PATTERNS` row while `apps/` and `website/`
+    are both in `NON_PYTHON_PREFIXES`. Before the `CORE_ALSO` entries, such a
+    diff filtered to `changed == []` and took the docs-only early return (tier-1
+    smoke only) — measured on the branch that fixed I1/I3:
+    `select(['apps/graph-viz/package.json'])` -> `surfaces=[]` with the guard
+    absent. That is the #1349/#3332/#3616 silent-drop class on exactly the diff
+    the guard exists for: the graph-viz arm is the one that reds when the
+    manifest loses its `nanoid`/`source-map-js` floors again.
+
+    blog-admin reaches the guard through the OTHER arm: `website/apps/blog-admin/`
+    is a `onboarding` SOURCE_PATTERNS row, where the guard is dual-registered.
+
+    Asserted per FILE, on the guard's presence, not on non-emptiness: the
+    pre-entry tree selects tier-1 smoke for these paths, which is non-empty and
+    contains no guard.
+    """
+    guard = "test_spa_dependency_overrides.py"
+    for app, surface in (("apps/graph-viz", "core"),
+                         ("website/apps/dashboard", "core"),
+                         ("website/apps/blog-admin", "onboarding")):
+        for name in ("package.json", "package-lock.json"):
+            changed = f"{app}/{name}"
+            assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+            r = _sel([changed])
+            assert surface in r["surfaces"], (
+                f"{changed} selects {r['surfaces']} — the override guard is "
+                f"registered on `{surface}` and a manifest-only diff must reach it"
+            )
+            assert guard in r["test_files"], (
+                f"{changed} does not select {guard} — a dependency override could "
+                f"lose its floor (or gain one that clears nothing) with every "
+                f"check green"
+            )
+
+
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
     """#3673 indicator (2): the parity gate runs on every PR touching either copy.
 

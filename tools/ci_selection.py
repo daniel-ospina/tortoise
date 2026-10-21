@@ -1584,7 +1584,29 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_the_engine_pin_guards_are_selected_on_the_files_they_pin.
              "apps/graph-viz/docker-compose.yml",
-             "docs/quickstart-selfhosted.md")
+             "docs/quickstart-selfhosted.md",
+             # #9524 review I1/I3: the SPA `overrides` record. `tests/
+             # test_spa_dependency_overrides.py` (registered `core` AND
+             # `onboarding`) reads `apps/graph-viz/` and
+             # `website/apps/dashboard/` `package.json` +
+             # `package-lock.json`. Neither app's manifest matches a
+             # SOURCE_PATTERNS row AND `apps/` + `website/` are both in
+             # NON_PYTHON_PREFIXES, so such a diff was filtered out BEFORE any
+             # surface was matched, took the docs-only early return and ran
+             # tier-1 smoke only — measured on this branch:
+             # `select(['apps/graph-viz/package.json'])` -> surfaces=[] with the
+             # guard absent, i.e. the exact dependency-manifest diff the guard
+             # exists for would never run it (the #1349/#3332/#3616 silent-drop
+             # class). Named per file, not per directory: the guard reads these
+             # two files only, and a wholesale `apps/graph-viz/` claim would
+             # pull the whole `core` set onto every source edit in that app.
+             # blog-admin needs no entry — `website/apps/blog-admin/` is already
+             # a SOURCE_PATTERNS row of `onboarding`, where the guard's other
+             # arm is registered.
+             "apps/graph-viz/package.json",
+             "apps/graph-viz/package-lock.json",
+             "website/apps/dashboard/package.json",
+             "website/apps/dashboard/package-lock.json")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
