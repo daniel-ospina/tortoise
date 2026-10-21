@@ -2758,9 +2758,13 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         # change fixes. Failures only, never passed/skipped: a summary-less log
         # cannot establish either.
         if not parsed["summary_seen"]:
+            # Same bracket-balance rule as the list below: an id that embeds another
+            # nodeid is not a name pytest reports, and counting it here published a
+            # failure the leg's own list excluded (#9134 review, P2).
+            _counted = {n: st for n, st in parsed["outcomes"].items()
+                        if n.count("[") == n.count("]")}
             for state, key in (("FAILED", "failed"), ("ERROR", "error")):
-                total_counts[key] += sum(
-                    1 for st in parsed["outcomes"].values() if st == state)
+                total_counts[key] += sum(1 for st in _counted.values() if st == state)
         killed_any = killed_any or parsed["killed"]
         # An id with unbalanced brackets embeds another nodeid and is not a name pytest
         # ever reports; publishing it made the failure list disagree with the banners
