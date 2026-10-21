@@ -37,6 +37,8 @@ def test_summary_sums_the_manifests_and_counts_ep_runs():
     assert summary["requested"] is True
     assert summary["questions"] == 2
     assert summary["ep_ran"] == 2
+    # the POSITIVE-measurement cell: both questions' censuses found posteriors
+    assert summary["questions_with_ep"] == 2
     assert summary["failed"] == 0
     assert summary["points_promoted"] == 15
     assert summary["operators_promoted"] == 6
@@ -160,6 +162,158 @@ def test_activated_requires_every_question_to_have_run_ep():
          {"belief_activation": _manifest(ep_ran=False)}], requested=True)
     assert mp.belief_layer_state(requested=True, activation=half) == \
         mp.BELIEF_LAYER_PARTIAL
+
+
+# ── POSITIVE measurement: "ran" is not "measured" ──────────────────────
+
+def _unmeasured_manifest(**over) -> dict:
+    """The manifest ``ep_activation.activate_beliefs`` returns when the EP
+    pass ran and RETURNED NORMALLY but the post-pass census found no point
+    carrying a posterior.
+
+    Two documented, reachable states produce exactly this: the window holds no
+    EP factors (``sdk.dream`` records ``no_op_reason = "no_ep_factors"`` and
+    returns — a v2 question whose extraction minted claims but no IMPL/NAND
+    operators, common on single-session questions), and the #1163 stale-run
+    stand-down ("zero writes is correct here"). The shape is pinned by
+    ``tests/longmem_eval/test_ep_activation.py::test_activate_counts_unmeasured``
+    and ``::test_activate_no_drafts_still_runs_ep``.
+    """
+    m = {"points_promoted": 57, "operators_promoted": 0, "ep_ran": True,
+         "ep_engine": "dream:full", "points_with_ep": 0,
+         "points_unmeasured": 57, "duration_ms": 9}
+    m.update(over)
+    return m
+
+
+def test_a_pass_that_measured_nothing_is_never_activated():
+    """RED (fresh-context review, P1 — fail-open): ``ep_ran`` is set by a bare
+    ``try`` around ``sdk.dream(...)``, which returns normally with ZERO
+    belief-state writes in the two states documented above. Deciding the
+    state from ``ep_ran``/``failed`` alone therefore let a run publish
+    ``beliefs_activated: true`` for a graph in which not one claim carries a
+    posterior, while its own ``activation.points_unmeasured`` recorded the
+    opposite — the precise over-claim (#2598) this gate exists to stop, in the
+    direction the gate must fail CLOSED. The manifest's own positive census
+    (``points_with_ep``) is the evidence that a question was measured.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _unmeasured_manifest()}],
+        requested=True)
+    assert summary["ep_ran"] == 1            # the pass ran...
+    assert summary["failed"] == 0
+    assert summary["questions_with_ep"] == 0  # ...and measured nothing
+    posture = mp.build(ingest_mode="v2", activation=summary)
+    assert posture["belief_layer"] == mp.BELIEF_LAYER_PARTIAL
+    assert posture["beliefs_activated"] is False
+
+
+def test_one_unmeasured_question_makes_the_whole_run_partial():
+    """The requirement is PER QUESTION: one question whose census found no
+    posterior is an EP-inert question inside the same number.
+
+    The summed census here is NON-zero (10), so only a per-question count can
+    see the unmeasured one — this is what distinguishes the fix from a
+    ``sum(points_with_ep) > 0`` check, which would still read ``activated``.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": _manifest()},
+         {"question_id": "q2", "belief_activation": _unmeasured_manifest()}],
+        requested=True)
+    assert summary["points_with_ep"] == 10
+    assert summary["questions_with_ep"] == 1
+    posture = mp.build(ingest_mode="v2", activation=summary)
+    assert posture["belief_layer"] == mp.BELIEF_LAYER_PARTIAL
+    assert posture["beliefs_activated"] is False
+
+
+def test_unreachable_points_do_not_block_activation():
+    """POLICY (recorded, not accidental): ``points_unmeasured > 0`` alone does
+    NOT force ``partial``.
+
+    A v2 graph holds non-operator points that belong to NO factor graph (its
+    turn + raw-chunk points), so they can never be stamped and the census is
+    non-zero for EVERY real run — requiring the whole census would make
+    ``activated`` unreachable and the arm meaningless. A claim left without a
+    posterior still reads ``unmeasured`` through
+    ``ep_activation.read_confidence`` (#2598), so the per-point truth does not
+    depend on this policy.
+    """
+    summary = mp.summarize_belief_activation(
+        [{"belief_activation": _manifest(points_with_ep=10,
+                                          points_unmeasured=47)}],
+        requested=True)
+    assert mp.build(ingest_mode="v2", activation=summary)["belief_layer"] == \
+        mp.BELIEF_LAYER_ACTIVATED
+
+
+# ── the arm-resolution refusals + the per-question fail-open wrapper ──────
+
+def _one_instance() -> list[dict]:
+    import json
+
+    path = (Path(__file__).resolve().parents[1]
+            / "fixtures" / "longmemeval_mini.json")
+    return json.loads(path.read_text(encoding="utf-8"))[:1]
+
+
+def test_run_evaluation_refuses_the_belief_arm_on_a_deterministic_graph():
+    """The programmatic mirror of the CLI refusal: a deterministic graph has
+    no operators/EP structure, so an "activated" posture claimed over it would
+    describe a graph that cannot carry a belief layer. Refused at ARM
+    RESOLUTION — before any question runs, no DB, outside every fail-open
+    region — so it aborts instead of degrading per question."""
+    from tools.longmem_eval import run as runner
+
+    with pytest.raises(ValueError) as ei:
+        runner.run_evaluation(_one_instance(), reader=None, judge=None,
+                              ks=(5,), top_k=5, split="s",
+                              activate_beliefs=True)
+    assert "activate_beliefs requires ingest_mode='v2'" in str(ei.value)
+
+
+def test_cli_refuses_the_belief_arm_on_a_deterministic_graph(capsys):
+    """``--activate-beliefs --ingest-mode deterministic`` is a posture claim
+    about a graph with nothing to activate: the CLI must reject it loudly
+    (exit 2) rather than run an inert pass that then reports a posture."""
+    from tools.longmem_eval import run as runner
+
+    with pytest.raises(SystemExit) as ei:
+        runner.run_main(["--activate-beliefs", "--ingest-mode",
+                         "deterministic"])
+    assert ei.value.code == 2
+    err = capsys.readouterr().err
+    assert "--activate-beliefs requires --ingest-mode v2" in err
+
+
+def test_a_failed_activation_records_the_fail_open_shape_and_reads_partial(
+        capsys):
+    """``_activate_beliefs_for_question`` is fail-open by design — a hard
+    failure must not abort a mid-flight 500-Q run, but it must never be
+    silent. It records ``{"ep_ran": False, "error": ...}`` on the outcome
+    (which the run's posture then reads as ``partial``) and says so on stderr.
+    """
+    from tools.longmem_eval import run as runner
+
+    class _Boom:
+        def _get_proj(self):
+            raise RuntimeError("graph unreachable")
+
+    shape = runner._activate_beliefs_for_question(
+        _Boom(), namespace="ns-1", qid="q1")
+    assert shape["ep_ran"] is False
+    assert "RuntimeError: graph unreachable" in shape["error"]
+    assert "[beliefs] activation FAILED for q1" in capsys.readouterr().err
+
+    summary = mp.summarize_belief_activation(
+        [{"question_id": "q1", "belief_activation": shape},
+         {"question_id": "q2", "belief_activation": _manifest()}],
+        requested=True)
+    assert summary["failed"] == 1
+    assert summary["questions_with_ep"] == 1
+    posture = mp.build(ingest_mode="v2", activation=summary)
+    assert posture["belief_layer"] == mp.BELIEF_LAYER_PARTIAL
+    assert posture["beliefs_activated"] is False
 
 
 # ── build ────────────────────────────────────────────────────────────────

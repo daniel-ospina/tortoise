@@ -91,6 +91,15 @@ def summarize_belief_activation(
     checkpoint fingerprint refuses a cross-arm resume (``_build_fingerprint``
     carries ``activate_beliefs``); this denominator is the INDEPENDENT second
     guard, and it is what makes a blended run report ``partial``.
+
+    ``questions_with_ep`` is the POSITIVE-measurement cell: a manifest counts
+    only when the pass ran AND its own post-pass census found at least one
+    non-operator point carrying persisted EP state (``points_with_ep > 0``).
+    ``ep_ran`` alone is not evidence of measurement — ``sdk.dream(...)``
+    returns NORMALLY with zero belief writes when the window holds no EP
+    factors (``no_op_reason = "no_ep_factors"``) and on the #1163 stale-run
+    stand-down, so a run whose every question's EP pass measured nothing
+    would otherwise read ``activated`` (fresh-context review, P1).
     """
     rows = [o for o in (outcomes or ()) if isinstance(o, dict)]
     manifests = [o["belief_activation"] for o in rows
@@ -102,6 +111,14 @@ def summarize_belief_activation(
         # the subset that actually reported an activation manifest
         "measured": len(manifests),
         "ep_ran": sum(1 for m in manifests if m.get("ep_ran") is True),
+        # #8486: the positive-measurement evidence for this question (the
+        # pass ran AND its census found persisted posteriors) — see the
+        # docstring; ``belief_layer_state`` cannot report ``activated``
+        # without one per question.
+        "questions_with_ep": sum(
+            1 for m in manifests
+            if m.get("ep_ran") is True
+            and _as_int(m.get("points_with_ep")) > 0),
         "failed": sum(1 for m in manifests if m.get("error")),
         "engine": next((m.get("ep_engine") for m in manifests
                         if m.get("ep_engine")), None),
@@ -121,6 +138,26 @@ def belief_layer_state(*, requested: bool,
     questions, must not read as activated), and neither is a partial one: a
     question with no manifest (a resumed outcome from before the arm) is an
     EP-INERT question in the same number, so the run is ``partial``.
+
+    "Measured" means MEASURED, not "returned without raising": ``ep_ran`` is
+    set by a bare ``try`` around ``sdk.dream(...)``, which returns normally
+    with zero belief-state writes when the window holds no EP factors
+    (``no_op_reason = "no_ep_factors"`` — a v2 question whose extraction
+    minted claims but no IMPL/NAND operators, common on single-session
+    questions) and on the #1163 stale-run stand-down. Both shapes are already
+    reported by the manifest this function reads (``points_with_ep == 0``,
+    ``points_unmeasured == every non-operator point``), so a question without
+    a positive census is UNMEASURED → ``partial`` (fresh-context review, P1:
+    the arm could otherwise publish ``beliefs_activated: true`` for a graph in
+    which not one claim carries a posterior).
+
+    ``points_unmeasured > 0`` alone deliberately does NOT force ``partial``:
+    a v2 graph holds non-operator points that belong to NO factor graph (its
+    turn + raw-chunk points), so they can never be stamped, and requiring the
+    whole census would make ``activated`` unreachable for every real run. A
+    claim with no posterior still reads ``unmeasured`` through
+    ``ep_activation.read_confidence`` (#2598) — the per-point truth does not
+    depend on this summary's policy.
     """
     if not requested:
         return BELIEF_LAYER_INERT
@@ -139,7 +176,12 @@ def belief_layer_state(*, requested: bool,
         # layer with an EP-inert one — never ACTIVATED.
         return BELIEF_LAYER_PARTIAL
     if (_as_int(activation.get("failed", 0)) == 0
-            and _as_int(activation.get("ep_ran", 0)) == questions):
+            and _as_int(activation.get("ep_ran", 0)) == questions
+            # a question the EP pass measured NOTHING in is unmeasured —
+            # ``ep_ran`` alone is "dream() did not raise", never consent.
+            # An absent cell is 0 (fail-closed): no positive evidence, no
+            # ``activated`` claim.
+            and _as_int(activation.get("questions_with_ep", 0)) == questions):
         return BELIEF_LAYER_ACTIVATED
     return BELIEF_LAYER_PARTIAL
 

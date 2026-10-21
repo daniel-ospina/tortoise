@@ -40,7 +40,7 @@ extends: docs/planning/2026-09-01-2080-gbrain-plan.md (DM-11, §6.6, §7 E2E-8),
 |---|---|
 | Benchmark | LongMemEval-S cleaned (`xiaowu0162/longmemeval-cleaned`, official 500-Q set) |
 | Run | `run_protocol` step 5 (full 500-Q), resumable state machine |
-| Ingest mode | `deterministic` — episodic turn points + turn-granular raw chunks + session nodes (see §4 mechanism note) |
+| Ingest mode | **`v2`** — the production extractor (statement points + IMPL/NAND operators), i.e. `run_protocol` step 5's documented mode. **SUPERSEDES the `deterministic` record this row carried before #8486**: the belief layer is armable ONLY on a `v2` graph (the runner **refuses** `--activate-beliefs` with `--ingest-mode deterministic` — `parser.error` at the CLI, `ValueError` for programmatic callers), and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs` on every run step, so a `deterministic` step-5 command is now unrunnable. The deterministic raw-content mode (turn points + raw chunks, no operators) remains the historical variant in §3/§4; it cannot carry a belief layer. |
 | Belief layer | **`inert` — not activated.** The belief-activation arm (`tools/longmem_eval/run.py --activate-beliefs` → `ep_activation.activate_beliefs`, `#3011`) is now wired into the runner and armed by the `#8486` run protocol; the step-5 run MUST arm it. Reasons it is not optional: `ingest_v2` writes every extraction point `status="draft"` and mints its operators with `promote_source=False`, and `tortoise/ep.py` filters the factor graph with `_live_only(..., include_draft=False)` — so an un-activated graph is **EP-inert** and every claim reads the neutral `0.50` of a Beta(1,1) prior that was never measured (`#2598`). A `v2` number without this row saying `activated` must not be described as measuring Tortoise's reasoning (`#8486`). Both halves are carried mechanically: the report's `methodology.measurement_posture` records them, and `w7_publish.validate_receipt` **refuses** a `completed` receipt whose posture is absent or `unknown`. |
 | Reader | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned default, `reader_pinned: true`) |
 | Judge | `openai/gpt-4o-2024-08-06` (the OFFICIAL LongMemEval judge model; verbatim `evaluate_qa.py` anscheck prompts, `judge_call_shape` = official, rubric hash `82d07b0de05daa48`) via the OpenRouter transport — OPENAI_API_KEY absent, identical model id |
@@ -125,8 +125,11 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
   in the eval graphs (`dataset_audit.py` divergence record rides the
   report). The reader model is the pinned default (deepseek-v4-flash);
   QA accuracy is reader-bound and is reported separately from retrieval.
-- **Ingest-mode note (mechanism honesty):** this run used the runner's
-  `deterministic` ingest (raw-content graph: turn points + raw chunks). The
+- **Ingest-mode note (mechanism honesty):** the pre-#8486 configuration of
+  this run used the runner's `deterministic` ingest (raw-content graph: turn
+  points + raw chunks) — **superseded for step 5 by #8486**, which requires
+  the belief layer and therefore `v2` (the runner REFUSES
+  `--activate-beliefs` on `deterministic`, so §1's ingest mode is `v2`). The
   v2 (LLM-extraction) 500-Q baseline — `run_protocol` step 5's documented
   mode — remains pending: it requires the 3-provider rotation for a ~40 h
   run at tens of dollars (measured: 2-Q v2 slice ≈ 40 min; #1509 pilot
@@ -141,8 +144,13 @@ Full per-`k` table + per-question digests: `w7a-500q.variants.json`
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_lme_w7' \
 TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06' \
 python -m tools.longmem_eval.run_protocol run 5 -- \
-  --ingest-mode deterministic --workers 3
+  --ingest-mode v2 --workers 3
 ```
+
+(#8486: `--ingest-mode v2` — the belief layer is armable ONLY on a v2 graph,
+and the protocol additionally injects `--activate-beliefs` on every run step.
+A `--ingest-mode deterministic` extra is now refused by the runner's CLI at
+arm resolution, so it can no longer appear here.)
 
 (Full argv in the protocol state file's step-5 `command`.) Resolved knobs are
 recorded in the report methodology: chunk_turns 2, context cap 8000,
@@ -221,6 +229,7 @@ never a silent in-place edit (publication discipline, #2106 §7):
 | Date | Entry |
 |---|---|
 | (machinery commit) | Report committed in PENDING state: protocol gates 1-4 passed (evidence below); steps 5+ (full 500-Q execution) not run. |
+| 2026-10-21 | #8486 follow-up (doc reconciliation, raised by the PR's fresh-context review): §1's **Ingest mode** row now states `v2` (it still said `deterministic`, which is mutually exclusive with the adjacent **Belief layer** row — the runner refuses `--activate-beliefs` on a deterministic graph, and the #8486 protocol injects `--ingest-mode v2 --activate-beliefs`). §3's ingest-mode note and §4's exact command follow. No metric, gate or receipt value changed — the run is still PENDING. |
 
 ## 10. Handoff to W7-b (#2106)
 
