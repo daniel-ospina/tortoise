@@ -2060,12 +2060,23 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: come here: they ride the house ``asyncio.to_thread`` default executor
 #: (``dream_health``'s pass on ``_DREAM_EXECUTOR``), so a read request's
 #: occupancy of this pool is exactly one submission, not one per read. Before
-#: #3718 no read touched this pool at all; the consequences are stated rather
-#: than hidden: (1) a WRITE burst that fills the backlog (128) can now refuse a
-#: dashboard read, and (2) those reads fail CLOSED with the 503
-#: ``graph_unavailable`` body rather than their ``#1591`` empty shape, because a
-#: capacity refusal is not a store condition (#3892: never a clean empty for a
-#: store we could not reach). Both are accepted for a construction that
+#: #3718 no dashboard OVERVIEW read touched this pool: what was already here is
+#: named in the paragraphs above — the ``/v1/events`` and ``/v1/dream`` SDK
+#: opens, the org switcher's chunked graph LISTING, and the graph-bound
+#: ``_data_sdk`` control-plane ownership read. The consequences are stated
+#: rather than hidden: (1) a WRITE burst that fills the backlog (128) can now
+#: refuse a dashboard read, and (2) the THREE of the six whose routes carry a
+#: ``#1591`` fail-soft arm — ``GET /v1/team``, ``GET /v1/sessions``,
+#: ``GET /v1/sessions/{id}`` — now fail CLOSED with the 503
+#: ``graph_unavailable`` body instead of that empty shape; ``GET /v1/points``,
+#: ``GET /v1/points/{id}`` and ``GET /v1/dream/health`` were already
+#: fail-closed on their read, so nothing changes for them. A capacity refusal
+#: is not a store condition (#3892: never a clean empty for a store we could
+#: not reach). That scoping of ``#1591`` is a departure from the "every
+#: failure here is fail-soft" reading, so it carries an ``OVERRIDES:`` line at
+#: each of the three construction sites and is relayed to #3718 (the burn-down
+#: tracker the next slice reads), not left implicit in a 40k-line module.
+#: Both costs are accepted for a construction that
 #: otherwise blocks the loop on every dashboard load; if read pressure ever
 #: saturates this lane, size it or give reads their own pool rather than
 #: re-inlining. Pinned by

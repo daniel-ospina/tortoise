@@ -9823,7 +9823,9 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     # exactly as before. Pinned by
     # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
     # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
-    # — pool capacity is not a store condition, so it stays a hard 503.
+    # — pool capacity is not a store condition, so it stays a hard 503. Relayed
+    # to the burn-down tracker rather than left here alone: #3718,
+    # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _graph_offload(
         lambda: _make_sdk(namespace=org["org_id"]), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
@@ -16948,7 +16950,9 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
     # exactly as before. Pinned by
     # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
     # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
-    # — pool capacity is not a store condition, so it stays a hard 503.
+    # — pool capacity is not a store condition, so it stays a hard 503. Relayed
+    # to the burn-down tracker rather than left here alone: #3718,
+    # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _data_sdk_offloaded(org)
     try:
         # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
@@ -17124,7 +17128,9 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     # the attach/read below still degrades to the soft shape. Pinned by
     # `test_graph_pool_capacity_is_fail_closed_not_a_silent_empty` (#3718).
     # OVERRIDES: the "every failure on this route is `#1591` fail-soft" reading
-    # — pool capacity is not a store condition, so it stays a hard 503.
+    # — pool capacity is not a store condition, so it stays a hard 503. Relayed
+    # to the burn-down tracker rather than left here alone: #3718,
+    # issuecomment-6305730612 (DECISION RELAY).
     sdk = await _data_sdk_offloaded(org)
     try:
         # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB

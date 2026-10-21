@@ -39,6 +39,17 @@ main thread alone would stop observing exactly the bodies the #4660 construction
 burn-down moves to a worker (#3718), and their attach assertions would pass
 vacuously.
 
+A WINDOW ALONE IS NOT ENOUGH, though: the sweeps are armed from ``_lifespan``
+at fixture entry and ``_sweep_events`` / ``_sweep_invite_ghosts`` construct AND
+attach as ADJACENT statements on their daemon thread, so one firing inside an
+open window would be owned — which re-admits exactly the corruption recorded
+above for the one caller the probe was scoped to exclude. The window half is
+therefore CLOSED to the background sweep lanes by thread name
+(``_BACKGROUND_SDK_THREAD_PREFIXES``) and stays open to every thread the
+request itself works on (``asyncio.to_thread``'s executor, the ``graph`` pool).
+``test_probe_does_not_own_a_background_sweep_built_inside_the_window`` pins
+both halves.
+
 SCOPE — the handlers converted in this change (the read-only FalkorDB class):
 ``list_points``, ``get_point``, ``org_info``, ``list_sessions``,
 ``get_session_detail``, ``dream_health`` (graph) and ``list_api_keys``,
@@ -233,6 +244,33 @@ _CONSTRUCTION_CASES = [c for c in _READ_CASES
                        if c[0] in _CONSTRUCTION_OFFLOADED_READS]
 
 
+#: Daemon worker THREAD-name prefixes whose SDK builds are NOT the request's
+#: work (#3718 review P2). ``run_on_daemon_worker`` names BOTH sweep lanes
+#: ``tortoise-boot-sweep`` — the one-shot ``_run_boot_sweeps`` and the periodic
+#: ``_event_retention_loop`` — and ``_sweep_events`` (``sdk = _make_sdk(...)``
+#: then ``proj = sdk._get_proj()``) / ``_sweep_invite_ghosts`` construct-and-
+#: attach adjacently on that thread, on a schedule the test does not control.
+#:
+#: Why name, not time: a WINDOW-ONLY ownership rule owns a sweep's SDK whenever
+#: the sweep fires while the window is open, which (a) satisfies the new
+#: construction test's ``sdk_builds > 0`` guard — whose whole job is "the run
+#: actually built a REQUEST SDK, so a short-circuited request cannot pass" —
+#: with work the request never did, and (b) in the ``block=True`` freeze test
+#: lets that SDK's ``_get_proj`` overwrite ``entered`` / ``exited`` (last-write-
+#: wins, ``_make_probe_fn``), rotating the measured stall window. The window is
+#: load-bearing for the request's own WORKER-built SDK (#3718 moves the
+#: construction there), so it cannot simply be dropped — it is closed to these
+#: threads instead. ``workers == 1`` keeps the thread name exact; a multi-worker
+#: lane is suffixed (``<name>-<i>``), hence the prefix match.
+_BACKGROUND_SDK_THREAD_PREFIXES = ("tortoise-boot-sweep",)
+
+
+def _is_background_sdk_thread() -> bool:
+    """Is the current thread a background lane whose SDK build is not ours?"""
+    name = threading.current_thread().name
+    return any(name.startswith(p) for p in _BACKGROUND_SDK_THREAD_PREFIXES)
+
+
 class _RequestScopedProbe:
     """A ``TortoiseSDK._get_proj`` probe that only sees REQUEST-owned SDKs.
 
@@ -248,8 +286,11 @@ class _RequestScopedProbe:
     builds (the pre-#3718 shape). Owning by the main thread ALONE would stop
     observing exactly the worker-built SDK the #3718 conversion introduces, and
     every attach assertion below would then pass vacuously. A daemon-thread
-    sweep that runs with no window open owns nothing and is delegated
-    untouched — which is why the window, not the thread, is the owner.
+    sweep owns nothing — with no window open, and by NAME even when a window is
+    open (``_BACKGROUND_SDK_THREAD_PREFIXES``: the sweeps construct-and-attach
+    adjacently on their own schedule, so a window alone would own them) — and
+    is delegated untouched. The window plus that name exclusion, not the
+    thread, is the owner.
 
     LIMIT, stated rather than implied: this observes the ATTACH, not the query
     round trip. A read reverted to inline on an ALREADY-ATTACHED projection
@@ -271,11 +312,19 @@ class _RequestScopedProbe:
 
         def _capture(real):
             def _wrapped(*args, **kwargs):
+                # #3718: "this build is the REQUEST's work" — a build inside the
+                # window AND not on a background sweep lane. Attribution gates
+                # BOTH the construction record below and ownership: a sweep's
+                # SDK must not satisfy `sdk_builds > 0` (the short-circuit
+                # guard) nor become `_get_proj`-observable.
+                request_work = (
+                    bool(self._state.get("active"))
+                    and not _is_background_sdk_thread())
                 # #3718: record the CONSTRUCTION's own view of the loop. This is
                 # the behavioural half of the AST pin's construction class — the
                 # pin sees `_make_sdk` / `_data_sdk` in an async body, this sees
                 # whether the call actually ran on the loop thread.
-                if self._state.get("active"):
+                if request_work:
                     try:
                         asyncio.get_running_loop()
                         built_on_loop = True
@@ -293,14 +342,16 @@ class _RequestScopedProbe:
                         self._state.setdefault("sdk_build_threads", []).append(
                             threading.current_thread().name)
                 sdk = real(*args, **kwargs)
-                # Owned = built during the request WINDOW, or on the main thread
-                # (the pre-#3718 shape). The window is what keeps the probe
-                # honest once a body builds its SDK on a WORKER thread: owning
-                # by main thread alone would silently stop observing the SDK
-                # the request is about to use, and every attach assertion would
-                # pass vacuously. A daemon-thread sweep's SDK is still not owned
-                # (no window open, not the main thread).
-                if (self._state.get("active")
+                # Owned = built as the request's own work (`request_work`: inside
+                # the window and not on a background sweep lane), or on the main
+                # thread (the pre-#3718 shape). The window is what keeps the
+                # probe honest once a body builds its SDK on a WORKER thread:
+                # owning by main thread alone would silently stop observing the
+                # SDK the request is about to use, and every attach assertion
+                # would pass vacuously. The sweep exclusion is what stops the
+                # window from owning a sweep's own SDK when the two overlap
+                # (`_BACKGROUND_SDK_THREAD_PREFIXES`).
+                if (request_work
                         or threading.current_thread() is threading.main_thread()):
                     self._owned.append(sdk)
                 return sdk
@@ -467,6 +518,83 @@ def test_read_route_construction_is_offloaded(client, monkeypatch, label,
     assert response.status_code == 200, (
         f"[{label}] the off-loaded construction changed the response "
         f"({response.status_code}: {response.text[:200]})")
+
+
+def test_probe_does_not_own_a_background_sweep_built_inside_the_window(
+        monkeypatch):
+    """#3718 review: a sweep's SDK built INSIDE the window is NOT request-owned.
+
+    The ownership rule is "built while the request window was open, on whichever
+    thread does the request's work" — but a WINDOW IS NOT A REQUEST. The boot
+    sweeps are armed from ``_lifespan`` at fixture entry and ``_sweep_events``
+    builds its SDK and attaches it as ADJACENT statements on the
+    ``tortoise-boot-sweep`` daemon thread (``_make_sdk`` then
+    ``sdk._get_proj()``), so whenever a sweep fires inside an open window a
+    window-only rule owns it. That re-admits the very corruption this probe was
+    scoped to exclude (header: ``thread='tortoise-boot-sweep'``), and it breaks
+    two guards rather than one:
+
+    * ``sdk_builds > 0`` — the construction test's "the run built a REQUEST SDK"
+      half — becomes satisfiable by a sweep, so a request that short-circuited
+      before its own construction could pass;
+    * in the ``block=True`` freeze test that SDK's ``_get_proj`` overwrites
+      ``entered`` / ``exited`` (last-write-wins), rotating the measured stall
+      window.
+
+    Pre-fix this is RED on both halves: the sweep build increments
+    ``sdk_builds`` and lands in ``state["sdks"]``. Post-fix the window keeps
+    owning the request's own worker build (``asyncio_0`` here — the shape
+    ``asyncio.to_thread`` / the graph pool produce) and refuses the sweep lane.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    built: list = []
+
+    def _stub_make_sdk(*_args, **_kwargs):
+        sdk = object()          # distinct identity per build, so ownership is
+        built.append(sdk)       # observable without constructing a real SDK
+        return sdk
+
+    monkeypatch.setattr(ha_mod, "_make_sdk", _stub_make_sdk)
+    state: dict = {}
+    _RequestScopedProbe(monkeypatch, ha_mod, state, block=False)
+
+    state["active"] = True      # the request's window is OPEN ...
+
+    def _build_from(thread_name: str):
+        """Construct an SDK from a thread named like the named lane would."""
+        done = threading.Event()
+
+        def _run():
+            try:
+                ha_mod._make_sdk(namespace="org-3718")
+            finally:
+                done.set()
+
+        worker = threading.Thread(target=_run, name=thread_name, daemon=True)
+        worker.start()
+        assert done.wait(10), f"the {thread_name!r} builder never ran"
+        worker.join(10)
+        assert not worker.is_alive(), f"the {thread_name!r} builder hung"
+
+    _build_from("tortoise-boot-sweep")     # a background sweep, mid-window
+    _build_from("asyncio_0")               # the request's own worker build
+
+    sweep_sdk, request_sdk = built
+
+    assert state["sdks"] == [request_sdk], (
+        f"the probe owned {len(state['sdks'])} SDK(s) for a background sweep "
+        f"that built one INSIDE the request window (owned={state['sdks']!r}, "
+        f"sweep={sweep_sdk!r}) — a sweep's SDK is not the request's work, and "
+        f"owning it re-opens the measured `tortoise-boot-sweep` corruption "
+        f"(#3718)")
+    assert state.get("sdk_builds") == 1, (
+        f"the request's construction count is {state.get('sdk_builds')!r}, not "
+        f"1 — a background sweep's build was attributed to the request, so "
+        f"`sdk_builds > 0` no longer proves the REQUEST built an SDK (#3718)")
+    assert state.get("sdk_built_on_loop") is False, (
+        f"neither build ran on a loop thread, yet the probe recorded "
+        f"sdk_built_on_loop={state.get('sdk_built_on_loop')!r} (#3718)")
 
 
 class _BrokenSDK:
