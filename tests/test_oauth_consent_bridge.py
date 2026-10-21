@@ -737,9 +737,12 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
 
     What each row can and cannot prove, measured rather than assumed. Reverting `_fold_doc`'s
     BLOCK TRACKING reds the `:39205` negative below (with the boundary gone the owner search reaches
-    back across the paragraph break), reverting its `^\\s*(?:>\\s?)+` strip reds the two
-    wrapped-blockquote rows, and
-    reverting `_file_basename`'s escape strip reds the escaped-continuation row — those are
+    back across the paragraph break), reverting its `^\\s*(?:>\\s?)+` strip reds the
+    wrapped-blockquote EXPLICIT row (and the note test's wrapped row) — ONE row here, not two: the
+    `>`-continuation row does not depend on the strip, because the `>` sitting between the two
+    tokens is not a digit and the owner search still finds `hosted_api.py` to its left (measured: a
+    strip revert leaves it green at `[2]`).
+    Reverting `_file_basename`'s escape strip reds the escaped-continuation row — those are
     single-mechanism rows. `html.unescape` and the `Cf` drop are each pinned by one row here;
     NFKC is pinned by the fullwidth-colon row of the form test below. The `IGNORECASE` flags and the case FOLD are NOT
     individually load-bearing, because the two arms overlap: `HOSTED_API.PY:39286` is caught by
