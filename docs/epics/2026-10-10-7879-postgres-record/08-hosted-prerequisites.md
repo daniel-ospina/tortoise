@@ -356,7 +356,7 @@ change and needs the ordering-across-three-doors question answered.
 its own hard rule is decisive: *"The meter must be wired into the gate before any allowance is
 configured"*. ⚠️ **The gate is NOT on `main`** — it lives on the unmerged
 `feat/5331-node-to-byte-cap` branch, where it is **fail-closed** and raises `QuotaCheckError` when no
-reading is supplied (`STORAGE-ARCHITECTURE-CHANGELOG.md:341-352`, the `#4495` entry's "Status of the implementation" bullet (`:347` calls the **meter** fail-soft; `:349-350` are the **gate**, which is the object this item is about)), and
+reading is supplied (`STORAGE-ARCHITECTURE.md:86-91` (the standing statement: the **meter** is fail-soft, the **gate** is fail-closed and raises `QuotaCheckError`) — the changelog lines at `:341-352` are the same text kept as a build record, under the "Removed wording" archive), and
 `grep` finds `max_storage_bytes` in **no** module here. So the item has two ordered halves:
 land the gate (code, from that branch), then wire the meter into it — and only then configure
 an allowance. Configuring the key today is inert rather than a 500; configuring it after the gate
@@ -388,7 +388,7 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 |---|---|---|---|
 | resident nodes (dogfood/prod graph) | **89,701** | `MATCH (n)`, 2026-09-25 (§17.4.2) | **MEASURED** |
 | quota-counted nodes | **24,978** | the quota predicate; `§17.4.2`, 2026-09-25 | **MEASURED** |
-| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 MiB figure is the top ruling block of 2026-09-25 (`STORAGE-ARCHITECTURE.md:63`; §1 itself is a different section), mirrored in §17.4.2) | **MEASURED (estimate by construction)** |
+| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 figure is the top ruling block of 2026-09-25 (`STORAGE-ARCHITECTURE.md:63`, which writes it in **MB**; §17.4.2 restates it in MiB at `:1693`; §1 itself is a different section)) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
 | in-graph vectors + indices | **51.6 MB** stored vectors; **45 MB** of indices — the **total** index footprint, of which only the `Point.embedding` HNSW index is vector-driven (§12.1b: exactly one vector index in the graph). ⚠️ These belong to §2.2's ~141 MB reading; the ruling block gives this pair as **143 MB with 46 MB of indices** (`STORAGE-ARCHITECTURE.md:63`) and §17.4.2 restates it in MiB (`:1693`), and the instruction to use that pair sits at `:460` (**§7**'s state-value entry, where it contrasts the two readings) — so quote 143/46, not 141/45 | §2.2 / §12.1b (2026-09-24) | **MEASURED** |
@@ -407,8 +407,9 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 
 **⇒ Three of the five quantities a cost model needs — writes/day, reads/day, tenant density — are
 unmeasured, and the reason is one fact, not three: no tenant serves a workload yet.** The two volume
-figures that *are* measured (143 MiB, 0.1916 GB/tenant) are single-graph measurements of our own
-dogfood, not a customer's. **No vendor recommendation is offered here** — §14 already decides Supabase
+figures that *are* measured are our own data at our own scale — one live dogfood read (**143 MiB**) and one
+bench **planted** at that graph's node count (**0.1916 GB/tenant**, so a different population from
+the live mix) — not a customer's. **No vendor recommendation is offered here** — §14 already decides Supabase
 Postgres, and §17.4 already prices both stores.
 
 ---
