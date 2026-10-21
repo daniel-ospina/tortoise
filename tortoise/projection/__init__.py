@@ -3350,9 +3350,14 @@ def _journal_safe_params(params, cypher=None):
 #     replay it (#4641 below), which is what makes declaring it honest; the
 #     argument, the class it authorizes beyond metadata (`:Subject`, disclosed),
 #     and its recovery gap (`tortoise/backup.py`'s JSONL fallback) are stated
-#     with the writers. `:TeamMeta` is its documented sibling (#5353 below),
-#     not a vetted precedent: it holds no declaration of its own — its writers
-#     escape at (3).
+#     with the writers. `:TeamMeta` is its documented sibling (#5353 below):
+#     after #9157 it is DECLARED BY THE SAME ARGUMENT, not borrowed from
+#     elsewhere, because the two classes are ONE statement — the five
+#     `eager_init_query()` sites create `:TeamMeta` nodes and append the
+#     `:OnboardingState` fragment, and the whole statement rides the guarded
+#     handle through `run_eager_init`. Its recovery argument is the #5353 one
+#     (capture-restored, no record of its own), which is why the one lane can
+#     honestly declare both labels.
 #     ⚠️ THIS LANE APPENDS NOTHING, which is what distinguishes it from the
 #     `_live_write_scope` openers above rather than a contradiction of them:
 #     read the "append first, fold second" invariant as describing the SDK's
@@ -3367,13 +3372,18 @@ def _journal_safe_params(params, cypher=None):
 #     deliberately does not delegate to `_graph_metadata_write_scope` (whose
 #     docstring carries the epoch's two obligations, the first of them false of
 #     this lane).
-#     ⚠️ And it does not cover the whole onboarding class: the five
-#     `eager_init_query()` call sites that CREATE `:OnboardingState` execute on
-#     `proj.db.select_graph(...)` — escape (3) below — so those writes remain
-#     unjournalled AND undeclared and are filed as `#9157`. Journalling the class
-#     is the larger, §2.0-correct increment and is filed separately
-#     (`#9129`), not assumed by this lane. A door inventory done against THIS block must not
-#     close escape (3) believing onboarding is covered.
+#     ✅ It NOW covers the whole onboarding class it claims, including the five
+#     `eager_init_query()` call sites that CREATE `:OnboardingState` (`#9157`).
+#     Those sites used to issue their statement on `proj.db.select_graph(...)` —
+#     escape (3) below — so the class's CREATION writes were unjournalled AND
+#     undeclared while this block read as complete. They now go through
+#     `onboarding/state.py::run_eager_init` on a `guarded_write_handle` bound to
+#     the ORG graph, i.e. the door above. Journalling the class instead is the
+#     larger, §2.0-correct increment and is filed separately
+#     (`#9129`), not assumed by this lane.
+#     ⚠️ Escape (3) itself is still open — it is structural, and any writer that
+#     holds a driver handle can take it. What this lane can now say is the
+#     narrower true thing: its OWN class does not ride it.
 #   * `structural-edge.derived` (`tortoise/projection/edges.py`, #9195) — the
 #     SDK's structural-edge mints (`create_edge` and `create_about_edge`, each
 #     with ONE `MERGE`, plus `create_edge`'s three typed wrappers — two mints
@@ -3652,6 +3662,43 @@ def _reset_undeclared_handle_writes() -> None:
         _UNDECLARED_HANDLE_WRITES.clear()
 
 
+def guarded_write_handle(proj: FalkorProjection, graph_name: str) -> _GuardedGraph:
+    """A §17.1 write handle on ``graph_name``, judged by ``proj``'s journal.
+
+    For a writer that must address a graph OTHER than the projection's own —
+    the org mint is the case that needed it (#9157): `sdk.org_create` and the
+    hosted-api lanes write `:TeamMeta` + `:OnboardingState` into
+    ``org_<id>`` while the SDK's projection is bound to another graph, so
+    `proj.g` is the wrong target and `proj.db.select_graph(name)` is
+    §17.1's escape (3) — one hop below every door §17.1 has.
+
+    This returns the handle WITHOUT opening a declaration: the caller still has
+    to be authorized for the statement it issues. That separation is the point
+    — a handle that declared its own writes would make the guard's default
+    (refuse) unreachable for exactly the writers it exists to judge. Pass it to
+    a sink that opens a lane (`onboarding/state.py::run_eager_init` does that
+    for the eager-init class; the backup dump path builds the same handle for a
+    read-only dump).
+
+    ``proj`` is used for its JOURNAL-BACKED state and its connection only — the
+    handle's writes are classified against ``proj``'s binding, which is what
+    "this cache is the derived cache of THAT journal" means. An unbound
+    projection therefore yields an unguarded-but-harmless handle (the guard's
+    arming rule is the same one the fold uses).
+
+    ⛔ AND THE HANDLE'S OWN GRAPH IS THE ONE L2 JUDGES (#9409 review). Because
+    this factory exists precisely to bind a graph that is NOT ``proj``'s own,
+    the handle's bulk-wipe name rule must name the graph it wipes: a statement
+    door judged by ``proj._graph_name`` approves a name it is not touching, and
+    ``guarded_write_handle(proj_on_test_x, "prod_tenant")`` would then
+    "approve" a whole-graph wipe of ``prod_tenant`` on the strength of
+    ``test_x``. ``_GuardedGraph._statement_graph_name`` reads ``self._g.name``
+    for exactly that reason; this paragraph is here because a writer taught the
+    factory is the reader that has to know it.
+    """
+    return _GuardedGraph(proj.db.select_graph(graph_name), proj)
+
+
 #: The single-writer authorization for the current context. ``None`` = no
 #: sanctioned projection is in flight, so the default is REFUSAL. A ContextVar
 #: (not an instance or `threading.local` attribute) so a concurrent thread
@@ -3688,9 +3735,12 @@ def _live_write_scope(reason: str = "live-door"):
     `_cache_write_authorized(ONBOARDING_WRITE_LANE)`, i.e. the same ContextVar
     this function sets, **not through this alias** (that module never imports
     it; two spellings, one primitive). That lane appends nothing — the opener
-    inventory above says why, and names the seam the declaration does NOT cover
-    (`#9157`). `onboarding/seed.py::_run` does not open it at all: its only
-    caller issues a READ.
+    inventory above says why — and since `#9157` it covers its OWN whole class,
+    including the eager-init CREATION statement, which rides
+    `onboarding.state.run_eager_init` on a `guarded_write_handle`. What it still
+    does not cover is escape (3) itself, which is structural and belongs to no
+    lane. `onboarding/seed.py::_run` does not open it at all: its only caller
+    issues a READ.
     """
     return _cache_write_authorized(reason)
 
@@ -4755,8 +4805,15 @@ class _GuardedGraph:
         # statement's own TEXT, which no param map can carry.
         _guard_numeric_literals(cypher)
         if _is_bulk_wipe(cypher):
+            # #9409 review: judge the graph THIS handle wipes, not the
+            # projection's. The wrapper is built in-tree over a graph that is
+            # not the projection's own (`guarded_write_handle`, and
+            # `hosted_api`'s raw form), so judging `proj._graph_name` approves
+            # a name this statement never touches — the #9209 defect one verb
+            # over, generalized by the new factory.
             self._proj._assert_test_graph(
-                "REFUSING to run bulk DETACH DELETE on non-test graph"
+                "REFUSING to run bulk DETACH DELETE on non-test graph",
+                graph_name=self._statement_graph_name(),
             )
         # #3359: count the op as ISSUED to the raw handle, AFTER the destructive
         # guard — a refused bulk wipe is not work the capture caused, and the
@@ -4764,9 +4821,20 @@ class _GuardedGraph:
         # dead socket is still an op the capture generated). No-op (one
         # ContextVar read) when no capture is active.
         record_graph_op(cypher)
-        return self._g.query(
-            cypher, params=_journal_safe_params(params, cypher), timeout=timeout
-        )
+        # #9157: forward ONLY the optional kwargs that were supplied. The
+        # repo's convention for a duck-typed inner handle (cypher_guard's
+        # `_forward_query_unguarded`, `_GuardedHandleProxy`) is exactly this, and
+        # the projection's own handle has to obey it too: a lightweight or
+        # recording stub is allowed to declare `query(self, cypher, params=None)`
+        # only, and passing `timeout=None` to it raises TypeError at a depth that
+        # reads as the caller's bug. Measured: routing the org mint through this
+        # handle broke six tests on stubs of exactly that shape.
+        kwargs: dict = {}
+        if params is not None:
+            kwargs["params"] = _journal_safe_params(params, cypher)
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return self._g.query(cypher, **kwargs)
 
     def ro_query(self, cypher: str, params=None, timeout=None):
         # The "read-only" verb is mutating-CAPABLE, not read-only: the name is
@@ -5060,8 +5128,12 @@ class _GuardedGraph:
         # as `proj.g.query`'s statement would be.
         self._refuse_unauthorized_cache_write(statement)
         if _is_bulk_wipe(statement):
+            # Same name rule as `query` — the statement is built by the vendor
+            # from a caller string, and this handle may front a graph that is
+            # not the projection's own (#9409 review).
             self._proj._assert_test_graph(
-                "REFUSING to run bulk DETACH DELETE on non-test graph"
+                "REFUSING to run bulk DETACH DELETE on non-test graph",
+                graph_name=self._statement_graph_name(),
             )
         return self._g.call_procedure(
             procedure, read_only=read_only, args=args, emit=emit
@@ -5302,6 +5374,30 @@ class _GuardedGraph:
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+    def _statement_graph_name(self) -> str | None:
+        """The graph a STATEMENT on this handle writes, for L2's name rule.
+
+        ``delete()`` passes ``self._g.name`` explicitly (it REFUSES a handle
+        that cannot name itself, #9209 round 9); the two statement doors cannot
+        pass a command argument, so the handle's own name is the only source
+        that is about the graph actually written.
+
+        Returning ``None`` for a handle with no usable ``name`` deliberately
+        keeps L2's pre-existing meaning (judge the projection). That is not the
+        ``delete()`` polarity, and the difference is measured rather than
+        stylistic: every real handle this wrapper fronts carries a string
+        ``name`` (the pinned vendor's ``Graph.name`` property; the
+        ``cypher_guard`` proxy forwards it), so a missing/non-string name means
+        a duck-typed STUB — which cannot reach a server graph, and which L2's
+        existing pins drive as the *allowed* half of the name rule on a
+        ``test_``-named projection (``test_destructive_wipe_guard.py``).
+        Refusing those would turn a stub into a false positive while protecting
+        no server graph; the foreign-handle case this fix is for always HAS a
+        name.
+        """
+        name = getattr(self._g, "name", None)
+        return name if isinstance(name, str) else None
 
     def _bar(self, cypher: str) -> str:
         """#7162: the `WITH *` barrier, when this handle's engine needs it.

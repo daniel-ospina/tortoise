@@ -95,9 +95,20 @@ def _scanned_write_verbs() -> frozenset[str]:
 
 #: The classes this lane declares. `:Subject` is in the set BY DISCLOSURE, not
 #: by blessing: see the module docstring's "does not claim" section.
+#:
+#: `:TeamMeta` joins it WITH ITS ARGUMENT (#9157). It is not a new claim: on the
+#: eager-init lanes the two are ONE statement (`eager_init_query` appends the
+#: `:OnboardingState` fragment to the `:TeamMeta` CREATE — scope pin 10), and
+#: `:TeamMeta` has always been documented as "capture-restored, no record" in
+#: the same #5353 block this lane's declaration cites. Before #9157 that
+#: statement rode escape (3) and thus appeared on no lane at all, so the census
+#: never had to name it; now that it rides this lane, the lane has to declare
+#: what it writes. The alternative readings are both wrong: leaving it out makes
+#: the census red on the honest route, and routing only the onboarding fragment
+#: would split a statement whose graph-side atomicity is the point.
 _DECLARED_LABELS = frozenset(
     {"OnboardingState", "OnboardingStep", "COMPLETED_STEP", "onboards",
-     "Subject"})
+     "Subject", "TeamMeta"})
 
 
 @pytest.fixture
@@ -183,6 +194,9 @@ _EXERCISED_WRITERS = frozenset({
     "write_compact", "write_fork_unsure_at", "clear_fork_unsure_at",
     "write_last_decide_attempt", "write_operational_state",
     "remove_decide_completed_edge", "regress_status",
+    # #9157: the eager-init route — the CREATION write the lane used to miss.
+    # Exercised here so the label census covers it in the SAME walk.
+    "run_eager_init",
 })
 _EXERCISED_READERS = frozenset({
     "read_onboarding_node", "completed_steps", "decide_completed_edge_exists",
@@ -219,6 +233,17 @@ def _walk_the_hosted_write_set(proj, org_id: str = ORG) -> None:
     _os.clear_fork_unsure_at(proj, org_id)
     _os.write_last_decide_attempt(proj, org_id, "failed")
     _os.write_operational_state(proj, org_id, {"capture_disclosed": True})
+    # #9157: the eager-init CREATION statement, issued through the declared lane
+    # (`run_eager_init` -> `_run` -> `_onboarding_write_scope`). The fragment is
+    # the same text production appends to `:TeamMeta`; it is issued alone here so
+    # the census attributes its labels to THIS route.
+    _os.run_eager_init(
+        proj,
+        f"CREATE (:TeamMeta {{name:$name}})\n"
+        f"{_os.onboarding_node_init_fragment()}",
+        {"name": f"walk-{org_id}", "org_id": f"eager-{org_id}",
+         **_os._node_init_params()},
+    )
 
     audited = f"{org_id}-audited"
     _os.ensure_onboarding_state_node(proj, audited)
