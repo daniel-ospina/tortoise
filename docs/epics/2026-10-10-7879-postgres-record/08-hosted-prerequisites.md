@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**, materialised *only where a journaled edge record carries them*: `DirectEdgeCreated` → `IMPL`/`NAND` (nothing else is even accepted, `sdk.py:19689`), `EntityLinked` → `about*`. No journaled edge record carries `INPUT` at all). What does **not** reach `relation`: (i) the families **derived from point properties** — `extractedFrom`, `references`, `about*`, `mitigated_by` (`04-projection.md` §3, R5); (ii) **an operator's own edges** — `OperatorAdded` is a `point`-row upsert whose inputs sit in `point.props`, so its `IMPL`/`NAND`/`INPUT` topology is R5's work; (iii) **`CONTAINS`** — the capture's `contains_session` rides the *journal envelope* and is dropped by the record projection (`record_projection.py:978`), so the journal rebuilds the edge and the record cannot |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands only when a **journaled edge record** carries the edge: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede. Everything else is R5's work: the point-property-derived families (`extractedFrom`, `about*`, `mitigated_by`), `CONTAINS` (its `contains_session` rides the journal envelope and the record projection drops it, `record_projection.py:978`), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates with no carrier at all (`projection/edges.py:736-745`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -99,8 +99,8 @@ the runs and their output are in **§G**.
 layer is the fold over them (`…04_record_procedural.sql` `object_current_status`).
 
 **EP weights are correctly ABSENT.** `public.point`'s `chk_point_props_no_derived` refuses
-`ep_alpha`, `ep_beta`, `confidence`, `posterior_*`, `baseline_set`, `content_hash`, `ep_dirty*` **by
-name as props keys** (`…03_record_epistemic.sql:128`); the columns themselves do not exist, so a
+`ep_alpha`, `ep_beta`, `c_cal`, `confidence`, `posterior_*`, `baseline_set`, `content_hash`,
+`inherited_at`, `ep_dirty*` (16 keys in all) **by name as props keys** (`…03_record_epistemic.sql:128`); the columns themselves do not exist, so a
 writer adding one meets a SQL error rather than this CHECK. **Where belief lives:** EP
 confidence is computed in Python over the structure (§2.0 clause (a));
 `tortoise/ep.py` is its home, and `baseline_source`/`baseline_alpha`/`baseline_beta` are the one
