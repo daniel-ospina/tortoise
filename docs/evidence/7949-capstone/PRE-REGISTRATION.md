@@ -88,7 +88,7 @@ file.
 | corpus root | `tests/eval/write_path` | — |
 | `fixtures_hash` | `sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc` | `corpus.compute_fixtures_hash()` over every fixture + gold |
 | sessions | **7** (`wp01`…`wp07`) | `corpus.session_ids()` |
-| seed / schema | `42` / `1` | `_manifest.json` |
+| seed / schema | `42` / `1` | **read from `_manifest.json`, not re-derived by the gate** — `compute_fixtures_hash()` hashes only the fixture and gold files, so a seed/schema edit is NOT caught by §7. They pin determinism-within-a-run, not the measurement, and are stated here so a re-run is comparable |
 | planted units | **90** | gold `planted_units` summed |
 | value-bearing units (§3, E2a) | **14** | digit-bearing anchors (16) minus the 2 exclusions named in §3 |
 | planted operator edges | **15** (`wp01` 2, `wp02` 1, `wp03` 3, `wp04` 3, `wp05` 2, `wp06` 1, `wp07` 3) | `corpus.planted_operator_count()` |
@@ -465,6 +465,7 @@ corpus:
   value_bearing_units: 14
   planted_operator_edges: 15
   hedge_scope_sentences: 29
+  hedge_scope_sentences_total: 343
   hedge_scope_lexemes:
     - probably
     - maybe

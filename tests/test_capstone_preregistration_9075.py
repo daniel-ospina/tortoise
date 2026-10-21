@@ -424,11 +424,8 @@ def _record(**over) -> dict:
         "written_before_any_scored_run_basis": f"no scored run exists; the {check.UNSCORED} log predates it",
         "unscored_runs_before_this_registration": sorted(
             pins["pre_existing_unscored_logs"]),
-        "corpus": {
-            k: pins["corpus"][k]
-            for k in ("fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
-                      "value_bearing_units", "hedge_scope_sentences", "planted_operator_edges")
-        },
+        "corpus": {k: pins["corpus"][k] for k in check.CROSS_CHECKED_CORPUS_KEYS},
+        "denominator_floors": dict(pins["denominator_floors"]),
         "split": {"tune": list(pins["split"]["tune"]),
                   "held_out": list(pins["split"]["held_out"])},
         "e4_denominator": pins["e4_denominator"],
@@ -814,3 +811,112 @@ def test_the_real_record_restates_every_pinned_denominator():
     assert record["e4_denominator"] == pins["e4_denominator"] == 15
     assert sorted(record["split"]["tune"]) == sorted(pins["split"]["tune"])
     assert sorted(record["split"]["held_out"]) == sorted(pins["split"]["held_out"])
+
+
+# ── round-4 review regressions ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("key,value", [
+    ("e1_objects", 3),
+    ("e1_min_before_share", 0.01),
+    ("e2b_surviving_units", 4),
+    ("e3_derived_nodes", 3),
+    ("e5_rate_min_sentences", 1),
+])
+def test_a_record_denominator_floor_that_disagrees_with_the_pins_fails(tmp_path, key, value):
+    """REGRESSION (#9075 review r4 P2): `denominator_floors` was restated in both copies, unchecked.
+
+    These are the REFUSED boundaries the run probe enforces. `e5_rate_min_sentences: 1` makes the
+    8-sentence HELD-OUT half rate-reportable when the pins forbid it; `e2b_surviving_units: 4`
+    smuggles the forbidden small denominator back into the machine-consumed artefact.
+    """
+    rec = _record()
+    rec["denominator_floors"] = dict(rec["denominator_floors"])
+    rec["denominator_floors"][key] = value
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any(f"denominator_floors.{key}" in f for f in failures), failures
+
+
+def test_a_record_inventing_a_floor_the_pins_do_not_state_fails(tmp_path):
+    """The record may not add a REFUSED boundary the document never argued."""
+    rec = _record()
+    rec["denominator_floors"] = dict(rec["denominator_floors"])
+    rec["denominator_floors"]["e9_made_up"] = 99
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("has no pin" in f for f in failures), failures
+
+
+def test_a_record_sentence_total_that_disagrees_with_the_pins_fails(tmp_path):
+    """`hedge_scope_sentences_total` (343) was restated by the record and never compared."""
+    rec = _record()
+    rec["corpus"] = dict(rec["corpus"])
+    rec["corpus"]["hedge_scope_sentences_total"] = 999
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("hedge_scope_sentences_total" in f for f in failures), failures
+
+
+def test_a_pins_block_missing_a_cross_checked_key_fails_instead_of_skipping(tmp_path):
+    """REGRESSION (#9075 review r4 P2): `if key in pins` silently disabled the comparison."""
+    pins = check.parse_pins(PREREG.read_text())
+    del pins["corpus"]["hedge_scope_sentences_total"]
+    d = _materialise(tmp_path, _record())
+    failures = check.check_machine_record(d, pins)
+    assert any("omits 'hedge_scope_sentences_total'" in f for f in failures), failures
+
+
+def test_the_pin_total_against_the_derived_sentence_count():
+    """The new pin must be tree-derived, not copied from the record it is checked against."""
+    pins = check.parse_pins(PREREG.read_text())
+    derived = check.derive_corpus_facts(pins)
+    assert pins["corpus"]["hedge_scope_sentences_total"] == derived["sentences_total"] == 343
+
+
+@pytest.mark.parametrize("block", ["pre_existing_unscored_logs: notamap"])
+def test_a_wrong_typed_pins_block_is_a_usage_error_not_a_traceback(tmp_path, monkeypatch, block):
+    """REGRESSION (#9075 review r4 P3): `dict("notamap")` raised ValueError past `except CheckError`.
+
+    A valid-YAML-wrong-TYPE pins value is a PARSE error, which the contract says is exit 2.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    key = block.split(":")[0]
+    pins = {"pre_existing_unscored_logs": {}, "denominator_floors": {}}
+    pins[key] = "notamap"
+    with pytest.raises(check.CheckError) as excinfo:
+        check.check_ordering(prereg, [log], pins)
+    assert f"pins.{key} is str" in str(excinfo.value)
+
+
+def test_a_wrong_typed_denominator_floors_block_is_a_usage_error(tmp_path):
+    """The machine-record half of the same guard."""
+    rec = _record()
+    d = _materialise(tmp_path, rec)
+    pins = check.parse_pins(PREREG.read_text())
+    pins["denominator_floors"] = "notamap"
+    with pytest.raises(check.CheckError) as excinfo:
+        check.check_machine_record(d, pins)
+    assert "pins.denominator_floors is str" in str(excinfo.value)
+
+
+def test_the_touch_history_sees_a_merge_commit(tmp_path, monkeypatch):
+    """REGRESSION (#9075 review r4 P3): `git log -- path` history-simplified the merge away.
+
+    Without `--full-history` a `--no-ff` merge that touched the exempt log was absent from the
+    epochs, so the content bound could miss an edit landed on a side branch.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
+    # A side branch edits the log, then main merges it with --no-ff.
+    _git(repo, "checkout", "-q", "-b", "side")
+    log.write_text(UNSCORED_LOG.replace("after_share=0.6", "after_share=0.25"))
+    _git(repo, "add", str(log.relative_to(repo)))
+    _git(repo, "commit", "-q", "-m", "side edit", epoch=1_700_000_050)
+    _git(repo, "checkout", "-q", "-")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge side", "side", epoch=1_700_000_200)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log], _exempt())
+    assert failures and "MODIFIED at" in failures[0], failures

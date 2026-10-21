@@ -114,6 +114,14 @@ EXIT_KEY = re.compile(r"(?:^|\s)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 #: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
 VALUE_TRAILING = ",;."
 
+#: Every pinned corpus quantity the machine record restates and is cross-checked against. A REQUIRED
+#: set: a pins block missing one of these is a failure, never a silently-skipped comparison.
+CROSS_CHECKED_CORPUS_KEYS = (
+    "fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
+    "planted_operator_edges", "value_bearing_units", "hedge_scope_sentences",
+    "hedge_scope_sentences_total",
+)
+
 #: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); a required id is
 #: satisfied when at least one row's id equals it or starts with it.
 REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
@@ -449,7 +457,10 @@ def _touch_epochs(path: Path) -> list[int]:
         return []
     try:
         out = subprocess.run(
-            ["git", "log", "--format=%ct", "--", str(rel)],
+            # `--full-history`: without it git's history simplification can drop a MERGE commit
+            # that touched the log, and the content bound would then miss an edit landed on a side
+            # branch (#9075 review r4 P3).
+            ["git", "log", "--full-history", "--format=%ct", "--", str(rel)],
             cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
         )
     except OSError:  # pragma: no cover - git absent
@@ -459,10 +470,26 @@ def _touch_epochs(path: Path) -> list[int]:
     return sorted(int(x) for x in out.stdout.split() if x.strip().isdigit())
 
 
+def _pins_mapping(pins: dict, key: str) -> dict:
+    """A pins sub-block as a mapping, or a CheckError — never a bare ``dict()`` crash.
+
+    A valid-YAML-wrong-TYPE pins value (``pre_existing_unscored_logs: notamap``) is a PARSE error,
+    which the contract says is exit 2; ``dict("notamap")`` raised ``ValueError`` and escaped as an
+    unhandled traceback (#9075 review r4 P3).
+    """
+    value = (pins or {}).get(key) or {}
+    if not isinstance(value, dict):
+        raise CheckError(
+            f"pins.{key} is {type(value).__name__}, expected a mapping — the pins block is "
+            "unparseable for this check"
+        )
+    return dict(value)
+
+
 def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored."""
     failures: list[str] = []
-    exempt = dict((pins or {}).get("pre_existing_unscored_logs") or {})
+    exempt = _pins_mapping(pins or {}, "pre_existing_unscored_logs")
     present = {p.name for p in logs}
     for name in sorted(set(exempt) - present):
         failures.append(
@@ -583,12 +610,34 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
                 "two copies of a denominator that can disagree"
             )
 
-    for key in ("fixtures_hash", "sessions", "seed", "schema_version", "planted_units",
-                "value_bearing_units", "hedge_scope_sentences", "planted_operator_edges"):
-        if key in pins_corpus:
-            cmp(f"corpus.{key}", pins_corpus[key], corpus.get(key))
+    # A REQUIRED list, not `if key in pins`: a `in` guard means a pins edit that DROPS a key
+    # silently disables that cross-check, which is the failure mode the check exists to prevent
+    # (#9075 review r4 P2).
+    for key in CROSS_CHECKED_CORPUS_KEYS:
+        if key not in pins_corpus:
+            failures.append(
+                f"pins.corpus omits {key!r} — the record is cross-checked against it, so a pins "
+                "block that drops the key would silently disable that comparison"
+            )
+            continue
+        cmp(f"corpus.{key}", pins_corpus[key], corpus.get(key))
 
-    pins_split = pins.get("split") or {}
+    pins_floors = _pins_mapping(pins, "denominator_floors")
+    rec_floors = record.get("denominator_floors") or {}
+    if not pins_floors:
+        failures.append(
+            "pins.denominator_floors is empty — every REFUSED boundary the run probe enforces "
+            "comes from it, and the record restates it"
+        )
+    for key, want in pins_floors.items():
+        cmp(f"denominator_floors.{key}", want, rec_floors.get(key))
+    for key in sorted(set(rec_floors) - set(pins_floors)):
+        failures.append(
+            f"{MACHINE_RECORD} denominator_floors.{key} has no pin — the record may not invent a "
+            "REFUSED boundary the document does not state"
+        )
+
+    pins_split = _pins_mapping(pins, "split")
     rec_split = record.get("split") or {}
     for half in ("tune", "held_out"):
         cmp(f"split.{half}", sorted(pins_split.get(half) or []), sorted(rec_split.get(half) or []))
@@ -613,7 +662,7 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
     if missing:
         failures.append(f"{MACHINE_RECORD} omits criteria rows {missing}")
 
-    exempt = sorted((pins.get("pre_existing_unscored_logs") or {}))
+    exempt = sorted(_pins_mapping(pins, "pre_existing_unscored_logs"))
     if sorted(record.get("unscored_runs_before_this_registration") or []) != exempt:
         failures.append(
             f"{MACHINE_RECORD} unscored_runs_before_this_registration is "
@@ -711,6 +760,8 @@ def check_pins(pins: dict, derived: dict) -> list[str]:
         derived["value_bearing_units"])
     cmp("corpus.hedge_scope_sentences", corpus.get("hedge_scope_sentences"),
         derived["hedge_scope_sentences"])
+    cmp("corpus.hedge_scope_sentences_total", corpus.get("hedge_scope_sentences_total"),
+        derived["sentences_total"])
     cmp("salience_labels.rows", salience_pins.get("rows"), derived["salience"]["rows"])
     cmp("salience_labels.in_scope", salience_pins.get("in_scope"),
         derived["salience"]["in_scope"])
