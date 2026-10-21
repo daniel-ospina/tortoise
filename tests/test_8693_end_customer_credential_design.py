@@ -113,13 +113,17 @@ def _membership_checks(node: ast.AST, needle: str) -> list[tuple[ast.Compare, as
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Compare):
             continue
-        # ``strict=True`` asserts the invariant the loop already assumes: an ``ast.Compare``
-        # carries exactly as many comparators as ops — ``comparator[i]`` is the right operand
-        # of ``op[i]``, so ``a in b`` is ops=[In]/comparators=[b] and ``a in b in c`` is
-        # ops=[In, In]/comparators=[b, c]. Measured on all five shapes: 1/1, 1/1, 2/2, 3/3,
-        # 2/2 — the pairing was always correct, so this raises on no well-formed comparison.
-        # It is NOT ``strict=False``: that only silences B905 (#9316) while tolerating a
-        # truncated walk, which would drop the later links of a chained comparison silently.
+        # ``strict=True`` states the invariant the loop relies on: an ``ast.Compare`` carries
+        # exactly as many comparators as ops — ``comparator[i]`` is the right operand of
+        # ``op[i]``, so ``a in b`` is ops=[In]/comparators=[b] and ``a in b in c`` is
+        # ops=[In, In]/comparators=[b, c]. Measured on five shapes (1/1, 1/1, 2/2, 2/2, 3/3)
+        # and over all 1,221 ``Compare`` nodes in ``tortoise/hosted_api.py`` (0 unequal), so it
+        # raises on nothing reachable from source — the equality is a property of the grammar.
+        # What it buys is therefore twofold, and neither is a truncation that happens today:
+        # it is what conforms to B905, so this file cannot redden the repo-wide lint leg again
+        # (#9316), and it turns a *malformed* node (only constructible by hand) into a loud
+        # failure instead of a partial walk. ``strict=False`` — what #9249 left behind — buys
+        # neither, so it is not a resting place.
         for op, comparator in zip(sub.ops, sub.comparators, strict=True):
             if not isinstance(op, (ast.In, ast.NotIn)):
                 continue
@@ -222,31 +226,33 @@ def test_membership_pairing_is_strict_not_truncating():
 
     An ``ast.Compare`` carries exactly as many comparators as ops — ``comparator[i]`` is
     the right operand of ``op[i]`` — measured on five shapes: ``a in b`` 1/1, ``a not in b``
-    1/1, ``a in b in c`` 2/2, ``a in b == c`` 2/2, ``a < b < c < d`` 3/3. So a strict zip
-    raises on no well-formed comparison, and this file's own corpus proves it: every
-    assertion below walks ``tortoise/hosted_api.py`` through this helper.
+    1/1, ``a in b in c`` 2/2, ``a in b == c`` 2/2, ``a < b < c < d`` 3/3. Equal counts are a
+    property of the comparison grammar, not of our code, so ``strict=True`` raises on nothing
+    reachable from source: `strict=False` truncated nothing in production either.
 
-    What strictness buys is the failure mode. A non-strict zip *truncates*: a chained
-    membership test would be walked only as far as the shorter list and its later links
-    would vanish with no error, weakening a pin silently. That is why ``strict=False`` — the
-    form #9249 left behind when it silenced B905 (#9316) — is not an acceptable resting
-    place, and why this is pinned by behaviour rather than by grepping for the parameter.
+    What is pinned here is the failure *mode*, and it is the only reachable difference: a
+    hand-built node with unequal lists must fail loudly rather than be walked as far as the
+    shorter list. Accepting either exception type on purpose — an ``enumerate`` rewrite
+    (``IndexError``) is *louder* than ``strict=True`` and equally correct, so the test must
+    not force one spelling. Reverting the site to ``strict=False`` makes nothing raise, which
+    is what this test exists to catch (#9316).
     """
     needle = "graphs:create"
     container = ast.Constant(value=[needle])
     # Two ops, one comparator: a chain with a link missing. No well-formed comparison can
-    # look like this, so failing loudly on it costs nothing — and truncating it silently is
-    # precisely the bug B905 exists to catch.
+    # look like this, so failing loudly on it costs nothing — and walking it as far as the
+    # shorter list would be the silent weakening B905 exists to catch.
     malformed = ast.Compare(
         left=ast.Constant(value=needle),
         ops=[ast.In(), ast.In()],
         comparators=[container],
     )
-    with pytest.raises(ValueError, match="shorter than"):
+    with pytest.raises((ValueError, IndexError)):
         _membership_checks(malformed, needle)
 
-    # Non-vacuity of the safe half: the invariant holds over the whole real module, which
-    # is what lets strict=True stand in for a silent truncation without new failures.
+    # Evidence, not a guard: the invariant holds over the whole real module, so the strict
+    # zip adds no failure to the corpus these pins walk. (It could only red on a CPython
+    # grammar bug; that is why it is phrased as the claim the comment makes.)
     unequal = [
         (len(sub.ops), len(sub.comparators))
         for sub in ast.walk(_module())
@@ -258,11 +264,13 @@ def test_membership_pairing_is_strict_not_truncating():
         "pairing assumption this file's pins rest on is broken"
     )
 
-    # And the happy path still resolves: a simple membership test yields its container.
-    scopes = _membership_checks(ast.parse(f"x = {needle!r} in scopes").body[0], needle)
-    assert scopes and ast.unparse(scopes[0][1]) == "scopes", (
-        'a plain `"graphs:create" in scopes` no longer resolves to the `scopes` container '
-        f"({[ast.unparse(c) for _, c in scopes]}) — strictness broke the pairing it asserts"
+    # The reachable positive property: pairing reaches the LATER link of a chain, so a walk
+    # limited to the first link (what a shorter-list zip degrades to) would be caught.
+    chained = _membership_checks(ast.parse("scopes in other in 'graphs:create'").body[0], needle)
+    assert [ast.unparse(c) for _, c in chained] == ["scopes"], (
+        "a chained `scopes in other in \"graphs:create\"` no longer resolves through its second "
+        f"link ({[ast.unparse(c) for _, c in chained]}) — the zip stopped pairing ops with "
+        "comparators past the first one"
     )
 
 
