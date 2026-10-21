@@ -406,7 +406,15 @@ HISTORY_UNAVAILABLE = (
 
 
 class HistoryUnavailable(CheckError):
-    """The checkout does not carry the history the ordering half needs to reach a verdict."""
+    """The checkout does not carry the history the ordering half needs to reach a verdict.
+
+    Carries the failures the GIT-FREE half already found, so an unprovable history cannot swallow a
+    laundering finding that needed no history at all (#9075 review r6 P2).
+    """
+
+    def __init__(self, message: str, failures: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.failures = list(failures or [])
 
 
 def history_unavailable() -> bool:
@@ -451,10 +459,15 @@ def _is_tracked(path: Path) -> bool:
         rel = path.resolve().relative_to(REPO_ROOT)
     except ValueError:
         return False
-    out = subprocess.run(
-        ["git", "ls-files", "--error-unmatch", str(rel)],
-        cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
-    )
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(rel)],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:  # pragma: no cover - git absent
+        # Every other git call here guards this; without it a git-less host raised an unhandled
+        # FileNotFoundError past the exit-2 contract (#9075 review r6 P3).
+        return False
     return out.returncode == 0
 
 
@@ -574,8 +587,6 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> 
     Raises ``HistoryUnavailable`` (a ``CheckError``) when this checkout is shallow: with a grafted
     tip the comparison cannot be evaluated at all, and a wrong verdict is worse than no verdict.
     """
-    if history_unavailable():
-        raise HistoryUnavailable(HISTORY_UNAVAILABLE)
     failures: list[str] = []
     exempt = _pins_mapping(pins or {}, "pre_existing_unscored_logs")
     present = {p.name for p in logs}
@@ -584,6 +595,19 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> 
             f"pins.pre_existing_unscored_logs exempts {name!r}, which is not in this directory — "
             "an exemption that exempts nothing is how an exempt set is grown one stale row at a time"
         )
+
+    # The laundering whitelist needs NO git: it reads the log's own lines. Run it BEFORE the history
+    # guard, because CI test jobs are always shallow and the guard would otherwise disable the only
+    # defense against a scored number for every CI run (#9075 review r6 P2).
+    for log in logs:
+        if log.name in exempt:
+            ok, why = _log_declares_unscored(log)
+            if not ok:
+                failures.append(f"{log.name}: exempted, but the log {why}")
+
+    if history_unavailable():
+        raise HistoryUnavailable(HISTORY_UNAVAILABLE, failures)
+
     prereg_epochs = _added_epochs(prereg)
     if not prereg_epochs:
         if not logs:
@@ -616,10 +640,6 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> 
                     f"pre-registration's add-commit {prereg_epoch} — the exemption is unnecessary "
                     "here and would hide a log that should have been ordered normally"
                 )
-                continue
-            ok, why = _log_declares_unscored(log)
-            if not ok:
-                failures.append(f"{log.name}: exempted, but the log {why}")
                 continue
             touches = _touch_epochs(log)
             if not touches:
@@ -735,7 +755,10 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
 
     # Each criterion row's threshold in the record must match the table's, character for character.
     rows = parse_criteria_rows((directory / PREREG_NAME).read_text())
-    table = {r["id"]: _plain(r["threshold"]) for r in rows}
+    table = {
+        r["id"]: {part: _plain(r[part]) for part in ("metric", "denominator", "threshold")}
+        for r in rows
+    }
     for crit in _list(record, "criteria", MACHINE_RECORD):
         if not isinstance(crit, dict):
             failures.append(
@@ -747,11 +770,13 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         if cid not in table:
             failures.append(f"{MACHINE_RECORD} carries criterion {cid!r} with no row in the table")
             continue
-        if _plain(str(crit.get("threshold") or "")) != table[cid]:
-            failures.append(
-                f"{MACHINE_RECORD} threshold for {cid} is {crit.get('threshold')!r} but the "
-                f"table says {table[cid]!r}"
-            )
+        for part in ("metric", "denominator", "threshold"):
+            if _plain(str(crit.get(part) or "")) != table[cid][part]:
+                failures.append(
+                    f"{MACHINE_RECORD} {part} for {cid} is {crit.get(part)!r} but the table "
+                    f"says {table[cid][part]!r} — the record is what the run probe FREEZES, so a "
+                    "paraphrase here is a second copy that can disagree"
+                )
     missing = sorted(
         set(table)
         - {str(c.get("id")) for c in _list(record, "criteria", MACHINE_RECORD)
@@ -759,6 +784,12 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
     )
     if missing:
         failures.append(f"{MACHINE_RECORD} omits criteria rows {missing}")
+
+    for match in FOUR_EDGE_RATE.finditer(path.read_text()):
+        failures.append(
+            f"{MACHINE_RECORD}: four-edge denominator rate {match.group(0)!r} — the record is "
+            "frozen by the run probe, so the forbidden denominator may not appear here either"
+        )
 
     exempt = sorted(_pins_mapping(pins, "pre_existing_unscored_logs"))
     if sorted(_list(record, "unscored_runs_before_this_registration", MACHINE_RECORD)) != exempt:
@@ -928,9 +959,12 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
         try:
             failures += check_ordering(prereg, logs, pins)
             ordering = "verified"
-        except HistoryUnavailable:
+        except HistoryUnavailable as exc:
             # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
-            # what reds a correctly ordered tree in every CI test job (#9075 r4 P1).
+            # what reds a correctly ordered tree in every CI test job (#9075 r4 P1). The git-FREE
+            # findings it carries are kept — an unprovable history must not clear a laundering
+            # finding that needed no history to prove.
+            failures += exc.failures
             ordering = HISTORY_UNAVAILABLE
     else:
         ordering = "UNVERIFIED (--no-git)"

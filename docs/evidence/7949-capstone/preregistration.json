@@ -39,59 +39,59 @@
   "criteria": [
     {
       "id": "E1",
-      "metric": "':Object' nodes whose name satisfies is_bare_definite_description (the ^the <X> shape)",
-      "denominator": "all :Object nodes written by the run, same arm, same commit (floor >= 30 Objects)",
-      "threshold": "`after_share <= 0.50 \u00d7 before_share`",
+      "metric": "`:Object` nodes written by the run whose name satisfies `is_bare_definite_description` (the `^the <X>` shape)",
+      "denominator": "**all** `:Object` nodes written by the run, same arm, same commit (floor ≥ 30 Objects)",
+      "threshold": "`after_share <= 0.50 × before_share`",
       "measurement_visible_to_author": true,
-      "basis": "bounded by the shipped positive predicate (9 of 15 shape-in-scope labelled names) and the backfill's measured ~48% delete precision; NOT fitted to the unscored 60.0%"
+      "threshold_basis": "bounded by the shipped positive predicate (9 of 15 shape-in-scope labelled names) and the backfill's measured ~48% delete precision; NOT fitted to the unscored 60.0%"
     },
     {
       "id": "E1b",
-      "metric": "planted units that strictly survive on the deterministic m2 lane (seed 42, judge pin w2-write-path-mechanical-v2)",
-      "denominator": "the 90 planted units",
+      "metric": "anti-gaming control: planted units that **strictly** survive (`grading.strict_survival_counts`) on the deterministic `m2` lane (seed 42, judge pin `w2-write-path-mechanical-v2`)",
+      "denominator": "the **90** planted units",
       "threshold": "`>= 90 of 90`",
       "measurement_visible_to_author": true,
-      "basis": "anti-gaming control for E1: the m2 baseline is 1.0 at this fixtures_hash, so there is no noise budget to hide in"
+      "threshold_basis": "anti-gaming control for E1: the m2 baseline is 1.0 at this fixtures_hash, so there is no noise budget to hide in"
     },
     {
       "id": "E2a",
-      "metric": "value-bearing planted units that strictly survive, each named by id if lost",
-      "denominator": "the 14 value-bearing units",
+      "metric": "value-bearing planted units that **strictly** survive, each named by id if lost",
+      "denominator": "the **14** value-bearing units (§3.3)",
       "threshold": "`>= 13 of 14`",
       "measurement_visible_to_author": true,
-      "basis": "100% would fail on one legitimate reformatting; two losses is a filter eating the carve-out"
+      "threshold_basis": "100% would fail on one legitimate reformatting; two losses is a filter eating the carve-out"
     },
     {
       "id": "E2b",
-      "metric": "surviving planted units whose matched Point also matches at least one OTHER distinct surviving unit (a fused claim)",
-      "denominator": "the planted units that survived (floor >= 30)",
+      "metric": "surviving planted units whose matched `Point` **also** matches at least one **other** distinct surviving unit (a fused claim)",
+      "denominator": "the planted units that survived (floor ≥ 30)",
       "threshold": "`<= 0.05`",
       "measurement_visible_to_author": true,
-      "basis": "anti-fusion control: EXTRACTOR-V4-ARCHITECTURE section 7 forbids aggregation, so volume cannot be won by fusing claims"
+      "threshold_basis": "anti-fusion control: EXTRACTOR-V4-ARCHITECTURE section 7 forbids aggregation, so volume cannot be won by fusing claims"
     },
     {
       "id": "E3",
-      "metric": "derived nodes written by the run (Point + Object + Event) carrying a version anchor",
-      "denominator": "all derived nodes written by the run (floor >= 30 nodes)",
+      "metric": "derived nodes written by the run (`Point` + `Object` + `Event`) carrying a version anchor",
+      "denominator": "**all** derived nodes written by the run (floor ≥ 30 nodes)",
       "threshold": "`= 1.000` (zero unanchored)",
       "measurement_visible_to_author": false,
-      "basis": "an unanchored derivation is a structural defect, not a rate to be traded"
+      "threshold_basis": "an unanchored derivation is a structural defect, not a rate to be traded"
     },
     {
       "id": "E4",
-      "metric": "planted operator edges wired AND persisted with endpoint refs remapped",
-      "denominator": "the 15 planted operator edges of the full 7-session corpus",
+      "metric": "planted operator edges **wired AND persisted** with endpoint refs remapped",
+      "denominator": "the **15** planted operator edges of the full 7-session corpus",
       "threshold": "`= 15 of 15`",
       "measurement_visible_to_author": false,
-      "basis": "the 15 edge gold replaced a 4-edge denominator that swung 0-2 of 4 on identical code; no rate may ever be reported against 4"
+      "threshold_basis": "the 15 edge gold replaced a 4-edge denominator that swung 0-2 of 4 on identical code; no rate may ever be reported against 4"
     },
     {
       "id": "E5",
-      "metric": "hedge/scope/stance-bearing claims recovered as claims in the narrative arm, against the raw arm of the same run",
-      "denominator": "the 29 marker-bearing sentences (plus the raw arm's absolute recovery)",
+      "metric": "hedge/scope/stance-bearing claims recovered as claims in the **narrative** arm",
+      "denominator": "the same claims recovered in the **raw** arm of the same run, both over the **29** marker-bearing sentences (the ratio's denominator); the raw arm's absolute recovery is reported too",
       "threshold": "`>= 0.90` ratio `and >= 0.80` raw absolute",
       "measurement_visible_to_author": false,
-      "basis": "the ratio alone is degenerate - two arms both at 20% give ratio 1.0 - so the raw absolute floor is required too"
+      "threshold_basis": "the ratio alone is degenerate - two arms both at 20% give ratio 1.0 - so the raw absolute floor is required too"
     }
   ],
   "e4_denominator": 15,

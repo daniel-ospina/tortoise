@@ -1159,3 +1159,112 @@ def test_a_non_mapping_criteria_entry_is_reported_not_fatal(tmp_path):
     d = _materialise(tmp_path, rec)
     failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
     assert any("expected a mapping" in f for f in failures), failures
+
+
+# ── round-6 review regressions ───────────────────────────────────────────────
+
+
+def test_the_laundering_whitelist_still_runs_when_history_is_unavailable(tmp_path, monkeypatch):
+    """REGRESSION (#9075 review r6 P2-1): the history guard ran BEFORE the git-free whitelist.
+
+    CI test jobs are ALWAYS shallow, so the one defense against a scored number — which reads the
+    log's own lines and needs no git — was disabled in every CI run. The whitelist must run first,
+    and its findings must survive the unprovable-history verdict.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000,
+                     body=UNSCORED_LOG.replace("verdict=UNPREREGISTERED", "verdict=PASS"))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    with pytest.raises(check.HistoryUnavailable) as excinfo:
+        check.check_ordering(prereg, [log], _exempt())
+    carried = excinfo.value.failures
+    assert any("verdict=PASS" in f for f in carried), carried
+
+
+def test_a_laundered_log_reds_even_in_a_shallow_checkout(monkeypatch):
+    """End to end: the shallow verdict must not turn a laundering finding into a green."""
+    real = (PREREG_DIR / "e1-e2.log").read_text()
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    monkeypatch.setattr(
+        check, "_log_declares_unscored",
+        lambda _log: (False, "carries verdict=PASS — fabricated"),
+    )
+    report = check.run(PREREG_DIR, use_git=True, use_corpus=False)
+    assert not report["ok"], "a carried whitelist failure must survive the shallow verdict"
+    assert any("verdict=PASS" in f for f in report["failures"]), report["failures"]
+    assert report["ordering"].startswith("UNPROVABLE")
+    assert real  # the real log is untouched by this test
+
+
+def test_an_absent_exemption_still_fails_when_history_is_unavailable(monkeypatch):
+    """The `exempt - present` check is also git-free, so it must also run before the guard."""
+    pins = check.parse_pins(PREREG.read_text())
+    pins["pre_existing_unscored_logs"]["ghost.log"] = {"verdict": check.UNSCORED}
+    monkeypatch.setattr(check, "history_unavailable", lambda: True)
+    prereg = PREREG_DIR / check.PREREG_NAME
+    with pytest.raises(check.HistoryUnavailable) as excinfo:
+        check.check_ordering(prereg, sorted(PREREG_DIR.glob("*.log")), pins)
+    assert any("not in this directory" in f for f in excinfo.value.failures)
+
+
+@pytest.mark.parametrize("part", ["metric", "denominator", "threshold"])
+def test_a_record_criterion_cell_that_disagrees_with_the_table_fails(tmp_path, part):
+    """REGRESSION (#9075 review r6 P2-2): only `threshold` was compared.
+
+    `criteria[E4].denominator = "the 4 planted operator edges"` passed with the gate green — the
+    record is what the run probe freezes, so a paraphrase there is a second copy that can disagree.
+    """
+    rec = _record()
+    rec["criteria"] = [dict(c) for c in rec["criteria"]]
+    for crit in rec["criteria"]:
+        if crit["id"] == "E4":
+            crit[part] = "the 4 planted operator edges"
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any(f"{part} for E4" in f for f in failures), failures
+
+
+def test_a_four_edge_rate_in_the_machine_record_is_refused(tmp_path):
+    """The forbidden denominator may not reach the artefact the probe freezes."""
+    rec = _record()
+    rec["criteria"] = [dict(c) for c in rec["criteria"]]
+    for crit in rec["criteria"]:
+        if crit["id"] == "E4":
+            crit["metric"] = "edges wired, reported as 2/4"
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("four-edge denominator rate" in f for f in failures), failures
+
+
+def test_the_real_record_carries_the_tables_own_cells():
+    """No paraphrase: the record is generated from the table, not retyped beside it."""
+    import json as _json
+    record = _json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    table = {r["id"]: r for r in check.parse_criteria_rows(PREREG.read_text())}
+    for crit in record["criteria"]:
+        row = table[crit["id"]]
+        for part in ("metric", "denominator", "threshold"):
+            assert crit[part] == row[part], (crit["id"], part)
+
+
+def test_a_missing_git_binary_does_not_crash_the_ordering(monkeypatch, tmp_path):
+    """REGRESSION (#9075 review r6 P3): `_is_tracked` was the one unguarded subprocess call."""
+    import subprocess as sp
+
+    def no_git(*_a, **_k):
+        raise FileNotFoundError("git")
+
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "e1-e2.log", epoch=1_700_000_000)
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log], _exempt()) == []
+    monkeypatch.setattr(sp, "run", no_git)
+    # With git gone the epochs are unreadable; the contract is an attributed failure, not a crash,
+    # and never a silent pass.
+    try:
+        result = check.check_ordering(prereg, [log], _exempt())
+    except check.CheckError:
+        return
+    assert result, "an unreadable history must not report a clean ordering"

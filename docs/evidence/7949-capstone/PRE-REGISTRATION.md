@@ -406,6 +406,19 @@ including in a historical aside. The history is stated in words (§1.4) for exac
 uv run python tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone
 ```
 
+**Exit codes.** `0` only when every rule below holds; `1` when any rule fails; `2` when the check
+cannot read its subject at all (no document, an unparseable or wrong-typed pins/record block) — a
+check that cannot read what it audits never reports success. `--no-git` and `--no-corpus` exist for
+authoring only: they SKIP a half, and the report says so (`OK (ordering NOT checked)`), so neither can
+be mistaken for a verified run. CI and the acceptance command above run the full check.
+
+**The ordering half has a third outcome.** CI test jobs check out at `fetch-depth: 1`, and git grafts
+a depth-1 clone at its tip, so both sides of an epoch comparison collapse onto one number and
+"violated" is indistinguishable from "unprovable". The check says `UNPROVABLE — shallow clone` rather
+than inventing a verdict. **The laundering whitelist below still runs in that case**, because it reads
+the log's own lines and needs no history at all — so the shallow path weakens the *date* comparison,
+never the protection against a scored number.
+
 Exit 0 only when **all** of these hold:
 
 1. **The five rows carry all three parts.** Every criteria row (E1–E5) names a metric, a denominator
