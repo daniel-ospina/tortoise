@@ -3153,6 +3153,17 @@ surfaces:
   # diff takes `select()`'s early return, so `tier1` is where it must live;
   # `core` is its home for the code diffs that can re-rotate a passage.
   - test_extractor_v4_citation_rot.py
+  # #7948: §13's `aboutObject` read-site census — the table that is the WHOLE
+  # evidence base for the KEEP ruling on the stored edge. It parses `tortoise/`
+  # with `ast` (28 modules carry the edge name; the rescan is the only cost) and
+  # §13 of the storage document, and reds when a reader is undeclared or a row
+  # cites a symbol that does not read. Registered on `core` because the code
+  # diffs that can ADD a reader are core/sdk diffs, and on `tier1` (below)
+  # because the document side of this pin is edited by docs-only PRs — which
+  # take `select()`'s early return and run `tier1` only. Both arms are also the
+  # only reason `tools/ci_selection.py --integrity` can classify the file at
+  # all (`classify_test_file` is exact-name membership, #1262).
+  - test_7948_about_edge_read_sites.py
   # #8500: the FOURTH guard over the same document — the S4 divergence. The doc
   # says *"There is no S4"*, the shipped pipeline runs one whenever a story
   # exists, and the drift marker recording that (#8498) is PROSE: nothing failed
@@ -5455,6 +5466,10 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #7948: the storage document's §13 read-site census (`core` above) — same no-DB,
+# `ast`-only shape, and the same docs-only PR is exactly the change that can
+# leave the table short of a reader (which is how it went wrong four times).
+- test_7948_about_edge_read_sites.py
 # #8500: the same document's S4-divergence guard (`core` above) — same no-DB,
 # `ast`-only shape, and the same docs-only PR is exactly the change that can
 # falsify a claim it pins (or tidy the marker away).
@@ -6878,6 +6893,7 @@ durations:
   test_extractor_v4_step_list_consistency.py: 0.1  # #5092: two fenced blocks + one paragraph read; measured 0.01s of test body (session setup excluded)
   test_extractor_v4_doc_citations.py: 0.1  # #8498 review P2: one row + two module assertions; same no-DB shape as the step-list guard
   test_extractor_v4_citation_rot.py: 0.1  # #8506: doc-text scans + a handful of file reads; same no-DB shape as the two guards above
+  test_7948_about_edge_read_sites.py: 3.5  # unmeasured — #7948 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and WITHOUT this row `duration_coverage_issues()` reds on `ci_selection.py --integrity`. Local reading at this head with `--durations=0`: 3.44 s of call time (`ast` parse + walk of the 28 modules that carry `aboutObject`, the biggest being `sdk.py` at ~1.0 s and `projection/__init__.py` + `mcp_server.py` at ~0.5 s each) and 2.1 s of fixture setup that belongs to the session, not this file. No DB, no network. Refresh from the first post-merge run that includes it.
   test_extractor_v4_s4_stage_claims.py: 6.9  # #8500: `ast` walks over two source files + doc-text scans, plus THREE in-process behavioural tests (`vet_gate.check_batch`/`apply_vet`, `kind_classifier`/`_apply_classify_kinds`) and a row-scoped read of §4.0; no DB. Measured 2026-10-18 with `--durations=0`: 3.96–6.97 s of call time over three runs (one `ast.parse` of the 9.5k-line `extractor_v2.py` is 0.44 s and the mutation fixtures reparse it), so the previous `0.1` under-declared ~50x (#8955 review, UNVERIFIED item)
   test_extractor_v4_failure_policy.py: 0.1  # #8495: §4.4 doc-text scan + two module reads; same no-DB shape as the three guards above
   test_extractor_v4_redaction_reconciliation.py: 0.3  # #8496: one section read + a marker/idempotence check; the `tortoise.sdk` import (~0.12s) is the only cost
