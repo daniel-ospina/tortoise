@@ -9800,6 +9800,97 @@ class TortoiseSDK:
         )
         _capture_redactions = _capture_write["redacted_total"]
 
+        # ⛔ #8501 — THE SESSION-SOURCE MATERIALIZATION RUNS **BEFORE**
+        # EXTRACTION, NOT AFTER IT. `s.contentHash` IS the version anchor a
+        # derived Point records at link time (`resolve_source_versions` →
+        # `r.sourceVersion`, #5256). Extraction is what creates those Points,
+        # and `_materialize_session_source` is what SETS `contentHash` — so
+        # while it ran AFTER extraction the session Source was still the
+        # empty-hash stub when every `extractedFrom` link was MERGEd: `$v`
+        # bound nothing and every point of every capture was written
+        # unanchored (measured on the pre-fix tree: `references` 1/1 anchored,
+        # `extractedFrom` 0/1 — so a revised transcript could never mark its
+        # Points stale, which is the whole #5199/#5038 currency read).
+        #
+        # The ordering cannot be repaired afterwards, and that is why it is
+        # fixed HERE rather than by a post-pass: `sourceVersion` is `ON CREATE`
+        # only (#5199), and the replay value is the Point's OWN journaled
+        # `sourceVersionTransit` snapshot — a re-stamp after the fact would be
+        # an unjournalled second write that a rebuild drops (#9206/#9079).
+        # Materializing first makes the ordinary link-time read return the
+        # version, so the anchor lands in the same snapshot every other
+        # create-path Point uses.
+        #
+        # Only the MINT + MATERIALIZE half moves: the provenance STAMPS below
+        # need `extracted`, so they stay after extraction and read `event_id`
+        # bound here.
+        _capture_source_warnings: list[str] = []
+        # #8501: the mint's two failure shapes are DISTINCT and now live in two
+        # blocks — a RAISE (warned here) and a create that returns no id (warned
+        # by the stamp block below). Without this flag a raise would also hit
+        # that block's "returned no id/eventId" arm and report a shape that did
+        # not happen.
+        _capture_mint_failed = False
+        event_id: str | None = None
+        if not session_existed or (retry_failed_capture and not no_provider):
+            # W5 Phase F (#2104): the mint uses the DETERMINISTIC id derived
+            # from session_id (_server_id channel — the server-only explicit-id
+            # convention, mirroring the explicit ``is_episodic`` param) so two
+            # concurrent FRESH-session captures of the same session_id
+            # (per-thread SDKs / two POSTs — the #1727 TOCTOU: both observe
+            # session_existed=False) MERGE onto ONE Event node instead of
+            # minting two fresh-ULID Events. The Event projection MERGEs on
+            # eventId, so the second concurrent writer's create is an
+            # idempotent no-op.
+            try:
+                event = self.create_event(
+                    f"session_{session_id}", "sessionCaptured",
+                    _server_id=_session_capture_event_id(session_id),
+                    startedAt=now, endedAt=now, sessionId=session_id,
+                    is_episodic=True,
+                )
+                event_id = event.get("id") or event.get("eventId") or None
+            except Exception as e:
+                # Non-fatal — mirrors hosted behavior, but surface the failure
+                # so silent event-log loss is visible (#721). P1 #1529 (D4):
+                # an additive warning entry — never indistinguishable from a
+                # clean capture.
+                _logger.warning(
+                    "capture_session: sessionCaptured Event/EventRecorded write "
+                    "failed (non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                _capture_mint_failed = True
+                _capture_source_warnings.append(
+                    f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
+            # #1352: the extraction projection auto-created a document-typed
+            # Source stub at `session:{id}` (default sourceKind in _link_source)
+            # — the ontology v3.6 §4.6 session source kind is agentSession.
+            # Materialize the typed Source (capture metadata + sessionId +
+            # capturedAt + eventId) and wire (Source)-[:references]->(sessionCaptured
+            # Event). W5 Phase F (#2104, review r1): runs ONLY on a genuine
+            # capture — inside the mint gate (hosted #1727 parity) — a REPLAY
+            # must not re-SET the first capture's Source capturedAt/contentHash
+            # (a replay is a true no-op). Still runs when the mint itself
+            # failed: the Source upgrade is independent of the Event write's
+            # health; the references edge is skipped when no Event landed
+            # (event_id None).
+            # P1 #1529 (D4): a Source materialization failure is non-fatal and
+            # surfaced as an additive warning — never a raw exception after
+            # partial writes.
+            try:
+                self._materialize_session_source(
+                    session_id, event_id, now, conversation)
+            except Exception as e:
+                _logger.warning(
+                    "capture_session: session Source materialization failed "
+                    "(non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                _capture_source_warnings.append(
+                    f"session Source materialization failed: "
+                    f"{type(e).__name__}: {e}")
+
         # M2 LLM extraction over the whole conversation (#822) — replaces the
         # regex decision/claim loop (removed as a product path). Shared with
         # the hosted copy so the two stay in sync.
@@ -9887,6 +9978,10 @@ class TortoiseSDK:
         # P1 #1529: the fail-closed assembly consumes the shared contract.
         extraction_errors = list(meta.get("errors") or [])
         extraction_warnings = list(meta.get("warnings") or [])
+        # #8501: the mint/materialize half now runs BEFORE extraction, so its
+        # additive warnings are collected separately and folded into the same
+        # fail-closed surface (never a silent drop).
+        extraction_warnings.extend(_capture_source_warnings)
 
         # Ontology episodic model (v3.1 §4.5/§3.2): Event node + the point's
         # eventId provenance property. #1417: provenance is the point's
@@ -9894,7 +9989,8 @@ class TortoiseSDK:
         # reserves aboutEvent for "What Event this describes"). Stamp each
         # extracted point's provenance surface; aboutEvent stays clean for
         # content (B3's event slot).
-        event_id: str | None = None
+        # #8501: `event_id` is bound by the phase-1 mint ABOVE (before
+        # extraction); the stamp block below reuses it.
         # W5 Phase F (#2104, indicator 8 — hosted #1727 byte-parity): the
         # sessionCaptured Event mint + provenance stamp run ONLY on a genuine
         # capture — a REPLAY of an existing session_id SKIPS them, exactly
@@ -9936,24 +10032,12 @@ class TortoiseSDK:
             # provenance stamp + typed-Source upgrade they need. The prior
             # failed attempt's Event node exists; the deterministic id makes
             # this a convergent no-op-create + refresh.
+            # #8501: the MINT and the Source MATERIALIZATION already ran in
+            # phase 1, BEFORE extraction (see `_capture_source_warnings`
+            # above) — that ordering is what lets each extracted Point read the
+            # session Source's `contentHash` and record it as `sourceVersion`.
+            # What is left here is the STAMP half, which needs `extracted`.
             try:
-                # W5 Phase F (#2104): the mint uses the DETERMINISTIC id
-                # derived from session_id (_server_id channel — the
-                # server-only explicit-id convention, mirroring the explicit
-                # ``is_episodic`` param) so two concurrent FRESH-session
-                # captures of the same session_id (per-thread SDKs / two
-                # POSTs — the #1727 TOCTOU: both observe
-                # session_existed=False) MERGE onto ONE Event node instead of
-                # minting two fresh-ULID Events. The Event projection MERGEs
-                # on eventId, so the second concurrent writer's create is an
-                # idempotent no-op.
-                event = self.create_event(
-                    f"session_{session_id}", "sessionCaptured",
-                    _server_id=_session_capture_event_id(session_id),
-                    startedAt=now, endedAt=now, sessionId=session_id,
-                    is_episodic=True,
-                )
-                event_id = event.get("id") or event.get("eventId")
                 if event_id:
                     # W5 (#2104, S1): the SDK mirror stamps the full write
                     # provenance alongside the ontology-compliant eventId —
@@ -10153,9 +10237,12 @@ class TortoiseSDK:
                             what="capture retry-heal provenance stamp",
                             params={"sid": session_id},
                         )
-                else:
+                elif not _capture_mint_failed:
                     # P1 #1529 (D4): create_event returning no id/eventId
                     # silently skips stamping — surface as an additive warning.
+                    # #8501: NOT when the mint RAISED — phase 1 already
+                    # reported that, and "returned no id" would name a shape
+                    # that did not happen (one failure, one warning).
                     _logger.warning(
                         "capture_session: sessionCaptured Event write returned "
                         "no id/eventId for session %s — extracted points not "
@@ -10166,43 +10253,20 @@ class TortoiseSDK:
                         "sessionCaptured Event write returned no id/eventId — "
                         "extracted points not stamped")
             except Exception as e:
-                # Non-fatal — mirrors hosted behavior, but surface the failure
-                # so silent event-log loss is visible (#721). P1 #1529 (D4):
-                # also append an additive warnings entry (never
-                # indistinguishable from a clean capture).
+                # Non-fatal — surface the failure so silent provenance loss is
+                # visible (#721). P1 #1529 (D4): an additive warnings entry,
+                # never indistinguishable from a clean capture.
+                # #8501: THIS BLOCK IS THE STAMP HALF ONLY — the mint moved to
+                # phase 1 and reports its own failure there, so naming an
+                # "Event write" here would both mislabel a stamp failure and
+                # collapse the two shapes the split exists to keep distinct.
                 _logger.warning(
-                    "capture_session: sessionCaptured Event/EventRecorded write "
-                    "failed (non-fatal) for session %s: %s", session_id, e,
-                    exc_info=True,
-                )
-                extraction_warnings.append(
-                    f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
-            # #1352: the extraction projection auto-created a document-typed
-            # Source stub at `session:{id}` (default sourceKind in _link_source)
-            # — the ontology v3.6 §4.6 session source kind is agentSession.
-            # Materialize the typed Source (capture metadata + sessionId +
-            # capturedAt + eventId) and wire (Source)-[:references]->(sessionCaptured
-            # Event). W5 Phase F (#2104, review r1): runs ONLY on a genuine
-            # capture — inside the mint gate (hosted #1727 parity) — a REPLAY
-            # must not re-SET the first capture's Source capturedAt/contentHash
-            # (a replay is a true no-op). Still runs when the mint itself
-            # failed: the Source upgrade is independent of the Event write's
-            # health; the references edge is skipped when no Event landed
-            # (event_id None).
-            # P1 #1529 (D4): a Source materialization failure is non-fatal and
-            # surfaced as an additive warning — never a raw exception after
-            # partial writes.
-            try:
-                self._materialize_session_source(
-                    session_id, event_id, now, conversation)
-            except Exception as e:
-                _logger.warning(
-                    "capture_session: session Source materialization failed "
+                    "capture_session: sessionCaptured provenance stamp failed "
                     "(non-fatal) for session %s: %s", session_id, e,
                     exc_info=True,
                 )
                 extraction_warnings.append(
-                    f"session Source materialization failed: "
+                    f"sessionCaptured provenance stamp failed: "
                     f"{type(e).__name__}: {e}")
 
         # #3664 / #1727 Slice 2 (Task 12) — SDK-parity entity-linking pass.
@@ -11712,6 +11776,43 @@ class TortoiseSDK:
         # must NOT move but must not DESTROY on replay either (see the carrier
         # note below). Read back from the node the write just completed, in the
         # same statement, so the values are the ones it holds.
+        #
+        # ⛔ #8501 — THIS WRITER CAN NOW RUN **FIRST**, so it must be able to
+        # mint the stub it upgrades. `capture_session` calls it BEFORE
+        # extraction (that ordering is what gives the extracted Points a
+        # `contentHash` to record as `sourceVersion`), i.e. before any Point has
+        # created the `session:{id}` stub, so its MERGE is now often the CREATE
+        # rather than an upgrade of `_link_source`'s node. The ON CREATE arm
+        # below therefore reproduces that stub's create-time shape EXACTLY —
+        # `sourceKind`, `title=url`, `canonicalUrl`, `urlAliases`, empty
+        # `contentHash`, `ingestedAt` (`projection/edges.py::_mint_source_stub`
+        # is the replay-shared twin of this shape) — and the SET clauses then
+        # upgrade it. Running earlier must not change the node a capture lands:
+        # `test_capture_path_source_shape_is_unchanged_by_the_early_materialization`
+        # pins the resulting property set against the pre-#8501 shape.
+        from .projection.edges import _mint_source_stub
+        # `now` is the CAPTURE's instant, not a fresh clock read: for a capture
+        # that mints no Point this is the only writer of `ingestedAt`, and the
+        # `SourceCreated` record below carries `now` — so a fresh clock here
+        # would make the live node disagree with the replayed one (#8501).
+        #
+        # ⛔ THE RETURNED KEY IS USED, NEVER DISCARDED (#8501 review P3).
+        # `_mint_source_stub`'s contract is explicit — callers MUST address
+        # their subsequent MATCH/MERGE by the key it returns, because a URL
+        # VARIANT resolves (through the SHARED `resolve_source_key`) to the node
+        # its canonical identity already names. Addressing the raw spelling
+        # afterwards would leave the mint and this SET on two different nodes,
+        # i.e. exactly the duplicate `:Source` that resolution exists to
+        # prevent. For a `session:` ref the two are provably equal today
+        # (`normalize_source_url` returns a non-network identity unchanged, so
+        # `resolve_source_key` can only resolve `session:<id>` to itself) —
+        # which is why the contract is honoured LITERALLY here instead of
+        # re-derived by the next reader. `or url` covers the one case the mint
+        # returns ``None`` (an unwritable MERGE key: nothing was minted, so the
+        # MERGE below must keep addressing the key it always did).
+        source_key = _mint_source_stub(
+            proj.g, url, "agentSession", now=now) or url
+        params["url"] = source_key
         _rows = proj.g.query(
             "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses)
             + " RETURN s.validFrom, s.is_episodic",
@@ -11745,8 +11846,8 @@ class TortoiseSDK:
         # "precedes both writes" wording literally would file this door under
         # the journal-first lane, which its order does not earn.
         self._emit_event(
-            "SourceCreated", id=url,
-            url=url,
+            "SourceCreated", id=source_key,
+            url=source_key,
             sourceKind="agentSession",
             contentHash=content_hash,
             title=None,
@@ -11765,7 +11866,7 @@ class TortoiseSDK:
         if event_id:
             # Anchored ON CREATE by the shared derivation writer (#5199).
             # AFTER the record on purpose — see the order note above.
-            proj.link_source_to_event(url, event_id)
+            proj.link_source_to_event(source_key, event_id)
         # ⛔ WHY THAT RECORD EXISTS AT ALL — THE RAW MERGE ABOVE NEEDS A JOURNAL
         # CARRIER (lane L5 #5097, gate item 2). It is a raw graph SET on the
         # capture path, and the rule for those is ALREADY recorded on this lane
@@ -11798,7 +11899,9 @@ class TortoiseSDK:
         #   * `_stub_completion=True` — THIS RECORD COMPLETES A STUB, IT DOES NOT
         #     CREATE A SOURCE (`_upsert_source` reads it as `$stub_completion`).
         #     It suppresses the ON CREATE arm's three CREATOR-ONLY defaults, which
-        #     the live node never has (the M2 `_link_source` stub created it):
+        #     the live node never has — the stub mint never sets them, whether it
+        #     was `_link_source` (any non-capture path) or the `_mint_source_stub`
+        #     call above (the capture path since #8501):
         #     `id`, `version=1` and `externalId=''`. Without it a `rebuild_all` —
         #     which folds `SourceCreated` in pass 1b, BEFORE pass 2 mints the stub
         #     — recovered a session `:Source` carrying a version ordinal this
@@ -11817,15 +11920,39 @@ class TortoiseSDK:
         #   * `updatedAt` carries the instant the write stamped, so the fold's
         #     stub-completion arm reproduces it instead of the replay clock.
         #
-        # ⚠️ `ingestedAt` is emitted too, but it is a KNOWN RESIDUAL and is not
-        # claimed as faithful: the stub this write completes is created by the
-        # M2 `_link_source` projection write, whose `ingestedAt` is minted from
-        # the clock at ITS write, and `_upsert_source`'s ON MATCH arm has no
-        # `ingestedAt` clause at all (only ON CREATE reads the recorded value).
-        # So a rebuilt session Source keeps a replay-clock ingest stamp. That
-        # is the same unjournaled-writer class one writer upstream, not
-        # something this record can fix; the recorded value is emitted anyway so
-        # the ON CREATE path (no stub) is faithful.
+        #   * `ingestedAt` is emitted and IS faithful on the capture path
+        #     (#8501 corrected this note; it used to call the field a KNOWN
+        #     RESIDUAL on a premise this change removed). The stub this write
+        #     completes is now minted BY THIS DOOR — `_mint_source_stub(...
+        #     now=now)` above — so its `ingestedAt` is the CAPTURE's instant, not
+        #     a fresh clock at a later write; this record carries that same
+        #     `now`, and `_upsert_source`'s ON CREATE arm reads the RECORDED
+        #     value (`coalesce($ingestedAt, $now)`, the #5024 rule) instead of
+        #     the replay clock. So live == rebuilt for the field, which is what
+        #     `test_the_stub_the_early_materialization_mints_survives_a_rebuild`
+        #     asserts (`s.ingestedAt` compared after a destructive
+        #     `rebuild_all()`), and
+        #     `test_a_keyless_capture_stamps_its_stub_with_the_capture_instant`
+        #     pins the value on the no-Point lane, and
+        #     `test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`
+        #     pins it on the lane that extracts.
+        #
+        #     The residual it used to describe is still REACHABLE — the
+        #     boundary is the stub's CREATOR, not the path. The field above is
+        #     faithful exactly where this door's own mint CREATED the node.
+        #     Whenever a `session:<id>` stub ALREADY EXISTS when this door runs,
+        #     the mint's ON MATCH arm leaves that earlier writer's `ingestedAt`
+        #     in place while the record carries the capture's instant, and
+        #     `_upsert_source`'s ON MATCH arm has no `ingestedAt` clause at all
+        #     (only ON CREATE reads the recorded value) — so a rebuild folds the
+        #     recorded instant onto a live node still holding the earlier one.
+        #     That earlier writer is any door that minted the ref first (a
+        #     `create_point` carrying a `session_id` → `_link_source`, the
+        #     hosted commit path's `create_source`, the #4125 reconciler) plus
+        #     every node written before #8501 or by a legacy writer. This record
+        #     cannot correct that — the instant was never journaled by the
+        #     writer that chose it — but it is no longer the capture path's
+        #     DEFAULT shape: a fresh capture now mints as it materializes.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods

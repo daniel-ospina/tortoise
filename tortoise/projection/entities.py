@@ -5465,8 +5465,11 @@ class _EntityHandlers:
             # `version`, `externalId`) are suppressed for a record that
             # COMPLETES a stub instead of creating a Source (`$stub_completion`,
             # set only by `sdk._materialize_session_source`). Its live node was
-            # created by the M2 `_link_source` stub, which writes NONE of the
-            # three — so an ON CREATE arm that wrote them would make a replay
+            # created by a stub MINT, and no mint writes any of the three —
+            # `_link_source` on every non-capture path, or, since #8501, that
+            # same `_mint_source_stub` called by `_materialize_session_source`
+            # itself (the capture path mints the stub it completes). So an ON
+            # CREATE arm that wrote them would make a replay
             # GAIN `id`/`version=1`/`externalId=''` the live node never had, and
             # (worse) restart a version ordinal for a writer that does not
             # advance one. `NULL` is the removal/no-op value, so the property

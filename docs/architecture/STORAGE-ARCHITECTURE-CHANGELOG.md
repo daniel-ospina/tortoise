@@ -822,3 +822,53 @@ The lesson this entry keeps re-learning, now recorded in the guard itself: **a g
 - **The exemption's SECOND premise was asserted function-wide, so it was satisfied by the other fold's gate.** `re.search(r"if k in \(|if attrs:", body)` over the whole function passed on the creation fold's `if attrs:` and said nothing about the repoint fold — the same "function-wide text union" leg 9's own docstring rejects for the about-literal half, one level down. It is now `_setter_gate_premises`: each `SET` statement is walked to its OWN enclosing `if` and to the assignment that builds the map it writes, and the map must be built from a fixed literal attribute vocabulary (a ceiling, `FALSE_POSITIVE_ATTR_VOCAB`). A constant gate (`if True:`) is rejected explicitly — a gate that can never be false is not a gate — and the leg carries a synthetic two-fold probe in which only the first fold is gated, asserting the rule reds there and passes when both are. Mutation-checked: `if True:` on the repoint fold reds (the function-wide search this replaced stayed green).
 - **The guard's `WHAT IS PINNED` list claimed "one entry per test, in file order" and was one entry short and out of order.** It listed 24 entries for 25 tests, and the omitted leg (`test_the_unmeasured_share_retraction_is_pinned`) is the **2nd** in the file, so every later entry described the wrong test — and the last entry described the 7th. The merge is where it went stale: two parents carried 24 tests each but *different* sets, and the resolution unioned them without re-deriving either count. The list is now one entry per test **in file order**, and its dedicated leg (`test_the_pin_index_names_every_leg`) re-derives the coverage, the uniqueness AND the order from `def test_` instead of trusting the prose — the same class round 8 declared eliminated, in the artifact that declares it. Mutation-checked: deleting an entry, duplicating one, or reordering one reds.
 - **A CI-configuration count, corrected by measurement, and a duplicate row removed.** The `durations` row's tail still said "over ALL **24** tests"; the merge union made it 25, and this round's added leg makes 26 — and the merge left the row TWICE (both lanes had edited it), so the surviving row is single, states 26, and retires the restated seconds in favour of how to re-derive them. The same cycle removed a 19.5 s O(n²) in the exemption leg (it called `ast.get_source_segment` for every call in a 16k-line module; the line index is now built once), which is the reading's real cause and not a property of the assertions.
+
+---
+
+## The capture-path write order — the invariant §9.6 states, now pinned (`#8501`)
+
+**What §9.6 says, and what the code did.** §9.6 records that the capture owns a
+session `:Source`'s version. The code did not: `capture_session` (and hosted
+`_capture_session_impl`) ran extraction — which creates the Points and MERGEs
+their `extractedFrom` links — **before** `_materialize_session_source`, the one
+writer that SETs `contentHash`. So `resolve_source_versions` read an empty hash
+**at link time**, `$v` bound nothing, and `_anchor_on_create` wrote
+`sourceVersion = NULL` on every create-path link. Measured on the pre-fix tree:
+`references` 1/1 anchored, `extractedFrom` 0/1. The consequence is not cosmetic —
+a revised transcript could never mark the claims it had superseded, because no
+claim recorded which version it was read from.
+
+**The invariant, stated so the next lane does not have to re-derive it.** *A
+capture must write its session Source's version BEFORE anything reads it at link
+time.* That is what §9.6 already assumed; it was true in prose and false in code,
+and nothing compared the two.
+
+**What changed.** Both lanes move the MINT + MATERIALIZE half above extraction,
+inside the **same gate** each lane already used (`not session_existed or
+(retry_failed_capture and not no_provider)` / `… and not store_only`), and the
+provenance stamp stays after extraction. Three consequences were handled
+deliberately rather than discovered later:
+
+- **The materializer can now CREATE the stub** (nothing created it yet), so it
+  mints `_link_source`'s create-time shape through the replay-shared
+  `_mint_source_stub` and upgrades it — and the `SourceCreated` record is
+  emitted before the link, so the raw `SET` still has a journal carrier (§17.1).
+- **`_mint_source_stub(now=…)` carries the CAPTURE's instant**, not a fresh clock
+  read: for a keyless capture this mint is the only writer of `ingestedAt`, and
+  its `SourceCreated` record carries `now`. A fresh read would put a later clock
+  on the live node than the replay folds in — a live≠replay divergence on a path
+  that previously had none.
+- **A KEYLESS capture's `:Source` gains four properties** (`title`,
+  `canonicalUrl`, `urlAliases`, `is_episodic`). Pre-fix that lane created the node
+  with only its `SET` properties, because it never reached `_link_source`. The
+  new shape is the stub shape the extracting lane has always had (and
+  `is_episodic` is the `#1486` discriminator), but it IS a behaviour change on
+  that lane, and it is pinned rather than disclosed-away.
+
+**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` — the
+anchor must be non-NULL, equal to the Source's stored `contentHash`, and present
+in the Point's own journaled `sourceVersionTransit`; it must survive a
+destructive `rebuild_all()`; a re-capture must neither advance nor drop it; the
+keyless lane's full key set is pinned; and the pre-fix Source shape is pinned
+against the literal set. Registered on the `core` surface with a `durations:`
+weight, because a guard no CI leg selects is a guard that does not run.
