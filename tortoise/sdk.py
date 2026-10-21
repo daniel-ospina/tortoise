@@ -4624,6 +4624,169 @@ def _capture_minted_ids(extracted: list[dict]) -> list[str]:
             if p.get("dedup", DEDUP_NEW) == DEDUP_NEW and p.get("id")]
 
 
+#: The §17.1 lane the capture provenance stamp writes under (#9350).
+#:
+#: Before this, the stamp was a raw write at the projection's handle with NO
+#: record, which #9206's rule forbids declaring ("a declaration that blesses an
+#: unjournalled cache write is the #9068 defect") and which a journal-only
+#: rebuild silently reverted for any minted Point that is never promoted. The
+#: stamp is now journalled FIRST and the write declares this lane.
+#:
+#: A stable literal ON PURPOSE: `tests/test_9350_capture_provenance_journalled.py`
+#: reads it back AT the write handle (`_CACHE_WRITE_AUTHORIZED`), the same way
+#: `test_9079_ep_epoch_declared.py` pins the graph-metadata lane, so a rename is
+#: a red test rather than a silent relabelling.
+_CAPTURE_PROVENANCE_LANE = "capture.provenance-stamp"
+
+
+def _stamp_capture_provenance(sdk, proj, ids, *, event_id, session_id,
+                              harness, ingested_at, statement, what,
+                              params=None) -> bool:
+    """Journal the capture provenance, then write it under its own lane.
+
+    THE STAMP DOOR (#9350): one ``PointRevised`` per id is appended FIRST,
+    then the cache write runs inside
+    ``_live_write_scope(_CAPTURE_PROVENANCE_LANE)`` — the ordering every live
+    door in this module takes (§17.1,
+    `docs/architecture/STORAGE-ARCHITECTURE.md`). The append is IN THIS BODY
+    rather than in a helper on purpose: the §17.1 census
+    (`tests/test_9124_declared_live_doors.py`) reads one function at a time and
+    refuses a lane declaration whose own body appends no record — a door whose
+    record lives behind a call edge is a door the gate cannot check.
+
+    ONE RECORD PER ID, not one batched record: ``PointRevised`` is id-keyed
+    (``_revise_point`` and the pure fold both address a single Point), so a
+    batched payload would be a record NO fold could apply — a carrier with no
+    fold is the #3299 class. This is also why a minted Point's provenance
+    survives a journal-only rebuild even when the Point is never promoted: the
+    four fields are not in its ``PointAdded`` snapshot (that was taken at
+    extraction time, before the stamp).
+
+    ``statement`` is the caller's own SET (the three call sites differ in the
+    node variable and in their no-clobber WHERE guards, and those guards are
+    the reason the statement is passed rather than built here); ``params`` adds
+    any guard-specific parameters beside the standard five.
+
+    Returns ``False`` when a CONFIGURED journal refused an append, so the
+    caller can skip the cache write: the derived store must never lead the
+    truth (§17.1). ``True`` otherwise, including the journal-less lane — there
+    is nothing to commit to there, and nothing a replay could restore. The
+    caller does not inspect the value: the refusal is already disclosed to the
+    customer, because ``_emit_event`` counts it on
+    ``_journal_write_failures`` and the capture receipt carries the #4240
+    delta warning (both lanes).
+    """
+    if not ids:
+        return True
+    if "IS NULL" in statement and "$stamp_ids" not in statement:
+        # #9350 review (P2-1): a GUARDED stamp's ``$ids`` is the caller's CLAIM
+        # predicate, not the set that WOULD be journalled. Without the narrow
+        # clause the WRITTEN set is not a subset of the JOURNALLED set, so an id
+        # that became eligible between the pre-read and the write is stamped
+        # with no record — the §17.1 window this change exists to close.
+        #
+        # ⛔ The check runs BEFORE the appends (review round 3): raising after
+        # them left the journal holding records for a write that was then
+        # skipped — `rebuild()` would apply provenance the capture never wrote,
+        # the mirror of the defect this issue removes. `_recorded` is computed
+        # first because nothing here depends on the append.
+        raise ValueError(
+            f"a guarded stamp must narrow its write to $stamp_ids ({what})")
+    # ONE record per id, for the ids a record CAN name. The SAME filtered list
+    # binds the write (#9350 review): the record loop already skipped a non-str
+    # / empty id, so binding the raw list would let the write touch an id the
+    # loop had no record for — the unjournalled shape, one malformed id away.
+    _recorded = [pid for pid in ids if isinstance(pid, str) and pid]
+    # ONE RECORD PER ID, appended UNCONDITIONALLY for every id before the single
+    # cache write below. A comprehension rather than a `for` loop ON PURPOSE:
+    # the §17.1 census derives "the record precedes the write" from the AST, and
+    # an append nested one control-flow level deeper than the write it covers
+    # cannot be proven to cover it (the write would be reachable on a branch
+    # with no record) — `tests/test_9124_declared_live_doors.py::
+    # test_every_live_declared_door_is_journal_first` refuses that shape. The
+    # comprehension also states the property directly: every id is emitted,
+    # then the write runs once.
+    appended = [
+        sdk._emit_event(
+            "PointRevised", id=pid,
+            eventId=event_id, source_session=session_id,
+            source_harness=harness, ingested_at=ingested_at)
+        for pid in _recorded
+    ]
+    if any(ok is False for ok in appended):
+        # A configured journal REFUSED the record: do NOT write the cache. The
+        # write is the thing the record describes, so proceeding would leave
+        # the derived store ahead of the truth with no repair path (§17.1
+        # window (a)). `_emit_event` has already logged and counted it (#4240).
+        return False
+    bound = {"ids": list(_recorded), "eid": event_id, "sid": session_id,
+             "harness": harness, "ing": ingested_at, **(params or {})}
+    if "$stamp_ids" in statement:
+        # #9350: a GUARDED stamp's ``$ids`` is the caller's CLAIM predicate (it
+        # arrives through ``params``), so it is NOT the set this call just
+        # journalled — binding the write to it alone would let an id that became
+        # eligible between the pre-read and the write be stamped with NO record
+        # (the #9068 shape this change exists to remove). ``$stamp_ids`` is bound
+        # AFTER ``params``, so no caller can widen it: the statement's
+        # ``AND <node>.id IN $stamp_ids`` makes the WRITTEN set a subset of the
+        # JOURNALLED set by construction. An id that appeared in between is left
+        # for the next pass rather than written unrecorded.
+        bound["stamp_ids"] = list(_recorded)
+    with _live_write_scope(_CAPTURE_PROVENANCE_LANE):
+        sdk._graph_write_with_retry(
+            lambda: proj.g.query(statement, params=bound), what=what)
+    return True
+
+
+def _capture_stamp_targets(sdk, proj, statement: str, params: dict,
+                           what: str) -> list[str]:
+    """The ids a guarded provenance stamp statement WOULD match, read first.
+
+    The operator and retry-heal stamps carry ``eventId IS NULL`` no-clobber
+    guards, so the set they write is not known before the write. #9350 needs
+    one ``PointRevised`` per written id BEFORE the cache write, so the ids are
+    read with the SAME predicate the write uses (``statement`` is the shared
+    prefix of both, in the caller) — one extra index-served read per guarded
+    statement, on the operator / retry paths only.
+
+    A stale read is harmless to the WRITE: the write keeps its own guard, so an
+    id stamped in between simply does not match and nothing is clobbered.
+
+    ⚠ It is NOT invisible to the RECORD, and the difference is stated rather
+    than papered over: the ``PointRevised`` for such an id was already appended
+    from THIS read and carries THIS capture's four values, while the node now
+    holds the other writer's. So a journal-only rebuild takes this capture's
+    ``eventId``/``ingested_at`` for that id until the next record for it — a
+    window bounded to attribution fields on an id this capture was already
+    stamping, and unclosable by re-ordering (the record precedes the write by
+    design). The inverse direction is benign: an id that becomes eligible
+    between read and write is not healed on this pass (``if not ids`` skips the
+    statement), which is what the pre-#9350 code did for the whole set.
+
+    The read rides ``_graph_write_with_retry`` (#7405): it is part of the same
+    stamp path, and a transient graph-replaced abort on the READ would otherwise
+    lose the whole stamp — the #2552 ``operator_counts == {}`` signature the
+    retry funnel exists to prevent, one query earlier than before.
+
+    ⛔ ``statement`` must be READ-ONLY, and that is enforced here rather than
+    trusted to the callers: the §17.1 census declares this function as an
+    unresolved *read*, and a statement that writes would let an unjournalled,
+    lane-less write ride a declaration that says "reads" — the #9350 review's
+    P2-2 (measured: a ``SET`` smuggled into a caller's prefix left the arming
+    gate reporting a fully-declared surface).
+    """
+    from .projection import _statement_writes
+
+    if _statement_writes(statement):
+        raise ValueError(
+            "_capture_stamp_targets reads the ids a stamp WOULD write, so its "
+            f"statement must be read-only; refusing a writing one ({what})")
+    result = sdk._graph_write_with_retry(
+        lambda: proj.g.query(statement, params=params), what=what)
+    rows = getattr(result, "result_set", None) or []
+    return [r[0] for r in rows if r and isinstance(r[0], str)]
+
+
 def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
     """Ids the ingest EP pass must calibrate for one capture (Phase D).
 
@@ -6416,6 +6579,15 @@ class TortoiseSDK:
         measures retry behaviour — the eval's ``ingest_retries`` Layer-1 outcome
         — can observe a retry that happened INSIDE the SDK, not only the outer
         phase retry.
+
+        #9350: the funnel is also used for the capture stamp's id PRE-READ
+        (``_capture_stamp_targets``), so a re-issued read increments the same
+        counter. That is deliberate — the counter measures *re-issues through
+        this funnel*, not statements that mutate — but a caller reading it as
+        "write retries" will over-count by at most the guarded-stamp reads of
+        one capture, and only when a re-issue actually happened. Suppressing it
+        here would hide real instability (a read that had to be re-issued after
+        a GRAPH-REPLACED abort is the same defect the retry exists for).
         """
         from .retry import (
             WriteStageRetriesExhausted,
@@ -9525,15 +9697,22 @@ class TortoiseSDK:
                     # bounded write retry too. Idempotent: the statement SETs
                     # absolute values on an explicit id list, so a re-issue
                     # writes the same four fields again.
-                    self._graph_write_with_retry(
-                        lambda: proj.g.query(
+                    # #9350: JOURNAL-FIRST (§17.1). One `PointRevised` per
+                    # minted id is appended BEFORE this statement reaches the
+                    # write handle, and the statement then runs inside its own
+                    # `_live_write_scope` lane — so the minted Point's
+                    # provenance survives a journal-only rebuild even when the
+                    # Point is never promoted, and the write is a declared
+                    # lane rather than a raw cache write (the #9068 shape
+                    # #9206 forbids blessing).
+                    _stamp_capture_provenance(
+                        self, proj, minted_ids, event_id=event_id,
+                        session_id=session_id, harness=source_harness,
+                        ingested_at=now,
+                        statement=(
                             "MATCH (n:Point) WHERE n.id IN $ids "
                             "SET n.eventId=$eid, n.source_session=$sid, "
-                            "    n.source_harness=$harness, n.ingested_at=$ing",
-                            params={"ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now},
-                        ),
+                            "    n.source_harness=$harness, n.ingested_at=$ing"),
                         what="capture minted-point provenance stamp",
                     )
                     # #2552 (layer-2 WIRE — the structural leg): reified
@@ -9560,29 +9739,44 @@ class TortoiseSDK:
                         # #7853: c is id-anchored — sweep the epistemic labels.
                         # The SET is idempotent, so a multi-labelled endpoint is
                         # stamped under each matching label harmlessly.
-                        for _q in epistemic_label_queries(
+                        for _prefix in epistemic_label_queries(
                             "MATCH (o:Point {is_operator:true})-"
                             "[:IMPL|NAND]->(c:{label}) "
                             "WHERE c.id IN $ids "
                             "AND (o.status IS NULL OR o.status = 'draft') "
                             "AND o.eventId IS NULL "
-                            "SET o.eventId=$eid, o.source_session=$sid, "
-                            "    o.source_harness=$harness, "
-                            "    o.ingested_at=$ing"
                         ):
                             # #7405 (audit G8): each label statement is its own
                             # write and rides the retry. Idempotent: the
                             # statement carries an ``o.eventId IS NULL`` guard,
                             # so a re-issue stamps only what a partial attempt
-                            # did not already stamp. ``_q`` is bound as a default
-                            # so the lambda can never close over a LATER loop
-                            # value.
-                            self._graph_write_with_retry(
-                                lambda _q=_q: proj.g.query(_q, params={
-                                    "ids": minted_ids,
-                                    "eid": event_id, "sid": session_id,
-                                    "harness": source_harness, "ing": now}),
+                            # did not already stamp.
+                            # #9350: the guard means the written set is not
+                            # known before the write, so the ids are read with
+                            # the SAME predicate first and journalled per id;
+                            # the write then carries ``AND o.id IN $stamp_ids``
+                            # so it touches only ids that DID get a record. A
+                            # stale read still leaves the record ahead of the
+                            # node for that id (stated in
+                            # `_capture_stamp_targets`) — it never lets a WRITE
+                            # go unrecorded.
+                            _op_ids = _capture_stamp_targets(
+                                self, proj, _prefix + "RETURN DISTINCT o.id",
+                                {"ids": minted_ids},
+                                what="capture operator-label stamp targets")
+                            _stamp_capture_provenance(
+                                self, proj, _op_ids, event_id=event_id,
+                                session_id=session_id,
+                                harness=source_harness, ingested_at=now,
+                                statement=(
+                                    _prefix
+                                    + "AND o.id IN $stamp_ids "
+                                      "SET o.eventId=$eid, "
+                                      "o.source_session=$sid, "
+                                      "    o.source_harness=$harness, "
+                                      "    o.ingested_at=$ing"),
                                 what="capture operator-label provenance stamp",
+                                params={"ids": minted_ids},
                             )
                     # #4936: the minted-point join above CANNOT reach an
                     # operator whose endpoint RE-KEYED to a pre-existing
@@ -9611,19 +9805,32 @@ class TortoiseSDK:
                     if operator_ids:
                         # #7405 (audit G8): same funnel; idempotent by the
                         # statement's own ``o.eventId IS NULL`` guard.
-                        self._graph_write_with_retry(
-                            lambda: proj.g.query(
-                                "MATCH (o:Point {is_operator:true}) "
-                                "WHERE o.id IN $ids "
-                                "AND o.eventId IS NULL "
-                                "SET o.eventId=$eid, o.source_session=$sid, "
-                                "    o.source_harness=$harness, "
-                                "    o.ingested_at=$ing",
-                                params={"ids": operator_ids,
-                                        "eid": event_id, "sid": session_id,
-                                        "harness": source_harness, "ing": now},
-                            ),
+                        # #9350: journalled per WRITTEN id first (read with the
+                        # same guard), then the guarded write under the stamp
+                        # lane — a raw write here would be refused under an
+                        # armed handle.
+                        _op_prefix = (
+                            "MATCH (o:Point {is_operator:true}) "
+                            "WHERE o.id IN $ids "
+                            "AND o.eventId IS NULL ")
+                        _requested = set(operator_ids)
+                        _written = [pid for pid in _capture_stamp_targets(
+                            self, proj, _op_prefix + "RETURN DISTINCT o.id",
+                            {"ids": operator_ids},
+                            what="capture operator-id stamp targets")
+                            if pid in _requested]
+                        _stamp_capture_provenance(
+                            self, proj, _written, event_id=event_id,
+                            session_id=session_id, harness=source_harness,
+                            ingested_at=now,
+                            statement=(
+                                _op_prefix
+                                + "AND o.id IN $stamp_ids "
+                                  "SET o.eventId=$eid, o.source_session=$sid, "
+                                  "    o.source_harness=$harness, "
+                                  "    o.ingested_at=$ing"),
                             what="capture operator-id provenance stamp",
+                            params={"ids": operator_ids},
                         )
                     if retry_failed_capture:
                         # #2335 WI-2b / review (PR #2473): a RETRY heals the
@@ -9650,18 +9857,28 @@ class TortoiseSDK:
                         # ``n.eventId IS NULL`` guard, so a re-issue after an
                         # abort cannot re-stamp a node a partial attempt
                         # already touched.
-                        self._graph_write_with_retry(
-                            lambda: proj.g.query(
-                                "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
-                                "(n:Point) WHERE n.eventId IS NULL "
-                                "AND coalesce(n.is_episodic, false) <> true "
-                                "SET n.eventId=$eid, n.source_session=$sid, "
-                                "    n.source_harness=$harness, "
-                                "    n.ingested_at=$ing",
-                                params={"sid": session_id, "eid": event_id,
-                                        "harness": source_harness, "ing": now},
-                            ),
+                        # #9350: journalled per written id first, then the
+                        # guarded write under the stamp lane.
+                        _heal_prefix = (
+                            "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                            "(n:Point) WHERE n.eventId IS NULL "
+                            "AND coalesce(n.is_episodic, false) <> true ")
+                        _heal_ids = _capture_stamp_targets(
+                            self, proj, _heal_prefix + "RETURN DISTINCT n.id",
+                            {"sid": session_id},
+                            what="capture retry-heal stamp targets")
+                        _stamp_capture_provenance(
+                            self, proj, _heal_ids, event_id=event_id,
+                            session_id=session_id, harness=source_harness,
+                            ingested_at=now,
+                            statement=(
+                                _heal_prefix
+                                + "AND n.id IN $stamp_ids "
+                                  "SET n.eventId=$eid, n.source_session=$sid, "
+                                  "    n.source_harness=$harness, "
+                                  "    n.ingested_at=$ing"),
                             what="capture retry-heal provenance stamp",
+                            params={"sid": session_id},
                         )
                 else:
                     # P1 #1529 (D4): create_event returning no id/eventId

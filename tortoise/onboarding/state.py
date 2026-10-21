@@ -542,10 +542,10 @@ def _eager_init_fragment_shapes() -> frozenset[str]:
 
 
 #: The ONLY shape a legal `eager_init_query()` PREFIX may have: zero or more
-#: `CREATE`/`MERGE` clauses, each a `:TeamMeta` node pattern with an optional
+#: write clauses, each of them a `:TeamMeta` node pattern with an optional
 #: property map — i.e. exactly the argument `eager_init_query` documents
-#: ("append the OnboardingState init to a TeamMeta CREATE") and exactly what all
-#: five call sites pass.
+#: ("append the OnboardingState init to a TeamMeta statement") and exactly
+#: what all five call sites pass.
 #:
 #: ⛔ A *regex over the pattern*, not a keyword blocklist, on purpose: the lane's
 #: width claim is "this statement writes `:TeamMeta` + the onboarding fragment",
@@ -572,7 +572,7 @@ def is_eager_init_statement(cypher: str) -> bool:
       `onboarding_node_init_fragment()` itself (every fork/compact/edge variant),
       so a reformat of the builder moves the check with it instead of turning
       every org mint into a `ValueError`;
-    * the PREFIX must be a `:TeamMeta` CREATE/MERGE and nothing else
+    * the PREFIX must be the `TeamMeta` node write and nothing else
       (`_EAGER_INIT_PREFIX_SHAPE`). `eager_init_query()` PREPENDS a
       caller-supplied statement, so a fragment-contains test would have
       authorized `eager_init_query("CREATE (:Point {id:$id})", …)` — an
@@ -635,8 +635,8 @@ def run_eager_init(graph: Any, cypher: str,
         raise ValueError(
             "run_eager_init only issues an `eager_init_query()` statement: the "
             "masked text must END with `onboarding_node_init_fragment()`'s "
-            "`:OnboardingState` MERGE, and everything before it must be a "
-            "`:TeamMeta` CREATE/MERGE (#9157); for anything else open the lane "
+            "`:OnboardingState` MERGE, and everything before it must be the "
+            "`TeamMeta` node write (#9157); for anything else open the lane "
             "your write belongs to. Refusing:\n"
             f"{cypher[:400]}"
         )

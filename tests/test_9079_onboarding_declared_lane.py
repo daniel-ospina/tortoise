@@ -59,11 +59,13 @@ from pathlib import Path
 
 import pytest
 
+from tests._declared_lane_probe import (
+    LaneProbe,
+    assert_no_foreign_undeclared,
+)
 from tortoise.projection import (
-    _CACHE_WRITE_AUTHORIZED,
     DirectCacheWriteRefused,
     _GuardedGraph,
-    _statement_writes,
 )
 
 ORG = "org9121"
@@ -128,13 +130,23 @@ def sdk_with_journal(tmp_path):
         sdk.close()
 
 
-def _instrument(monkeypatch, *, refuse: bool):
-    """Install the #9124 predicate on `_GuardedGraph.query`; record every
-    statement the onboarding writers issue as `(statement, reason, writes)`.
+def _instrument(monkeypatch, *, refuse: bool, owner) -> LaneProbe:
+    """Install the #9124 predicate on `_GuardedGraph.query`, ATTRIBUTED to `owner`.
 
-    `reason` is `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle
-    dispatch, which is where #9124's guard will read it — so "the write ran
-    inside a declaration" is observed rather than inferred from source.
+    The recorder is `tests/_declared_lane_probe.LaneProbe` (#9256): it records
+    `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle dispatch,
+    which is where #9124's guard will read it, so "the write ran inside a
+    declaration" is observed rather than inferred from source — together with
+    the identity of the PROJECTION whose handle issued the statement.
+
+    ⛔ WHY IDENTITY (#9256). The patch is on the CLASS (the handle is
+    `__slots__`-restricted and read-only), so the recorder sees every projection
+    in the process. Without the owner it attributed a PEER projection's
+    `_ensure_indexes` burst — `CREATE INDEX FOR (n:Point) …`, legitimately
+    declared under `_ensure_indexes_declared`'s `schema-ddl` lane for THAT
+    projection — to the onboarding writers, and this suite red on a statement no
+    onboarding writer issues. Assertions below read `probe.own()`; the probe's
+    `foreign()` view is what keeps the filter from being a blindfold.
 
     ⛔ The statement is recorded IN FULL (normalized whitespace only). An earlier
     version truncated it to 160 chars for the failure message — and the class
@@ -142,24 +154,7 @@ def _instrument(monkeypatch, *, refuse: bool):
     cut and an appended `MERGE (p:Point …)` passed silently: fail-open in the
     one direction that check exists for. Truncation belongs in the MESSAGE.
     """
-    original = _GuardedGraph.query
-    seen: list[tuple[str, str | None, bool]] = []
-
-    def instrumented(self, cypher, params=None, timeout=None):
-        writes = _statement_writes(cypher)
-        reason = _CACHE_WRITE_AUTHORIZED.get()
-        seen.append((" ".join((cypher or "").split()), reason, writes))
-        if (refuse and writes and reason is None
-                and getattr(self._proj, "_journal_backed", False)):
-            raise DirectCacheWriteRefused(
-                "§17.1 third door (#9079/#9124): a mutating statement reached "
-                "`proj.g` with no declaration in flight — statement="
-                + seen[-1][0][:160]
-            )
-        return original(self, cypher, params=params, timeout=timeout)
-
-    monkeypatch.setattr(_GuardedGraph, "query", instrumented)
-    return seen
+    return LaneProbe(owner).install(monkeypatch, refuse=refuse)
 
 
 def test_the_instrument_records_statements_in_full(sdk_with_journal,
@@ -169,9 +164,10 @@ def test_the_instrument_records_statements_in_full(sdk_with_journal,
     rather than quietly shrink what they can see.
     """
     proj = sdk_with_journal._get_proj()
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_hosted_write_set(proj)
 
+    seen = probe.own()
     longest = max(len(c) for c, _r, _w in seen)
     assert longest > 160, (
         "every recorded statement is <= 160 chars, so the class check may be "
@@ -325,10 +321,10 @@ def test_every_onboarding_write_declares_its_lane(sdk_with_journal, monkeypatch)
         "rule and every assertion below would be vacuous"
     )
 
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_hosted_write_set(proj)
 
-    writes = [(c, r) for c, r, w in seen if w]
+    writes = [(c, r) for c, r, w in probe.own() if w]
     assert len(writes) >= 6, (
         f"the writers issued {len(writes)} mutating statement(s); the walk no "
         "longer covers the hosted write set, so this pin has gone stale"
@@ -343,6 +339,11 @@ def test_every_onboarding_write_declares_its_lane(sdk_with_journal, monkeypatch)
         "the lane must declare ONE name, so the guard block and the refusal "
         f"message can point at it; saw {sorted({r for _c, r in writes})}"
     )
+    # ⛔ Attribution is not a blindfold (#9256): scoping this census to THIS
+    # lane must not silence a PEER projection's UNDECLARED write — that is a
+    # §17.1 violation on product code (`hosted_api._acquire_probe_sdk`), not
+    # another lane's declaration to judge.
+    assert_no_foreign_undeclared(probe)
 
 
 def test_every_declared_statement_writes_only_declared_labels(
@@ -369,11 +370,11 @@ def test_every_declared_statement_writes_only_declared_labels(
     }
 
     proj = sdk_with_journal._get_proj()
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_hosted_write_set(proj)
 
     written: set[str] = set()
-    for cypher, _reason, writes in seen:
+    for cypher, _reason, writes in probe.own():
         if writes:
             written |= _labels_written(cypher)
     assert written, "the walk issued no mutating statement — vacuous"
@@ -388,6 +389,9 @@ def test_every_declared_statement_writes_only_declared_labels(
         "declared set WITH its argument, or stop routing it through this "
         "funnel."
     )
+    # ⛔ The label check above reads `probe.own()` (#9256); this keeps a PEER
+    # projection's undeclared write from being filtered away with it.
+    assert_no_foreign_undeclared(probe)
 
 
 def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
@@ -408,8 +412,9 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
     from tortoise.onboarding import state as _os
 
     proj = sdk_with_journal._get_proj()
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_hosted_write_set(proj)
+    seen = probe.own()
 
     expected = (
         "MERGE (s:Subject {id: $sid}) WITH s "
@@ -430,6 +435,71 @@ def test_the_subject_anchor_mint_is_not_widened(sdk_with_journal, monkeypatch):
             "on #9079 and update both the bullet and this expectation:\n"
             f"  expected: {expected}\n  actual:   {cypher}"
         )
+
+
+def test_a_peer_projection_opening_mid_walk_is_not_attributed_to_this_lane(
+        sdk_with_journal, monkeypatch, tmp_path):
+    """#9256, reproduced deterministically: a SECOND projection is not this lane.
+
+    `_GuardedGraph.query` is patched on the CLASS, so a peer projection that
+    opens while the instrument is installed puts its own `_ensure_indexes` burst
+    in the record set. Those statements ARE declared (under
+    `_ensure_indexes_declared`'s `schema-ddl` lane), for THEIR projection; the
+    defect was that the two attribution assertions below read the whole record
+    set and so reddened on a `CREATE INDEX FOR (n:Point) …` / `Point` label no
+    onboarding writer ever issues. In the wild this fired when
+    `hosted_api._acquire_probe_sdk` opened its own SDK from `monitoring._loop`
+    (`test_webhook_delivery.py` + this suite: 3 of 3 runs).
+
+    MUTATION: make `LaneProbe.own()` return every record (the pre-fix
+    behaviour) and the class check below fails with
+    `['Event', 'Meta', 'Object', 'Point', 'Session', 'Source']`.
+    """
+    from tortoise.onboarding import state as _os
+
+    proj = sdk_with_journal._get_proj()
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
+
+    # A PEER projection opens mid-walk — a real one, so its index DDL really is
+    # issued through the patched class.
+    from tortoise.sdk import TortoiseSDK
+
+    peer_sdk = TortoiseSDK(str(tmp_path / "peer9256.db"),
+                           event_log_path=str(tmp_path / "peer9256.jsonl"))
+    try:
+        peer_sdk._get_proj()
+    finally:
+        peer_sdk.close()
+
+    _walk_the_hosted_write_set(proj)
+
+    own = probe.own()
+    writes = [(c, r) for c, r, w in own if w]
+    assert writes, "the walk issued no mutating statement — vacuous"
+    undeclared = [c for c, r in writes if r is None]
+    assert not undeclared, (
+        "an onboarding write ran outside its declaration: "
+        f"{undeclared}"
+    )
+    assert {r for _c, r in writes} == {_os.ONBOARDING_WRITE_LANE}, (
+        "the lane's own view carries a peer projection's declaration: "
+        f"saw {sorted({r for _c, r in writes})}"
+    )
+    written: set[str] = set()
+    for cypher, _reason, writes_here in own:
+        if writes_here:
+            written |= _labels_written(cypher)
+    assert not (written - _DECLARED_LABELS), (
+        "a label the onboarding declaration does not name was attributed to "
+        f"this lane: {sorted(written - _DECLARED_LABELS)}"
+    )
+
+    # ⛔ and the filter is not a blindfold: the peer's DDL really was recorded.
+    assert any("CREATE INDEX FOR (n:Point)" in statement
+               for statement, _r, _w in probe.foreign()), (
+        "the peer projection contributed no statement, so this pin would pass "
+        "on an instrument that had simply gone blind"
+    )
 
 
 def test_the_class_check_covers_every_run_call_site():
@@ -510,11 +580,11 @@ def test_a_read_through_the_onboarding_lane_is_not_declared(
     the next author to the wrong file.
     """
     proj = sdk_with_journal._get_proj()
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
 
     _walk_the_read_set(proj)
 
-    reads = [(c, r) for c, r, w in seen if not w]
+    reads = [(c, r) for c, r, w in probe.own() if not w]
     assert len(reads) >= 5, (
         f"the readers issued {len(reads)} statement(s) — `_walk_the_read_set` "
         "no longer covers the lane's readers, so this pin has gone stale"
@@ -563,7 +633,7 @@ def test_the_org_still_reaches_complete_when_the_handle_guard_is_armed(
     from tortoise.onboarding import state as _os
 
     proj = sdk_with_journal._get_proj()
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
 
     _walk_or_fail(proj)
 
@@ -605,7 +675,7 @@ def test_the_selfhost_onboarding_lane_reaches_the_graph_with_the_guard_armed(
     from tortoise.onboarding import state as _os
 
     proj = sdk_with_journal._get_proj()
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
 
     selfhost.ensure_selfhost_onboarding(sdk_with_journal)
 
@@ -646,7 +716,7 @@ def test_the_fail_open_caller_reports_the_completion_instead_of_swallowing_it(
                  "decide-completed"):
         _os.write_completed_step(proj, ORG, step)
 
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
 
     assert hosted_api._maybe_apply_completion(ORG) is True, (
         "the completion write was refused and swallowed — the caller reports "
@@ -687,7 +757,7 @@ def test_the_mcp_caller_caches_completion_only_when_the_write_lands(
     _os.ensure_onboarding_state_node(proj, ORG)
     _os.write_fork(proj, ORG, _os.FORK_SELF)
 
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
 
     token = _current_org_id.set(ORG)
     try:

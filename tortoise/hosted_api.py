@@ -175,6 +175,7 @@ from tortoise.sdk import (
     _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_redaction_warning,  # #4911: the shared "a secret was redacted" receipt warning
     _capture_resp_error_split,  # #2335 WI-2: customer error contract (headline/diagnostics)
+    _capture_stamp_targets,  # #9350: the ids a guarded provenance stamp WOULD write
     _capture_turn_embeddings,  # #4194: batched local-embedder call for stored turn Points
     _capture_turn_id,  # #3551: the ONE offset-aware turn-id derivation
     _capture_turn_role_text,  # #4675: the inverse of the stored turn format
@@ -184,6 +185,7 @@ from tortoise.sdk import (
     _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+    _stamp_capture_provenance,  # #9350: the journal-first capture provenance stamp door
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
     _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
@@ -14357,13 +14359,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # its original ingest; re-stamping would clobber the first
                 # session's single-eventId provenance (mirror byte-parity).
                 minted_ids = _capture_minted_ids(extracted)
-                proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids "
-                    "SET n.eventId=$eid, n.source_session=$sid, "
-                    "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": minted_ids,
-                            "eid": event_id, "sid": session_id,
-                            "harness": source_harness, "ing": now},
+                # #9350: JOURNAL-FIRST (§17.1), byte-parity with
+                # `sdk.capture_session` — one `PointRevised` per minted id is
+                # appended BEFORE the stamp reaches the write handle, and the
+                # stamp then runs inside its own `_live_write_scope` lane. A
+                # raw write here had no carrier at all, so a journal-only
+                # rebuild lost the four fields on every minted Point that is
+                # never promoted.
+                _stamp_capture_provenance(
+                    sdk, proj, minted_ids, event_id=event_id,
+                    session_id=session_id, harness=source_harness,
+                    ingested_at=now,
+                    statement=(
+                        "MATCH (n:Point) WHERE n.id IN $ids "
+                        "SET n.eventId=$eid, n.source_session=$sid, "
+                        "    n.source_harness=$harness, n.ingested_at=$ing"),
+                    what="hosted capture minted-point provenance stamp",
                 )
                 # #2552 (layer-2 WIRE — the structural leg): mirror of the
                 # sdk capture stamp — the reified operator Points this
@@ -14376,18 +14387,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # emitted later by _apply_capture_ingest_ep snapshots the
                 # stamped state (rebuild-durable).
                 if minted_ids:
-                    proj.g.query(
+                    _op_prefix = (
                         "MATCH (o:Point {is_operator:true})-"
                         "[:IMPL|NAND]->(c:Point) "
                         "WHERE c.id IN $ids "
                         "AND (o.status IS NULL OR o.status = 'draft') "
-                        "AND o.eventId IS NULL "
-                        "SET o.eventId=$eid, o.source_session=$sid, "
-                        "    o.source_harness=$harness, "
-                        "    o.ingested_at=$ing",
-                        params={"ids": minted_ids,
-                                "eid": event_id, "sid": session_id,
-                                "harness": source_harness, "ing": now},
+                        "AND o.eventId IS NULL ")
+                    _op_ids = _capture_stamp_targets(
+                        sdk, proj, _op_prefix + "RETURN DISTINCT o.id",
+                        {"ids": minted_ids},
+                        what="hosted capture operator-label stamp targets")
+                    _stamp_capture_provenance(
+                        sdk, proj, _op_ids, event_id=event_id,
+                        session_id=session_id, harness=source_harness,
+                        ingested_at=now,
+                        statement=(
+                            _op_prefix
+                            + "AND o.id IN $stamp_ids "
+                              "SET o.eventId=$eid, o.source_session=$sid, "
+                              "    o.source_harness=$harness, "
+                              "    o.ingested_at=$ing"),
+                        what="hosted capture operator-label provenance stamp",
+                        params={"ids": minted_ids},
                     )
                 # #4936 (mirror of the sdk capture stamp): the minted-point
                 # join above CANNOT reach an operator whose endpoint RE-KEYED
@@ -14406,16 +14427,28 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # (the M2 projection path).
                 operator_ids = list(meta.get("operator_ids") or [])
                 if operator_ids:
-                    proj.g.query(
+                    _o_prefix = (
                         "MATCH (o:Point {is_operator:true}) "
                         "WHERE o.id IN $ids "
-                        "AND o.eventId IS NULL "
-                        "SET o.eventId=$eid, o.source_session=$sid, "
-                        "    o.source_harness=$harness, "
-                        "    o.ingested_at=$ing",
-                        params={"ids": operator_ids,
-                                "eid": event_id, "sid": session_id,
-                                "harness": source_harness, "ing": now},
+                        "AND o.eventId IS NULL ")
+                    _requested = set(operator_ids)
+                    _written = [pid for pid in _capture_stamp_targets(
+                        sdk, proj, _o_prefix + "RETURN DISTINCT o.id",
+                        {"ids": operator_ids},
+                        what="hosted capture operator-id stamp targets")
+                        if pid in _requested]
+                    _stamp_capture_provenance(
+                        sdk, proj, _written, event_id=event_id,
+                        session_id=session_id, harness=source_harness,
+                        ingested_at=now,
+                        statement=(
+                            _o_prefix
+                            + "AND o.id IN $stamp_ids "
+                              "SET o.eventId=$eid, o.source_session=$sid, "
+                              "    o.source_harness=$harness, "
+                              "    o.ingested_at=$ing"),
+                        what="hosted capture operator-id provenance stamp",
+                        params={"ids": operator_ids},
                     )
                 if retry_failed_capture:
                     # #2335 WI-2b / review (PR #2473): a RETRY heals the
@@ -14431,13 +14464,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     # pointKind 'event') never carry the sessionCaptured
                     # eventId in the normal flow — excluded via the
                     # non-episodic clause (mirror of the sdk heal).
-                    proj.g.query(
+                    _heal_prefix = (
                         "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
-                        "(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true "
-                        "SET n.eventId=$eid, n.source_session=$sid, "
-                        "    n.source_harness=$harness, n.ingested_at=$ing",
-                        params={"sid": session_id, "eid": event_id,
-                                "harness": source_harness, "ing": now},
+                        "(n:Point) WHERE n.eventId IS NULL AND coalesce(n.is_episodic,false) <> true ")
+                    _heal_ids = _capture_stamp_targets(
+                        sdk, proj, _heal_prefix + "RETURN DISTINCT n.id",
+                        {"sid": session_id},
+                        what="hosted capture retry-heal stamp targets")
+                    _stamp_capture_provenance(
+                        sdk, proj, _heal_ids, event_id=event_id,
+                        session_id=session_id, harness=source_harness,
+                        ingested_at=now,
+                        statement=(
+                            _heal_prefix
+                            + "AND n.id IN $stamp_ids "
+                              "SET n.eventId=$eid, n.source_session=$sid, "
+                              "    n.source_harness=$harness, n.ingested_at=$ing"),
+                        what="hosted capture retry-heal provenance stamp",
+                        params={"sid": session_id},
                     )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently

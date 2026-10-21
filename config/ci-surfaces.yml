@@ -757,6 +757,16 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #9350: the capture provenance stamp is JOURNALLED before its cache write,
+  # and the hosted twin journals + replays the same four fields.
+  # DUAL-REGISTERED (also under `core`, where its primary entry carries the
+  # full rationale): `tortoise/hosted_api.py` SELECTS the `api` surface, and a
+  # named-surface match REPLACES the `core` fallback — so a
+  # hosted_api.py-only PR would run `test_hosted_api.py` and never
+  # `test_the_hosted_capture_journals_and_replays_the_same_provenance`, the
+  # only assertion in the tree that the hosted lane journals provenance BEFORE
+  # the write. Same #2938 dual-membership convention as the #4911 entry above.
+  - test_9350_capture_provenance_journalled.py
   # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
   # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
   # that carries a PR-shape requirement — the primitive is called from
@@ -1470,6 +1480,7 @@ surfaces:
   # under the 'not a trigger' answer: delete it only together with a real
   # runtime reader of the directory (see the module docstring).
   - test_9231_record_migrations_trigger.py
+  - test_9256_lane_probe_attribution.py
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
@@ -3620,6 +3631,20 @@ surfaces:
   # `test_pipeline_2792`/`test_semantics_write_path_7852`, so it is registered in
   # `carve_out:` below and in `tests/_embedded.py`.
   - test_5097_capture_source_replay.py
+  # #9350: the capture provenance stamp's journal carrier, one record per
+  # minted id, and the two replay engines restoring `eventId` /
+  # `source_session` / `source_harness` / `ingested_at` on a minted Point that
+  # is never promoted. DUAL-REGISTERED (also under `api`, see the entry there):
+  # the SDK half (`tortoise/sdk.py`, a SHARED_MODULE, so its diff selects the
+  # full matrix) and the two folds' provenance clauses
+  # (`projection/__init__.py`, a `core` fallback) are what `core` claims here;
+  # the HOSTED writer `tortoise/hosted_api.py` SELECTS `api` instead, and a
+  # named-surface match REPLACES the `core` fallback, so it cannot be covered
+  # from this list alone.
+  # CARVE-OUT: the fixtures build EMBEDDED stores by db path and drive
+  # `rebuild()` / `rebuild_all()`, so it is registered in `carve_out:` below
+  # and in `tests/_embedded.py`.
+  - test_9350_capture_provenance_journalled.py
   - test_connection_url_redaction_5326.py  # #5326: the password-bearing connection URL (`postgres://user:pw@host`) — the `connection_url` rule in tortoise/security.py: the closed scheme allow-list anchor, the URL-grammar confirmation, each removed #4911 revision answered (no-password class, no dotted-host gate, no greedy span), and the documented residuals. NOT dual-registered under `api`: it asserts nothing about hosted_api.py, and its end-to-end capture half is the DUAL-REGISTERED #4911 file
   - test_security.py
   - test_semantic_extractor.py
@@ -5593,6 +5618,15 @@ carve_out:
 # registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_5097_capture_source_replay.py
+# #9350: the capture provenance stamp's journal carrier. The fixtures build
+# `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines against that embedded
+# store, so a URI-set lane would redirect the construction and the embedded
+# replay under test would be gone. Mirror of the
+# `test_9350_capture_provenance_journalled.py` rows in the `core` and `api`
+# surfaces above (dual-registered, #2938);
+# the two registries are one set in two homes
+# (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_9350_capture_provenance_journalled.py
 # #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
@@ -5948,6 +5982,7 @@ durations:
   test_5509_name_keyed_identity_reads.py: 138.6  # #5509 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it is hand-added here — and WITHOUT this row the durations map drops to 89.98% coverage (799/888), below the 90% floor, which is how #8874's merge of main 46185aba9 first surfaced it. MEASURED on this host 2026-10-17 in the #8874 worktree on a private tools/test_lane.py docker container reached via TORTOISE_DB_URI: pytest session total, 16 tests, "16 passed in 138.63s". WHAT THE NUMBER IS: the session total, NOT what the refresher computes (it sums the textual `--durations=15` block from a CI log, a LOWER bound). Refresh from the first post-merge push run that includes it.
   test_8864_shared_name_merge_key.py: 2.0  # #8864: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the #3400 flat 2.0s default. Required for the durations half as well as the surface half (#4348 trap): the surface entry alone does not cover it. Local reading on this host (embedded carve-out lane, 8 tests): "8 passed in 5.82s" — the session total, which is conftest/DB setup the #3400 method attributes to no file; NOT substituted for a CI weight. Refresh from the first post-merge run that includes it.
   test_8098_webhook_retry_sweep.py: 8.8  # #8098 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-18 at the PR head AFTER the LAST review fixes (embedded carve-out lane, **56 tests**, `--junitxml`): sum of testcase/@time ranged **7.25s** on a quiet host to **24.65s** with the fleet loading this box, max single test 1.65-6.90s (`test_every_test_the_plan_cites_exists`, which rglobs `tests/`). The reading is re-derived with the COUNT at every revision, never carried forward (the neighbouring #3429 row states the same convention): earlier revisions of this row read 39, 48, 49, 51, 53 and 55 tests as the file grew. The 8.8 WEIGHT is deliberately left alone: it is the shard packer's input, and keeping the higher of the readings means a file whose per-test sum is dominated by one cold-lane test is never under-weighted, so do not "correct" it down without a CI junit measurement. Required for the durations half as well as the surface half (#4348 trap): MEASURED this turn, WITHOUT this row `tools/ci_selection.py --integrity` reds the durations coverage floor (the file is in the fast pool, so an absent row also packs it at the flat 2.0s default). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
+  test_9256_lane_probe_attribution.py: 6.8  # #9256 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host at the review-fix head, re-derived together with the COUNT (the convention the neighbouring rows state — the count is re-derived at every revision, never carried forward): embedded carve-out lane, **7 tests**, `--junitxml` sum of `testcase/@time` 6.47 s cold over all 7 (6.03 s warm), whole-file wall 6.72 s cold then 6.29 s warm, max single test 3.83 s. ⚠️ Earlier revisions of this row read 4.01 s over the **4** tests the file held when it was written and 6.53 s over 6; the pins added since (`test_the_census_helper_reds_…`, `test_the_classifier_reads_the_raw_statement_…`, and this round's `test_the_census_does_not_red_on_an_unarmed_peer_…`) are the +3, and ALL THREE take the two-SDK `two_journal_backed_sdks` fixture — 6 of the 7 tests do — which is the dominant per-test cost (a real `_ensure_indexes` burst plus the double close). WEIGHT raised 4.2 -> 6.8 to the coldest reading ever taken and never corrected downward, on the same rule the row above states, so a cold shard leg cannot under-pack: the 7-test wall (6.72 s) is BELOW the 6.8 weight, so it is left alone rather than trimmed to it. Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the `duration_coverage_issues()` floor at that head — with it the fast pool is 866/961 weighted = 90.11%, 0.11 pp above the floor.
   test_9233_webhook_declared_lane.py: 14.0  # #9233 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host at the PR head AFTER the review fixes (embedded carve-out lane, 25 tests — 23 when this row was first written, +2 contract pins since; the count is re-derived at every revision and the WEIGHT is left at the coldest reading), whole-file wall): 14.03 s cold (first run after `uv sync --extra embeddings --extra parity`), then 9.90 / 9.98 / 11.12 s warm. Several tests build an embedded SDK each and `test_a_rebuild_does_not_restore_the_store` runs a real `rebuild_all`, so the weight is SDK builds + a journal rebuild, and it is declared at the COLDEST reading so a cold shard leg cannot under-pack. Added on the review advisory that measured this margin over four rounds: the fast pool is 943 files, so WITHOUT this row 849 weighted = 90.03% (0.03 pp above the `duration_coverage_issues()` floor) and the next unmeasured fast file would red the repo-wide gate at 849/944 = 89.94%; WITH it 850 weighted = 90.14%. Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
   test_9209_handle_non_cypher_wipe.py: 26.8  # #9209 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host 2026-10-20 at the PR head AFTER the last review fixes: embedded carve-out lane, `--junitxml`, sum of testcase/@time over ALL **70** collected cases at THIS head (the count is re-derived at every revision, never carried forward: 58 when the row was first written, 59 after one review round, and the last two rounds took it to 70). The WEIGHT stays at the COLDEST reading — 26.8 s, the loaded-box measurement this row already carried — and deliberately NOT the quiet-box 20.56 s or the later 33.54 s re-read: the adjacent rows' convention (#8098/#9233/#3429) is the higher of the readings, never a downward correction without a CI junit measurement, because the packer packs from this number and an under-weight starves a loaded shard leg. Max single test 3.96 s; whole-file wall 21.06 s quiet / 34 s on a box at load 180. Why the row exists at all: the fast pool is 952 files, so WITHOUT it 858 measured = 90.1261% against `DURATION_COVERAGE_MIN` 0.90 and WITH it 859 = 90.2311% (re-derived at this head: the pool grows as PRs add files, so re-derive rather than copying these) — the gate is not red at this head either way, so this row is the #3400 convention (and the shard packer's input: an absent row packs the file at the flat 2.0 s default, a 13x under-weight for a suite that builds a journal-backed embedded SDK per test), not a floor rescue. Do NOT drop it without re-deriving the floor at that head.
   test_installer_preserves_foreign_skill_content.py: 0.6
@@ -6101,8 +6136,8 @@ durations:
   # manifest-integrity job). Local embedded/docker-lane readings, measured at
   # this branch head as the sum of testcase/@time over all tests:
   test_7951_enforce_atomic_write.py: 7.4  # #7951: 19 tests, 7.39s wall (measured at the rebase head; refresh from the first post-merge run)
-  test_9079_onboarding_declared_lane.py: 3.6  # #9079: 14 tests, 3.63s wall (same convention)
-  test_9079_edge_lane_declared.py: 18.0  # unmeasured — #9195 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and WITHOUT this row `duration_coverage_issues()` reds on `ci_selection.py --integrity`. Local embedded-lane wall readings at this head: 15.3 s, 22.4 s, 12.2 s and 6.7 s over four runs (12 test functions / 13 collected — `test_a_read_on_this_path_is_not_declared` is parametrized over BOTH declared mints; fleet load varies). ⚠️ The testcase/@time sum is ~18 s, NOT the wall clock — the first `create_point` in a process pays the one-time lazy embedding load (the same weight the #9123 row documents), and the fixture is per-test. Refresh from the first post-merge run that includes it.
+  test_9079_onboarding_declared_lane.py: 6.2  # #9079: **15 tests**, 6.12 s wall at the #9256 review-fix head (embedded carve-out lane, `--junitxml` sum of `testcase/@time` 5.85 s; warm re-reads 6.25 / 6.63 s wall, max single test 2.44 s) — the count is 14 when the row was written and this PR's `test_a_peer_projection_opening_mid_walk_is_not_attributed_to_this_lane` is the +1, a second embedded SDK the fixture now builds. WEIGHT raised 3.6 -> 6.2 to that coldest reading, never corrected downward (same convention as the rows above: an under-weight starves a loaded shard leg). Refresh from the first post-merge run that includes it.
+  test_9079_edge_lane_declared.py: 18.0  # unmeasured — #9195 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and WITHOUT this row `duration_coverage_issues()` reds on `ci_selection.py --integrity`. Local embedded-lane wall readings at this head: 15.3 s, 22.4 s, 12.2 s and 6.7 s over four runs (12 test functions / 13 collected when this row was written — `test_a_read_on_this_path_is_not_declared` is parametrized over BOTH declared mints; fleet load varies). ⚠️ COUNT re-derived at the #9256 review-fix head: **13 test functions / 14 collected**, the +1 being this PR's `test_a_peer_projection_opening_mid_walk_is_not_attributed_to_this_lane`, which builds a SECOND embedded SDK. The 18.0 WEIGHT predates that added test and is deliberately NOT re-derived from this box: a re-read here gave 82.99 / 90.19 s of testcase/@time with ONE test, `test_every_edge_mint_declares_its_lane`, at 76.32-86.13 s — ~5x the 18 s this row records for the same walk — which is the lazy embedding-model fetch/load the note below already names (the run logs an unauthenticated HF Hub request), i.e. sandbox network variance rather than test weight, so adopting it would bake a dev-box artefact into the shard packer (record it, do not adopt it — the #3429 rule). Re-derive BOTH the count and the weight from the first post-merge CI run that includes it. ⚠️ The testcase/@time sum is ~18 s on a host with a warm model cache, NOT the wall clock — the first `create_point` in a process pays the one-time lazy embedding load (the same weight the #9123 row documents), and the fixture is per-test. Refresh from the first post-merge run that includes it.
   test_write_op_reachability.py: 3.3  # #8135: 43 tests + 1 xfail, 3.25s wall (same convention)
   test_capture_loop_responsiveness.py: 10.2
   # #2988/#3243: AST pins plus behavioural tests that park real daemon-pool
