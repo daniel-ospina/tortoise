@@ -918,6 +918,108 @@ class TestSupersessionBounds:
         assert model.supersessions[0].supersedes_by == long_name
 
 
+# ── Per-request COLLECTION bounds (#4051 §3.3) ────────────────────────────
+
+def _event(i: int, **overrides) -> dict:
+    """A minimal valid ``CommitEvent``: content-addressed id, closed-vocab
+    kind, and a ``source_ref`` that resolves to the session Source the
+    default ``provenance_refs`` entry mints."""
+    e = {"id": "ev_" + f"{i:062d}", "eventKind": "decision",
+         "content": f"event {i}", "about_entities": [],
+         "source_ref": "session.md", "captured_at": "2026-08-11T10:00:00Z"}
+    e.update(overrides)
+    return e
+
+
+def _source(i: int) -> dict:
+    return {"sourceKind": "github_issue", "url": f"https://github.com/x/{i}",
+            "credibilityTier": "T2", "contentHash": "h"}
+
+
+def _ref(i: int) -> dict:
+    return {"path": f"doc{i}.md", "spans": ["0-10"]}
+
+
+class TestCommitCollectionBounds:
+    """#4051 (§3.3): every payload collection that grows stored data ONE ENTRY
+    at a time is capped at Layer-1 → 422, exactly like ``points``/``entities``/
+    ``operators``/``supersessions``.
+
+    WHY. ``_execute_commit_writes`` mints one ``:Event`` + one ``produces``
+    edge per ``events[]`` entry, one ``:Source`` per ``sources[]`` entry, and
+    the session ``:Source`` whose stored ``provenance_spans`` property is
+    every ``provenance_refs[].spans`` concatenated. None of the three had a
+    count cap, so the only bound on how many nodes ONE request creates was the
+    8 MiB request body — at the 1000-char event-content cap that is ~8k event
+    nodes from a single legal request, at 300 requests/min/key.
+
+    ⛔ These are REQUEST-SHAPE bounds (Layer-1 → 422), NOT retention bounds.
+    What a tenant may KEEP is unchanged: sessions stay unlimited (#4010) and
+    there is still no eviction window (#3853). A future reader must not
+    "improve" these into a storage cap — that would be a reversal, not a fix.
+    """
+
+    @pytest.mark.parametrize("field,cap_name,make", [
+        ("events", "MAX_EVENTS", _event),
+        ("sources", "MAX_SOURCES", _source),
+        ("provenance_refs", "MAX_PROVENANCE_REFS", _ref),
+    ])
+    def test_over_cap_422(self, field, cap_name, make):
+        from tortoise import quota
+
+        cap = getattr(quota, cap_name)
+        raw = _raw_payload(n_points=0 if field == "provenance_refs" else 1)
+        raw[field] = [make(i) for i in range(cap + 1)]
+        result, _ = _check(raw)
+        assert not result.ok
+        assert any(cap_name in r for r in result.errors[field]), result.errors
+
+    @pytest.mark.parametrize("field,make", [
+        ("events", _event),
+        ("sources", _source),
+        ("provenance_refs", _ref),
+    ])
+    def test_exactly_at_cap_ok(self, field, make):
+        from tortoise import quota
+
+        cap = {"events": quota.MAX_EVENTS, "sources": quota.MAX_SOURCES,
+               "provenance_refs": quota.MAX_PROVENANCE_REFS}[field]
+        raw = _raw_payload(n_points=0 if field == "provenance_refs" else 1)
+        raw[field] = [make(i) for i in range(cap)]
+        result, model = _check(raw)
+        assert result.ok, result.errors
+        assert len(getattr(model, field)) == cap
+
+    def test_the_gate_reads_the_constant(self, monkeypatch):
+        """Non-vacuity for the cap: the check is gated on the QUOTA constant,
+        not on a hard-coded 500. Lowering the constant moves the boundary.
+
+        Without this, a cap could be satisfied by any number that happens to
+        sit above the fixtures and no boundary would ever be exercised."""
+        import tortoise.commit_schema as cs
+
+        monkeypatch.setattr(cs, "MAX_EVENTS", 3)
+        raw = _raw_payload()
+        raw["events"] = [_event(i) for i in range(4)]
+        result, _ = _check(raw)
+        assert not result.ok
+        assert any("MAX_EVENTS (3)" in r for r in result.errors["events"])
+
+        raw["events"] = [_event(i) for i in range(3)]
+        result, _ = _check(raw)
+        assert result.ok, result.errors
+
+    def test_a_capped_collection_is_still_an_ordinary_payload(self):
+        """The caps do not change the EMPTY-collection contract: a payload
+        that omits all three arrays validates byte-identically to before
+        (additive, no migration — the #1350 additive shape)."""
+        raw = _raw_payload(n_points=0, events=[], sources=[],
+                           provenance_refs=[])
+        result, model = _check(raw)
+        assert result.ok, result.errors
+        assert (model.events, model.sources, model.provenance_refs) == ([], [], [])
+
+
 # ── L2 reconciliation + budget (DE2E-7 Sessions A/B/C) ────────────────────
 
 def _ten_new_points() -> list[dict]:
