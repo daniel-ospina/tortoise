@@ -46,7 +46,14 @@ So the census resolves the *expression*, not just the leaf:
   module-level or class-level, in this file or (when the name is unique
   repo-wide) in the module that defines it — so an `import`ed constant resolves;
 * `NAME = "a|b|…"` joined via `"|".join(NAME)`, and `for rel in NAME` loop
-  variables, expanded to the constant's members.
+  variables, expanded to the constant's members — including a **`frozenset`**
+  (`frozenset({...})`, `ast.Set`), which is the idiomatic shape for a rel family
+  here (`DERIVABLE_STRUCTURAL_RELS`, `_ABOUT_REPLAY_RELS`, `ENTITY_LINKED_RELS`)
+  and the one that escaped the resolver until the fourth review.
+
+THREE derivations, because a reader can reach the edge in three shapes: by NAME
+(the named census), through a pattern that names NO type (the empty-pattern class),
+and through a type slot the resolver cannot fill (the call-time class).
 
 WHAT THIS PINS
 --------------
@@ -57,7 +64,7 @@ WHAT THIS PINS
    §13's table. A new reader added anywhere under `tortoise/` reds this until it
    is declared.
 2. **`test_every_declared_symbol_still_performs_the_read`** — ROT. Every symbol
-   the table names must be a site of one of the two derivations below. A row
+   the table names must be a site of one of the three derivations below. A row
    whose symbol resolves but does not read misleads every re-verifier —
    `EXTRACTOR-V4-ARCHITECTURE`'s own rule is *"the symbol name is authoritative,
    the line number is a convenience"*.
@@ -73,23 +80,27 @@ WHAT THIS PINS
    was the shape's defect: it let three further members — two of them
    customer-callable — go absent while every arm stayed green.
 4. **`test_the_table_is_not_vacuous`** — the census, the empty-pattern class,
-   the table and the customer-callable count are all non-trivially populated, so
-   none of the arms above can pass by finding nothing.
+   the call-time class, the table and the customer-callable count are all
+   non-trivially populated, so none of the arms above can pass by finding
+   nothing.
 5. **`test_the_census_derives_a_relationship_name_built_at_runtime`** — the
    MECHANISM, on synthetic sources: a literal, a `+`-concatenation, an f-string,
-   `"|".join(TUPLE)` and a `for rel in TUPLE` loop must each derive; a `MERGE`
-   writer must not. Without this arm the resolver could regress to
-   literal-only and the table would silently go back to being un-checked in the
-   class that produced the fourth correction.
-6. **`test_the_undeclarable_shape_is_declared_by_name`** — the shape NEITHER
-   census can derive: a relationship name assembled entirely from a call-time
-   value (a dict lookup, an instance attribute). Nothing derives it, so §13 must
-   name it — and the declaration is checked in both directions, because the
-   revision before this one SAID the class was "declared by name instead" while
-   declaring nothing at all, with two about*-specific readers of the shape live
-   (`link_entity`, `bind_point_subjects`). A parameter default is resolvable and
-   is therefore derived (row 19); the dict-lookup member is row 20 and is also
-   registered here.
+   `"|".join(TUPLE)`, a `for rel in TUPLE` loop and a `for rel in FROZENSET`
+   loop (the idiomatic rel-family shape in this package, which the resolver once
+   could not follow) must each derive; a `MERGE` writer must not. Without this
+   arm the resolver could regress to literal-only and the table would silently go
+   back to being un-checked in the class that produced the fourth correction.
+6. **`test_the_call_time_shape_is_derived_and_declared`** — the THIRD
+   derivation, and the one this file used to DECLARE instead. A relationship
+   type written as an expression (a function argument, a dict lookup, a journal
+   field) leaves the type slot EMPTY when the resolver gives up on it, so the
+   resolved candidate carries `-[r:]->` — a shape, like `-[r]->`, and therefore
+   derivable as a class: every member must be a §13 row or an entry in
+   `CALL_TIME_REL` (with the reason its gap cannot carry `aboutObject` for a
+   referent), and every entry must still derive. Declaring the class by hand is
+   what let `TortoiseSDK.traverse` and `TortoiseSDK.ingest` — both
+   customer-callable — sit outside the census while every arm stayed green, and
+   what made a NEW reader of the shape invisible by construction.
 7. **`test_the_prose_counts_match_the_table`** — the NUMBERS. §13 states its
    counts in prose and the other arms check only the rows, so the numerals are
    read out of the sentences that state them and compared to the table. A
@@ -211,10 +222,20 @@ _CLAUSE = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE)\b")
 #: A traversal: an opening `[` or `-` shortly before the relationship name, so
 #: prose ("an ``aboutObject`` edge") is not mistaken for Cypher.
 _TRAVERSAL = re.compile(rf"[-\[][^\n]{{0,140}}?{EDGE}", re.IGNORECASE)
-#: An EMPTY relationship pattern: a bracketed traversal that names NO type
-#: (`-[r]->`, `<-[r]-`, `-[r*1..2]->`). It walks EVERY relationship type, so it
-#: reads the edge without naming it — the class no scan for the NAME can find.
+#: A bracketed traversal, whatever its type slot holds (`-[r]->`, `<-[r]-`,
+#: `-[r:aboutObject]->`, `-[r:{rel}]->`). `_type_slot` decides what the bracket
+#: names; this only finds the brackets.
 _EMPTY_TRAVERSAL = re.compile(r"[-<]\s*\[([^\]]*)\]\s*[-<>]")
+#: The text signature of a CALL-TIME type slot — a traversal whose relationship
+#: type is written as an expression rather than a name: an f-string interpolation
+#: inside the bracket (`-[r:{rel}]->`, `-[:{EDGE}]->`, including one that carries a
+#: property map: `-[r:{rel} {confidence:$c}]->`), or a `+`-concatenated fragment
+#: where the literal ENDS inside the pattern (`"MATCH (n)-[r:" + rel + "](m)"`).
+#: Only a file FILTER (a file that cannot be parsed cheaply is not walked);
+#: `_is_gap_type_read` decides, on the resolved candidate.
+_GAP_TYPE_HINT = re.compile(
+    r"[\[<][^\]\n]*:[^\]\n]*\{[^\]\n]*\]|[\[<][^\]\n]*:\s*[\"']"
+)
 #: The most candidate strings one expression may expand to. A rel list is at most
 #: a handful of members, so this only bounds pathological input.
 _MAX_CANDIDATES = 64
@@ -229,11 +250,13 @@ _SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\
 #: deriving nothing (today's census: 23 members).
 _MIN_EMPTY_PATTERN = 5
 
-#: Floor arms: deliberately BELOW today's census (19 named sites / 16 rows at the
-#: time of writing), because a row deleted together with its reader is not a
-#: reason to red — that is a legitimate contraction, and a floor pinned at
-#: today's exact count turns it into a failure whose message says "the parser
-#: broke". The floor exists only so no arm can pass by finding nothing.
+#: Floor arms: deliberately BELOW today's census (20 named sites / 22 rows at the
+#: time of writing — the numerals are historical, which is the point: a floor is
+#: not a count, and pinning it at today's exact figure would turn a legitimate
+#: contraction into a failure whose message says "the parser broke"). They are
+#: below deliberately, because a row deleted together with its reader is not a
+#: reason to red. The floor exists only so no arm can pass by finding nothing.
+#: ⚠️ The exact counts are asserted against the TABLE, one arm down — never here.
 _MIN_SITES = 10
 _MIN_ROWS = 10
 #: `FOUR` was the floor when this arm was written, i.e. the count BEFORE the
@@ -241,6 +264,11 @@ _MIN_ROWS = 10
 #: value so a *contraction* of the prose is visible even before the exact-count
 #: arm below reads the numeral itself; the table declares seven today.
 _MIN_CUSTOMER_CALLABLE = 4
+
+#: Floor for the call-time class walk (today's census: ten members), for the same
+#: reason as `_MIN_EMPTY_PATTERN`: the shape detector breaking is a failure, a
+#: legitimate contraction is not.
+_MIN_CALL_TIME = 4
 
 #: The empty-pattern readers that are NOT an `aboutObject` read for a referent,
 #: declared by name with the reason, so a NEW member of the class cannot appear
@@ -353,27 +381,72 @@ EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
     ),
 )
 
-#: The readers of the SECOND un-derivable shape: a relationship name assembled
-#: ENTIRELY from a call-time value (a dict lookup, an instance attribute, a value
-#: passed in from a caller). The resolver follows a name one level deep and then
-#: leaves a gap, so such a reader derives nothing from either census — it is the
-#: one shape that can only be DECLARED. Each entry is
-#: `(filename, symbol, the value it interpolates)`.
+#: The readers of the THIRD shape: a relationship type that is an EXPRESSION, not
+#: a name — a function argument, a dict lookup, a journal field, a value imported
+#: from a module this census does not parse. The resolver follows a name one level
+#: deep and then leaves a GAP, so the resolved candidate carries an EMPTY type
+#: slot (`-[r:]->`) and the shape walk (`_call_time_sites`) derives the class the
+#: same way `_is_empty_pattern_read` derives the no-type one.
 #:
-#: ⚠️ This is not a second hand list standing in for a scan: the arm below
-#: asserts every entry is a §13 ROW *and* that neither census derives it. If the
-#: resolver ever learns to follow it the entry goes stale and reds; if a row is
-#: dropped the entry reds; and a new reader of the shape has nowhere to hide
-#: except here, which is a reviewed declaration rather than silence. (The first
-#: member of this class that IS resolvable — a parameter default — is derived
-#: instead: `session_link.link_entity`.)
-UNDERIVABLE_CALL_TIME: tuple[tuple[str, str, str], ...] = (
+#: ⚠️ This register is NOT the class. The class is derived; this is the list of
+#: its members that are NOT an `aboutObject` read for a referent — gated to the
+#: operator rels, a fixed non-about* edge, or a by-type edge rewrite. Each entry
+#: is `(filename, symbol, why the gap cannot carry `aboutObject` for a referent)`,
+#: and `test_the_call_time_shape_is_derived_and_declared` checks BOTH directions:
+#: every derived member is a §13 row or an entry here (so a NEW reader of the
+#: shape cannot ship green), and every entry still derives (so a stale entry
+#: cannot make the next reader's absence invisible).
+CALL_TIME_REL: tuple[tuple[str, str, str], ...] = (
     (
-        "tortoise/subject_binding.py",
-        "bind_point_subjects",
-        '`edge_type`, from `_ROLE_TARGET["object"][1]` — a dict lookup at call '
-        "time, so the re-probe `MATCH (s:Point)-[r:{edge_type}]->(t)` names no "
-        "relationship and no constant resolves it",
+        "tortoise/analyze.py",
+        "_bfs_select_operators",
+        '`safe_rel`, a `for rel in rel_types` loop variable — the loop body skips '
+        'every rel that is not `"IMPL"`/`"NAND"`, so the expansion queries cannot '
+        "carry `aboutObject`; they walk the operator graph, not a referent",
+    ),
+    (
+        "tortoise/commit_ops.py",
+        "apply_payload_operators",
+        '`_edge_type`, `"hasPart"` or the operator `op_type` — the `#4971` '
+        "idempotency probe reads the exact edge `create_operator` would have "
+        "written (operator → input), and the property map in the bracket "
+        "(`[:{_edge_type} {idx:0}]`) is why the type slot stays a gap",
+    ),
+    (
+        "tortoise/projection/__init__.py",
+        "_capture_onboarding_snapshot",
+        "`onboarding.state.COMPLETED_STEP_EDGE` (`\"COMPLETED_STEP\"`) — a fixed, "
+        "non-about* step edge; imported INSIDE the function, and the defining "
+        "module carries no edge literal, so the resolver cannot follow the "
+        "binding and the slot stays a gap. It also does not derive the named "
+        "census, because the value it resolves to contains no `aboutObject`",
+    ),
+    (
+        "tortoise/projection/__init__.py",
+        "_rebuild_all_replay",
+        "`etype`, the `edge_type` field of a journaled replay event — the "
+        "rebuild/rollback replay deletes and rewrites every replayed edge BY "
+        "TYPE, so it carries the edge rather than reading it for a referent "
+        "(registered for its empty patterns too: an edge can be replayed "
+        "without its type being named)",
+    ),
+    (
+        "tortoise/projection/entities.py",
+        "_fold_edge_message_changed",
+        '`rel`, from the event, gated to `("IMPL", "NAND")` before the query — '
+        "an operator-edge attribute fold, not a referent read",
+    ),
+    (
+        "tortoise/sdk.py",
+        "_find_operator",
+        '`edge_rel`, `"hasPart"` or the operator `op_type` — the dedupe probe '
+        "collects an operator's targets, never a referent",
+    ),
+    (
+        "tortoise/sdk.py",
+        "create_direct_edge",
+        "`rel_type`, `op_type` (IMPL / NAND, `create_operator`'s edge set) — the "
+        "existence pre-count and attribute SET for an operator edge",
     ),
 )
 
@@ -577,14 +650,20 @@ def _files() -> tuple[_File, ...]:
     the empty-pattern class: a module that walks EVERY relationship type names
     neither the edge nor a constant, so it is found by the shape of its pattern
     (`_may_traverse_every_type`) — which is how `navigation.py` and the backfill
-    census were missing from a census that had already declared the class.
+    census were missing from a census that had already declared the class. The
+    fourth half is the call-time class, whose module may name neither the edge
+    nor any type at all (`_may_have_gap_type`).
     """
     parsed = {file.path: file for file in _literal_files()}
     names = _rel_constant_names()
     for path, source in _sources().items():
         if path in parsed:
             continue
-        if any(name in source for name in names) or _may_traverse_every_type(source):
+        if (
+            any(name in source for name in names)
+            or _may_traverse_every_type(source)
+            or _may_have_gap_type(source)
+        ):
             parsed[path] = _File(path, str(path.relative_to(ROOT)), source)
     return tuple(sorted(parsed.values(), key=lambda file: file.path))
 
@@ -726,7 +805,7 @@ def _resolve(
         return [_UNKNOWN]
     if isinstance(node, ast.Constant):
         return [node.value] if isinstance(node.value, str) else [_UNKNOWN]
-    if isinstance(node, (ast.Tuple, ast.List)):
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
         out: list[str] = []
         for element in node.elts:
             out.extend(_resolve(element, scope, file, depth + 1))
@@ -761,7 +840,19 @@ def _resolve(
             return _resolve(value, _scope(owner, None), owner, depth + 1)
         return [_UNKNOWN]
     if isinstance(node, ast.Call):
-        # `"|".join(ABOUT_EDGE_TYPES)` — the one call shape that builds a rel
+        # `frozenset({...})` / `set({...})` / `tuple([...])` / `list([...])` over
+        # a resolvable member list — `frozenset` is the IDIOMATIC shape for a rel
+        # family in this package (`DERIVABLE_STRUCTURAL_RELS`, `_ABOUT_REPLAY_RELS`,
+        # `ENTITY_LINKED_RELS`), and a `for rel in CONSTANT` loop over one is the
+        # same read as a loop over a tuple. Without this branch those loops fell
+        # through to the gap and the family constants escaped the census.
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id in ("frozenset", "set", "tuple", "list")
+            and len(node.args) == 1
+        ):
+            return _resolve(node.args[0], scope, file, depth + 1)
+        # `"|".join(ABOUT_EDGE_TYPES)` — the other call shape that builds a rel
         # pattern: a separator constant joined over a constant's members.
         if (
             isinstance(node.func, ast.Attribute)
@@ -784,7 +875,17 @@ def _may_traverse_every_type(source: str) -> bool:
     """Text pre-filter for the empty-pattern class: is there a bracket with no
     type in it? Cheap, and only a filter — `_is_empty_pattern_read` decides.
     """
-    return any(":" not in match.group(1) for match in _EMPTY_TRAVERSAL.finditer(source))
+    return any(_type_slot(m.group(1)) is None for m in _EMPTY_TRAVERSAL.finditer(source))
+
+
+def _may_have_gap_type(source: str) -> bool:
+    """Text pre-filter for the call-time class: is any type slot an EXPRESSION?
+
+    Also only a filter (`_is_gap_type_read` decides) — but it has to be a
+    SUPERSET of the class, or the walk never reaches the site it exists for: a
+    filtered-out file is a reader that ships green.
+    """
+    return bool(_GAP_TYPE_HINT.search(source))
 
 
 def _docstrings(file: _File) -> set[int]:
@@ -823,22 +924,72 @@ def _is_read(text: str) -> bool:
     return False
 
 
+def _type_slot(content: str) -> str | None:
+    """What TYPE a bracketed traversal names, decided once for both shapes.
+
+    The type slot is the text after the first `:` in the part BEFORE any property
+    map — a colon inside `{...}` is a map key, not a type (which is how
+    `MATCH (n)-[r {idx:$i}]->(m)` names no type while carrying a colon).
+
+    * `None` — the bracket carries no type slot at all: `[r]`, `<-[r]-`,
+      `[r*1..2]`, `[r {idx:$i}]`. It walks EVERY relationship type.
+    * `""` — the slot exists and is EMPTY: `[r:]`, `[:]`, `[r: {c:$c}]`. That is
+      what an interpolation the resolver could not fill leaves behind, so this is
+      the call-time class's signature.
+    * anything else — the type the pattern NAMES (`aboutObject`, `A|B`).
+    """
+    head = content.split("{", 1)[0]
+    if ":" not in head:
+        return None
+    return re.split(r"[{*\s]", head.split(":", 1)[1].strip(), maxsplit=1)[0]
+
+
+def _reads_at(text: str, start: int) -> bool:
+    """Is the traversal at `start` governed by a reading clause?
+
+    Per traversal, the *last* clause before it decides: `MATCH`/`OPTIONAL MATCH`
+    read, `MERGE`/`CREATE` mint. Shared by both shape walks, so neither can drift
+    from the other (or from `_is_read`).
+    """
+    clauses = _CLAUSE.findall(text[:start])
+    if not clauses:
+        return False
+    return " ".join(clauses[-1].split()).upper() in ("MATCH", "OPTIONAL MATCH")
+
+
 def _is_empty_pattern_read(text: str) -> bool:
     """Does this Cypher traverse a relationship it does NOT name?
 
     Same governing-clause rule as `_is_read` — only a `MATCH`/`OPTIONAL MATCH`
     makes it a read — but the subject is the pattern's SHAPE: a bracketed
-    traversal whose contents carry no `:` has no type, so it walks every
-    relationship type and `aboutObject` is one of them.
+    traversal with no type slot at all (`-[r]->`, `<-[r]-`, `-[r {c:$c}]->`) has
+    no type, so it walks every relationship type and `aboutObject` is one of them.
     """
     for match in _EMPTY_TRAVERSAL.finditer(text):
-        if ":" in match.group(1):
+        if _type_slot(match.group(1)) is not None:
             continue
-        clauses = _CLAUSE.findall(text[: match.start()])
-        if not clauses:
+        if _reads_at(text, match.start()):
+            return True
+    return False
+
+
+def _is_gap_type_read(text: str) -> bool:
+    """Does this Cypher traverse a relationship whose type is a GAP?
+
+    The third shape, and the one no name-based scan can see: the type slot is
+    filled by an expression (a parameter, a dict lookup, a journal field), which
+    `_resolve` follows one level and then leaves empty — `-[:{rel}]->` resolves to
+    `-[:]->`. A bracketed traversal with an empty type slot is therefore the
+    signature of a call-time relationship name, and `aboutObject` may be what the
+    expression evaluates to at run time.
+
+    A literal `[r:]` would be invalid Cypher, so an empty slot on a resolved
+    candidate is always an interpolation the resolver could not fill.
+    """
+    for match in _EMPTY_TRAVERSAL.finditer(text):
+        if _type_slot(match.group(1)) != "":
             continue
-        governing = " ".join(clauses[-1].split()).upper()
-        if governing in ("MATCH", "OPTIONAL MATCH"):
+        if _reads_at(text, match.start()):
             return True
     return False
 
@@ -974,6 +1125,54 @@ def _empty_pattern_sites() -> dict[tuple[str, str], tuple[int, ...]]:
             line = getattr(node, "lineno", 0)
             for symbol in _site_symbol(node, file):
                 sites.setdefault((file.rel, symbol), []).append(line)
+    return {key: tuple(sorted(value)) for key, value in sites.items()}
+
+
+def _call_time_sites_in(file: _File) -> set[tuple[str, int]]:
+    """`_call_time_sites()` restricted to one (usually synthetic) module.
+
+    The mechanism arm's harness: it lets a synthetic source — a reader of a shape
+    the tree does not contain — be run through the SAME derivation the real
+    census uses, so "a new member of this class cannot ship green" is measured on
+    a source that would be a new member, not on today's tree.
+    """
+    docstrings = _docstrings(file)
+    sites: set[tuple[str, int]] = set()
+    for node in _roots(file):
+        if id(node) in docstrings:
+            continue
+        candidates = _resolve(node, _scope(file, node), file)
+        if not any(_is_gap_type_read(text) for text in candidates):
+            continue
+        line = getattr(node, "lineno", 0)
+        for symbol in _site_symbol(node, file):
+            sites.add((symbol, line))
+    return sites
+
+
+@lru_cache(maxsize=1)
+def _call_time_sites() -> dict[tuple[str, str], tuple[int, ...]]:
+    """Every site that reads an edge whose relationship TYPE is an expression.
+
+    The third class, and the one the census used to DECLARE instead of derive: a
+    relationship name assembled at call time (a parameter, a dict lookup, a
+    journal field) leaves the type slot empty when the resolver gives up on it, so
+    the shape `-[r:]->` is the class's signature — exactly as `-[r]->` is the
+    empty-pattern class's. Deriving it is what makes a NEW reader of the shape red
+    instead of shipping green: a hand list can only check the entries it was
+    given, which is how `traverse`, `ingest` and the replay reads were missed.
+
+    Kept apart from the other two walks because each class answers a different
+    question, and a missing site has to be reported against the class it belongs
+    to ("this names no type" and "this names a type nobody can see" are
+    different defects with different fixes).
+    """
+    sites: dict[tuple[str, str], list[int]] = {}
+    for file in _files():
+        if not _may_have_gap_type(file.source):
+            continue
+        for symbol, line in sorted(_call_time_sites_in(file)):
+            sites.setdefault((file.rel, symbol), []).append(line)
     return {key: tuple(sorted(value)) for key, value in sites.items()}
 
 
@@ -1117,6 +1316,7 @@ def test_the_table_is_not_vacuous():
     list was complete."""
     sites = _census()
     empty_pattern = _empty_pattern_sites()
+    call_time = _call_time_sites()
     rows = _declared_rows()
     customer_callable = [row for row in rows if "customer-callable" in row[2].lower()]
 
@@ -1132,6 +1332,13 @@ def test_the_table_is_not_vacuous():
         "and with it the only arm that can see a reader which names no "
         "relationship type. The defect that produced this arm was exactly this "
         "class going unenumerated."
+    )
+    assert len(call_time) >= _MIN_CALL_TIME, (
+        "the call-time walk derived only "
+        f"{len(call_time)} sites from tortoise/ — the type-slot detector broke, "
+        "and with it the only arm that can see a relationship type written as an "
+        "expression. While it was a hand list, `TortoiseSDK.traverse` and "
+        "`TortoiseSDK.ingest` were outside the census and every arm was green."
     )
     assert len(rows) >= _MIN_ROWS, (
         f"§13's table parsed to {len(rows)} rows — the table moved out of the "
@@ -1400,10 +1607,10 @@ def test_the_empty_pattern_register_count_matches_the_prose():
 
 
 def test_every_code_site_that_traverses_the_edge_is_declared():
-    """COMPLETENESS: both derivations must be declared somewhere.
+    """COMPLETENESS: all three derivations must be declared somewhere.
 
     This is the arm that no symbol-resolution check can replace — a *missing*
-    row has no symbol to fail to resolve. It covers both classes:
+    row has no symbol to fail to resolve. It covers three classes:
 
     * a reader that NAMES the edge — literally, or through a constant the
       resolver can follow — must be a §13 row;
@@ -1413,16 +1620,26 @@ def test_every_code_site_that_traverses_the_edge_is_declared():
       three further members that exist today — `entityProfile` / `tortoise_traverse`
       (customer-callable) and the backfill census — were absent from the table
       while every arm stayed green.
+    * a reader whose type slot is an EXPRESSION the resolver cannot fill
+      (`-[:{rel}]->`) must be a §13 row or a `CALL_TIME_REL` entry. ⚠️ This class
+      used to be a hand list whose completeness was TRUSTED, so it could only
+      ever check the entries it was given: two customer-callable SDK readers
+      (`traverse`, `ingest`) sat outside the census, and a new reader of the
+      shape would have shipped green.
     """
     declared = {
         pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs
     }
     registered = {(filename, _last(symbol)) for filename, symbol, _reason in EMPTY_PATTERN}
+    registered |= {
+        (filename, _last(symbol)) for filename, symbol, _why in CALL_TIME_REL
+    }
 
     undeclared = []
     for label, sites in (
         ("names the edge", _census()),
         ("names no type (empty pattern)", _empty_pattern_sites()),
+        ("names a type the resolver cannot follow (call time)", _call_time_sites()),
     ):
         for (path, symbol), lines in sorted(sites.items()):
             if (path.rsplit("/", 1)[-1], symbol) in declared:
@@ -1437,8 +1654,9 @@ def test_every_code_site_that_traverses_the_edge_is_declared():
         "base for the KEEP ruling, and the document's own rule is that the "
         "count IS the argument — so an omitted reader is an unmeasured one "
         "(add the row, with the symbol, to `## 13` of STORAGE-ARCHITECTURE.md, "
-        "or — only if it is not an about* read for a referent — add it to "
-        "`EMPTY_PATTERN` with the reason):\n  - "
+        "or — only if it is not an about* read for a referent — add it to the "
+        "register for its class, `EMPTY_PATTERN` or `CALL_TIME_REL`, with the "
+        "reason):\n  - "
         + "\n  - ".join(
             f"{path}::{symbol} — {label} (lines {lines})"
             for label, path, symbol, lines in undeclared
@@ -1451,25 +1669,21 @@ def test_every_declared_symbol_still_performs_the_read():
 
     Four prior audits failed in this direction too — a symbol that exists, is
     quoted, and is not where the traversal happens — so the check is that the
-    symbol is a **site of one of the two derivations**, not merely present in
+    symbol is a **site of one of the three derivations**, not merely present in
     the file. A name-only check would pass `_hop_query` (which builds the query)
-    for the wrong reason, so both classes count and nothing else does.
+    for the wrong reason, so the three classes count and nothing else does.
     """
     site_symbols: set[tuple[str, str]] = {
         (path.rsplit("/", 1)[-1], symbol) for path, symbol in _census()
     } | {(path.rsplit("/", 1)[-1], symbol) for path, symbol in _empty_pattern_sites()}
-    # A reader of the un-derivable shape is declared by name, so it cannot be a
-    # derived site — `test_the_undeclarable_shape_is_declared_by_name` owns it
-    # (it checks the symbol exists, is a row, and is still not derived).
-    declared_by_name = {
-        (filename.rsplit("/", 1)[-1], _last(symbol))
-        for filename, symbol, _why in UNDERIVABLE_CALL_TIME
+    site_symbols |= {
+        (path.rsplit("/", 1)[-1], symbol) for path, symbol in _call_time_sites()
     }
 
     problems: list[str] = []
     for number, _site_cell, _reach, pairs in _declared_rows():
         for key in pairs:
-            if key in site_symbols or key in declared_by_name:
+            if key in site_symbols:
                 continue
             problems.append(
                 f"row {number}: `{key[1]}` ({key[0]}) is declared as a reader but no "
@@ -1579,50 +1793,297 @@ _MECHANISM_CASES: tuple[tuple[str, str, bool], ...] = (
 )
 
 
-def test_the_undeclarable_shape_is_declared_by_name():
-    """The class NO census can derive is declared, and the declaration is checked.
+def test_the_call_time_shape_is_derived_and_declared():
+    """The THIRD class is DERIVED, and every member of it is declared.
 
-    A relationship name assembled entirely from a call-time value (a dict lookup,
-    an instance attribute) resolves to nothing — no literal, no constant, no
-    empty pattern — so it cannot be derived and must be declared by name in §13.
-    Both directions are checked, because each has already failed once:
+    A relationship type written as an expression (a function argument, a dict
+    lookup, a journal field) leaves the type slot EMPTY once the resolver gives
+    up on it — `-[:{rel}]->` resolves to `-[:]->` — so the class has a SHAPE, and
+    a shape can be walked. This arm used to be its opposite: a one-entry hand
+    list (`UNDERIVABLE_CALL_TIME`) whose completeness was trusted, which could
+    only ever validate the entries it was given. Measured against this head, that
+    list was missing four live members — `TortoiseSDK.traverse` and
+    `TortoiseSDK.ingest` (both customer-callable), plus the replay reads — and
+    no arm could see a NEW member of the shape at all.
 
-    * **every entry is a §13 row** — the previous revision of §13 said this class
-      was "declared by name instead" while it declared nothing at all, and two
-      about*-specific readers of the shape (`link_entity`, `bind_point_subjects`)
-      were in neither the table nor any list.
-    * **every entry is still un-derivable** — if the resolver learns to follow
-      it, the entry is stale and the class statement is wrong.
+    Three directions, because each one has failed or could fail silently:
+
+    * **every derived member is declared** — a §13 row, or a `CALL_TIME_REL`
+      entry saying why its gap cannot carry `aboutObject` for a referent. A new
+      reader of the shape therefore cannot ship green.
+    * **every registered member still derives** — if a member stops being a
+      call-time read (retargeted, or the resolver learns to follow it), the entry
+      is rot and the class statement is wrong.
+    * **the register is not the class** — the class has members that are §13
+      rows, so an empty register is legitimate and must not make this arm vacuous
+      (that vacuity is what the previous revision's "passes when the list is
+      empty" defect looked like). The floor is on the DERIVED set.
     """
+    derived = set(_call_time_sites())
     rows = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
-    derived = set(_census()) | set(_empty_pattern_sites())
+    registered = {(filename, _last(symbol)) for filename, symbol, _why in CALL_TIME_REL}
 
     problems: list[str] = []
-    for filename, symbol, why in UNDERIVABLE_CALL_TIME:
+    for path, symbol in sorted(derived):
+        if (path.rsplit("/", 1)[-1], symbol) in rows:
+            continue
+        if (path, symbol) in registered:
+            continue
+        problems.append(
+            f"{path}::{symbol} reads an edge whose relationship type is an "
+            "EXPRESSION (the resolved pattern carries an empty type slot), and "
+            "nothing declares it — add a §13 row if `aboutObject` is reachable "
+            "there for a referent, or a `CALL_TIME_REL` entry with the reason "
+            "it is not"
+        )
+
+    for filename, symbol, _why in CALL_TIME_REL:
         target = ROOT / filename
         if not target.exists() or symbol not in target.read_text(encoding="utf-8"):
             problems.append(
-                f"`{symbol}` no longer exists in {filename} — re-verify the row "
-                "and this declaration"
+                f"`{symbol}` no longer exists in {filename} — re-verify the entry"
             )
             continue
-        if (filename.rsplit("/", 1)[-1], _last(symbol)) not in rows:
+        if (filename, _last(symbol)) not in derived:
             problems.append(
-                f"{filename}::{symbol} reads the edge ({why}) and no §13 row "
-                "names it — the class is declared here precisely because nothing "
-                "derives it, so the row is the only place a re-verifier can see it"
-            )
-        if (filename, _last(symbol)) in derived:
-            problems.append(
-                f"{filename}::{symbol} is DECLARED as un-derivable and one of "
-                "the censuses now derives it — delete the entry and keep the row"
+                f"{filename}::{symbol} is registered in `CALL_TIME_REL` and the "
+                "call-time walk no longer derives it — either it stopped reading "
+                "through an expression (delete the entry) or the shape detector "
+                "broke (fix it); a stale entry hides the next reader's absence"
             )
 
-    assert not problems, (
-        "the shape that names no relationship type at all is the one shape only "
-        "a declaration can cover, so the declaration must be complete and must "
-        "not be stale:\n  - " + "\n  - ".join(problems)
+    assert len(derived) >= _MIN_CALL_TIME, (
+        "the call-time walk derived "
+        f"{len(derived)} sites, below the floor of {_MIN_CALL_TIME} — with no "
+        "members, both checks above would pass over an empty set and the class "
+        "would be unguarded again"
     )
+
+    assert not problems, (
+        "the class whose type slot is an expression is DERIVED from the resolved "
+        "shape, so a member of it can only be legitimate as a reviewable "
+        "declaration — a §13 row, or a `CALL_TIME_REL` entry with the reason its "
+        "gap cannot carry `aboutObject` for a referent:\n  - "
+        + "\n  - ".join(problems)
+    )
+
+
+#: Synthetic sources for the call-time arm: a type slot written as an
+#: expression, in every shape the tree uses, plus the near-misses that must NOT
+#: count (a named type, a writer, a docstring quoting the pattern) and the shapes
+#: that belong to the OTHER classes (a bracket with no type slot at all, which is
+#: the empty-pattern class's business).
+_CALL_TIME_CASES: tuple[tuple[str, str, bool], ...] = (
+    (
+        "f-string interpolation",
+        'def read(g, rel):\n    g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "f-string interpolation with a property map",
+        'def read(g, rel):\n'
+        '    g.query(f"MATCH (n)-[:{rel} {{idx:0}}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "dict lookup from an event",
+        'def read(g, ev):\n    rel = ev.get("edge_type")\n'
+        '    g.query(f"MATCH (n)-[r:{rel}]->(m) DELETE r")\n',
+        True,
+    ),
+    (
+        "`+`-concatenated type slot",
+        'def read(g, rel):\n'
+        '    g.query("MATCH (n)-[r:" + rel + "]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "interpolation into a bracketed pattern with no alias",
+        'def read(g, rel):\n    g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "named type (the named census's job, not this class)",
+        'def read(g):\n    g.query("MATCH (n)-[r:aboutObject]->(m) RETURN n")\n',
+        False,
+    ),
+    (
+        "empty pattern (the empty-pattern class's job, not this one)",
+        'def read(g):\n    g.query("MATCH (n)-[r]->(m) RETURN type(r)")\n',
+        False,
+    ),
+    (
+        "MERGE writer",
+        'def write(g, rel):\n    g.query(f"MERGE (n)-[:{rel}]->(m)")\n',
+        False,
+    ),
+    (
+        "a docstring quoting the pattern is not a site",
+        'def read(g, rel):\n    """Tried `MATCH (n)-[:{rel}]->(m)`; it scanned."""\n'
+        "    return None\n",
+        False,
+    ),
+)
+
+
+def test_the_call_time_shape_derivation_holds():
+    """The MECHANISM of the third class, on synthetic sources.
+
+    The class is only as good as its type-slot detector. These cases pin both
+    directions on sources that do not depend on today's tree, including the two
+    near-misses that must NOT count (a named type, a writer) and the two shapes
+    that belong to the neighbouring classes (an empty pattern is the
+    empty-pattern walk's, not this one) — two classes must not double-count one
+    site and then each re-declare it.
+    """
+    missing = []
+    for label, source, should_derive in _CALL_TIME_CASES:
+        derived = _call_time_sites_in(
+            _File(TORTISE / "<synthetic>", "<synthetic>", source)
+        )
+        if bool(derived) is not should_derive:
+            missing.append(
+                f"{label}: expected {'a site' if should_derive else 'no site'}, "
+                f"derived {sorted(derived)}"
+            )
+    assert not missing, (
+        "the call-time derivation lost a shape (or started counting one it must "
+        "not), so a reader whose relationship type is an expression would pass "
+        "this guard undeclared:\n  - " + "\n  - ".join(missing)
+    )
+
+
+#: Readers the tree does NOT contain, injected into the completeness arm's own
+#: inputs. Non-vacuity for the class statement: each of these would be a NEW
+#: member, and each must come back as undeclared — the property a hand list
+#: cannot have.
+_NEW_READER_CASES: tuple[tuple[str, str], ...] = (
+    (
+        "a relationship passed in as a parameter",
+        'def read_param(g, rel):\n'
+        '    g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+    ),
+    (
+        "a type read off a journal event",
+        'def read_event(g, ev):\n    rel = ev.get("edge_type")\n'
+        '    g.query(f"MATCH (n)-[r:{rel}]->(m) RETURN n")\n',
+    ),
+    (
+        "a loop over a rel-family frozenset, via an f-string",
+        "RELS = frozenset({'x', 'aboutObject'})\n\n\n"
+        "def read_family(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+    ),
+)
+
+
+def test_a_new_call_time_reader_cannot_ship_green():
+    """NON-VACUITY of the class statement: a NEW member reds the completeness arm.
+
+    The defect this arm exists for is not a wrong declaration, it is a missing
+    one: while the class was a hand list, the arm could only ever validate the
+    entries it was handed, so `TortoiseSDK.traverse` and `TortoiseSDK.ingest` sat
+    outside the census with every test green. So the check is not "is today's
+    tree declared" (the arm above does that) — it is "would tomorrow's reader be
+    caught", measured on sources that are NOT in the tree.
+
+    Each case is run through the shape walks and then through the completeness
+    arm's own predicate: derived as SOME class (so the reader is visible at all)
+    and declared by NO row or register (so it is a genuine new member). A case
+    that a derivation cannot see fails here as loudly as one that is "declared".
+    """
+    rows = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
+    registered = {(filename, _last(symbol)) for filename, symbol, _why in CALL_TIME_REL}
+    registered |= {(filename, _last(symbol)) for filename, symbol, _why in EMPTY_PATTERN}
+
+    problems: list[str] = []
+    for label, source in _NEW_READER_CASES:
+        file = _File(TORTISE / "<synthetic>", "<synthetic>", source)
+        derived = set(_sites_in(file)) | _empty_pattern_sites_in(file)
+        derived |= _call_time_sites_in(file)
+        if not derived:
+            problems.append(
+                f"{label}: no derivation sees this reader at all, so it would "
+                "ship as an unmeasured read"
+            )
+            continue
+        for symbol, _line in sorted(derived):
+            if ("<synthetic>", symbol) in rows or ("<synthetic>", symbol) in registered:
+                problems.append(
+                    f"{label}: `{symbol}` is visible to a derivation AND already "
+                    "declared — a synthetic source cannot be pre-declared, so this "
+                    "means the declaration test is accepting anything and a new "
+                    "member of the class would ship green"
+                )
+
+    assert not problems, (
+        "a reader of a shape this PR claims to derive is not visible to the "
+        "declaration test, which is exactly how the four missing members "
+        "survived four reviews:\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: FROZENSET cases for the named census's resolver: the rel family shapes that
+#: used to fall through to `_UNKNOWN` because `_resolve` handled `ast.Tuple`/
+#: `ast.List` only — so a `for rel in FAMILY` loop over a `frozenset` was missed
+#: while a loop over a tuple was caught. Pinned here so the branch cannot regress.
+_FROZENSET_CASES: tuple[tuple[str, str, bool], ...] = (
+    (
+        "`ast.Set` literal",
+        "RELS = {'x', 'aboutObject'}\n\n\n"
+        "def read(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "`frozenset({...})` call",
+        "RELS = frozenset({'x', 'aboutObject'})\n\n\n"
+        "def read(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "`tuple([...])` call",
+        "RELS = tuple(['x', 'aboutObject'])\n\n\n"
+        "def read(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "a frozenset that does NOT carry the edge derives nothing",
+        "RELS = frozenset({'x', 'y'})\n\n\n"
+        "def read(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        False,
+    ),
+)
+
+
+def test_the_resolver_follows_a_frozenset_rel_family():
+    """The resolver follows `ast.Set` and the collection constructors.
+
+    `frozenset` is the IDIOMATIC shape for a rel family in this package
+    (`DERIVABLE_STRUCTURAL_RELS`, `_ABOUT_REPLAY_RELS`, `ENTITY_LINKED_RELS` are
+    all frozensets), and the resolver used to handle `ast.Tuple`/`ast.List` only —
+    so a `for rel in FAMILY` loop over a tuple derived and one over a frozenset
+    did not. The fourth review measured that asymmetry on a synthetic probe; these
+    cases pin it, in both directions.
+    """
+    problems = []
+    for label, source, should_derive in _FROZENSET_CASES:
+        derived = _sites_in(_File(TORTISE / "<synthetic>", "<synthetic>", source))
+        if bool(derived) is not should_derive:
+            problems.append(
+                f"{label}: expected {'a site' if should_derive else 'no site'}, "
+                f"derived {sorted(derived)} — a `for rel in FAMILY` loop over "
+                "this collection shape is not followed by `_resolve`"
+            )
+    assert not problems, (
+        "the resolver cannot follow a rel-family collection shape, so a reader "
+        "written the way this package actually writes them would derive nothing "
+        "and ship undeclared:\n  - " + "\n  - ".join(problems)
+    )
+
 
 
 def test_the_census_derives_a_relationship_name_built_at_runtime():
@@ -1674,6 +2135,18 @@ _EMPTY_PATTERN_CASES: tuple[tuple[str, str, bool], ...] = (
         True,
     ),
     (
+        "empty pattern carrying a property map (the colon is a map key)",
+        'def read(g):\n'
+        '    g.query("MATCH (n)-[r {idx:$i}]->(m) RETURN type(r)")\n',
+        True,
+    ),
+    (
+        "named type carrying a property map (not this class)",
+        'def read(g):\n'
+        '    g.query("MATCH (n)-[r:aboutObject {idx:$i}]->(m) RETURN n")\n',
+        False,
+    ),
+    (
         "named type (the named census's job, not this class)",
         'def read(g):\n    g.query("MATCH (n)-[r:aboutObject]->(m) RETURN n")\n',
         False,
@@ -1715,8 +2188,11 @@ def test_the_empty_pattern_class_derivation_holds():
     regressed, `_empty_pattern_sites()` would return nothing, the three §13 rows
     for its members would become "declared but not derived", and — worse — a new
     member would be silently acceptable. These cases pin both directions on
-    sources that do not depend on today's tree, including the two near-misses
-    that must NOT count (a named type, and a docstring that only quotes Cypher).
+    sources that do not depend on today's tree, including the near-misses that
+    must NOT count (a named type, a named type carrying a property map, a
+    `MERGE` writer, and a docstring that only quotes Cypher) and the one shape a
+    `":" in contents` test got wrong: `-[r {idx:$i}]->` names NO type, because
+    that colon is a property-map key.
     """
     missing = []
     for label, source, should_derive in _EMPTY_PATTERN_CASES:
@@ -1849,7 +2325,10 @@ def test_the_prose_names_every_row_in_the_empty_pattern_class():
     derived_keys = {
         (path.rsplit("/", 1)[-1], symbol) for path, symbol in _empty_pattern_sites()
     }
-    shape_only = derived_keys - named_keys
+    call_time_keys = {
+        (path.rsplit("/", 1)[-1], symbol) for path, symbol in _call_time_sites()
+    }
+    shape_only = derived_keys - named_keys - call_time_keys
     derived_rows = {
         number
         for number, _site_cell, _reach, pairs in _declared_rows()
