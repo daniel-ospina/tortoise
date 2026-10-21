@@ -163,9 +163,28 @@ WHAT THIS PINS
    unguarded hand-copy this whole section exists to end, in the one sentence of
    the changed passage no other arm read. Now every count is quoted with the
    sha or date it was measured at, and a `… at the head` form reds.
+14. `test_every_literal_bracket_is_classified_not_just_the_first` — a string
+   literal may hold MORE than one `aboutObject` bracket, and write-vs-read is
+   decided per bracket. Classifying only the first let a query shaped
+   write-then-read hide its read from this whole file.
+15. `test_the_count_reader_sees_every_statement_not_just_the_first` — §13
+   states the customer-callable figure TWICE, so the arm that checks it
+   collects with `finditer` and compares SETS. A `re.search` binds the first
+   statement only, and the second copy is then read by nothing.
+16. `test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion` — the
+   UNTYPED-WALK class is now DERIVED from the tree, not hand-listed: every
+   relationship bracket carrying no type at all, in a read clause, must own a
+   §13 row or appear in `_EXCLUDED_UNTYPED`. This is the class that was wrong
+   five times running — each pass re-applied §13's inclusion rule by hand and
+   reached a different count, the last one finding 27 sites where the tree had
+   33 (the backup's all-edge dump and the `backfill_v25` count among the six).
+17. `test_every_stated_exclusion_is_still_true` — an exclusion is not a
+   promise: its code facts are asserted inside the excluded symbol's span, so
+   removing the constraint that put the edge out of the walk's result set reds
+   as an unowned read rather than silently re-entering the class.
 
-⚠️ **What this deliberately does NOT claim.** The census is a LOWER BOUND: it
-sees a literal relationship pattern naming the edge, so a reader that
+⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
+BOUND: it sees a relationship pattern naming the edge, so a reader that
 computes or carries the name (`_neighbors`, `_hop_query`,
 `_retrieve_topic_neighborhood`, `_preview_supersede`, `_rebuild_all_replay`,
 `supersede_point`, the `recall_state` constant readers) is invisible to it and
@@ -174,11 +193,11 @@ from going unnoticed (its pin would dangle). There is NO carrier fallback in
 (2): a row is a literal read, a pinned computed-name read, or red — the old
 fallback ("any `MATCH` in the span plus a bare mention of a carrier-shaped
 constant") decided no current row and would have greened a future one that read
-nothing. Rows 26–27 are unfiltered walks, so they are pinned the same way (2)
-pins rows 3 and 22 — a `MATCH` with no rel-type filter, which no grep for the edge
-name can see. Line NUMBERS are not asserted — the symbol is authoritative and a symbol that merely moved
-passes. And the enumeration is of READERS of the edge as data; writers that
-MERGE it are not rows here.
+nothing. The UNTYPED walks (rows 3, 22, 24–33) are NOT a lower bound any more:
+(16) derives them from the tree, which is what stopped the class moving on
+every pass. Line NUMBERS are not asserted — the symbol is authoritative and a
+symbol that merely moved passes. And the enumeration is of READERS of the edge
+as data; writers that MERGE it are not rows here.
 
 Static, stdlib-only, no network / DB / graph.
 """
@@ -351,6 +370,116 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     "definite_description_backfill.py::CENSUS_QUERY": (
         "OPTIONAL MATCH (o)<-[r]-()",
         "collect(DISTINCT type(r)) AS ref_edges",
+    ),
+    # Rows 28-33 — the FIFTH re-derivation, and the one that closed the class
+    # instead of extending it by hand. Every row below is an ALL-EDGE read: the
+    # pattern constrains no rel type at all, so the walk returns `aboutObject`
+    # edges as data without ever naming them. Rows 26-27 established the rule
+    # for the non-customer half (a count that a `SET`-free derive would silently
+    # shrink); rows 28-32 are the same rule where the edge is DUMPED, SHIPPED or
+    # COUNTED for a customer, which is why the figures the ruling calls decisive
+    # moved again. Row 33 is the write-side twin.
+    #
+    # ⚠️ The backup rows are not a marginal addition: §13's own `#4240` bullet is
+    # about this edge class's durability, and the backup IS the durability
+    # mechanism — so "would a derive change what the customer can restore?" is
+    # that bullet's question, and it was answerable only from a site the table
+    # did not carry.
+    "hosted_backup.py::_DUMP_EDGE_PAGE_QUERY": (
+        '"MATCH (a)-[r]->(b) WHERE id(r) >= $cursor "',
+        '"RETURN id(a), id(b), type(r), properties(r), id(r) "',
+    ),
+    "hosted_backup.py::_COUNT_ALL_EDGES_QUERY": (
+        '_COUNT_ALL_EDGES_QUERY = "MATCH ()-[r]->() RETURN count(r)"',
+    ),
+    "hosted_backup.py::restore_graph": (
+        '"MATCH ()-[r]->() RETURN count(r)").result_set[0][0])',
+        "baseline_edges",
+    ),
+    "hosted_backup.py::_restore_copy_settled": (
+        '"MATCH ()-[r]->() RETURN count(r)").result_set[0][0])',
+        "dst_edges",
+    ),
+    "sdk.py::TortoiseSDK.backfill_v25": (
+        'proj.g.query("MATCH ()-[r]->() RETURN count(r)")',
+        'report["edge_count"]',
+    ),
+    "sdk.py::TortoiseSDK._promote_incident_operators": (
+        '"MATCH (o:Point {id:$oid})-[r]->(s) "',
+        "epistemic_disjunction('s')",
+    ),
+}
+
+#: Untyped walks that CANNOT observe the edge, keyed by the symbol that owns
+#: them: `row key -> (the code facts to assert in its span, why it is out).`
+#:
+#: ⚠️ **This table is what turns §13's *"the class is enumerated, not excluded"*
+#: from a promise into a check, and it exists because the previous four hand
+#: passes each produced a DIFFERENT answer.** Rows 24-27 were added by applying
+#: the section's own rule (*an unfiltered walk reads the edge without naming
+#: it*), and every subsequent reader of the section applied the same rule and
+#: got a different count — because the rule admitted, and nothing said where it
+#: STOPPED. An exclusion that is not written down is indistinguishable from an
+#: omission, so each one below carries the code fact that earns it and a red when
+#: that fact goes away.
+#:
+#: The two shapes that exclude are the two ways a walk can bound the RESULT SET
+#: away from the edge (its target is `:Object`, `STRUCTURAL_REL_LABELS` in
+#: `projection/edges.py`):
+#:
+#: * the relationship TYPE is restricted downstream (`type(r) IN [...]`), or
+#: * an ENDPOINT label excludes both of the edge's ends.
+#:
+#: A pattern-comprehension degree (`size([(old)-[x]-(y) | x])`) is the second
+#: shape: it is anchored on a `:Source`, and no `aboutObject` starts or ends at a
+#: Source.
+_EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
+    "hosted_api.py::_load_commit_graph_state": (
+        (
+            "MATCH (o:Point {is_operator:true})-[r]->(t) ",
+            "WHERE type(r) IN ['IMPL','NAND'] ",
+        ),
+        "the walked relationship type is restricted to the operator pair, so an "
+        "`aboutObject` edge is filtered out before the row is returned",
+    ),
+    "mining.py::EpSafeCommit.verify_no_auto_wire": (
+        (
+            "MATCH (o:Point {is_operator:true})-[r]->(n:Point) ",
+            "MATCH (o:Point {id:$oid})-[r]->(s:Point) ",
+        ),
+        "both endpoints are pinned to `:Point`, and `aboutObject`'s target is "
+        "`:Object` (`STRUCTURAL_REL_LABELS`)",
+    ),
+    "projection/entities.py::_EntityHandlers._materialize_connector_source": (
+        ("size([(old)-[x]-(y) | x]) AS deg",),
+        "a pattern-comprehension degree over a `:Source` re-point — no "
+        "`aboutObject` starts or ends at a Source",
+    ),
+    "sdk.py::TortoiseSDK.provenance": (
+        ("MATCH (s:Subject {id:$sid})-[r]->(n) ",),
+        "the walk is OUTGOING from a `:Subject`, and `aboutObject` starts at a "
+        "Point",
+    ),
+    "sdk.py::TortoiseSDK._connected_pairs": (
+        ("MATCH (a:Point)-[r]-(b:Point) ",),
+        "both endpoints are pinned to `:Point`, and `aboutObject`'s target is "
+        "`:Object`",
+    ),
+    "session_source_migration.py::_OUT_TYPES": (
+        ("MATCH (old:Source {url:$u})-[r]->(t) ",),
+        "the walk is OUTGOING from a `:Source`, which no `aboutObject` starts at",
+    ),
+    "session_source_migration.py::_IN_TYPES": (
+        ("MATCH (n)-[r]->(old:Source {url:$u}) ",),
+        "the walk is INCOMING to a `:Source`, which no `aboutObject` targets",
+    ),
+    "session_source_migration.py::_DEGREE": (
+        ("size([(old)-[x]-(y) | x]) AS deg",),
+        "a pattern-comprehension degree over a `:Source`",
+    ),
+    "session_source_migration.py::_delete_if_orphan": (
+        ("size([(old)-[x]-(y) | x]) AS deg",),
+        "a pattern-comprehension degree over a `:Source`",
     ),
 }
 
@@ -534,7 +663,9 @@ def _reads_literally(value: str) -> bool:
     `test_no_read_site_lacks_a_row`'s "every read clause that names the edge"
     over-promised. Measured on the pre-fix rule: a new method returning only
     the FRAGMENT `"(n)-[:aboutObject]->(o)"` — the shape
-    `SubgraphExpander._neighbors` already builds — kept all thirteen arms green.
+    `SubgraphExpander._neighbors` already builds — kept every arm green (all
+    thirteen of them at `c0c67fa34`, where that mutation was run; the file
+    defines seventeen at this head, all of them green on the shipped rule).
     """
     for match in _EDGE_PATTERN.finditer(value):
         clauses = _CLAUSE.findall(value[: match.start()])
@@ -709,6 +840,125 @@ def _literal_read_sites() -> dict[str, list[int]]:
             found.setdefault(str(path.relative_to(PKG)), []).append(
                 getattr(node, "lineno", 0)
             )
+    return found
+
+
+#: A Cypher relationship bracket with NO rel-type constraint: `[r]`,
+#: `[r*1..2]`, `[x]`. A bracket carrying a `:` is either a TYPED read or a
+#: run-time type name — the carrier/computed-name half, which `_NON_LITERAL`
+#: already decides — so the colon is exactly the line between the two halves of
+#: this census.
+_UNTYPED_BRACKET = re.compile(r"(?:<-|-)\s*\[([^\]\n]*)\]\s*(?:-|->)")
+
+#: The stand-in for a run-time hole in a reconstructed query string. Marks where
+#: a value is computed (a rel type, a label, an id) WITHOUT destroying the
+#: surrounding Cypher, so `[r:{rel}]` still reads as a bracket that carries a
+#: type while `[r]` still reads as one that carries none.
+_HOLE = "\u00abexpr\u00bb"
+
+
+def _docstring_ids(tree: ast.Module) -> set[int]:
+    """The `id()`s of every docstring Constant — prose, not a query."""
+    ids: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            continue
+        body = node.body
+        if (
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            ids.add(id(body[0].value))
+    return ids
+
+
+def _query_text(node: ast.AST, docstrings: set[int]) -> tuple[str, int] | None:
+    """A string-valued expression's text, with run-time values replaced by `_HOLE`.
+
+    Cypher reaches the driver as `Constant`, `f"…{x}…"` and `"a" + b + "c"`
+    indiscriminately, and the bracket this census decides can live in any of
+    them: `_hop_query` builds `MATCH (n:{label} {{{key}:$eid}})-[r]->(m)` as an
+    f-string, so a census that read only `ast.Constant` would be blind to the
+    exact row it was written for. Reconstructing the whole expression keeps the
+    clause before the bracket, which is what decides read-vs-write.
+    """
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, str) and id(node) not in docstrings:
+            return node.value, node.lineno
+        return None
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            else:
+                parts.append(_HOLE)
+        return "".join(parts), node.lineno
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _query_text(node.left, docstrings)
+        right = _query_text(node.right, docstrings)
+        if left is None and right is None:
+            return None
+        text = (left[0] if left else _HOLE) + (right[0] if right else _HOLE)
+        return text, (left or right)[1]
+    return None
+
+
+def _untyped_read_sites() -> dict[str, list[int]]:
+    """Census: module → lines of every READ-clause walk with NO rel-type constraint.
+
+    `_literal_read_sites` finds the reader that SPELLS the edge. This one finds
+    the reader that CANNOT: a relationship bracket carrying no type at all
+    (`[r]`, `[r*1..2]`, `[x]`), in a `MATCH`/`OPTIONAL MATCH`. Such a walk
+    returns `aboutObject` edges as data and no `grep` for the edge name will
+    ever see it.
+
+    ⚠️ **This arm is the point of the whole file, applied to the LAST class that
+    was still hand-maintained.** The literal census plus `_NON_LITERAL` made
+    every NAMED reader executable. The untyped walk stayed a hand pass — and it
+    is the hand pass that was wrong five times running: rows 24-27 were added by
+    applying §13's own inclusion rule (*an unfiltered walk reads the edge without
+    naming it*), and each later reader of the section re-applied the same rule
+    and reached a different count, because the rule admitted everything and
+    nothing recorded where it stopped. Measured at the head this arm was written
+    for: the table carried 27 sites and the tree had 33, and the six missing ones
+    included `POST /v1/backups` — the durability mechanism the ruling's own
+    bullet is about.
+
+    Membership is decided the same way as the literal census (by ENCLOSING
+    SYMBOL, so a new walk added beside a row reds), and the sites that CANNOT
+    observe the edge are carried by `_EXCLUDED_UNTYPED` with the code fact that
+    earns the exclusion. Nothing is out of the class by silence.
+    """
+    found: dict[str, list[int]] = {}
+    for path in sorted(PKG.rglob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        if "MATCH" not in text:
+            continue
+        tree = _parsed(str(path))
+        docstrings = _docstring_ids(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+                continue
+            rebuilt = _query_text(node, docstrings)
+            if rebuilt is None:
+                continue
+            value, lineno = rebuilt
+            for match in _UNTYPED_BRACKET.finditer(value):
+                if ":" in match.group(1):
+                    continue  # a typed read, or a run-time type name
+                clauses = _CLAUSE.findall(value[: match.start()])
+                if not clauses:
+                    continue
+                if " ".join(clauses[-1].upper().split()) not in _READ_CLAUSES:
+                    continue
+                lines = found.setdefault(str(path.relative_to(PKG)), [])
+                if lineno not in lines:
+                    lines.append(lineno)
     return found
 
 
@@ -947,6 +1197,103 @@ def test_the_computed_name_readers_are_still_complete_reads():
             )
 
 
+def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
+    """Every untyped walk is a row, or carries the code fact that excludes it.
+
+    ⚠️ **The class this decides is the one that was wrong five times.** §13 says
+    *the class is enumerated, not excluded*, and rows 24-27 were added by
+    applying that rule to the code. Every subsequent pass applied the same rule
+    and got a different answer, because a rule that admits every unfiltered walk
+    admits more than any hand pass will find — the last one found 27 sites where
+    there were 33, and the six it missed included `POST /v1/backups`.
+
+    So the enumeration is now derived from the TREE, the same way the literal
+    census is: every relationship bracket with no `:` at all, in a READ clause,
+    keyed on its enclosing `module.py::symbol`. Each site must then either own a
+    §13 row or appear in `_EXCLUDED_UNTYPED` **with the code fact that earns the
+    exclusion asserted in that symbol's span** — so an exclusion cannot be a
+    claim, and it cannot silently stop being true: drop the `:Point` constraint
+    or the `type(r) IN [...]` filter and the site reds here as an unowned walk.
+    """
+    named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
+    census = _untyped_read_sites()
+    assert census, (
+        "the untyped-walk census found NOTHING under tortoise/ — the bracket "
+        "pattern or the clause rule was changed and this arm has stopped "
+        "measuring. Rows 22, 24-27 and 28-33 are all of this shape, so an empty "
+        "census cannot be true."
+    )
+
+    unowned: list[str] = []
+    for module, lines in sorted(census.items()):
+        tree = _module_tree(_module_path(module))
+        symbols = _row_symbols(tree)
+        for line in lines:
+            candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
+            keys = [f"{module}::{name}" for name in candidates]
+            if any(key in named or key in _EXCLUDED_UNTYPED for key in keys):
+                continue
+            unowned.append(
+                f"{module}:{line}  (inside {', '.join(candidates) or 'module level'})"
+            )
+    assert not unowned, (
+        "these walks read EVERY relationship type (so they read `aboutObject`) "
+        "and are neither absorbed by a §13 row nor covered by a stated "
+        "exclusion:\n  " + "\n  ".join(unowned) + "\n§13's `the class is "
+        "enumerated, not excluded` is only true if every such walk is one or the "
+        "other. Add the row, or add an `_EXCLUDED_UNTYPED` entry carrying the "
+        "code fact that puts the edge out of its result set."
+    )
+
+
+def test_every_stated_exclusion_is_still_true():
+    """An exclusion must stay earned: its code facts are asserted where they live.
+
+    `_EXCLUDED_UNTYPED` is the register that makes *"not excluded by silence"*
+    mean something, so it is held from both sides. A fact that no longer appears
+    in the symbol's span means the constraint that excluded the edge was removed
+    — and the site is then an unowned READ of the edge, which is exactly the
+    under-count this file exists to end. A symbol that no longer exists, or that
+    has since been given a row, is a dead entry: it hides nothing today and would
+    hide a real walk tomorrow.
+    """
+    named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
+    assert _EXCLUDED_UNTYPED, (
+        "the exclusion register is empty — this direction now measures nothing, "
+        "and every untyped walk would have to own a row instead."
+    )
+    problems: list[str] = []
+    for key, (facts, _reason) in sorted(_EXCLUDED_UNTYPED.items()):
+        module_rel, _, symbol = key.partition("::")
+        path = _module_path(module_rel)
+        if not path.exists():
+            problems.append(f"{key} — {module_rel} no longer exists")
+            continue
+        tree = _module_tree(path)
+        span = _span(tree, symbol)
+        if span is None:
+            problems.append(f"{key} — the symbol no longer resolves")
+            continue
+        if key in named:
+            problems.append(
+                f"{key} — is excluded AND has a §13 row; one of the two is dead"
+            )
+            continue
+        span_text = "\n".join(
+            path.read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
+        )
+        lost = [fact for fact in facts if fact not in span_text]
+        if lost:
+            problems.append(
+                f"{key} — the constraint that excluded the edge is gone: {lost!r}. "
+                "The walk now reads `aboutObject` and needs a row."
+            )
+    assert not problems, (
+        "§13's exclusion register no longer matches the code:\n  "
+        + "\n  ".join(problems)
+    )
+
+
 def test_every_computed_name_pin_owns_a_row():
     """A pinned computed-name reader with NO row is silently IGNORED.
 
@@ -1029,16 +1376,17 @@ def test_no_read_site_lacks_a_row():
 #: Every form §13 states the READ-SITE count in. Deliberately case-sensitive:
 #: `customer-callable read sites` must fall to `_CALLABLE_SITE_COUNT` below and
 #: NOT be read as a site count, because that sentence states the callable
-#: figure (TWELVE), not the total (TWENTY-SEVEN).
+#: figure, not the total.
 _SITE_COUNT = re.compile(r"\b([A-Z]+(?:-[A-Z]+)?|\d+) read sites\b")
 
 #: Every form §13 states the CUSTOMER-CALLABLE count in. The section states it
-#: TWICE — derived once at its head (`TWELVE of them are CUSTOMER-CALLABLE`) and
-#: quoted again in the blast-radius sentence (`TWELVE customer-callable read
+#: TWICE — derived once at its head (`N of them are CUSTOMER-CALLABLE`) and
+#: quoted again in the blast-radius sentence (`N customer-callable read
 #: sites`) — and BOTH are read. ⚠️ **`re.search` was a false PASS here**: it
-#: binds the first statement only, so the blast-radius sentence could say
-#: `FIFTEEN customer-callable read sites` while §13's table carried twelve and
-#: all thirteen arms stayed green — the same "hand copy with no reader" shape
+#: binds the first statement only, so the blast-radius sentence could state a
+#: different figure from the one §13's table carries and every arm stayed green
+#: (measured at `c0c67fa34`: thirteen arms, this one included) — the same
+#: "hand copy with no reader" shape
 #: the door figure in that very sentence was fixed for. The sibling
 #: `test_the_extractor_document_agrees_on_the_count` reads its document the same
 #: way (`stated == {counted}`), so the two arms now agree on the rule too.
@@ -1067,10 +1415,10 @@ def test_the_count_reader_sees_every_statement_not_just_the_first():
     ⚠️ **Non-vacuity for the arm above, independent of the document's current
     wording.** §13 states the customer-callable figure twice in two different
     shapes, so a reader that binds only the first (`re.search`) leaves the
-    second unguarded — measured on the pre-fix guard: rewriting the
-    blast-radius sentence to `FIFTEEN customer-callable read sites` left all
-    thirteen arms green. This fixture states the same figure twice, in both
-    shapes, and requires both to be seen.
+    second unguarded — measured on the pre-fix guard at `c0c67fa34`: rewriting
+    the blast-radius sentence to `FIFTEEN customer-callable read sites` left
+    every arm green (thirteen of them, at that sha). This fixture states the
+    same figure twice, in both shapes, and requires both to be seen.
     """
     fixture = (
         "TWENTY-SEVEN read sites, and TWELVE of them are CUSTOMER-CALLABLE."

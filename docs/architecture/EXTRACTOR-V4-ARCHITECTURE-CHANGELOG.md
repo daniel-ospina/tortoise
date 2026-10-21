@@ -753,3 +753,59 @@ method, or a served REST route — counted once per site that reaches it*), and
 `test_the_stated_door_count_matches_the_table` derives the total and the per-kind breakdown (nine MCP tools,
 five SDK methods, two REST routes) from the reach cells and asserts it in BOTH documents. Measured before the
 fix: rewriting the figure to `four` here, or `TEN` in the sibling, left all ten tests green.
+
+## §13.8 question 2 — the count moves to SEVENTEEN sites / TWENTY doors, because the ALL-EDGE class was still a hand pass (2026-10-21, `#7948`)
+
+The guard over this passage now DERIVES the untyped-walk class from the tree, so this entry records what the
+derivation moved and why the predecessor kept missing it.
+
+**What was wrong.** Rows 24–27 of `STORAGE-ARCHITECTURE.md` §13 were added by applying the section's own
+declared rule — *an unfiltered walk reads the edge without naming it; the class is enumerated, not excluded*.
+Every subsequent pass applied that rule and reached a different number, because a rule that admits every
+unfiltered walk admits more than any hand pass will find, and nothing recorded where it stopped. Measured at
+the head this entry was written for: the table carried 27 sites and the tree had 33, and the six it missed
+included the two whose absence mattered most to the ruling.
+
+**The six, and why the backup ones are load-bearing.**
+
+- `hosted_backup.py::_DUMP_EDGE_PAGE_QUERY` — every edge of the graph keyset-paged out **as data**
+  (`MATCH (a)-[r]->(b) … RETURN …, type(r), properties(r), …`, no rel-type filter, no label constraint), into
+  the per-org encrypted backup, behind `POST /v1/backups`.
+- `hosted_backup.py::_COUNT_ALL_EDGES_QUERY`, `::restore_graph`, `::_restore_copy_settled` — the unlabelled
+  whole-graph edge counts (`MATCH ()-[r]->() RETURN count(r)`) that make a dump's completeness checkable, take
+  a restore's baseline/delta and gate whether the copy has settled. Behind `POST /v1/backups` and
+  `POST /v1/backups/restore`.
+- `sdk.py::TortoiseSDK.backfill_v25` — the same unlabelled all-edge count, returned to the caller as
+  `report["edge_count"]`, on a public `TortoiseSDK` method with a registered MCP tool
+  (`tortoise_backfill_v25`) in front of it.
+- `sdk.py::TortoiseSDK._promote_incident_operators` — every incident operator edge of a freshly-live Point,
+  target swept across all four epistemic labels (`epistemic_disjunction`, which **includes `Object`**) with no
+  rel-type filter, so an `aboutObject` edge is walked and its endpoint status gates the promotion.
+
+⚠️ **The backup readers are not a marginal addition to the count — they are the site the §13 ruling's own
+durability bullet is about.** That bullet asks whether this edge class is consistent about durability, and the
+backup **is** the durability mechanism, so *would a `SET`-free derive change what the customer can restore?*
+was answerable only from a reader the table did not carry. `sdk.py::TortoiseSDK.backfill_v25` is the direct
+analogue of row 27 (`definite_description_backfill.CENSUS_QUERY`), which the table already carried — on a
+public SDK method rather than an ops audit.
+
+**The structural fix — the part that stops a sixth pass.** `tests/test_7948_about_object_read_sites.py` now
+censuses every Cypher relationship bracket that carries **no type at all** (`[r]`, `[r*1..2]`, `[x]`) inside a
+read clause, reconstructing f-strings and `+`-concatenations so `[r:{rel}]` still reads as typed and the
+`_hop_query` shape is not lost. Ownership is by enclosing `module.py::symbol`, exactly as the literal census
+is, so a new unfiltered walk added beside an existing row reds. A site that genuinely **cannot** observe the
+edge must appear in `_EXCLUDED_UNTYPED` with the code fact that earns the exclusion **asserted inside that
+symbol's span** — today that is only two shapes: the walked type restricted downstream
+(`type(r) IN ['IMPL','NAND']` in `hosted_api._load_commit_graph_state`) and endpoints pinned away from the
+edge's `Point → Object` shape (`STRUCTURAL_REL_LABELS`). Measured: the register's nine entries cover exactly
+the remaining untyped walks, and deleting a constraint reds
+`test_every_stated_exclusion_is_still_true` while leaving the site unowned in
+`test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion`. **Nothing in this class is out by silence any more.**
+
+**Counts.** §13, §13's blast-radius sentence, §13.6 and §13.8 now state THIRTY-THREE read sites, SEVENTEEN
+customer-callable, TWENTY doors — ten MCP tools, six SDK methods and four REST routes (`POST /v1/backups` and
+`POST /v1/backups/restore` are new; `backfill_v25` / `tortoise_backfill_v25` are new) — every figure derived
+from the reach cells by the guard, never hand-counted. §13.8's enumeration names all seventeen, and
+`test_the_extractor_document_agrees_on_the_count` holds it there in both directions. The ruling is unchanged:
+**KEEP the stored edges, deferred to post-launch** — the corrected count moves in the direction the ruling
+already bet on, since more read sites make keeping the edge more strongly indicated.
