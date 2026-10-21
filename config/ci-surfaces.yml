@@ -3390,6 +3390,12 @@ surfaces:
   # implementation (extractor_v2.fold_allowed), so the file is registered
   # alongside test_consolidation_4way.py, which guards the same classifier.
   - test_never_across_fold_5080.py
+  # #5006: the attachments half of the same D12/O4 ruling — a fold that would
+  # drop an entity only the candidate names is refused. Registered `core` beside
+  # `test_never_across_fold_5080.py` (same classifier, same fold asymmetry):
+  # `extractor_v2.py` is not a SHARED_MODULE, so a diff touching only it selects
+  # `core` — unregistered, this guard would run in NO leg at all.
+  - test_merge_fold_5006.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
   - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
@@ -7209,6 +7215,7 @@ durations:
   test_fanout_cap.py: 0.2  # unmeasured
   test_sufficiency_router.py: 7.5  # #5009: hermetic (no DB, no graph, no model call) — 211 tests, measured 4.5-7.8s on a quiet host and 15.9-17.5s while this box carried a 40-deep CI queue. The WEIGHT stays at the quiet-host reading on purpose: it is a packing weight, and the 17s sample measures fleet load, not the file. Refresh from the first post-merge junit sweep (`--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR has no measured value at PR time).
   test_never_across_fold_5080.py: 2.0  # unmeasured
+  test_merge_fold_5006.py: 2.0  # unmeasured — new in #5006; the weight is the flat default, not a measurement
   test_operator_alert.py: 2.3
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
   bench/test_smoke_embedded.py: 38.6

@@ -5700,9 +5700,22 @@ def supersede_allowed(a: str, b: str) -> bool:
 #
 # So a fold that would drop an attachment is REFUSED and the claim falls
 # through to ADD — both survive. The asymmetry is the ruling's ("a false merge
-# costs more than a kept near-duplicate"), and it is the same direction
-# ``_boundary`` already refuses in: an unreadable comparison reads as a
-# DIFFERENCE.
+# costs more than a kept near-duplicate"): a wrong keep is noise, a wrong drop
+# is memory loss.
+#
+# ⚠️ The READ direction is the opposite of the boundary's, on purpose.
+# ``_boundary``/``fold_allowed`` are fail-CLOSED (an unreadable comparison
+# refuses the fold); ``_attachments_preserved`` is fail-OPEN (an absent or
+# unreadable attachment set on either side permits it). S3 prior rows carry
+# ``about_entities`` only when the Task-4 enrichment ran and a minted operator
+# ref carries none, so refusing on an unknown set would silently become "never
+# fold" wherever the enrichment is off — a volume regression, not a safety
+# gain. Read ``_attachments_preserved``'s docstring before "simplifying" the
+# branch into a fail-closed one.
+#
+# BOTH no-payload arms are guarded, because both drop the same evidence: the
+# paraphrase band below AND the exact-content arm (step 1), which returns
+# before the per-prior loop.
 #
 # ⚠️ This is the evidence-preservation half of #5006, NOT the union-merge. The
 # Jev-arbitrated fusion that keeps ONE point and writes the union onto it is
@@ -5754,7 +5767,11 @@ def classify_consolidation(point: dict, priors: list[dict], *,
     to one of ADD / UPDATE / NOOP / DELETE in priority order:
 
       1. NOOP (identical)   — normalized content equals a prior (the
-                              existing exact/content-hash dedup);
+                              existing exact/content-hash dedup).  A fold is
+                              admissible only when it loses nothing here too:
+                              the prior must already carry every entity the
+                              candidate names (#5006), else that prior is
+                              skipped and the claim falls through to ADD;
       2. UPDATE             — same entity + same attribute, VALUE differs
                               (value-signature inequality when both sides
                               carry a signature, else the E5 frame-token
@@ -5795,10 +5812,17 @@ def classify_consolidation(point: dict, priors: list[dict], *,
 
     # 1) NOOP — identical (existing exact/content-hash dedup)
     for p in priors:
-        if _norm(str(p.get("content") or "")) == norm:
-            return DecisionRecord("NOOP", prior_id=str(p.get("id") or ""),
-                                  overlap=1.0, reason="identical",
-                                  evidence="exact normalized content match")
+        if _norm(str(p.get("content") or "")) != norm:
+            continue
+        # #5006: this arm emits no payload point either, so it drops exactly
+        # the evidence the paraphrase arm would. A prior that does not already
+        # carry every entity the candidate names may not absorb it — skip that
+        # prior (not the candidate) and let the pair fall through to ADD.
+        if not _attachments_preserved(p, point):
+            continue
+        return DecisionRecord("NOOP", prior_id=str(p.get("id") or ""),
+                              overlap=1.0, reason="identical",
+                              evidence="exact normalized content match")
 
     best_update: tuple[float, dict] | None = None
     best_noop: tuple[float, dict, str] | None = None   # (overlap, prior, mode)

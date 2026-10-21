@@ -22,6 +22,10 @@ unreadable direction is already **both claims survive**.
 ⇒ The fix is the same direction one layer out: when the fold would drop an
 attachment, the fold is refused and the claim falls through to `ADD`.
 
+BOTH no-payload arms are covered: the paraphrase band (step 3) and the
+exact-content arm (step 1, `reason == "identical"`), which returns before the
+per-prior loop and would otherwise drop the same evidence.
+
 ⚠️ SCOPE — this is the EVIDENCE-PRESERVATION half of #5006, not the union-merge
 itself. The Jev-arbitrated fusion (which keeps ONE point and writes the union of
 both sides' attachments onto it) remains unimplemented: `config/v4-mechanisms.yml`
@@ -157,6 +161,57 @@ class TestFailOpenOnAnUnknownAttachmentSet:
                       {"content": CANDIDATE_CONTENT,
                        "about_entities": ["team", "office"]})
         assert d.decision == "NOOP", d.evidence
+
+
+class TestTheIdenticalArmIsGuardedToo:
+    """The exact-content arm folds and drops evidence exactly like the band.
+
+    `reason == "identical"` returns from step 1, above the per-prior loop, so a
+    guard placed only in the paraphrase pass leaves it open — and the widest
+    entity set is the one a restated claim picks up. Pre-fix these two cases
+    come back `NOOP / identical` and the candidate's extra link is dropped.
+    """
+
+    def test_identical_content_with_a_new_entity_refuses_the_fold(self):
+        d = v2.classify_consolidation(
+            {"content": "gym at 6pm", "about_entities": ["gym", "office"]},
+            [_prior(id="pt1", content="gym at 6pm", about_entities=["gym"])],
+            entity_mentions=["gym"])
+        assert d.decision == "ADD", d.evidence
+        assert d.reason != "identical"
+        # Both claims survive — the same direction the boundary refuses in.
+        assert d.prior_id == ""
+
+    def test_the_refusal_is_per_prior_on_the_identical_arm_too(self):
+        """A narrow identical prior must not veto a fold onto a wider one."""
+        d = v2.classify_consolidation(
+            {"content": "gym at 6pm", "about_entities": ["gym", "office"]},
+            [_prior(id="pt_narrow", content="gym at 6pm",
+                    about_entities=["gym"]),
+             _prior(id="pt_wide", content="gym at 6pm",
+                    about_entities=["gym", "office"])],
+            entity_mentions=["gym"])
+        assert d.decision == "NOOP", d.evidence
+        assert d.reason == "identical"
+        assert d.prior_id == "pt_wide"
+
+    def test_identical_content_and_identical_attachments_still_folds(self):
+        """The sanctioned re-ingest is unchanged: same content, same links."""
+        d = v2.classify_consolidation(
+            {"content": "gym at 6pm", "about_entities": ["gym"]},
+            [_prior(id="pt1", content="gym at 6pm", about_entities=["gym"])],
+            entity_mentions=["gym"])
+        assert d.decision == "NOOP", d.evidence
+        assert d.reason == "identical"
+        assert d.prior_id == "pt1"
+
+    def test_identical_arm_stays_fail_open_on_an_unknown_set(self):
+        d = v2.classify_consolidation(
+            {"content": "gym at 6pm", "about_entities": ["gym", "office"]},
+            [_prior(id="pt1", content="gym at 6pm")],
+            entity_mentions=["gym"])
+        assert d.decision == "NOOP", d.evidence
+        assert d.reason == "identical"
 
 
 class TestTheBoundaryStillWins:
