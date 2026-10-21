@@ -35,22 +35,26 @@ WHAT THIS PINS
    `` `sym` (`file.py:NNNN`) `` (and the reverse parenthetical form) the symbol
    must exist in the cited file at HEAD. Catches a rename or removal that would
    leave the citation naming a symbol that is not there.
-5. **`test_the_rederived_read_site_citations_land_inside_their_own_symbol`** —
-   the LINE, in the one place the document keeps one. §13.8 question 2 was
-   re-derived at a pin and carries a `file.py:NNNN` per reader, so there the
-   line is not a convenience: two of the ten had drifted onto a DIFFERENT
-   reader (`_state_related_objects` cited `sdk.py:29361`, inside
-   `_state_mitigations`; its `def` is at `29392`), which is exactly the failure
-   §13's table condemns for the old row 4. Symbol-exists-in-file cannot see it.
+5. **`test_section_13_8_carries_no_line_citations_and_its_symbols_resolve`** —
+   §13.8 question 2 was the ONE paragraph that kept a `file.py:NNNN` per reader,
+   and that exemption was itself the rot: ten of its eleven citations pointed at
+   a `def` line, so inserting a single line above `def _preview_supersede` in
+   `mcp_server.py` reddened a `core`-registered test on a PR that touched
+   nothing here — which is exactly the failure `STORAGE-ARCHITECTURE.md` §13
+   retired in `#7948`. The paragraph is now symbol-keyed (`module.py::symbol`)
+   like §13, so a citation cannot rot, and this guard holds it there AND resolves
+   each symbol.
 
 NOT promised:
-- The line NUMBER is only a convenience and is not asserted **outside §13.8** —
-  the symbol is, per the document's own rule. A citation whose symbol has
-  merely MOVED inside its file passes, and that is deliberate. §13.8's
-  re-derived paragraph is the exception because the document carries a line
-  there on purpose, so the line is checked against the symbol's own span.
+- The line NUMBER is never asserted anywhere in the document — the symbol is,
+  per the document's own rule. A citation whose symbol has merely MOVED inside
+  its file passes, and that is deliberate. §13.8 was the one exception (it
+  carried a line per reader because it was re-derived at a pin); `#7948`
+  symbol-keyed it, because a pinned line reds every unrelated code move in six
+  large files and its test could not tell a correct line from a wrong one that
+  stayed inside the span.
 - Citations whose passage quotes no symbol are out of scope (the document
-  carries ~40 of those); this pins the class the issue described.
+  carries ~30 of those); this pins the class the issue described.
 - Issue-state claims (`#NNNN` open/closed) are NOT resolved over the network —
   this test is static and offline by design.
 
@@ -525,10 +529,13 @@ def test_every_quoted_symbol_citation_resolves_at_head():
     count assertion reds, so the guard cannot quietly become vacuous.
     """
     citations = _quoted_symbol_citations()
-    assert len(citations) >= 10, (
+    assert len(citations) >= 6, (
         f"only {len(citations)} quoted-symbol citations found — the document's "
         "citation shape changed (or the extractor broke) and this guard would "
-        "otherwise pass vacuously."
+        "otherwise pass vacuously. The floor was 10 until #7948 symbol-keyed "
+        "§13.8's eleven `file.py:NNNN` citations (this form no longer matches "
+        "them); the six that remain are the rest of the document's, and they "
+        "are what this guard pins."
     )
 
     unresolved = []
@@ -558,11 +565,18 @@ def test_every_quoted_symbol_citation_resolves_at_head():
     )
 
 
-#: §13.8 of `DOC` is the ONE section whose citations were RE-DERIVED at a pin
-#: (`26aff163c`) and therefore carries a `file.py:NNNN` for each reader it names.
-#: Everywhere else the line is a convenience; here it is the citation, so here it
-#: is asserted against the symbol's own span.
+#: §13.8 of `DOC` is the section whose citations `#7948` moved from
+#: `file.py:NNNN` to `module.py::symbol`, the form §13 uses. There is no longer
+#: any section whose LINE is asserted — see the test below for why keeping one
+#: there was itself the rot.
 _SECTION_13_8 = ("### 13.8 What this does to our design", "## 14. Not established")
+
+#: A `module.py::symbol` citation — the form §13 and §13.8 both use, and the one
+#: that survives any code move. `_Symbol` allows a dotted `Class.attr`.
+_SECTION_13_8_SYMBOL = re.compile(r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][\w.]*)`")
+
+#: A stale `file.py:NNNN` line citation. §13.8 carries none.
+_LINE_CITATION = re.compile(r"[A-Za-z0-9_./-]+\.py:[0-9]+")
 
 
 def _symbol_span(path: Path, base: str) -> tuple[int, int] | None:
@@ -574,59 +588,78 @@ def _symbol_span(path: Path, base: str) -> tuple[int, int] | None:
     return None
 
 
-def test_the_rederived_read_site_citations_land_inside_their_own_symbol():
-    """In §13.8 a citation's LINE must fall inside the symbol it is attached to.
+def test_section_13_8_carries_no_line_citations_and_its_symbols_resolve():
+    """§13.8 pins a SYMBOL per reader, never a line — and every symbol resolves.
 
-    `test_every_quoted_symbol_citation_resolves_at_head` proves the symbol exists
-    in the cited FILE, which is the right bound for a document that treats the
-    line as a convenience — and the wrong one for §13.8 question 2, which was
-    re-derived at `26aff163c` and carries a line for each of its readers. Two had
-    drifted onto a DIFFERENT reader: `_state_related_objects` cited
-    `sdk.py:29361` and `_state_related_points` `sdk.py:29378`, while both `def`s
-    sit at `29392`/`29409` — `29361` is inside `_state_mitigations`, a reader of
-    `mitigated_by`, not of `aboutObject`. That is the shape §13's table condemns
-    for the old row 4 (*"`ranking.py:714` is `eid = row[0]`"*), read as a
-    citation, and neither citation guard could see it.
+    This replaces the guard that asserted each §13.8 line landed inside its
+    symbol's span (`#7948`). The exemption was the rot: ten of the eleven
+    citations named the reader's `def` line, so inserting ONE line above
+    `def _preview_supersede` in `mcp_server.py` moved the span's start and
+    reddened a `core`-registered test on a PR that touched nothing in this
+    document. Its silent half was worse — the one mid-body citation
+    (`mcp_server.py` in `_preview_delete_edges`) was only bounded by "somewhere
+    in the symbol", so it could point at a different statement and stay green.
+
+    That is the failure `STORAGE-ARCHITECTURE.md` §13 retired in this same PR
+    (*"the symbol is authoritative, the line was the convenience, and the lines
+    had all rotted"*), and this document's own `NOT promised` contract already
+    said the line number is not asserted. So §13.8 is symbol-keyed now, and the
+    two directions are pinned here:
+
+    * NO `file.py:NNNN` survives in the section (the pre-fix text carried
+      eleven, so this arm is red on it — measured: reverting one citation to
+      `(`mcp_server.py:6529`)` reds this test, naming it);
+    * every `` `module.py::symbol` `` resolves in that module at HEAD, so the
+      symbol-keyed form cannot rot into a name that no longer exists.
     """
     text = _doc_text()
     start_marker, end_marker = _SECTION_13_8
     start = text.index(start_marker)
     section = text[start : text.index(end_marker, start)]
-    citations = _citations_in(section)
-    assert len(citations) >= 8, (
-        f"only {len(citations)} line citations parsed in §13.8 — the section's "
-        "citation shape changed (or the extractor broke) and this guard would "
-        "otherwise pass vacuously."
+
+    surplus = [
+        (text.count("\n", 0, start + match.start()) + 1, match.group(0))
+        for match in _LINE_CITATION.finditer(section)
+    ]
+    assert not surplus, (
+        "§13.8 carries line citations again, and a line in a design document "
+        "rots: it reds every unrelated code move in a large file while being "
+        "unable to tell a correct line from a wrong one. Symbol-key them "
+        "(`module.py::symbol`) — that is the form §13 uses:\n  - "
+        + "\n  - ".join(f"line {line}: `{cite}`" for line, cite in surplus)
     )
 
-    drifted = []
-    for offset, symbol, cited_file, cited_line in citations:
+    found = [
+        (text.count("\n", 0, start + match.start()) + 1, match.group(1), match.group(2))
+        for match in _SECTION_13_8_SYMBOL.finditer(section)
+    ]
+    assert len(found) >= 10, (
+        f"only {len(found)} `module.py::symbol` citations parsed in §13.8 — the "
+        "section's citation shape changed (or the extractor broke) and this "
+        "guard would otherwise pass vacuously."
+    )
+
+    unresolved = []
+    for doc_line, cited_file, symbol in found:
         path = ROOT / "tortoise" / cited_file
         if not path.exists():
             path = ROOT / cited_file
-        doc_line = text.count("\n", 0, start + offset) + 1
+        if not path.exists():
+            unresolved.append((doc_line, symbol, cited_file, "file not found"))
+            continue
         base = re.sub(r"\(\)$", "", symbol).rsplit(".", 1)[-1]
-        span = _symbol_span(path, base)
-        if span is None:
-            drifted.append(
-                (doc_line, symbol, f"{cited_file}:{cited_line}", "symbol not in file")
-            )
-        elif not span[0] <= cited_line <= span[1]:
-            drifted.append(
-                (
-                    doc_line,
-                    symbol,
-                    f"{cited_file}:{cited_line}",
-                    f"its definition spans {span[0]}-{span[1]}",
-                )
+        if _symbol_span(path, base) is None:
+            unresolved.append(
+                (doc_line, symbol, cited_file, "symbol does not resolve at HEAD")
             )
 
-    assert not drifted, (
-        "these §13.8 citations name a line that holds a DIFFERENT symbol — the "
-        "citation has rotted (re-derive the line at HEAD, or symbol-key it):\n  - "
+    assert not unresolved, (
+        "§13.8 cites these readers as living in these modules, and they do not "
+        "— the citation has rotted (re-verify the passage, or re-point it to "
+        "the symbol that replaced it):\n  - "
         + "\n  - ".join(
-            f"doc line {line}: `{sym}` -> {where} ({why})"
-            for line, sym, where, why in drifted
+            f"doc line {line}: `{cited_file}::{sym}` ({why})"
+            for line, sym, cited_file, why in unresolved
         )
     )
 

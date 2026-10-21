@@ -108,6 +108,15 @@ def rephrase_hit(
     consolidation classifier's paraphrase band.  Bounded candidate scan
     (``_MAX_PARAPHRASE_CANDIDATES``): overlap resolution is O(n) token
     comparisons and the capture seams call it per claim.
+
+    ⚠️ SCOPE — this band enforces the BOUNDARY half of D12/O4 (#5080) only.
+    The ATTACHMENTS half (#5006) is enforced by the against-store classifier
+    (``extractor_v2.classify_consolidation``), whose guard needs both sides'
+    attachment sets; this seam takes ``(canonical_id, content)`` pairs and
+    carries none, so the guard cannot run here as written — and the capture
+    seam that consumes a hit DETACH-DELETEs the folded node, dropping that
+    node's own ``aboutObject`` edges. Tracked as #9437; do not read #5006 as
+    having closed fold-side evidence loss generally.
     """
     best: tuple[float, str] | None = None
     norm = _norm(content)

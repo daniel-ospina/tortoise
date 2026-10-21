@@ -68,9 +68,26 @@ census already named** — which is why the census below is keyed on
 A module-level census cannot see any of them: each module was already named by
 a row, and no row count changes when a reader is added beside it.
 
+**A FOURTH re-derivation — this time of the class the section declares, not of
+the customer doors — found two MORE, and neither is reachable from a customer
+surface:** the whole-graph incident-edge COUNT in `subgraph.py`
+(`MATCH (o)-[r]-()`: no rel-type filter, so it reads the edge without naming it,
+and it COUNTS it, so a `SET`-free derive silently changes the `hub_degree` the
+`#3011` engine ranks on) and the read-only reference census in
+`definite_description_backfill.py` (an unlabelled inbound-edge count whose own
+docstring says a referent is an Object if *anything* points at it, `aboutObject`
+included). Both are the same rule that admits rows 3, 22, 24 and 25 — *an
+unfiltered walk reads the edge without naming it* — and both were invisible to
+every earlier pass because each one asked "which customer door reaches this?"
+instead of "which code reads every edge?". §13 says the class is *enumerated,
+not excluded*, so they are rows 26–27.
+
 The two documents that carry this census (§13 and `EXTRACTOR-V4-ARCHITECTURE.md`
 §13.8) also disagreed with each other — the sibling still said FOUR — which is
 how an under-count survives a review: each copy looks confirmed by the other.
+They disagreed AGAIN in the count's own enumeration: §13.8 stated TWELVE and
+listed thirteen, the extra one (`supersede_point`) being a row §13 classes
+`write path` — so the numeral agreed with §13 while the list under it did not.
 
 WHAT THIS PINS
 --------------
@@ -117,8 +134,12 @@ WHAT THIS PINS
    `ToolDefinition`. That is what makes "customer-callable" a claim about the
    product surface rather than an adjective.
 9. `test_the_extractor_document_agrees_on_the_count` — the sibling document
-   states the SAME count and names the state-recall readers; the two copies
-   cannot diverge again.
+   states the SAME fact as §13, and "fact" is the NUMBER **and the
+   ENUMERATION**: §13.8 said TWELVE and listed thirteen (the extra being a
+   `write path` row), and the count is stated in two word orders, so the guard
+   reads both and asserts set-equality between the readers it names and the
+   customer-callable rows. It also names the state-recall readers the four-site
+   census missed.
 10. `test_section_13_carries_no_line_citations` — §13 says *"Line numbers are
    deliberately **not** carried any more … the lines had all rotted"*, so it
    must carry none. Two survived underneath that sentence
@@ -141,8 +162,13 @@ computes or carries the name (`_neighbors`, `_hop_query`,
 `_retrieve_topic_neighborhood`, `_preview_supersede`, `_rebuild_all_replay`,
 `supersede_point`, the `recall_state` constant readers) is invisible to it and
 is pinned by (2)/(7) instead, and (4) keeps a dropped row for one of them
-from going unnoticed (its pin would dangle). Line NUMBERS
-are not asserted — the symbol is authoritative and a symbol that merely moved
+from going unnoticed (its pin would dangle). There is NO carrier fallback in
+(2): a row is a literal read, a pinned computed-name read, or red — the old
+fallback ("any `MATCH` in the span plus a bare mention of a carrier-shaped
+constant") decided no current row and would have greened a future one that read
+nothing. Rows 26–27 are unfiltered walks, so they are pinned the same way (2)
+pins rows 3 and 22 — a `MATCH` with no rel-type filter, which no grep for the edge
+name can see. Line NUMBERS are not asserted — the symbol is authoritative and a symbol that merely moved
 passes. And the enumeration is of READERS of the edge as data; writers that
 MERGE it are not rows here.
 
@@ -302,31 +328,39 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     "hosted_api.py::_export_graph_snapshot": (
         '"MATCH (a)-[r]->(b) RETURN labels(a), coalesce(a.id, a.name), "',
     ),
-    # The third all-edge walk in `subgraph.py` — the module rows 13 and 14 come
-    # from. `MATCH (o)-[r]-()` counts EVERY incident edge of a hub `:Object`
-    # with no rel-type filter, and every edge incident to an `:Object` is an
-    # `about*` edge, so a `SET`-free derive would silently change `hub_degree`
-    # and with it the hub-mediated damping. Found by applying §13's own declared
-    # rule (*"the class is enumerated, not excluded"*) to the module the table
-    # already enumerates twice — it named no edge, so the literal census could
-    # not see it, and it had no pin, so neither could the row checks.
+    # Rows 26-27 — the fourth re-derivation, and the same unfiltered-walk class
+    # as rows 3, 22, 24 and 25 one layer out: neither names the edge, so neither
+    # is visible to the literal census, and both COUNT what they walk (so a
+    # `SET`-free derive silently changes the number they report). Not customer
+    # doors, so neither was found by asking what a customer can reach: they were
+    # found by applying the section's own rule (*an unfiltered walk reads the
+    # edge without naming it*) to the code, which is what "the class is
+    # enumerated, not excluded" has to mean.
     "subgraph.py::_CYPHER_HUB_DEGREE": (
         '"MATCH (o)-[r]-() "',
+        '"RETURN o.id AS hub_id, count(r) AS hub_degree"',
+    ),
+    "definite_description_backfill.py::CENSUS_QUERY": (
+        "OPTIONAL MATCH (o)<-[r]-()",
+        "collect(DISTINCT type(r)) AS ref_edges",
     ),
 }
 
-#: Facts outside the symbol that make the two computed-name readers complete
-#: reads: the empty `rel_pattern` for the default completeness mode.
-#:
-#: ⚠️ The KEY is the row the pin belongs to — `_neighbors` is the reader §13
-#: enumerates — while the FACTS are set in `SubgraphExpander.expand`, where
-#: `rel_pattern` is computed; `_neighbors` only receives it. Pinned here rather
-#: than re-keyed because `_NON_LITERAL_SIBLINGS` keys must own a row (see
-#: `test_every_computed_name_pin_owns_a_row`), and `expand` is not a row.
-_NON_LITERAL_SIBLINGS: dict[str, tuple[str, ...]] = {
+#: Facts OUTSIDE the row's own symbol that make a computed-name reader a
+#: COMPLETE read, keyed by the row they belong to: `row key -> (the symbol the
+#: facts live in, the facts)`. The owner is named explicitly because the pin was
+#: keyed on `_neighbors` while the two facts live in `SubgraphExpander.expand`
+#: (which computes `rel_pattern` and defaults `completeness`); the assertion was
+#: module-wide, so a failure would have blamed `_neighbors` for a default it does
+#: not own. Naming the owner makes the assertion span-precise AND the message
+#: true.
+_NON_LITERAL_SIBLINGS: dict[str, tuple[str, tuple[str, ...]]] = {
     "ranking.py::SubgraphExpander._neighbors": (
-        'rel_pattern = ":IMPL|NAND" if completeness == "core" else ""',
-        'completeness: str = "full"',
+        "SubgraphExpander.expand",
+        (
+            'rel_pattern = ":IMPL|NAND" if completeness == "core" else ""',
+            'completeness: str = "full"',
+        ),
     ),
 }
 
@@ -497,50 +531,6 @@ def _reads_naming_the_edge(tree: ast.Module, lo: int, hi: int) -> bool:
     return False
 
 
-@functools.cache
-def _carrier_constants(rel: str) -> dict[str, str]:
-    # qualified name -> the bare name its readers use
-    """module/class-level constants whose SOURCE names the edge.
-
-    A reader can name the edge through one of these instead of in its query —
-    `ABOUT_EDGE_TYPES`, `TortoiseSDK._ABOUT_TYPES`, `SUPERSEDE_STRUCTURAL_RELS`
-    and the replay families all do. That is how three `recall_state` reads and
-    the whole supersede path stayed invisible to a literal census, and it is
-    the blind spot this helper closes: the constant's MEMBERSHIP is what makes
-    those readers reads, so it is asserted, not assumed.
-    """
-    path = _module_path(rel)
-    text = path.read_text(encoding="utf-8")
-    tree = _parsed(str(path))
-    carriers: dict[str, str] = {}
-
-    def scan(body, prefix: str = "") -> None:
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                scan(node.body, prefix=f"{node.name}.")
-                continue
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                name = _bound_name(node)
-                if name is None:
-                    continue
-                segment = ast.get_source_segment(text, node) or ""
-                if "aboutObject" in segment:
-                    carriers[prefix + name] = name
-    scan(tree.body)
-    return carriers
-
-
-def _reads_via_carrier(rel: str, source: str) -> list[str]:
-    """The edge-name carriers this symbol's source references in a query."""
-    if "MATCH" not in source.upper():
-        return []
-    return sorted(
-        qualified
-        for qualified, bare in _carrier_constants(rel).items()
-        if re.search(rf"\b{re.escape(bare)}\b", source)
-    )
-
-
 def _about_family_dominates(elements: tuple[str, ...]) -> bool:
     """Is `about*` the constant's FAMILY, rather than one word among many?
 
@@ -576,14 +566,14 @@ def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     interpolates into `-[a:<value>]->`, which is exactly why the edge name can
     live in the constant and nowhere in the query.
 
-    ⛔ Deliberately NOT filtered by `aboutObject`. `_carrier_constants()`
-    selects only constants whose source ALREADY contains the edge name, so
-    asserting that a selected constant contains it can never fail — removing
-    `aboutObject` from `ranking.ABOUT_EDGE_TYPES` left all eight tests green,
-    while the mutation the PR body claims reds the carrier test. Candidate
-    shape here is decided by the VALUE's form plus the `about*` family, both of
-    which survive `aboutObject` itself leaving the constant; membership is then
-    asserted by the caller, where it can actually fail.
+    ⛔ Deliberately NOT filtered by `aboutObject`. A selector that keeps only
+    constants whose source ALREADY contains the edge name can never fail the
+    membership assertion — removing `aboutObject` from
+    `ranking.ABOUT_EDGE_TYPES` left the suite green while the mutation the PR
+    body claimed reds the carrier test. Candidate SHAPE here is decided by the
+    VALUE's form plus the `about*` family, both of which survive `aboutObject`
+    itself leaving the constant; membership is then asserted by the caller,
+    where it can actually fail.
 
     The family test is a MAJORITY, not a prefix hit on any element — see
     `_about_family_dominates()` for why the loose form is wrong.
@@ -827,19 +817,25 @@ def test_every_named_reader_still_reads_the_edge():
         span_text = "\n".join(
             module_path.read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
         )
-        # A computed-name row is decided by ITS OWN FACTS, IN ITS OWN SPAN,
-        # BEFORE the carrier fallback gets a chance to short-circuit it.
+        # A computed-name row is decided by ITS OWN FACTS, IN ITS OWN SPAN —
+        # and there is NO carrier fallback behind it any more.
         #
-        # Order matters, and it was wrong: `_fetch_object_signals` sits in a
-        # module whose `ABOUT_EDGE_TYPES` constant carries the edge name, so
-        # the carrier branch went green on a name that merely APPEARS in the
-        # symbol — two unrelated `MATCH (o:Object)` / `ABOUT_EDGE_TYPES` lines
-        # were enough. The consuming line
+        # Order mattered and was wrong once: `_fetch_object_signals` sits in a
+        # module whose `ABOUT_EDGE_TYPES` constant carries the edge name, so a
+        # carrier branch that ran FIRST went green on a name that merely
+        # APPEARS in the symbol — two unrelated `MATCH (o:Object)` /
+        # `ABOUT_EDGE_TYPES` lines were enough. The consuming line
         # (`"OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "`) could be
-        # deleted and all eight tests stayed green, leaving row 17 naming code
-        # that no longer reads the edge. The facts are the read here, so they
-        # are asserted first, and only inside the span — a fact found elsewhere
-        # in the module is not evidence about THIS reader.
+        # deleted and every test stayed green, leaving row 17 naming code that
+        # no longer reads the edge.
+        #
+        # That fallback is now DELETED, not just ordered after the facts: it was
+        # a latent fail-open for any FUTURE row (a bare mention of a
+        # carrier-shaped constant plus any `MATCH` anywhere in a 300-line span
+        # was enough), and it decided none of the rows that exist — every carrier
+        # row is pinned in `_NON_LITERAL` by its CONSUMING line instead. Deleting
+        # it makes this test fail CLOSED: a row is now either a literal read, a
+        # pinned computed-name read, or red.
         if key in _NON_LITERAL:
             missing = [fact for fact in _NON_LITERAL[key] if fact not in span_text]
             if missing:
@@ -848,10 +844,9 @@ def test_every_named_reader_still_reads_the_edge():
                     f"fact that makes it a read: {missing!r}"
                 )
             continue
-        if _reads_via_carrier(str(row["module"]), span_text):
-            continue
         stale.append(
-            f"row {row['n']}: {key} — the named symbol does not read the edge"
+            f"row {row['n']}: {key} — the named symbol does not read the edge, "
+            "and it has no computed-name pin"
         )
     assert not stale, (
         "§13's table names readers that no longer read `aboutObject`:\n  "
@@ -863,14 +858,35 @@ def test_every_named_reader_still_reads_the_edge():
 
 
 def test_the_computed_name_readers_are_still_complete_reads():
-    """The two rows no grep can find must keep the fact that makes them reads."""
-    ranking = (PKG / "ranking.py").read_text(encoding="utf-8")
-    for fact in _NON_LITERAL_SIBLINGS["ranking.py::SubgraphExpander._neighbors"]:
-        assert fact in ranking, (
-            "`recall_subgraph`'s default `completeness=\"full\"` is what makes "
-            "`SubgraphExpander._neighbors` read `aboutObject` without naming it. "
-            f"{fact!r} is gone, so the row's reach claim must be re-derived."
+    """The rows no grep can find must keep the facts that make them reads.
+
+    The facts are asserted INSIDE the span of the symbol that OWNS them —
+    `SubgraphExpander.expand` computes `rel_pattern` and defaults
+    `completeness`, while row 3 names `_neighbors`, which only receives the
+    pattern. Module-wide, the assertion fired but blamed the wrong symbol; the
+    owner is named in the pin so this both narrows the check and makes the
+    failure message true.
+    """
+    for row_key, (owner, facts) in _NON_LITERAL_SIBLINGS.items():
+        module_rel, _, _ = row_key.partition("::")
+        path = _module_path(module_rel)
+        tree = _module_tree(path)
+        span = _span(tree, owner)
+        assert span is not None, (
+            f"{module_rel} no longer defines `{owner}`, the symbol that owns the "
+            f"facts making {row_key} a computed-name read — re-derive the row."
         )
+        span_text = "\n".join(
+            path.read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
+        )
+        for fact in facts:
+            assert fact in span_text, (
+                f"`recall_subgraph`'s default `completeness=\"full\"` is what "
+                f"makes `SubgraphExpander._neighbors` read `aboutObject` without "
+                f"naming it. {fact!r} is gone from `{module_rel}::{owner}` (the "
+                "symbol that computes it), so the row's reach claim must be "
+                "re-derived."
+            )
 
 
 def test_every_computed_name_pin_owns_a_row():
@@ -1278,12 +1294,12 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
     leaves one of these constants, the §13 row keeps resolving while the site
     stops reading the edge — an under-count in the direction that matters.
 
-    The candidates come from `_carrier_shaped_constants()` (shape + `about*`
-    family), NOT from `_carrier_constants()` (which filters on the very name
-    this test asserts). Deleting the edge from `ABOUT_EDGE_TYPES` therefore
-    reds here — measured: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest
-    tests/test_7948_about_object_read_sites.py -q` goes 8 passed → 1 failed
-    with `row 17: … ABOUT_EDGE_TYPES`.
+    The candidates come from `_carrier_shaped_constants()` (shape + the `about*`
+    family — never filtered on the edge name this test asserts). Deleting the
+    edge from `ABOUT_EDGE_TYPES` therefore reds here — measured:
+    `TORTOISE_TEST_CARVE_OUT=1 uv run pytest
+    tests/test_7948_about_object_read_sites.py -q` → 1 failed with
+    `row 17: … ABOUT_EDGE_TYPES`.
     """
     broken: list[str] = []
     for row in _rows():
@@ -1321,88 +1337,142 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
 
 # ── 7. the sibling document states the same fact ───────────────────────────
 
+#: Where §13.8's customer-callable ENUMERATION starts and stops. The first is the
+#: sentence that states the figure; the second is the next claim in the same
+#: paragraph, so everything between them is the list the figure is about. The two
+#: markers are asserted, not `.index()`-ed blind: a reworded section fails with a
+#: reason here instead of an IndexError.
+_13_8_ENUMERATION = (
+    "sites are customer-callable",
+    "Two more are default-ON on the ingestion path",
+)
+
+#: `` `token` `` — the unit §13.8 names a reader (or a door) with.
+_BACKTICKED = re.compile(r"`([^`\n]+)`")
+
+
+def _extractor_doc() -> str:
+    return (
+        ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
+    ).read_text(encoding="utf-8")
+
+
+def _reader_reach() -> dict[str, tuple[int, str]]:
+    """§13's base reader name (`_neighbors`) -> (row number, reach class).
+
+    The base name is the symbol's last dotted component, which is how §13.8 names
+    a reader; a duplicate base across rows would make membership ambiguous, so it
+    is asserted instead of silently overwritten.
+    """
+    reach: dict[str, tuple[int, str]] = {}
+    for row in _rows():
+        base = str(row["symbol"]).rsplit(".", 1)[-1]
+        assert base not in reach, (
+            f"rows {reach.get(base, (None,))[0]} and {row['n']} both resolve to "
+            f"`{base}`, so §13.8 cannot name one of them unambiguously — key the "
+            "reader by its full `module.py::symbol` in the document."
+        )
+        reach[base] = (int(row["n"]), _reach(row))
+    return reach
+
+
+def _readers_named(text: str, reach: dict[str, tuple[int, str]]) -> list[str]:
+    """The §13 reader base names a passage names, in order of first appearance."""
+    named: list[str] = []
+    for token in _BACKTICKED.findall(text):
+        token = re.sub(r"\(\)$", "", token.strip())
+        # `module.py::Symbol.attr` and `Klass.attr` both reduce to `attr` — the
+        # module prefix must be dropped BEFORE the last-dot split, or a
+        # `module.py::name` token reduces to `py::name`.
+        base = token.split("::", 1)[-1].rsplit(".", 1)[-1]
+        if base in reach and base not in named:
+            named.append(base)
+    return named
+
 
 def test_the_extractor_document_agrees_on_the_count():
-    """§13.8 of `EXTRACTOR-V4-ARCHITECTURE.md` carries the same census.
+    """§13.8 states the same fact as §13 — the NUMBER and the ENUMERATION.
 
     Two live documents stating one fact is how this under-count survived three
     reviews: a repair that corrects §13 and leaves §13.8 asserting the old
-    number re-creates exactly the contradiction `#7956` had to correct. The
-    sibling must therefore state the §13 count, and must name the state-recall
-    readers that the four-site census missed.
+    number re-creates exactly the contradiction `#7956` had to correct. So the
+    sibling must state the §13 count, and must name the state-recall readers that
+    the four-site census missed.
 
-    ⚠️ **Three holes were measured shut here.** (i) The count pattern matched
-    only ONE word order — `TWELVE sites are customer-callable` — so editing
-    §13.8 and leaving §13.6's `TWELVE *customer-callable* sites DO` stale left
-    this test green; both orders are now read. (ii) Nothing cross-checked
-    MEMBERSHIP, so §13.8 enumerated THIRTEEN readers under a stated TWELVE, the
-    extra one being `supersede_point` — a row §13 classes `write path`. Both
-    halves are asserted below: every customer-callable reader is NAMED, and no
-    citation in the section may be bound to a reader §13 does not class
-    customer-callable.
+    ⚠️ **The number alone was not enough, and that is the fail-open this closes.**
+    §13.8 stated TWELVE and then ENUMERATED thirteen: it listed
+    `supersede_point` (`sdk.TortoiseSDK.supersede_point`) among the
+    customer-callable sites while §13's authoritative table classes that reader
+    `write path` (row 20), the argument running *"the transfer it previews"*. The
+    numeral matched, the enumeration contradicted it, and every test stayed
+    green — the sibling had one more customer-callable site than the count the
+    ruling turns on. Membership is therefore asserted in BOTH directions:
+
+    * every customer-callable row's reader is named in §13.8's enumeration, and
+    * §13.8's enumeration names no reader §13 classes as anything else.
+
+    The word-order half is the other false PASS: the count is stated twice, in two
+    orders — *"TWELVE sites are customer-callable"* (§13.8) and *"TWELVE
+    *customer-callable* sites DO"* (§13.6) — and the original pattern matched only
+    the first, so editing one and leaving the other stale stayed green. Both
+    orders are read, and both must equal §13's count.
     """
-    extractor = (
-        ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
-    ).read_text(encoding="utf-8")
-    section = _section_13_8()
-    callable_rows = [row for row in _rows() if _reach(row) == "customer-callable"]
+    extractor = _extractor_doc()
+    reach = _reader_reach()
+    callable_rows = {base for base, (_, cls) in reach.items() if cls == "customer-callable"}
     counted = len(callable_rows)
-    word = _spelled(counted)
+    assert counted, "no §13 row is classed customer-callable — the guard is vacuous"
+    word = next(word for word, value in _NUMBER_WORDS.items() if value == counted)
 
-    stated: set[int] = set()
-    for pattern in (
-        r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:sites?|of them) (?:are|is) \*?customer-callable",
-        r"\b([A-Z]+(?:-[A-Z]+)?|\d+) \*?customer-callable\*? sites?\b",
-    ):
-        stated |= {_words(m.group(1)) for m in re.finditer(pattern, extractor, re.I)}
+    # (a) the stated figure, in EITHER word order the sibling uses.
+    stated = {
+        _words(match.group(1))
+        for pattern in (
+            r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:sites?|of them) (?:are|is) \*?customer-callable",
+            r"\b([A-Z]+(?:-[A-Z]+)?|\d+) \*?customer-callable\*? (?:sites?|read sites?)\b",
+        )
+        for match in re.finditer(pattern, extractor, re.I)
+    }
     assert stated == {counted}, (
         f"EXTRACTOR-V4-ARCHITECTURE.md states customer-callable counts {sorted(stated)} "
         f"and §13's table counts {counted} ({word}) — the two documents must state "
-        "ONE fact, and it must be the one the table enumerates"
+        "ONE fact, and it must be the one the table enumerates. Both word orders are "
+        "read: `N sites are customer-callable` and `N *customer-callable* sites`."
     )
-    for reader in ("_fetch_object_signals", "_state_related_objects", "_state_related_points"):
-        assert reader in extractor, (
-            f"EXTRACTOR-V4-ARCHITECTURE.md does not name `{reader}` — a "
-            "`recall_state` read the four-site census missed"
-        )
 
-    # MEMBERSHIP, both directions.
-    readers = {str(row["symbol"]).rsplit(".", 1)[-1]: row for row in _rows()}
-    unnamed = sorted(
-        base
-        for base, row in readers.items()
-        if _reach(row) == "customer-callable" and base not in section
+    # (b) the ENUMERATION, which the number alone cannot hold.
+    start_marker, end_marker = _13_8_ENUMERATION
+    assert start_marker in extractor, (
+        f"§13.8 no longer states its count with {start_marker!r} — this guard "
+        "reads the enumeration that follows it; re-point the marker or restore the "
+        "sentence."
     )
-    assert not unnamed, (
-        "EXTRACTOR-V4-ARCHITECTURE.md §13.8 does not name these customer-callable "
-        "readers, so its enumeration is smaller than the count it states:\n  - "
-        + "\n  - ".join(f"{base} (row {readers[base]['n']})" for base in unnamed)
-        + "\nName every customer-callable reader, or the sibling repeats the "
-        "under-count it exists to prevent."
+    start = extractor.index(start_marker)
+    assert end_marker in extractor[start:], (
+        f"§13.8's customer-callable enumeration is no longer closed by "
+        f"{end_marker!r}, so this guard cannot tell where the list ends — "
+        "restore the marker or re-point it."
     )
-    cited = {
-        match.group(1).rsplit(".", 1)[-1]
-        for match in re.finditer(
-            r"`([A-Za-z_][\w.]*)`\s*\(`?[A-Za-z0-9_./-]+\.py:\d+`?\)", section
+    enumeration = extractor[start : extractor.index(end_marker, start)]
+    named = set(_readers_named(enumeration, reach))
+
+    extra = sorted(named - callable_rows)
+    assert not extra, (
+        "EXTRACTOR-V4-ARCHITECTURE.md §13.8 names these readers among the "
+        f"{word} customer-callable sites and §13's table classes them otherwise:\n  - "
+        + "\n  - ".join(
+            f"`{base}` — §13 row {reach[base][0]} is `{reach[base][1]}`" for base in extra
         )
-    }
-    assert len(cited) >= 8, (
-        f"only {len(cited)} line-bound reader citations parsed in §13.8 — the "
-        "sentence's citation shape changed and the membership check below would "
-        "pass vacuously."
+        + "\nThe two documents must carry the same reach for the same reader: "
+        "either drop it from the sibling's list, or reclassify the row in §13 and "
+        "move BOTH counts."
     )
-    misclassified = sorted(
-        f"{base} (row {readers[base]['n']}, reach {_reach(readers[base])!r})"
-        for base in cited
-        if base in readers and _reach(readers[base]) != "customer-callable"
-    )
-    assert not misclassified, (
-        "EXTRACTOR-V4-ARCHITECTURE.md §13.8 cites these readers as members of its "
-        "customer-callable enumeration, and §13's table classes them otherwise:\n  - "
-        + "\n  - ".join(misclassified)
-        + "\nA row's reach class is decided in ONE place (§13's table); name a "
-        "write path or a replay reader as CONTEXT (no line-bound citation), not "
-        "as one of the twelve."
+    missing = sorted(callable_rows - named)
+    assert not missing, (
+        f"§13.8 says {word} customer-callable sites and does not name these "
+        "customer-callable readers §13's table carries:\n  - " + "\n  - ".join(missing)
+        + "\nA count is only as good as the list under it — the sibling is the "
+        "second copy of this ruling, so it must enumerate the same readers."
     )
 
 
