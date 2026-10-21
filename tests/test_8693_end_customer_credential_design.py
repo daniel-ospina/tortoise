@@ -113,7 +113,14 @@ def _membership_checks(node: ast.AST, needle: str) -> list[tuple[ast.Compare, as
     for sub in ast.walk(node):
         if not isinstance(sub, ast.Compare):
             continue
-        for op, comparator in zip(sub.ops, sub.comparators, strict=False):
+        # ``strict=True`` asserts the invariant the loop already assumes: an ``ast.Compare``
+        # carries exactly as many comparators as ops — ``comparator[i]`` is the right operand
+        # of ``op[i]``, so ``a in b`` is ops=[In]/comparators=[b] and ``a in b in c`` is
+        # ops=[In, In]/comparators=[b, c]. Measured on all five shapes: 1/1, 1/1, 2/2, 3/3,
+        # 2/2 — the pairing was always correct, so this raises on no well-formed comparison.
+        # It is NOT ``strict=False``: that only silences B905 (#9316) while tolerating a
+        # truncated walk, which would drop the later links of a chained comparison silently.
+        for op, comparator in zip(sub.ops, sub.comparators, strict=True):
             if not isinstance(op, (ast.In, ast.NotIn)):
                 continue
             left = sub.left
@@ -206,6 +213,57 @@ def _doc_lines_matching(*needles: str) -> list[str]:
 
 def _doc() -> str:
     return DESIGN_DOC.read_text(encoding="utf-8")
+
+
+# ── 0. the AST helper pairs ops with comparators strictly (#9316) ──────────
+
+def test_membership_pairing_is_strict_not_truncating():
+    """``_membership_checks`` zips ops with comparators *strictly*.
+
+    An ``ast.Compare`` carries exactly as many comparators as ops — ``comparator[i]`` is
+    the right operand of ``op[i]`` — measured on five shapes: ``a in b`` 1/1, ``a not in b``
+    1/1, ``a in b in c`` 2/2, ``a in b == c`` 2/2, ``a < b < c < d`` 3/3. So a strict zip
+    raises on no well-formed comparison, and this file's own corpus proves it: every
+    assertion below walks ``tortoise/hosted_api.py`` through this helper.
+
+    What strictness buys is the failure mode. A non-strict zip *truncates*: a chained
+    membership test would be walked only as far as the shorter list and its later links
+    would vanish with no error, weakening a pin silently. That is why ``strict=False`` — the
+    form #9249 left behind when it silenced B905 (#9316) — is not an acceptable resting
+    place, and why this is pinned by behaviour rather than by grepping for the parameter.
+    """
+    needle = "graphs:create"
+    container = ast.Constant(value=[needle])
+    # Two ops, one comparator: a chain with a link missing. No well-formed comparison can
+    # look like this, so failing loudly on it costs nothing — and truncating it silently is
+    # precisely the bug B905 exists to catch.
+    malformed = ast.Compare(
+        left=ast.Constant(value=needle),
+        ops=[ast.In(), ast.In()],
+        comparators=[container],
+    )
+    with pytest.raises(ValueError, match="shorter than"):
+        _membership_checks(malformed, needle)
+
+    # Non-vacuity of the safe half: the invariant holds over the whole real module, which
+    # is what lets strict=True stand in for a silent truncation without new failures.
+    unequal = [
+        (len(sub.ops), len(sub.comparators))
+        for sub in ast.walk(_module())
+        if isinstance(sub, ast.Compare) and len(sub.ops) != len(sub.comparators)
+    ]
+    assert not unequal, (
+        f"hosted_api.py carries Compare nodes pairing unequal op/comparator counts ({unequal[:3]}) "
+        "— the strict zip in _membership_checks would now raise, and the op/comparator "
+        "pairing assumption this file's pins rest on is broken"
+    )
+
+    # And the happy path still resolves: a simple membership test yields its container.
+    scopes = _membership_checks(ast.parse(f"x = {needle!r} in scopes").body[0], needle)
+    assert scopes and ast.unparse(scopes[0][1]) == "scopes", (
+        'a plain `"graphs:create" in scopes` no longer resolves to the `scopes` container '
+        f"({[ast.unparse(c) for _, c in scopes]}) — strictness broke the pairing it asserts"
+    )
 
 
 # ── 1. the lifecycle verbs are pinned to the caller's own org ──────────────
