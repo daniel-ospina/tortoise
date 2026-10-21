@@ -66,6 +66,23 @@ _EMPTY_TRAVERSAL = re.compile(r"[-<]\s*\[([^\]]*)\]\s*[-<>]")
 #: on purpose: a bare `--` in prose, a CLI flag or a `->` in a log message is not
 #: a traversal, and a Cypher relationship always sits between two nodes.
 _BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
+#: Is the offset inside a Cypher PATTERN COMPREHENSION? The delimiter test is
+#: exact rather than a heuristic: no other construct puts a relationship
+#: bracket inside an unclosed `[` of the same query string — `[(n)-[r]->(m) |
+#: r]`, `size([(n)-[r]->(m) | r])`. This is the predicate the retired guard's
+#: literal arm pinned (`_reads_literally`), moved here so the guard's classifier
+#: and this module's empty-pattern walk share ONE definition (#9493): a second
+#: copy would be the two-implementations drift this repo keeps re-deriving.
+def _inside_pattern_comprehension(query: str, start: int) -> bool:
+    depth = 0
+    for char in reversed(query[:start]):
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            if depth == 0:
+                return True
+            depth -= 1
+    return False
 #: The text signature of a CALL-TIME type slot — a traversal whose relationship
 #: type is written as an expression rather than a name: an f-string interpolation
 #: inside the bracket (`-[r:{rel}]->`, `-[:{EDGE}]->`, including one that carries a
@@ -95,6 +112,15 @@ _UNKNOWN = ""
 #: silently: `test_the_empty_pattern_class_is_derived_and_declared` derives the class from
 #: the pattern's shape and requires every member to be either a §13 row or an
 #: entry here. Each entry is `(filename, symbol, why it is not an about read)`.
+#:
+#: ⚠️ **A site that owns a §13 ROW is not carried here (#9493).** A row says the
+#: reader IS enumerated; an entry says the walk cannot observe the edge — both on
+#: one site are opposite claims, and the stale one silently shields the other's
+#: drift. The `#9400` remerge left ten such dead entries beside rows (the backup
+#: family, the graph export, the delete preview, the replay, the v2.5 backfill,
+#: the operator promotion and the hub-degree count — all rows since the third and
+#: fifth passes); they are removed, and
+#: `test_no_empty_pattern_entry_is_also_a_row` reds any regrowth.
 EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
     (
         "tortoise/domain_validators.py",
@@ -108,54 +134,15 @@ EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "tortoise/hosted_api.py",
-        "_export_graph_snapshot",
-        "a whole-graph export — it copies every node and edge, so it carries the "
-        "edge as data, not as a read for a referent",
-    ),
-    (
-        "tortoise/hosted_api.py",
         "_load_commit_graph_state",
         "restore/rollback bookkeeping — it rewires every edge type it finds, "
         "`aboutObject` included, but asks nothing about a referent",
-    ),
-    (
-        "tortoise/hosted_backup.py",
-        "_independent_counts",
-        "an edge-count cross-check (`MATCH ()-[r]->() RETURN count(r)`) — it "
-        "counts the edge, it does not read it for a referent",
-    ),
-    (
-        "tortoise/hosted_backup.py",
-        "_restore_copy_settled",
-        "the post-restore settle check, again a total-edge count",
-    ),
-    (
-        "tortoise/hosted_backup.py",
-        "dump_graph",
-        "the dump cursor walks every edge type to serialise them",
-    ),
-    (
-        "tortoise/hosted_backup.py",
-        "restore_graph",
-        "the restore replay that writes those edges back",
-    ),
-    (
-        "tortoise/mcp_server.py",
-        "_preview_delete_edges",
-        "the delete preview enumerates every edge touching the node — a "
-        "deletion inventory, not an about* read",
     ),
     (
         "tortoise/mining.py",
         "verify_no_auto_wire",
         "the no-auto-wire verifier walks every edge type to assert a shape is "
         "absent",
-    ),
-    (
-        "tortoise/projection/__init__.py",
-        "_rebuild_all_replay",
-        "the rebuild/rollback replay — every edge is deleted and rewritten by "
-        "type, so it carries the edge rather than reading it",
     ),
     (
         "tortoise/projection/entities.py",
@@ -167,18 +154,6 @@ EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
         "_connected_pairs",
         "a connectivity inventory (which node pairs are joined at all) — the "
         "edge TYPE is deliberately ignored",
-    ),
-    (
-        "tortoise/sdk.py",
-        "_promote_incident_operators",
-        "an endpoint-liveness gate for operator promotion: it reads every "
-        "outgoing edge of the incident operator to decide whether all its "
-        "endpoints are live, and asks nothing about a referent",
-    ),
-    (
-        "tortoise/sdk.py",
-        "backfill_v25",
-        "a migration — it counts all edges as a baseline",
     ),
     (
         "tortoise/sdk.py",
@@ -202,12 +177,6 @@ EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
         "tortoise/session_source_migration.py",
         "_rel_types",
         "an inventory of the edge TYPES on a node, reported as labels",
-    ),
-    (
-        "tortoise/subgraph.py",
-        "_hub_degrees",
-        "hub-degree counting for the fan-out cap — it counts every edge of a "
-        "node, whatever its type",
     ),
 )
 
@@ -710,17 +679,30 @@ def _reads_at(text: str, start: int) -> bool:
 def _is_empty_pattern_read(text: str) -> bool:
     """Does this Cypher traverse a relationship it does NOT name?
 
-    Same governing-clause rule as `_is_read` — only a `MATCH`/`OPTIONAL MATCH`
-    makes it a read — but the subject is the pattern's SHAPE: a traversal with no
-    type slot at all (`-[r]->`, `<-[r]-`, `-[r {c:$c}]->`, and their bracket-less
-    spelling `(n)--()`) has no type, so it walks every relationship type and
-    `aboutObject` is one of them. Both spellings are checked, because a reader
-    written in the bracket-less one is the same read and was invisible here.
+    Same governing-clause rule as `_is_read` — a `MATCH`/`OPTIONAL MATCH`
+    before the traversal makes it a read — but the subject is the pattern's
+    SHAPE: a traversal with no type slot at all (`-[r]->`, `<-[r]-`,
+    `-[r {c:$c}]->`, and its bracket-less spelling `(n)--()`) has no type, so
+    it walks every relationship type and `aboutObject` is one of them. Both
+    spellings are checked, because a reader written in the bracket-less one
+    is the same read and was invisible here.
+
+    One exception to the governing-clause rule, ported from the retired
+    guard's untyped arm when the two derivations of this class were folded
+    into one (#9493): a PATTERN COMPREHENSION enumerates the edges it walks,
+    so its bracket is a READ whatever clause introduces it — in
+    `SET n.deg = size([(n)-[r]->(m) | r])` the comprehension sits after a
+    `SET`, and a comprehension carrying no `MATCH` at all (`RETURN
+    size([(n)-[r]-(m) | r]) AS deg`) must still derive, or a walk over every
+    relationship type would be discarded as a write — a fail-open in the one
+    direction this class exists to close.
     """
     for match in _EMPTY_TRAVERSAL.finditer(text):
         if _type_slot(match.group(1)) is not None:
             continue
         if _reads_at(text, match.start()):
+            return True
+        if _inside_pattern_comprehension(text, match.start()):
             return True
     return any(_reads_at(text, match.start()) for match in _BARE_TRAVERSAL.finditer(text))
 
