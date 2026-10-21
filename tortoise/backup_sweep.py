@@ -83,6 +83,7 @@ from .incident_kinds import (
 )
 from .onboarding.state import ONBOARDING_STEP_LABEL, count_stamped_repairs
 from .retention import RESTORE_WINDOW_DAYS  # #4179 single window authority
+from .retry import call_with_predicate, is_dead_reader, is_instance_unavailable
 
 # #2562 (re-audit P3): the sweep/purge per-org acquisitions are TIMED too
 # — a stuck holder (a restore whose locked body wedged) must not block that
@@ -959,6 +960,62 @@ def _record_org_storage(db, org_id: str, graphs: list[dict[str, Any]]) -> None:
             org_id)
 
 
+def _graph_read_error(org_id: str, graph_id: str, exc: BaseException) -> dict[str, Any]:
+    """A per-graph `error` result that NAMES the cause class when it has one (#6977).
+
+    Every arm below that can lose a graph to a dead connection — the size-guard
+    count, the dump, and the mirror copy (an object-store write, classified here
+    because its failure is just as easy to misread as the graph's) — reports
+    through this, so a torn-down connection is never presented as a finding about
+    the graph's data. The run keeps the
+    failing result — nothing was backed up — and adds `error_kind`, which the
+    roll-up surfaces as `graph_failures[].error_kind` (the field name the repo
+    already uses for an error's cause class; `kind` on this body means an
+    INCIDENT kind and is left alone).
+    """
+    result: dict[str, Any] = {
+        "status": "error", "org_id": org_id, "graph_id": graph_id,
+        "error": str(exc),
+    }
+    if is_instance_unavailable(exc):
+        result["error_kind"] = "transport"
+    return result
+
+
+def _probe_graph(db, graph_name: str):
+    """(graph handle, node count) — the sweep's FIRST read of a graph (#6977).
+
+    Re-issued ONCE when the read races a connection parser's teardown. That is
+    safe by the rule this module already records rather than a new one:
+    #7405/#7685 forbid re-issuing a bare ``CREATE`` because its outcome is
+    UNKNOWN, and a read changes nothing. The re-issue also RECONNECTS — redis-py
+    discards the connection before a parse error propagates and rebuilds the
+    parser on the next ``connect`` — which is why the observed race was a
+    one-shot red rather than a persistent one.
+
+    The predicate is the NARROW dead-reader arm, not the whole
+    `is_instance_unavailable` family: a redis ``TimeoutError`` is ALSO that
+    family, and re-issuing a count that legitimately outlived the client's read
+    bound would double the bound and eat the driver's run budget — a slower red,
+    not a truer one. Classification for the run result still uses the wide
+    family (`_graph_read_error`).
+
+    Before #6977 the teardown landed in the plain ``except`` below and was
+    folded into a per-graph DATA error, so a transport blip redded the #2823 P0
+    guard with ``team_s2/default: I/O operation on closed file.`` — measured at
+    ~20% of runs, and indistinguishable in the run result from a graph that
+    genuinely could not be dumped.
+    """
+    def _read():
+        g = db.select_graph(graph_name)
+        return g, int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+
+    return call_with_predicate(
+        _read, predicate=is_dead_reader, retries=1,
+        what=f"size-guard count for {graph_name}", marker_armed=False,
+    )
+
+
 def _backup_graph(
     *,
     db,
@@ -994,11 +1051,10 @@ def _backup_graph(
 
     # ── Size guard: cheap COUNT before any dump (the #545 OOM blast radius). ──
     try:
-        g = db.select_graph(graph_name)
-        count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+        # #6977: re-issued once if the read races a parser teardown.
+        g, count = _probe_graph(db, graph_name)
     except Exception as e:
-        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
-                "error": str(e)}
+        return _graph_read_error(org_id, graph_id, e)
     # NOTE (#5331): graph-storage metering is per-ORG, not per-graph — see
     # `_record_org_storage`, called once at the end of `_sweep_org`. It must
     # not be done here: the metering ledger is a per-(org, period) GAUGE, so
@@ -1055,8 +1111,11 @@ def _backup_graph(
             key=config.registry_stream_key,
         )
     except Exception as e:
-        return {"status": "error", "org_id": org_id, "graph_id": graph_id,
-                "error": str(e)}
+        # #6977: the dump is the sweep's LONGEST read, so a teardown is likelier
+        # here than at the count — and it must not be read as a data finding
+        # either. Not re-issued: `create_backup` uploads before it can fail, so a
+        # second attempt is not the same no-side-effect read the count is.
+        return _graph_read_error(org_id, graph_id, e)
 
     # ── P0 guard: the manifest must name the seam-derived graph and carry data.
     # The graph name comes from the sweep list seam (registry: org_{id};
@@ -1197,9 +1256,11 @@ def _backup_graph(
             logger.exception(
                 "mirror of %s/%s failed (primary backup durable): %s",
                 org_id, graph_id, e)
-            return {"p0_checked": p0_checked, "status": "error", "org_id": org_id,
-                    "graph_id": graph_id,
-                    "error": f"backup accepted but mirror failed: {e}"}
+            result = _graph_read_error(
+                org_id, graph_id, e)
+            result["p0_checked"] = p0_checked
+            result["error"] = f"backup accepted but mirror failed: {e}"
+            return result
     else:
         mirror_result = None
 
@@ -1752,11 +1813,21 @@ def run_backup_sweep(
                 key = f"{org_id}:{gid}"
                 streak = int(prev_streaks.get(key) or 0) + 1
                 streaks[key] = streak
-                graph_failures.append({
+                failure = {
                     "org_id": org_id, "graph_id": gid,
                     "error": str(gr.get("error") or "")[:300],
                     "streak": streak,
-                })
+                }
+                # #6977: carry the CAUSE CLASS through, so a transport teardown
+                # is not read as a data finding. Only set when the per-graph
+                # result named one — the fixture shape stays byte-identical for
+                # every failure that has no class. Named `error_kind`, not
+                # `kind`: on this body `kind` is an INCIDENT kind
+                # (tortoise/incident_kinds.py), and one word for two
+                # vocabularies is how a consumer picks the wrong one.
+                if gr.get("error_kind"):
+                    failure["error_kind"] = gr["error_kind"]
+                graph_failures.append(failure)
     if len(streaks) > 500:  # bounded — drop oldest under pathological churn
         for _ in range(len(streaks) - 500):
             streaks.pop(next(iter(streaks)), None)
