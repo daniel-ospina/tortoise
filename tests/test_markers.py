@@ -861,6 +861,19 @@ def test_no_redirect_stems_registry_exact():
         # working as designed, so the stem is DECLARED here rather than
         # exempted.
         "test_record_reconcile_trigger",
+        # #5140: the behavioural `ingestedAt` file. It carries NO module-level
+        # `embedded_only` marker, so the load-bearing reason it needs the
+        # exemption is the REDIRECT: every test builds its own
+        # `FalkorProjection(<mkdtemp>/t.db, graph_name="test")` and asserts the
+        # `objectType='Document'` event branch's write on THAT graph — a URI-set
+        # lane would discard the path, connect the construction to the server,
+        # and the minted-node `ingestedAt` it exists to prove would certify a
+        # lane (and a graph) it does not target. The third leg of the
+        # three-way mirror: config/ci-surfaces.yml:carve_out and
+        # TEST_NO_REDIRECT_STEMS were registered with the PR — this pin reding
+        # on the addition is the pin working as designed, so the stem is
+        # DECLARED here rather than exempted.
+        "test_document_source_ingested_at_5140",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

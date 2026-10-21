@@ -223,6 +223,12 @@ surfaces:
   # `tortoise/projection/__init__.py` needs no arm: it is in SHARED_MODULES
   # (full matrix).
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   - test_7951_write_doors.py
   # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
   # surfaces as the door inventory above, for the same reason — the guard's
@@ -1597,6 +1603,21 @@ surfaces:
   # `test_durability_posture.py`), because a docs-only `docs/ONTOLOGY.md`
   # wording edit is what this guard is FOR.
   - test_5142_ontology_record.py
+  # #5140: the two document `:Source` writers that wrote no `ingestedAt`
+  # (`entities.py::_event_plain_merge`'s `objectType='Document'` branch and
+  # `hosted_api.py::_execute_commit_writes`) — behavioural half. This row is
+  # the `--integrity` CLASSIFICATION (`classify_test_file` → `core`, which is
+  # also what puts the file in `carve_out_by_surface['core']`); it does NOT
+  # decide the leg. `select()` strips carve-out members from `test_files`
+  # (`files -= carve`) on every non-full selection, so `carve_out_run` is what
+  # RUNS the file (entry in `carve_out:` below) — the same correction the
+  # in-file #9196 review P2 records at the `api` row. It becomes load-bearing
+  # only if the file LEAVES `carve_out:`.
+  # It builds its own throwaway embedded graph (no docker lane) and is mirrored
+  # in `tests/_embedded.TEST_NO_REDIRECT_STEMS`. Registered at all because an
+  # unlisted file is a `manifest-integrity` red (#1262) AND runs in no leg: the
+  # #9396 review's blocking finding.
+  - test_document_source_ingested_at_5140.py
   - test_8702_identity_skip_accounting.py
   # #8738 review P2: the doc-affiliation frontmatter on the three changelog
   # companions this change adds AND on every `docs/architecture/*.md`. The
@@ -1765,6 +1786,12 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
   # lane (`create_edge` and `create_about_edge`, each with ONE `MERGE`, plus
   # `create_edge`'s three typed wrappers — the lane mints no node, no property
@@ -1794,6 +1821,18 @@ surfaces:
   # `--changed-files tortoise/cypher_guard.py` → surfaces=['core']. `--integrity`
   # also requires every test file to be classified, which this entry satisfies.
   - test_9079_handle_write_authority.py
+  # #9079 (the door ONE HOP BELOW the write handle): the client handle escapes —
+  # `proj.g._g.query(...)` and `proj.db.select_graph(<g>).query(...)` — and the
+  # registry that makes the client-level door judge the right (store, graph).
+  # SAME TWO SUBJECTS as the #9124 entry above, so it takes the same arm: a
+  # change to `tortoise/projection/__init__.py` selects the full matrix anyway,
+  # and `tortoise/cypher_guard.py` (where the authority hook is consulted) matches
+  # no named SOURCE_PATTERN and falls through to `core` — verified with the
+  # repo's own selector: `--changed-files tortoise/cypher_guard.py` →
+  # surfaces=['core'], and the file appears in that selected set. Registering it
+  # is also what `--integrity` requires (a test file in NO surface reds
+  # `manifest-integrity`, which `python-ci-gate` needs).
+  - test_9079_client_handle_door.py
   # #9124 part 1 (the DECLARATION census): every mutating entry point that
   # reaches the write handle must be declared or inventoried, enumerated from
   # the SOURCE of `tortoise/sdk.py` and `tortoise/event_store.py` rather than
@@ -4352,6 +4391,12 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   - test_7951_write_doors.py
   # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
@@ -4962,6 +5007,12 @@ surfaces:
   # otherwise never run it (the #1349/#2938 silent-drop class; full rationale in
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -5622,6 +5673,14 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+# #5140: the behavioural half of the `ingestedAt` fix constructs its own
+# embedded `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`),
+# so under a URI lane the redirect would flip it to the shared server. Routed
+# here so the URI-unset carve-out job runs it as designed; the stem is
+# mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# the raw construction is allowlisted in `test_embedded_lifecycle.py`.
+- test_document_source_ingested_at_5140.py
 # #8488: the in-process Okapi BM25 lexical arm. Module-level `embedded_only`
 # (its subject is the embedded lane + the shipped read), so a `core`-only
 # registration would make the manifest green and run NOTHING on a docker leg.
@@ -5855,6 +5914,7 @@ durations_captured_at: "2026-10-17T15:43:47Z"
 durations:
   test_9362_sweep_mirror_order.py: 2.0  # unmeasured — new in #9362; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and the local whole-file reading here (135.6s) is ~124s of SESSION cost that lands on whichever test runs first (measured both ways: `-k stale_epoch` alone 125.2s, `-k peer_already_cleared` alone 123.9s, and the same two cost ~1s each when not first — the #3400 attribution the map's header warns about), so a locally derived row would misstate the file by whatever order the shard happens to run. It matters here rather than being cosmetic: at b76de57c the map sat at 96/961 missing = coverage 0.900104 against the 0.90 floor with ZERO headroom, so one more unweighted fast file reds `--integrity`'s `duration_coverage_issues`. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 15 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
+  test_9157_eager_init_declared.py: 2.0  # unmeasured — new in #9157; no CI sweep has collected it yet, so it carries the same flat default as its siblings (test_9121_onboarding_residual_pins.py, test_9079_ep_epoch_declared.py) rather than a local timing, which this map forbids as a SHARD-LAYOUT input: a local reading here is dominated by the #3400 first-fixture session cost (~124 s), not by this file's weight, and substituting it would pack a real graph fixture into an already-heavy shard. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch
@@ -7434,6 +7494,7 @@ durations:
   test_7935_restore_destination_lock.py: 5.0  # #7935 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 780/867 = 89.97% (formatted as the `90.0%` in that error) — the file is in the fast pool, so its absence packs it at the flat 2.0s default and drops coverage under the 90% floor; the same shape as the rows above. Local embedded-carve-out reading (4 tests, re-measured after the P3 journal-lock test was added): call 0.52 s + 2.83 s + 2.73 s + <0.01 s (the lock-only test enters `_destination_lock` directly, no restore), setup/teardown ~0.5 s each. The file's FIRST embedded replay in a cold process also pays the once-per-leg embedding-model load the #3400 method attributes to no file (~124 s, and the fixture pays it in setup so the lock gates are not timed against it) — that cost is already carried by `test_7767_restore_rollback.py`, which replays the same path. Refresh from the first post-merge run that includes it.
 
   test_9079_handle_write_authority.py: 10.0  # unmeasured — new in #9124 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and this PR's two new fast files tipped `duration_coverage_issues()` to 848/943 = 89.9% (red against the 90% floor) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 9.2s (23 tests) out of the 22.4s both new files took; setup dominates (each test builds its own journal-backed SDK) and the one `rebuild_all`/sweep test pays the FTS drop→recreate. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
+  test_9079_client_handle_door.py: 12.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and reds `duration_coverage_issues()`. Collected count at this head: 37 cases (25 at the first review head; the review fixes add the split-spelling, the barrier/procedure/bytes-graph census shapes and the raw-command-shape pins — the `close()` pin replaces its predecessor rather than adding one). Local docker-lane wall readings at this head: 6.4 s, 6.5 s and 7.0 s over three runs (the file is registered in `core`, which is the docker lane; each test builds its own journal-backed SDK, one `rebuild_all`/sweep test pays the FTS drop->recreate, and the barrier case seeds a node first). Declared above the local readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_9124_declared_live_doors.py: 14.0  # unmeasured — new in #9124 (#3400 trap): same class as the row above (new fast file, no CI measurement). Local embedded-lane reading 13.2s (13 tests), of which `test_arming_the_guard_requires_a_fully_declared_surface` alone is 9.2s: it parses and censuses EVERY module in the package that reaches the write handle, so it tracks the package's size rather than the box's load. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────

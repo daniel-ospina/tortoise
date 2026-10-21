@@ -350,6 +350,23 @@ def _document_writers_in_source(text: str, filename: str) -> dict[str, str]:
     except SyntaxError:  # pragma: no cover — a syntax error fails elsewhere
         return {}
     module_consts = _module_string_consts(tree)
+    # #9396 review P2: a DOCSTRING is an `ast.Constant` string too, so `ast.walk`
+    # alone let prose satisfy a caller's assertion — a writer whose MERGE lost
+    # the clause but whose docstring still quoted it went green, which is the
+    # false PASS this scanner exists to prevent. The exclusion is EVERY bare
+    # string EXPRESSION statement in the tree (any function's or class's
+    # docstring, at any nesting depth, plus a dead string statement), not just
+    # the outer function's `body[0]`: a nested helper's docstring is walked by
+    # `ast.walk(node)` exactly like the outer one, so excluding only `body[0]`
+    # would leave the same hole one `def` deeper. What may speak for the query
+    # are the string VALUES this function actually evaluates.
+    prose_nodes = {
+        id(child.value)
+        for child in ast.walk(tree)
+        if isinstance(child, ast.Expr)
+        and isinstance(child.value, ast.Constant)
+        and isinstance(child.value.value, str)
+    }
     writers: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -357,7 +374,8 @@ def _document_writers_in_source(text: str, filename: str) -> dict[str, str]:
         parts: list[str] = [
             child.value
             for child in ast.walk(node)
-            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+            if id(child) not in prose_nodes
+            and isinstance(child, ast.Constant) and isinstance(child.value, str)
         ]
         parts += [
             module_consts[child.id]
@@ -425,6 +443,32 @@ def test_every_document_source_writer_stamps_source_kind() -> None:
         )
 
 
+def test_every_document_source_writer_stamps_ingested_at() -> None:
+    """#5140 (P2 finding 5): §4.6 marks `ingestedAt` REQUIRED on every `:Source`
+    too, and the SAME three writers must therefore stamp it — this is the second
+    REQUIRED field, not a new claim. Two of them (`_event_plain_merge`'s
+    `objectType='Document'` branch and `hosted_api._execute_commit_writes`'
+    `/v1/sessions` transcript MERGE) wrote none, so every D10 requirement sweep
+    read the document they minted as a violation.
+
+    `coalesce` is asserted, not merely the property name: an instant a writer
+    already recorded must never be overwritten (the field means *when Tortoise
+    first saw this source*), and a node minted before the fix is repaired by the
+    next fold. The behavioural half is
+    `tests/test_document_source_ingested_at_5140.py`; this half is the one that
+    covers the hosted writer, whose commit path needs the full request stack.
+    """
+    writers = _document_source_writers()
+    for name, src in writers.items():
+        assert "coalesce(s.ingestedAt" in src, (
+            f"{name} must stamp `ingestedAt` (CREATE-only, `coalesce`) on the "
+            f"document :Source it mints — §4.6 marks it REQUIRED on every "
+            f":Source and the D10 `_required_sweep` harnesses assert it, so a "
+            f"writer that drops it turns those sweeps red on the document it "
+            f"creates (#5140 P2 finding 5, the #5082 class)"
+        )
+
+
 def test_writer_scanner_follows_module_level_constants() -> None:
     """The derivation must not miss a writer that composes its MERGE clause from
     a module-level constant (the #8525 review's P2).
@@ -453,4 +497,64 @@ def _synthetic_writer():
     )
     assert "coalesce(s.sourceKind, 'document')" in writers["synthetic.py::_synthetic_writer"], (
         "the resolved module-level clause must be visible to the stamp check"
+    )
+
+
+def test_writer_scanner_ignores_a_docstring_that_quotes_the_clause() -> None:
+    """PROSE is not the query: a docstring must not satisfy the stamp assertion.
+
+    #9396 review P2. A docstring is an `ast.Constant` string, so an
+    `ast.walk`-only scanner returned it as if it were a literal in the MERGE —
+    a writer whose query had LOST `coalesce(s.ingestedAt, …)` but whose
+    docstring still quoted it passed `test_every_document_source_writer_stamps_
+    ingested_at`, which is the false PASS that assertion exists to prevent. The
+    assertion is now falsifiable in the one way that matters: with the clause
+    only in prose, the scanner must not report it.
+    """
+    text = '''\
+def _docstring_only_writer():
+    """Documents its clause: s.ingestedAt=coalesce(s.ingestedAt, $iat)."""
+    return (
+        "MERGE (s:Source {url:$id}) "
+        "SET s.documentKind='transcript'"
+    )
+'''
+    writers = _document_writers_in_source(text, "synthetic.py")
+    derived = writers.get("synthetic.py::_docstring_only_writer", "")
+    assert "documentKind" in derived, (
+        "the writer must still be DERIVED (its executed literals name the "
+        "document :Source) — this test is about what it may be credited with"
+    )
+    assert "coalesce(s.ingestedAt" not in derived, (
+        "a docstring quoting the clause was counted as the query — the stamp "
+        "assertion would pass on a writer that no longer stamps the field"
+    )
+
+
+def test_writer_scanner_ignores_a_NESTED_docstring_too() -> None:
+    """The exclusion is per-string-statement, not the outer function's `body[0]`.
+
+    #9396 re-review P2. `ast.walk(node)` reaches a NESTED function's docstring
+    exactly like the outer one's, so excluding only `node.body[0]` left the
+    same false PASS one `def` deeper: a helper whose docstring quoted the
+    clause credited the outer writer with a write it does not perform.
+    """
+    text = '''\
+def _outer_writer():
+    """The writer."""
+    def _helper():
+        """s.ingestedAt=coalesce(s.ingestedAt, $iat)"""
+        return None
+    return (
+        "MERGE (s:Source {url:$id}) "
+        "SET s.documentKind='transcript'"
+    )
+'''
+    derived = _document_writers_in_source(text, "synthetic.py").get(
+        "synthetic.py::_outer_writer", ""
+    )
+    assert "documentKind" in derived, "the outer writer must still be derived"
+    assert "coalesce(s.ingestedAt" not in derived, (
+        "a NESTED helper's docstring was counted as the query text — the outer "
+        "writer is credited with a stamp it never writes"
     )
