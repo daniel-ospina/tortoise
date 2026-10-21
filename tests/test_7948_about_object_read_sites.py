@@ -132,14 +132,18 @@ WHAT THIS PINS
    customer-callable row names a door that exists **and REACHES that row's own
    reader**: ``SDK `<method>` `` must be a public `TortoiseSDK` method,
    ``MCP `<tool>` `` a registered `ToolDefinition`, ``REST `<VERB path>` `` a live
-   route — and then, past existence, the reader must be in the door's bounded
-   reference closure. That is what makes "customer-callable" a claim about the
-   product surface rather than an adjective. ⚠️ **Existence alone was measured
+   route — and then, past existence, the reader must be within the door's
+   reference-distance BUDGET (`_DOOR_REACH_HOPS`, with per-reader
+   `_DISTANCE_EXCEPTIONS`). That is what makes "customer-callable" a claim about
+   the product surface rather than an adjective. ⚠️ **Existence alone was measured
    fail-open:** substituting a different REGISTERED tool on rows 4 and 21 left
    every arm green, and the blast-radius door count is derived from those very
    cells. The residual is named there — the closure is name-based (permissive:
-   it can miss a bad door, never invent reach) and `_DOOR_REACH_HOPS` is a
-   BOUND, 5 being the tightest that costs no false red on the seventeen rows.
+   it can miss a bad door, never invent reach), the budget is a BOUND (3, with two
+   measured exceptions), and its acceptance RATE is pinned by (22) so it cannot
+   loosen again silently. **The REST door is keyed on `(verb, path)`, not path
+   alone** — a cell naming the sibling `GET` of a `POST` route is a different
+   door, and was green before the verb was checked.
 9. `test_the_extractor_document_agrees_on_the_count` — the sibling document
    states the SAME fact as §13, and "fact" is the NUMBER **and the
    ENUMERATION**: §13.8 said TWELVE and listed thirteen (the extra being a
@@ -227,6 +231,13 @@ WHAT THIS PINS
    (8) would then green every substituted door — falsifiability stated as an
    ARM rather than as a comment, the same correction (16) records for the
    fragment census that existed for three cycles and was never CALLED.
+22. `test_the_attribution_predicate_does_not_swallow_the_whole_table` — (8)'s
+   relation is a BOUND, so the RATE it accepts is pinned as its own number: at
+   most `_ACCEPTED_PAIRS_AT_THIS_HEAD` (63) of the 340 (row, table-door) pairs and
+   at most `_WORST_ROW_AT_THIS_HEAD` (15) for any one row, with a floor at the 29
+   true attributions so a predicate that breaks the other way also reds. The
+   inputs are the TABLE's twenty doors, not the 99-tool registry, so adding a tool
+   does not move them — which is what makes them pinnable without churn.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -2078,7 +2089,10 @@ def _doors(cell: str) -> dict[str, str]:
     """
     doors = {f"MCP {name}": "mcp" for name in _DOOR_MCP.findall(cell)}
     doors |= {f"SDK {name}": "sdk" for name in _DOOR_SDK.findall(cell)}
-    doors |= {f"REST {match.group(2)}": "rest" for match in _DOOR_REST.finditer(cell)}
+    # ⚠️ The VERB is part of the door key. Stripping it (the earlier shape) made the
+    # verb uncheckable: rows 28-31 all share a path with a sibling route that reads
+    # no edge, so a cell could name the wrong verb and every arm stayed green.
+    doors |= {f"REST {match.group(1)}": "rest" for match in _DOOR_REST.finditer(cell)}
     return doors
 
 
@@ -2133,37 +2147,52 @@ def _registered_tools() -> set[str]:
     return names
 
 
-def _rest_routes() -> set[str]:
-    """The paths this repo serves over its own hosted REST surface.
+@functools.cache
+def _route_table() -> dict[tuple[str, str], frozenset[str]]:
+    """`(VERB, path) -> the handler functions decorated with exactly that route`.
 
-    A customer-callable row may reach the edge through REST instead of an SDK
-    method or an MCP tool: §13 row 25's reader is the org export, served by
-    `@app.get("/v1/organizations/{org_id}/export")` in `hosted_api.py`. Without
-    this the door test would either refuse a legitimate REST-only row or be
-    widened to `assert path in module text`, which is an existence check on a
-    string rather than on a route — the weaker form that let row 1 name a door
-    that could not reach its reader.
+    ONE tree-wide table, consumed by BOTH legs of the door check (existence and
+    attribution), because two tables is two definitions of "this door is a
+    route" — and they already disagreed here once. Measured before this shape:
+    the existence leg read `tortoise/hosted_api.py` only while the attribution leg
+    scanned the whole tree, so a route legitimately moved into another module
+    passed attribution and red-ed existence with "is not a route in
+    hosted_api.py". Today both sets are the same 132 paths, so that divergence was
+    only latent; one table makes it impossible rather than currently harmless.
+
+    ⚠️ **The VERB is part of the key, and that is the half that was missing.**
+    `_doors()` used to keep only the path, and this function used to union every
+    verb's handler at that path, so a cell stating `REST `POST /v1/backups`` was
+    never checked for `POST` — measured, rewriting row 28's door to
+    `REST `GET /v1/backups`` (the list endpoint, which dumps no edge at all) left
+    all arms green. Keyed on `(verb, path)` that substitution reds, because the
+    `GET` handler is a different function with a different reference closure.
+
+    Scanned across EVERY module so that a legitimate move is not a false red, and
+    the row's reach cell is the only place a door may be spelled.
     """
-    tree = _module_tree(PKG / "hosted_api.py")
-    routes: set[str] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call):
+    table: dict[tuple[str, str], set[str]] = {}
+    for path in sorted(PKG.rglob("*.py")):
+        rel = str(path.relative_to(PKG))
+        for node in ast.walk(_parsed(str(path))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
-            func = decorator.func
-            if not (
-                isinstance(func, ast.Attribute)
-                and isinstance(func.value, ast.Name)
-                and func.value.id == "app"
-                and func.attr in {"get", "post", "put", "patch", "delete"}
-            ):
-                continue
-            if decorator.args and isinstance(decorator.args[0], ast.Constant):
-                routes.add(str(decorator.args[0].value))
-    assert routes, "no `@app.<verb>(path)` routes found in tortoise/hosted_api.py"
-    return routes
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not decorator.args:
+                    continue
+                func = decorator.func
+                if not (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "app"
+                    and func.attr in {"get", "post", "put", "patch", "delete"}
+                ):
+                    continue
+                if isinstance(decorator.args[0], ast.Constant):
+                    key = (func.attr.upper(), str(decorator.args[0].value))
+                    table.setdefault(key, set()).add(f"{rel}::{node.name}")
+    assert table, "no `@app.<verb>(path)` routes found anywhere under tortoise/"
+    return {key: frozenset(ids) for key, ids in table.items()}
 
 
 # ── door → reader ATTRIBUTION ─────────────────────────────────────────────
@@ -2207,21 +2236,66 @@ def _rest_routes() -> set[str]:
 #     below), and does NOT certify that a named door is the CANONICAL door — a
 #     substitution into the same shared lane would still pass. Stated because the
 #     alternative is a comment claiming more than the predicate proves.
-#   * **`_DOOR_REACH_HOPS` is a BOUND, and depth trades BOTH ways — measured:**
-#     at 2 hops the two substitutions red but NINE legitimate rows false-red; at
-#     3 hops two rows false-red; at 4 hops one does; at 5 every one of the
-#     seventeen customer-callable rows attributes and the two substitutions still
-#     red. 5 is the tightest bound that costs no false red, and it is named a
-#     BOUND because a door reaching its reader in six references would attribute
-#     only by way of a shorter parallel path.
+#   * **`_DOOR_REACH_HOPS` is a BOUND, and the number is a MEASUREMENT, not a
+#     guess — the first one was WRONG and a review caught it.** A uniform budget
+#     of 5 attributed all seventeen rows, so it looked safe; measured against
+#     substitutions that keep a REAL tool in the cell it accepted **44.7 % of the
+#     340 (row, table-door) pairs**, and three such substitutions stayed GREEN
+#     (rows 22/24's reach cells swapped, rows 28-31's backup doors swapped, and
+#     row 28's verb changed to the sibling `GET` that dumps nothing). At a uniform
+#     3 hops the same sweep accepts **15.6 %** and all three red; the SHIPPED
+#     predicate — those two exceptions included — accepts 63/340 = **18.5 %**, and
+#     that is the figure pinned by the arm below. Depth still trades both
+#     ways — at 2 hops nine legitimate rows false-red — and the only two true
+#     attributions beyond 3 are named in `_DISTANCE_EXCEPTIONS` with the code fact
+#     that earns each. ⚠️ This is why the bound is pinned on BOTH sides: the
+#     acceptance rate is itself an arm
+#     (`test_the_attribution_predicate_does_not_swallow_the_whole_table`), so the
+#     predicate cannot quietly go permissive again.
 #   * **Falsifiability is a SEPARATE arm**
 #     (`test_the_door_attribution_refuses_a_door_that_reaches_another_reader`),
 #     not a comment here: it runs the live registered tools through this same
 #     predicate, so the gap cannot silently re-open as "latent".
 
 #: How many reference hops a door→reader attribution may take. See the residual
-#: note above: this is a BOUND, and 5 is the tightest one that costs no false red.
-_DOOR_REACH_HOPS = 5
+#: note above: this is a BOUND, not a proof.
+#:
+#: ⚠️ **Three, and the tighter number is what makes the arm discriminate.** A
+#: uniform budget of 5 was measured to accept **44.7 % of the 340
+#: (row, table-door) pairs** — three substitutions that keep a REAL tool in a
+#: cell were green under it (rows 22/24's reach cells swapped, rows 28/30's REST
+#: doors swapped, and row 28's verb changed). A uniform 3 accepts **15.6 %**, and
+#: all three of those red; the shipped predicate, with the two exceptions below,
+#: accepts 63/340 = **18.5 %**. Every one of the 29 true attributions is within 3
+#: hops except the two named in `_DISTANCE_EXCEPTIONS`.
+_DOOR_REACH_HOPS = 3
+
+#: Readers whose door chain is legitimately LONGER than `_DOOR_REACH_HOPS`,
+#: keyed by the reader symbol (the same key the table uses — a row NUMBER would
+#: churn every time the table is renumbered). Each entry states the code fact that
+#: earns it, so this is a register of measured exceptions rather than a place to
+#: park a failing row: an entry silences ONE row's budget, and the arm's message
+#: asks for exactly this rather than for a looser global bound.
+_DISTANCE_EXCEPTIONS: dict[str, tuple[int, str]] = {
+    "hosted_backup.py::_COUNT_ALL_EDGES_QUERY": (
+        4,
+        "the dump's verify leg is `_paged_rows(g, _DUMP_EDGE_PAGE_QUERY, 4)` — the "
+        "count constant is reached through the pager, which the query-declaring "
+        "handler reaches one reference later than the query it pages",
+    ),
+    "hosted_backup.py::_restore_copy_settled": (
+        5,
+        "the settle leg sits behind the restore orchestrator AND its settle helper "
+        "(`restore_graph` -> `_restore_copy_settled`), one further than the restore "
+        "graph itself",
+    ),
+}
+
+#: How far the search itself may walk. Deliberately above every budget in play, so
+#: a `None` means UNREACHABLE rather than "further than we looked" — the message
+#: distinguishes the two, and a short search cap would report a long chain as no
+#: chain at all.
+_DISTANCE_SEARCH_CAP = 12
 
 
 @functools.cache
@@ -2306,45 +2380,18 @@ def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]
 
 
 @functools.cache
-def _route_handlers() -> dict[str, frozenset[str]]:
-    """`route path -> the handler functions decorated with it`, over the tree.
-
-    Scanned across EVERY module rather than just `hosted_api.py`: the backup
-    doors of rows 28-31 are served there today, and pinning the scan to one file
-    would turn a legitimate move into a false red.
-    """
-    handlers: dict[str, set[str]] = {}
-    for path in sorted(PKG.rglob("*.py")):
-        rel = str(path.relative_to(PKG))
-        for node in ast.walk(_parsed(str(path))):
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for decorator in node.decorator_list:
-                if not isinstance(decorator, ast.Call) or not decorator.args:
-                    continue
-                func = decorator.func
-                if not (
-                    isinstance(func, ast.Attribute)
-                    and isinstance(func.value, ast.Name)
-                    and func.value.id == "app"
-                    and func.attr in {"get", "post", "put", "patch", "delete"}
-                ):
-                    continue
-                if isinstance(decorator.args[0], ast.Constant):
-                    handlers.setdefault(str(decorator.args[0].value), set()).add(
-                        f"{rel}::{node.name}"
-                    )
-    return {route: frozenset(ids) for route, ids in handlers.items()}
-
-
-@functools.cache
 def _door_entry_ids(door: str) -> frozenset[str]:
     """The symbols a door STARTS from. Empty means the door cannot be resolved."""
     kind, name = door.split(" ", 1)
     if kind == "SDK":
         return frozenset({f"sdk.py::TortoiseSDK.{name}"})
     if kind == "REST":
-        return _route_handlers().get(name, frozenset())
+        route = tuple(name.split(" ", 1))
+        assert len(route) == 2, (
+            f"REST door {name!r} carries no verb — §13 must spell a REST door as "
+            "REST `VERB /v1/…` so the verb can be checked against the route table"
+        )
+        return _route_table().get((route[0].upper(), route[1]), frozenset())
     # MCP: the entry point is the module-level handler in `mcp_server.py` named
     # exactly as the tool (`def tortoise_supersede(...)`). ⚠️ The `sdk_method`
     # binding a `ToolDefinition` declares is deliberately NOT added to the entry
@@ -2356,21 +2403,45 @@ def _door_entry_ids(door: str) -> frozenset[str]:
     return frozenset({handler}) if handler in _symbol_index()[1] else frozenset()
 
 
-def _door_reaches(door: str, reader: str) -> bool:
-    """Does `door` reach `reader` within `_DOOR_REACH_HOPS` references?"""
+@functools.cache
+def _door_distance(door: str, reader: str) -> int | None:
+    """Shortest reference distance from `door` to `reader`; `None` = unreachable.
+
+    Returns the DISTANCE rather than a boolean so the failure can say how far the
+    chain actually is — "needs 4 references, budget is 3" is actionable, "not
+    reachable" for a chain that exists is not.
+    """
+    if not door or not reader:
+        return None
     defs, refs = _symbol_index()
     frontier = set(_door_entry_ids(door))
+    if reader in frontier:
+        return 0
     seen = set(frontier)
-    for _ in range(_DOOR_REACH_HOPS):
+    for distance in range(1, _DISTANCE_SEARCH_CAP + 1):
         nxt: set[str] = set()
         for node_id in frontier:
             for name in refs.get(node_id, frozenset()):
                 nxt |= defs.get(name, frozenset()) - seen
         if not nxt:
-            break
+            return None
+        if reader in nxt:
+            return distance
         seen |= nxt
         frontier = nxt
-    return reader in seen
+    return None
+
+
+def _distance_budget(reader: str) -> int:
+    """How many references this reader's door is allowed to take."""
+    exception = _DISTANCE_EXCEPTIONS.get(reader)
+    return exception[0] if exception else _DOOR_REACH_HOPS
+
+
+def _door_reaches(door: str, reader: str) -> bool:
+    """Does `door` reach `reader` within this reader's budget?"""
+    distance = _door_distance(door, reader)
+    return distance is not None and distance <= _distance_budget(reader)
 
 
 def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
@@ -2396,7 +2467,7 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     assert _door_reaches("MCP tortoise_supersede", "mcp_server.py::_preview_supersede")
     assert _door_reaches("MCP tortoise_recall", "ranking.py::StateRanker._fetch_point_signals")
     assert _door_reaches(
-        "REST /v1/organizations/{org_id}/export", "hosted_api.py::_export_graph_snapshot"
+        "REST GET /v1/organizations/{org_id}/export", "hosted_api.py::_export_graph_snapshot"
     ), "the REST door does not resolve to its decorated handler at all"
 
     # …and a door that exists but is on another surface path must not be
@@ -2413,10 +2484,72 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
         )
 
 
+#: Measured at this head: how many of the table's own TWENTY doors the attribution
+#: predicate accepts, summed over the seventeen customer-callable rows, and the
+#: worst single row. Inputs are the TABLE (whose doors change only when the
+#: document does) rather than the 99-tool registry, so a new tool does not move
+#: these — which is what makes them pinnable.
+_ACCEPTED_PAIRS_AT_THIS_HEAD = 63
+_WORST_ROW_AT_THIS_HEAD = 15
+
+
+def test_the_attribution_predicate_does_not_swallow_the_whole_table():
+    """The bound above is only a check if the predicate still DISCRIMINATES.
+
+    `_DOOR_REACH_HOPS = 5` was measured to accept 44.7 % of the
+    (row, table-door) pairs — and three substitutions that keep a REAL tool in a
+    cell stayed green under it. A bound is not a proof, so the acceptance RATE is
+    pinned as its own number: the predicate may accept, over the table's own
+    doors, at most `_ACCEPTED_PAIRS_AT_THIS_HEAD` pairs and at most
+    `_WORST_ROW_AT_THIS_HEAD` for any single row. A predicate that starts
+    accepting everything moves these and reds here — which is the tripwire the
+    residual note describes in prose, expressed as an arm for the same reason
+    (16) gives about the fragment census.
+
+    ⚠️ **Both figures are MEASURED, and neither is to be nudged.** A RISE means
+    the relation loosened (fix the relation, not the ceiling); a FALL means it
+    tightened, and the new figure should be re-derived and the reason recorded.
+    """
+    rows = [row for row in _rows() if _reach(row) == "customer-callable"]
+    table_doors = sorted({door for row in rows for door in _doors(str(row["reach"]))})
+    assert rows and table_doors, "the sweep found no customer-callable rows or no doors"
+
+    accepted: dict[int, list[str]] = {}
+    for row in rows:
+        reader = f"{row['module']}::{row['symbol']}"
+        accepted[int(row["n"])] = [door for door in table_doors if _door_reaches(door, reader)]
+
+    total = sum(len(doors) for doors in accepted.values())
+    worst_row, worst = max(accepted.items(), key=lambda item: len(item[1]))
+
+    assert total <= _ACCEPTED_PAIRS_AT_THIS_HEAD, (
+        f"the door→reader predicate now accepts {total} of the "
+        f"{len(rows) * len(table_doors)} (row, table-door) pairs, up from "
+        f"{_ACCEPTED_PAIRS_AT_THIS_HEAD} — it has loosened, so substitutions it used "
+        f"to refuse now pass `test_every_customer_callable_row_reaches_a_declared_door`. "
+        f"Worst row: {worst_row} accepting {len(worst)}/{len(table_doors)} "
+        f"({', '.join(worst)}). Tighten the relation (or its budget) rather than "
+        "raising this ceiling."
+    )
+    assert len(worst) <= _WORST_ROW_AT_THIS_HEAD, (
+        f"row {worst_row} ({rows[[int(r['n']) for r in rows].index(worst_row)]['module']}::"
+        f"{rows[[int(r['n']) for r in rows].index(worst_row)]['symbol']}) has "
+        f"{len(worst)}/{len(table_doors)} of the table's doors attributed to it, up "
+        f"from {_WORST_ROW_AT_THIS_HEAD} — for that row the arm has stopped "
+        f"discriminating: {', '.join(worst)}"
+    )
+    # The tripwire must not be satisfied by a predicate that accepts NOTHING:
+    # every true attribution is inside this set by construction.
+    assert total >= 29, (
+        f"only {total} pairs are accepted although §13's cells name 29 door "
+        "occurrences — the predicate has broken the other way"
+    )
+
+
 def test_every_customer_callable_row_reaches_a_declared_door():
     sdk_methods = _public_sdk_methods()
     tools = _registered_tools()
-    routes = _rest_routes()
+    routes = _route_table()
     broken: list[str] = []
     attributed = 0
 
@@ -2435,7 +2568,7 @@ def test_every_customer_callable_row_reaches_a_declared_door():
         broken.extend(
             f"{label} — `{span}` is a REST path in NO form this test can "
             "resolve: write the door as REST `GET /v1/…` so it is checked "
-            "against the routes in hosted_api.py"
+            "against the route table"
             for span in _loose_rest_doors(cell)
         )
         if not doors:
@@ -2455,28 +2588,40 @@ def test_every_customer_callable_row_reaches_a_declared_door():
             if kind == "MCP" and name not in tools:
                 broken.append(f"{label} — MCP `{name}` is not a registered tool")
                 continue
-            if kind == "REST" and name not in routes:
-                broken.append(
-                    f"{label} — REST `{name}` is not a route in hosted_api.py"
-                )
-                continue
+            if kind == "REST":
+                verb, _, path = name.partition(" ")
+                if (verb.upper(), path) not in routes:
+                    near = sorted(p for v, p in routes if v == verb.upper() and p == path)
+                    broken.append(
+                        f"{label} — REST `{name}` is not a route: no "
+                        f"`@app.{verb.lower()}({path!r})` decorator exists anywhere under "
+                        "tortoise/ (the VERB is checked, not just the path — a sibling "
+                        "route on the same path is a different door)"
+                    )
+                    continue
             # ⚠️ EXISTENCE IS NOT ATTRIBUTION — see the note above this section.
             # A door that exists but reaches a DIFFERENT reader is not this row's
             # door, and the blast-radius count would be counted from it.
             attributed += 1
-            if not _door_reaches(door, reader):
+            hops = _distance_budget(reader)
+            distance = _door_distance(door, reader)
+            if distance is None or distance > hops:
+                reached = "does not reach it at all" if distance is None else f"needs {distance} references"
                 broken.append(
-                    f"{label} — {door} exists but reaches nothing within "
-                    f"{_DOOR_REACH_HOPS} references that is `{reader}` — the door is "
-                    "not a door to THIS reader, so the blast-radius count would be "
-                    "counted from the wrong tool"
+                    f"{label} — {door} exists but {reached} to reach `{reader}`, and this "
+                    f"row's budget is {hops} — the door is not a door to THIS reader, so "
+                    "the blast-radius count would be counted from the wrong tool "
+                    "(if the chain is legitimately longer now, give the reader an entry in "
+                    "`_DISTANCE_EXCEPTIONS` with the reason, rather than loosening the budget "
+                    "for every row)"
                 )
 
     # A predicate that silently stops resolving its entries turns this arm green
     # on an assertion it never made — so the floor is asserted, not assumed.
-    assert attributed >= 20, (
-        f"only {attributed} door attributions were attempted — the door parser or "
-        "its resolver has stopped recognising the reach cells"
+    assert attributed >= 29, (
+        f"only {attributed} door attributions were attempted, and §13's "
+        "customer-callable cells name 29 door OCCURRENCES — a lower floor let a dead "
+        "door KIND parser (all six SDK doors, say) pass this arm silently"
     )
     assert not broken, (
         "§13 classes these rows customer-callable without naming a door that "
