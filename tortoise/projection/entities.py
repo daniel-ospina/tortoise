@@ -4785,7 +4785,7 @@ class _EntityHandlers:
             # event applied without one (legacy lines, test fixtures). "Usable"
             # is `_usable_instant` — the policy `_journal_instant` wraps, and the
             # form to copy. It is a choice made HERE, not a guarantee inherited
-            # from the file: `valid_to` (the retract/invalidate folds) and
+            # from the file: `valid_to` (the supersede/invalidate folds) and
             # `_upsert_source`'s `ingestedAt`/`updatedAt`/`rawStateAt` still ride
             # ungated (#7369), so nothing else gates this slot for you. Cited by
             # NAME, never by line — a number here is stale the next time
