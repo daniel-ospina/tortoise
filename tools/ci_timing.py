@@ -421,17 +421,21 @@ COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 #
 # Two shapes the rule must keep: the id is captured with `.+?`, so a parameter containing
 # whitespace (`test_spaced[server lane]`) survives rather than truncating to a nodeid pytest never
-# reports; and anything between the verdict and the marker is allowed EXCEPT another verdict word,
-# because pytest truncates a skip reason IN PLACE (`SKIPPED (rea...) [ 37%]`).
+# reports; and the verdict may be followed by pytest's PARENTHESISED reason before the marker
+# (`SKIPPED (rea...) [ 37%]`, truncated in place). The reason is the ONLY thing allowed there:
+# permitting arbitrary text let a reason that CONTAINED a verdict word re-anchor the rule inside
+# itself — `XFAIL (expected FAILED) [ 12%]` was published as `('…::test_xf XFAIL (expected',
+# 'FAILED')`, i.e. a failure for a test that never failed.
 _V = r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)"
 V_PROGRESS_RE = re.compile(
     rf"^(?P<nodeid>tests/\S+?\.py::.+?)\s+(?P<verdict>{_V})"
-    rf"(?:(?!{_V}\b).)*?\[\s*\d+%\]\s*$")
-# Not every progress line carries a marker: a plugin-free `-v` fixture log, and the `-rA` short
-# summary, both print a bare `id VERDICT`. Accepting only the marked form silently dropped whole
-# legs of the per-file census (caught by the suite's own fixture, #9134 review, P2). A bare id
-# cannot contain a space here, which is what keeps this alternative from re-reading an embedded
-# nodeid as a bare line.
+    rf"(?:\s+\(.*\))?\s*\[\s*\d+%\]\s*$")
+# Some logs carry a bare `id VERDICT` line with no percentage marker (a hand-trimmed capture, an
+# extract, the suite's own fixture). Accepting only the marked form dropped every outcome in such a
+# leg, so this alternative reads them. It is deliberately narrow: the id may not contain a space,
+# which stops it from re-reading an embedded nodeid as a bare line. pytest's own formats are NOT
+# this shape — `-v` always emits the marker, and `-rA` puts the verdict FIRST
+# (`PASSED tests/x.py::test_y`) — so do not cite this as `-rA` support.
 V_PROGRESS_BARE_RE = re.compile(
     rf"^(?P<nodeid>tests/\S+?\.py::\S+?)\s+(?P<verdict>{_V})\s*$")
 
@@ -490,10 +494,27 @@ def _is_summary_line(line: str) -> bool:
                 or " deselected" in stripped)
 
 
-# The id runs to the ` - <message>` separator, NOT to the first space: a parametrized id
-# may CONTAIN a space (`test_spaced[server lane]`), and truncating at whitespace published a
-# nodeid that does not exist and collapsed distinct failures into one (#9134 review, P2).
-R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::.+?)(?:\s+-\s+.*)?$")
+# The `<id> - <message>` split cannot be done by pattern: a parametrized id may CONTAIN both a
+# space (`test_spaced[server lane]`) and the separator itself (`test_p[a - b]`), and truncating at
+# either published a nodeid pytest never reports, collapsing distinct failures into one
+# (#9134 review, P2). So match the whole tail and split it with `_short_summary_id`.
+R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::.+)$")
+
+
+def _short_summary_id(tail: str) -> str:
+    """Split `<id> - <message>` at the FIRST ` - ` outside brackets.
+
+    The id can be `test_p[a - b]` and the message is free text that may itself contain ` - `, so
+    neither the first dash nor the last is right. The id's brackets balance; the message's do not
+    belong to it. A tail with no separator (pytest omits a message sometimes) is the id.
+    """
+    at = tail.find(" - ")
+    while at != -1:
+        head = tail[:at]
+        if head.count("[") == head.count("]"):
+            return head
+        at = tail.find(" - ", at + 3)
+    return tail
 
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
@@ -635,7 +656,7 @@ def parse_log(path: Path) -> dict:
             continue
         m = R_SUMMARY_RE.match(line)
         if m:
-            outcomes[m.group(2)] = m.group(1)
+            outcomes[_short_summary_id(m.group(2))] = m.group(1)
             continue
         # ⛔ The counts are NOT credited here. Exactly ONE site decides them — `_cand`
         # below, after this loop — and it resets every key before it sets one. A
@@ -2783,8 +2804,8 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
         # change fixes. Failures only, never passed/skipped: a summary-less log
         # cannot establish either.
         if not parsed["summary_seen"]:
-            # `parse_log` already refused every line carrying two verdicts (an embedded
-            # nodeid), so each outcome here is one test's own verdict — including the
+            # The progress rule reads an embedded nodeid's OUTER verdict and its own id, so
+            # each outcome here is one test's own verdict — including the
             # legitimate ids whose parameter contains `[` and is therefore bracket-unbalanced
             # (#9134 review, P1: the balance filter dropped those genuine failures).
             for state, key in (("FAILED", "failed"), ("ERROR", "error")):
