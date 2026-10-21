@@ -107,6 +107,15 @@ moment a second process writes, and a per-record source of truth already
 exists — the append-only journal. A re-run after a crash re-derives the same
 offset from the same durable facts, so nothing renumbers.
 
+THE LIVE DOOR OWNS THE SAME FACT. Every live journal append site
+(`TortoiseSDK._emit_event`, `EventAPI._emit`,
+`ConversationMiner._emit_event`) appends through `EventLog.append`, which
+RETURNS the record's journal position, and passes that value here as
+`first_seq=` (#9190). So the live path writes the position row for every record
+whose append reported one, and omits it — per RECORD, never categorically —
+when the append returned `None` (a named absence: the ordinal is not proven).
+Nothing here mints a number and nothing here caches one.
+
 **THE TRANSACTION.** The seam never calls `commit()` and never calls
 `rollback()` (pinned by a test whose fake connection counts both and asserts
 they are zero). When the caller injects `conn=`, the boundary is unambiguously
@@ -144,7 +153,7 @@ _logger = logging.getLogger(__name__)
 __all__ = [
     "CONNECT_TIMEOUT_SECONDS",
     "LIVE_WRITE_BREAKER_SECONDS",
-    "POSITION_ROW_DEFERRED_ON",
+    "POSITION_ROW_REQUIRES_THE_APPENDS_OWN_POSITION",
     "RECORD_DSN_ENV",
     "RECORD_GRAPH_ENV",
     "RECORD_ORG_ENV",
@@ -161,15 +170,19 @@ __all__ = [
     "write_records",
 ]
 
-#: The record's position row (`public.journal_event`) is NOT written by the live
-#: path yet: a position is a fact only a bounded replay can derive, and the live
-#: chokepoint has no ordinal (`EventLog.append` reports nothing; there is no
-#: count accessor). Writing one anyway would collide on `(org_id, graph_id,
-#: seq)` with a later full replay's numbering — in silence. #9190 owns the
-#: ordinal; the live write passes `position=False` until it lands, and the FOUR
-#: ontology layers are unaffected (the position row is bookkeeping ABOUT them,
-#: not one of them).
-POSITION_ROW_DEFERRED_ON = "#9190"
+#: THE POSITION RULE (#9190). A record's `journal_event.seq` is ONLY ever the
+#: number that record's OWN `EventLog.append` returned — `EventLog.position()`
+#: exists to REPORT what the journal consumed, never to mint a `seq` (see its
+#: docstring). `append()` returning ``None`` is a NAMED absence (six documented
+#: states, `tortoise/log.py`), so an absent ordinal means NO position row for
+#: THAT record rather than a categorical deferral for every live write, and a
+#: number derived any other way would collide on `(org_id, graph_id, seq)` with
+#: a later full replay's numbering — in silence. `write_live_record` therefore
+#: takes the ordinal from the caller (`first_seq=`) and
+#: `tools/record_wiring_check.py` FAILS if a live door stops passing the
+#: append's own return. The FOUR ontology layers are unaffected either way (the
+#: position row is bookkeeping ABOUT them, not one of them).
+POSITION_ROW_REQUIRES_THE_APPENDS_OWN_POSITION = "#9190"
 
 #: The arming key. Present ⇒ armed; unset/blank ⇒ ``NOT_ARMED``. See the module
 #: docstring, decision 2 — and note it is a DSN, not a boolean, so a second
@@ -509,11 +522,12 @@ class RecordWriter:
             the journal append and this projection in ONE transaction; the seam
             then neither opens nor closes nor commits it.
         :param position: write the per-record ``journal_event`` position row
-            (default ``True``). The LIVE path passes ``False``: it has no
-            ordinal to record (
-            :data:`POSITION_ROW_DEFERRED_ON`, #9190), and a guessed one would
-            collide with a later replay's numbering in silence. The four
-            ontology layers are written either way.
+            (default ``True``). The LIVE path derives it from the ordinal the
+            record's own journal append REPORTED (:func:`write_live_record`,
+            #9190) — ``False`` for a record whose `append()` returned ``None``,
+            because a guessed ``seq`` would collide with a later replay's
+            numbering in silence. The four ontology layers are written either
+            way.
 
         :raises RecordWriteError: the record was ARMED and the write did not
             happen (malformed DSN, unreachable record, totality refusal, or a
@@ -669,7 +683,8 @@ def _count_non_journal_skip(reason: str = "no_durable_journal") -> None:
 
 
 def write_live_record(record: Mapping[str, Any], *,
-                      durable: bool = True) -> RecordWrite | None:
+                      durable: bool = True,
+                      first_seq: int | None = None) -> RecordWrite | None:
     """The LIVE door: one journal record that has ALREADY been appended.
 
     Called at each of the three places the journal is appended on a live write
@@ -677,6 +692,16 @@ def write_live_record(record: Mapping[str, Any], *,
     _emit_event` — so every producer's record reaches the record, not just the
     SDK's. §17.1: the append is the commit point, so this runs after it and
     before any cache fold.
+
+    ``first_seq`` is that record's JOURNAL POSITION — the value its own
+    `EventLog.append` RETURNED (#9190). It is the caller's fact for the same
+    reason it is in :meth:`RecordWriter.write`: the ordinal is a property of the
+    journal, so a number minted here (`position()` + 1, `MAX(seq) + 1`) would
+    collide on `(org_id, graph_id, seq)` with a later replay's numbering, in
+    silence. ``None`` means the append SUCCEEDED but did not prove a position
+    (six documented states in `EventLog.append`) ⇒ no ``journal_event`` row for
+    THIS record and the layer rows still land. That is a PER-RECORD absence, not
+    the categorical deferral this door used to apply to every live write.
 
     ``durable`` says whether the log the record was appended to is a JOURNAL.
     The record is ``replay(journal)`` — its whole repair story is "rebuild the
@@ -778,9 +803,16 @@ def write_live_record(record: Mapping[str, Any], *,
         )
         return None
     connection: Any | None = None
+    # The position row is written for a record whose append REPORTED its
+    # position, and omitted for one whose append did not (#9190): `append()`
+    # returning `None` is a named absence, so `position=False` is a per-record
+    # answer here rather than the old categorical deferral that threw away the
+    # ordinal `append()` had already returned.
+    has_position = first_seq is not None
     try:
         write = write_records([record], org_id=org_id, graph_id=graph_id,
-                              position=False)  # #9190: never invent a position
+                              first_seq=first_seq if has_position else 1,
+                              position=has_position)
         _close_live_breaker()
         connection = write.connection
         if connection is not None:

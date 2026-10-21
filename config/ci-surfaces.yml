@@ -6461,6 +6461,26 @@ durations:
   # tree; if they no longer match the file, re-measure.
   # Refresh from the first post-merge push run that includes the file.
   test_9190_journal_position.py: 5.0
+  # #9231 review P2 (#3400 trap): a file ADDED BY A PR has no CI junit
+  # measurement — the refresher samples push-to-main runs only — so an absent row
+  # packs it at the flat 2.0s default AND spends the durations-coverage headroom
+  # #9190 had just bought (measured on `origin/main`: fast=951/durations=957,
+  # missing=93, coverage 0.90221; with this file and no row, missing=94 and
+  # 0.90126 — two more fast files and the 0.90 floor reds).
+  # MEASURED in the #9078 worktree 2026-10-20, embedded lane
+  # (`TORTOISE_TEST_CARVE_OUT=1`) with `HF_HUB_OFFLINE=1` so the reading is the
+  # file's own cost rather than a model download: "43 passed, 2 skipped in
+  # 61.43s", and the sum of the testcase times (`--durations=0`) is 54.75s — the
+  # figure this map is built from. Two costs dominate and both are real in CI:
+  # the session `wiring` fixture runs `record_wiring_check.check()` (~14s of AST
+  # work over all 239 package modules) and
+  # `test_the_declared_gap_is_gone_and_a_stale_one_fails_the_gate` runs it a
+  # second time; the one `capture_session` leg pays the lazy embedding load.
+  # Declared ABOVE the quiet-box reading so a cold leg cannot under-pack.
+  # ⚠️ Read WITHOUT `HF_HUB_OFFLINE` the same file reports 277s — that is the
+  # unauthenticated HF Hub fetch, not this file. Refresh from the first
+  # post-merge push run that includes it.
+  test_9078_record_written_by_production_path.py: 55.0
   test_5917_torn_tail_seal.py: 2.0
   test_longmem_costing.py: 0.2
   test_longmem_errors.py: 0.1

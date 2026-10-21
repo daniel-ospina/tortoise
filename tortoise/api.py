@@ -153,7 +153,11 @@ class EventAPI:
         # transport over. See `_refuse_unapproved_kinds` for why it must run
         # before the append rather than after.
         self._refuse_unapproved_kinds(event)
-        self.log.append(event)
+        # #9190: the append reports the record's journal position, which is the
+        # only legitimate `journal_event.seq`. `None` ⇒ the position is not
+        # proven, so the record is written without a position row (never with an
+        # invented one).
+        seq = self.log.append(event)
         # #9188: the Postgres record, AFTER the append (the commit point, §17.1)
         # and before the fold. This door is a LIVE journal writer — the v1
         # extractor, `ingest`, `docs_miner`, `mining` and the CLI all append
@@ -173,7 +177,7 @@ class EventAPI:
         # `record_write_failures`: a lane with no journal by design lost nothing a
         # replay could restore (#9231 review P2).
         record_writer.write_live_record(
-            event, durable=getattr(self.log, "durable", True))
+            event, durable=getattr(self.log, "durable", True), first_seq=seq)
         if self.projection is not None:
             # #7951 §17.1: journal-first door — the append above is the COMMIT
             # POINT, so the fold runs inside the live-write scope.
