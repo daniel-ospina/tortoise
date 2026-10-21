@@ -691,3 +691,26 @@ that was itself a heading cannot collide with this file's own outline.
   - Measured 2026-10-08 (10,000 `Point`s; 87 distinct property names on that sample — itself truncated by FalkorDB's silent 10,000-row cap): 9 of those 87 property names are DERIVED or VOLATI…
   - ✅ The canonical id contract (`#7955`). The stable key is fixed per label — `:Point` → `id` (minted by `tortoise/ids.py::ulid()`), `:Event` → `eventId`, `:Subject`/`:Object` → `name`, `:So…
   - ⛔ CORRECTION TO §17.5 AS WRITTEN — `baseline_source` is NOT unconditionally DERIVED; `baseline_set` is DERIVED, but not as a record column. When an author sets the prior (`baseline_source…
+
+## §13 — the `aboutObject` headline claim is SCOPED to the files it measured (`#9399`)
+
+The removed sentence and why it went. §13's evidence for the KEEP ruling opened
+with an unqualified claim about *"the primary search path"*, but the command it
+quotes as proof measures exactly three modules — and `tortoise/ranking.py`, which
+holds both product ranking read paths and therefore the reads behind the default
+recall door (`tortoise_recall` → `sdk_method="recall_state"`), is not one of them.
+
+**Removed (verbatim):**
+
+> **The primary search path does NOT read it.** `rg -n 'aboutObject'
+> tortoise/retrieval.py tortoise/search_engine.py tortoise/session_reinjection.py`
+> → **exit 1, zero matches**, case-insensitive. **Hindsight's premise holds for
+> this path.**
+
+The measurement was never wrong; the **scope** was unstated, so the sentence read
+as a whole-product claim and a reader checking only the quoted command concluded
+the opposite of what the section rules on. The design document now states the
+lane the three files bound and names the module and the door outside it;
+`tests/test_9399_search_path_claim_scope.py` holds it there by parsing the file
+list OUT of the sentence and re-running the scan over it, so widening the list or
+reverting the qualification reds.

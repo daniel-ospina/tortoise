@@ -2754,6 +2754,17 @@ surfaces:
   # `encode_for_store` seam an `embeddings.py` diff would need to select —
   # the sibling #4208 file above already carries that dual registration.
   - test_update_point_none_content_5240.py
+  # #9167: `create_point(kind, content)` must REFUSE a `None`/non-str `content`
+  # by name at its own door, instead of escaping as an `AttributeError` from
+  # `_content_hash`'s `text.encode` one frame inside a private helper — a
+  # caller error (every write path funnels through this door, and the MCP
+  # `tortoise_create_point` tool forwards `content` verbatim) that read as an
+  # internal bug. `core` owns it: the fix is `tortoise/sdk.py` (a
+  # SHARED_MODULE, so an sdk diff selects the full matrix) and the file's
+  # fail-closed half pins that a refused call writes and journals nothing.
+  # NOT dual-registered with `eval`: it patches `compute_embedding` for
+  # determinism and never reaches the `encode_for_store` seam.
+  - test_create_point_content_9167.py
   - test_onboarding_truth_surface.py  # #3670/#3671/#3681: dual-registered (api+core) — pins tortoise/hosted_api.py
   # #2007 (W12): the self-hosted onboarding path. Load-bearing HERE because the
   # two SDK-init seams it pins (`tortoise/selfhost_api.py` `_sdk`,
@@ -3390,6 +3401,12 @@ surfaces:
   # implementation (extractor_v2.fold_allowed), so the file is registered
   # alongside test_consolidation_4way.py, which guards the same classifier.
   - test_never_across_fold_5080.py
+  # #5006: the attachments half of the same D12/O4 ruling — a fold that would
+  # drop an entity only the candidate names is refused. Registered `core` beside
+  # `test_never_across_fold_5080.py` (same classifier, same fold asymmetry):
+  # `extractor_v2.py` is not a SHARED_MODULE, so a diff touching only it selects
+  # `core` — unregistered, this guard would run in NO leg at all.
+  - test_merge_fold_5006.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
   - test_notify_offloop_4456.py  # #4456: billing notify off-loop + never-raise in webhooks_stripe (dual: api)
@@ -4172,6 +4189,18 @@ surfaces:
   # class). This file pins that calendar attendees are grounded on the meeting's
   # OWN evidence before they become CRM contacts/opportunities.
   - test_8491_cal_attendee_grounding.py
+  # #9399: §13's "primary search path does not read `aboutObject`" sentence is
+  # scoped to the THREE files its quoted `rg` names, and `tortoise/ranking.py`
+  # — which holds both product ranking read paths, i.e. the reads behind
+  # `tortoise_recall`/`recall_state` — is not one of them. So the sentence was
+  # true of the FTS/vector/RRF LANE and false of the default recall DOOR, while
+  # §13's own text calls the count decisive for the KEEP ruling. The file parses
+  # the file list OUT of the sentence, re-runs the scan over it, and requires the
+  # claim to name the module it excludes and the door that reads through it. It
+  # also pins the code facts the scoping rests on (`ABOUT_EDGE_TYPES`,
+  # `_ABOUT_TYPES`, the two `recall_state` enrichment readers), so it cannot
+  # survive as a stale qualifier. Text-only: no DB, no network.
+  - test_9399_search_path_claim_scope.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -5272,6 +5301,7 @@ tier1:
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
+- test_9399_search_path_claim_scope.py  # #9399: §13's `aboutObject` headline claim vs the scope of the grep it quotes (hermetic doc↔code pin, and the claim's own file list is what a docs-only edit falsifies fastest) — dual-registered with `core`
 - test_ep_draft_filter.py
 - test_ep_operatorless.py
 - test_event_store.py
@@ -6805,6 +6835,7 @@ durations:
   test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB
   test_test_design_1992_traceability.py: 0.1  # #1992 review: doc-text table/row scans + two file reads; no DB. A file ADDED BY A PR has no CI junit measurement (#3400 — the refresher samples push-to-main runs only), so this is a local reading: 0.01–0.02 s per test of call time (`--durations=0`), the same no-DB shape as the doc guards above
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
+  test_9399_search_path_claim_scope.py: 2.0  # unmeasured — #9399 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading — the #2818/#3419 convention (`tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it (#8254 review P3). LOCAL reading, recorded as provenance for the `2.0` and NOT adopted: embedded carve-out lane, `--junitxml`, 3 tests, sum of `testcase/@time` 2.52s, max single test 2.10s, whole-file wall 2.77–4.76s — and the max-single is the FIRST test absorbing the once-per-leg conftest setup the #3400 method attributes to no file (`--durations=5`: setup 2.60s vs call 0.02–0.04s), which is exactly why the local figure is not substituted. Text-only (doc-line read + three file scans + two source reads); no DB, no network. Required on BOTH halves: the `core` surface row alone is manifest CLASSIFICATION, not a durations weight (#4348). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the coverage floor at that head.
   test_file_indexer.py: 0.7
   test_open_kinds.py: 0.3
   test_postmerge_verdict.py: 0.4
@@ -7209,6 +7240,7 @@ durations:
   test_fanout_cap.py: 0.2  # unmeasured
   test_sufficiency_router.py: 7.5  # #5009: hermetic (no DB, no graph, no model call) — 211 tests, measured 4.5-7.8s on a quiet host and 15.9-17.5s while this box carried a 40-deep CI queue. The WEIGHT stays at the quiet-host reading on purpose: it is a packing weight, and the 17s sample measures fleet load, not the file. Refresh from the first post-merge junit sweep (`--refresh-durations` samples push-to-main runs only, so a file ADDED BY A PR has no measured value at PR time).
   test_never_across_fold_5080.py: 2.0  # unmeasured
+  test_merge_fold_5006.py: 2.0  # unmeasured — new in #5006; the weight is the flat default, not a measurement
   test_operator_alert.py: 2.3
   test_consumed_sdk_binding_3904.py: 2.0  # unmeasured — new in #3904. Without a row this file packs at the flat 2.0s default anyway, but it would count as UNCOVERED, dropping the repo-wide coverage floor (#3400) to 89.9% and redding the manifest-integrity gate. The 2.0 value is the default it would have received; it is a weight, not a measurement.
   bench/test_smoke_embedded.py: 38.6
@@ -7271,6 +7303,7 @@ durations:
   test_journal_embedding_5004.py: 24.0  # unmeasured
   test_update_point_content_embedding_4208.py: 9.6  # #4208: 9 tests, docker FalkorDB; locally measured (junit testcase/@time sum, max of 4 runs)
   test_update_point_none_content_5240.py: 2.0  # #5240: 6 tests; measured 9.5s locally on the embedded carve-out lane (@time sum, max of 3 runs), entered at the flat default per the #3400/#4221 convention below until a CI junit artifact carries the weight
+  test_create_point_content_9167.py: 2.0  # #9167: 5 tests; measured 4.6s locally on the embedded carve-out lane (@time sum), entered at the flat default per the #3400/#4221 convention below until a CI junit artifact carries the weight
   test_helpers.py: 0.0  # unmeasured
   # #3400/#4221 convention: a new file enters at the flat 2.0s default and keeps
   # the `# unmeasured` marker until a CI junit artifact carries a measured weight,

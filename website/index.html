@@ -59,7 +59,9 @@
        events (#744). Beats without interactive children inherit
        pointer-events: none from .beat. */
     #beat-cta { pointer-events: none; }
-    #beat-cta form, #beat-cta a, #beat-cta button { pointer-events: auto; }
+    /* The label is interactive: `for="waitlist-email"` makes a click on it
+       focus the field, so it needs pointer events like the form itself. */
+    #beat-cta form, #beat-cta a, #beat-cta button, #beat-cta .cta-label { pointer-events: auto; }
     #beat-tortoise a { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
@@ -144,6 +146,16 @@
     #beat-lab h3 strong { color: var(--text); font-weight: 400; }
 
     /* CTA */
+    #beat-cta .cta-label {
+      display: block;
+      width: 100%; max-width: 400px;
+      margin-bottom: 0.55rem;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+    }
     #beat-cta form {
       display: flex; gap: 0.75rem; max-width: 400px; width: 100%;
     }
@@ -302,8 +314,13 @@
       <h3><strong>Premise Labs</strong></h3>
     </section>
     <section id="beat-cta" class="beat">
+      <!-- A VISIBLE label, not just a placeholder: the field is legible to a
+           human, but a placeholder is invisible to a text-only reader of the
+           page (innerText drops it), which makes the form look absent. It is
+           also what WCAG asks for — a placeholder is not a label. -->
+      <label class="cta-label" for="waitlist-email">Email address</label>
       <form id="waitlist-form" novalidate>
-        <input type="email" name="email" placeholder="your@email.com" aria-label="Email address" autocomplete="email" required>
+        <input id="waitlist-email" type="email" name="email" placeholder="your@email.com" autocomplete="email" required>
         <input type="text" name="hp" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
         <button type="submit">Stay in touch</button>
       </form>
@@ -656,7 +673,6 @@
   <footer class="legal-bar" aria-label="Footer">
     <a href="https://tortoise.premiselabs.co/blog">Blog</a>
     <a href="https://tortoise.premiselabs.co/privacy">Privacy Policy</a>
-    <a href="https://tortoise.premiselabs.co/aviso-privacidad">Aviso de Privacidad</a>
     <a href="https://tortoise.premiselabs.co/tos">Terms of Service</a>
     <a href="https://tortoise.premiselabs.co/license">License</a>
     <a href="https://tortoise.premiselabs.co/dpa">DPA</a>
