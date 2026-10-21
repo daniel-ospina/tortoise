@@ -1059,7 +1059,7 @@ miss, which deletes and rewrites replayed edges **by type** from a journal field
 edge as data, not for a referent. Counts: **twenty-four → twenty-six sites, twenty → twenty-two
 rows**; the chain's closing increment is stated and asserted, as the tenth correction requires.
 
-**Measured, not asserted.** Non-vacuity for each new arm: against the pre-fix document **10 of 17
+**Measured, not asserted.** Non-vacuity for each new arm: against the pre-fix document **11 of 23
 arms red** (the derivation arms stay green by design — they pin the mechanism, not the prose); with
 the call-time walk removed, three arms red including the floor and the synthetic-new-member arm;
 with the frozenset branch removed, `test_the_resolver_follows_a_frozenset_rel_family` reds. The
@@ -1068,3 +1068,53 @@ and the neighbouring class's shapes (an empty pattern belongs to the empty-patte
 shape walks cannot double-count one site and then each re-declare it. `_type_slot` is shared by both
 walks, which also closes a hole the fourth review named: `-[r {idx:$i}]->` names **no** type, because
 that colon is a property-map key, not a type.
+
+⚠️ **The two figures in this entry were re-read at the head that closed the round after it.** They
+were written at `9b5d14b10`, when the file held 17 arms; five arms arrived with this very round
+(17 → 22) and one more in the twelfth, so "10 of 17" described an artifact that no longer existed.
+A record that stops at the head it was written against is the same rot this section exists to end,
+one level up — hence the re-read, not a footnote.
+
+### Follow-up, same day — the TWELFTH correction: the empty-pattern class was walked in ONE of its two spellings (`PR #9398`, seventh review)
+
+The seventh review found no defect in the derivation the eleventh correction added, the table, the
+CI registration or the numerals the KEEP ruling rests on. It found one **live reader the whole
+census could not see**, and one promise that was in prose only.
+
+- **A traversal that names no type has TWO legal spellings, and only one was walked.**
+  `_EMPTY_TRAVERSAL` required brackets, so `-[r]->` derived and `(n)--()` did not — but the
+  bracket-less form is the same traversal: no type is written, so it walks every relationship type,
+  `aboutObject` included. There was a live member: `domain_validators.validate_chain_integrity`,
+  inside the `orphaned_draft` rule (`#131`), runs `MATCH (n:Point {status:'draft'}) … AND NOT
+  (n)--()` — a degree count over every edge type, the same read `session_source_migration._degree`
+  is already registered for. The module carries no `aboutObject` literal and no rel-family constant,
+  so the file filter skipped it and no walk ever reached it. §13's *"every such reader is enumerated
+  by its own shape walk"* was therefore **false at that head**, and the shape a new orphan/degree
+  rule is idiomaticly written in was the one that shipped green.
+- **The "numbering of record" omitted two arms.** The docstring's `WHAT THIS PINS` list held 19
+  entries for 22 arms; the two with no entry were the call-time class's mechanism arm and its
+  synthetic-new-member arm — the latter being the arm the PR body advertised as the sixth review's
+  headline fix. The list says of itself that it is the numbering of record, and three places in the
+  file cite arms *by number*, so an omission there is not cosmetic.
+
+**The fix, in three moves.** (1) `_BARE_TRAVERSAL` derives the bracket-less form — `<-->`, `<--`,
+`-->`, `--`, anchored between two node patterns (`)` … `(`) so a bare `--` in prose, a CLI flag or a
+`->` in a log message is not a traversal — and both shape predicates (`_may_traverse_every_type`,
+`_is_empty_pattern_read`) use it, so the file FILTER and the walk cannot disagree. (2)
+`validate_chain_integrity` is a named `EMPTY_PATTERN` entry with its reason (a degree count, not a
+read for a referent), taking the register from eighteen to nineteen members, and `_EMPTY_PATTERN_CASES`
+gains five bracket-less cases plus the two near-misses that must NOT derive (`--` inside a string
+literal, a `MERGE (n)-->(m)` writer) — the mechanism arm has the new direction on sources that are
+not today's tree. (3) `test_the_docstring_names_every_arm` makes the numbering of record executable:
+every `test_` function is a numbered entry or a declared collapse (`_COLLAPSED_ARMS`), the numbers are
+contiguous with no duplicates (an *"arm N"* reference must not silently resolve to the wrong arm),
+and every collapsed name is a real arm the prose still names.
+
+**Measured.** With the bracket-less spelling un-walked, three arms red — `test_the_empty_pattern_class_is_declared`
+(the new register entry stops deriving), `test_the_empty_pattern_class_derivation_holds` (the five
+new cases) and `test_a_new_call_time_reader_cannot_ship_green` (an `EMPTY_PATTERN` entry that no
+longer resolves into the walk keyspace). Removing entries 20/21 from `WHAT THIS PINS` reds
+`test_the_docstring_names_every_arm` naming both, and a duplicated entry number reds it on the
+duplicate. Counts are unchanged: **twenty-six sites, twenty-two rows, nine customer-callable rows
+(twelve sites)** — this round added no reader to the table, which is the point: the member it found
+is not one.

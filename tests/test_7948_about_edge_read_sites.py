@@ -195,13 +195,39 @@ WHAT THIS PINS
    case tuple must hold both directions (something that derives and a near-miss
    that must not), no repeated labels, and a floor on its size: a corpus silently
    shrunk to one direction leaves the arm above it green and unmeasured.
+20. **`test_the_call_time_shape_derivation_holds`** — the MECHANISM for arm 6, on
+   the synthetic sources in `_CALL_TIME_CASES`: the exact analogue of arm 14 for
+   the third class, and it was missing from this list while arm 14 was not. An
+   empty type slot must derive, and the near-misses must NOT (a named type, an
+   empty PATTERN, a `MERGE` writer). Without it the call-time walk could regress to
+   "finds nothing" and arm 6 would report a class of size zero as complete.
+21. **`test_a_new_call_time_reader_cannot_ship_green`** — the NEW-MEMBER direction
+   of that class, run on `_NEW_READER_CASES`: sources the tree does not contain are
+   pushed through the completeness arm's OWN predicate, so *"a new member of the
+   shape cannot ship green"* is a measurement rather than a claim about the
+   derivation. Also missing from this list, and it is the arm the PR body cites as
+   the sixth review's headline fix.
+22. **`test_the_docstring_names_every_arm`** — the NUMBERING OF RECORD, checked
+   against the arms themselves. This list called itself the numbering of record
+   while two arms had no entry at all (20 and 21 above, which is how they were
+   found), so the promise is now executable: every `test_` function is either a
+   numbered entry here or a declared collapse (`_COLLAPSED_ARMS`), the numbers are
+   contiguous with no duplicates, and every collapsed name is a real arm still
+   named in the prose. A count in a comment is exactly the claim class this file
+   exists to stop being unread.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
 * **An empty relationship pattern** names no type, so nothing literal or
   constant carries `aboutObject` — no scan for the NAME can find it. It is not
   left undeclared: the class is derived by arm 3's shape walk, and every member
-  must be a row or an `EMPTY_PATTERN` entry. A pattern assembled **entirely from
+  must be a row or an `EMPTY_PATTERN` entry. The walk covers **both legal
+  spellings**, the bracketed `-[r]->` and the bracket-less `(n)--()`: the second
+  one used to be outside it, and a live member of it —
+  `domain_validators.validate_chain_integrity`'s `AND NOT (n)--()`, the
+  `orphaned_draft` degree check — sat undeclared while §13 claimed every such
+  reader was enumerated, and the register was only floor-checked so nothing
+  noticed. A pattern assembled **entirely from
   a variable** (no bracket text anywhere in the source) is out of reach of that
   walk — and it is **neither derived nor declarable**: a §13 row for it reds arm 2
   ("declared as a reader but no Cypher in it traverses `aboutObject`") and a
@@ -273,8 +299,20 @@ _CLAUSE = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE)\b")
 _TRAVERSAL = re.compile(rf"[-\[][^\n]{{0,140}}?{EDGE}", re.IGNORECASE)
 #: A bracketed traversal, whatever its type slot holds (`-[r]->`, `<-[r]-`,
 #: `-[r:aboutObject]->`, `-[r:{rel}]->`). `_type_slot` decides what the bracket
-#: names; this only finds the brackets.
+#: names; this only finds the brackets. The bracket-free spelling of the same
+#: traversal is `_BARE_TRAVERSAL` — both must be walked, or the class is half-seen.
 _EMPTY_TRAVERSAL = re.compile(r"[-<]\s*\[([^\]]*)\]\s*[-<>]")
+#: The OTHER legal spelling of a relationship pattern that names no type: a
+#: BRACKET-LESS traversal — `(n)--()`, `(n)-->(m)`, `(n)<--(m)`, `(n)<-->(m)`.
+#: It is the SAME shape as `-[r]->`: no type is written, so it walks every
+#: relationship type and `aboutObject` is one of them. The bracket detector above
+#: cannot see it, and that was not academic — a live member existed while this
+#: regex did not (`domain_validators.validate_chain_integrity`'s
+#: `AND NOT (n)--()`), so §13's *"every such reader is enumerated by its own shape
+#: walk"* was false at that head. Anchored between two node patterns (`)` … `(`)
+#: on purpose: a bare `--` in prose, a CLI flag or a `->` in a log message is not
+#: a traversal, and a Cypher relationship always sits between two nodes.
+_BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
 #: The text signature of a CALL-TIME type slot — a traversal whose relationship
 #: type is written as an expression rather than a name: an f-string interpolation
 #: inside the bracket (`-[r:{rel}]->`, `-[:{EDGE}]->`, including one that carries a
@@ -296,7 +334,7 @@ _UNKNOWN = ""
 _SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?\Z")
 
 #: Floor for the empty-pattern class walk, so the class arm cannot pass by
-#: deriving nothing (today's census: 23 members).
+#: deriving nothing (today's census: 24 members).
 _MIN_EMPTY_PATTERN = 5
 
 #: Floor arms: deliberately BELOW today's census (20 named sites / 22 rows at the
@@ -325,6 +363,16 @@ _MIN_CALL_TIME = 4
 #: the pattern's shape and requires every member to be either a §13 row or an
 #: entry here. Each entry is `(filename, symbol, why it is not an about read)`.
 EMPTY_PATTERN: tuple[tuple[str, str, str], ...] = (
+    (
+        "tortoise/domain_validators.py",
+        "validate_chain_integrity",
+        "the `orphaned_draft` rule's zero-edge check (`AND NOT (n)--()`) — a "
+        "degree count over every edge type, used to decide whether a Point is "
+        "orphaned; the same read `session_source_migration._degree` is registered "
+        "for one file over. It asks nothing about a referent, and its bracket-less "
+        "spelling is why the class walk had to cover both spellings: it was live "
+        "and invisible while only the bracketed form derived",
+    ),
     (
         "tortoise/hosted_api.py",
         "_export_graph_snapshot",
@@ -921,10 +969,18 @@ def _resolve(
 
 
 def _may_traverse_every_type(source: str) -> bool:
-    """Text pre-filter for the empty-pattern class: is there a bracket with no
-    type in it? Cheap, and only a filter — `_is_empty_pattern_read` decides.
+    """Text pre-filter for the empty-pattern class: is there a relationship
+    pattern with no type in it?
+
+    Both spellings count: the bracketed `-[r]->` (no type slot at all) and the
+    bracket-less `(n)--()`. Cheap, and only a filter — `_is_empty_pattern_read`
+    decides. It must stay a SUPERSET of the class, or a filtered-out file is a
+    reader that ships green — which is exactly how the bracket-less member was
+    missed while `EMPTY_PATTERN` was floor-checked.
     """
-    return any(_type_slot(m.group(1)) is None for m in _EMPTY_TRAVERSAL.finditer(source))
+    if any(_type_slot(m.group(1)) is None for m in _EMPTY_TRAVERSAL.finditer(source)):
+        return True
+    return bool(_BARE_TRAVERSAL.search(source))
 
 
 def _may_have_gap_type(source: str) -> bool:
@@ -1010,16 +1066,18 @@ def _is_empty_pattern_read(text: str) -> bool:
     """Does this Cypher traverse a relationship it does NOT name?
 
     Same governing-clause rule as `_is_read` — only a `MATCH`/`OPTIONAL MATCH`
-    makes it a read — but the subject is the pattern's SHAPE: a bracketed
-    traversal with no type slot at all (`-[r]->`, `<-[r]-`, `-[r {c:$c}]->`) has
-    no type, so it walks every relationship type and `aboutObject` is one of them.
+    makes it a read — but the subject is the pattern's SHAPE: a traversal with no
+    type slot at all (`-[r]->`, `<-[r]-`, `-[r {c:$c}]->`, and their bracket-less
+    spelling `(n)--()`) has no type, so it walks every relationship type and
+    `aboutObject` is one of them. Both spellings are checked, because a reader
+    written in the bracket-less one is the same read and was invisible here.
     """
     for match in _EMPTY_TRAVERSAL.finditer(text):
         if _type_slot(match.group(1)) is not None:
             continue
         if _reads_at(text, match.start()):
             return True
-    return False
+    return any(_reads_at(text, match.start()) for match in _BARE_TRAVERSAL.finditer(text))
 
 
 def _is_gap_type_read(text: str) -> bool:
@@ -2306,6 +2364,36 @@ _EMPTY_PATTERN_CASES: tuple[tuple[str, str, bool], ...] = (
         False,
     ),
     (
+        "bracket-less empty pattern (the other spelling of the same class)",
+        'def read(g):\n    g.query("MATCH (n:Point)--() RETURN n.id")\n',
+        True,
+    ),
+    (
+        "bracket-less outbound traversal",
+        'def read(g):\n    g.query("MATCH (n)-->(m) RETURN type(m)")\n',
+        True,
+    ),
+    (
+        "bracket-less inbound traversal",
+        'def read(g):\n    g.query("MATCH (n)<--(m) RETURN n.id")\n',
+        True,
+    ),
+    (
+        "bracket-less both-directions traversal",
+        'def read(g):\n    g.query("MATCH (n)<-->(m) RETURN n.id")\n',
+        True,
+    ),
+    (
+        "a `--` inside a string literal is not a traversal",
+        'def read(g):\n    g.query("MATCH (n) WHERE n.note = \'--\' RETURN n")\n',
+        False,
+    ),
+    (
+        "bracket-less MERGE writer",
+        'def write(g):\n    g.query("MERGE (n)-->(m)")\n',
+        False,
+    ),
+    (
         "MERGE writer",
         'def write(g):\n    g.query("MERGE (n)-[r]->(m)")\n',
         False,
@@ -2985,4 +3073,105 @@ def test_the_case_corpora_are_not_vacuous():
     assert not problems, (
         "a synthetic corpus the mechanism arms depend on is no longer able to "
         "pin the shape it is cited for:\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: Arms the `WHAT THIS PINS` list collapses into another entry instead of giving a
+#: number of their own. Declared rather than assumed, so "every arm is numbered"
+#: stays a MEASUREMENT: the arm below requires every `test_` function to be either
+#: a numbered entry or a name in this set.
+_COLLAPSED_ARMS = frozenset(
+    {
+        # Entry 5 owns it: the rel-family constructors are that resolver's
+        # branches, and the docstring says so in the entry itself.
+        "test_the_resolver_follows_a_frozenset_rel_family",
+    }
+)
+
+#: A numbered entry of the `WHAT THIS PINS` list: `<n>. **`test_...`**`.
+_NUMBERED_ENTRY = re.compile(r"^(\d+)\.\s+\*\*`(test_[A-Za-z0-9_]+)`\*\*", re.MULTILINE)
+
+
+def test_the_docstring_names_every_arm():
+    """The `WHAT THIS PINS` list IS the numbering of record, so it is read.
+
+    The docstring states that its numbered list *"is the numbering of record"* —
+    and two arms had no entry in it (`test_the_call_time_shape_derivation_holds`
+    and `test_a_new_call_time_reader_cannot_ship_green`, the mechanism and
+    new-member arms of the third class) while three separate places in the file
+    refer to arms by number. A reader who audits *"does every arm have a stated
+    purpose"* got a list that silently omitted the class a review was convened
+    about, which is the same failure direction as every count this file polices:
+    the claim was in prose and nothing compared it to the set it describes.
+
+    So the comparison is executable: every `test_` function in this module must be
+    either a numbered entry or a declared collapse, the numbers must be contiguous
+    with no duplicates (a renumbering that leaves two entry 12s would let every
+    *"arm N"* reference in the prose resolve to the wrong arm), and every collapsed
+    name must be a real arm that the docstring still names.
+    """
+    document = globals().get("__doc__") or ""
+    assert len(document) > 2000, (
+        "the module docstring is gone or truncated, so this arm would compare the "
+        "arms to nothing — restore it or delete this arm and say why"
+    )
+
+    entries = _NUMBERED_ENTRY.findall(document)
+    numbered = [name for _number, name in entries]
+    numbers = [int(number) for number, _name in entries]
+
+    problems: list[str] = []
+    if not numbers:
+        problems.append(
+            "the `WHAT THIS PINS` list parsed to zero numbered entries — the "
+            "format this arm reads has changed, not the list's content"
+        )
+    duplicates = sorted({number for number in numbers if numbers.count(number) > 1})
+    if duplicates:
+        problems.append(f"duplicate entry number(s) in the list: {duplicates}")
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        problems.append(
+            f"the entry numbers are not contiguous from 1: {numbers} — an *\"arm N\"* "
+            "reference elsewhere in this file would then resolve to the wrong arm"
+        )
+
+    arms = sorted(
+        name
+        for name, value in globals().items()
+        if name.startswith("test_") and callable(value)
+    )
+    if len(arms) < 20:
+        problems.append(
+            f"only {len(arms)} arms were collected from this module — the harness "
+            "is reading the wrong namespace, so 'every arm is numbered' would be "
+            "vacuously true"
+        )
+    unnamed = [name for name in arms if name not in numbered and name not in _COLLAPSED_ARMS]
+    if unnamed:
+        problems.append(
+            "these arms have no numbered entry in `WHAT THIS PINS` and are not a "
+            f"declared collapse: {unnamed} — add an entry (the list is the numbering "
+            "of record) or declare the collapse in `_COLLAPSED_ARMS` with the entry "
+            "that owns it"
+        )
+    stale_collapsed = sorted(name for name in _COLLAPSED_ARMS if name not in arms)
+    if stale_collapsed:
+        problems.append(
+            f"`_COLLAPSED_ARMS` names arms this module no longer has: {stale_collapsed}"
+        )
+    uncited_collapsed = sorted(name for name in _COLLAPSED_ARMS if name not in document)
+    if uncited_collapsed:
+        problems.append(
+            "these arms are declared as collapsed but the docstring never names "
+            f"them, so the collapse is invisible to a reader: {uncited_collapsed}"
+        )
+    phantom = sorted(name for name in numbered if name not in arms)
+    if phantom:
+        problems.append(
+            f"`WHAT THIS PINS` numbers arms this module does not define: {phantom}"
+        )
+
+    assert not problems, (
+        "the docstring's numbering of record no longer describes this file:\n  - "
+        + "\n  - ".join(problems)
     )
