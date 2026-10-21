@@ -19,6 +19,16 @@ and a mechanism that is **neither** FAILS the gate. A mechanism with code but no
 test is not "implemented with a test" — that is the `declared ⇒ present`
 inference this issue exists to kill, one level down.
 
+⭐ THE CODE ANCHOR IS A SYMBOL, NOT A FILE. `code:` used to prove only that a
+file existed at the declared path, so a mechanism whose symbol had been renamed
+or removed — or that was never written there — still read as shipped for as long
+as any `.py` sat at that path (`tortoise/fanout.py` losing
+`PER_ENTITY_FANOUT_CAP` is the concrete case; the cited test is a second opinion,
+not an anchor, because re-shaping a mechanism is exactly when its test is
+edited). An `implemented` row therefore names its `symbols:` and the gate
+resolves each one in the file(s) the SAME row declares — so "the mechanism is
+there" is a fact about the code, not about the path.
+
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
 * It does not implement any mechanism. Three of the seven are genuinely absent
@@ -35,6 +45,7 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -77,6 +88,61 @@ def load_registry(path: Path = REGISTRY) -> dict:
         doc = yaml.safe_load(fh)
     assert isinstance(doc, dict), f"{path} must parse to a mapping"
     return doc
+
+
+def _defined_names(path: Path) -> set[str] | None:
+    """Module-level names a source file DEFINES, or ``None`` if unreadable.
+
+    Only the shapes a declared mechanism can be carried by: a function, a class,
+    a module-level assignment (an ``Assign``/``AnnAssign`` target —
+    ``PER_ENTITY_FANOUT_CAP = 200`` is the fan-out cap), and ``__all__`` is not
+    consulted because it re-exports rather than defines.
+
+    ``None`` — not an empty set — for an unreadable/unparsable file: the caller
+    must be able to tell "this file defines nothing named that" (a violation)
+    from "there was no file to read" (already reported by the path rule, and
+    reporting it twice would make one defect look like two).
+    """
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, SyntaxError, ValueError, UnicodeError):
+        return None
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, (ast.Tuple, ast.List)):
+                    names.update(
+                        elt.id for elt in target.elts if isinstance(elt, ast.Name)
+                    )
+    return names
+
+
+def _resolve_in_repo(rel: str, root: Path) -> Path | None:
+    """``root / rel`` when it is a real file INSIDE the repo, else ``None``.
+
+    The same containment discipline ``_path_violations`` applies — an absolute
+    path, ``..``, or a committed symlink that escapes the repo is not a declared
+    artifact — reduced to the one question the symbol check asks: WHICH FILE TO
+    READ. Kept separate rather than shared so a change to the reporting rule
+    cannot silently change what the anchor reads.
+    """
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts or not p.parts:
+        return None
+    try:
+        resolved = (root / p).resolve()
+        if not (resolved.is_file() and resolved.is_relative_to(root.resolve())):
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return resolved
 
 
 def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
@@ -243,6 +309,50 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 errors.extend(
                     _path_violations(mid, "tests", row["tests"], root, "test")
                 )
+            # ⭐ THE CODE ANCHOR. `code:` above proves the FILE; this proves the
+            # MECHANISM. Both are required: a resolved symbol in a file the row
+            # declares is the strongest claim this registry can make without
+            # executing the code, and it is the one a rename cannot satisfy by
+            # accident (the file still exists, the symbol does not).
+            symbols = row.get("symbols")
+            if not isinstance(symbols, list) or not symbols:
+                errors.append(
+                    f"{mid}: implemented but declares no symbol — a file at "
+                    f"`code:` is not the mechanism. Name the symbol that "
+                    f"carries it in `symbols:` (a function, class or "
+                    f"module-level constant), so a rename or removal cannot "
+                    f"leave this row claiming an implementation"
+                )
+            elif not all(isinstance(s, str) and s.strip() for s in symbols):
+                errors.append(
+                    f"{mid}: `symbols` entries must be non-empty strings: "
+                    f"{symbols!r}"
+                )
+            else:
+                code_entries = row.get("code")
+                defined: set[str] = set()
+                readable = False
+                for rel in (code_entries if isinstance(code_entries, list) else []):
+                    if not isinstance(rel, str) or not rel:
+                        continue
+                    resolved = _resolve_in_repo(rel, root)
+                    if resolved is None:
+                        continue
+                    names = _defined_names(resolved)
+                    if names is None:
+                        continue
+                    readable = True
+                    defined |= names
+                if readable:
+                    missing = sorted(s for s in symbols if s not in defined)
+                    if missing:
+                        errors.append(
+                            f"{mid}: symbol(s) {missing} are not defined at "
+                            f"module level in the `code:` file(s) this row "
+                            f"declares ({code_entries}) — the declared "
+                            f"mechanism is not where the row says it is. A "
+                            f"file at the declared path is not the mechanism"
+                        )
 
         else:  # NOT_IMPLEMENTED — the only other member of STATES
             # A tracking issue must be a REAL issue number — a positive,
@@ -334,6 +444,76 @@ def test_gate_fails_closed_on_not_implemented_without_a_tracking_issue() -> None
     assert any("no real tracking_issue" in e for e in errors), errors
 
 
+# ── the CODE ANCHOR: `implemented` must name a SYMBOL, not just a file ──────
+#
+# The gate's remaining `declared ⇒ present` inference: `code:` proved a FILE
+# existed, so a mechanism whose symbol had been renamed, deleted or never
+# written still read as shipped for as long as any `.py` remained at the
+# declared path. `tortoise/fanout.py` losing `PER_ENTITY_FANOUT_CAP` is the
+# concrete case — the row would keep claiming the fan-out cap is implemented
+# while the constant that IS the cap is gone (the cited test is a second, not
+# an anchor: it is exactly the thing a re-shaping PR edits).
+#
+# A row now names the SYMBOL that carries its mechanism, and the gate resolves
+# it in the declared source. Same polarity as every other rule here: an
+# unnameable symbol, or a symbol the declared source does not define, is a
+# violation rather than a default.
+
+
+def _implemented_row(**overrides) -> dict:
+    row = {
+        "id": "x",
+        "name": "x",
+        "declared_in": ["config/v4-mechanisms.yml"],
+        "state": "implemented",
+        "code": ["tortoise/fanout.py"],
+        "tests": ["tests/test_fanout_cap.py"],
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],
+    }
+    row.update(overrides)
+    return row
+
+
+def test_code_anchor_accepts_an_implemented_row_whose_symbol_its_code_defines() -> None:
+    """The control: a resolvable symbol is NOT a violation (so the two below
+    fail for the reason they claim, not because the rule always fires)."""
+    errors = [e for e in gate_errors([_implemented_row()]) if "symbol" in e]
+    assert errors == [], errors
+
+
+def test_gate_fails_closed_on_an_implemented_row_with_no_declared_symbol() -> None:
+    errors = gate_errors([_implemented_row(symbols=None)])
+    assert any("declares no symbol" in e for e in errors), errors
+
+
+def test_gate_fails_closed_on_a_symbol_its_declared_code_does_not_define() -> None:
+    """A file at the declared path is not the mechanism — the SYMBOL is."""
+    errors = gate_errors([_implemented_row(symbols=["NOT_DEFINED_IN_FANOUT_5064"])])
+    assert any(
+        "NOT_DEFINED_IN_FANOUT_5064" in e and "symbol" in e for e in errors
+    ), errors
+
+
+def test_gate_fails_closed_on_a_symbol_defined_only_in_an_undeclared_file() -> None:
+    """The symbol must be in a file the ROW declares for the mechanism —
+    otherwise `symbols:` would be satisfied by anything importable anywhere."""
+    errors = gate_errors(
+        [_implemented_row(symbols=["EMBED_GATE"])]  # lives in embed_gate.py
+    )
+    assert any("EMBED_GATE" in e for e in errors), errors
+
+
+def test_every_implemented_mechanism_names_a_symbol_its_code_defines() -> None:
+    """The registry itself: no `implemented` row may stand on a file alone."""
+    errors = [
+        e for e in gate_errors(load_registry()["mechanisms"]) if "symbol" in e
+    ]
+    assert errors == [], (
+        "every implemented row must anchor its mechanism to a symbol its own "
+        "`code:` files define:\n  " + "\n  ".join(errors)
+    )
+
+
 def test_gate_fails_closed_on_a_placeholder_tracking_issue() -> None:
     """A tracking issue must be a REAL issue number, not a truthy placeholder.
 
@@ -421,6 +601,7 @@ def test_gate_accepts_the_star_test_suffix(tmp_path) -> None:
         "declared_in": ["docs/design.md"],
         "code": ["src/impl.py"],
         "tests": ["tests/smoke_test.py"],
+        "symbols": ["x"],  # the code anchor — `src/impl.py` defines it
     }
     assert gate_errors([row], root=repo) == []
 
@@ -544,6 +725,7 @@ def test_gate_accepts_the_yaml_document_suffix() -> None:
         "declared_in": ["config/v4-mechanisms.yml"],
         "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],
     }
     assert gate_errors([row]) == []
 
@@ -765,6 +947,7 @@ def test_gate_pins_the_branches_the_ad_hoc_cases_do_not_reach() -> None:
         "declared_in": ["config/v4-mechanisms.yml"],
         "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
+        "symbols": ["PER_ENTITY_FANOUT_CAP"],
     }
     cases = {
         "row is not a mapping": (["not a dict"], "not a mapping"),
@@ -850,6 +1033,7 @@ def test_gate_accepts_the_issue_number_one_and_a_symlinked_root(tmp_path) -> Non
         "declared_in": ["docs/design.md"],
         "code": ["src/impl.py"],
         "tests": ["tests/test_x.py"],
+        "symbols": ["x"],
     }
     assert gate_errors([row], root=linked) == []
 

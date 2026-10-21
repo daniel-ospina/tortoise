@@ -12,9 +12,16 @@
 # This file is the ONE PLACE the declared set lives (#5064 indicator 1). The
 # gate is `tests/test_v4_declared_mechanisms.py`:
 #
-#   state: implemented      -> `code:` and `tests:` are non-empty and EVERY
-#                              declared path exists on disk
+#   state: implemented      -> `code:`, `tests:` and `symbols:` are non-empty,
+#                              EVERY declared path exists on disk, and every
+#                              declared symbol is DEFINED at module level in the
+#                              `code:` file(s) this same row names
 #   state: not-implemented  -> `tracking_issue:` is present
+#
+# ⭐ `symbols:` is the CODE ANCHOR (#5064 indicator (1), the "a code path with a
+# test" half). `code:` alone proved a FILE existed, so a mechanism whose symbol
+# had been renamed or removed still read as shipped while any `.py` sat at that
+# path. Each `implemented` row therefore names the symbol that IS the mechanism.
 #
 # A row that is **neither** fails the gate (FAIL CLOSED). That is the root
 # sentence made checkable: a declared-and-absent mechanism cannot be read as a
@@ -61,6 +68,8 @@ mechanisms:
       - tortoise/extractor_v2.py
     tests:
       - tests/test_vet_gate_5005.py
+    symbols:
+      - check_batch
     note: >-
       Flag-gated (`TORTOISE_VET`), off by default — the gate is off-path until
       the flag says otherwise.
@@ -74,6 +83,9 @@ mechanisms:
       - tortoise/source_identity.py
     tests:
       - tests/test_source_dedup_registration.py
+    symbols:
+      - normalize_source_url
+      - source_identity
     note: >-
       S0b resolves an inbound spelling to the `:Source` node that owns its
       identity; dedup was URL-keyed only before this.
@@ -99,6 +111,8 @@ mechanisms:
       - tortoise/commit_schema.py
     tests:
       - tests/test_verbatim_span.py
+    symbols:
+      - validate_span
     note: >-
       `source_turn_id` + `span_start`/`span_end` character offsets into the
       `Source`; the span TEXT is never stored on the `Point`.
@@ -115,6 +129,8 @@ mechanisms:
       - tortoise/projection/entities.py  # the entity/Event/Document/Point writers
     tests:
       - tests/test_embed_gate_5008.py
+    symbols:
+      - embedding_verdict
     note: >-
       Two gates on one policy: the SELECTION sibling is the identifier-only
       DISCARD predicate (`tortoise/value_gate.py`, #4899); this is the
@@ -158,6 +174,9 @@ mechanisms:
       - tortoise/fanout.py
     tests:
       - tests/test_fanout_cap.py
+    symbols:
+      - PER_ENTITY_FANOUT_CAP
+      - bounded_fanout
     note: >-
       `PER_ENTITY_FANOUT_CAP = 200` (owner, 2026-09-23), consumed by the
       assembly slices.
