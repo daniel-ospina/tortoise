@@ -354,7 +354,23 @@ def test_capture_receipt_carries_the_notice(sdk, monkeypatch):
     assert len(notices) == 1, receipt
     assert notices[0]["source"] == session_url
     assert notices[0]["previousVersion"] == "h1"
-    assert notices[0]["currentVersion"] == "h2"
+    # #8501: the notice reports the version the write is AGAINST, and the
+    # capture now MATERIALIZES the session Source (its `contentHash` = the
+    # stored transcript's hash) BEFORE extraction — so a Point written by this
+    # capture was read from the transcript version the capture itself records,
+    # not from the foreign "h2" staged above. Before the fix the ordering put
+    # "h2" in front of the link, i.e. the Point was anchored to a version of the
+    # source it was never read from. `previousVersion` is unchanged: that is the
+    # prior READ version, from the earlier Point's link.
+    stored = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.contentHash",
+        params={"u": session_url}).result_set[0][0]
+    assert stored and stored != "h2", (
+        "the capture must record its own transcript version on the session "
+        f"Source; got {stored!r}")
+    assert notices[0]["currentVersion"] == stored, (
+        f"the notice must name the version the write was against: "
+        f"{notices[0]['currentVersion']!r} != {stored!r}")
 
 
 def test_capture_receipt_notice_helper_is_additive_only():

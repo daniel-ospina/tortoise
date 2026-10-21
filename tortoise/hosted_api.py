@@ -14115,6 +14115,80 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _turn_texts = _capture_write["turn_texts"]
     _capture_redactions = _capture_write["redacted_total"]
 
+    # ⛔ #8501 — MATCH THE SDK LANE: the mint + the session-Source
+    # MATERIALIZATION run BEFORE extraction, not after it. `s.contentHash` is
+    # the version anchor a derived Point records at link time
+    # (`resolve_source_versions` → `r.sourceVersion`, #5256). Extraction is
+    # what creates those Points and `_materialize_session_source` is what SETS
+    # `contentHash`, so while it ran afterwards the session Source was still an
+    # empty-hash stub when every `extractedFrom` link was MERGEd — `$v` bound
+    # nothing and every captured Point was written unanchored, so a revised
+    # transcript could never mark its Points stale (the #5199/#5038 currency
+    # read). Measured on the pre-fix tree: `references` 1/1 anchored,
+    # `extractedFrom` 0/1.
+    #
+    # The ordering cannot be repaired afterwards: `sourceVersion` is
+    # `ON CREATE` only (#5199) and the replay value is the Point's own journaled
+    # `sourceVersionTransit` snapshot, so a post-pass re-stamp would be an
+    # unjournalled second write that a rebuild drops (#9206/#9079).
+    #
+    # ⚠️ The SDK lane (`capture_session`) and this one are documented
+    # byte-parity (#4014/#1727); the anchor is part of that parity, so fixing
+    # one without the other would DIVERGE them.
+    #
+    # Only the MINT + MATERIALIZE half moves — the provenance STAMPS need
+    # `extracted`, so they stay below and read the `event_id` bound here.
+    _capture_source_warnings: list[str] = []
+    # #8501: the mint's two failure shapes are DISTINCT and now live in two
+    # blocks — a RAISE (warned here) and a create that returns no id (warned by
+    # the stamp block below). Without this flag a raise would also hit that
+    # block's "returned no id/eventId" arm and report a shape that did not
+    # happen.
+    _capture_mint_failed = False
+    if not session_existed or (retry_failed_capture and not store_only):
+        try:
+            event = sdk.create_event(
+                f"session_{session_id}",
+                "sessionCaptured",
+                _server_id=_session_capture_event_id(session_id),
+                startedAt=now,
+                endedAt=now,
+                sessionId=session_id,
+                is_episodic=True,
+            )
+            event_id = event.get("id") or event.get("eventId")
+            minted_event = bool(event_id)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "session Event creation failed (non-fatal)")
+            # P1 #1529 (D4): a missing Event is visible, never indistinguishable
+            # from a clean capture.
+            _capture_mint_failed = True
+            _capture_source_warnings.append(
+                "sessionCaptured Event write failed (non-fatal)")
+        # #1352: materialize the typed session `:Source` (capture metadata +
+        # sessionId + capturedAt + eventId) and wire
+        # (Source)-[:references]->(sessionCaptured Event) — parity with
+        # sdk.capture_session via the shared `_materialize_session_source`.
+        # P1 #1529 (D4): non-fatal, surfaced as an additive warning — never a
+        # 500 after writes.
+        try:
+            # #4911: off the event loop. The helper scrubs every turn it is
+            # handed (5,000 chars PER TURN, but the turn count is the caller's);
+            # the derivation alone measured ~0.8 s for a legal-maximum
+            # 500x5,000 session and the scrub pushed that to ~7 s of CPU that
+            # would otherwise block every other request on this loop.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR, sdk._materialize_session_source,
+                session_id, event_id, now, body.conversation)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "session Source materialization failed (non-fatal)")
+            _capture_source_warnings.append(
+                "session Source materialization failed (non-fatal)")
+
     # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
     # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
     # deterministically keyed; re-running would mint fresh nodes). The turn
@@ -14323,6 +14397,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # unset warnings). Mirrors sdk.capture_session's unconditional read.
     extraction_errors = list(meta.get("errors") or [])
     extraction_warnings = list(meta.get("warnings") or [])
+    # #8501: the mint/materialize half now runs BEFORE extraction, so its
+    # additive warnings are collected separately and folded into the same
+    # fail-closed surface (never a silent drop).
+    extraction_warnings.extend(_capture_source_warnings)
     if not session_existed or retry_failed_capture:
         # #2444: partial-extraction failures are the product's live error surface —
         # surface them to Sentry (when enabled) with org/session context so an
@@ -14384,19 +14462,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # nothing to stamp, while re-minting re-journals EventRecorded and
         # refreshes startedAt on every call. Byte-parity with
         # sdk.capture_session.
+        # #8501: the MINT and the Source MATERIALIZATION already ran in phase 1,
+        # BEFORE extraction — that ordering is what lets each extracted Point
+        # read the session Source's `contentHash` and record it as
+        # `sourceVersion`. What is left here is the STAMP half.
         try:
-            event = sdk.create_event(
-                f"session_{session_id}",
-                "sessionCaptured",
-                _server_id=_session_capture_event_id(session_id),
-                startedAt=now,
-                endedAt=now,
-                sessionId=session_id,
-                is_episodic=True,
-            )
-            event_id = event.get("id") or event.get("eventId")
             if event_id:
-                minted_event = True
                 # W5 (#2104, S1): the provenance stamp now carries the full
                 # write provenance (source_session / source_harness /
                 # ingested_at) alongside the ontology-compliant eventId —
@@ -14545,45 +14616,27 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                         what="hosted capture retry-heal provenance stamp",
                         params={"sid": session_id},
                     )
-            else:
+            elif not _capture_mint_failed:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
                 # skips stamping — surface as an additive warning.
+                # #8501: NOT when the mint RAISED — phase 1 already reported
+                # that, and "returned no id" would name a shape that did not
+                # happen (one failure, one warning).
                 extraction_warnings.append(
                     "sessionCaptured Event write returned no id/eventId — "
                     "extracted points not stamped")
         except Exception:
             import logging
+            # #8501: THIS BLOCK IS THE STAMP HALF ONLY — the mint moved to
+            # phase 1 and reports its own failure there, so naming an "Event
+            # write" here would both mislabel a stamp failure and collapse the
+            # two shapes the split exists to keep distinct.
             logging.getLogger("tortoise.api").exception(
-                "session Event creation failed (non-fatal)")
-            # P1 #1529 (D4): a missing Event is visible, never indistinguishable
+                "session provenance stamp failed (non-fatal)")
+            # P1 #1529 (D4): a missing stamp is visible, never indistinguishable
             # from a clean capture.
             extraction_warnings.append(
-                "sessionCaptured Event write failed (non-fatal)")
-
-        # #1352: the extraction projection auto-created a document-typed Source
-        # stub at `session:{id}` (default sourceKind in _link_source) — the
-        # ontology v3.6 §4.6 session source kind is agentSession. Materialize the
-        # typed Source (capture metadata + sessionId + capturedAt + eventId) and
-        # wire (Source)-[:references]->(sessionCaptured Event) — parity with the
-        # SDK capture path via the shared sdk._materialize_session_source helper.
-        # P1 #1529 (D4): a Source materialization failure is non-fatal and
-        # surfaced as an additive warning — never a 500 after writes.
-        try:
-            # #4911: off the event loop. The helper now scrubs every turn it is
-            # handed (bounded at 5,000 chars PER TURN, but the turn count is the
-            # caller's), and the pre-existing derivation alone measured ~0.8 s
-            # for a legal-maximum 500x5,000 session — the scrub pushed that to
-            # ~7 s of CPU that would otherwise block every other request on this
-            # loop. Non-fatal either way, same as the surrounding wrap.
-            await _run_off_loop(
-                _CAPTURE_EXECUTOR, sdk._materialize_session_source,
-                session_id, event_id, now, body.conversation)
-        except Exception:
-            import logging
-            logging.getLogger("tortoise.api").exception(
-                "session Source materialization failed (non-fatal)")
-            extraction_warnings.append(
-                "session Source materialization failed (non-fatal)")
+                "sessionCaptured provenance stamp failed (non-fatal)")
 
     # Log audit event — P1 #1529 (D4): a committed capture must never 500
     # over audit bookkeeping (log-only wrap). The MCP tool path has no HTTP
