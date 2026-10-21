@@ -22,6 +22,19 @@
 #                              because re-exporting a name is not defining it
 #   state: not-implemented  -> `tracking_issue:` is present
 #
+# ⭐ `preconditions:` is the ORDERING (#5064's Verification Checklist: *"a
+# mechanism whose precondition is unbuilt cannot be marked implemented"*). It
+# names OTHER declared mechanism ids in this same file that must be in place
+# first — #5064's refactor direction item 3, *"a precondition (the fan-out cap
+# gates deduplication) is ordered in the registry rather than discovered at
+# implementation time"*. The field is OPTIONAL (omit it when a mechanism is not
+# ordered) and it is declarable on a `not-implemented` row on purpose: that is
+# where the ordering matters most, because the absent mechanism records what it
+# waits for instead of the next lane meeting a surprise. The gate fails closed
+# on an unknown id, a self-reference, a cycle, and an `implemented` row on top
+# of a precondition that is not implemented — so an ordering can neither be
+# skipped nor satisfied by construction.
+#
 # ⭐ `symbols:` is the CODE ANCHOR (#5064 indicator (1), the "a code path with a
 # test" half). `code:` alone proved a FILE existed, so a mechanism whose symbol
 # had been renamed or removed still read as shipped while any `.py` sat at that
@@ -100,10 +113,21 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §16.4; decision D12
     state: not-implemented
     tracking_issue: 5006
+    # #5010 as #5064 summarises it: the adopted fan-out cap has no
+    # implementation "and it is the precondition for ever deduplicating" —
+    # and #5064's refactor direction names this same pair as the ordering
+    # example, so it is declared rather than discovered when #5006 is picked up.
+    preconditions:
+      - fanout_cap
     note: >-
       `classify_consolidation` still has the four-way ADD/UPDATE/NOOP/DELETE
       outcome set and no MERGE action; the paraphrase-NOOP band absorbs one side
-      by threshold instead.
+      by threshold instead. The OTHER half of the ordering is not a row here and
+      is NOT silently assumed: the against-store exact dedup's fourth
+      precondition — an ATOMIC write (`create_point(dedup=True)` is a
+      check-then-CREATE with no uniqueness constraint on `Point`;
+      EXTRACTOR-V4-ARCHITECTURE.md §4.2) — is unimplemented and has no registry
+      row and no tracking issue in this closed set.
 
   - id: span_link
     name: "verbatim SPAN link on every Point (an address, not a payload)"
