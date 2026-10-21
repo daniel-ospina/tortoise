@@ -23,8 +23,10 @@ Canonical sources these tests key off:
   * `docs/ONTOLOGY.md` — the ontology (linked by both pages, never version-pinned inline)
   * `tortoise/ep.py`   — how `confidence` is computed
 
-Unconditional (no network, no browser, no DB): plain string pins on the checked-in
-HTML, matching the harness contract of `tests/test_signup_form_safety.py`.
+Unconditional (no network, no browser, no DB) for the page pins below: they are
+plain string pins on the checked-in HTML, matching the harness contract of
+`tests/test_signup_form_safety.py`. The `source_ref` pin additionally imports the
+Point model, because the sentence it pins is a claim about the commit contract.
 """
 from __future__ import annotations
 
@@ -41,8 +43,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:  # tools/ is not an installed package
     sys.path.insert(0, str(REPO_ROOT))
 
-from tortoise.commit_schema import Point, point_content_id  # noqa: E402
-from tools.ci_selection import load_manifest, select  # noqa: E402, I001
 from tests._html_links import (  # noqa: E402
     _AnchorHrefParser,
     blog_entry_hrefs,
@@ -50,6 +50,8 @@ from tests._html_links import (  # noqa: E402
     extract_element_ids,
     is_blog_entry,
 )
+from tools.ci_selection import load_manifest, select  # noqa: E402
+from tortoise.commit_schema import Point, point_content_id  # noqa: E402
 
 WEBSITE = REPO_ROOT / "website"
 FUNCTIONS = WEBSITE / "functions"
@@ -190,7 +192,7 @@ def test_both_pages_name_expectation_propagation(page: Path) -> None:
 # ── #9510: a published claim must be true of the path it names ────────────────
 
 
-def test_commit_schema_requires_a_source_on_every_extracted_claim() -> None:
+def test_commit_schema_requires_a_source_ref() -> None:
     """The evidence under the FAQ's narrowed traceability sentence.
 
     `website/faq.html` claims traceability for *extracted* claims only. That is
@@ -234,8 +236,73 @@ def test_faq_ties_only_extracted_claims_to_their_source() -> None:
     """
     text = _normalise(_read(FAQ))
     assert "every extracted claim carries the source it was drawn from" in text
-    assert "every claim is tied to the source" not in text
-    assert "every claim carries the source" not in text
+    # The universal must stay absent. The quantifier may be separated from the
+    # claim noun by intervening words and the verb need not be "carry": the defect
+    # was the quantifier spreading a commit-path requirement over doors that do
+    # not enforce it (#9510), and "all such claims must carry a source" restores it.
+    #
+    # A SMELL DETECTOR, NOT A PROOF. It catches the phrasings this page has
+    # actually shipped the defect in; it cannot decide the general case, and the
+    # general case is a REVIEW judgement, not a lexical one.
+    #
+    # Deliberately NOT widened toward "proof". Doing that was tried: scanning the
+    # whole sentence for a source noun reds the page's own true thesis ("Every
+    # claim's score is recomputed whenever its source is superseded"), and a
+    # negation window wide enough to accept "It is not required that every claim
+    # carry a source" also swallows the affirmative "Not only do all claims carry
+    # a source". A guard that reds TRUE copy is worse than a narrow one: the first
+    # person it blocks weakens or deletes it, and we lose the pin entirely.
+    #
+    # What IS load-bearing, all found by mutation:
+    #  * the qualifier is what makes the shipped sentence true, so a quantifier
+    #    whose intervening words include "extracted" is the LEGITIMATE form;
+    #  * the lookahead starts at the claim noun. A single `[^.]{0,120}` tail would
+    #    span a comma-joined coordinate ("every extracted claim …, and all such
+    #    claims must carry a source") and absorb the offender into the legitimate
+    #    match, filtering both away;
+    #  * the quantifier-to-noun span is 12 words — at 4, "every newly created and
+    #    separately stored claim must carry a source" slipped through;
+    #  * a requirement predicate must follow the noun. Requiring a predicate (and
+    #    excluding a bare "is") is what keeps true sentences such as "Every
+    #    claim's score is recomputed whenever its source is superseded" green;
+    #  * any negation anywhere in the sentence SKIPS it, so the honest "No claim
+    #    lacks a source" and "Every claim need not carry a source" stay green.
+    #    The cost is that emphatic affirmatives starting "Not only …" are missed;
+    #    that is an accepted, stated limitation, not an oversight;
+    #  * BOTH the match and the lookahead are case-insensitive — "All claims carry
+    #    a Source" is the same overclaim in title case, which is exactly how an
+    #    FAQ question heading is written.
+    quantifier = re.compile(
+        r"\b(every|all|each|any)\b((?:\s+\w+){0,12}\s+)(?:claims?|points?|beliefs?)\b", re.I
+    )
+    predicate = re.compile(
+        r"\b(?:carry|carries|need|needs|require|requires|must|have|has|tie|tied|"
+        r"trace|traced|traceable|record|records|keep|keeps)\b",
+        re.I,
+    )
+    negation = re.compile(r"\b(?:not|no|never|without|lacks?)|n't\b", re.I)
+    offenders = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if negation.search(sentence):
+            continue  # honest negations and emphatic affirmatives: out of scope
+        for m in quantifier.finditer(sentence):
+            if "extracted" in m.group(2).lower():
+                continue  # the scoped form: this is the shipped, true statement
+            tail = sentence[m.end() : m.end() + 120]
+            if not predicate.search(tail):
+                continue  # no requirement predicate: not this defect
+            if re.search(
+                r"\b(?:sourc|traceabl|traced|origin|provenance|came from|where it came)",
+                tail,
+                re.I,
+            ):
+                offenders.append(sentence[m.start() : m.end() + 120].strip())
+    assert not offenders, (
+        "faq.html universalised the source requirement again: "
+        f"{offenders}. Scope it to extracted claims (the commit contract requires "
+        "source_ref, but sdk.create_point does not — it returns a no_source "
+        "advisory, #8171)."
+    )
 
 
 def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
@@ -246,8 +313,12 @@ def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
     follow. Keep mechanism prose here to the minimum needed to answer an
     objection." Pre-fix, the FAQ was the only page describing what a NAND and an
     IMPL do to a score, so the page carried more mechanism than the page it defers
-    to — the reverse of the order the note mandates. The mechanism now lives on
-    docs.html's Confidence (EP) card and the FAQ answers the objection only.
+    to — the reverse of the order the note mandates. The NAND/IMPL formulas now
+    live on docs.html's Confidence (EP) card; this gate pins the two formulas and
+    the two mechanism phrases out of the FAQ, and pins the note itself, so the
+    rule cannot be deleted silently. It does not police every remaining mechanism
+    phrase (the FAQ still answers what a directed contradiction does), which is
+    the note's own "minimum needed to answer an objection" allowance.
     """
     note = re.sub(r"\s+", " ", _read(FAQ))
     assert "Keep mechanism prose here to the minimum" in note, (
@@ -268,6 +339,8 @@ def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
     for moved in (
         "penalty on both claims being true",
         "pulls its target toward the source's level",
+        "joint-truth penalty",
+        "exp(-w",
     ):
         assert moved not in faq, (
             f"website/faq.html restates the mechanism ({moved!r}). Update /docs first "
