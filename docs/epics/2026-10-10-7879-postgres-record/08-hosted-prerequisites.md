@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands only when a **journaled edge record** carries the edge: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede. Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), `CONTAINS` (its `contains_session` rides the journal envelope and the record projection drops it, `record_projection.py:978`), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:736-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands only when a **journaled edge record** carries the edge: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede. Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), `CONTAINS` (its `contains_session` rides the journal envelope and the record projection drops it, `record_projection.py:978`), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -126,7 +126,9 @@ per journal record type, totality as a registry property, idempotence by stateme
 | production call sites | `tortoise/api.py:179` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
 | tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py:110`; by-value on the hosted REST lane |
 
-**Measured (§G, run 2): the SDK's public capture path wrote all four layers into a real Postgres** —
+**Measured (§G, run 2): the SDK's public capture path wrote layers 1–3 into a real Postgres** — layer 4 is views, and
+the run left `subject` 0 and `relation` 0 (A8, R4, R5), so it does **not** demonstrate edge or Subject
+coverage:
 36 `journal_event` · 2 `source` · 4 `event` · 2 `session` · 4 `object` · 4 `point` · 17
 `node_identity`, with 4 embeddings. The seam is **fail-soft by construction** (the journal append
 already committed; a failure is counted on `monitoring.metrics()["record_write_failures"]`, never
@@ -178,7 +180,7 @@ idempotent, total, and stores no EP scalar`.
 | **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
-| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** The modules that archive today copy **the graph** — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` (`tortoise/backup.py`), and the R2 logical dump (`hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`). `docs/durability-posture.md`, the page that records durability for every deployment, has **no row for the record** (four deployments, none of them Postgres; it never mentions Supabase). Whether the Supabase project backs it up is **unverified** — the tree's statements about that are plan-level and about the **control plane**, not the record (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
+| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** The modules that archive today copy **the graph** — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` (`tortoise/backup.py`), and the Cloudflare-R2 logical dump (`hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`). `docs/durability-posture.md`, the page that records durability for every deployment, has **no row for the record** (four deployments, none of them Postgres; it never mentions Supabase). Whether the Supabase project backs it up is **unverified** — the tree's statements about that are plan-level and about the **control plane**, not the record (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
 ---
 
@@ -248,12 +250,12 @@ handles `EntityLinked` / `DirectEdgeCreated` / `DirectEdgeRepoint`. What is **de
 (`04-projection.md` §3) is the edge set **derived from point properties** — `extractedFrom`,
 `about*`, `mitigated_by` — which live on the point row's props today, so a rebuild from the record
 alone reproduces the claims and **not the topology**. (§3 lists a fourth, `references`, which this document
-correction narrows: ⚠️ **`references` is in neither place** — it is not a point property and it is not journaled either (`link_source_to_entity`/`create_edge` write it bare), and the structural edge lane emits no record for
-`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom` and the rest of that class (`projection/edges.py:736-745`,
+narrows: ⚠️ **`references` is in neither place** — it is not a point property and it is not journaled either (`link_source_to_entity`/`create_edge` write it bare), and the structural edge lane emits no record for
+`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom` and the rest of that class (`projection/edges.py:735-745`,
 measured there as `edges: 0` after a rebuild; `aboutSource`/`aboutAction` ARE carried, by `EntityLinked`).
 For those the fix is a **producer** — the record type, the fold and the resolver already exist as
 `DirectEdgeCreated`, and nothing emits them from those doors. That half has **no live home**: `#9079` closed
-on 2026-10-21 with the §17.1 write-door fix, not this one, so it is recorded on the root (**#7879**). ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
+on 2026-10-21 with the §17.1 write-door fix, not this one, so it is recorded on the root ([comment 6323627886](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6323627886)). ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
 rides the **journal envelope**, so a *journal* rebuild restores the edge — a *record*-sourced rebuild cannot,
 because the projection drops that key (`record_projection.py:978`) and emits no `relation` row for it. And an
 **operator's** `IMPL`/`NAND`/`INPUT` edges: `OperatorAdded` is a `point`-row upsert whose inputs sit in
@@ -314,12 +316,12 @@ at 03:00.
 ### R9 — Back up the record, and test the restore · **M** · ops + decision · **BLOCKER**
 
 **What:** no module of ours backs up the record. `tortoise/backup.py` (module docstring: *"JSONL archiver +
-FalkorDB BGSAVE"*), `hosted_backup.py` (R2) and `backup_sweep.py` (the cron driver) archive the **graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them backs up the record.
+FalkorDB BGSAVE"*), `hosted_backup.py` (Cloudflare R2) and `backup_sweep.py` (the cron driver) archive the **graph** — `backup.py` additionally copies the local journal's `events.jsonl` — and none of them backs up the record.
 §3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
 so promoting Postgres to the record **moves the durability obligation onto Postgres**, and no
 module of ours holds it (whether the paid plan does is unverified — every statement in the tree
 about it is plan-level, and A8 names two of them). Two halves: Supabase's PITR (a plan-tier fact, and therefore an owner decision on
-cost) **plus** an off-box logical dump to R2 on the existing sweep, **plus** a drill that proves it.
+cost) **plus** an off-box logical dump to Cloudflare R2 on the existing sweep, **plus** a drill that proves it.
 **What it blocks:** durability of the new system of record. This is the item most likely to be
 mistaken for "already done" because the backup machinery *looks* present — it is present, for the
 wrong store.
