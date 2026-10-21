@@ -84,16 +84,27 @@ def _admin_client():
     URIs default to 16379 (the repo-wide convention — projection/session
     parsers; docker-compose maps 6379 for containers WITH the port).
 
-    #7357 — built through ``guarded_client`` (the #6882 seam), so a role/ACL
-    mutation that meets a restarting instance is told the instance went away,
-    and that whether the command took effect is UNKNOWN — anything that mutates
-    must be read back before it is re-issued — instead of surfacing the bare
-    transport sentence as if the statement had been refused. The HEDGE arm is
-    the one this channel gets, deliberately: every verb this module sends is
-    non-Cypher (``MODULE LIST``, ``ACL GETUSER``/``SETUSER``/``DELUSER``/
-    ``SAVE``), so ``_command_mutating`` has no statement to classify and
-    answers ``None``. The ACL bearer commands are also not operator-guarded
-    (no Cypher reaches the ``=~`` guard); the outage note is the whole gain.
+    #7357 — built through ``guarded_client`` (the #6882 seam), so a transport
+    failure on a role/ACL mutation carries the instance-outage note: the
+    instance went away (a restart, an RDB reload, an OOM-kill), and for a
+    mutating verb whether the command took effect is UNKNOWN — read the ACL
+    state back before re-issuing it.
+
+    THE SURFACE THAT GAINS THE NOTE IS THIS MODULE'S LOG LINE, NOT a
+    caller-facing message: every ACL fn here is fail-soft and catches what the
+    guarded channel raises (``except Exception`` → ``logger.warning(...)``, then
+    ``False``/``None`` — see :func:`_setuser`, :func:`drop_acl_user`), so the
+    noted exception is LOGGED and swallowed rather than returned to a caller,
+    and an ``AclLayerError`` from a real ``ResponseError`` refusal is untouched
+    and correctly carries no note (``is_instance_unavailable`` excludes it).
+    What was missing before this seam is the mechanism class and the read-back
+    instruction; the prefix this module already logged said "connection
+    failure". The HEDGE arm is the one this channel gets, deliberately: every
+    verb this module sends is non-Cypher (``MODULE LIST``, ``ACL GETUSER``/
+    ``SETUSER``/``DELUSER``/``SAVE``), so ``_command_mutating`` has no statement
+    to classify and answers ``None``. The ACL bearer commands are also not
+    operator-guarded (no Cypher reaches the ``=~`` guard); the outage note is
+    the whole gain.
     """
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
