@@ -20906,7 +20906,7 @@ class TortoiseSDK:
                 # this run's snapshot is not this process's to drop, and a root
                 # that is already gone from the graph (deleted, or cleared by a
                 # peer) leaves the mirror with its retry state.
-                verdict = self._retry_cap_verdict(root, run_ep)
+                verdict, verdict_error = self._retry_cap_verdict(root, run_ep)
                 if verdict == "retained":
                     # Another process's newer marking. Keep the root AND its
                     # attempts (so the next cap attempt is one pass away), and
@@ -20925,11 +20925,16 @@ class TortoiseSDK:
                     # root is never reported capped and retrying at once.
                     self._retry_attempts[root] = attempts
                     self._stale_unresolved.pop(root, None)
+                    # ⛔ `exc_info=verdict_error`, never `exc_info=True`: the
+                    # exception was swallowed inside `_retry_cap_verdict`, so
+                    # this frame has no live handler and `exc_info=True` would
+                    # render `NoneType: None` — discarding exactly the cause
+                    # this diagnostic exists for.
                     _logger.warning(
                         "#9362: could not read the graph's verdict for capped "
                         "dirty root %s — keeping it retryable (attempt %d); a "
                         "persistent failure here makes the retry cap inert",
-                        root, attempts, exc_info=True)
+                        root, attempts, exc_info=verdict_error)
                     continue
                 # `retired` (this run's snapshot outranks the stamp and the
                 # flag is now gone) or `absent` (no such dirty :Point — the
@@ -20954,9 +20959,16 @@ class TortoiseSDK:
                 # stale_unresolved at once.
                 self._stale_unresolved.pop(root, None)
 
-    def _retry_cap_verdict(self, root: str, run_ep: int | None) -> str:
+    def _retry_cap_verdict(self, root: str,
+                           run_ep: int | None) -> tuple[str, BaseException | None]:
         """The GRAPH's verdict on retiring a capped root: ``retired``,
-        ``retained``, ``absent`` or ``unknown`` (#9362 review).
+        ``retained``, ``absent`` or ``unknown`` (#9362 review), plus the
+        swallowed exception for ``unknown`` (``None`` otherwise).
+
+        The exception is RETURNED rather than logged here so the caller can
+        put it on its own contextual warning with a real traceback — this frame
+        is the only one holding it, and a caller logging `exc_info=True` after
+        this handler exits would report `NoneType: None`.
 
         One statement, so the clear and the verdict cannot disagree: a flag a
         peer stamped AFTER this run's snapshot is left exactly as it is
@@ -20978,11 +20990,11 @@ class TortoiseSDK:
                 "RETURN retired_now AS retired_now",
                 params={"id": root, "run_ep": run_ep},
             ).result_set
-        except Exception:  # noqa: BLE001, RUF100 - fail safe, see docstring
-            return "unknown"
+        except Exception as exc:  # noqa: BLE001, RUF100 - fail safe, see docstring
+            return "unknown", exc
         if not rows:
-            return "absent"
-        return "retired" if rows[0][0] is True else "retained"
+            return "absent", None
+        return ("retired", None) if rows[0][0] is True else ("retained", None)
 
     def _reset_retry_state(self, roots: set[str]) -> None:
         """Clear attempt/backoff state for roots that CONVERGED."""
@@ -22645,8 +22657,8 @@ class TortoiseSDK:
         claim's belief is stale" marker; before #6211 the only path that
         retired a CONVERGED PASS's recomputed set was the dreaming adapters'
         `_sweep_dirty_roots` (the two other writers of the flag — `_mark_dirty`'s
-        terminal-point clear and `_register_failed_attempt`'s retry-cap clear —
-        are lifecycle events, not "this pass recomputed it"). A writer following
+        terminal-point clear and `_retry_cap_verdict`'s retry-cap clear — are
+        lifecycle events, not "this pass recomputed it"). A writer following
         the documented "compute confidence for my claims" call (`anchors=` /
         `factors=`) therefore got posteriors and `converged: true` while its own
         claims stayed `ep_dirty` forever. The two TARGETED branches (`factors=` /
@@ -22979,8 +22991,8 @@ class TortoiseSDK:
         set is `_sweep_dirty_roots`, called from the three dreaming adapters
         (`_dream_local` / `_dream_stale_first` / `_dream_full`). Two other
         writers touch the same flag and are NOT this rule: `_mark_dirty` clears
-        it for TERMINAL points as it re-marks them, and
-        `_register_failed_attempt` clears it when a root hits the retry cap —
+        it for TERMINAL points as it re-marks them, and `_retry_cap_verdict`
+        clears it when a root hits the retry cap —
         both are lifecycle events, not "a pass recomputed this belief". The
         targeted fast path — `compute_confidence(
         factors=…)` / `compute_confidence(anchors=…)`, the call the graph

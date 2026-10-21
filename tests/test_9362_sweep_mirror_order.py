@@ -582,7 +582,12 @@ def test_retry_cap_fails_safe_and_logs_when_the_verdict_cannot_be_read(caplog):
     """A raise from the cap's statement keeps the root retryable AND says so.
 
     `unknown` must not silently become "the cap never retires": an inert cap
-    restores #1243's immortal-retry class, so the arm logs. It also drops any
+    restores #1243's immortal-retry class, so the arm logs — and the log must
+    carry the CAUSE. `exc_info=True` in that arm is evaluated outside the
+    handler that swallowed the exception (it is swallowed inside
+    `_retry_cap_verdict`), so it renders `NoneType: None` and throws away the
+    one thing the diagnostic exists for. That is why this test asserts the
+    record's `exc_info`, not just its message text. It also drops any
     stale `capped` record, because a root cannot be reported capped and kept
     retryable at the same time (#1243's mutual exclusion).
     """
@@ -627,10 +632,24 @@ def test_retry_cap_fails_safe_and_logs_when_the_verdict_cannot_be_read(caplog):
                 "the root is reported capped while still being retried (#1243's "
                 "mutual exclusion)"
             )
-            assert any("#9362" in r.getMessage()
-                       for r in caplog.records if r.levelno >= logging.WARNING), (
+            warnings = [r for r in caplog.records
+                        if r.levelno >= logging.WARNING
+                        and "#9362" in r.getMessage()]
+            assert warnings, (
                 "the fail-safe arm is silent: a broken cap statement would make "
                 "the retry cap inert with no diagnostic"
+            )
+            # ⛔ The message alone is not the diagnostic — the CAUSE is. On the
+            # pre-fix arm (`exc_info=True`, outside any handler) this record
+            # carries `(None, None, None)` and formats as `NoneType: None`.
+            assert warnings[0].exc_info and warnings[0].exc_info[1] is not None, (
+                "the fail-safe warning dropped the exception: `exc_info=True` "
+                "was evaluated outside the handler that swallowed it, so the "
+                "record carries no traceback (NoneType: None)"
+            )
+            assert isinstance(warnings[0].exc_info[1], RuntimeError), (
+                "the logged cause is not the engine error that aborted the "
+                f"verdict: {warnings[0].exc_info[1]!r}"
             )
         finally:
             sdk.close()
