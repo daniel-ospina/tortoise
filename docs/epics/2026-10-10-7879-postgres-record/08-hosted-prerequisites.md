@@ -422,8 +422,9 @@ Postgres, and §17.4 already prices both stores.
 4. **R4** the two schema↔producer disagreements → *so the session/point record is complete*
 5. **R6** tenancy enforced → *before a second customer's data exists*
 6. **R5** the edge/operator family → *before the "destroy the graph" claim can be made*
-7. **R7** raw text + S1 narrative in Postgres → *for the same claim: the record has no narrative
-table, only an episodic `point.content` row*
+7. **R7** raw text + S1 narrative in Postgres → *for the same claim: the record has no narrative-first
+home — the text is carried as data (an episodic `point.content` row and its `journal_event.payload`),
+so a record-sourced rebuild loses the narrative, not the text*
 8. **R8** a restore verb + a drill → *a restore that has never been run is not a restore*
 9. **R9** back up the record → *the durability obligation moved, and no module of ours holds it*
 
