@@ -340,18 +340,23 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 #: ⛔ SO THERE IS NOW EXACTLY ONE NORMALISER AND ONE SCAN. `_fold_doc` turns the WHOLE document
 #: into one text — blockquote markers stripped the way the block parser strips them, HTML entities
 #: decoded, NFKC-folded, zero-width/combining characters dropped WITHOUT a word break, whitespace
-#: runs folded to one
-#: space, the fullwidth colon folded to ASCII — while keeping, per character, the RAW LINE and the
-#: BLOCK (blank-line-separated paragraph or table, or a list item) it came from. Every rule is
-#: then decided by
-#: POSITION on that single text:
+#: runs folded to one space, the fullwidth colon folded to ASCII — while keeping, per character,
+#: the RAW LINE and TWO boundaries: the BLOCK (blank-line-separated paragraph or table, or a list
+#: item) and the RUN (blank-line-separated region, list items included). Every rule is then
+#: decided by POSITION on that single text:
 #:
 #:  * an explicit anchor inside the provenance note may only quote `_NOTE_QUOTED_ANCHORS`;
 #:  * anywhere else it is a violation;
 #:  * a bare anchor carries a note violation when it falls inside the note, and otherwise belongs
-#:    to the nearest FILE TOKEN in ITS BLOCK — compared through `_file_basename`, which strips a
+#:    to the nearest FILE TOKEN in its RUN — compared through `_file_basename`, which strips a
 #:    regex escape and folds the case, so `tortoise/hosted_api.py`, `HOSTED_API.PY` and
 #:    `hosted_api\.py` attribute like the plain name.
+#:
+#: ⛔ THE TWO BOUNDARIES ARE NOT INTERCHANGEABLE: a BOUNDARY MAY FILTER A MATCH'S SPAN, BUT IT MAY
+#: NEVER REMOVE THE OWNER A READER WOULD INFER (#9485 review). One primitive doing both jobs is how
+#: the evasion arrived — the block opened at a list item took the owner away from every anchor
+#: written inside one, so `1. `:99998`` under a `hosted_api.py` paragraph was GREEN while the same
+#: number with no marker was RED.
 #:
 #: Two pre-sliced texts with two normalisations was the defect: an anchor is a TWO-TOKEN
 #: construct, so any split the slice boundary fell inside was invisible to both halves — a new
@@ -401,10 +406,13 @@ _BARE_ANCHOR_RE = re.compile(
 #: token is the owner whatever its extension; only a `hosted_api.py` ownership reds, so widening
 #: the token set can only REMOVE reports, never add one.
 #:
-#: In the BODY the scan is per BLOCK — not per line, and not document-wide: a continuation whose
+#: In the BODY the scan is per RUN — not per line, and not document-wide: a continuation whose
 #: governing `hosted_api.py` sits on an earlier line of the same paragraph or table IS attributed,
 #: and one separated by a blank line is not. Same-LINE-only was a hole — `` …`hosted_api.py` ``
 #: then `` `:39205` `` reads clean, yet CommonMark joins the pair into one sentence (measured).
+#: ⚠️ The RUN, not the BLOCK: a list item interrupting a paragraph starts a new block (so a match
+#: may not span into it) but stays in the same run (so an anchor inside it keeps its owner) —
+#: deriving ownership from the block was a one-token evasion of this whole guard (#9485 review).
 #: ⚠️ The NOTE region is the exception and is deliberate: there the search is document-wide (a
 #: bare number in the note is a citation even when the file that governs it sits in the paragraph
 #: above), and an UNOWNED one flags too — see `_hits`, which is the only place either rule lives.
@@ -425,20 +433,33 @@ def _file_basename(token: str) -> str:
     return token.replace("\\", "").rsplit("/", 1)[-1].lower()
 
 
-#: The start of a markdown LIST ITEM on a raw line — `1.` / `1)` at line start, after whatever
-#: indentation and blockquote markers the line carries. A list item is its OWN BLOCK even when no
-#: blank line separates it from the paragraph that introduces it: CommonMark lets an ordered list
-#: starting at `1` interrupt a paragraph, so `… in this order:` + newline + `1. first` is a
-#: paragraph followed by a list, NOT one sentence. `_fold_doc` therefore opens a block here, the
-#: same way it opens one at a blank line — without that, the fold produced
-#: `… in this order: 1. first` and the continuation arm reported `: 1` as a `hosted_api.py`
-#: citation the editor never wrote (measured, #9485 review: the shape the always-loaded note said
-#: could not be reported).
-_LIST_ITEM_RE = re.compile(r"^\s*\d+[.)](?:\s|$)")
+#: The start of a markdown LIST ITEM on a raw line, after whatever indentation and blockquote
+#: markers the line carries. A list item is its OWN BLOCK even when no blank line separates it
+#: from the paragraph that introduces it, and it is its own block **exactly when CommonMark says
+#: it is**:
+#:
+#:   * an ORDERED item interrupts a paragraph only when it starts at `1` — `2.` and up are a lazy
+#:     paragraph continuation (CommonMark's own example: `The number of windows in my house is` /
+#:     `14.  The number of doors is 6.` is ONE paragraph). So the marker set is `1[.)]`, never
+#:     `\d+[.)]`: accepting any digit INVENTED a block the parser does not see, which made
+#:     ``… `hosted_api.py`, L`` + `12. first` GREEN — a coverage REGRESSION against `main`, whose
+#:     fold kept `L 12` in one block and reported it (measured, #9485 review);
+#:   * a BULLET (`-`, `*`, `+`) interrupts a paragraph unconditionally, so it is an opener too.
+#:     Omitting it made the constant's own claim ("a list item is its OWN BLOCK") false for the
+#:     class it names — it implemented ordered items only, the instance, not the class (#9485
+#:     review).
+#:
+#: `_fold_doc` therefore opens a BLOCK here, the same way it opens one at a blank line — without
+#: that, the fold produced `… in this order: 1. first` and the continuation arm reported `: 1` as a
+#: `hosted_api.py` citation the editor never wrote (measured, #9485 review: the shape the
+#: always-loaded note said could not be reported).
+#:
+#: ⚠️ And a block boundary is the SPAN FILTER's, NOT the owner rule's — see `_fold_doc`'s RUN.
+_LIST_ITEM_RE = re.compile(r"^\s*(?:1[.)]|[-*+])(?:\s|$)")
 
 
-def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
-    """The ONE normaliser: `(text, raw_line_of_each_char, block_of_each_char)`.
+def _fold_doc(raw: str) -> tuple[str, list[int], list[int], list[int]]:
+    """The ONE normaliser: `(text, raw_line_of_each_char, block_of_each_char, run_of_each_char)`.
 
     Folds every spelling of an anchor to one shape and remembers where each character came from,
     so a violation can be reported at a real line while the RULES are decided on normalised text.
@@ -446,9 +467,27 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
     parser does before inline parsing — a code span wrapped across two `>` lines renders as one
     sentence, so an anchor split there is one anchor, not two fragments no rule can see.
 
-    A BLOCK is a blank-line-separated paragraph or table — OR a list item, which starts a block
-    even with no blank line before it (see `_LIST_ITEM_RE`). Both are block boundaries a markdown
-    parser agrees with, so neither is an opinion this module invented.
+    ⛔ TWO BOUNDARIES, TWO JOBS — they are not interchangeable, and confusing them is what the
+    #9485 review found. A boundary may FILTER A MATCH'S SPAN, but it may never REMOVE THE OWNER a
+    reader would infer:
+
+    * a BLOCK is a blank-line-separated paragraph or table — OR a list item (see
+      `_LIST_ITEM_RE`), which starts one with no blank line to announce it. Both are boundaries a
+      markdown parser agrees with, so neither is an opinion this module invented. Blocks answer
+      ONE question: may a match span this change? It may not, because the join is a folding
+      artifact (`_hits` filter).
+    * a RUN is a contiguous region between BLANK LINES — list items do NOT start a new run. Runs
+      answer the OTHER question: what does this anchor belong to? A list item interrupting a
+      paragraph is a new block but the same sentence's neighbourhood, so `` `hosted_api.py` `` +
+      `1. `:99998`` still has an owner. Deriving ownership from BLOCKS instead deleted it, which
+      was a one-token evasion of the guard's whole purpose: a reintroduced line number was
+      invisible whenever its line was prefixed `1. ` (measured — RED at `99026d7f8`, GREEN at
+      `49d62d3bd`, RED again here).
+
+    The two are deliberately kept apart rather than collapsed: using RUNS for the span filter
+    resurrects the false positive this module was fixed for (the colon ending `… in this order:`
+    and the `1` of the next list item share a run, so `: 1` would match again), and using BLOCKS
+    for ownership is the evasion above.
 
     ⚠️ Blocks are joined by ONE space, and that join is a FOLDING ARTIFACT, never a citation: a
     paragraph ending in a bare `hosted_api.py` would otherwise read as one token with a `:39205`
@@ -461,17 +500,21 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
     out: list[str] = []
     line_of: list[int] = []
     block_of: list[int] = []
-    block, gap = 0, False
+    run_of: list[int] = []
+    block, run, gap = 0, 0, False
     for index, line in enumerate(raw.splitlines()):
         stripped = re.sub(r"^\s*(?:>\s?)+", "", line)
         if not stripped.strip():
+            # A blank line ends BOTH: the paragraph (block) and the ownership window (run).
             block += 1
+            run += 1
             gap = True
             continue
         if _LIST_ITEM_RE.match(stripped):
-            # A list item opens a block with no blank line to announce it, so the previous line's
+            # A list item opens a BLOCK with no blank line to announce it, so the previous line's
             # `:`/`L`/`line` opener must not reach into it (`gap` is already True: the join is
-            # still ONE space, it is the SPAN filter that refuses it).
+            # still ONE space, it is the SPAN filter that refuses it). The RUN does NOT move: the
+            # item is still the neighbourhood a bare anchor in it belongs to.
             block += 1
         for char in unicodedata.normalize("NFKC", html.unescape(stripped)):
             # `Cf` covers every zero-width form this doc could carry (space, joiners, BOM) and `Mn`
@@ -493,12 +536,14 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
                 out.append(" ")
                 line_of.append(index + 1)
                 block_of.append(block)
+                run_of.append(run)
             gap = False
             out.append(char)
             line_of.append(index + 1)
             block_of.append(block)
+            run_of.append(run)
         gap = True
-    return "".join(out), line_of, block_of
+    return "".join(out), line_of, block_of, run_of
 
 
 def _collapse(text: str) -> str:
@@ -525,16 +570,23 @@ def _hits(
 
     The owner rule differs by region, deliberately:
 
-    * in the BODY, a bare anchor belongs to the nearest file token in its own BLOCK, and is
-      flagged only when that is `hosted_api.py`. §10's `Redemption` row names `hosted_api.py` AND
-      carries `session_auth.py:588`, so the loose "any file in the block" rule reported that
-      row's legitimate anchor to a different file (measured);
+    * in the BODY, a bare anchor belongs to the nearest file token in its own RUN — the
+      blank-line-delimited neighbourhood `_fold_doc` tracks alongside the block. NOT its own
+      BLOCK: a block boundary exists to refuse a span, and letting it also decide ownership
+      removed the owner a reader infers from the paragraph a list item interrupts, which was a
+      one-token evasion while its line was prefixed `1. ` (measured, #9485 review). The RUN is
+      the same rule stated without that leak — and it still stops at a BLANK line, which is what
+      keeps `"The base is in `hosted_api.py`.\n\nAnd `:39205`."` legal, exactly as `main` did;
+      * in the BODY, the anchor is flagged only when that owner is `hosted_api.py`. §10's
+      `Redemption` row names `hosted_api.py` AND carries `session_auth.py:588`, so the loose
+      "any file in the block" rule reported that row's legitimate anchor to a different file
+      (measured);
     * in the NOTE, the search is document-wide and an UNOWNED anchor is also a violation — the
       note exists to quote anchors, so a bare number in it is a citation even when the file name
       that governs it sits in the paragraph above (measured green before). A number owned by a
       DIFFERENT file stays legal, because the note legitimately quotes `oauth.py:1425,1592`.
     """
-    text, line_of, block_of = _fold_doc(raw)
+    text, line_of, block_of, run_of = _fold_doc(raw)
     in_note = [note_start < line <= note_end for line in line_of]
     anchors: list[tuple[str, int, bool]] = []
     explicit: list[tuple[int, int]] = []
@@ -565,10 +617,12 @@ def _hits(
             # The number INSIDE an explicit anchor is that anchor, not a continuation.
             continue
         note = in_note[match.start()]
-        block = block_of[match.start()]
+        run = run_of[match.start()]
         owner = None
         for candidate in _NEAREST_FILE_RE.finditer(text, 0, match.start()):
-            if note or block_of[candidate.start()] == block:
+            # BODY: the ownership window is the RUN, not the block (see the docstring). NOTE: the
+            # window is the whole document, and staying in the same run is not enough there.
+            if note or run_of[candidate.start()] == run:
                 owner = candidate.group(0)
         is_hosted = owner is not None and _file_basename(owner) == "hosted_api.py"
         if is_hosted or (note and owner is None):
@@ -789,16 +843,50 @@ _EVASION_SHAPES = (
     ("See `hosted_api.py`, L\n\n39205 names the handler.", []),
     ("See `hosted_api.py`, line\n\n39205 names the handler.", []),
     # …and the SAME ordered list with NO blank line before it, which is the shape the block model
-    # above did not know: CommonMark lets an ordered list interrupt a paragraph, so
-    # `… in this order:` + `1. first` is a paragraph AND a list, not one sentence. The blank line
-    # is not what makes these non-citations — the BLOCK is. Without `_LIST_ITEM_RE`'s block open
-    # the fold produced `… in this order: 1. first` and all three rows reported the list marker as
-    # a `hosted_api.py` continuation (measured at the #9485 review — the very shape `MEMORY.md`
-    # says cannot be reported, which is why the block MODEL grew here rather than the sentence
-    # growing a qualifier).
+    # above did not know: CommonMark lets an ordered list interrupt a paragraph ONLY when it starts
+    # at `1` (a `2.` and up is a lazy paragraph continuation), so `… in this order:` + `1. first`
+    # is a paragraph AND a list, not one sentence. The blank line is not what makes these
+    # non-citations — the BLOCK is. Without `_LIST_ITEM_RE`'s block open the fold produced
+    # `… in this order: 1. first` and this row reported the list marker as a `hosted_api.py`
+    # continuation (measured at the #9485 review — the very shape `MEMORY.md` says cannot be
+    # reported, which is why the block MODEL grew here rather than the sentence growing a
+    # qualifier).
     ("Read `hosted_api.py` in this order:\n1. first", []),
-    ("See `hosted_api.py`, L\n12. first", []),
-    ("See `hosted_api.py`, line\n12. first", []),
+    # …and the `L` twin of it, which is GREEN for a different reason: the `L` arm requires TWO
+    # digits, so `L 1` is not an anchor at all. Pinned anyway, because widening that floor to one
+    # digit would bring the shape back through the span filter's blind side.
+    ("See `hosted_api.py`, L\n1. first", []),
+    # ⛔ THE EVASION `420bf6031` OPENED, and the row that would have caught it. A bare `:n` alone
+    # on a line prefixed `1. ` is a citation a reader infers from the `hosted_api.py` paragraph
+    # directly above it; opening a block at the list item took its OWNER away, so it went GREEN
+    # while the same number with no marker stayed RED (measured at the #9485 review: RED at
+    # `99026d7f8`, GREEN at `49d62d3bd`). The owner is now decided on the RUN — the
+    # blank-line-delimited neighbourhood — so a list item interrupting a paragraph does not sever
+    # it, and the SPAN filter still refuses the `: 1` the list MARKER would otherwise become.
+    ("See `hosted_api.py`\n1. `:99998`.", [2]),
+    # …and the same continuation one token earlier, with no marker at all, which was already RED
+    # and must stay RED: the two rows are one mechanism (ownership across a boundary), and the row
+    # above is the one that reds if the RUN goes back to being a BLOCK.
+    ("See `hosted_api.py`\n`:99998`.", [2]),
+    # ⛔ THE BULLET TWIN of the row above, and it is RED on purpose. A bullet is a list item
+    # (CommonMark interrupts a paragraph with one unconditionally), so `_LIST_ITEM_RE` opens a
+    # BLOCK at it — but the same fail-closed ownership applies: a bare `:n` alone in an item under
+    # a `hosted_api.py` paragraph is attributed to it. A GREEN row here would pin the widening of
+    # the evasion above (`- ` instead of `1. `) as expected-green.
+    ("See the builder in `hosted_api.py`:\n- `:99998` is the handler.", [2]),
+    # …while a BULLET whose item names its OWN file stays legal, so `_LIST_ITEM_RE`'s bullet half
+    # is a block boundary and not an exemption: the nearest token to the LEFT of the anchor is the
+    # `.ts`, and only a `hosted_api.py` ownership reds.
+    ("- the builder `hosted_api.py`\n- then the BFF `token.ts`, `:152`.", []),
+    # ⛔ RESTORED COVERAGE, not a new capability: on `main` (which had no list-item branch at all)
+    # `L 12` and `line 12` are ONE folded block and red, owned by `hosted_api.py`. `_LIST_ITEM_RE`
+    # accepted any `\d+` marker, so `12.` INVENTED a block CommonMark does not see (a non-`1`
+    # marker is a lazy paragraph continuation), the opener landed in block N and the digits in
+    # N+1, and the span filter dropped a real citation. Both rows asserted `[]` — a regression
+    # pinned as expected-green, the worst kind of test. They red again from the marker set being
+    # `1[.)]` (#9485 review).
+    ("See `hosted_api.py`, L\n12. first", [1]),
+    ("See `hosted_api.py`, line\n12. first", [1]),
     # …while a continuation INSIDE one list item is still ours: opening a block at a list item
     # must not become an exemption for the item that names the file.
     ("1. the builder `hosted_api.py`\n   then `:39205`.", [2]),
@@ -861,12 +949,22 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     `hosted_api.py` paragraph (measured — that is the shape a review found: a paragraph ending in
     a bare `hosted_api.py` followed by an ordered list was reported as a `: 1` continuation).
 
-    The three NO-BLANK-LINE list rows (`… in this order:` then `1. first`, and the `L`/`line`
-    twins) pin `_LIST_ITEM_RE`: reverting that one branch reds all three, because without a block
-    open at a list item the fold joins the paragraph and the marker with one space and the
-    continuation arm matches the list's own number. The row immediately after them is the other
-    direction of the same mechanism — a continuation INSIDE one list item still reds, so the block
-    open is a boundary between items, not an exemption for lists.
+    The NO-BLANK-LINE list row (`… in this order:` then `1. first`) pins the BLOCK OPEN at a list
+    item: reverting that one branch makes the fold join the paragraph and the marker with one
+    space, and the continuation arm matches the list's own number. The row immediately after the
+    list rows is the other direction of the same mechanism — a continuation INSIDE one list item
+    still reds, so the block open is a boundary between items, not an exemption for lists.
+
+    ⛔ And the boundary is the SPAN's, never the OWNER's (#9485 review). The `1. `/`2. `/`- `
+    continuation rows and `test_a_body_continuation_cannot_hide_behind_a_list_item_marker` pin
+    that: ownership is decided on the RUN (blank-line-delimited), so an anchor written inside a
+    list item keeps the owner of the paragraph the list interrupts. Reverting `_hits` to
+    `block_of` for the owner reds them, and NOTHING else — which is the point: the two primitives
+    are load-bearing separately.
+
+    The two `12.` rows are the OPPOSITE mutation: they went GREEN when `_LIST_ITEM_RE` accepted any
+    `\\d+`, because `12.` invented a block CommonMark does not see and the span filter dropped a
+    real `L 12`/`line 12` citation. Restoring `\\d+[.)]` reds them again (measured: `[]` → `[1]`).
     """
     lines = fragment.splitlines()
     reported = _stray_anchors(lines, 0, 0)
@@ -987,6 +1085,43 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
                 "the citation was dropped rather than converted")
     for token in _HOSTED_ANCHORS.values():
         _only_line(HOSTED, token)
+
+
+def test_a_body_continuation_cannot_hide_behind_a_list_item_marker() -> None:
+    """A `:n` injected under the body's `hosted_api.py` mention is caught WHATEVER its marker.
+
+    ⛔ The regression this pins (#9485 review, P1): `_fold_doc` opens a BLOCK at a list item, and
+    the block is what `_hits` uses to find an anchor's OWNER — two jobs on one primitive, and only
+    the span filter is justified. Every continuation written inside a list item therefore lost its
+    owner, so a reintroduced line number went GREEN the moment its line was prefixed `1. ` while
+    the same number with no marker stayed RED (measured: RED at `99026d7f8`, GREEN at `49d62d3bd`,
+    RED again once the owner is decided on the RUN rather than the BLOCK).
+
+    Driven on the REAL document by injecting one line under the body sentence that names
+    `tortoise/hosted_api.py`, because that is the shape the whole-document guard actually sees: a
+    synthetic fragment proves the rule, this proves the guard.
+
+    ⚠️ The bullet and `2.` markers are here on purpose. A bullet interrupts a paragraph
+    unconditionally, so `_LIST_ITEM_RE` opens a block at it — but the same fail-closed ownership
+    has to survive, or the widening becomes a second channel for the same evasion (`- :99998`).
+    `2.` is CommonMark's lazy continuation, so it never opens a block at all and the number is
+    simply inside the paragraph.
+    """
+    lines = SPEC.read_text().splitlines()
+    anchor_line = next(
+        (i for i, line in enumerate(lines) if "tortoise/hosted_api.py" in line), None)
+    assert anchor_line is not None, (
+        "the body no longer names `tortoise/hosted_api.py` — this probe needs the mention a "
+        "reader would attribute an injected continuation to, so restore it or move the probe")
+    for marker in ("", "1. ", "2. ", "- "):
+        injected = [*lines[:anchor_line + 1], f"{marker}`:99998`", *lines[anchor_line + 1:]]
+        _, _, stray = _spec_violations("\n".join(injected))
+        assert any("99998" in entry and "hosted_api.py" in entry for entry in stray), (
+            f"a bare continuation injected directly under the body's `tortoise/hosted_api.py` "
+            f"mention must be reported with that owner even when its line is prefixed {marker!r} "
+            f"— got stray={stray}. A list item starts a BLOCK (so a match may not span into it) "
+            "but it does not start a run (so the owner a reader infers survives); deriving "
+            "ownership from the block is what made this evasion GREEN.")
 
 
 def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
