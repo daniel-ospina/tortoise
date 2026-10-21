@@ -266,6 +266,8 @@ import functools
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
 PKG = ROOT / "tortoise"
@@ -2963,7 +2965,7 @@ def test_the_ungated_walk_reuses_the_gated_derivations():
     is run over a truncated module set, so an inline copy records NOTHING and reds.
     """
     census = _call_time_census()
-    sources = census._sources()
+    sources = census._universe()
     assert len(sources) > 2, "the package has too few modules to run this arm"
     subset = dict(sorted(sources.items())[:2])
 
@@ -2972,7 +2974,7 @@ def test_the_ungated_walk_reuses_the_gated_derivations():
         "_empty_pattern_sites_in": set(),
         "_call_time_sites_in": set(),
     }
-    originals = {name: getattr(census, name) for name in (*recorded, "_sources")}
+    originals = {name: getattr(census, name) for name in (*recorded, "_universe")}
 
     def _recording(name: str, real):
         def wrapper(file):
@@ -2984,7 +2986,7 @@ def test_the_ungated_walk_reuses_the_gated_derivations():
     patched: dict[str, object] = {
         name: _recording(name, getattr(census, name)) for name in recorded
     }
-    patched["_sources"] = lambda: subset
+    patched["_universe"] = lambda: subset
     try:
         for name, value in patched.items():
             setattr(census, name, value)
@@ -3069,3 +3071,131 @@ def test_a_module_constant_is_attributed_to_its_consumer():
         f"derived {sorted(derived)} — either the fallback is unreachable again (the "
         "line the review flagged) or the rule now attributes an unattributable read"
     )
+
+def _pin_universe_to_disk(census, on_disk: set[Path]) -> None:
+    """The completeness pin's BODY — factored out so its FLOOR is pinnable too.
+
+    ⚠️ The floor is not decoration. Both set differences below are vacuously EMPTY
+    when `on_disk` is empty, so an enumeration that resolves to nothing (the package
+    moved or renamed, `TORTISE` mis-resolved, a packaging change) would let this arm
+    report green having asserted nothing — the exact defect
+    `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md` records for the carrier arm
+    ("it could report green having asserted nothing … It now counts the pairs it
+    examined"). For the one arm whose purpose is "the universe is complete", silence
+    on an empty universe is the failure it exists to prevent, so it reds here with its
+    own diagnosis. The sibling arms in this file carry the same shape
+    (`assert len(sources) > 2`, `assert len(census._sources()) > len(census._files())`).
+    """
+    assert len(on_disk) > 2, (
+        f"the package enumeration found {len(on_disk)} module(s) under "
+        f"{census.TORTISE} — this arm cannot assert completeness against an empty "
+        "disk set, so it reds here instead of passing vacuously"
+    )
+
+    for name in ("_universe", "_sources"):
+        observed = set(getattr(census, name)())
+        hidden = sorted(
+            str(path.relative_to(census.TORTISE)) for path in on_disk - observed
+        )
+        assert not hidden, (
+            f"`{name}()` omits {len(hidden)} module(s) that exist on disk, so every "
+            f"derivation silently stops covering them: {hidden[:5]}"
+        )
+        assert not (observed - on_disk), (
+            f"`{name}()` names paths that do not exist — the universe was built from "
+            "something other than this package"
+        )
+
+
+def test_the_census_universe_is_every_module_on_disk():
+    """The UNIVERSE must be every module under `tortoise/`, not a filtered subset.
+
+    ⚠️ This is the arm the `#9501` review earned, and it is about the gate one function
+    UPSTREAM of `_files()`. The file gate is interrogated from an ungated walk, but a
+    universe that silently drops a module removes its reader from every derivation
+    while every other arm stays green — measured: filtering one module out of the old
+    single source left all 29 arms green while §13's row 22
+    (`navigation.py::_hop_query`) stopped being derived.
+
+    Both halves are pinned against the DISK, not against each other: `_universe()` is
+    the disk enumeration, and `_sources()` is the set the derivations consume. If
+    either is narrowed, one of the two assertions reds — and the floor in
+    `_pin_universe_to_disk` means an EMPTY enumeration reds too, instead of passing
+    having asserted nothing. The mutation arms below make BOTH halves executable, one
+    per name: the floor arm reaches only the floor, so it cannot stand in for them.
+    """
+    census = _call_time_census()
+    _pin_universe_to_disk(census, {path for path in census.TORTISE.rglob("*.py")})
+
+
+def test_the_universe_pin_reds_on_an_empty_disk_set():
+    """The FLOOR: an enumeration that resolves to NOTHING must red, not pass.
+
+    Without the floor both of the pin's set differences are empty on an empty
+    `on_disk`, so the arm reports green having asserted nothing. Constructing that
+    state directly is the only way to prove the floor is load-bearing rather than
+    decorative: a `TORTISE` that resolves to nothing is exactly what a package move,
+    rename or packaging change produces, and it must red with its own diagnosis.
+    """
+    census = _call_time_census()
+    with pytest.raises(AssertionError, match="cannot assert completeness"):
+        _pin_universe_to_disk(census, set())
+
+
+def test_the_universe_pin_reds_when_a_module_is_dropped():
+    """Mutation: narrowing `_universe()` must RED — the pin is not vacuous.
+
+    This is the measurement the `#9504`/`#9501` review established by hand and the PR
+    body states in prose ("`_universe()` drops one module → RED — the universe pin").
+    Made executable here.
+
+    ⚠️ `_call_time_census()` is `@functools.cache`d, so every arm in this file shares
+    ONE module object — the patch below is process-wide and MUST be reverted, or an
+    arm that runs after this one reads a universe with a module missing (measured: 241
+    of 242, and the completeness arm reds on `migrate_db.py`). The `try/finally`
+    restore is the file's own convention (the reuse pin above does the same with its
+    `originals` snapshot), not belt-and-braces.
+    """
+    census = _call_time_census()
+    on_disk = {path for path in census.TORTISE.rglob("*.py")}
+    full = census._universe()
+    dropped = sorted(full)[len(full) // 2]
+    original = census._universe
+    try:
+        census._universe = lambda: {k: v for k, v in full.items() if k != dropped}
+        with pytest.raises(
+            AssertionError, match=re.escape(str(dropped.relative_to(census.TORTISE)))
+        ):
+            _pin_universe_to_disk(census, on_disk)
+    finally:
+        census._universe = original
+
+
+def test_the_universe_pin_reds_when_the_derivation_universe_is_dropped():
+    """Mutation: narrowing `_sources()` must RED — the OTHER half of the same pin.
+
+    `_universe()` and `_sources()` are two names for one contract: the disk
+    enumeration and the set the DERIVATIONS consume. Narrowing the second is the
+    `#9501` defect itself (a filter arriving on the gated side), and it is the arm the
+    PR body records by hand ("`_sources()` drops one module → RED — the universe
+    pin"). Executable here: `_sources()` is normally `@lru_cache(maxsize=1)`-warm from
+    earlier arms, so the patch replaces the module ATTRIBUTE — the only place the pin
+    can observe a narrowed derivation universe — and `_universe()` is left intact, so
+    the `_sources` half is the one that must speak.
+
+    The patch is reverted in `finally`: `_call_time_census()` is shared process-wide.
+    """
+    census = _call_time_census()
+    on_disk = {path for path in census.TORTISE.rglob("*.py")}
+    full = census._sources()
+    dropped = sorted(full)[len(full) // 3]
+    original = census._sources
+    try:
+        census._sources = lambda: {k: v for k, v in full.items() if k != dropped}
+        with pytest.raises(
+            AssertionError,
+            match=r"`_sources\(\)` omits 1 module\(s\)",
+        ):
+            _pin_universe_to_disk(census, on_disk)
+    finally:
+        census._sources = original

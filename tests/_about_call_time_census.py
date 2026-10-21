@@ -100,8 +100,6 @@ _MAX_CANDIDATES = 64
 #: it still derives. Deliberately empty rather than a marker string — the point
 #: is to keep the surrounding Cypher intact, not to guess the value.
 _UNKNOWN = ""
-#: A backticked token in §13's `site` column that can be a symbol.
-
 #: ⚠️ The FLOORS of the retired guard's arms (`_MIN_SITES`, `_MIN_ROWS`,
 #: `_MIN_CUSTOMER_CALLABLE`, `_MIN_CALL_TIME`, `_MIN_EMPTY_PATTERN`) are NOT here: a floor
 #: was that guard's own guard-rail, its arms live in the guard that owns the table, and a
@@ -327,11 +325,29 @@ class _File:
 
 
 @lru_cache(maxsize=1)
-def _sources() -> dict[Path, str]:
-    """Every module under `tortoise/`, read once (text only — parsing is lazy)."""
+def _universe() -> dict[Path, str]:
+    """EVERY module under `tortoise/`, read from the DISK — the census's universe.
+
+    ⚠️ **The universe is a gate, and it is one function upstream of `_files()`.** A
+    universe that silently drops a module removes its reader from every derivation
+    while the file-gate arm stays green — measured under the `#9501` review, filtering
+    one module out of the old single source left all 29 arms green while §13's row 22
+    (`navigation.py::_hop_query`) stopped being derived.
+
+    So the disk is enumerated HERE, once, and everything else reads this. It is not a
+    filter: the only thing this function may do is `rglob("*.py")` under `TORTISE` and
+    read the text. `test_the_census_universe_is_every_module_on_disk` pins it (and
+    `_sources()`) back to the disk, so a narrowing reds instead of hiding.
+    """
     return {
         path: path.read_text(encoding="utf-8") for path in sorted(TORTISE.rglob("*.py"))
     }
+
+
+@lru_cache(maxsize=1)
+def _sources() -> dict[Path, str]:
+    """The universe the DERIVATIONS consume — pinned to `_universe()`, never filtered."""
+    return _universe()
 
 
 @lru_cache(maxsize=1)
@@ -775,15 +791,18 @@ def _site_symbol(node: ast.AST, file: _File) -> list[str]:
 
     const_name = None
     for stmt in file.tree.body:
-        # `AnnAssign` carries the SAME shape as `Assign` (`NAME: str = "..."`), so a
-        # module constant written that way must be attributable to its consumer like
-        # any other — without this branch it fell through to the `<module>` fallback
-        # and the read lost its symbol. ⚠️ This is NOT what makes the fallback
-        # reachable (an annotated constant lands in the branch BELOW); the fallback is
-        # reached by a root that sits in no module-level constant statement at all — a
-        # `class` body or an `if` block. Both input classes are now exercised on
-        # synthetic sources by `test_a_module_constant_is_attributed_to_its_consumer`,
-        # so neither branch is a line no arm can reach.
+        # `AnnAssign` carries the SAME shape as `Assign` (`NAME: str = "..."`).
+        # Scanning it is a DEFENSIVE no-op at this head — measured, the site rows
+        # are identical with and without it and no site row resolves through the
+        # `<module>` fallback — but the omission was silent: an annotated module
+        # constant fell through to the consumer lookup with no name to look up.
+        # Broadening the input class is the cheap half. The bare `<module>` fallback
+        # IS pinned synthetically — the sibling arm
+        # `test_a_module_constant_is_attributed_to_its_consumer` puts a root inside an
+        # `if` block, which reaches it — so what has no fixture is the OTHER
+        # unattributed shape, the `<module:NAME>` return below (a constant that is
+        # found but has no consumer). That shape is recorded open rather than claimed
+        # fixed.
         if isinstance(stmt, ast.AnnAssign):
             if (
                 stmt.value is not None
@@ -921,7 +940,12 @@ def _ungated_walk_sites() -> tuple[
     named: set[tuple[str, str]] = set()
     empty: set[tuple[str, str]] = set()
     call_time: set[tuple[str, str]] = set()
-    for path, source in _sources().items():
+    # ⚠️ `_universe()`, NOT `_sources()`. `_sources()` is what the GATED walks consume,
+    # so walking it here would make the comparison blind one function upstream: a
+    # narrowed `_sources()` hides a module from both sides at once and the difference
+    # stays empty. Measured under the `#9501` review — filtering one module out of
+    # `_sources()` left all 29 arms green. This side reads the disk.
+    for path, source in _universe().items():
         file = _File(path, str(path.relative_to(ROOT)), source)
         for symbol, _line in _sites_in(file):
             named.add((file.rel, symbol))
@@ -942,14 +966,14 @@ def _narrow_gate_walk_sites() -> tuple[
     non-empty difference here the comparison above could not detect a narrowing at
     all, and its silence would mean nothing.
     """
-    gate = {file.path for file in _literal_files()}
     named: set[tuple[str, str]] = set()
     empty: set[tuple[str, str]] = set()
     call_time: set[tuple[str, str]] = set()
-    for path, source in _sources().items():
-        if path not in gate:
-            continue
-        file = _File(path, str(path.relative_to(ROOT)), source)
+    # `_literal_files()` is already parsed and cached; re-reading `_sources()` and
+    # rebuilding the same 29 `_File`s measured 10.36 s of the control's 10.85 s for
+    # byte-identical output.
+    for file in _literal_files():
+        source = file.source
         for symbol, _line in _sites_in(file):
             named.add((file.rel, symbol))
         if _may_traverse_every_type(source):
