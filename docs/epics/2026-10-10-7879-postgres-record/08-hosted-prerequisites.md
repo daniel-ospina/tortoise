@@ -33,30 +33,30 @@ item below implying either has found a defect in this document, not a proposal.
 > *"ok, so we do hybrid now, data goes to postgres and it's loaded to hot (falkor); for now we keep
 > the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor
 > and postgres."*
-
+>
 > **§2.2 — the order.**
 > *"The order is: fix the writing, land the Postgres record, then re-measure — the engine stays as
 > the hot cache throughout."*
-
+>
 > **§3 — authority, and the one exception.**
 > *"⛔ READ THE AUTHORITY COLUMN AS AUTHORITY, NOT AS LOCATION … Postgres is the system of record for
 > EVERY layer, including the epistemic layer (`Point`, operators, `IMPL`/`NAND`, edges) and the
 > entity layer (`Object`, `Subject`). ⚠️ The ONE exception is the EP SCALARS — `ep_alpha`, `ep_beta`,
 > `confidence`, `posterior_*`, `baseline_*`: they are recomputed from the structure and never stored
 > as authority."*
-
+>
 > **§4 — tenancy.**
 > *"Decision: a shared tenancy — one Postgres database, one schema, rows scoped by tenant via
 > row-level security."* … *"⚠️ Bypass rule, to state explicitly: RLS is bypassed by the table owner
 > and by `service_role`. Say which role the app connects as, and why."*
-
+>
 > **§9.1 — raw text and the S1 narrative.**
 > *"the narrative is not something we're suggesting to store in the graph (same as raw) but store in
 > supabase."*
-
+>
 > **§12.1c — the vector question is OPEN, and it is the owner's.**
 > *"⚠️ NOT DECIDED — owner's call."* (§14.3 **V1**.)
-
+>
 > **§14 — vendor.**
 > *"The vendor — **Supabase Postgres** is the owner's recorded choice for the system of record (local
 > default now, Supabase post-beta)."*
@@ -436,25 +436,30 @@ Postgres, and §17.4 already prices both stores.
 URI-less run refuses by design).
 
 **Run 1 — the record suite, default env (the CI-shaped run):**
-```
+
+```text
 uv run pytest tests/test_record_schema_placement.py tests/test_record_projection.py -q
 → 118 passed in 4.57s
 
 uv run pytest tests/test_9078_record_written_by_production_path.py -q   # TEST_RECORD_DB_URI set
 → 57 passed, 2 skipped in 187.36s
 ```
+
 ⚠️ **The 2 skips are the two Postgres legs, and they skipped with a database available** — `psycopg2`
 is not in the default env (`ModuleNotFoundError`), so `pytest.importorskip("psycopg2")` fires. This is
 R3.
 
 **Run 2 — the same suite with the `[postgres]` extra:**
-```
+
+```text
 uv run --extra postgres pytest tests/test_9078_record_written_by_production_path.py::test_the_public_capture_path_writes_the_record \
     …::test_the_public_capture_path_writes_the_epistemic_layer -q
 → 2 passed in 146.75s
 ```
+
 Row counts in the record afterwards (§A3, §A8):
-```
+
+```text
 journal_event 36 · source 2 · event 4 · session 2 · object 4 · subject 0 · point 4
 relation 0 · node_identity 17 · points with embedding 4 · points with content 4
 session.capture_redactions → NULL on both rows            ← R4 / #9264
@@ -462,7 +467,8 @@ point.embedding type → jsonb                              ← A5 (no pgvector)
 ```
 
 **Run 3 — the DB-level proof on real Postgres (PGlite):**
-```
+
+```text
 cd supabase/tests/pglite && npm install && npm run validate
 → ✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED
   ✓ #7969: the record projection replays 39 journal records, is idempotent, total,
@@ -470,7 +476,8 @@ cd supabase/tests/pglite && npm install && npm run validate
 ```
 
 **Census commands (the "not in place" claims):**
-```
+
+```text
 grep -c TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/*.yml   → 0
 grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0
