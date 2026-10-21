@@ -28329,9 +28329,9 @@ class TortoiseSDK:
               state should instead read ``unknown`` / ``open`` is #9202's OWNER
               DECISION and this fix does not pre-empt it: the coverage gate
               changes which instants match, never what the end is called.
-              Pinned by ``tests/test_validity_windows.py``
-              ::``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_
-              unparseable_probe``.
+              Pinned by
+              ``test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe``
+              in ``tests/test_validity_windows.py``.
             """
             if vf is not None:
                 kf = _created_sort_key(vf)

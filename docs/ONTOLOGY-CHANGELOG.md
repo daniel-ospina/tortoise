@@ -1025,8 +1025,9 @@ when the QUERY string parsed. `get_historical_knowledge`'s `_covers` gated the S
 orderability (#6140) but ordered the END key unconditionally, and an unorderable end and an
 unparseable probe both bucket as `(1, <text>)`, so the comparison fell through to the TEXT: a stored
 `validTo="TBD"` **excluded** probe `"zzz"` (which sorts after `"TBD"`) while covering `"AAA"` and
-every dated probe, and an empty end sorted before every probe. One stored window answered `absent`
-for one junk probe and `found` for another.
+every dated probe, and an empty end sorted before every **unparseable** probe. The two shapes were
+broken differently, and neither excluded a dated query — bucket `(1, "")` sorts after every
+parseable instant. One stored window answered `absent` for one junk probe and `found` for another.
 
 What changed: the END arm now requires the END to name an instant before it bounds anything — the
 same rule §4.7 already states for this value on the write side (*"an unorderable bound … names no

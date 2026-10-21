@@ -903,8 +903,11 @@ def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_prob
 
     Both shapes of the class are exercised, because they were broken
     DIFFERENTLY: ``"TBD"`` excluded only the probes its text sorts before
-    (``"zzz"``), while the empty value keys as ``(1, "")`` and therefore
-    sorted before EVERY probe, excluding both.
+    (``"zzz"``, not ``"AAA"``), while the empty value keys as ``(1, "")``
+    and therefore sorted before EVERY UNPARSEABLE probe — both junk probes, and
+    neither a dated one: bucket ``(1, "")`` sorts AFTER every ``(0, epoch)``
+    instant, which is why the ``dated`` assertion below is green on the unfixed
+    code too.
 
     ONTOLOGY §4.7 already states the rule for this value — an *"unorderable
     bound ... names no instant, so a refusal would rest on a lexicographic
@@ -940,8 +943,9 @@ def test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_prob
 
     before = sdk.get_historical_knowledge(p["id"], "AAA")
     assert before["status"] == "found", (
-        "coverage must not depend on the probe's spelling, and this probe is "
-        f"the one the {stored_end!r} end used to exclude: {before}"
+        "coverage must not depend on the probe's spelling — the "
+        f"{stored_end!r} end names no instant, so it cannot exclude this "
+        f"probe either: {before}"
     )
     assert before["valid_point"]["id"] == p["id"]
 
