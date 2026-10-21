@@ -98,6 +98,29 @@ def test_a_transport_failure_is_not_the_family_and_vice_versa():
         _ceiling_error(), mutating=True) is None
 
 
+def test_the_nearest_neighbour_is_not_the_family_either():
+    """`LOADING` is the other ANSWERED refusal, and it sits one step away.
+
+    Both are replies rather than outages, so a reloading instance must not be
+    told it "reached a memory limit" — the remediation (free memory, raise the
+    ceiling) would turn a knob that changes nothing. MEASURED on the pinned
+    redis (7.4.1): `BusyLoadingError` is NOT a `ResponseError` — it arrives as
+    `network:BusyLoadingError` under the CONNECTION family, which is why
+    `is_instance_unavailable` needs its order-critical early return for it. So
+    the two predicates partition it deliberately: an outage (per that family) and
+    not a ceiling refusal. Both halves are pinned here, because a future redis
+    that reparented it would break the partition silently.
+    """
+    loading = redis_exc.BusyLoadingError(
+        "LOADING Redis is loading the dataset in memory")
+    assert not isinstance(loading, redis_exc.ResponseError), (
+        "the partition below is pinned on the measured inheritance")
+    assert is_memory_ceiling_refusal(loading) is False
+    assert explain_memory_ceiling(loading) is None
+    assert is_instance_unavailable(loading) is True, (
+        "LOADING is the outage family's answered member (#9352)")
+
+
 # ── the note's content ──────────────────────────────────────────────────────
 def test_the_note_names_the_mechanism_and_refuses_the_data_loss_reading():
     text = explain_memory_ceiling(_ceiling_error())
