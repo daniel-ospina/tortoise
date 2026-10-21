@@ -129,10 +129,17 @@ WHAT THIS PINS
    `projection/edges.py`), because a same-module scan would leave those rows
    unasserted.
 8. `test_every_customer_callable_row_reaches_a_declared_door` — each
-   customer-callable row names a door that exists: ``SDK `<method>` `` must be
-   a public `TortoiseSDK` method, ``MCP `<tool>` `` a registered
-   `ToolDefinition`. That is what makes "customer-callable" a claim about the
-   product surface rather than an adjective.
+   customer-callable row names a door that exists **and REACHES that row's own
+   reader**: ``SDK `<method>` `` must be a public `TortoiseSDK` method,
+   ``MCP `<tool>` `` a registered `ToolDefinition`, ``REST `<VERB path>` `` a live
+   route — and then, past existence, the reader must be in the door's bounded
+   reference closure. That is what makes "customer-callable" a claim about the
+   product surface rather than an adjective. ⚠️ **Existence alone was measured
+   fail-open:** substituting a different REGISTERED tool on rows 4 and 21 left
+   every arm green, and the blast-radius door count is derived from those very
+   cells. The residual is named there — the closure is name-based (permissive:
+   it can miss a bad door, never invent reach) and `_DOOR_REACH_HOPS` is a
+   BOUND, 5 being the tightest that costs no false red on the seventeen rows.
 9. `test_the_extractor_document_agrees_on_the_count` — the sibling document
    states the SAME fact as §13, and "fact" is the NUMBER **and the
    ENUMERATION**: §13.8 said TWELVE and listed thirteen (the extra being a
@@ -211,6 +218,15 @@ WHAT THIS PINS
    `assert fragments`, and the carrier arm's `assert checked`). A predicate that
    silently stops recognising its candidates turns the arm green on an assertion
    it never made — the carrier arm was exactly that before its floor.
+21. `test_the_door_attribution_refuses_a_door_that_reaches_another_reader` —
+   (8)'s predicate must be able to REFUSE, so it is pointed at the LIVE
+   registered tools: a real tool that reads nothing
+   (`tortoise_suggest_entry_points`) must not be attributed to rows 4/21's
+   readers, while the true doors must attribute. Without this arm the gap
+   (8) closes could re-open as a predicate that answers True everywhere, and
+   (8) would then green every substituted door — falsifiability stated as an
+   ARM rather than as a comment, the same correction (16) records for the
+   fragment census that existed for three cycles and was never CALLED.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -2150,11 +2166,259 @@ def _rest_routes() -> set[str]:
     return routes
 
 
+# ── door → reader ATTRIBUTION ─────────────────────────────────────────────
+#
+# ⚠️ **An existence check is not an attribution, and that gap was measured.**
+# The arm below originally asserted only that each named door EXISTS — a
+# registered tool, a public `TortoiseSDK` method, a live route. Measured on the
+# shipped guard (head docs, mutation applied, all arms re-run, mutation
+# reverted), substituting row 21's `MCP `tortoise_supersede`` for
+# `MCP `tortoise_suggest_entry_points`` left **every arm green** — and likewise
+# for row 4. Both substituted doors pass the existence check, and neither reads
+# the edge (`tortoise_suggest_entry_points` reads no `aboutObject`; that is
+# provable from this file's own greenness, since a literal read would red
+# `test_no_read_site_lacks_a_row`). The blast-radius figure — *"reached through
+# TWENTY doors"* — is DERIVED from these cells, so an existence-only check let a
+# **false door** carry a **real count**: the half of the argument that survives
+# re-derivation would be the half nothing re-derived.
+#
+# The relation is a bounded REFERENCE CLOSURE over `tortoise/**/*.py`. From the
+# door's entry symbol it follows what a body actually REACHES — a call target, a
+# function passed as a VALUE (`_safe(_preview_supersede, …)`, which is how the
+# supersede dry run is reached and which a call-target-only graph misses), a
+# carrier constant, or an imported name with `from x import y as _y` resolved
+# back to `y` (how `sdk.topic_summarize` reaches its reader at all). The reader
+# must be in that set.
+#
+# ⚠️ **Declared residuals — each MEASURED here, not assumed:**
+#
+#   * **The relation is PERMISSIVE, so it can miss a bad door; it cannot invent
+#     reach.** Resolution is by name, so a call through a computed attribute
+#     (`getattr(obj, name)`) is invisible. That direction is chosen: a
+#     permissive relation false-REDS nothing, and this arm's job is to stop a
+#     *substituted* door, not to prove a call graph.
+#   * **A door that ENTERS the shared search path is attributed to the readers
+#     that path touches — measured, not merely possible.**
+#     `tortoise_suggest_entry_points` reaches row 2's reader in three hops
+#     (`tortoise_suggest_entry_points` → `sdk.TortoiseSDK.tortoise_fts_query` →
+#     `StateRanker.rerank` → `_fetch_point_signals`), so it is a TRUE door for that
+#     row and is deliberately not used as a negative probe. The arm therefore
+#     catches a door on a DIFFERENT surface path (the two measured bypasses
+#     below), and does NOT certify that a named door is the CANONICAL door — a
+#     substitution into the same shared lane would still pass. Stated because the
+#     alternative is a comment claiming more than the predicate proves.
+#   * **`_DOOR_REACH_HOPS` is a BOUND, and depth trades BOTH ways — measured:**
+#     at 2 hops the two substitutions red but NINE legitimate rows false-red; at
+#     3 hops two rows false-red; at 4 hops one does; at 5 every one of the
+#     seventeen customer-callable rows attributes and the two substitutions still
+#     red. 5 is the tightest bound that costs no false red, and it is named a
+#     BOUND because a door reaching its reader in six references would attribute
+#     only by way of a shorter parallel path.
+#   * **Falsifiability is a SEPARATE arm**
+#     (`test_the_door_attribution_refuses_a_door_that_reaches_another_reader`),
+#     not a comment here: it runs the live registered tools through this same
+#     predicate, so the gap cannot silently re-open as "latent".
+
+#: How many reference hops a door→reader attribution may take. See the residual
+#: note above: this is a BOUND, and 5 is the tightest one that costs no false red.
+_DOOR_REACH_HOPS = 5
+
+
+@functools.cache
+def _symbol_index() -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
+    """`(symbol name -> defining node ids, node id -> names its body mentions)`.
+
+    A node id is `module.py::Qualname`, the SAME spelling §13's table uses for a
+    reader, so an attribution compares like with like. Module- and class-level
+    CONSTANTS are indexed too: rows 28-29 name `_DUMP_EDGE_PAGE_QUERY` /
+    `_COUNT_ALL_EDGES_QUERY`, which are strings rather than functions, and a
+    function-only index would have reported those two rows as unreachable — a
+    false red produced by the instrument, not by the table.
+    """
+    defs: dict[str, set[str]] = {}
+    refs: dict[str, frozenset[str]] = {}
+
+    def mentions(subtree: ast.AST) -> frozenset[str]:
+        """What a body REACHES — calls and references, not every attribute name.
+
+        Tightened from an all-`Name`/all-`Attribute` sweep because that spelling
+        follows incidental mentions (`x.some_attr` in a comparison, a keyword of
+        an unrelated call) and so over-reaches by a hop or more. Call targets and
+        call ARGUMENTS stay, the latter because a function is routinely passed as
+        a value rather than called in place.
+        """
+        names: set[str] = set()
+
+        def reference(node: ast.AST | None) -> None:
+            if node is None:
+                return
+            for inner in ast.walk(node):
+                if isinstance(inner, ast.Name):
+                    names.add(inner.id)
+                elif isinstance(inner, ast.Attribute):
+                    names.add(inner.attr)
+
+        for inner in ast.walk(subtree):
+            if isinstance(inner, ast.Call):
+                func = inner.func
+                if isinstance(func, ast.Name):
+                    names.add(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.add(func.attr)
+                for argument in list(inner.args) + [kw.value for kw in inner.keywords]:
+                    reference(argument)
+            elif isinstance(inner, ast.ImportFrom):
+                # `from .m import reader as _r` REFERENCES `reader`.
+                names.update(alias.name for alias in inner.names)
+            elif isinstance(inner, ast.Import):
+                names.update(alias.name.split(".")[-1] for alias in inner.names)
+            elif isinstance(inner, (ast.Assign, ast.AnnAssign)):
+                reference(inner.value)
+        return frozenset(names)
+
+    def index(body, rel: str, prefix: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                qual = f"{prefix}{node.name}"
+                node_id = f"{rel}::{qual}"
+                defs.setdefault(node.name, set()).add(node_id)
+                refs[node_id] = mentions(node)
+                index(node.body, rel, f"{qual}.")
+            elif isinstance(node, ast.ClassDef):
+                defs.setdefault(node.name, set()).add(f"{rel}::{prefix}{node.name}")
+                index(node.body, rel, f"{prefix}{node.name}.")
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        node_id = f"{rel}::{prefix}{target.id}"
+                        defs.setdefault(target.id, set()).add(node_id)
+                        refs[node_id] = mentions(node.value)
+
+    for path in sorted(PKG.rglob("*.py")):
+        index(_parsed(str(path)).body, str(path.relative_to(PKG)), "")
+
+    assert defs, "the symbol index is empty — no functions were found under tortoise/"
+    return (
+        {name: frozenset(ids) for name, ids in defs.items()},
+        refs,
+    )
+
+
+@functools.cache
+def _route_handlers() -> dict[str, frozenset[str]]:
+    """`route path -> the handler functions decorated with it`, over the tree.
+
+    Scanned across EVERY module rather than just `hosted_api.py`: the backup
+    doors of rows 28-31 are served there today, and pinning the scan to one file
+    would turn a legitimate move into a false red.
+    """
+    handlers: dict[str, set[str]] = {}
+    for path in sorted(PKG.rglob("*.py")):
+        rel = str(path.relative_to(PKG))
+        for node in ast.walk(_parsed(str(path))):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call) or not decorator.args:
+                    continue
+                func = decorator.func
+                if not (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "app"
+                    and func.attr in {"get", "post", "put", "patch", "delete"}
+                ):
+                    continue
+                if isinstance(decorator.args[0], ast.Constant):
+                    handlers.setdefault(str(decorator.args[0].value), set()).add(
+                        f"{rel}::{node.name}"
+                    )
+    return {route: frozenset(ids) for route, ids in handlers.items()}
+
+
+@functools.cache
+def _door_entry_ids(door: str) -> frozenset[str]:
+    """The symbols a door STARTS from. Empty means the door cannot be resolved."""
+    kind, name = door.split(" ", 1)
+    if kind == "SDK":
+        return frozenset({f"sdk.py::TortoiseSDK.{name}"})
+    if kind == "REST":
+        return _route_handlers().get(name, frozenset())
+    # MCP: the entry point is the module-level handler in `mcp_server.py` named
+    # exactly as the tool (`def tortoise_supersede(...)`). ⚠️ The `sdk_method`
+    # binding a `ToolDefinition` declares is deliberately NOT added to the entry
+    # set: measured, it changes none of the MCP attributions (the handler's own
+    # closure already reaches the SDK method it forwards to), and it is not a
+    # substitute for the handler — only the handler carries the dry-run preview,
+    # so a binding-only index false-reds row 21.
+    handler = f"mcp_server.py::{name}"
+    return frozenset({handler}) if handler in _symbol_index()[1] else frozenset()
+
+
+def _door_reaches(door: str, reader: str) -> bool:
+    """Does `door` reach `reader` within `_DOOR_REACH_HOPS` references?"""
+    defs, refs = _symbol_index()
+    frontier = set(_door_entry_ids(door))
+    seen = set(frontier)
+    for _ in range(_DOOR_REACH_HOPS):
+        nxt: set[str] = set()
+        for node_id in frontier:
+            for name in refs.get(node_id, frozenset()):
+                nxt |= defs.get(name, frozenset()) - seen
+        if not nxt:
+            break
+        seen |= nxt
+        frontier = nxt
+    return reader in seen
+
+
+def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
+    """The attribution arm is only a CHECK if its predicate can REFUSE.
+
+    Runs the LIVE registered tools through the same `_door_reaches` the arm
+    above uses, so this is not a fixture that agrees with itself: swap the names
+    for real ones and a permissive-by-accident predicate (one that answers True
+    for everything) reds here instead of quietly greening every row above.
+
+    The two substitutions are the measured bypass from the attribution note: each
+    is a REGISTERED tool, so each passed the existence check, and each left all
+    arms green before attribution existed.
+
+    ⚠️ **The probes are deliberately limited to doors on a DIFFERENT surface
+    path.** `tortoise_suggest_entry_points` is NOT used as a probe against row
+    2's reader: measured, it genuinely reaches it in three hops
+    (`tortoise_suggest_entry_points` → `sdk.TortoiseSDK.tortoise_fts_query` →
+    `StateRanker.rerank` → `_fetch_point_signals`), so asserting it is refused
+    there would be asserting a code fact that is false.
+    """
+    # The true door reaches its own reader…
+    assert _door_reaches("MCP tortoise_supersede", "mcp_server.py::_preview_supersede")
+    assert _door_reaches("MCP tortoise_recall", "ranking.py::StateRanker._fetch_point_signals")
+    assert _door_reaches(
+        "REST /v1/organizations/{org_id}/export", "hosted_api.py::_export_graph_snapshot"
+    ), "the REST door does not resolve to its decorated handler at all"
+
+    # …and a door that exists but is on another surface path must not be
+    # attributed to a reader it does not reach.
+    for wrong in (
+        "mcp_server.py::_preview_supersede",
+        "sdk.py::TortoiseSDK.belief_timeline",
+    ):
+        assert not _door_reaches("MCP tortoise_suggest_entry_points", wrong), (
+            f"MCP `tortoise_suggest_entry_points` is attributed to `{wrong}`, which it "
+            "does not reach — the door→reader predicate answers True too freely, so "
+            "`test_every_customer_callable_row_reaches_a_declared_door` would pass a "
+            "substituted door."
+        )
+
+
 def test_every_customer_callable_row_reaches_a_declared_door():
     sdk_methods = _public_sdk_methods()
     tools = _registered_tools()
     routes = _rest_routes()
     broken: list[str] = []
+    attributed = 0
 
     for row in _rows():
         if _reach(row) != "customer-callable":
@@ -2180,22 +2444,43 @@ def test_every_customer_callable_row_reaches_a_declared_door():
                     f"{label} — names no door (SDK/MCP/REST backticked name)"
                 )
             continue
+        reader = f"{row['module']}::{row['symbol']}"
         for door in sorted(doors):
             kind, name = door.split(" ", 1)
             if kind == "SDK" and name not in sdk_methods:
                 broken.append(
                     f"{label} — SDK `{name}` is not a public TortoiseSDK method"
                 )
-            elif kind == "MCP" and name not in tools:
+                continue
+            if kind == "MCP" and name not in tools:
                 broken.append(f"{label} — MCP `{name}` is not a registered tool")
-            elif kind == "REST" and name not in routes:
+                continue
+            if kind == "REST" and name not in routes:
                 broken.append(
                     f"{label} — REST `{name}` is not a route in hosted_api.py"
                 )
+                continue
+            # ⚠️ EXISTENCE IS NOT ATTRIBUTION — see the note above this section.
+            # A door that exists but reaches a DIFFERENT reader is not this row's
+            # door, and the blast-radius count would be counted from it.
+            attributed += 1
+            if not _door_reaches(door, reader):
+                broken.append(
+                    f"{label} — {door} exists but reaches nothing within "
+                    f"{_DOOR_REACH_HOPS} references that is `{reader}` — the door is "
+                    "not a door to THIS reader, so the blast-radius count would be "
+                    "counted from the wrong tool"
+                )
 
+    # A predicate that silently stops resolving its entries turns this arm green
+    # on an assertion it never made — so the floor is asserted, not assumed.
+    assert attributed >= 20, (
+        f"only {attributed} door attributions were attempted — the door parser or "
+        "its resolver has stopped recognising the reach cells"
+    )
     assert not broken, (
         "§13 classes these rows customer-callable without naming a door that "
-        "exists:\n  " + "\n  ".join(broken)
+        "exists AND reaches the row's own reader:\n  " + "\n  ".join(broken)
     )
 
 
