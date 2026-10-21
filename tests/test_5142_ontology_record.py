@@ -354,10 +354,24 @@ def _document_writers_in_source(text: str, filename: str) -> dict[str, str]:
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
+        # #9396 review P2: a DOCSTRING is an `ast.Constant` string too, so
+        # `ast.walk` alone let prose satisfy a caller's assertion — a writer
+        # whose MERGE lost the clause but whose docstring still quoted it went
+        # green, which is the false PASS this scanner exists to prevent. Only
+        # the executed string literals may speak for the query.
+        docstring_node = (
+            node.body[0].value
+            if node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+            else None
+        )
         parts: list[str] = [
             child.value
             for child in ast.walk(node)
-            if isinstance(child, ast.Constant) and isinstance(child.value, str)
+            if child is not docstring_node
+            and isinstance(child, ast.Constant) and isinstance(child.value, str)
         ]
         parts += [
             module_consts[child.id]
@@ -479,4 +493,35 @@ def _synthetic_writer():
     )
     assert "coalesce(s.sourceKind, 'document')" in writers["synthetic.py::_synthetic_writer"], (
         "the resolved module-level clause must be visible to the stamp check"
+    )
+
+
+def test_writer_scanner_ignores_a_docstring_that_quotes_the_clause() -> None:
+    """PROSE is not the query: a docstring must not satisfy the stamp assertion.
+
+    #9396 review P2. A docstring is an `ast.Constant` string, so an
+    `ast.walk`-only scanner returned it as if it were a literal in the MERGE —
+    a writer whose query had LOST `coalesce(s.ingestedAt, …)` but whose
+    docstring still quoted it passed `test_every_document_source_writer_stamps_
+    ingested_at`, which is the false PASS that assertion exists to prevent. The
+    assertion is now falsifiable in the one way that matters: with the clause
+    only in prose, the scanner must not report it.
+    """
+    text = '''\
+def _docstring_only_writer():
+    """Documents its clause: s.ingestedAt=coalesce(s.ingestedAt, $iat)."""
+    return (
+        "MERGE (s:Source {url:$id}) "
+        "SET s.documentKind='transcript'"
+    )
+'''
+    writers = _document_writers_in_source(text, "synthetic.py")
+    derived = writers.get("synthetic.py::_docstring_only_writer", "")
+    assert "documentKind" in derived, (
+        "the writer must still be DERIVED (its executed literals name the "
+        "document :Source) — this test is about what it may be credited with"
+    )
+    assert "coalesce(s.ingestedAt" not in derived, (
+        "a docstring quoting the clause was counted as the query — the stamp "
+        "assertion would pass on a writer that no longer stamps the field"
     )

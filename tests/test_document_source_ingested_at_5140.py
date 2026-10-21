@@ -90,9 +90,11 @@ def test_event_document_branch_fills_a_pre_fix_null_and_never_clobbers():
     """Input: a document `:Source` that already exists.
 
     FAILS IF the match arm leaves a pre-existing NULL `ingestedAt` NULL (the
-    repair half #5082 added for `sourceKind`), or overwrites an
-    already-recorded instant (the field means "when Tortoise FIRST saw this
-    source" — #398's never-overwrite contract).
+    repair half #5082 added for `sourceKind`). The `doc-5140-stamped` assertion
+    is NOT a falsifier of the pre-fix source — that writer never touched the
+    field, so the 2020 value survived by ABSENCE, not by the new `coalesce`; it
+    guards against a future re-stamp (the field means "when Tortoise FIRST saw
+    this source" — #398's never-overwrite contract).
     """
     proj = _proj()
     try:
@@ -108,6 +110,29 @@ def test_event_document_branch_fills_a_pre_fix_null_and_never_clobbers():
         proj.apply(_event("doc-5140-stamped"))
         assert _ingested_at(proj, "doc-5140-legacy") == RECORD_TS
         assert _ingested_at(proj, "doc-5140-stamped") == "2020-05-06T07:08:09+00:00"
+    finally:
+        proj.close()
+
+
+def test_a_corrupt_record_ts_falls_back_instead_of_aborting_the_fold():
+    """Input: a journal line whose `ts` is not a driver-writable instant.
+
+    FAILS IF the fold hands the RAW record value to the driver (#5048): the new
+    `$iat` rides as a Cypher parameter, so an ungated value raises
+    `ResponseError: Property values can only be of primitive types` — from
+    inside a `rebuild_all` replay that has ALREADY wiped the graph, which is
+    why `_usable_instant` exists and why this slot must not be the exception.
+    This is the mutation the #9396 review's P1 named: restore
+    `record_ts or _now_iso()` and this test errors instead of stamping.
+    """
+    proj = _proj()
+    try:
+        proj.apply(_event("doc-5140-corrupt", ts={"evil": 1}))
+        stamped = _ingested_at(proj, "doc-5140-corrupt")
+        assert isinstance(stamped, str), (
+            "a corrupt recorded `ts` must fall back to the write clock, and the "
+            f"document :Source must still be stamped (§4.6 REQUIRED); got {stamped!r}"
+        )
     finally:
         proj.close()
 

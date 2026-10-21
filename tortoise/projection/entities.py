@@ -4677,6 +4677,16 @@ class _EntityHandlers:
         value the document `:Source` below is stamped with (#5140), so live and
         replay agree on when Tortoise first saw that source — §4.6's
         `ingestedAt`, which the record — not the fold — is the authority for.
+
+        That agreement holds for the door that STAMPS ``ts`` on the record it
+        folds (`EventAPI._emit`), not for every door: `TortoiseSDK.
+        _apply_and_journal` appends through `_emit_event`, which mints ``ts`` on
+        a COPY of the record, then folds the caller's own dict — so a caller
+        setting ``objectType='Document'`` through THAT door stamps the write
+        clock live and the envelope ``ts`` on replay. Latent rather than live
+        today (no producer sets ``objectType`` there), and the same residue
+        `_journal_record_payload` closes for ``createdAt``; stamping ``ts`` in
+        that door the same way is the fix, not a change of this contract.
         """
         # #4524: the ON MATCH embedding write below can be a SILENT no-op on
         # the embedded engine — a ``vecf32`` overwrite of an existing vector is
@@ -4754,9 +4764,13 @@ class _EntityHandlers:
             # is repaired by the next fold — while an instant a writer already
             # recorded is never overwritten (#398's never-overwrite contract;
             # the field means when Tortoise FIRST saw this source). The value is
-            # the record's own `ts` when it carries one — deterministic on
-            # replay — falling back to the write clock only for a synthetic
-            # event applied without one (legacy lines, test fixtures).
+            # the record's own `ts` when it carries a USABLE one — deterministic
+            # on replay — falling back to the write clock only for a synthetic
+            # event applied without one (legacy lines, test fixtures). "Usable"
+            # is `_usable_instant`, not truthiness: this value rides as a Cypher
+            # parameter (#5048), so a corrupt line's `ts={"evil": 1}` would raise
+            # `ResponseError: Property values can only be of primitive types`
+            # from inside a replay that has ALREADY wiped the graph.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
@@ -4765,7 +4779,8 @@ class _EntityHandlers:
                 "              s.ingestedAt=$iat "
                 "ON MATCH SET s.sourceKind=coalesce(s.sourceKind, 'document'), "
                 "             s.ingestedAt=coalesce(s.ingestedAt, $iat)",
-                params={"id": obj, "iat": record_ts or _now_iso()},
+                params={"id": obj,
+                        "iat": record_ts if _usable_instant(record_ts) else _now_iso()},
             )
             self.g.query(
                 "MATCH (s:Source {url:$id}), (e:Event {eventId:$eid}) "

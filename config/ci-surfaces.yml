@@ -1567,14 +1567,18 @@ surfaces:
   - test_5142_ontology_record.py
   # #5140: the two document `:Source` writers that wrote no `ingestedAt`
   # (`entities.py::_event_plain_merge`'s `objectType='Document'` branch and
-  # `hosted_api.py::_execute_commit_writes`) — behavioural half, listed here
-  # because `tortoise/projection/` falls through to `core` and a
-  # `hosted_api.py` edit is an exact `api` match; both surfaces can break the
-  # writers this file pins. It builds its own throwaway embedded graph (no
-  # docker lane) so it is ROUTED to the URI-unset carve-out job below and
-  # mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS`. Registered at all
-  # because an unlisted file is a `manifest-integrity` red (#1262) AND runs in
-  # no leg: the #9396 review's blocking finding.
+  # `hosted_api.py::_execute_commit_writes`) — behavioural half. This row is
+  # the `--integrity` CLASSIFICATION (`classify_test_file` → `core`, which is
+  # also what puts the file in `carve_out_by_surface['core']`); it does NOT
+  # decide the leg. `select()` strips carve-out members from `test_files`
+  # (`files -= carve`) on every non-full selection, so `carve_out_run` is what
+  # RUNS the file (entry in `carve_out:` below) — the same correction the
+  # in-file #9196 review P2 records at the `api` row. It becomes load-bearing
+  # only if the file LEAVES `carve_out:`.
+  # It builds its own throwaway embedded graph (no docker lane) and is mirrored
+  # in `tests/_embedded.TEST_NO_REDIRECT_STEMS`. Registered at all because an
+  # unlisted file is a `manifest-integrity` red (#1262) AND runs in no leg: the
+  # #9396 review's blocking finding.
   - test_document_source_ingested_at_5140.py
   - test_8702_identity_skip_accounting.py
   # #8738 review P2: the doc-affiliation frontmatter on the three changelog
