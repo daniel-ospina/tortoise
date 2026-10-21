@@ -805,6 +805,14 @@ _CHANGE_NARRATION = re.compile(
     r"|(?:CORRECTED|AMENDED)\b[^0-9\n]{0,12}20[0-9]{2}[-/]"
     r"|\bDraft [0-9]\b"
     r"|rewritten twice"
+    # A numbered pass / re-derivation: the narration of how many times the
+    # passage was re-derived. `STORAGE-ARCHITECTURE.md` §13 carried a FIVE-pass
+    # log ("a second re-derivation then found three more … a FIFTH pass found
+    # SIX more") while this guard reported the design documents clean, because
+    # no arm described the shape — the same false PASS the dated-stamp arm above
+    # closed for `CORRECTED (20xx-…)`. The dated history belongs in the
+    # `*-CHANGELOG.md`; the design document states the rule it settled on.
+    r"|\b(?:a|the) (?:second|third|fourth|fifth|sixth|seventh) (?:re-?derivation|pass|recount)\b"
     # A version the passage says it has been true since — change history, not the
     # rule it settled on. Measured across the three design documents before
     # adding: 0 hits at HEAD.
@@ -950,6 +958,12 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "**CORRECTED AGAIN 2026-10-20, second pass (`#7948`): 23 sites.**",
         "The row was amended on 2026-10-19, after the recount.",
         "**Implementation status.** Both halves are now implemented.",
+        # The numbered-pass arm, verbatim from the five-pass log #7948 carried in
+        # `STORAGE-ARCHITECTURE.md` §13 — the shape no arm described, so the
+        # design documents were reported clean while the history sat in §13.
+        "⚠️ **A second re-derivation then found three more readers INSIDE "
+        "modules the table already named.**",
+        "⚠️ **And a FIFTH pass found SIX more, five of one shape.**",
         "**\u26a0\ufe0f Draft 1** claimed the index is RAM-mandatory.",
         "\u00a716.2's rule is now also a billing rule (see `#5024` CLOSED).",
         # The change-history date form, on the §8 direction note #8738 moved (the
@@ -978,6 +992,9 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # A near-miss for the version-date arm: a version NAMED, not asserted as
         # a period the passage has held true since.
         "Model version v3.15 retires the `:Document` label.",
+        # A near-miss for the numbered-pass arm: an ordinal that counts WALKS,
+        # not re-derivations of the passage.
+        "A second walk added beside an excluded one cannot inherit its exclusion.",
         # A near-miss for the parenthesised-date arm: `AMENDED` closed by a
         # paren and followed by a dash. The state word is design prose here
         # (`STORAGE-ARCHITECTURE.md` §14.1 O2), not a dated correction stamp.

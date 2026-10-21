@@ -451,7 +451,10 @@ _EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
         "`:Object` (`STRUCTURAL_REL_LABELS`)",
     ),
     "projection/entities.py::_EntityHandlers._materialize_connector_source": (
-        ("size([(old)-[x]-(y) | x]) AS deg",),
+        (
+            "size([(old)-[x]-(y) | x]) AS deg",
+            "MATCH (old:Source)-[r:references]->(e:Event {eventId: $eid}) ",
+        ),
         "a pattern-comprehension degree over a `:Source` re-point — no "
         "`aboutObject` starts or ends at a Source",
     ),
@@ -461,9 +464,12 @@ _EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
         "Point",
     ),
     "sdk.py::TortoiseSDK._connected_pairs": (
-        ("MATCH (a:Point)-[r]-(b:Point) ",),
-        "both endpoints are pinned to `:Point`, and `aboutObject`'s target is "
-        "`:Object`",
+        (
+            "MATCH (op:Point {is_operator:true})-[r1]->(a:Point), ",
+            "MATCH (a:Point)-[r]-(b:Point) ",
+        ),
+        "BOTH walks pin every endpoint to `:Point` — the shared-operator pair and "
+        "the direct-edge pair — and `aboutObject`'s target is `:Object`",
     ),
     "session_source_migration.py::_OUT_TYPES": (
         ("MATCH (old:Source {url:$u})-[r]->(t) ",),
@@ -474,11 +480,17 @@ _EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
         "the walk is INCOMING to a `:Source`, which no `aboutObject` targets",
     ),
     "session_source_migration.py::_DEGREE": (
-        ("size([(old)-[x]-(y) | x]) AS deg",),
+        (
+            "size([(old)-[x]-(y) | x]) AS deg",
+            "MATCH (old:Source {url:$u}) ",
+        ),
         "a pattern-comprehension degree over a `:Source`",
     ),
     "session_source_migration.py::_delete_if_orphan": (
-        ("size([(old)-[x]-(y) | x]) AS deg",),
+        (
+            "size([(old)-[x]-(y) | x]) AS deg",
+            "MATCH (old:Source {url:$u}) ",
+        ),
         "a pattern-comprehension degree over a `:Source`",
     ),
 }
@@ -664,8 +676,8 @@ def _reads_literally(value: str) -> bool:
     over-promised. Measured on the pre-fix rule: a new method returning only
     the FRAGMENT `"(n)-[:aboutObject]->(o)"` — the shape
     `SubgraphExpander._neighbors` already builds — kept every arm green (all
-    thirteen of them at `c0c67fa34`, where that mutation was run; the file
-    defines seventeen at this head, all of them green on the shipped rule).
+    thirteen of them at `c0c67fa34`, where that mutation was run; every arm in
+    the file is green on the shipped rule, seventeen of them at `73e3c68b4`).
     """
     for match in _EDGE_PATTERN.finditer(value):
         clauses = _CLAUSE.findall(value[: match.start()])
@@ -698,9 +710,8 @@ def _about_family_dominates(elements: tuple[str, ...]) -> bool:
     the candidate set, and it WOULD red the first §13 row whose span mentioned
     one, on a constant that carries no edge at all. ⚠️ Measured: no row's span
     mentions any of the three today, so the red is latent, not observed —
-    reverting to the prefix rule keeps the suite at 8 passed. The narrowing is
-    therefore a correctness fix for the candidate set, not a repair of a
-    currently red test.
+    reverting to the prefix rule keeps the suite green, so the narrowing is a
+    correctness fix for the candidate set, not a repair of a currently red test.
 
     ⚠️ The threshold is measured against `aboutObject` REMOVED, which is the
     state the caller must still detect: dropping it leaves 5/6 of
@@ -844,11 +855,19 @@ def _literal_read_sites() -> dict[str, list[int]]:
 
 
 #: A Cypher relationship bracket with NO rel-type constraint: `[r]`,
-#: `[r*1..2]`, `[x]`. A bracket carrying a `:` is either a TYPED read or a
-#: run-time type name — the carrier/computed-name half, which `_NON_LITERAL`
-#: already decides — so the colon is exactly the line between the two halves of
-#: this census.
+#: `[r*1..2]`, `[x]`, `[r {idx:0}]`. A bracket carrying a `:` outside a
+#: property MAP is either a TYPED read or a run-time type name — the
+#: carrier/computed-name half, which `_NON_LITERAL` already decides — so the
+#: colon is exactly the line between the two halves of this census. ⚠️ **The
+#: property map has to come out first**: Cypher allows `-[r {idx:0}]->` on an
+#: UNTYPED relationship, and the colon there is a key separator, so a bare
+#: `":" in bracket` test made an unconstrained all-edge walk invisible to the
+#: arm whose whole job is to derive the untyped class.
 _UNTYPED_BRACKET = re.compile(r"(?:<-|-)\s*\[([^\]\n]*)\]\s*(?:-|->)")
+
+#: The property map inside a relationship bracket — removed before the colon
+#: test, because `{idx:0}` is not a type.
+_PROPERTY_MAP = re.compile(r"\{[^}]*\}")
 
 #: The stand-in for a run-time hole in a reconstructed query string. Marks where
 #: a value is computed (a rel type, a label, an id) WITHOUT destroying the
@@ -908,14 +927,35 @@ def _query_text(node: ast.AST, docstrings: set[int]) -> tuple[str, int] | None:
     return None
 
 
-def _untyped_read_sites() -> dict[str, list[int]]:
-    """Census: module → lines of every READ-clause walk with NO rel-type constraint.
+def _untyped_read_brackets(query: str) -> list[int]:
+    """Start offsets of every UNTYPED relationship bracket in a READ clause.
+
+    One rule, used by the census AND by the fixture that pins it: a bracket is
+    untyped when it carries no type after its property map is removed, and it is
+    a READ when the last Cypher clause before it is `MATCH`/`OPTIONAL MATCH`
+    (`MERGE … MATCH` is a write, `MATCH … MERGE` is a write).
+    """
+    positions: list[int] = []
+    for match in _UNTYPED_BRACKET.finditer(query):
+        if ":" in _PROPERTY_MAP.sub("", match.group(1)):
+            continue  # a typed read, or a run-time type name
+        clauses = _CLAUSE.findall(query[: match.start()])
+        if not clauses:
+            continue
+        if " ".join(clauses[-1].upper().split()) not in _READ_CLAUSES:
+            continue
+        positions.append(match.start())
+    return positions
+
+
+def _untyped_read_sites() -> dict[str, list[tuple[int, str]]]:
+    """Census: module → `(line, query text)` of every untyped READ-clause walk.
 
     `_literal_read_sites` finds the reader that SPELLS the edge. This one finds
     the reader that CANNOT: a relationship bracket carrying no type at all
-    (`[r]`, `[r*1..2]`, `[x]`), in a `MATCH`/`OPTIONAL MATCH`. Such a walk
-    returns `aboutObject` edges as data and no `grep` for the edge name will
-    ever see it.
+    (`[r]`, `[r*1..2]`, `[x]`, `[r {idx:0}]`), in a `MATCH`/`OPTIONAL MATCH`.
+    Such a walk returns `aboutObject` edges as data and no `grep` for the edge
+    name will ever see it.
 
     ⚠️ **This arm is the point of the whole file, applied to the LAST class that
     was still hand-maintained.** The literal census plus `_NON_LITERAL` made
@@ -932,9 +972,16 @@ def _untyped_read_sites() -> dict[str, list[int]]:
     Membership is decided the same way as the literal census (by ENCLOSING
     SYMBOL, so a new walk added beside a row reds), and the sites that CANNOT
     observe the edge are carried by `_EXCLUDED_UNTYPED` with the code fact that
-    earns the exclusion. Nothing is out of the class by silence.
+    earns the exclusion.
+
+    ⚠️ **The query TEXT travels with each site, not just its line**, because an
+    exclusion is a claim about a WALK, not about a symbol: without the text, a
+    second unconstrained walk added inside an excluded symbol is absorbed by the
+    symbol's exclusion — the one direction where symbol granularity is backwards
+    (a row says "this symbol reads the edge"; an exclusion says "this walk cannot
+    reach it").
     """
-    found: dict[str, list[int]] = {}
+    found: dict[str, list[tuple[int, str]]] = {}
     for path in sorted(PKG.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         if "MATCH" not in text:
@@ -948,17 +995,11 @@ def _untyped_read_sites() -> dict[str, list[int]]:
             if rebuilt is None:
                 continue
             value, lineno = rebuilt
-            for match in _UNTYPED_BRACKET.finditer(value):
-                if ":" in match.group(1):
-                    continue  # a typed read, or a run-time type name
-                clauses = _CLAUSE.findall(value[: match.start()])
-                if not clauses:
-                    continue
-                if " ".join(clauses[-1].upper().split()) not in _READ_CLAUSES:
-                    continue
-                lines = found.setdefault(str(path.relative_to(PKG)), [])
-                if lineno not in lines:
-                    lines.append(lineno)
+            if not _untyped_read_brackets(value):
+                continue
+            sites = found.setdefault(str(path.relative_to(PKG)), [])
+            if all(lineno != line for line, _ in sites):
+                sites.append((lineno, value))
     return found
 
 
@@ -1208,13 +1249,41 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
     there were 33, and the six it missed included `POST /v1/backups`.
 
     So the enumeration is now derived from the TREE, the same way the literal
-    census is: every relationship bracket with no `:` at all, in a READ clause,
+    census is: every relationship bracket with no type at all, in a READ clause,
     keyed on its enclosing `module.py::symbol`. Each site must then either own a
     §13 row or appear in `_EXCLUDED_UNTYPED` **with the code fact that earns the
-    exclusion asserted in that symbol's span** — so an exclusion cannot be a
-    claim, and it cannot silently stop being true: drop the `:Point` constraint
-    or the `type(r) IN [...]` filter and the site reds here as an unowned walk.
+    exclusion present in that site's OWN query text** — so an exclusion cannot be
+    a claim, it cannot silently stop being true, and it cannot swallow a SECOND,
+    unconstrained walk added beside the one it excuses.
     """
+    # The bracket rule itself, before the census uses it: an UNTYPED walk is one
+    # whose bracket carries no type, and a property map is not a type.
+    must_match = (
+        "MATCH (n)-[r]->(m)",
+        "MATCH (n)-[r*1..2]->(m)",
+        "MATCH (n)-[r {idx:0}]->(m)",
+    )
+    must_not_match = (
+        "MATCH (n)-[r:aboutObject]->(m)",
+        "MATCH (n)-[r:{rel}]->(m)",
+        "MERGE (n)-[r]->(m)",
+    )
+
+    def _brackets(query: str) -> list[int]:
+        return _untyped_read_brackets(query)
+
+    for query in must_match:
+        assert _brackets(query), (
+            f"this census is blind to {query!r} — a bracket with no rel type is "
+            "an ALL-EDGE walk, and a `{{…}}` property map must not read as a type."
+        )
+    for query in must_not_match:
+        assert not _brackets(query), (
+            f"this census reads {query!r} as untyped — a bracket that carries a "
+            "type (`[r:aboutObject]`, `[r:{rel}]`) is the computed-name half, and "
+            "a MERGE is a write."
+        )
+
     named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
     census = _untyped_read_sites()
     assert census, (
@@ -1225,16 +1294,29 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
     )
 
     unowned: list[str] = []
-    for module, lines in sorted(census.items()):
+    for module, sites in sorted(census.items()):
         tree = _module_tree(_module_path(module))
         symbols = _row_symbols(tree)
-        for line in lines:
+        for line, query in sites:
             candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
             keys = [f"{module}::{name}" for name in candidates]
-            if any(key in named or key in _EXCLUDED_UNTYPED for key in keys):
+            if any(key in named for key in keys):
+                continue
+            excluded = [key for key in keys if key in _EXCLUDED_UNTYPED]
+            if excluded and any(
+                fact in query
+                for key in excluded
+                for fact in _EXCLUDED_UNTYPED[key][0]
+            ):
                 continue
             unowned.append(
                 f"{module}:{line}  (inside {', '.join(candidates) or 'module level'})"
+                + (
+                    "  — its symbol is excluded, but THIS walk carries none of "
+                    "the facts that exclusion rests on"
+                    if excluded
+                    else ""
+                )
             )
     assert not unowned, (
         "these walks read EVERY relationship type (so they read `aboutObject`) "
@@ -1242,7 +1324,7 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
         "exclusion:\n  " + "\n  ".join(unowned) + "\n§13's `the class is "
         "enumerated, not excluded` is only true if every such walk is one or the "
         "other. Add the row, or add an `_EXCLUDED_UNTYPED` entry carrying the "
-        "code fact that puts the edge out of its result set."
+        "code fact that puts the edge out of this walk's result set."
     )
 
 
