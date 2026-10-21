@@ -23,7 +23,7 @@ created: 2026-08-08
 | Status | **draft-for-G-gate** |
 | Effective date | `[effective date to be set to the actual deploy date at T8]` (G-gate ① LOCKED) |
 | Controller | Daniel Ospina, individual operating as "Premise Labs" (d/b/a) — natural person, NOT a registered entity (D4 LOCKED) |
-| Jurisdiction of residence | Mexico — owner clarification 2026-08-08 (Mexico-based, not incorporated; Delaware governing law kept); reissuable via versioned procedure (§15) if it changes |
+| Jurisdiction of residence | **United Kingdom** — owner clarification 2026-10-21 (`i have legal residence in the UK`), superseding the 2026-08-08 Mexico premise. Reissued through the versioned procedure (§15), which is the record of the versions — the change this header anticipated. The Delaware governing-law note in the ToS/DPA is a SEPARATE recorded decision and is NOT touched by it (#9486) |
 
 ### Step 5 — delete-account capability check (build-time, G-gate ⑧)
 
@@ -36,13 +36,31 @@ created: 2026-08-08
 
 **CHOSEN BRANCH: SCOPED CLAIM** (matches the plan's expected outcome). The policy below does **not** promise an in-product delete button. Primary erasure path = **"request deletion via GitHub issues"** + Art. 12(3) one-month commitment + 2-month extension-with-notice + Art. 12(6) identity verification + redaction guidance. A product follow-up for the self-service delete feature is filed per scope §6.2 #5 (Supabase Auth admin `deleteUser` + dashboard account UI). If the capability lands before deploy, re-run this check and switch §16 to the in-product path (record evidence in this header).
 
-### LFPDPPP note (RESOLVED 2026-08-08 — owner clarification)
+### LFPDPPP note (SUPERSEDED 2026-10-21 — the premise was false)
 
-The operator is Mexico-based (not incorporated; Delaware governing law kept). LFPDPPP therefore APPLIES to personal data of individuals in Mexico: §1 states that LFPDPPP applies, ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>, and a standalone Aviso de Privacidad in Spanish is published at /aviso-privacidad, linked from §1 (issue #658 deliverable).
+The 2026-08-08 clarification recorded the operator as **Mexico-based**, and LFPDPPP was applied on that
+basis: §1 asserted it, ARCO rights were routed to <hello@premiselabs.co>, and a standalone Aviso de
+Privacidad in Spanish was published at `/aviso-privacidad` (#658).
+
+**The owner corrected the premise on 2026-10-21: legal residence is the United Kingdom.** The controller
+is therefore **UK-established**, and:
+
+- §1 states **UK GDPR + the Data Protection Act 2018** and the **ICO** complaint route, and carries a
+  **Mexico** paragraph that says the controller is not established there and points Mexican data subjects
+  at the ordinary request path — deliberately NOT an absolute "the LFPDPPP does not apply", because the
+  2025 LFPDPPP also reaches foreign controllers by other limbs (means/equipment in Mexican territory),
+  which non-establishment alone does not dispose of (recorded on #9486);
+- §12 names the **UK International Data Transfer Agreement / UK Addendum** as the instrument for
+  UK-GDPR transfers;
+- the **Aviso de Privacidad is RETIRED**: the file is deleted and `/aviso-privacidad` 301s to `/privacy`,
+  which is the privacy notice. Nothing in the legal surface links it any more.
+
+The Delaware governing-law convention (a ToS/DPA choice, not a residence fact) is untouched: it is a
+recorded decision whose reopen is tracked on #9486.
 
 ### Outline coverage (16 areas per plan T2 Step 1 → sections)
 
-① controller identity/contact + Art. 27 → §1 · ② data categories + expectation line → §2 · ③ analytics/cookies → §3 · ④ legal bases + purposes + ePrivacy → §4 · ⑤ CCPA/CPRA + Meta sharing/joint-controller + Shine the Light → §5 · ⑥ retention → §6 · ⑦ security → §7 · ⑧ user rights → §8 · ⑨ DPA → §9 · ⑩ processors → §10 · ⑪ no-AI-training → §11 · ⑫ international transfers → §12 · ⑬ no-intentional-sensitive-PII → §13 · ⑭ PostHog residency (folded into transfers) → §12 · ⑮ version/effective date + revision history → §15 · ⑯ user rights/erasure → §16.
+① controller identity/contact + Art. 27 → §1 · ② data categories + expectation line → §2 · ③ analytics/cookies → §3 · ④ legal bases + purposes + PECR/ePrivacy → §4 · ⑤ CCPA/CPRA + Meta sharing/joint-controller + Shine the Light → §5 · ⑥ retention → §6 · ⑦ security → §7 · ⑧ user rights → §8 · ⑨ DPA → §9 · ⑩ processors → §10 · ⑪ no-AI-training → §11 · ⑫ international transfers → §12 · ⑬ no-intentional-sensitive-PII → §13 · ⑭ PostHog residency (folded into transfers) → §12 · ⑮ version/effective date + revision history → §15 · ⑯ user rights/erasure → §16.
 
 ### Canonical-sentence inventory (verbatim, count = 12)
 
@@ -51,7 +69,7 @@ The operator is Mexico-based (not incorporated; Delaware governing law kept). LF
 3. sharing pair — "we share limited data with advertising/analytics providers as disclosed in this policy." (§5) — the **only** present-tense guard-regex match in the policy body by design (pinned expected match for the T7 guard)
 4. minimal-PII — "we do not intentionally collect sensitive personal information" (§13)
 5. eligibility — "you must be at least 18 years old" (§2)
-6. Art. 27 — "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here." (§1)
+6. Art. 27 — "We are not currently established in the EU/EEA. If we become subject to EU GDPR Art. 27, we will designate and disclose an EU representative here." (§1 — qualified to the EU GDPR, because the policy defines "the GDPR" as the UK GDPR; UK GDPR Art. 27 would require a UK representative, and this controller is established in the UK)
 7. consent banner — "you can give or withdraw consent at any time via the consent banner" (§3, §4)
 8. deployed PostHog — "PostHog is a data processor; data is stored in the United States" (§3, §12) — the former repo-state sentence ("no analytics tools are currently deployed") is REMOVED: the tree now ships consent.js + the PostHog loader (#658). GA4 is ALSO deployed — delivered via the Google Tag Manager container (GTM-WQR34GSC, owner decision #736), consent-gated at the GTM load.
 9. purposes (passive) — "your email address and account information are used to deliver the service, respond to requests, and manage billing; usage data is used to improve the product" (§4)
@@ -80,7 +98,7 @@ The operator is Mexico-based (not incorporated; Delaware governing law kept). LF
 # Privacy Policy
 
 **Effective date:** [effective date to be set to the actual deploy date at T8]
-**Version:** 1.0
+**Version:** 1.3
 
 ## Scope of this policy
 
@@ -98,13 +116,17 @@ This policy is written in plain English. It describes current practices truthful
 
 Premise Labs is **not a registered legal entity**. The data controller is the natural person named above, acting in their personal capacity.
 
-**Jurisdiction of residence:** Mexico.
+**Jurisdiction of residence:** United Kingdom.
 
 **Contact for privacy matters:** email <hello@premiselabs.co>. This is the controller's designated contact channel for all privacy inquiries and requests.
 
-**EU/EEA representative (GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to GDPR Art. 27, we will designate and disclose an EU representative here."
+**EU/EEA representative (EU GDPR Art. 27):** "We are not currently established in the EU/EEA. If we become subject to EU GDPR Art. 27, we will designate and disclose an EU representative here."
 
-**LFPDPPP (Mexico):** The Mexican Federal Law on the Protection of Personal Data Held by Private Parties (LFPDPPP) applies to personal data of individuals in Mexico. ARCO rights (Access, Rectification, Cancellation, Opposition) are exercised via email <hello@premiselabs.co>. A standalone privacy notice (Aviso de Privacidad) in Spanish is available at [Aviso de Privacidad (Español)](https://tortoise.premiselabs.co/aviso-privacidad).
+**UK GDPR and the Data Protection Act 2018:** the controller carries on the business from the United Kingdom, so it is established here, and the UK GDPR and the Data Protection Act 2018 apply to the processing described in this policy. References to "the GDPR" below mean the UK GDPR and, where relevant, the EU GDPR; the EU GDPR articles cited throughout this policy are numbered identically.
+
+**Transfers and complaints (UK):** the GDPR rights in §8 and the response commitment in §16 apply here as UK GDPR provisions, and in §12 the UK's International Data Transfer Agreement and the UK Addendum stand in for the SCCs — the UK Extension to the EU–US Data Privacy Framework also applies where a recipient participates. You may lodge a complaint with the UK supervisory authority, the Information Commissioner's Office (ICO), at [ico.org.uk/make-a-complaint](https://ico.org.uk/make-a-complaint/), or, where one exists, with the supervisory authority of your country of residence.
+
+**Mexico:** the controller is not established in Mexico. This policy describes the processing for all users, including users in Mexico, and does not limit any right you may have under Mexican law. If you are in Mexico and want to exercise access, rectification, cancellation or objection rights, send the request to <hello@premiselabs.co>. A request made under Mexican law is answered within 20 Mexican business days of receipt of a complete request, and the two-month extension in §16 is not applied to it.
 
 ## 2. Data processed by the service (outline ②)
 
@@ -149,7 +171,7 @@ Until consent is given, PostHog captures no data, the planned tools are not load
 - **Consent (Art. 6(1)(a)):** analytics tools are activated and process data only after consent is given, as described in §3; waitlist email addresses are processed to send the requested launch notifications, with consent recorded when the waitlist form is submitted.
 - **Legal obligation (Art. 6(1)(c)):** billing and transactional records may be processed to comply with tax and accounting obligations, where applicable.
 
-Consent, where given, may be withdrawn at any time with effect for the future. Under ePrivacy rules, non-essential cookies and pixels are subject to the same consent: you can give or withdraw consent at any time via the consent banner.
+Consent, where given, may be withdrawn at any time with effect for the future. Under PECR, and the equivalent ePrivacy rules where you are in the EU/EEA, non-essential cookies and pixels are subject to the same consent: you can give or withdraw consent at any time via the consent banner.
 
 ## 5. California — CCPA/CPRA disclosures (outline ⑤)
 
@@ -189,7 +211,7 @@ No security measures are absolute, and the security of the internet cannot be gu
 
 ## 8. Your rights (outline ⑧)
 
-**GDPR rights.** If you are located in the EU/EEA, the UK, or Switzerland, you have the right to:
+**GDPR rights.** The controller is established in the United Kingdom, so the UK GDPR gives you these rights wherever you are located; where the EU GDPR applies, it gives you equivalent rights. You have the right to:
 
 - **Access** a copy of your personal data;
 - **Rectify** inaccurate personal data;
@@ -198,7 +220,7 @@ No security measures are absolute, and the security of the internet cannot be gu
 - **Data portability** — receive personal data you provided in a structured, machine-readable format;
 - **Object** to processing based on legitimate interests;
 - **Withdraw consent** at any time, where processing is based on consent;
-- **Lodge a complaint** with a supervisory authority in your country of residence.
+- **Lodge a complaint** with a supervisory authority where one exists in your country of residence — for the UK that is the Information Commissioner's Office, at [ico.org.uk/make-a-complaint](https://ico.org.uk/make-a-complaint/).
 
 **CCPA/CPRA rights.** If you are a California resident, you have the right to:
 
@@ -245,9 +267,9 @@ Personal data may be transferred to, and processed in, countries other than the 
 Where personal data is transferred from the EU/EEA, the UK, or Switzerland, appropriate safeguards are provided:
 
 - **Data Privacy Framework (DPF):** transfers to processors that participate in the EU–US DPF, the UK Extension, or the Swiss–US DPF rely on those certifications.
-- **Standard Contractual Clauses (SCCs):** where a processor does not rely on the DPF, transfers are protected by SCCs adopted by the European Commission or equivalent safeguards.
+- **Standard Contractual Clauses (SCCs):** where a processor does not rely on the DPF, transfers are protected by SCCs adopted by the European Commission or equivalent safeguards; for transfers from Switzerland, the Swiss Addendum to the EU SCCs. For transfers subject to the UK GDPR, the equivalent instrument is the UK's International Data Transfer Agreement, or the UK Addendum to the EU SCCs — one of the two is put in place before any transfer that needs it, and both are "equivalent safeguards" for this purpose.
 
-**PostHog US residency.** PostHog is a data processor; data is stored in the United States. EU-origin analytics data captured with consent is stored in the United States.
+**PostHog US residency.** PostHog is a data processor; data is stored in the United States. EU- and UK-origin analytics data captured with consent is stored in the United States.
 
 ## 13. Sensitive data (outline ⑬)
 
@@ -257,7 +279,7 @@ As stated in §2, "we expect users not to place sensitive data in the service." 
 
 ## 15. Version, effective date, and document history (outline ⑮)
 
-**Current version:** 1.2
+**Current version:** 1.3
 **Effective date:** [effective date to be set to the actual deploy date at T8]
 
 This policy is versioned. When this policy changes, the version number and effective date are updated, and a new entry is added to the document history below. Material changes are posted before they take effect.
@@ -266,6 +288,7 @@ This policy is versioned. When this policy changes, the version number and effec
 
 | Version | Effective date | Summary |
 |---|---|---|
+| 1.3 | 2026-10-21 | Corrective as to the controller — the same natural person, no right reduced, no user obligation changed — and the additions below are commitments the policy did not previously state. Corrected the controller's jurisdiction of residence to the United Kingdom (it read Mexico), replaced the Mexican LFPDPPP paragraph with the UK GDPR / Data Protection Act 2018 position, the ICO complaint route and a Mexico request path, removed the location gate from §8's GDPR rights and added the ICO to its complaint bullet, named the UK's International Data Transfer Agreement and the Swiss Addendum in §12, said there that UK-origin as well as EU-origin analytics data is stored in the United States, qualified the Art. 27 reference to the EU GDPR (§1), stated the §16 deadline for a request made under Mexican law, and cited PECR in §4. The standalone Aviso de Privacidad (Spanish LFPDPPP notice) is retired; this policy is the only privacy notice we publish. |
 | 1.2 | 2026-10-08 | Added disclosure of session recordings as a processed category (§2) with its purpose and legal basis (§4); added the session-recordings retention statement to §6 (retained until deleted, no automatic expiry; who may delete; departure; recording off does not delete; the backup residual), and cross-referenced it from §16. |
 | 1.1 | 2026-09-30 | Added self-service account deletion and the account-deletion retention windows to §6 and §16. |
 | 1.0 | 2026-08-08 | Initial publication of the Privacy Policy for the hosted Tortoise service. |
@@ -274,7 +297,7 @@ This policy is versioned. When this policy changes, the version number and effec
 
 **Primary mechanism: email.** To make a privacy request other than the in-product account deletion described below (access, correction, export, restriction, objection) — or to request deletion of your account when you cannot sign in — email your request to <hello@premiselabs.co>.
 
-**Response commitment.** Requests are answered within **one month** of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay.
+**Response commitment.** Requests are answered within **one month** of receipt, as required by GDPR Art. 12(3). If a request is complex or numerous, the response period may be extended by up to two additional months; you will be informed of any extension within one month of receipt, together with the reasons for the delay. The exception is a request made under Mexican law, which is answered within the 20 Mexican business days stated in §1, or within one month under GDPR Art. 12(3) if that is earlier.
 
 **Identity verification.** we may request identity verification before acting on any request (GDPR Art. 12(6)). Where a request cannot be verified or is manifestly unfounded or excessive, the request may be refused or a reasonable fee may be charged, as permitted by law.
 

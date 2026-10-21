@@ -101,6 +101,13 @@ export const onRequest: PagesFunction = async (context) => {
     "/tos", "/tos.html",
     "/license", "/license.html",
     "/dpa", "/dpa.html",
+    // RETIRED page (#9486): the Spanish LFPDPPP notice is gone (the controller
+    // is UK-resident). Kept DELIBERATELY: it makes the FIRST Location name the
+    // canonical host, so the retired route consolidates exactly like every
+    // sibling above and the terminal hop is the _redirects rule to /privacy.
+    // (Removing it would still not 404 — pages falls through to _redirects,
+    // which answers all three shapes — but one retired route would then behave
+    // unlike the rest of this set.)
     "/aviso-privacidad", "/aviso-privacidad.html",
     "/signin", "/signin.html",
   ]);
