@@ -8482,10 +8482,12 @@ def _cmd_pack_new(args) -> int:
 
     Validates the namespace BEFORE writing (camelCase, no colons, no whitespace,
     not a canonical kind, not a reserved starter name) so a broken pack is never
-    created. The rule set mirrors `PackRegistry._validate`'s namespace checks —
-    a scaffolder that writes a manifest its own validator refuses is worse than
-    no scaffold at all. Writes <dir>/<namespace>/manifest.yaml filled with the
-    namespace + name + version.
+    created. The rule set is a SUPERSET of `PackRegistry._validate`'s namespace
+    checks (`:` and whitespace only — the validator does not know about reserved
+    starter packs or canonical words), so nothing the scaffolder accepts can be a
+    manifest the validator refuses. A scaffolder that writes such a manifest is
+    worse than no scaffold at all. Writes <dir>/<namespace>/manifest.yaml filled
+    with the namespace + name + version.
     """
 
     from tortoise.pack_registry import canonical_kind_words
