@@ -594,10 +594,22 @@ DERIVATION_ANCHOR_QUERY = (
 #: is the one that finds the edge, and an `a.id IN $ids` filter over the
 #: session's Source silently yields 0/0 (a "nothing to anchor" reading of a
 #: graph that HAS an anchor — measured on the session-capture path).
+#:
+#: ⚠️ CONTAINMENT IS EXCLUDED, and that exclusion is load-bearing: a
+#: `(Source)-[:references]->(:Source)` link is referential containment and
+#: carries NO `sourceVersion` **by design** (`projection/edges.py`, the
+#: `_DERIVATION_REFERENCES_LABELS` note — the `hosted_api` session→external
+#: MERGE writes those outside the anchored path). Counting them would make a
+#: deliberately unanchored, non-derivation edge read as an E3 failure — a
+#: FALSE RED, the mirror of the false green the anchored predicate guards
+#: against. They are counted separately (`containment_excluded`) so the
+#: population stays visible instead of vanishing.
 SESSION_REFERENCES_ANCHOR_QUERY = (
-    "MATCH (s:Source {sessionId: $sid})-[r:references]->() "
-    "RETURN count(r), sum(CASE WHEN r.sourceVersion IS NULL "
-    "OR r.sourceVersion = '' THEN 0 ELSE 1 END)"
+    "MATCH (s:Source {sessionId: $sid})-[r:references]->(t) "
+    "RETURN sum(CASE WHEN t:Source THEN 0 ELSE 1 END), "
+    "sum(CASE WHEN t:Source THEN 0 "
+    "WHEN r.sourceVersion IS NULL OR r.sourceVersion = '' THEN 0 ELSE 1 END), "
+    "sum(CASE WHEN t:Source THEN 1 ELSE 0 END)"
 )
 
 
@@ -615,9 +627,9 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
          "derivation_edges": {"extractedFrom": {"total", "anchored"},
                               "references": {"total", "anchored"}}}
 
-    and raises nothing of its own: a caller that wants fail-closed reporting
-    wraps it (``census_or_error``), so a graph failure is never silently read
-    as a measured zero.
+    and does not swallow a graph failure: the runner ALWAYS reaches it through
+    ``census_or_error`` precisely so that a failure is reported and can never
+    be read as a measured zero.
     """
     g = sdk._get_proj().g
     pids = sorted({pid for pid in point_ids if pid})
@@ -644,10 +656,15 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
     ).result_set
     for rel, rows in (("extractedFrom", extracted_rows),
                       ("references", references_rows)):
-        total = anchored = 0
+        total = anchored = containment = 0
         if rows:
             total, anchored = int(rows[0][0] or 0), int(rows[0][1] or 0)
-        derivation_edges[rel] = {"total": total, "anchored": anchored}
+            containment = int(rows[0][2] or 0) if len(rows[0]) > 2 else 0
+        derivation_edges[rel] = {
+            "total": total, "anchored": anchored,
+            **({"containment_excluded": containment} if rel == "references"
+               else {}),
+        }
     return {
         "session_id": session_id,
         "objects": {

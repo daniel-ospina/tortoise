@@ -128,6 +128,13 @@ def test_a_blank_or_absent_anchor_is_counted_as_UNANCHORED(captured):
     nulled = runner.graph_census(sdk, session_id, pids)["derivation_edges"]
     assert nulled["extractedFrom"]["anchored"] == 0, nulled
 
+    # The `references` leg has its own copy of the predicate (it also excludes
+    # containment targets), so pin its `''` arm too — one shared-looking rule
+    # spelled twice is exactly where a false current survives.
+    g.query("MATCH (:Source)-[r:references]->(:Event) SET r.sourceVersion = ''")
+    refs = runner.graph_census(sdk, session_id, pids)["derivation_edges"]["references"]
+    assert refs["total"] >= 1 and refs["anchored"] == 0, refs
+
 
 def test_the_census_sees_the_unanchored_class_provenance_accuracy_cannot(captured):
     """The `#8444` argument, measured rather than asserted.
@@ -187,6 +194,33 @@ def test_the_session_source_to_event_reference_anchor_is_counted(captured):
     assert refs["anchored"] == refs["total"], refs
 
 
+def test_a_containment_link_is_excluded_from_the_reference_anchor_count(captured):
+    """FAILS IF the `references` leg counts referential CONTAINMENT.
+
+    A `(Source)-[:references]->(:Source)` link carries no `sourceVersion` **by
+    design**, so counting one would turn a deliberately unanchored,
+    non-derivation edge into an E3 failure — a false red. The excluded
+    population is still reported, so it cannot vanish silently either.
+    """
+    sdk, session_id, snap = captured
+    g = sdk._get_proj().g
+    before = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+    assert before["containment_excluded"] == 0, before
+
+    g.query(
+        "MATCH (s:Source {sessionId:$sid}) "
+        "CREATE (s)-[:references]->(:Source {url:$url, sourceKind:'external'})",
+        params={"sid": session_id, "url": f"session:{session_id}:external"})
+    after = runner.graph_census(
+        sdk, session_id, _point_ids(snap))["derivation_edges"]["references"]
+    assert after["total"] == before["total"], (
+        "a containment link entered the derivation population — an unanchored "
+        "non-derivation edge would read as an E3 failure")
+    assert after["anchored"] == after["total"]
+    assert after["containment_excluded"] == 1, after
+
+
 def test_a_graph_error_is_reported_never_zeroed(captured):
     """FAILS IF `census_or_error` swallows a graph failure into zeros — a
     measured empty session and an unreadable graph must not be the same
@@ -233,6 +267,9 @@ def test_the_census_is_report_only(captured):
     measurement added to make `#7949` E1/E3 answerable.
     """
     assert "graph_census" not in schema.METRIC_VALUES
+    # The gated vocabulary must not ACQUIRE an object-composition or anchor
+    # metric by accident: adding one is a decision that re-blesses every
+    # baseline, so it must move this pin in the same commit.
     assert not any("object" in name or "anchor" in name
                    for name in schema.METRIC_VALUES)
 
