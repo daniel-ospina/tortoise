@@ -34,6 +34,8 @@ import re
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 OAUTH = REPO / "tortoise" / "oauth.py"
 HOSTED = REPO / "tortoise" / "hosted_api.py"
@@ -306,7 +308,7 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
             "table's shape changed and this guard can no longer tell which row it is checking"
         )
         # Both citation forms the spec uses: `oauth.py:<n>` and the bare in-context `:<n>` (§7
-        # only cites `oauth.py`, but the bare form is what the §4 table already uses). The item's
+        # only cites `oauth.py`, but the bare form is what the §1 table already uses). The item's
         # line must be the START of a cited span: a range names the block it opens, and the
         # singleton anchors name the individual sites INSIDE such a range. Containment is
         # deliberately not accepted — the round-2 defect was exactly the singletons going stale
@@ -323,19 +325,20 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
     )
 
 
-# ── The spec's `hosted_api.py` anchors, recomputed the same way ──────────────
+# ── The spec's `hosted_api.py` citations: SYMBOLS, never line numbers ───────
 
 #: Every form this tree writes a `hosted_api.py` LINE citation in: `:39152`, `#L39152`, a space or
 #: a newline after the colon (CommonMark renders a wrapped code span as one space), the fullwidth
-#: colon, and the bare `:<n>` CONTINUATION the §4 table uses for `session_auth.py:588` →
+#: colon, and the bare `:<n>` CONTINUATION the §1 table uses for `session_auth.py:588` →
 #: `` (`:600`) ``. Each was let through by an earlier version of this guard (measured), because
 #: the check read one line at a time and knew one separator. So:
 #:
-#:  * `_HOSTED_ANCHOR_RE` matches the explicit forms after `_collapse()` — whitespace runs folded to
-#:    ONE space and the fullwidth colon folded to ASCII, so a split or padded anchor is one shape
-#:    again and the offset still points at a real position;
-#:  * `_BARE_ANCHOR_LINE_RE` catches the continuation idiom: a line that NAMES `hosted_api.py` and
-#:    carries a bare `:<digits>` is citing it, whatever the sentence around it says.
+#:  * `_HOSTED_ANCHOR_RE` matches the explicit forms; `_stray_anchors` FOLDS the body first
+#:    (whitespace runs to one space, the fullwidth colon to ASCII), so a wrapped or padded anchor
+#:    is one shape again and the offset still points at a real line;
+#:  * `_BARE_ANCHOR_RE` + `_NEAREST_PY_RE` catch the continuation idiom line by line, attributing
+#:    the number to the nearest `something.py` to its LEFT rather than to "any file named on the
+#:    line" (see `_NEAREST_PY_RE` for why the looser rule over-reported).
 _HOSTED_ANCHOR_RE = re.compile(r"hosted_api\.py(?:\s*#L|\s*:)\s*(\d+)")
 _BARE_ANCHOR_RE = re.compile(r":\s*(\d+)")
 #: The nearest `something.py` to the LEFT of a bare `:<n>`, which is what the continuation
@@ -377,6 +380,61 @@ def _fold(raw: str) -> tuple[str, list[int]]:
     return "".join(out), origin
 
 
+def _provenance_note_bounds(lines: list[str]) -> tuple[int, int]:
+    """The `[start, end)` span of the ONE blockquote this doc may quote an anchor in.
+
+    An ASSERTION, not `next(...)` with no default: a reworded or retired `#3524` note raised a
+    bare `StopIteration` from inside the test body — fail-closed, but with no message to act on,
+    which contradicts this module's contract that "each one asserts it found its subject".
+    """
+    note_start = next(
+        (i for i, line in enumerate(lines)
+         if line.startswith(">") and "#3524" in line and "Provenance" in line), None)
+    assert note_start is not None, (
+        "the `#3524` provenance note is gone — the ONE blockquote allowed to quote a "
+        "`hosted_api.py` anchor can no longer be identified, so this guard cannot tell a "
+        "quotation from a citation. Restore the note, or move its anchors into the evidence rows."
+    )
+    note_end = note_start
+    while note_end < len(lines) and lines[note_end].startswith(">"):
+        note_end += 1
+    return note_start, note_end
+
+
+def _stray_anchors(lines: list[str], note_start: int, note_end: int) -> list[str]:
+    """Every `hosted_api.py` line anchor outside the note, each with the line it is REALLY on.
+
+    The body is scanned with the note REMOVED, so an index into that shortened list is not a line
+    number of the file: reporting one as such named a line `note_end - note_start` early (7 in this
+    spec) — an unrelated table row — for essentially every anchor a future editor could add, which
+    is the one message this guard ever produces.
+    """
+    outside = [
+        (index, re.sub(r"^\s*(?:>\s?)+", "", line))
+        for index, line in enumerate(lines)
+        if not note_start <= index < note_end]
+    folded, origin = _fold("\n".join(line for _, line in outside))
+    stray: list[str] = []
+    explicit: set[int] = set()
+    for match in _HOSTED_ANCHOR_RE.finditer(folded):
+        lineno = outside[origin[match.start()] - 1][0] + 1
+        explicit.add(lineno)
+        stray.append(f"line {lineno}: {match.group(0)!r}")
+    for index, line in outside:
+        if index + 1 in explicit:
+            # Already reported at this line by the explicit scan; the bare `:<n>` inside the same
+            # anchor is the same citation, and a message that names one line twice reads as two.
+            continue
+        folded_line = _collapse(line)
+        for match in _BARE_ANCHOR_RE.finditer(folded_line):
+            owners = _NEAREST_PY_RE.findall(folded_line[:match.start()])
+            if owners and owners[-1] == "hosted_api.py":
+                stray.append(
+                    f"line {index + 1}: bare continuation {match.group(0)!r} belongs to "
+                    "`hosted_api.py`")
+    return stray
+
+
 #: `(section heading prefix, row prefix, citations that row must carry)` — the sites the old line
 #: anchors pointed at. Pinned PER ROW, and the row must be unique IN ITS SECTION: a document-wide
 #: presence check is satisfied by an unrelated occurrence of the same route string (the route also
@@ -398,7 +456,7 @@ _SPEC_ROW_CITATIONS = (
 #: still resolve to exactly ONE line each.
 #:
 #: ⛔ These used to be LINE anchors, and the spec used to cite them by number. Both were retired:
-#: the numbers drifted ~50 lines behind the source and the §4/§5/§10 tables then pointed at the
+#: the numbers drifted ~50 lines behind the source and the §1/§5/§10 tables then pointed at the
 #: wrong functions while reading as authoritative. The spec now cites the route string or the
 #: symbol, and `test_the_spec_cites_no_hosted_api_line_numbers` pins that it does so IN THE ROW
 #: THAT MAKES THE CLAIM, while forbidding any line anchor outside the `#3524` provenance note.
@@ -420,7 +478,7 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     repaired. It demanded that every `hosted_api.py:<n>` anchor match a live site — a check that
     has to be re-derived after EVERY source edit and silently becomes the defect between edits.
     It did: on `main` at `fa7b27b66` the spec cited `39152/39225/39233/39379` while the sites had
-    moved to `39205/39278/39286/39432`, so the whole §4/§5/§10 evidence table named the wrong
+    moved to `39205/39278/39286/39432`, so the whole §1/§5/§10 evidence table named the wrong
     functions and only a red shard noticed.
 
     A line number is valid only at the commit it was written against; a symbol or a route is
@@ -428,7 +486,8 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     by syntax:
 
     * the ONE blockquote this doc owns — the `#3524` provenance note — is identified by its
-      content, and the anchors inside it are asserted to be exactly the quoted issue-body pair.
+      content, and the anchors inside it may only be the quoted issue-body pair (pruning the
+      quotation passes; ADDING one does not).
       A blanket "skip every line starting with `>`" is what an earlier version did, and it let a
       stale anchor ride in any NEW blockquote (measured: `> Verified against \
       `hosted_api.py:39286`.` passed);
@@ -444,21 +503,18 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     """
     raw = SPEC.read_text()
     lines = raw.splitlines()
-    note_start = next(
-        i for i, line in enumerate(lines)
-        if line.startswith(">") and "#3524" in line and "Provenance" in line)
-    note_end = note_start
-    while note_end < len(lines) and lines[note_end].startswith(">"):
-        note_end += 1
+    note_start, note_end = _provenance_note_bounds(lines)
     note_raw = "\n".join(lines[note_start:note_end])
     rest_raw = "\n".join(lines[:note_start] + lines[note_end:])
 
     quoted = set(_HOSTED_ANCHOR_RE.findall(_collapse(note_raw)))
-    assert quoted == {"23409", "23284"}, (
-        f"the provenance note quotes the issue-body anchors {sorted(quoted)}; it must quote "
-        "exactly `hosted_api.py:23409` and `hosted_api.py:23284-23292` (#3524's stale body). A "
-        "NEW anchor here — including one wrapped across two `>` lines — is a citation this doc "
-        "owns, and belongs in the rows below instead."
+    assert quoted <= {"23409", "23284"}, (
+        f"the provenance note quotes the issue-body anchors {sorted(quoted)}; the only anchors it "
+        "may quote are `hosted_api.py:23409` and `hosted_api.py:23284-23292` (#3524's stale "
+        "body). A NEW anchor here — including one wrapped across two `>` lines — is a citation "
+        "this doc owns, and belongs in the rows below instead. Pruning a stale quotation is "
+        "fine (a subset passes), because retiring a record that no longer needs quoting must not "
+        "be blocked by the guard that pins it."
     )
 
     # Every OTHER line: no explicit anchor in any spelling — the whole body is FOLDED before it is
@@ -466,22 +522,7 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     # fullwidth colon is the same shape as the plain one — and no bare `:<n>` continuation whose
     # nearest `something.py` is hosted_api.py (§10 writes ``session_auth.py:588`` AND names
     # hosted_api.py in the same row, so "the line mentions the file" would over-report).
-    outside = [
-        (index, re.sub(r"^\s*(?:>\s?)+", "", line))
-        for index, line in enumerate(lines)
-        if not note_start <= index < note_end]
-    folded, origin = _fold("\n".join(line for _, line in outside))
-    stray: list[str] = []
-    for match in _HOSTED_ANCHOR_RE.finditer(folded):
-        stray.append(f"line {outside[origin[match.start()] - 1][0] + 1}: {match.group(0)!r}")
-    for index, line in outside:
-        folded_line = _collapse(line)
-        for match in _BARE_ANCHOR_RE.finditer(folded_line):
-            owners = _NEAREST_PY_RE.findall(folded_line[:match.start()])
-            if owners and owners[-1] == "hosted_api.py":
-                stray.append(
-                    f"line {index + 1}: bare continuation {match.group(0)!r} belongs to "
-                    "`hosted_api.py`")
+    stray = _stray_anchors(lines, note_start, note_end)
     assert not stray, (
         f"the spec cites hosted_api.py by a LINE NUMBER again: {sorted(stray)}. A line number is "
         "valid only at the commit it was written against — cite the symbol or the route string "
@@ -501,7 +542,9 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
         rows = [line for line in body.splitlines() if line.startswith(row_prefix)]
         assert len(rows) == 1, (
             f"{section!r} must hold exactly ONE row starting {row_prefix!r}; found {len(rows)} "
-            "(0 = the evidence was deleted, >1 = a duplicate that could mask a gutted original)")
+            "(0 = the evidence was deleted — or the row was REFLOWED so it no longer STARTS with "
+            "the prefix, which reads as a deletion here; >1 = a duplicate that could mask a "
+            "gutted original)")
         for citation in citations:
             assert citation in rows[0], (
                 f"the {row_prefix.strip()!r} row in {section!r} no longer cites {citation!r}; it "
@@ -509,6 +552,60 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
                 "the citation was dropped rather than converted")
     for token in _HOSTED_ANCHORS.values():
         _only_line(HOSTED, token)
+
+
+def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
+    """The ban must cover each citation form AND name the line a reader can actually open.
+
+    Proven on a synthetic body rather than only on the live spec, because the live spec returns
+    `[]` — a scan that caught nothing at all would pass there too. Line 5-6 is one anchor
+    WRAPPED across a line break; 8 is the bare `:<n>` continuation; 9-10 are the fullwidth colon
+    and a space-padded anchor. Line 7 cites a DIFFERENT file in the same idiom and must stay
+    legal, and the note's own quotation (lines 3-4) must not be reported at all — nor may one
+    line be reported twice (an explicit anchor also carries a bare `:<n>`; the message names the
+    line once, as one citation).
+
+    The expected numbers are the REAL ones: the note is removed before the scan, so an index into
+    the shortened body used to be reported as a file line (2 early, here) — the one message this
+    guard produces sent the reader to an unrelated row.
+    """
+    lines = [
+        "| row | `hosted_api.py:39152` |",
+        "",
+        "> **Provenance (#3524)** — the stale issue body quoted: `hosted_api.py:23409` of",
+        "> `hosted_api.py:23284-23292` are unrelated code today.",
+        "wrapped `hosted_api.py:",
+        "39286`",
+        "the other file (`session_auth.py:588`), and `:600`",
+        "a row naming `hosted_api.py`, then `:39205`",
+        "fullwidth `hosted_api.py\uff1a39432`",
+        "padded `hosted_api.py : 39278`",
+    ]
+    stray = _stray_anchors(lines, note_start=2, note_end=4)
+    reported = sorted(int(m.group(1)) for m in re.finditer(r"line (\d+):", " | ".join(stray)))
+    assert reported == [1, 5, 8, 9, 10], (
+        "expected the five hosted_api.py anchors on source lines 1, 5, 8, 9 and 10 — the wrapped "
+        "one reported where it STARTS, the other file's on line 7 and the note's own quotation "
+        f"on lines 3-4 excluded; got {reported} from {stray}"
+    )
+
+
+def test_the_guard_asserts_its_subject_when_the_provenance_note_is_gone() -> None:
+    """A retired or reworded note must fail closed WITH a message, not with `StopIteration`.
+
+    The note is the only place a `hosted_api.py` anchor is legal, so the guard has to identify it;
+    locating it with `next(...)` and no default raised a bare `StopIteration` from inside the test
+    body — unreadable in a shard log, and a contradiction of this module's own contract ("each
+    one asserts it found its subject"). The exact wording matters too: it must say what to do.
+    """
+    with pytest.raises(AssertionError, match="provenance note is gone"):
+        _provenance_note_bounds(["# 1. a heading, no blockquote here", "| a row |"])
+
+    # And the live spec does carry one, so the assertion above is not describing an unreachable
+    # branch: the found span starts at a `>` line that names both `#3524` and `Provenance`.
+    spec_lines = SPEC.read_text().splitlines()
+    note_start, note_end = _provenance_note_bounds(spec_lines)
+    assert spec_lines[note_start].startswith(">") and note_end > note_start
 
 
 # ── The spec's own load-bearing clauses ─────────────────────────────────────
