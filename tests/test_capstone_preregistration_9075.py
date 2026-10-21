@@ -17,6 +17,7 @@ fixture repo is the only way to assert the failure direction without mutating th
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -496,6 +497,9 @@ def _record(**over) -> dict:
         "split": {"tune": list(pins["split"]["tune"]),
                   "held_out": list(pins["split"]["held_out"])},
         "e4_denominator": pins["e4_denominator"],
+        # The record must pin the document it describes; `_materialise` copies the real document,
+        # so the digest is the real one (#9075 review r3 P3).
+        check.DOCUMENT_SHA_PIN: "sha256:" + hashlib.sha256(PREREG.read_bytes()).hexdigest(),
         "criteria": [{"id": r["id"], "threshold": r["threshold"]} for r in rows],
     }
     base.update(over)
@@ -634,8 +638,10 @@ def test_an_exempted_log_with_a_marker_other_than_unpreregistered_fails(
 def test_an_unreadable_corpus_is_a_usage_error_not_a_traceback(tmp_path):
     """REGRESSION (#9075 review P2): a check that cannot read its subject must exit 2.
 
-    A corpus change that deletes a fixture or the salience JSONL is exactly the event this gate
-    exists to catch, so it must be attributed, never an unhandled traceback.
+    This exercise is the EXPLICIT branch — a corpus root that is not there — while the wide
+    `except (OSError, ImportError, …)` tuple `run()` wraps is covered separately by
+    `test_every_unreadable_subject_becomes_a_check_error`. Both are exit 2; only the mechanism
+    differs (#9075 review r5 note 4).
     """
     doc = _doc(tmp_path, _rows(
         "| E1 | shape Objects written | all Objects written (floor >= 30) | `<= 0.50 x before` |",
@@ -1268,3 +1274,167 @@ def test_a_missing_git_binary_does_not_crash_the_ordering(monkeypatch, tmp_path)
     except check.CheckError:
         return
     assert result, "an unreadable history must not report a clean ordering"
+
+
+# ── round-5/6 review regressions ─────────────────────────────────────────────
+
+
+def test_deleting_e1_cannot_be_masked_by_the_e1b_control():
+    """REGRESSION (#9075 review r3 P2): `startswith` let `E1b` stand in for a deleted `E1`.
+
+    `E1b` is E1's ANTI-GAMING control, so a table can lose the epic's central criterion *and* the
+    `after_share <= 0.50 x before_share` bar while the completeness check stays green — the guard
+    keeps the check satisfied for the row it guards. Only `E2` accepts sub-rows.
+    """
+    body = _rows(
+        "| E1b | planted units surviving | the **90** planted units | `>= 90 of 90` |",
+        "| E2a | value units surviving | the **14** value units | `>= 13 of 14` |",
+        "| E2b | fused claims | the planted units that survived | `<= 0.05` |",
+        "| E3 | anchored derived nodes | all derived nodes (floor ≥ 30) | `= 1.000` |",
+        "| E4 | operator edges | the **15** edges | `= 15 of 15` |",
+        "| E5 | marker claims | **29** sentences | `>= 0.90` ratio |",
+    )
+    failures = check.check_completeness(check.parse_criteria_rows(body))
+    assert any("criterion E1 has no row" in f for f in failures), failures
+    # The sub-row allowance is NOT narrowed: E2 is still satisfied by E2a/E2b.
+    assert not any("criterion E2 has no row" in f for f in failures), failures
+
+
+def test_the_operator_denominator_comes_from_the_corpus_own_function(monkeypatch):
+    """REGRESSION (#9075 review r1 P2): the tool re-encoded the operator-edge denominator.
+
+    `corpus.planted_operator_count()` calls itself "the ONE source for an operator-edge DENOMINATOR
+    in tests and lanes", and §1.1 names it as the derivation method — so an inline re-derivation is
+    a second encoding that has to be kept in sync by hand.
+    """
+    from tests.eval.write_path import corpus
+
+    monkeypatch.setattr(corpus, "planted_operator_count", lambda ids=None, root=None: 4242)
+    pins = check.parse_pins(PREREG.read_text())
+    assert check.derive_corpus_facts(pins)["planted_operator_edges"] == 4242
+
+
+def test_the_fixtures_are_read_through_the_corpus_loader(monkeypatch):
+    """The same seam one layer down: fixtures are `corpus.load_fixture`, not a hand-rolled read."""
+    from tests.eval.write_path import corpus
+
+    def boom(*_a, **_k):
+        raise AssertionError("load_fixture is the corpus package's reader")
+
+    monkeypatch.setattr(corpus, "load_fixture", boom)
+    with pytest.raises(AssertionError, match="load_fixture"):
+        check.derive_corpus_facts(check.parse_pins(PREREG.read_text()))
+
+
+def test_an_exclusion_that_excludes_nothing_is_a_stale_pin():
+    """REGRESSION (#9075 review r5 note 1): only the *absent* id was checked, not the idle one.
+
+    §3.3 says both named exclusions are re-derived. An exclusion that exists but whose anchor
+    carries no digit excludes nothing from the value-bearing class, so it is a pin from a corpus
+    that is no longer there — and the real pins are digit-bearing today.
+    """
+    pins = check.parse_pins(PREREG.read_text())
+    pins["corpus"]["value_excluded_unit_ids"] = [
+        *pins["corpus"]["value_excluded_unit_ids"], "wp01_quarry_debug_u_02"]
+    failures = check.check_pins(pins, check.derive_corpus_facts(pins))
+    assert any("carries no digit" in f for f in failures), failures
+    assert any("wp01_quarry_debug_u_02" in f for f in failures), failures
+
+
+def test_the_four_edge_refusal_is_a_rate_not_a_count():
+    """REGRESSION (#9075 review r5 note 2): the claim was "any rate phrasing" for a rate regex.
+
+    §1.4 narrates the history as `swung 0, 1, 1, 1, 2 of 4 on IDENTICAL code`; refusing that form
+    would red the document for stating its own reasoning. The refused thing is the RATE.
+    """
+    assert not check.FOUR_EDGE_RATE.search("swung 0, 1, 1, 1, 2 of 4 on identical code")
+    assert check.FOUR_EDGE_RATE.search("we measured 2/4 on identical code")
+
+
+def test_a_log_beside_the_probes_is_not_in_the_ordering_set(tmp_path):
+    """#9075 review r5 note 3: the glob is NON-RECURSIVE, and that is stated, not accidental.
+
+    A re-run's log would naturally land under `probes/`; the gate orders the logs of the evidence
+    directory itself, which is what §7 says ("each `*.log` in this directory").
+    """
+    (tmp_path / "probes").mkdir()
+    (tmp_path / "probes" / "rerun.log").write_text("x\n")
+    (tmp_path / "e9.log").write_text("x\n")
+    assert sorted(p.name for p in tmp_path.glob(check.EVIDENCE_LOG_GLOB)) == ["e9.log"]
+
+
+def test_a_record_without_the_document_pin_fails(tmp_path):
+    """REGRESSION (#9075 review r3 P3): the argument itself was the one unbounded artefact.
+
+    `--diff-filter=A` takes the OLDEST add-epoch, so a delete-and-re-add rewrite of the document
+    keeps the old epoch; a shallow checkout has no epochs at all. The digest is git-free.
+    """
+    rec = _record()
+    rec.pop(check.DOCUMENT_SHA_PIN)
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any(
+        check.DOCUMENT_SHA_PIN in f and "carries no" in f for f in failures
+    ), failures
+
+
+def test_a_record_describing_a_different_document_fails(tmp_path):
+    rec = _record(**{check.DOCUMENT_SHA_PIN: "sha256:" + "0" * 64})
+    d = _materialise(tmp_path, rec)
+    failures = check.check_machine_record(d, check.parse_pins(PREREG.read_text()))
+    assert any("re-edited without the record being re-cut" in f for f in failures), failures
+
+
+def test_a_rewritten_document_without_a_re_cut_record_fails(tmp_path):
+    """The failure the pin exists for: a threshold edited AFTER a scored log, record untouched."""
+    d = _materialise(tmp_path, _record())
+    doc = d / check.PREREG_NAME
+    doc.write_text(doc.read_text().replace("<= 0.50 × before", "<= 0.90 × before"))
+    failures = check.check_machine_record(d, check.parse_pins(doc.read_text()))
+    assert any("re-edited without the record being re-cut" in f for f in failures), failures
+
+
+def test_the_real_record_pins_the_real_document():
+    """The pinned digest is the document's, not a copy that can drift."""
+    import json as _json
+
+    record = _json.loads((PREREG_DIR / check.MACHINE_RECORD).read_text())
+    assert record[check.DOCUMENT_SHA_PIN] == (
+        "sha256:" + hashlib.sha256(PREREG.read_bytes()).hexdigest()
+    )
+
+
+def test_a_skipped_corpus_half_is_reported_not_hidden(capsys):
+    """REGRESSION (#9075 review r6 P1): `--no-corpus` is what CI's ordering step runs.
+
+    A report that reads as fully checked while one half never ran is the silent-green shape this
+    tool exists to refuse, so the skipped half appears in the verdict line.
+    """
+    assert check.main(["--dir", str(PREREG_DIR), "--no-corpus", "--no-git"]) == 0
+    out = capsys.readouterr().out
+    assert "corpus pins NOT checked" in out
+    assert "the pins match the tree" not in out
+
+
+def test_ci_runs_the_ordering_half_on_full_history():
+    """REGRESSION (#9075 review r6 P1): no automated path invoked the gate's git half.
+
+    CI test jobs check out at `fetch-depth: 1`, so the ordering half reports the third outcome
+    there and the git-dependent bounds (a)/(b) never evaluate. The full-history verdict therefore
+    lives in the `changes` job — the one checkout with `fetch-depth: 0` — and this pin keeps a
+    workflow edit from silently dropping it back to unenforced.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text())
+    steps = workflow["jobs"]["changes"]["steps"]
+    checkouts = [
+        s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")
+    ]
+    assert checkouts, "the changes job must check out the repo"
+    for step in checkouts:
+        assert (step.get("with") or {}).get("fetch-depth") == 0, step
+    runs = " ".join(str(s.get("run", "")) for s in steps)
+    assert "tools/capstone_preregistration_check.py" in runs
+    assert "--dir docs/evidence/7949-capstone" in runs

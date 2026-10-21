@@ -11,7 +11,9 @@ It verifies five things, and it fails on each of them for a specific reason:
 1. **Every criteria row carries a metric, a denominator AND a numeric threshold.** A row with a
    placeholder (*"to be decided"*, *"TBD"*, an em dash) is a row that will be decided later — which is
    the same failure as no registration at all. E1–E5 must each be present (E2 may be split into
-   sub-rows, e.g. ``E2a``/``E2b``, and every sub-row must itself be complete).
+   sub-rows, e.g. ``E2a``/``E2b``, and every sub-row must itself be complete). Only E2 takes
+   sub-rows: ``E1b`` is E1's anti-gaming CONTROL, so a table carrying ``E1b`` without an ``E1`` row
+   is the epic's central criterion deleted behind its guard (#9075 review r3 P2).
 2. **The registration strictly precedes every SCORED evidence log.** The commit that *adds*
    ``PRE-REGISTRATION.md`` must be **older** than the commit that adds each ``*.log`` beside it.
    "Same second" is not "before" — an ordering that cannot be shown is not an ordering.
@@ -48,11 +50,16 @@ It verifies five things, and it fails on each of them for a specific reason:
    reports ``UNPROVABLE — shallow clone`` in the report's ``ordering`` field and raises
    ``HistoryUnavailable`` from ``check_ordering`` — a verdict it cannot support is never given, and
    the tests that assert a real-artefact PASS skip instead of red-ing the required check (#9075 r4 P1).
+   The full-history verdict therefore runs where the history exists: CI's ``changes`` job (the one job
+   that checks out at ``fetch-depth: 0``) invokes this tool, so the third outcome never means the
+   ordering is unenforced (#9075 review r6 P1).
 3. **E4's denominator is 15, never 4.** The planted-operator gold is 15 edges across all seven
    sessions; the 4-edge denominator it replaced swung 0–2 of 4 on *identical* code, so a four-edge
-   rate is not evidence of anything. The phrase is rejected wherever it appears in the document,
-   including in a historical aside — a document that writes the bad denominator down is a document a
-   later reader will copy it out of.
+   rate is not evidence of anything. A ``N / 4`` RATE is rejected wherever it appears in the
+   document, including in a historical aside — a document that writes the bad rate down is a
+   document a later reader will copy it out of. The refusal is of the RATE specifically: the
+   history may still be stated as a count (``2 of 4``), which is not a fraction anyone can quote as
+   a result.
 4. **The pins still describe the tree.** Every denominator in the registration (``fixtures_hash``,
    90 planted units, 15 operator edges, 14 value-bearing units, 29 marker sentences, the 25/15/9/6
    salience measurement, and the TUNE/HELD-OUT split) is **re-derived from the corpus** and compared
@@ -65,7 +72,9 @@ It verifies five things, and it fails on each of them for a specific reason:
    ``written_before_any_scored_run``, NOT the unqualified ``written_before_any_run``, which is false
    whenever any log exists and which a machine consumer keys on by name — and **agree with the pins
    block** on every number it restates. Two copies of a threshold that can disagree is how a gate
-   reads one while a reviewer reads the other.
+   reads one while a reviewer reads the other. It must also pin ``document_sha256``: the record is
+   the artefact the run probe freezes, so an argument re-edited without the record moving with it is
+   a document the record no longer describes (#9075 review r3 P3).
 
 What it deliberately does NOT do: it does not judge whether the thresholds are *right*. That is the
 argument in the document, and an argument is reviewed, not grepped.
@@ -83,6 +92,7 @@ unparseable pins) — a check that cannot read its subject must never report suc
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import json
 import re
@@ -94,12 +104,23 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 PREREG_NAME = "PRE-REGISTRATION.md"
 PINS_FENCE = "```yaml prereregistration-pins"
+#: NON-RECURSIVE on purpose: the ordering half orders the logs of THIS directory. A log written
+#: under ``probes/`` (where a re-run's output naturally lands) is not in the set — the glob matches
+#: the prose "each ``*.log`` in this directory" exactly (#9075 review r5 note 3). Widening it is a
+#: deliberate act, not a side effect of adding a subdirectory.
 EVIDENCE_LOG_GLOB = "*.log"
 
 #: The machine-readable record beside the document. The evidence probe already names this path on
 #: its ``prereg=`` line, so the name is not this check's invention.
 MACHINE_RECORD = "preregistration.json"
 PREREG_SCHEMA = "capstone-preregistration/v1"
+
+#: The document's own sha256, restated in the record and REQUIRED there. ``git log`` bounds the
+#: document only where history is available (a shallow checkout has none) and ``--diff-filter=A``
+#: takes the OLDEST add-epoch, so a delete-and-re-add rewrite of the argument keeps the old epoch
+#: (#9075 review r3 P3). The digest is git-free: a re-edited document whose record was not re-cut
+#: fails this comparison, in every checkout.
+DOCUMENT_SHA_PIN = "document_sha256"
 
 #: The status a log carries when no threshold existed to score it against.
 UNSCORED = "UNPREREGISTERED"
@@ -140,9 +161,14 @@ CROSS_CHECKED_CORPUS_KEYS = (
     "hedge_scope_sentences_total",
 )
 
-#: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); a required id is
-#: satisfied when at least one row's id equals it or starts with it.
+#: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); the other four
+#: must be matched EXACTLY. A prefix match for every id let ``E1b`` (E1's anti-gaming control) stand
+#: in for a deleted ``E1`` — the epic's central criterion gone while its guard kept the check green
+#: (#9075 review r3 P2).
 REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+
+#: The one required id that may be carried by sub-rows.
+SUB_ROW_CRITERIA = ("E2",)
 
 #: Cell values that mean "decided later", i.e. not decided. Compared case-folded, stripped of
 #: markdown emphasis and punctuation.
@@ -154,8 +180,9 @@ PLACEHOLDER_CELLS = frozenset(
 #: A threshold must carry a comparator AND a number. Prose without both is not a threshold.
 COMPARATORS = ("<=", ">=", "<", ">", "=", "≤", "≥")
 
-#: The four-edge denominator, in any rate phrasing. ``\\d+ / 4`` — and never ``4 / 40``, hence the
-#: trailing guard.
+#: The four-edge denominator as a RATE: ``\\d+ / 4`` — and never ``4 / 40``, hence the trailing
+#: guard. A count in words (``2 of 4``) is deliberately NOT matched: §1.4 states the history that
+#: way, and refusing it would red the document for narrating its own reasoning.
 FOUR_EDGE_RATE = re.compile(r"(?<![\d.])(\d+)\s*/\s*4(?![\d.])")
 
 
@@ -248,7 +275,7 @@ def parse_pins(text: str) -> dict:
         raise CheckError(f"pyyaml is required to read the pins: {exc}") from exc
     try:
         pins = yaml.safe_load(text[body_start:end])
-    except Exception as exc:  # noqa: BLE001 - any YAML error is a parse error here
+    except Exception as exc:
         raise CheckError(f"pins block is not valid YAML: {exc}") from exc
     if not isinstance(pins, dict):
         raise CheckError("pins block did not parse to a mapping")
@@ -289,7 +316,6 @@ def derive_corpus_facts(pins: dict) -> dict:
 
     session_ids = sorted(corpus.session_ids(root))
     units_total = 0
-    operator_edges = 0
     excluded: set[str] = set(pins.get("corpus", {}).get("value_excluded_unit_ids") or [])
     value_ids: list[str] = []
     per_session_units: dict[str, int] = {}
@@ -301,7 +327,6 @@ def derive_corpus_facts(pins: dict) -> dict:
         per_session_units[sid] = len(units)
         units_total += len(units)
         per_session_ops[sid] = len(gold.get("planted_operators") or [])
-        operator_edges += per_session_ops[sid]
         n_value = 0
         for unit in units:
             anchor = str(unit.get("verbatim_anchor") or "")
@@ -313,12 +338,27 @@ def derive_corpus_facts(pins: dict) -> dict:
             value_ids.append(str(unit.get("id")))
         per_session_values[sid] = n_value
 
+    # The corpus-wide total comes from the corpus package's OWN denominator function — its
+    # docstring calls itself "the ONE source for an operator-edge DENOMINATOR in tests and lanes",
+    # and PRE-REGISTRATION.md §1.1 names it as the derivation method. Re-deriving it inline here
+    # would be a second encoding that has to be kept in sync by hand (#9075 review r1 P2); the
+    # per-session counts above stay only because the split reports per-half counts.
+    operator_edges = corpus.planted_operator_count(root=root)
+
     # An exclusion that does not exist, or that excludes nothing digit-bearing, is a stale pin.
     all_ids = set()
+    digit_bearing: set[str] = set()
     for sid in session_ids:
         for unit in corpus.load_gold(sid, root).get("planted_units") or []:
-            all_ids.add(str(unit.get("id")))
+            uid = str(unit.get("id"))
+            all_ids.add(uid)
+            if re.search(r"\d", str(unit.get("verbatim_anchor") or "")):
+                digit_bearing.add(uid)
     missing_exclusions = sorted(excluded - all_ids)
+    # The other half of the same pin (§3.3: "both exclusions are re-derived"): an id that exists but
+    # whose anchor carries no digit excludes nothing from the value-bearing class, so it is a pin
+    # from a corpus that no longer exists (#9075 review r5 note 1).
+    idle_exclusions = sorted((excluded & all_ids) - digit_bearing)
 
     lexemes = list(pins.get("corpus", {}).get("hedge_scope_lexemes") or [])
     pattern = _marker_pattern(lexemes) if lexemes else None
@@ -326,7 +366,7 @@ def derive_corpus_facts(pins: dict) -> dict:
     sentences_total = 0
     markers_total = 0
     for sid in session_ids:
-        fixture = json.loads((root / "fixtures" / f"{sid}.json").read_text())
+        fixture = corpus.load_fixture(sid, root)
         n = 0
         for turn in fixture.get("conversation") or []:
             for sentence in _sentence_count(str(turn.get("content") or "")):
@@ -356,6 +396,7 @@ def derive_corpus_facts(pins: dict) -> dict:
         "hedge_scope_sentences": markers_total,
         "sentences_total": sentences_total,
         "missing_exclusions": missing_exclusions,
+        "idle_exclusions": idle_exclusions,
         "salience": {
             "rows": len(rows),
             "in_scope": len(in_scope),
@@ -753,8 +794,27 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
     if "e4_denominator" in pins:
         cmp("e4_denominator", pins["e4_denominator"], record.get("e4_denominator"))
 
+    # The record must describe THIS document. Git-free by design: the ordering half cannot see a
+    # delete-and-re-add rewrite of the argument (it takes the OLDEST add-epoch) and cannot see
+    # anything at all in a shallow checkout, so the digest is the one bound that always applies
+    # (#9075 review r3 P3). A re-edited argument must be accompanied by a re-cut record — which is
+    # a second, reviewable artefact rather than a silent in-place edit.
+    document = (directory / PREREG_NAME).read_bytes()
+    want_document_sha = "sha256:" + hashlib.sha256(document).hexdigest()
+    got_document_sha = record.get(DOCUMENT_SHA_PIN)
+    if not got_document_sha:
+        failures.append(
+            f"{MACHINE_RECORD} carries no {DOCUMENT_SHA_PIN} — the record must pin the argument it "
+            "describes, or a rewrite after a scored log leaves the record describing nothing"
+        )
+    elif got_document_sha != want_document_sha:
+        failures.append(
+            f"{MACHINE_RECORD} {DOCUMENT_SHA_PIN} is {got_document_sha!r} but {PREREG_NAME} hashes "
+            f"to {want_document_sha!r} — the argument was re-edited without the record being re-cut"
+        )
+
     # Each criterion row's threshold in the record must match the table's, character for character.
-    rows = parse_criteria_rows((directory / PREREG_NAME).read_text())
+    rows = parse_criteria_rows(document.decode())
     table = {
         r["id"]: {part: _plain(r[part]) for part in ("metric", "denominator", "threshold")}
         for r in rows
@@ -822,7 +882,14 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
                 "a criteria row must name all three before any run"
             )
     for required in REQUIRED_CRITERIA:
-        if not any(r["id"] == required or r["id"].startswith(required) for r in rows):
+        if required in SUB_ROW_CRITERIA:
+            present = any(
+                r["id"] == required or r["id"].startswith(required) for r in rows
+            )
+        else:
+            # EXACT: ``E1b`` is E1's control, not a stand-in for E1 (#9075 review r3 P2).
+            present = any(r["id"] == required for r in rows)
+        if not present:
             failures.append(f"criterion {required} has no row")
     for row in rows:
         if is_placeholder(row["threshold"]):
@@ -906,6 +973,12 @@ def check_pins(pins: dict, derived: dict) -> list[str]:
             "corpus.value_excluded_unit_ids names ids absent from the gold: "
             f"{derived['missing_exclusions']}"
         )
+    if derived.get("idle_exclusions"):
+        failures.append(
+            "corpus.value_excluded_unit_ids excludes ids whose anchor carries no digit: "
+            f"{derived['idle_exclusions']} — an exclusion that excludes nothing value-bearing "
+            "cannot be the named reason a unit left the 14, so it is a stale pin"
+        )
 
     tune = list(split.get("tune") or [])
     held = list(split.get("held_out") or [])
@@ -972,6 +1045,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     failures += check_machine_record(directory, pins)
 
     if use_corpus:
+        corpus_state = "verified"
         try:
             derived = derive_corpus_facts(pins)
         except CheckError:
@@ -997,6 +1071,13 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
             "salience": derived["salience"],
         }
         failures += check_pins(pins, derived)
+    else:
+        # A skipped half must SAY it was skipped: `--no-corpus` is what the CI ordering step uses
+        # (the corpus leg needs the package deps, and the test suite owns it), and a report that
+        # reads as fully checked while one half never ran is the silent-green shape this tool
+        # exists to refuse (#9075 review r6 P1).
+        corpus_state = "UNVERIFIED (--no-corpus)"
+    report["corpus"] = corpus_state
 
     report["failures"] = failures
     report["ok"] = not failures
@@ -1048,14 +1129,19 @@ def main(argv: list[str] | None = None) -> int:
                 "/{sentences_total} salience={salience[in_scope]}-in-scope"
                 "/{salience[positively_classified]}-classified".format(**d)
             )
-        if report["ok"] and report["ordering"] == "verified":
+        unchecked = []
+        if report["ordering"] != "verified":
+            unchecked.append(f"ordering NOT checked ({report['ordering']})")
+        if report.get("corpus") != "verified":
+            unchecked.append(f"corpus pins NOT checked ({report.get('corpus')})")
+        if report["ok"] and not unchecked:
             print("OK — every criteria row is complete, the ordering holds, "
                   "the E4 denominator is 15, and the pins match the tree")
         elif report["ok"]:
-            # Never let an unchecked ordering read as a checked one: the verdict line carries the
+            # Never let an unchecked half read as a checked one: the verdict line carries the
             # reason it is missing, and it is the same string the report's claim field carries.
-            print("OK (ordering NOT checked) — every criteria row is complete, the E4 denominator "
-                  f"is 15, and the pins match the tree; the ordering half is {report['ordering']}")
+            print("OK (halves NOT checked) — every criteria row is complete and the E4 denominator "
+                  f"is 15; {'; '.join(unchecked)}")
         else:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:

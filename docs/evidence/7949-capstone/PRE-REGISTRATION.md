@@ -109,9 +109,9 @@ use — which is precisely the defect `#9075` exists to prevent:
 
 - **Source:** live graph `org_3326a01ea34ae595d84de5d8f9`, census of **2026-09-25**
   (`tortoise/definite_description_backfill.py` module docstring: *"`7,870` Objects, `27,324`
-  reference edges … `the ` alone: **4,901**, of which 2,570 are load-bearing"*).
+  reference edges … `the` alone: **4,901**, of which 2,570 are load-bearing"*).
 - **Arithmetic:** 4,901 / 7,870 = **62.27%** → the document's 62.3%. Same quantity, same shape
-  predicate (`^the `-prefixed name), one audited production graph.
+  predicate (`^the`-prefixed name), one audited production graph.
 - **What that denominator is NOT:** it is not the corpus. A corpus run writes its *own* Objects,
   with its own total, and a pipeline that extracts fewer real facts also writes fewer Objects — so
   a **production-graph 62.3% compared against a corpus-run share is a numerator/denominator
@@ -265,7 +265,7 @@ the `the <X>` class can be *decided* is in the tree, and it bounds the claim in 
 
 - the shape class is where the volume is: **62.27%** of the production graph's Objects (§1.2);
 - but the shipped **positive** predicate decides only **9 of the 15** shape-in-scope labelled names
-  (60%), and the backfill lane measured **≈48% precision on an irreversible delete** of the `the `
+  (60%), and the backfill lane measured **≈48% precision on an irreversible delete** of the `the`
   class (`tortoise/definite_description_backfill.py:20`: 4,901 rows, 2,570 load-bearing).
 
 **⇒ A promise to remove *most* of the class would be a promise the detector cannot keep.** Half is
@@ -409,15 +409,25 @@ uv run python tools/capstone_preregistration_check.py --dir docs/evidence/7949-c
 **Exit codes.** `0` only when every rule below holds; `1` when any rule fails; `2` when the check
 cannot read its subject at all (no document, an unparseable or wrong-typed pins/record block) — a
 check that cannot read what it audits never reports success. `--no-git` and `--no-corpus` exist for
-authoring only: they SKIP a half, and the report says so (`OK (ordering NOT checked)`), so neither can
-be mistaken for a verified run. CI and the acceptance command above run the full check.
+authoring only: they SKIP a half, and the report says so (`OK (halves NOT checked) — … ordering NOT
+checked (…)`), so neither can be mistaken for a verified run. The acceptance command above runs both
+halves; **CI runs the ordering half in the `changes` job** (the one job that checks out at
+`fetch-depth: 0`) with `--no-corpus`, and the corpus half in the `test` job via
+`tests/test_capstone_preregistration_9075.py`, which owns the package dependencies that leg needs.
+Neither half is left to a human.
 
 **The ordering half has a third outcome.** CI test jobs check out at `fetch-depth: 1`, and git grafts
 a depth-1 clone at its tip, so both sides of an epoch comparison collapse onto one number and
 "violated" is indistinguishable from "unprovable". The check says `UNPROVABLE — shallow clone` rather
-than inventing a verdict. **The laundering whitelist below still runs in that case**, because it reads
-the log's own lines and needs no history at all — so the shallow path weakens the *date* comparison,
-never the protection against a scored number.
+than inventing a verdict. **The `prereg=UNPREREGISTERED` / verdict / exit whitelist below still runs
+in that case**, because it reads the log's own lines and needs no history at all — so the shallow
+path weakens the *date* comparison, never the protection against a scored number. The two bounds that
+do need history (the log's add-commit, and its last-touch epoch) run in the `changes` job above,
+which is why that job keeps full history.
+
+**Scope of the log set.** The ordering half orders each `*.log` **in this directory**; the glob is
+non-recursive on purpose, so a log written beside the probes (`probes/*.log`) is not silently ordered
+as if it were an entry in this table. Adding a log there is a deliberate act with its own review.
 
 Exit 0 only when **all** of these hold:
 
@@ -455,24 +465,23 @@ Exit 0 only when **all** of these hold:
    rather than on prose, and it is **trusted, not derived** — it is only cross-checked against the
    `*.log` scan when the git ordering runs, so `--no-git` leaves it an assertion (the report says so).
    It must also agree with the pins block on
-   `fixtures_hash`, on every criterion threshold, and on the exempt-log list.
-4. **E4's denominator is 15.** The E4 row's denominator is `15`, and **no four-edge denominator rate
-   appears** (§6).
+   `fixtures_hash`, on **every criterion's metric, denominator and threshold**, and on the exempt-log
+   list; and it must carry `document_sha256`, the digest of THIS file. The digest is what makes a
+   re-edited argument visible without git: the ordering half takes the *oldest* add-commit, so a
+   delete-and-re-add rewrite keeps the old epoch, and a shallow checkout has no epochs at all. A
+   document edit must therefore move the record with it, and the record is the artefact the run
+   probe freezes.
+4. **E4's denominator is 15.** The E4 row's denominator is `15`, and **no four-edge `N / 4` rate
+   appears** (§6). The refusal is of the *rate*: §1.4 states the history as a count (`2 of 4`), which
+   is not a fraction anyone can quote as a result.
 5. **The pins still describe the corpus.** `fixtures_hash`, sessions, 90 planted units, 15 operator
    edges, 14 value-bearing units, 29 marker sentences, and the 25/15/9/6 salience measurement are
-   **re-derived** from the tree and compared with the pins block; and the split is a true partition
-   of the 7 sessions. A corpus change therefore fails this check instead of silently re-basing the
-   thresholds.
-
-**The ordering half has a third outcome, and it is neither a pass nor a failure.** In a **shallow
-clone** (CI test jobs check out at `fetch-depth: 1`) git grafts the boundary commit, so *every* path
-reports as added by HEAD and the epochs on both sides of the comparison collapse onto the same
-number. The check then cannot tell *"the ordering was violated"* from *"the ordering cannot be
-proved here"*, so it reports **`UNPROVABLE — shallow clone`** in the report's `ordering` and
-`run-order claim` fields, and never a violation: a false red on a correctly ordered tree is the one
-verdict this check must not give. Run it in a full clone (`git fetch --unshallow`) for the ordering
-verdict; the tests that assert a real-artefact PASS skip in a shallow checkout rather than assume
-one.
+   **re-derived** from the tree and compared with the pins block; the operator-edge total comes from
+   `corpus.planted_operator_count()` (§1.1), the corpus package's own single source for that
+   denominator; both named value exclusions are re-derived (§3.3) — an exclusion naming an absent id,
+   or a unit whose anchor carries no digit (so it excludes nothing), is a stale pin; and the split is
+   a true partition of the 7 sessions. A corpus change therefore fails this check instead of silently
+   re-basing the thresholds.
 
 The pins block below is the machine-readable copy; the prose in §1–§3 is the argument. Both are
 checked, so neither can rot alone.
