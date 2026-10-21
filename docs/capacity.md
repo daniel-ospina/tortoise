@@ -174,13 +174,16 @@ Read the caveats with the number, because they decide whether it applies to you:
 - **It is one box under variable load.** The profile's own measurement records
   absolute milliseconds moving 2–3× between runs with host load, and states that
   the *shares* are the robust output.
-- **The 345–460 ms row has no lineage.** An end-to-end retrieval p95 of
-  **345–460 ms on a development box** — above the ≤ 300 ms band — was quoted on
-  `/faq` until 2026-10-21, with no run, harness invocation or artifact named
-  behind it (`git show ade1cd0c0:website/faq.html` is that revision). It is
-  recorded here so the retired sentence was not the only copy of the number, and
-  it stays out of the measured table above for the same reason it is listed: an
-  unattributed number is a hint about the band, not a result to plan against.
+- **The 345–460 ms row is a contended-box reading, not a deployment number.**
+  An end-to-end (E2E-8) p95 of **345–460 ms on a development laptop** — above
+  the ≤ 300 ms band — was quoted on `/faq` until 2026-10-21. Its provenance is
+  `docs/adr/ADR-009-embedder-selection.md`: the post-swap E2E-8 re-run of
+  2026-08-21 measured bge-small at **345–358 ms** p95 against a MiniLM control at
+  **418–464 ms** under identical full-suite contention, and the ADR calls the
+  reading **inconclusive**, deferring the band to the pre-registered T15
+  production-class measurement. It stays out of the measured table above for that
+  reason, not for want of a source: a contended box on which the control misses by
+  more is a hint about the band, not a result to plan against.
 - It is the retrieval path with a deterministic stub reader, so no model call is
   inside it. The LLM leg is measured separately in the same profile.
 - 533 Points is a small corpus. It is a shape, not a scale test.
