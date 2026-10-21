@@ -780,7 +780,8 @@ still false. The review is the reason the count below moved in the direction tha
 - **The census could only see a string LITERAL.** It parsed `ast.Constant` and nothing else, so a
   reader that builds the relationship name at runtime was invisible — and five of them exist:
   `StateRanker._fetch_object_signals` (`ranking.py:1066`, `"|".join(ABOUT_EDGE_TYPES)`),
-  `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py:28773`/`:28790`,
+  `TortoiseSDK._state_related_objects` / `_state_related_points` (`sdk.py`, no line hint — see
+  the ninth entry below: the numbers this entry shipped with were already wrong when written),
   `"MATCH (n)-[a:" + self._ABOUT_TYPES + "]…"`), `supersede_point` (`sdk.py:13559`) and
   `_preview_supersede` (`mcp_server.py:6804`), both looping over `SUPERSEDE_STRUCTURAL_RELS`.
   Worse, the table and the census **agreed perfectly** on the 13 sites the literal scan could see,
@@ -983,4 +984,49 @@ carried nineteen hints across the two passages), `test_the_prose_names_every_row
 share: the guard resolved the `site` column and nothing else, so the prose around the table could
 carry a stale number, an under-counted class and a non-existent symbol while every arm stayed green
 — a **PASS about a false artifact**, which is the failure mode this whole instrument exists to end.
+
+### Follow-up, same day — the TENTH correction: the chronology now arrives at the headline, and a digit rewrite stays checkable (`PR #9398`, fifth review)
+
+The fifth review again found no defect in the census, the derivation or the KEEP ruling: the rows,
+the four numerals and the declared classes all reconciled at that head. Its three findings were the
+narrower kind — **a claim that disagreed with a claim next to it, a citation that had already
+rotted, and a documented capability that could not be reached** — and the first two share a shape
+worth naming: both were **prose asserting a fact about prose**, which no arm was reading.
+
+- **§13's chronology stopped two sites short of its own headline.** The headline stated
+  **TWENTY-FOUR read sites across TWENTY rows**; the three paragraphs explaining *why* the count
+  moved ended at **twenty → twenty-two sites**, the state before rows 19 (`session_link.link_entity`)
+  and 20 (`subject_binding.bind_point_subjects`) were added. The increment existed in this changelog
+  and **nowhere in the document being narrated**, so the passage a re-verifier reads to understand
+  the number answered with a smaller one. The closing increment is now stated (twenty-two →
+  twenty-four sites, eighteen → twenty rows, and **neither new row is customer-callable**, so the
+  numeral the ruling rests on — seven rows, ten sites — is unchanged), and the chain is **asserted**:
+  `test_the_change_chain_ends_at_the_headline_counts` compares the LAST `<from> → <to> <unit>`
+  increment of each unit to the table, so a chain that stops short reds instead of reading as
+  history. Non-vacuity is measured: on the pre-fix document it reds on
+  *"stops at `twenty-two` sites while its table has 24"* **and** on the missing rows increment.
+- **Two `file.py:NNNN` citations in the fifth-correction entry were already rotten when written.**
+  `_state_related_objects` / `_state_related_points` were cited at lines 28773 and 28790 of
+  `sdk.py`; at the head those lines are a validity-window helper and a sort-key comparison, while
+  the readers themselves sit roughly 590 lines further down. The entry now uses **`sdk.py`,
+  symbol-only** — the same form the same block adopts for `_connect_issue_objects` — because
+  re-measuring is what produced the wrong number in the first place, and the rotten numbers are
+  named here as numbers in prose rather than as a `file.py:NNNN` hint, so the passage that says
+  they rot does not hand a re-verifier a fresh one to copy. ⚠️ **This block is deliberately not
+  guarded by a no-hints arm**, and the reason is
+  structural rather than an omission: two of its hints exist **as examples of rot**
+  (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §16 pointer the fourth correction replaced,
+  and `sdk.py:20154`, the `_connect_issue_objects` citation that was wrong when written), so a
+  blanket arm would red on the passage that *documents* the defect. The rule this entry follows
+  instead is the document's own:
+  a hint is written only where the point is that it was wrong, never as an aid.
+- **`_numeral` advertised digits it could not receive.** Its docstring promised *"digits are
+  accepted as well, so a rewrite that writes `6` instead of `SIX` stays checkable"*, while all five
+  `_PROSE_*` captures were `([A-Za-z][A-Za-z-]*)` — so `token.isdigit()` was unreachable and a
+  digit rewrite of the headline matched **nothing**, redding the count arm with *"§13 no longer
+  states its site count … restore the sentence"*: a false diagnosis telling a fixer to restore a
+  sentence that is present. The captures now accept `[A-Za-z][A-Za-z-]*|\d+` through one shared
+  `_NUMERAL` body, the parsing was split into `_parse_prose_counts()` so the sentence forms have a
+  seam, and `test_the_numeral_parsing_accepts_digits` feeds **both spellings of the same claim**
+  through all four units plus the chain form. It reds if the captures go back to words-only.
 
