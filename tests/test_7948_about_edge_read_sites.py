@@ -171,7 +171,10 @@ WHAT THIS PINS
    surface get named", and it named the `tortoise_supersede` dry-run preview
    twice — ten entries for nine surfaces, read by nothing. A duplicate entry reads
    as a surface checked twice while another went unchecked, so the entries are
-   counted and de-duplicated against the table's customer-callable rows.
+   checked twice: no duplicate, and the distinct count against the numeral the
+   sentence itself states (`are nine of them` refers to the surfaces just listed).
+   Comparing them to the TABLE's row count was the units error this file exists
+   for, one sentence over.
 17. **`test_a_pattern_built_entirely_from_a_variable_is_unreachable_and_says_so`**
    — the stated LIMIT. A Cypher pattern assembled wholly from variables carries no
    bracket text for any of the three walks, AND is undeclarable: arm 2 requires
@@ -182,10 +185,12 @@ WHAT THIS PINS
 18. **`test_the_file_filter_un_sees_nothing`** — the FILTER. `_files()` is a
    text-predicate gate in front of three walks, and the PR body's claim that it is
    a strict superset was measured once by hand and pinned nowhere: a NARROWED gate
-   would un-see a reader silently instead of reding. The three walks are re-run
-   over every module with the gate removed and must agree, and a deliberately
-   narrowed filter (the literal carriers only) must be shown to DISAGREE — so the
-   arm proves it can see a narrowing rather than asserting it.
+   would un-see a reader silently instead of reding. The three walks are run over
+   the modules the gate SKIPPED (a gated module's sites are already the cached
+   walks' output) and must find nothing in any class, and a deliberately narrowed
+   filter (the literal carriers only) must be shown to DISAGREE — so the arm
+   proves it can see a narrowing rather than asserting it, at ~2 s rather than the
+   ~19 s a full 242-module re-walk cost.
 19. **`test_the_case_corpora_are_not_vacuous`** — the CORPORA. Every synthetic
    case tuple must hold both directions (something that derives and a near-miss
    that must not), no repeated labels, and a floor on its size: a corpus silently
@@ -2028,19 +2033,23 @@ def _declared_keys() -> set[tuple[str, str]]:
     (`_row_site_pairs` -> `"sdk.py"`) and the registers by the FULL relative path
     (`"tortoise/sdk.py"`) — so the "already declared" branch of the arm below
     could not fire for a synthetic source under either spelling: the branch the
-    docstring advertised as the second failure mode was dead code. Both are folded
-    to the basename here, which is the keyspace the walks report.
+    docstring advertised as the second failure mode was dead code. This function
+    folds both surfaces into §13's keyspace; the WALKS report `tortoise/<path>`,
+    so the bridge between the two is the basename fold — `_basename_keys()` below
+    is the one translator, and the arm requires the registers' keys to resolve
+    into the walk keyspace through it.
     """
     keys = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
-    keys |= {
-        (filename.rsplit("/", 1)[-1], _last(symbol))
-        for filename, symbol, _why in CALL_TIME_REL
-    }
-    keys |= {
-        (filename.rsplit("/", 1)[-1], _last(symbol))
-        for filename, symbol, _why in EMPTY_PATTERN
-    }
+    keys |= _basename_keys(CALL_TIME_REL)
+    keys |= _basename_keys(EMPTY_PATTERN)
     return keys
+
+
+def _basename_keys(
+    register: tuple[tuple[str, str, str], ...],
+) -> set[tuple[str, str]]:
+    """A register's entries in the rows' keyspace: `(basename, base symbol)`."""
+    return {(filename.rsplit("/", 1)[-1], _last(symbol)) for filename, symbol, _why in register}
 
 
 def _new_reader_problems(declared: set[tuple[str, str]]) -> list[str]:
@@ -2103,20 +2112,32 @@ def test_a_new_call_time_reader_cannot_ship_green():
         + "\n  - ".join(_new_reader_problems(declared))
     )
 
-    # The two surfaces must be in ONE keyspace, not merely both present: §13's rows
-    # are keyed by BASENAME and the registers by the FULL relative path, and that
-    # mismatch is what made the "already declared" branch unreachable in the first
-    # place — the CONTROL below would not notice it, because it injects the key it
-    # expects to match. So every registered reader is required to appear under its
-    # basename spelling.
-    for filename, symbol, _why in (*CALL_TIME_REL, *EMPTY_PATTERN):
-        key = (filename.rsplit("/", 1)[-1], _last(symbol))
-        assert key in declared, (
-            f"`{filename}::{symbol}` is registered and its basename key {key} is not "
-            "in the declaration set — the register and §13's rows are keyed "
-            "differently again, so the 'already declared' branch cannot fire for "
-            "any spelling a walk could report"
+    # The registers must resolve into the WALK keyspace, not merely into the
+    # declaration set this function just built — recomputing the same fold here
+    # would only re-assert the definition. The walks report `tortoise/<path>`, a
+    # register entry names one of its readers, so its basename key must BE one of
+    # the derived sites; if a register drifts back to a full path (or names a
+    # module the walks stopped deriving), that entry stops resolving and this
+    # reds. That drift is what made the "already declared" branch dead.
+    walk_keys = {
+        (path.rsplit("/", 1)[-1], symbol)
+        for path, symbol in (
+            *set(_call_time_sites()),
+            *set(_empty_pattern_sites()),
+            *set(_census()),
         )
+    }
+    unresolved = sorted(
+        key
+        for key in (_basename_keys(CALL_TIME_REL) | _basename_keys(EMPTY_PATTERN))
+        if key not in walk_keys
+    )
+    assert not unresolved, (
+        "these register entries do not resolve into the site keyspace the walks "
+        "report, so a reader declared there could never be matched against a "
+        "derivation (and the 'already declared' branch of this arm could not "
+        f"fire): {unresolved}"
+    )
 
     # CONTROL: a synthetic member that IS declared must be reported. One derived
     # symbol from the first case is enough — the point is that the branch fires.
@@ -2164,6 +2185,20 @@ _FROZENSET_CASES: tuple[tuple[str, str, bool], ...] = (
     (
         "`tuple([...])` call",
         "RELS = tuple(['x', 'aboutObject'])\n\n\n"
+        "def read(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "`set({...})` call",
+        "RELS = set({'x', 'aboutObject'})\n\n\n"
+        "def read(g):\n    for rel in RELS:\n"
+        '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
+        True,
+    ),
+    (
+        "`list([...])` call",
+        "RELS = list(['x', 'aboutObject'])\n\n\n"
         "def read(g):\n    for rel in RELS:\n"
         '        g.query(f"MATCH (n)-[:{rel}]->(m) RETURN n")\n',
         True,
@@ -2587,14 +2622,45 @@ def test_the_sibling_paragraph_names_every_customer_callable_row():
 #: The sentence in §13 that enumerates every customer-callable surface, from the
 #: colon that opens the list to the `are <N> of them` recital that closes it.
 _CALLABLE_LIST_INTRO = "every customer-callable surface:"
-#: A parenthetical aside inside one entry — `(MCP `tortoise_recall`)`,
-#: `(SDK, and hosted REST)`. Its commas are NOT entry separators, which is why the
-#: list is de-parenthesised before it is split.
-_PARENTHETICAL = re.compile(r"\([^()]*\)")
 
 
-def _callable_enumeration() -> tuple[str, ...]:
-    """The customer-callable surfaces §13 ENUMERATES, verbatim and in order.
+def _split_entries(text: str) -> list[str]:
+    """Split an enumeration on its top-level commas only.
+
+    A parenthetical aside is part of the entry's IDENTITY — `(MCP
+    `tortoise_recall`)` distinguishes it, and `(SDK, and hosted REST)` carries a
+    comma that is not a separator — so the text is scanned with a paren-depth
+    counter rather than de-parenthesised first. Stripping the asides made
+    `search(order_by="graph")` and a hypothetical `search(order_by="degree")`
+    collapse to the same `search`, i.e. a FALSE duplicate.
+    """
+    entries: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in text:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            entries.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    entries.append("".join(current))
+
+    cleaned: list[str] = []
+    for entry in entries:
+        entry = entry.strip()
+        if entry.lower().startswith("and "):
+            entry = entry[4:].strip()
+        if entry:
+            cleaned.append(entry)
+    return cleaned
+
+
+def _callable_enumeration() -> tuple[tuple[str, ...], str | None]:
+    """The customer-callable surfaces §13 ENUMERATES, and the numeral beside them.
 
     The `⇒` sentence is the one paragraph whose job is to be the reviewer's
     checklist for "did every customer-callable surface get named", and nothing
@@ -2602,23 +2668,23 @@ def _callable_enumeration() -> tuple[str, ...]:
     *nine*, so the sentence could list the same surface twice and still pass (it
     did: the `tortoise_supersede` dry-run preview appeared twice, i.e. ten entries
     standing for nine surfaces).
+
+    The numeral is returned with the entries because it is the count the LIST
+    itself states — `... are nine of them` refers to the surfaces just enumerated,
+    so it is the only like-for-like comparison available. Comparing the entries to
+    the TABLE's row count would repeat the units error the headline arm exists for
+    (a SYMBOL/LIST count against a ROW count): they agree today only because no row
+    is split and no two rows share a surface.
     """
     text = _bullet_text()
     intro = text.find(_CALLABLE_LIST_INTRO)
     if intro < 0:
-        return ()
+        return (), None
     rest = text[intro + len(_CALLABLE_LIST_INTRO) :]
     closing = _PROSE_CALLABLE_AGAIN.search(rest)
     if closing is None:
-        return ()
-    entries: list[str] = []
-    for raw in _PARENTHETICAL.sub("", rest[: closing.start()]).split(","):
-        entry = raw.strip()
-        if entry.lower().startswith("and "):
-            entry = entry[4:].strip()
-        if entry:
-            entries.append(entry)
-    return tuple(entries)
+        return (), None
+    return tuple(_split_entries(rest[: closing.start()])), closing.group(1)
 
 
 def test_the_callable_enumeration_lists_each_surface_once():
@@ -2626,40 +2692,50 @@ def test_the_callable_enumeration_lists_each_surface_once():
 
     A duplicated entry is not a cosmetic typo in this sentence: it reads as a
     surface that was checked twice, and it means one entry was not a surface at
-    all. So the entries are counted twice — once for duplicates, once for distinct
-    surfaces against the table's `customer-callable` row count.
+    all. So the entries are checked twice — once for duplicates, once for their
+    distinct count against the numeral THE SENTENCE states, which is what "are
+    <N> of them" refers to. The numeral's own agreement with the table's
+    customer-callable rows is arm 7's job, so a split row reds THERE (naming the
+    numeral) instead of producing an unsatisfiable pair of assertions here.
     """
-    entries = _callable_enumeration()
+    entries, token = _callable_enumeration()
     assert entries, (
         "§13 no longer ENUMERATES its customer-callable surfaces (the "
         f"`{_CALLABLE_LIST_INTRO}` sentence is gone or re-worded), so the "
         "reviewer's checklist for that set is unguarded — restore the list, or "
         "delete this arm and say why in the docstring"
     )
-
-    customer_callable = [
-        row for row in _declared_rows() if "customer-callable" in row[2].lower()
-    ]
+    assert token is not None, (
+        "the enumeration has no `are <N> of them` recital, so the surfaces it "
+        "lists are not compared to any count — restore the numeral, or delete "
+        "this arm"
+    )
+    stated = _numeral(token)
+    distinct = set(entries)
     duplicates = sorted({entry for entry in entries if entries.count(entry) > 1})
 
     problems: list[str] = [
         f"`{entry}` is listed {entries.count(entry)} times — one surface is one "
-        "entry; a duplicate stands for a ninth surface that was never named"
+        "entry, and a duplicate means one listed surface was counted twice while "
+        "another went unnamed"
         for entry in duplicates
     ]
-    distinct = set(entries)
-    if len(distinct) != len(customer_callable):
+    if stated is None:
+        problems.append(
+            f"the recital states `{token}` and this guard cannot read that numeral "
+            "— spell it out in words or digits"
+        )
+    elif len(distinct) != stated:
         problems.append(
             f"the sentence enumerates {len(distinct)} distinct surfaces "
-            f"({len(entries)} entries) and §13 marks {len(customer_callable)} rows "
-            "`customer-callable`"
+            f"({len(entries)} entries) and the recital beside it states {stated}"
         )
 
     assert not problems, (
         "the sentence §13 advertises as the checklist for its customer-callable "
-        "SET disagrees with the table it points at. The numeral beside it is "
-        "already asserted by `test_the_prose_counts_match_the_table`; this is the "
-        "list itself, which nothing read:\n  - " + "\n  - ".join(problems)
+        "SET disagrees with itself. The numeral is also checked against the table "
+        "by `test_the_prose_counts_match_the_table`; this is the LIST, which "
+        "nothing read:\n  - " + "\n  - ".join(problems)
     )
 
 
@@ -2701,6 +2777,12 @@ def test_a_pattern_built_entirely_from_a_variable_is_unreachable_and_says_so():
       register exemption; neither exists today, and this arm is what makes that
       visible instead of assumed.
     """
+    assert len(_OPAQUE_READER_CASES) >= 2, (
+        "the stated limit is evidenced by fewer than two sources, so the gap "
+        "below is measured on (or nothing at all) and this arm asserts only the "
+        "docstring wording"
+    )
+
     for label, source in _OPAQUE_READER_CASES:
         file = _File(TORTISE / "<synthetic>", "<synthetic>", source)
         derived = set(_sites_in(file)) | _empty_pattern_sites_in(file)
@@ -2726,20 +2808,29 @@ def test_a_pattern_built_entirely_from_a_variable_is_unreachable_and_says_so():
 
 
 @lru_cache(maxsize=1)
-def _unfiltered_walks() -> tuple[
+def _excluded_walk_sites() -> tuple[
     set[tuple[str, str]], set[tuple[str, str]], set[tuple[str, str]]
 ]:
-    """The three derivations run over EVERY module, with `_files()`'s gate removed.
+    """The three derivations run over the modules `_files()` EXCLUDES.
 
     `_files()` is a text-predicate gate in front of the walks, so it must be a
-    SUPERSET of what they would find: a gate that is one predicate too narrow
-    un-sees a reader silently — the arm below would stay green while the census
-    stopped covering it, which is this PR's own defect class one layer down.
+    SUPERSET of what they would find: a gate one predicate too narrow un-sees a
+    reader silently — the arm below would stay green while the census stopped
+    covering it, which is this PR's own defect class one layer down.
+
+    Only the EXCLUDED modules are walked, and that is the whole measurement: a
+    gated module's sites are exactly what the cached walks already returned, so a
+    narrow gate can only show up as a site in a module the gate skipped. Walking
+    all 242 modules again measured ~19 s — it paid to re-derive every gated site
+    for nothing, against the 4 s the filter exists to save.
     """
+    gated = {file.path for file in _files()}
     named: set[tuple[str, str]] = set()
     empty: set[tuple[str, str]] = set()
     call_time: set[tuple[str, str]] = set()
     for path, source in _sources().items():
+        if path in gated:
+            continue
         rel = str(path.relative_to(ROOT))
         file = _File(path, rel, source)
         for symbol, _line in _sites_in(file):
@@ -2762,31 +2853,40 @@ def test_the_file_filter_un_sees_nothing():
     the walks still work, every arm still passes, and the reader they no longer
     reach simply stops being covered.
 
-    So the walks are re-run with the gate removed and must agree exactly, in all
-    three classes. The CONTROL matters as much as the check: the same measurement
-    is run against a deliberately narrowed gate (`_literal_files()`, the single
+    So the three walks are run over the modules the filter SKIPPED (a gated
+    module's sites are already the cached walks' output) and must find nothing in
+    any class. The CONTROL matters as much as the check: the same measurement is
+    run against a deliberately narrowed gate (`_literal_files()`, the single
     predicate the filter started from) and must DISAGREE — otherwise this arm
     could not see a narrowing at all and would be a PASS about nothing.
     """
-    unfiltered_named, unfiltered_empty, unfiltered_call_time = _unfiltered_walks()
-    problems: list[str] = []
+    skipped_named, skipped_empty, skipped_call_time = _excluded_walk_sites()
+    gated_named = {path for path, _symbol in _census()}
+    gated_empty = {path for path, _symbol in _empty_pattern_sites()}
+    gated_call_time = {path for path, _symbol in _call_time_sites()}
 
-    for label, gated, unfiltered in (
-        ("named census", set(_census()), unfiltered_named),
-        ("empty-pattern class", set(_empty_pattern_sites()), unfiltered_empty),
-        ("call-time class", set(_call_time_sites()), unfiltered_call_time),
+    problems: list[str] = []
+    for label, gated, skipped in (
+        ("named census", gated_named, skipped_named),
+        ("empty-pattern class", gated_empty, skipped_empty),
+        ("call-time class", gated_call_time, skipped_call_time),
     ):
-        missed = sorted(unfiltered - gated)
+        assert gated, (
+            f"{label}: the gated walk derived nothing at all, so this arm would "
+            "compare against an empty set"
+        )
+        missed = sorted(skipped)
         if missed:
             problems.append(
-                f"{label}: {len(missed)} site(s) exist under `tortoise/` and the "
-                f"file filter skipped their module: {missed}"
+                f"{label}: {len(missed)} site(s) exist under `tortoise/` in a "
+                f"module the file filter SKIPPED: {missed}"
             )
-        if not unfiltered:
-            problems.append(
-                f"{label}: the unfiltered walk derived nothing, so this arm "
-                "passes vacuously"
-            )
+
+    assert len(_sources()) > len(_files()), (
+        "the filter admits every module, so this arm has no excluded module to "
+        "measure and passes vacuously — either the gate was widened to `True` or "
+        "the package shrank to the gated set"
+    )
 
     # CONTROL: the narrow gate (`_literal_files()` only, the single predicate the
     # filter started from) must MISS members of the three classes — a measurement
@@ -2819,7 +2919,9 @@ def test_the_file_filter_un_sees_nothing():
 
 
 #: Every synthetic corpus the mechanism arms iterate, by name. Each must hold both
-#: directions, or its arm is a PASS about nothing.
+#: directions, or its arm is a PASS about nothing. `_OPAQUE_READER_CASES` is
+#: checked by its own arm below — its direction is the INVERSE (every case must
+#: derive NOTHING), so it cannot join this loop's rule.
 _CASE_CORPORA = (
     ("_MECHANISM_CASES", _MECHANISM_CASES),
     ("_CALL_TIME_CASES", _CALL_TIME_CASES),
@@ -2838,7 +2940,12 @@ def test_the_case_corpora_are_not_vacuous():
     counts (a copy nobody reads is the defect), the properties the arms actually
     depend on are asserted: both directions present, no repeated label, a floor on
     the size. A corpus quietly shrunk to its deriving half leaves the arm above it
-    green with nothing to prove.
+    green with nothing to prove — and a corpus emptied entirely leaves it green
+    with nothing to ITERATE, which is why the size floor is the load-bearing check
+    rather than a formality.
+
+    `_OPAQUE_READER_CASES` is here rather than in `_CASE_CORPORA` because its rule
+    is inverted: a limit's evidence is that NO case derives.
     """
     problems: list[str] = []
     for name, cases in _CASE_CORPORA:
@@ -2856,13 +2963,26 @@ def test_the_case_corpora_are_not_vacuous():
         if repeated:
             problems.append(f"{name} repeats a case label: {repeated}")
 
-    if len(_NEW_READER_CASES) < 2:
-        problems.append(
-            f"_NEW_READER_CASES holds {len(_NEW_READER_CASES)} case(s) — the "
-            "non-vacuity arm's evidence has shrunk to the point it measures one shape"
+    for name, cases in (
+        ("_NEW_READER_CASES", _NEW_READER_CASES),
+        ("_OPAQUE_READER_CASES", _OPAQUE_READER_CASES),
+    ):
+        if len(cases) < 2:
+            problems.append(
+                f"{name} holds {len(cases)} case(s) — the arm that leans on it "
+                "has shrunk to measuring one shape, or to nothing at all"
+            )
+        repeated = sorted(
+            {
+                label
+                for label, _source in cases
+                if [cand for cand, _src in cases].count(label) > 1
+            }
         )
+        if repeated:
+            problems.append(f"{name} repeats a case label: {repeated}")
 
     assert not problems, (
         "a synthetic corpus the mechanism arms depend on is no longer able to "
-        "pin both directions of its shape:\n  - " + "\n  - ".join(problems)
+        "pin the shape it is cited for:\n  - " + "\n  - ".join(problems)
     )
