@@ -258,14 +258,27 @@ def resolve_source_key(g, url: str) -> str:
     # canonical form (the common API/connector case — its url was already
     # canonical, so the inbound variant never matches it by url).
     for candidate in ([url, canonical] if canonical != url else [url]):
-        g.query(
-            "MATCH (s:Source {url: $u}) WHERE s.canonicalUrl IS NULL "
-            "SET s.canonicalUrl = $cu, "
-            "    s.urlAliases = CASE WHEN $u IN coalesce(s.urlAliases, []) "
-            "        THEN s.urlAliases "
-            "        ELSE coalesce(s.urlAliases, []) + [$u] END",
-            params={"u": candidate, "cu": canonical},
-        )
+        # §17.1 LANE (#9206): DERIVED-RECOMPUTE, DECLARED. This is a write at
+        # the projection's write handle, and it appends NO record — because the
+        # value is not remembered, it is RE-DERIVED: `canonicalUrl` is
+        # `normalize_source_url(url)`, a pure function of the MERGE key, and
+        # the replay lane re-stamps both fields itself when it mints or folds
+        # the Source (`_mint_source_stub` / `_upsert_source`), which is what
+        # `tests/test_source_rematerialisation_5024.py` pins. The declaration
+        # is deferred (not shadowing) when a lane is already in flight: inside
+        # a fold or a replay this statement is already authorized, and a
+        # recompute label would be the weaker description of it.
+        from tortoise.projection import _derived_recompute_write_scope
+        with _derived_recompute_write_scope(
+                f"source_identity.resolve_source_key:{candidate}"):
+            g.query(
+                "MATCH (s:Source {url: $u}) WHERE s.canonicalUrl IS NULL "
+                "SET s.canonicalUrl = $cu, "
+                "    s.urlAliases = CASE WHEN $u IN coalesce(s.urlAliases, []) "
+                "        THEN s.urlAliases "
+                "        ELSE coalesce(s.urlAliases, []) + [$u] END",
+                params={"u": candidate, "cu": canonical},
+            )
     rows = g.query(
         "MATCH (s:Source {canonicalUrl: $cu}) RETURN s.url "
         "ORDER BY s.url LIMIT 1",

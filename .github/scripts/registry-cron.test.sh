@@ -180,6 +180,24 @@
 #      reading never resolves
 #  111. #4994: an UNMEASURED (partially listed) pool still names what WAS
 #      measured, and the body says so rather than reading as the whole pool
+#  112. #9361: the filed body names WHAT the sweep did with each graph — an
+#      all-`empty_skipped` run is glossed as "the pool is residue", not as an
+#      outage it never measured, and the log line carries the distribution
+#  113. #9361: an all-`error` run publishes `error=N` and the storage/sw-written
+#      gloss, so the two runs above can never be read as the same fact
+#  114. #9361 review P1: the org-level fallback is PER RESULT — a mixed run (one
+#      team resolved its graphs, one hit a held lock, one failed to resolve its
+#      graph list) must keep BOTH org-level `error`s in the distribution. The
+#      pre-fix (per-RUN) fallback dropped them and published an all-clear.
+#  115. #9361 review P2: the body's gloss discriminates by operator response —
+#      `error` = the write was attempted and failed, while
+#      data_loss_candidate/aborted_size_guard/p0_guard_failed = a guard FIRED
+#      and blocked the write (the pre-fix sentence claimed those were attempted)
+#  116. #9361: a payload with no `results` still says `unreported` (no blank, no
+#      invented distribution) and logs no per-graph line
+#  117. #9361 review P2: an app-controlled status string is REDACTED before it
+#      is published (the file's contract for every app-derived value), and the
+#      20-char secret rule does not swallow legitimate long status names
 #
 # Fixtures are simulated; the real driver defers nothing.
 
@@ -2588,6 +2606,121 @@ assert_filed "$(cat "$LOG")" POOL_STALE "111. measured-stale tenants are still n
 assert_match "$(cat "$LOG")" 'GH POST .*/issues .*listing did NOT complete' \
   "111. the body says the list is not the whole pool"
 assert_filed "$(cat "$LOG")" R2_UNLISTABLE "111. the storage fault is filed as its own incident"
+# ── 112. #9361: the body names WHAT the sweep did with each graph ───────────
+# The response already carries `results` — one entry per enumerated team, each
+# with the per-graph status reached. The driver published only
+# `graph_totals.backed_up`, so an incident asserted "backups are NOT running"
+# without ever reading the reason, and an all-empty steady state, one guarded
+# graph and a total outage all produced that one sentence. This pins the
+# distribution in BOTH public surfaces (log line + filed body) — the verdict is
+# unchanged, only the reason it publishes.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":2,"backed_up":0,"failed":0},"results":{"teamA":{"status":"no_work","graphs":{"default":{"status":"empty_skipped"},"custom":{"status":"empty_skipped"}}}}}'
+run_driver
+assert_eq "$RC" 1 "112. all-empty_skipped is still RED (verdict unchanged)"
+assert_contains "$OUT" "sweep per-graph outcomes: empty_skipped=2" \
+  "112. the log line carries the per-graph distribution"
+assert_contains "$(cat "$LOG")" "empty_skipped=2" \
+  "112. the FILED body carries the per-graph distribution"
+assert_contains "$(cat "$LOG")" "the pool is residue" \
+  "112. all-empty_skipped is glossed as residue, not as an outage"
+assert_contains "$(cat "$LOG")" "attempted 2" \
+  "112. the body publishes graph_totals.attempted next to the distribution"
+
+# ── 113. #9361: an all-`error` run publishes the OTHER story ────────────────
+# Same body arm, opposite diagnosis: every write was attempted and failed. The
+# assertion is on absence too — a stray empty_skipped would let the reader take
+# the residue arm again.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":2,"backed_up":0,"failed":2},"results":{"teamA":{"status":"no_work","graphs":{"default":{"status":"error"},"custom":{"status":"error"}}}}}'
+run_driver
+assert_eq "$RC" 1 "113. all-error is RED (1)"
+assert_match "$(cat "$LOG")" 'Per-graph outcomes on this run: error=2' \
+  "113. the body publishes error=2"
+assert_contains "$(cat "$LOG")" "the write was attempted and failed" \
+  "113. error is glossed as a failed write (storage/sweep broken)"
+assert_not_contains "$(cat "$LOG")" "Per-graph outcomes on this run: empty_skipped" \
+  "113. an all-error run never reports a residue status"
+
+# ── 114. #9361 review P1: the fallback is PER RESULT, not per run ───────────
+# The production shape: teamA resolves its graphs, teamB hit a held team lock
+# (`{"status":"error","error":"team lock busy…"}`) and teamC failed to resolve
+# its graph list (`{"status":"error","resolution":true}`) — NEITHER carries a
+# `graphs` map. A per-RUN fallback ("if ANY result had a graphs map, publish
+# only graph statuses") published `empty_skipped=1` alone, i.e. it hid both
+# failures and then told the reader "the pool is residue" — the #9361 defect
+# (a reason that was not the measured one) reproduced by its own fix.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":1,"backed_up":0,"failed":0},"results":{"teamA":{"status":"no_work","graphs":{"default":{"status":"empty_skipped"}}},"teamB":{"status":"error","error":"team lock busy past the timeout"},"teamC":{"status":"error","resolution":true}}}'
+run_driver
+assert_eq "$RC" 1 "114. a mixed run is RED (1)"
+assert_contains "$(cat "$LOG")" "empty_skipped=1 error=2" \
+  "114. the no-graphs results' own statuses stay in the distribution"
+assert_contains "$OUT" "sweep per-graph outcomes: empty_skipped=1 error=2" \
+  "114. the log line carries the whole mixed distribution too"
+assert_not_contains "$OUT" "sweep per-graph outcomes: empty_skipped=1 (graph_totals" \
+  "114. the org-level errors are not dropped from the published counts"
+
+# ── 115. #9361 review P2: the gloss discriminates by OPERATOR RESPONSE ─────
+# `aborted_size_guard` returns at the pre-dump size check — nothing was
+# attempted, the guard blocked it (backup_sweep.py). The pre-fix sentence
+# claimed the writes "were attempted and did not happen" for it, sending the
+# reader to look for a storage failure for a guard that did its job.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":2,"backed_up":0,"failed":0},"results":{"teamA":{"status":"no_work","graphs":{"default":{"status":"data_loss_candidate"},"custom":{"status":"aborted_size_guard"}}}}}'
+run_driver
+assert_contains "$(cat "$LOG")" "data_loss_candidate=1" \
+  "115. a guard status survives redaction (long names are not secret shapes)"
+assert_contains "$(cat "$LOG")" "aborted_size_guard=1" \
+  "115. the pre-dump guard status is published"
+assert_contains "$(cat "$LOG")" "a data-protection guard fired and blocked the write" \
+  "115. the gloss says the guard BLOCKED it (look at the graph, not the storage)"
+assert_not_contains "$(cat "$LOG")" "error / data_loss_candidate / aborted_size_guard mean the writes were attempted" \
+  "115. the guard statuses are no longer glossed as attempted-and-failed writes"
+
+# ── 116. #9361: no `results` is `unreported`, never a blank or an invention ──
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":0,"backed_up":0}}'
+run_driver
+assert_eq "$RC" 1 "116. a results-less no_work body is still RED (1)"
+assert_contains "$(cat "$LOG")" "Per-graph outcomes on this run: unreported" \
+  "116. the body says unreported instead of leaving the field blank"
+assert_not_contains "$OUT" "sweep per-graph outcomes" \
+  "116. no per-graph log line is emitted with nothing to report"
+
+# ── 117. #9361 review P2: app-controlled status text is REDACTED ───────────
+# Every other app-derived value is scrubbed before it reaches the public issue
+# body / Actions log (RUN_STATUS_SAFE, STORAGE_ERR_SAFE, LAST_SWEEP_SAFE). The
+# status strings are a closed vocabulary TODAY, but the contract exists because
+# that is not guaranteed — a status that ever formats an exception (or embeds a
+# credential) must not publish verbatim.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null)"
+export STUB_SWEEP_BODY='{"status":"no_work","teams_backed_up":0,"graph_totals":{"attempted":1,"backed_up":0},"results":{"teamA":{"status":"no_work","graphs":{"default":{"status":"error: Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"}}}}}'
+run_driver
+assert_eq "$RC" 1 "117. a leaky status does not change the verdict (still RED)"
+assert_not_contains "$(cat "$LOG")" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
+  "117. no credential shape reaches the filed issue body"
+assert_not_contains "$OUT" "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" \
+  "117. no credential shape reaches the public Actions log"
+
 echo ""
 echo "registry-cron.test.sh: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
