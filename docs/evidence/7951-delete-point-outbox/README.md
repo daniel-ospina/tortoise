@@ -26,9 +26,10 @@ is the guard's ARMING STATE, not a gap in its coverage: §17.1's write surface h
 `proj.g.query` — which DETECTS a mutating statement with no declared lane but does not yet REFUSE it
 (`_HANDLE_GUARD_ENFORCES` is `False`; part 2 arms it). Section 4 of the probe below (the residuals)
 prints `RAW HANDLE LANE (proj.g.query): SUCCEEDED` with that door measuring, which is why the failure
-in the test is INJECTED. ⚠️ Declaration state: `delete_point` holds NO live lane (`#9207`'s
-apply-first order makes one false) and is inventoried in `_APPLY_FIRST_DOORS`, so part 2's armed
-handle REFUSES it until an "apply-first, by decision" lane exists (#9124 / #9206).
+in the test is INJECTED. ⚠️ Declaration state: `delete_point` holds NO journal-first lane (`#9207`'s
+apply-first order makes one false) — #9206 has since landed the "apply-first, by decision" lane
+(`@_declares_apply_first_write_lane`), which this door now carries, so an armed handle COMPLETES it
+and it is no longer inventoried in `_APPLY_FIRST_DOORS`.
 The destroy is now issued FIRST (`MATCH … DETACH DELETE n`, with NO `RETURN` clause and no row-count
 gate) and the record follows only once that statement has RETURNED. Because a raise does not prove
 "nothing was destroyed" — the transport family may have applied the write and lost the reply — the
@@ -172,8 +173,9 @@ reads and writes to section 1's graph.
 
 1. **The raw handle (`proj.g.query`) is DETECTED but not yet REFUSING** — the recorded `OVERRIDES:`
    departure on `#7951`; a blanket refusal would break the product's own live write path (`#8389`).
-   #9124 part 1 counts and logs an undeclared write here; part 2 arms the refusal, and this
-   apply-first door then needs a lane (or is refused) — see `_APPLY_FIRST_DOORS`.
+   #9124 part 1 counts and logs an undeclared write here; part 2 arms the refusal. `delete_point`
+   itself is NOT one of them any more: #9206 declares its apply-first lane, so it completes under an
+   armed handle (`_APPLY_FIRST_DECLARED_DOORS`).
 2. **`delete_entity` (the generic entity delete) is still apply-first** — it `DETACH DELETE`s per
    matched canonical label and journals afterwards, so it still carries the resurrection window.
    Closing it needs a pre-read per label (to journal only the label that matched). Named in

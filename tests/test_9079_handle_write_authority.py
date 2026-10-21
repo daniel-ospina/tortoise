@@ -656,14 +656,11 @@ def test_a_declared_door_writes_through_the_handle_with_no_declaration_of_its_ow
     would otherwise refuse. A door declared too early (i.e. apply-first) would
     fail here rather than silently pass in measure mode.
 
-    ⚠️ `delete_point` is NOT in this list any more: #9207 reversed its order
-    (the `DETACH DELETE` first, the record after a landed destroy), so its
-    #9124 live-lane declaration was WITHDRAWN and it is inventoried in
-    `_APPLY_FIRST_DOORS`. Keeping it here would assert that an apply-first door
-    rides an armed handle — the exact dishonesty
-    `tests/test_9124_declared_live_doors.py::
-    test_every_live_declared_door_is_journal_first` exists to catch. Its
-    behaviour under an armed handle is pinned by the test below instead.
+    ⚠️ `delete_point` is NOT in this list: #9207 reversed its order (the
+    `DETACH DELETE` first, the record after a landed destroy), so it carries the
+    APPLY-FIRST declaration (#9206) rather than a journal-first one. Its
+    behaviour under an armed handle — the door completes AND an undeclared raw
+    destroy is still refused — is pinned by the test below.
 
     `force_sparse_tfidf` pins the embedder OFF for the same reason the
     sanctioned-lane test above does: seven `create_point`s against a cold HF
@@ -687,48 +684,62 @@ def test_a_declared_door_writes_through_the_handle_with_no_declaration_of_its_ow
     assert sdk.supersede_point(old, new)["invalidated"] is True
 
 
-def test_an_apply_first_door_is_refused_by_the_armed_guard(
+def test_a_declared_apply_first_door_writes_under_the_armed_guard(
         armed_sdk, enforced, force_sparse_tfidf):
-    """`delete_point` is APPLY-FIRST by decision (#9207) — an armed handle refuses it.
+    """`delete_point` is APPLY-FIRST BY DECISION (#9207) AND DECLARED (#9206).
 
-    The other half of the withdrawal above, executable. #9207 reversed this
-    door's order (the `DETACH DELETE` is issued BEFORE the record exists), which
-    is the apply-first shape, so no journal-first lane is honest on it and its
-    writes are UNDECLARED. With the handle refusing, that has to be visible: the
-    statement is REFUSED rather than silently blessed by a lane whose premise no
-    longer holds.
+    This test replaced `test_an_apply_first_door_is_refused_by_the_armed_guard`
+    in #9206, and it is STRONGER, not looser. Before the declaration, the
+    refusal it asserted only proved the door was unauthorized; what it could not
+    prove is that the DOOR still works — an armed handle refused the product's
+    own delete path, which is the regression §17.1's third door exists to avoid.
 
-    Two properties are asserted, and the second is #9207's invariant:
+    Three properties, and the second and third are what make the declaration
+    honest rather than an amnesty:
 
-    1. the destroy is refused BEFORE it lands (the Point is still served by
-       `get_point` — a refusal that deleted anyway would be the same divergence
-       in the other direction), and
-    2. NOTHING is appended: no destruction record for a destroy the cache never
-       performed.
-
-    NON-VACUITY: on the pre-#9207 shape (append-first, decorated with
-    `@_declares_live_write_lane("delete_point")`) the lane authorizes the write,
-    so no refusal is raised and `pytest.raises` fails — measured by the reversed
-    order reddening this test. `tests/test_9124_declared_live_doors.py`
-    (`_APPLY_FIRST_DOORS`) carries the same fact statically, so neither the
-    inventory nor this behaviour can drift alone.
+    1. the door COMPLETES under an armed handle (its lane authorizes the
+       `DETACH DELETE`), and the destroy LANDED;
+    2. the destruction RECORD is appended for it — the apply-first lane is only
+       allowed to cover a write whose record still exists (the #9068 defect a
+       lane must never bless), and its census pin refuses a door that appends
+       nothing;
+    3. a raw, UNDECLARED `DETACH DELETE` through the same handle is STILL
+       REFUSED. This is the assertion that keeps the test from becoming a
+       blanket "the guard no longer refuses deletes": the declaration lives on
+       the door, not on the statement.
     """
     sdk = armed_sdk
-    doomed = sdk.create_point("statement", "apply-first door refused")["id"]
+    doomed = sdk.create_point("statement", "apply-first door declared")["id"]
     journal = Path(sdk._journal_path_for_test)
     records_before = journal.read_text() if journal.exists() else ""
 
-    with pytest.raises(DirectCacheWriteRefused):
-        sdk.delete_point(doomed)
+    assert sdk.delete_point(doomed) is True, (
+        "the declared apply-first door must complete under an armed handle — a "
+        "guard that refuses the product's own delete path is the regression "
+        "#9124 part 2 must not ship")
+    assert not sdk.get_point(doomed), (
+        "the destroy must LAND: the record this door appends is true of the "
+        "cache only when the `DETACH DELETE` ran")
 
-    assert sdk.get_point(doomed) is not None, (
+    records_after = journal.read_text() if journal.exists() else ""
+    appended = records_after[len(records_before):]
+    assert appended.strip(), (
+        "a landed destroy left NO record — the apply-first lane covers a write "
+        "whose record follows it, never an unjournalled cache write (#9068)")
+    assert "EntityMutated" in appended, (
+        "the destroy landed but its `EntityMutated` op=delete record did not: "
+        f"appended={appended!r}")
+
+    # 3. The lane is on the DOOR, not on the statement: an undeclared raw
+    #    destroy through the same handle is still refused, BEFORE it lands.
+    survivor = sdk.create_point("statement", "raw destroy refused")["id"]
+    with pytest.raises(DirectCacheWriteRefused):
+        sdk._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": survivor})
+    assert sdk.get_point(survivor) is not None, (
         "the refusal must precede the destroy — a refused DETACH DELETE that "
         "still removed the Point is the #9207 divergence with the stores "
         "swapped")
-    records_after = journal.read_text() if journal.exists() else ""
-    assert records_after == records_before, (
-        "a destruction the cache never performed was recorded — the record "
-        f"must follow a LANDED destroy: {records_after[len(records_before):]!r}")
 
 
 # ── the schema-DDL decision (#9124's own, per the issue thread) ───────────

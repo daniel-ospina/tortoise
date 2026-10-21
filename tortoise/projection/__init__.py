@@ -3426,8 +3426,14 @@ def _journal_safe_params(params, cypher=None):
 #     declares its own, and `_HANDLE_GUARD_ENFORCES` is **False** — the handle
 #     MEASURES an undeclared write (counter + one WARNING naming the statement)
 #     instead of refusing it, which breaks nothing and prints the census;
-#   * PART 2 (blocked on those declarations): flip `_HANDLE_GUARD_ENFORCES` to
-#     True, so an undeclared write RAISES. Until then this door is a loud
+#   * PART 1b (#9206, landed): the SDK's apply-first doors DECLARE the order they
+#     actually use (`_apply_first_write_scope` / `_declares_apply_first_write_
+#     lane`) instead of leaving their writes undeclared. That lane is a
+#     declaration, not a bypass: it authorizes only a write for which a record
+#     IS still appended, and its census pin fails for a door that appends none
+#     (the #9068 defect) or that is not genuinely apply-first;
+#   * PART 2 (blocked on the rest of the surface): flip `_HANDLE_GUARD_ENFORCES`
+#     to True, so an undeclared write RAISES. Until then this door is a loud
 #     detector, NOT an enforcement point — do not read the guard's presence as
 #     "§17.1 is enforced here".
 #
@@ -3840,6 +3846,74 @@ def _prewipe_restore_write_scope(reason: str):
     return _cache_write_authorized(f"{_PREWIPE_RESTORE_LANE}: {reason}")
 
 
+#: The reason prefix every DERIVED-RECOMPUTE write carries. Pinned as a literal
+#: because a test reads it back AT THE WRITE HANDLE (#9206): a lane that renames
+#: itself silently is a lane the next reader cannot find.
+_DERIVED_RECOMPUTE_LANE = "derived-recompute"
+
+
+@contextlib.contextmanager
+def _derived_recompute_write_scope(reason: str):
+    """The DERIVED-RECOMPUTE lane: a value RE-DERIVED, never remembered (#9206).
+
+    §17.1's authorization classes are stated elsewhere in this module as two
+    ("the record came first" — live; "the record came FROM the journal" —
+    replay) plus the restore lanes for state that rides no record. This is a
+    DIFFERENT and honest class: the write stores a **pure function of
+    journal-carried input**, so it needs no record of its own — replaying the
+    same input through the same code RE-DERIVES it. Calling it live would claim
+    an append that does not happen; calling it replay would claim a record that
+    does not exist. `#9068` is the defect this must not become — a declaration
+    that blesses a cache write of RECOVERABLE state — and the distinguishing
+    property is the recomputability, so it is stated per writer:
+
+    * the TWO writers on this lane today are
+      `tortoise/source_identity.py::resolve_source_key`'s adopt-on-touch, and the
+      operator repair path `tools/source_dedup_report.py --backfill` (which issues
+      the SAME statement against a legacy corpus). The resolver stamps
+      ``canonicalUrl``/``urlAliases`` onto a PRE-canonical ``:Source``
+      it found by ``url``. ``canonicalUrl`` is
+      ``normalize_source_url(url)`` — a pure function of the ``url`` that is
+      the node's own journaled MERGE key — and the REPLAY lane re-derives both
+      fields from that url with no record: `_mint_source_stub` writes
+      ``canonicalUrl=$cu, urlAliases=[$raw_url]`` on CREATE and
+      coalesce-extends on MATCH, and `_upsert_source` carries the same two
+      props from ``SourceCreated``. That parity is already pinned where the
+      class lives — ``tests/test_source_rematerialisation_5024.py`` asserts the
+      rebuilt Point's ``canonicalUrl`` equals the live node's — so this lane
+      names a property a rebuild test relies on rather than promising one
+      nothing measures;
+    * it is one IDEMPOTENT statement (the ``canonicalUrl IS NULL`` predicate
+      makes a re-run a no-op), so it can never advance state the journal has
+      not already named;
+    * ``urlAliases`` accumulates the raw spellings the resolver has SEEN, so a
+      variant seen ONLY live is not restored by replay. Disclosed here rather
+      than claimed away: the alias list is a dedup aid re-derived from each ref
+      the journal carries, not a fact ``canonicalUrl`` depends on, and
+      ``tools/source_dedup_report.py --backfill`` is the path that repairs a
+      corpus whose aliases matter (#5012 S0a) — and it is a DECLARED writer of
+      this lane for that reason, not a mention: undeclared, §17.1's handle would
+      refuse the repair the disclosure recommends.
+
+    ⛔ It is NOT a scope to open around a mutating write generally: its honest
+    use is a single recompute statement whose inputs are ALL journal-carried.
+    It is deliberately a NESTED-NO-OP — when a lane is already in flight (a
+    fold, a replay engine, a live door) it yields WITHOUT changing the reason,
+    so this fallback can never rebrand an outer claim. The pre-wipe lane
+    shadows on purpose (an inner restore must not pass as a replay); this one
+    defers on purpose, because the outer claim is already true and a recompute
+    label would be the weaker description of the same statement.
+
+    The reason is what the declaration PINS — the value a test reads back at the
+    write handle — not a string any refusal prints.
+    """
+    if _CACHE_WRITE_AUTHORIZED.get() is not None:
+        yield
+        return
+    with _cache_write_authorized(f"{_DERIVED_RECOMPUTE_LANE}: {reason}"):
+        yield
+
+
 def _prewipe_synthetic_write_scope(reason: str):
     """The PRE-WIPE SYNTHETIC lane: graph-only Points carried back by FOLDING.
 
@@ -3955,9 +4029,10 @@ def _declares_live_write_lane(reason: str):
     `supersede_point` each call `_mark_dirty`, and `_mark_dirty` writes through
     the handle while appending no record — those writes are covered by the
     door's lane, and a per-FUNCTION census cannot see the call edge. (`delete_point`
-    was a fourth until #9207 made it apply-first; it holds no lane now, so its
-    `_mark_dirty` and `DETACH DELETE` are measured as undeclared instead of
-    being blessed.) The
+    was a fourth until #9207 made it apply-first; it now carries the apply-first
+    lane instead — `_declares_apply_first_write_lane`, #9206 — so its
+    `DETACH DELETE` and `_mark_dirty` are declared as what they are, not blessed
+    as journal-first.) The
     measured set is pinned in
     `tests/test_9124_declared_live_doors.py::test_a_whole_door_lane_authorizes_only_the_pinned_nested_writes`,
     so it can only change with a reviewed line there. That pin records the set;
@@ -3988,6 +4063,174 @@ def _declares_live_write_lane(reason: str):
         return _declared
 
     return _declare
+
+
+#: The reason prefix every APPLY-FIRST declaration carries. Pinned as a literal
+#: because a test reads it back AT THE WRITE HANDLE (#9206): a lane that renames
+#: itself silently is a lane the next reader cannot find, and it is the one
+#: string that separates "the record comes first" from "the record comes
+#: after, by decision".
+_APPLY_FIRST_LANE = "apply-first"
+
+
+def _apply_first_write_scope(reason: str):
+    """The APPLY-FIRST, by decision lane: the cache write IS the commit point.
+
+    §17.1's rule is "every write goes to the truth store first" and its live
+    lane (`_live_write_scope`) claims exactly that. A few SDK doors cannot make
+    that claim, and saying nothing instead leaves their writes undeclared — so
+    an armed handle refuses the product's own write path (#9206). This lane is
+    the declaration that lets those doors state the order they actually use:
+
+    **the mutating statement runs FIRST and the journal record that describes it
+    is appended AFTER it, BY DECISION — because the write's OUTCOME is an input
+    to the record.** Three doors justify it, each with the reason recorded where
+    it lives:
+
+    * `TortoiseSDK.delete_point` — #9207 chose cache-first on measured
+      direction: an append-first record commits a destruction the cache may
+      never have performed (the pre-#9207 shape), while the window this order
+      leaves (a landed destroy whose append failed) is REPORTED
+      (`record_committed=False`).
+    * `TortoiseSDK.update_point`'s PROMOTE arm — its `SET` is guarded by a
+      `WHERE` that can legitimately match nothing and the door then RAISES, so
+      an append-first record would claim a promotion the graph refused. The
+      SAME write region serves the non-promote arm, which IS journal-first and
+      aborts when its append fails (`WriteNotLandedError`); a whole-door lane
+      can only state the weaker claim, so it states the weaker claim.
+    * the mechanical apply-first doors (#9206) — `create_operator`,
+      `create_direct_edge`, `_update_entity`, `_delete_entity`,
+      `_write_capture_turns` and `_materialize_session_source` build their
+      record from the node they just wrote (the snapshot, the landed row count,
+      the emitted id), and moving the record above the write changes each
+      door's commit contract — the decision #9124 part 2 defers per door, not a
+      reordering a lane may take on its own. ⚠️ `_write_session_and_turns` is NOT
+      in that group: it declares the STRONGER `_declares_live_write_lane` (it
+      appends `SessionRecorded` before its `:Session` MERGE, #9206), and only its
+      nested turn store is apply-first.
+
+    ⛔ WHAT THIS LANE MAY NEVER COVER — the #9068 defect, and the reason this
+    is a DECLARATION and not a bypass. The lane authorizes writes for which a
+    record IS appended; it says NOTHING about a write that is journalled by
+    nothing. A door that writes the cache and appends no record must **journal
+    it** or **retire the path**; wrapping it here would bless an unjournalled
+    cache write. That is checked, not stated: the census pin
+    (`tests/test_9124_declared_live_doors.py::
+    test_every_apply_first_declared_door_states_an_order_and_a_record`) fails
+    for a door carrying this lane that appends no record, or that is not
+    actually apply-first (a journal-first door must carry the STRONGER
+    `_live_write_scope` claim).
+
+    **What the lane claims, stated so it cannot be over-read:** the record is
+    appended AFTER the write and before the door returns; the divergence window
+    it leaves is cache-ahead-of-journal (the `extra_in_cache` direction §17.1
+    names), and a door takes it only where that direction is the one it wants —
+    a record can then never describe a cache state that was never written. It
+    does not make the write replayable, and it is not a permit for a record
+    whose append outcome the door ignores: `delete_point` reports the failed
+    append, and the doors that cannot report it say so where they live.
+
+    The value is what a test reads back at the write handle (the reason string
+    carries `_APPLY_FIRST_LANE` as its prefix), never a string any refusal
+    prints: a refusal fires when NO scope is in flight, so there is no reason to
+    render.
+    """
+    return _cache_write_authorized(f"{_APPLY_FIRST_LANE}: {reason}")
+
+
+def _declares_apply_first_write_lane(reason: str):
+    """Declare a WHOLE entry point as an apply-first lane (§17.1, #9206).
+
+    The decorator form of `_apply_first_write_scope`, for the doors whose write
+    region IS the body (`update_point`, `delete_point`, `create_operator`,
+    `create_direct_edge`, `_update_entity`, `_delete_entity`,
+    `_write_capture_turns`, `_materialize_session_source`) — a hand-placed
+    ``with`` would reindent hundreds of lines and bury the semantic change (the
+    declaration) in a mechanical one. The `ep.py` and `hosted_api.py` doors
+    (`invalidate_messages`, `invalidate_factor_messages`,
+    `_delete_session_sync`) take it the same way.
+
+    ⛔ IT IS ONLY HONEST FOR A DOOR THAT APPENDS A RECORD AND IS GENUINELY
+    APPLY-FIRST, and both halves are checked rather than described:
+    `tests/test_9124_declared_live_doors.py::
+    test_every_apply_first_declared_door_states_an_order_and_a_record` fails for
+    a door carrying this lane that appends nothing (the #9068 defect) and for a
+    journal-first door that took this lane instead of the stronger
+    `_declares_live_write_lane`. The lane's membership is pinned there too, so
+    the set can only change with a reviewed line.
+
+    ⛔ IT ALSO AUTHORIZES EVERY NESTED CALL, exactly like the journal-first
+    decorator: `update_point` reaches `_mark_dirty`, and the capture writer
+    reaches `_write_capture_turns`. Those edges are pinned by the same
+    nested-writes test (`_DECLARED_DOOR_NESTED_INVENTORIED`), which derives its
+    population from the DECLARED doors (both lane families, every module), so a
+    new no-journal write reached from a declared door must be reviewed instead
+    of being assumed blessed.
+
+    A per-call ContextVar scope, released in a ``finally`` (the ``with``), so a
+    raising door cannot leak its authorization into the caller's next write. An
+    async door raises `TypeError` for the same reason the journal-first
+    decorator does: the wrapper would open the scope, return the coroutine and
+    close it — authorizing NOTHING while looking like it did.
+    """
+    def _declare(fn):
+        if inspect.iscoroutinefunction(fn):
+            raise TypeError(
+                "_declares_apply_first_write_lane wraps a synchronous door: "
+                "for an async door open `with _apply_first_write_scope(...)` "
+                "INSIDE the coroutine body instead")
+
+        @functools.wraps(fn)
+        def _declared(*args, **kwargs):
+            with _apply_first_write_scope(reason):
+                return fn(*args, **kwargs)
+
+        return _declared
+
+    return _declare
+
+
+#: The reason prefix a TEST FIXTURE write carries. A literal for the same
+#: reason as the product lanes: a fixture's declaration is read back at the write
+#: handle, and it must be visibly NOT a product claim (see
+#: `_test_fixture_write_scope`).
+_TEST_FIXTURE_LANE = "test-fixture"
+
+
+@contextlib.contextmanager
+def _test_fixture_write_scope(reason: str):
+    """The TEST-FIXTURE lane: setup a suite seeds, claiming NOTHING about the product.
+
+    A suite that binds a journal arms §17.1's write handle for its whole run
+    (`#9124`), so a FIXTURE write — seeding a `:Source` hash so a transit map is
+    non-empty, minting the `:Point:Object` label pair no production writer
+    produces, planting a PRE-canonical Source so an adopt-on-touch fires — needs
+    a lane too. Before this, those three sites reached for `_live_write_scope`,
+    whose docstring says the opposite of what they do: **that lane's whole claim
+    is "the record is appended FIRST, then the cache"**, and each of these
+    statements appends nothing.
+
+    ⛔ Why that mattered even though all three are test-only: `#9206`'s own rule
+    is "never reach for the nearest existing lane" (giving
+    `resolve_source_key` the live lane would have claimed a record that does not
+    exist — `#9068`). A fixture spelled with a product lane's name is the
+    copyable template a future product writer finds first, and the census cannot
+    catch it (`enumerate_handle_surface` runs over `tortoise/*.py` and
+    `tools/*.py`). Naming it `test-fixture: <site>` states the truth at no cost.
+
+    ⛔ IT IS NOT A PRODUCT LANE AND MUST NOT BE USED BY ONE. Its scope is the
+    truth "this write exists only to set up a test"; nothing about it is a claim
+    that a product path may make. Pinned by the census
+    (`tests/test_9124_declared_live_doors.py::
+    test_the_fixture_lane_is_used_only_by_tests`), so a `tortoise/` or `tools/`
+    caller reds instead of quietly taking a fixture's name.
+
+    It SHADOWS rather than defers (unlike `_derived_recompute_write_scope`): the
+    reason is what a caller of a fixture wants to read at the handle, and a
+    fixture never wraps a product lane whose claim it would then have to keep.
+    """
+    with _cache_write_authorized(f"{_TEST_FIXTURE_LANE}: {reason}"):
+        yield
 
 
 def _graph_metadata_write_scope(reason: str = "graph-metadata"):
@@ -4441,14 +4684,25 @@ class _GuardedGraph:
         `test_7951_update_point_outbox.py`, `test_7951_delete_point_outbox.py`,
         `test_5048_retract_instant_recorded.py` and
         `test_6239_promote_after_supersede.py`. The reason is a census, not a
-        hunch: the product's own write path is still largely undeclared — the 10
-        apply-first public doors (`delete_point` joined them in #9207: the
-        `DETACH DELETE` is issued FIRST, so its #9124 live-lane declaration was
-        withdrawn — see `_APPLY_FIRST_DOORS`), the 2 mixed-arm doors
-        (`update_point`, `capture_session`) and every writer that appends no
-        record at all, all inventoried in
+        hunch: the product's own write path is still largely undeclared — the
+        apply-first doors inventoried in `_APPLY_FIRST_DOORS` (`approve_merge`,
+        `assess_source`, `compute_confidence`, `mitigate_operator`,
+        `promote_point`, `record_calibration`, `set_point_baseline`), the
+        helpers inventoried beside them, `capture_session`'s remaining
+        provenance stamps (inventoried where a writer appends NO record of its
+        own — they are owed a record, #9350), and every other writer that
+        appends no record at all, all inventoried in
         `tests/test_9124_declared_live_doors.py`, which also REFUSES the flip
-        while any module has an undeclared entry point. The
+        while any module has an undeclared entry point. The doors #9206 DID
+        declare hold the apply-first lane
+        (`_declares_apply_first_write_lane`), so an ARMED handle COMPLETES them
+        — `delete_point` and `update_point` among them (their cache write IS the
+        commit point, by decision: #9207 and #8830), as are `create_operator`,
+        `create_direct_edge`, `_update_entity`, `_delete_entity`,
+        `_write_capture_turns`, `_materialize_session_source` and the capture
+        door's two state stamps — membership pinned as
+        `_APPLY_FIRST_DECLARED_DOORS` / `_APPLY_FIRST_DECLARED_DOORS_BY_MODULE`.
+        The
         detection itself is complete and identical in both modes; only the
         refusal is gated. Do not read this method's presence as "§17.1 is
         enforced at the handle".
