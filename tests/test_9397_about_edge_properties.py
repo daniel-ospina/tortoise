@@ -358,7 +358,12 @@ WHAT IS PINNED (one entry per test, in file order)
    — the retraction also has to reach the prose that CITES §9.6. Six production
    docstrings (`sdk.link_source_to_entity`, `search_engine.
    read_reference_currency_links`, `tools/source_currency.py`) still called those
-   links "property-free" and now scope the claim to the anchor.
+   links "property-free" and now scope the claim to the anchor. SITE-scoped on
+   BOTH halves, not file-wide: the positive half first asked whether each FILE
+   still said "carries no `sourceVersion`", which two of these files satisfy
+   twice, so one site of a pair could be emptied while the leg stayed green (the
+   silent deletion the `#9450` review measured). Each row now carries an ANCHOR
+   and the scoped fact that site must state.
 31. `test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree`
    — leg 30's six literals are pinned as retracted, and an absence check on a
    literal that was never there is permanently green: one mistyped character
@@ -3459,34 +3464,95 @@ def test_the_pin_index_entry_for_the_9_6_retraction_states_no_measured_distance(
 _RETRACTED_PRODUCTION_REV = "8767b1c8b"
 
 #: The six production docstrings that carried the retracted absolute (`#9450`
-#: review, P2), as (file, retracted literal). Pre-fix literals verbatim, so each
-#: pair is measurable against the revision it was removed from — and MEASURED by
+#: review, P2), as (file, retracted literal, site ANCHOR, scoped fact). Pre-fix
+#: literals verbatim, so each is measurable against the revision it was removed
+#: from — and MEASURED by
 #: `test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree`,
 #: because "measurable" is not "measured": a mistyped literal here would be a
 #: permanently green dead pin, inside the guard whose subject is dead pins.
+#:
+#: ⛔ The last two elements are what keep the POSITIVE half SITE-scoped. Two of
+#: these files carry two sites each, and a per-FILE membership test collapses
+#: each pair: as long as one passage still says "carries no `sourceVersion`",
+#: the other can lose its statement entirely and the leg stays green — measured,
+#: the `#9450` review's silent deletion (empty `link_source_to_entity`'s
+#: containment clause while its anchor paragraph still states the fact). The
+#: ANCHOR is a phrase that exists ONCE and precedes the site's own scoped fact,
+#: so the assertion is bounded by the site rather than by the file.
 _RETRACTED_PRODUCTION_ABSOLUTES = (
     (
         "tortoise/sdk.py",
         '``"Source"`` means referential containment and stays property-free.',
+        'The alias is NOT equivalent to ``"Source"`` for the caller',
+        '``"Source"`` means referential containment and carries no ``sourceVersion``.',
     ),
-    ("tortoise/sdk.py", "``Object`` links stay property-free."),
+    (
+        "tortoise/sdk.py",
+        "``Object`` links stay property-free.",
+        "Written ``ON CREATE`` only.",
+        "``Object`` (identity/mention) and ``Source`` (containment) links carry no "
+        "``sourceVersion``",
+    ),
     (
         "tortoise/search_engine.py",
         "identity/mention ``Object`` link stays property-free",
+        "owner ruling 2026-09-25, option A — ``Event``/``Document`` annotate",
+        "an identity/mention ``Object`` link carries no ``sourceVersion``",
     ),
     (
         "tortoise/search_engine.py",
         "Its link is property-free by the same ruling",
+        "AN ``Object`` READS ``unknown``, AND THAT IS THE ANSWER, NOT A BUG.",
+        "Its link carries no ``sourceVersion`` by the same ruling",
     ),
     (
         "tools/source_currency.py",
         "keeps identity/mention ``references`` links property-free",
+        "the 2026-09-25 owner ruling (option A) keeps",
+        "identity/mention ``references`` links carrying no ``sourceVersion``",
     ),
     (
         "tools/source_currency.py",
         "its ``references`` link is property-free (owner ruling 2026-09-25",
+        "An ``:Object`` reads ``unknown`` **by decision**, not by omission:",
+        "its ``references`` link carries no ``sourceVersion`` (owner ruling 2026-09-25",
     ),
 )
+
+#: How far AFTER a site's anchor its scoped fact may sit, in flattened characters.
+#: Measured with the widest row at 172, and bounded before the NEXT site's anchor
+#: (the closest pair, in `tortoise/sdk.py`, is 488 apart), so a NEIGHBOUR passage
+#: cannot satisfy this row — which is the whole point of the window: a window
+#: wide enough to span the file would re-create the file-wide check it replaces.
+_SITE_WINDOW = 400
+
+
+def _unstated_scoped_facts(texts: dict[str, str]) -> list[str]:
+    """Rows whose SITE `texts[path]` names no scoped fact within its own window.
+
+    Split out of the leg so the anti-vacuity probe can run the SAME check over a
+    MUTATED text: a probe that re-implemented the rule could pass while the rule
+    it is supposed to prove was broken. Accepts raw source; `_flat` is applied
+    here (and is idempotent, so a caller may pre-flatten).
+    """
+    unstated: list[str] = []
+    for path, _literal, anchor, scoped in _RETRACTED_PRODUCTION_ABSOLUTES:
+        flattened = _flat(texts[path])
+        needle = _flat(anchor)
+        at = flattened.find(needle)
+        if at < 0:
+            unstated.append(f"{path}: the site anchor {anchor!r} is gone")
+            continue
+        occurrences = flattened.count(needle)
+        if occurrences > 1:
+            unstated.append(
+                f"{path}: the site anchor {anchor!r} matches {occurrences} places, so "
+                "the window no longer identifies ONE site (re-pick the anchor)"
+            )
+            continue
+        if _flat(scoped) not in flattened[at : at + _SITE_WINDOW]:
+            unstated.append(f"{path}: the site {anchor!r} lost {scoped!r}")
+    return unstated
 
 
 def test_the_retracted_references_absolute_is_gone_from_production_docstrings():
@@ -3507,12 +3573,20 @@ def test_the_retracted_references_absolute_is_gone_from_production_docstrings():
     literal must also be absent from the PRODUCTION sources only — the test tree
     is out of this leg's scope on purpose, since a guard that also scanned tests
     would match its own table.
+
+    ⛔ BOTH halves are SITE-scoped, and the positive one was not at first: it
+    asked whether each FILE still said "carries no `sourceVersion`", which two of
+    these files satisfy twice. The `#9450` review measured the deletion that
+    survived it — empty `link_source_to_entity`'s containment clause while its
+    anchor paragraph still states the fact, no retracted literal reappearing, leg
+    green — so the table now pairs each site with an ANCHOR and the scoped fact
+    that site must state, and the fact is read only inside that site's window.
     """
     assert _RETRACTED_PRODUCTION_ABSOLUTES, "the table is empty — nothing is pinned"
-    texts = {path: _doc(ROOT / path) for path, _ in _RETRACTED_PRODUCTION_ABSOLUTES}
+    texts = {path: _doc(ROOT / path) for path, *_ in _RETRACTED_PRODUCTION_ABSOLUTES}
     live = [
         f"{path}: {literal!r}"
-        for path, literal in _RETRACTED_PRODUCTION_ABSOLUTES
+        for path, literal, _anchor, _scoped in _RETRACTED_PRODUCTION_ABSOLUTES
         if _flat(literal) in _flat(texts[path])
     ]
     assert not live, (
@@ -3523,13 +3597,47 @@ def test_the_retracted_references_absolute_is_gone_from_production_docstrings():
     )
     # The positive half: the scoped fact must be SAID at those sites, not merely
     # have the absolute removed — a silent deletion leaves the next reader with no
-    # statement at all, which is how the absolute gets re-invented.
-    unstated = [
-        path for path, text in texts.items() if _flat("no ``sourceVersion``") not in _flat(text)
-    ]
+    # statement at all, which is how the absolute gets re-invented. SITE-scoped,
+    # never file-wide: two of these files carry two sites each, so a per-file
+    # `in text` test stays green while ONE of the pair is emptied — the `#9450`
+    # review's silent deletion, and the same scoping defect the `_section`
+    # docstring above records (#8639).
+    unstated = _unstated_scoped_facts(texts)
     assert not unstated, (
-        "these production sources dropped the absolute without stating the scoped "
-        f"fact (they do not say \"carries no `sourceVersion`\"): {unstated}"
+        "these production SITES dropped the absolute without stating the scoped "
+        "fact inside their own passage (the file still says it elsewhere, which is "
+        "why a file-wide check was green):\n  " + "\n  ".join(unstated)
+    )
+    # Anti-vacuity, and MEASURED rather than argued: re-run BOTH halves of the old
+    # positive half over the review's silent deletion — the containment clause of
+    # `link_source_to_entity` emptied while its anchor paragraph still states the
+    # fact. The file-wide form (the one this leg shipped first) is GREEN on it;
+    # the site-scoped form reds. `_flat` is idempotent, so the probe mutates the
+    # flattened text and the same helper still reads it.
+    emptied = {path: _flat(text) for path, text in texts.items()}
+    emptied["tortoise/sdk.py"] = emptied["tortoise/sdk.py"].replace(
+        "referential containment and carries no sourceVersion",
+        "referential containment",
+    )
+    assert emptied["tortoise/sdk.py"] != _flat(texts["tortoise/sdk.py"]), (
+        "the anti-vacuity mutation did not apply — the containment clause's "
+        "wording moved, so this probe no longer reproduces the silent deletion "
+        "it exists to prove. Re-derive it against the clause, do not delete it"
+    )
+    file_wide = [
+        path for path, text in emptied.items() if "no sourceVersion" not in _flat(text)
+    ]
+    assert not file_wide, (
+        "the anti-vacuity probe's premise no longer holds: the emptied text ALSO "
+        "loses the scoped fact from the site's neighbour, so a file-wide check "
+        f"would red too ({file_wide}) and this probe would prove nothing about "
+        "the scoping. Re-derive the mutation so only ONE of the pair is emptied"
+    )
+    assert _unstated_scoped_facts(emptied), (
+        "the SITE-scoped half does not red on the review's silent deletion — the "
+        "containment clause of `link_source_to_entity` emptied while its anchor "
+        "paragraph still says \"carries no `sourceVersion`\" — so it is a dead "
+        "pin exactly where a per-file check was"
     )
 
 
@@ -3555,7 +3663,7 @@ def test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree
     never shallow-ified to reach it).
     """
     assert _RETRACTED_PRODUCTION_ABSOLUTES, "the table is empty — nothing is pinned"
-    paths = sorted({path for path, _ in _RETRACTED_PRODUCTION_ABSOLUTES})
+    paths = sorted({path for path, *_ in _RETRACTED_PRODUCTION_ABSOLUTES})
     texts: dict[str, str] = {}
     missing: list[str] = []
     for path in paths:
@@ -3574,7 +3682,7 @@ def test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree
         )
     dead = [
         f"{path}: {literal!r}"
-        for path, literal in _RETRACTED_PRODUCTION_ABSOLUTES
+        for path, literal, _anchor, _scoped in _RETRACTED_PRODUCTION_ABSOLUTES
         if _flat(literal) not in texts[path]
     ]
     assert not dead, (
