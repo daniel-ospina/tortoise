@@ -434,6 +434,14 @@ _EXPECTED_GUARD_SEAM_SITES = {
     "tortoise/backup.py": 1,               # BGSAVE
     "tortoise/projection/__init__.py": 2,  # embedded + server branches
     "tortoise/session_indexer.py": 1,      # graph-entity keyword lookup
+    # #7357: the two bare ``redis.Redis`` clients the SCOPE paragraph used to
+    # name as exceptions — the restore-swap copy client (its #3813 pool/second
+    # read bound is unchanged; only the CONSTRUCTION goes through the seam) and
+    # the ACL admin client. They are here because the seam is what carries the
+    # operator guard and the instance-outage note, not because of FalkorDB
+    # handles they never yield.
+    "tortoise/hosted_backup.py": 1,        # the restore-swap copy client
+    "tortoise/acl_graph_users.py": 1,      # the ACL admin client
 }
 
 

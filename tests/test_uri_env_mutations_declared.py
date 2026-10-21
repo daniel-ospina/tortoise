@@ -327,6 +327,13 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_namespace_uri_mode.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                      r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
                                      r'monkeypatch\.setenv\(\s*$'],
+    # #7357: the ACL admin client only builds a client when a URI is present, so
+    # this test FORCES a docker:// URI to reach `_admin_client()`, then replaces
+    # `redis.Redis` with a dead stub — nothing connects and no server is touched.
+    # The setenv IS the test input (deliberate docker lane), and the
+    # fixture-param monkeypatch auto-restores at teardown (no lane leak).
+    "test_7357_transport_legibility.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
+                                          r'monkeypatch\.setenv\(\s*$'],
     "test_session_index_health.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_tortoise_client.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_2206_confidence_surfaces.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],  # #2206: module-level live-FalkorDB probe + per-test isolated-graph fixture (set/restore, never leaves a mutation)

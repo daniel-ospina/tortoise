@@ -5,11 +5,14 @@ the eval lane by #3068 and for every raw product client by #8119/#3065. What
 stayed measurable is the BOUND's honesty, and the two vendor constructors the
 product builds DISAGREE about it on the pinned ``redis 7.4.1``:
 
-* a bare ``redis.Redis`` (the ACL admin client, ``acl_graph_users.py``)
-  carries ``Retry(ExponentialWithJitterBackoff(), retries=3)`` as a
-  FUNCTION-SIGNATURE default, and ``TimeoutError`` is one of its supported
-  errors — so a stalled read is re-issued three more times and the knob an
-  operator sets is multiplied by ~4 (plus backoff);
+* a bare ``redis.Redis`` carries ``Retry(ExponentialWithJitterBackoff(),
+  retries=3)`` as a FUNCTION-SIGNATURE default, and ``TimeoutError`` is one of
+  its supported errors — so a stalled read is re-issued three more times and
+  the knob an operator sets is multiplied by ~4 (plus backoff). Its product
+  consumer is the ACL admin client (``acl_graph_users.py``), which since #7357
+  builds that ``redis.Redis`` through ``guarded_client`` — a subclass whose
+  ``__init__`` is ``Redis.__init__``, so the default and the measurement below
+  are unchanged;
 * ``falkordb.FalkorDB`` (the projection's host branch, ``session_indexer``,
   ``backup``'s BGSAVE, the ``doctor`` probe) declares ``retry=None`` and hands
   that to redis-py explicitly, which lands on ``Retry(NoBackoff(), 0)`` — its
@@ -168,9 +171,11 @@ def test_the_half_open_retry_policy_of_the_embedded_lane_is_not_merged():
 def test_a_stalled_read_costs_the_product_one_read_bound(monkeypatch):
     """Wall clock AND attempt count on a real socket.
 
-    ``redis.Redis`` is the site that carried the multiplier (the ACL admin
-    client, ``acl_graph_users.py``), so timing it measures what that client
-    waits. Two independent assertions, because wall clock alone is
+    ``redis.Redis`` is the CONSTRUCTOR that carried the multiplier (the ACL
+    admin client, ``acl_graph_users.py``, builds its client from it through
+    ``guarded_client``, which subclasses it and adds nothing to ``__init__``),
+    so timing it measures what that client waits. Two independent assertions,
+    because wall clock alone is
     load-sensitive:
 
     * **attempts** — the silent peer counts the connections the client opened.
