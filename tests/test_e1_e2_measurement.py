@@ -1349,6 +1349,25 @@ def test_a_non_object_artifact_is_reported_as_malformed(monkeypatch, artifact):
     assert findings == [], findings
 
 
+def test_a_corpus_pin_with_an_embedded_nul_is_refused_not_crashed(monkeypatch):
+    """A malformed pin must refuse (exit 3), never crash (#9513 review P3).
+
+    Valid JSON can carry a NUL (`"path": "...\u0000x"`), and `Path.resolve()`
+    raises ValueError — not OSError — on it, so the pre-fix arm let the exception
+    escape: the probe died with a traceback and exit 1, the code a runner reads as
+    RED, while the docstring promises the unconsumable case on `prereg-error=`.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "corpus": {"path": _CORPUS_REL + "\u0000x"}})
+    assert code == 3, text
+    assert "prereg-binding status=MISMATCH" in text, text
+    assert "reason=corpus-path" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
 def test_a_matched_corpus_with_an_unreadable_bar_is_not_named_as_preregistered(
         monkeypatch):
     """A bound corpus does not make a malformed BAR a scored bar (#9513 review P2).

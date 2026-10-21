@@ -670,7 +670,11 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
         resolved = (declared if declared.is_absolute() else ROOT / declared)
         try:
             same = resolved.resolve() == corpus_path.resolve()
-        except OSError:  # pragma: no cover - unresolvable path is a mismatch
+        except (OSError, ValueError):
+            # ValueError is what `Path.resolve()` raises for an embedded NUL —
+            # valid JSON can carry one (`"path": "...\u0000x"`), and a malformed
+            # pin must be REFUSED (a mismatch) rather than crash the run with a
+            # traceback and an exit code a runner reads as RED (#9513 review P3).
             same = False
         if not same:
             reasons.append("corpus-path")
