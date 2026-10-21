@@ -132,6 +132,11 @@ WHAT THIS PINS
    nothing, redding arm 7 with *"no longer states its site count"* — a false
    cause. Both spellings of the same claim are now fed through every unit and
    through the chain form, so the arm reds if the captures regress.
+13. **`test_the_empty_pattern_register_count_matches_the_prose`** — the SIZE of the
+   `EMPTY_PATTERN` register. §13 states *"eighteen members today"* in the same
+   sentence that declares the class, and nothing read that numeral: the register
+   was only floor-checked, so adding or removing a member falsified the sentence
+   silently — the same rot class the arms above close for the headline counts.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -163,7 +168,9 @@ NOT promised, and deliberately so:
   NOT asserted: that column is prose with reasons, and a regex over the whole
   of it would pin wording rather than behaviour.
 
-The customer-callable **count** IS asserted (arm 6), because §13 calls it *"the
+The customer-callable **count** IS asserted (arm 7 — the `WHAT THIS PINS` list
+below is the numbering of record; earlier insertions moved this arm and a stale
+"arm 6" survived here for one revision), because §13 calls it *"the
 whole argument"*: the arm reads the numeral out of the sentence that states it
 and compares it to the `reach` column, so demoting two rows without moving the
 number — the `#7956` erratum's exact direction, and the error the KEEP ruling
@@ -408,6 +415,12 @@ _PROSE_CALLABLE_AGAIN = re.compile(rf"\bare\s+({_NUMERAL})\s+of them\b", re.IGNO
 _PROSE_CHAIN = re.compile(
     rf"\b({_NUMERAL})\s*(?:→|->|—>)\s*({_NUMERAL})\s+(sites|rows)\b", re.IGNORECASE
 )
+#: `(<N> members today` — the SIZE of the `EMPTY_PATTERN` register, which §13 states
+#: in the same bullet as its other numerals. It was the one census-adjacent
+#: numeral in that sentence nothing read: the register is floor-checked
+#: (`assert EMPTY_PATTERN`) but a member added to or removed from it would falsify
+#: "eighteen members today" without reding anything.
+_PROSE_EMPTY_PATTERN = re.compile(rf"\(({_NUMERAL})\s+members today\b", re.IGNORECASE)
 
 #: The number words §13 states its counts in. Digits are accepted as well, so
 #: a rewrite that writes `6` instead of `SIX` stays checkable.
@@ -1346,6 +1359,36 @@ def test_the_numeral_parsing_accepts_digits():
         "the census's numeral parsing no longer accepts every spelling it "
         "documents, so a legitimate rewrite reds as a missing sentence:\n  - "
         + "\n  - ".join(problems)
+    )
+
+
+def test_the_empty_pattern_register_count_matches_the_prose():
+    r"""`(<N> members today` is a numeral like the rest, so it is asserted.
+
+    §13 states the size of the guard's `EMPTY_PATTERN` register in the sentence
+    that declares the empty-pattern class *"(eighteen members today, with the
+    reason each is not an `aboutObject` read for a referent)"*. That was the ONE
+    census-adjacent numeral in the bullet nothing read: `test_the_table_is_not_vacuous`
+    only floors the register (`assert EMPTY_PATTERN`), so adding or removing a
+    member — the hand-maintained list this file's other arms exist to keep honest
+    — falsified the sentence silently. Same rule as the headline counts: a numeral
+    is a claim, and it is compared to the set it counts.
+    """
+    text = _bullet_text()
+    tokens = [m.group(1) for m in _PROSE_EMPTY_PATTERN.finditer(text)]
+    assert tokens, (
+        "§13 no longer states the `EMPTY_PATTERN` register's size (`(<N> members "
+        "today`), so this arm checks nothing — restore the clause or delete the "
+        "arm and say why in the docstring"
+    )
+    problems = [
+        f"§13 states `{token}` members and the register has {len(EMPTY_PATTERN)}"
+        for token in tokens
+        if _numeral(token) != len(EMPTY_PATTERN)
+    ]
+    assert not problems, (
+        "§13's stated size of the empty-pattern register does not match the "
+        "register itself:\n  - " + "\n  - ".join(problems)
     )
 
 
