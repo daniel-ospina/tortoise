@@ -341,27 +341,52 @@ _HOSTED_ANCHORS = {
 }
 
 
-def test_the_spec_cites_live_hosted_api_sites() -> None:
-    """EVERY `hosted_api.py:<n>` anchor in the spec must name one of the live sites.
+def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
+    """The spec must cite hosted_api.py by SYMBOL or ROUTE, never by line number.
 
-    Checked in the inverse direction on purpose: a dead anchor is dead even when the SAME line is
-    also cited correctly somewhere else, and the §5/§8 §10 rows did exactly that (one corrected
-    `_oauth_base` beside three anchors ~3,300 lines off). So the rule is "no citation may point
-    anywhere but a derived site", not "each site must be cited somewhere".
+    ⛔ THIS GUARD USED TO REQUIRE THE OPPOSITE, and that is why it was replaced rather than
+    repaired. It demanded that every `hosted_api.py:<n>` anchor match a live site — which is a
+    check that has to be re-derived after EVERY source edit and silently becomes the defect
+    between edits. It did: on `main` at `fa7b27b66` the spec cited `39152/39225/39233/39379`
+    while the sites had moved to `39205/39278/39286/39432`, so four anchors were ~50 lines off
+    and the only thing that noticed was a red shard (measured: the whole §4/§5/§10 evidence
+    table pointed at the wrong functions).
+
+    A line number is valid only at the commit it was written against; a symbol or a route is
+    valid while the code exists. So the prohibition is what gets pinned: NO line anchor may
+    return, and every symbol the spec leans on must still be findable EXACTLY ONCE in
+    `hosted_api.py` (`_only_line`, the same resolver the oauth-side anchors use) — that is what
+    makes a symbol citation checkable rather than decorative. A quotation of another artifact's
+    stale anchor (the `#3524` provenance note, whose lines start with `>`) is not a citation
+    this spec owns and stays excluded.
     """
     spec = SPEC.read_text()
-    # The provenance note QUOTES #3524's stale issue-body anchors; a quotation cannot be remapped
-    # when the source moves, so it is excluded rather than "fixed".
     body = "\n".join(line for line in spec.splitlines() if not line.startswith(">"))
-    live = {_only_line(HOSTED, token) for token in _HOSTED_ANCHORS.values()}
-    cited = {int(m.group(1)) for m in re.finditer(r"hosted_api\.py:(\d+)", body)}
-    assert cited, "the spec cites no `hosted_api.py` line anchors at all"
-    dead = sorted(cited - live)
-    assert not dead, (
-        f"the spec cites hosted_api.py line(s) {dead} that are not one of the live sites "
-        f"{sorted(live)} ({sorted(_HOSTED_ANCHORS)}) — re-derive them from tortoise/hosted_api.py "
-        "after the last source edit, or cite the route string instead of a line number."
+    cited = sorted({int(m.group(1)) for m in re.finditer(r"hosted_api\.py:(\d+)", body)})
+    assert not cited, (
+        f"the spec cites hosted_api.py by LINE NUMBER again: {cited}. A line number is valid "
+        "only at the commit it was written against — cite the symbol or the route string "
+        "(the live ones are named in `_HOSTED_ANCHORS`), so the citation cannot rot between "
+        "edits. If a number came back by copy-paste from another doc, quote it as a quotation "
+        "(a `>` line) or drop it."
     )
+    # The replacement is not merely "fewer numbers": the spec must actually NAME what it used to
+    # point at, or the citations are gone rather than converted. Each of the four sites the old
+    # anchors mapped to is asserted present by the string a reader can search for, and every
+    # anchor this file knows must still resolve uniquely (a symbol citation is only checkable
+    # while the symbol exists).
+    for token in _HOSTED_ANCHORS.values():
+        _only_line(HOSTED, token)
+    for cited_text in (
+        "`_oauth_base`",                       # the base builder
+        "/.well-known/oauth-authorization-server",  # both metadata routes
+        "`GET /oauth/authorize`",               # the authorize handler
+        "`POST /oauth/consent`",                # the consent handler
+    ):
+        assert cited_text in body, (
+            f"the spec no longer names {cited_text!r} — the line anchors were supposed to be "
+            "replaced by symbols/routes, not deleted"
+        )
 
 
 # ── The spec's own load-bearing clauses ─────────────────────────────────────
