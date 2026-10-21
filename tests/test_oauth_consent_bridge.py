@@ -418,6 +418,13 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
     Blockquote markers are stripped here rather than per caller, because that is what the block
     parser does before inline parsing — a code span wrapped across two `>` lines renders as one
     sentence, so an anchor split there is one anchor, not two fragments no rule can see.
+
+    ⚠️ Blocks are joined by ONE space, and that join is a FOLDING ARTIFACT, never a citation: a
+    paragraph ending in a bare `hosted_api.py` would otherwise read as one token with a `:39205`
+    opening the next paragraph. `_hits` therefore refuses an explicit match whose span crosses a
+    block change, the way it already block-filters the continuation arm (measured: without it,
+    `"Read hosted_api.py"` + a blank line + `":39205 names the handler."` was reported as a
+    citation the editor never wrote — GREEN on `main`, which folded per block).
     """
     out: list[str] = []
     line_of: list[int] = []
@@ -487,6 +494,13 @@ def _hits(
     anchors: list[tuple[str, int, bool]] = []
     explicit: list[tuple[int, int]] = []
     for match in _HOSTED_ANCHOR_RE.finditer(text):
+        if block_of[match.start()] != block_of[match.end() - 1]:
+            # The explicit arm's `\s*` reaches across the single space that joins two BLOCKS in
+            # the folded text, so `hosted_api.py` ending one paragraph and `:39205` opening the
+            # next would read as one citation — a false red naming a file the editor never
+            # opened. The continuation arm below is block-filtered for exactly this reason; the
+            # two arms must not disagree about where a block ends (#9485 review).
+            continue
         explicit.append(match.span())
         anchors.append((match.group(0), line_of[match.start()], in_note[match.start()]))
     bare: list[tuple[str, int, bool]] = []
@@ -535,7 +549,16 @@ def _anchor_digits(token: str) -> str:
 
 
 def _stray_anchors(lines: list[str], note_start: int, note_end: int) -> list[str]:
-    """The violations outside the note, each reported at the line it is REALLY on."""
+    """The violations outside the note, each reported at the line it is REALLY on.
+
+    ⛔ This returns the BODY bucket only, so it is not on its own a guard on the document: a
+    violation that STARTS inside the note is dropped here by construction. A caller that means to
+    guard the whole spec must call `_anchor_violations` on the whole document and assert all THREE
+    buckets. Pairing this helper with a note SLICE is what made the note's boundary a blind spot
+    one edge later — an anchor opening on the note's last line and closing just below it was
+    classified as a note violation by position and then discarded by both halves (measured: the
+    whole-document call returned `(['39286'], [], [])` while the guard stayed green).
+    """
     return _anchor_violations("\n".join(lines), note_start, note_end)[2]
 
 
@@ -563,6 +586,12 @@ def _note_anchor_violations(note_raw: str) -> tuple[list[str], list[str]]:
     `test_the_provenance_note_cannot_smuggle_a_bare_continuation` pinned set EQUALITY, so the
     honest cleanup the guard's own message invites redded its neighbour with a bare two-set diff
     and no instruction (measured).
+
+    ⚠️ It sees only `note_raw`, so it can say nothing about an anchor that STRADDLES the
+    fragment's edge. That is why the document-level guard in
+    `test_the_spec_cites_no_hosted_api_line_numbers` does NOT build itself out of this helper plus
+    `_stray_anchors`: it calls `_anchor_violations` once on the whole document and asserts all
+    three buckets (#9485 review).
     """
     note_new, note_bare, _ = _anchor_violations(note_raw, 0, len(note_raw.splitlines()))
     return note_new, note_bare
@@ -587,6 +616,21 @@ def _provenance_note_bounds(lines: list[str]) -> tuple[int, int]:
     while note_end < len(lines) and lines[note_end].startswith(">"):
         note_end += 1
     return note_start, note_end
+
+
+def _spec_violations(raw: str) -> tuple[list[str], list[str], list[str]]:
+    """`(new anchors in the note, bare anchors in the note, stray anchors outside it)`.
+
+    ONE call on the WHOLE document, all three buckets returned TOGETHER — the grouping is the fix,
+    not a convenience. The guard assembled its verdict from two SLICES instead:
+    `_note_anchor_violations(note_raw)` folded the note alone (so digits below the quotation were
+    not in the text it read) and `_stray_anchors(...)` is bucket [2] alone (so a violation that
+    STARTS in the note was thrown away by construction). The note's trailing edge therefore fell
+    in the gap between the two halves, and the answer the whole-document scan already held was
+    discarded (measured: `(['39286'], [], [])` while the guard was green). Every document-level
+    caller goes through here, so the three buckets cannot be audited separately again.
+    """
+    return _anchor_violations(raw, *_provenance_note_bounds(raw.splitlines()))
 
 
 #: `(section heading prefix, row prefix, citations that row must carry)` — the sites the old line
@@ -663,6 +707,15 @@ _EVASION_SHAPES = (
     # row is what pins the block (each revert of block tracking alone leaves the rest green once
     # the owner rule accepts any extension: §10's `.yml` row no longer depends on it).
     ("The base is in `hosted_api.py`.\n\nAnd `:39205`.", []),
+    # NEGATIVE: the folded text joins BLOCKS with one space, and the explicit arm's `\s*` reached
+    # across that join, so a paragraph ENDING in a bare `hosted_api.py` plus one OPENING with
+    # `:39205` read as one citation. `main` folded per block, where this was impossible, so all
+    # three were GREEN there and RED at the head that introduced one whole-document fold — a false
+    # red naming a citation the editor never wrote. These rows pin the block filter on the
+    # EXPLICIT arm (the continuation arm was already filtered).
+    ("Read hosted_api.py\n\n:39205 names the handler.", []),
+    ("Read hosted_api.py\n\nL39205 names the handler.", []),
+    ("Read hosted_api.py\n\nline 39205 names the handler.", []),
     # a WRAPPED EXPLICIT anchor inside a blockquote: the marker is stripped, so the code span and
     # its digits are one token again. Pins the `^\\s*(?:>\\s?)+` strip, which is load-bearing and
     # would otherwise be pinned only by the note test below.
@@ -754,10 +807,17 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     raw = SPEC.read_text()
     lines = raw.splitlines()
     note_start, note_end = _provenance_note_bounds(lines)
-    note_raw = "\n".join(lines[note_start:note_end])
     rest_raw = "\n".join(lines[:note_start] + lines[note_end:])
 
-    note_new_anchors, note_bare = _note_anchor_violations(note_raw)
+    # ⛔ ONE call on the WHOLE document, all THREE buckets. Slicing the note and taking
+    # `_stray_anchors`' body bucket discarded the answer the scan already had: an anchor that
+    # STARTS on the note's last line and completes on the line just below the quotation is a note
+    # violation by POSITION, which `_note_anchor_violations(note_raw)` cannot see (the digits are
+    # outside the slice) and `_stray_anchors` throws away (it returns bucket [2] only). Both
+    # halves were blind, one edge later than the defect this PR set out to close (measured — see
+    # `test_an_anchor_wrapped_across_the_notes_TRAILING_boundary_is_refused`, which drives this
+    # same helper on a smuggled document and is the row that reds if this goes back to slices).
+    note_new_anchors, note_bare, stray = _spec_violations(raw)
     assert not note_new_anchors, (
         f"the provenance note quotes the issue-body anchors {note_new_anchors} that it has no "
         "licence for; the only anchors it may quote are `hosted_api.py:23409` and "
@@ -783,7 +843,6 @@ def test_the_spec_cites_no_hosted_api_line_numbers() -> None:
     # continuation whose nearest file TOKEN (any extension, not just `*.py`) is hosted_api.py
     # (§10 writes ``session_auth.py:588`` AND names hosted_api.py in the same row, so "the line
     # mentions the file" would over-report).
-    stray = _stray_anchors(lines, note_start, note_end)
     assert not stray, (
         f"the spec cites hosted_api.py by a LINE NUMBER again: {sorted(stray)}. A line number is "
         "valid only at the commit it was written against — cite the symbol or the route string "
@@ -828,9 +887,12 @@ def test_the_anchor_scan_catches_every_form_at_the_line_it_is_on() -> None:
     line be reported twice (an explicit anchor also carries a bare `:<n>`; the message names the
     line once, as one citation).
 
-    The expected numbers are the REAL ones: the note is removed before the scan, so an index into
-    the shortened body used to be reported as a file line (2 early, here) — the one message this
-    guard produces sent the reader to an unrelated row.
+    The expected numbers are the REAL document lines, and nothing is re-indexed: `_stray_anchors`
+    passes the FULL `lines` and `_hits` classifies each match by the note's `[start, end)` span,
+    so a violation is reported at the line it is really on. (An earlier shape REMOVED the note and
+    scanned the remainder, so an index into the shortened body was reported as a file line — 2
+    early here — and the one message this guard produces sent the reader to an unrelated row. The
+    note is no longer removed, so that hazard is gone rather than merely avoided.)
     """
     lines = [
         "| row | `hosted_api.py:39152` |",
@@ -902,6 +964,52 @@ def test_the_provenance_note_rejects_an_anchor_wrapped_across_its_own_lines(
     assert "99999" in last_new and not last_stray, (
         "the note's own last line is part of the note, so an anchor it gains belongs in a note "
         f"bucket — got note_new={last_new} stray={last_stray}")
+
+
+def test_an_anchor_wrapped_across_the_notes_TRAILING_boundary_is_refused() -> None:
+    """The note boundary has TWO edges, and the trailing one was blind in both halves.
+
+    `_provenance_note_bounds` returns a half-open span, so an anchor that STARTS on the note's
+    last line and completes on the line just below the quotation is classified by POSITION as a
+    note violation. The guard could not see it: it folded the note's SLICE (which cannot contain
+    the digits, they are below it) and read `_stray_anchors`, which returns the BODY bucket only
+    — so the violation landed in bucket [0] of a call nobody made, and both halves stayed green.
+    Measured before the fix: `_anchor_violations(raw, note_start, note_end)` already returned
+    `(['39286'], [], [])` while every assertion in the guard passed.
+
+    Not reachable through `_NOTE_SMUGGLES`: that table injects BEFORE the note's last line, which
+    can only put digits INSIDE the quotation. This row injects AFTER it — the other edge, and the
+    direction a future editor copying a citation into the note's closing sentence would hit.
+
+    Non-vacuous by construction: this drives `_spec_violations`, the SAME helper
+    `test_the_spec_cites_no_hosted_api_line_numbers` uses, so restoring that guard's old
+    two-slice shape (`_note_anchor_violations` + `_stray_anchors`) reds the assertion below. Both
+    halves of that shape are asserted here to be blind, so the mechanism is measured, not claimed.
+    """
+    lines = SPEC.read_text().splitlines()
+    note_start, note_end = _provenance_note_bounds(lines)
+    injected = [
+        *lines[:note_end - 1],
+        lines[note_end - 1] + " See `hosted_api.py:",
+        "39286` names the handler.",
+        *lines[note_end:],
+    ]
+    note_new, note_bare, stray = _spec_violations("\n".join(injected))
+    assert note_new == ["39286"] and not stray, (
+        "an anchor that opens on the note's last line and closes on the line just below it is ONE "
+        "citation, and the note may quote only the `#3524` pair it owns — it must be reported as "
+        f"a NOTE violation, not dropped; got note_new={note_new} note_bare={note_bare} "
+        f"stray={stray}")
+
+    # …and the shape that dropped it, measured: the note's own SLICE never contains the digits,
+    # and the body bucket never contains a violation that starts in the note — so BOTH halves of
+    # the old two-call guard returned nothing here (verified at the pre-fix head).
+    assert _note_anchor_violations("\n".join(injected[note_start:note_end])) == ([], []), (
+        "this row is only interesting while the note SLICE cannot see the digits — the anchor "
+        "closes below it, which is exactly why slicing lost the citation")
+    assert _stray_anchors(injected, note_start, note_end) == [], (
+        "the body bucket alone cannot report a violation that STARTS inside the note — that is "
+        "the gap `_spec_violations` exists to close, not a bug in this row")
 
 
 def test_a_note_anchor_is_bounded_by_position_and_owned_document_wide() -> None:
