@@ -2861,7 +2861,8 @@ def main() -> int:
             root = manifest_path.resolve().parent.parent
             print(
                 "::warning::ci_timing: no declared testcase count resolved for any of the "
-                f"{len(weights)} measured files — every note will be written as (UNKNOWN). "
+                f"{len(weights)} measured files — the notes this refresh RE-BASES will be "
+                "written as (UNKNOWN). "
                 f"The root is the manifest's grandparent, which resolves to {root}; that "
                 f"directory {'has' if (root / 'tests').is_dir() else 'has NO'} tests/ in it. "
                 "The expected layout is <repo-root>/config/ci-surfaces.yml "

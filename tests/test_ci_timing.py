@@ -4710,7 +4710,17 @@ def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
     # The message names the DERIVED fact (the inferred root), never a guessed cause: a
     # manifest at the repo root or in a subdirectory is inside the tree, and telling the
     # operator to "re-run inside the tree" would be advice that is already satisfied.
-    assert "grandparent" in proc.stderr and "tests/" in proc.stderr, proc.stderr[-400:]
+    # Pin the VALUE and the POLARITY, not the vocabulary: a message that named a GUESSED
+    # root passed a two-substring check (measured), which is the defect this commit exists
+    # to remove. The fixture's manifest lives in <tmp>/elsewhere, so the derived root is
+    # <tmp> and it has no `tests/` — both facts are asserted, and the retired guess cannot
+    # come back.
+    assert str(moved.resolve().parent.parent) in proc.stderr, proc.stderr[-400:]
+    assert "has NO tests/" in proc.stderr, proc.stderr[-400:]
+    assert "probably outside" not in proc.stderr, proc.stderr[-400:]
+    # The consequence is scoped to the rows the render re-bases: equal-valued rows carry
+    # their note forward, so "every note" was false by 49 of 112 measured files (measured).
+    assert "RE-BASES" in proc.stderr, proc.stderr[-400:]
 
 
 @pytest.mark.parametrize("body,label", [
