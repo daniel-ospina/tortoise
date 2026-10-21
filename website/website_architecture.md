@@ -104,7 +104,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Welcome | `website/apps/dashboard/public/welcome.html`, served at `/welcome` by `website/apps/dashboard/functions/welcome.ts` | **Recovery landing only.** The page renders `#loading` / `#error-state` / `#reset-panel` and nothing else — no team creation, no API-key reveal. Post-signup provisioning happens **in the dashboard** (first-run onboarding). `/welcome` 302s a **signed-in** visitor to the app (`/?claim=1` while a claim is pending); no cookie or a dead session 302s `/auth?next=…&stale=1`; an unreachable session store 503s. **Any `reset` present** + a valid session is the one case that renders the page — unless `env.ASSETS` is unbound, in which case it 503s instead |
 | Invite accept | `website/apps/dashboard/public/invite-accept.html` | Public team-invite accept page (`/invite-accept?token=…`), reads `/v1/invites/info` |
 | Dashboard | `website/apps/dashboard/` (React + Vite) | Session-gated app: Overview / API Keys / Graphs / Members / Billing / **Profile** (login methods + recovery banner, #1765) |
-| Legal | `privacy.html` `tos.html` `license.html` `dpa.html` `security.html` `aviso-privacidad.html` | Footer-linked compliance pages |
+| Legal | `privacy.html` `tos.html` `license.html` `dpa.html` `security.html` | Compliance pages, linked from the footer of the pages that carry the site footer (`index`, `product`, `contact`, `faq`, `self-hosted`) — the legal pages themselves are hand-written documents whose footer is the revisions table. `aviso-privacidad.html` (the Spanish LFPDPPP notice) is deliberately in NO footer: `privacy.html` §1 links it, next to the LFPDPPP paragraph that says when it applies |
 
 ---
 

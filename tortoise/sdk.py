@@ -7675,7 +7675,8 @@ class TortoiseSDK:
                 ),
             )
 
-    def _journal_entity_event(self, event: dict) -> bool | None:
+    def _journal_entity_event(self, event: dict, *,
+                              recorded_ts: str | None = None) -> bool | None:
         """Append a canonical entity record to the journal (the WRITE half).
 
         The emission half of :meth:`_apply_and_journal`; split out so a
@@ -7684,6 +7685,12 @@ class TortoiseSDK:
         COMMIT POINT of a live write, so this runs BEFORE the fold. No-ops for
         a non-entity record type, a missing id, or an unconfigured journal —
         ``_emit_event`` owns the last case.
+
+        ``recorded_ts`` is the envelope instant the door ALREADY decided (#9434):
+        a door that stamps ``event["ts"]`` before folding hands the SAME value
+        here, so the record's envelope ``ts`` and the value the fold read are ONE
+        clock read. ``None`` (every pre-#9434 caller) keeps ``_emit_event``'s own
+        mint — this parameter changes nothing for them.
 
         ⛔ This is for a LIVE write. A REPLAY engine must never call it: the
         record being folded came FROM the journal, so journalling it again
@@ -7702,8 +7709,13 @@ class TortoiseSDK:
         # gate its cache write on — never a delta of `_journal_write_failures`,
         # which a CONCURRENT writer can inflate (#5612). Existing callers
         # ignored the return and are unaffected by its arrival.
+        # `recorded_ts` rides the ARGUMENT, never the payload: it is a
+        # `_JOURNAL_ENVELOPE_KEYS` member, so `_journal_record_payload` strips a
+        # caller-authored one — which is also why the door that stamps `ts` must
+        # hand the instant over explicitly rather than expect it to travel.
         return self._emit_event(
-            type_, id=id_, **_journal_record_payload(event))
+            type_, id=id_, recorded_ts=recorded_ts,
+            **_journal_record_payload(event))
 
     def _apply_and_journal(self, proj, event: dict, *,
                            journal: bool = True) -> None:
@@ -7777,8 +7789,67 @@ class TortoiseSDK:
                     and event.get("createdAt") is None):
                 from .ids import now_iso
                 event["createdAt"] = now_iso()
+            # (#9434) The `ts` half of the same VALUE-SYNTHESIS rule, and the
+            # other door `entities._event_plain_merge` names. This door appends
+            # through `_emit_event`, which minted the envelope `ts` on a COPY of
+            # the record — and it then folds the CALLER's dict, which carries no
+            # `ts` at all (`ts` is a reserved ENVELOPE prop). So any fold-level
+            # field stamped from the record's own instant took the FOLD clock
+            # live and the APPEND clock on replay: `_upsert_event` reads
+            # `record_ts=event.get("ts")` → `None` → `_event_plain_merge`'s
+            # document `:Source` `ingestedAt` (#5140) fell back to `_now_iso()`.
+            # Measured pre-fix on this door, one `objectType='Document'`
+            # record: live `…26.948766` vs rebuilt `…26.925052` — the #5024
+            # `derived = replay(journal)` class, on that field. Stamping HERE,
+            # before the append, makes the value the fold reads and the value
+            # the envelope carries ONE instant, and #9419 did the same on
+            # `_create_entity` (which folds first, so its divergence ran the
+            # other way).
+            #
+            # It does NOT move the ordering contract: the append is still the
+            # commit point, and a failed append still skips the fold. Only WHEN
+            # the instant is read changes, from inside the append to just before
+            # it — the shape the `createdAt` synthesis above already uses.
+            #
+            # `ts` is a reserved ENVELOPE name and neither side stores it: it is
+            # in `_META_KEYS`, so `_persist_extra_props` cannot put it on a node
+            # (`skip = _META_KEYS | handled_keys`), and `_journal_record_payload`
+            # drops it from the payload for the same reason. So live and replay
+            # both see a record-carried instant, and neither grows a `ts` prop —
+            # which matters MORE here than on `_create_entity`, because the dict
+            # this door stamps is the CALLER's own.
+            #
+            # Gated on is-None (not key-absence) exactly like `createdAt`: a
+            # producer that hands over a record read back off the journal keeps
+            # its recorded instant verbatim.
+            #
+            # ⛔ THE HAND-OFF IS THE DICT'S OWN `ts`, NOT WHAT THIS CALL MINTED
+            # (a #9445 review P1 this block used to get wrong). On the non-None
+            # branch the dict ALREADY carries an instant, and handing over
+            # `None` there made `_emit_event` mint a FRESH one while the fold
+            # read the dict's — two clocks on exactly the field this block
+            # exists to close, which also made the comment above false of the
+            # RECORD (it held for the node only). `ts` is stripped from the
+            # payload by `_journal_record_payload`, so nothing else carries the
+            # instant to `_emit_event`: the value the envelope gets and the value
+            # the fold reads must be ONE read on EVERY branch.
+            #
+            # Two shapes reach the non-None branch, and both need the same
+            # hand-off: (1) a producer handing over a record it read back off
+            # the journal (the case the sentence above names), and (2) a RETRY
+            # of the same dict after a failed append — `_emit_event` is
+            # best-effort, this door stamps the CALLER's dict in place, so
+            # attempt 1 leaves `ts=T1` behind; attempt 2 must journal T1, not
+            # re-mint a T2 the fold never read. (`createdAt` just above is
+            # retry-safe for a different reason — it travels in the PAYLOAD;
+            # `ts` deliberately does not.)
+            if (event.get("type") in _JOURNALED_ENTITY_EVENT_TYPES
+                    and event.get("ts") is None):
+                from .ids import now_iso
+                event["ts"] = now_iso()
+            _record_ts = event.get("ts")
             _failures_before = self._journal_write_failures
-            self._journal_entity_event(event)
+            self._journal_entity_event(event, recorded_ts=_record_ts)
             if self._journal_write_failures > _failures_before:
                 # Append failed → not committed → do not fold (contract).
                 # `_emit_event` already logged at ERROR and incremented
@@ -8018,6 +8089,37 @@ class TortoiseSDK:
         # widened a `dev`-only graph. Gate the whole mined key set, exactly as
         # the entity funnel does.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9167: `content` is a REQUIRED str and nothing said so. A ``None`` or
+        # any non-str reached ``_content_hash(content)`` below — i.e.
+        # ``text.encode("utf-8")`` one frame inside a private helper — so the
+        # caller got ``AttributeError: 'NoneType' object has no attribute
+        # 'encode'``, a message naming neither this door nor ``content``: a
+        # caller error that reads as an internal bug. The MCP
+        # ``tortoise_create_point`` tool passes the caller's ``content``
+        # straight through, so a client sending ``{"content": null}`` saw that
+        # same internal-looking trace on the wire.
+        #
+        # Fail closed HERE, at the door, naming the argument — the same posture
+        # as ``update_point`` (#5240) and ``checkpoint``'s item schema (#8554),
+        # each at its OWN door. Placement is deliberate: after the kind gates
+        # (so which error a doubly-invalid call sees is unchanged) and before
+        # any prop processing, graph read or write, so a refused call leaves
+        # nothing behind.
+        #
+        # ⛔ Deliberately NOT hardening ``_content_hash`` itself: that would
+        # close every remaining surface at once but CANNOT name the caller's
+        # parameter, and it would hide which doors still lack validation —
+        # #8554's own reason for choosing the door over the helper.
+        #
+        # An EMPTY string stays valid: ``""`` hashes to a real digest, and
+        # ``update_point`` already pins it as a real content edit (#5240).
+        # Only a wrong TYPE is refused, never a wrong length.
+        if not isinstance(content, str):
+            raise TypeError(
+                "create_point: content must be a str, got "
+                f"{type(content).__name__} — `content` is required and "
+                "cannot be None (every write path hashes it)"
+            )
         # #329: server-managed fields rejected on the props passthrough
         # (the explicit-id path via props.pop("id") below is preserved for operators)
         props = _sanitize_props(props)

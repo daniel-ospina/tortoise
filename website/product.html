@@ -90,6 +90,11 @@
     .feature { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--text); text-align: left; }
     .feature svg { width: 0.9rem; height: 0.9rem; flex-shrink: 0; }
     .feature .x { color: #f87171; margin-right: 0.25rem; }
+    /* The static cards use a text glyph where the JS render uses an inline SVG
+       (checkSvg()). Reserve the SVG's box so the two states wrap identically —
+       otherwise "Unlimited integrations" breaks onto two lines only after the
+       script swaps the markup. */
+    .feature .ck { color: #4ade80; flex: 0 0 0.9rem; width: 0.9rem; text-align: center; font-weight: 700; }
     .feature .muted { color: var(--text-dim); opacity: 0.7; }
     .pricing-card .btn { display: block; text-align: center; background: var(--accent); color: #04121a; padding: 0.6rem 1rem; border-radius: 0.5rem; text-decoration: none; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; }
     .pricing-card .btn:hover { background: var(--accent-hover, #0891b2); }
@@ -191,6 +196,7 @@
       background: var(--accent);
       color: var(--bg);
       padding: 0.9rem 2rem;
+      border-radius: 8px;   /* same corner radius as the Login button + pricing CTAs */
       font-family: var(--mono);
       font-size: 1rem;
       font-weight: 600;
@@ -329,7 +335,7 @@
       <h1>Agent memory that <span>thinks</span></h1>
       <p class="hero-sub">Tortoise connects your knowledge into a logical world model. It evaluates beliefs, reasons through dependencies, and recalculates implications as information changes, helping you and your agents make better decisions without being swayed by the last message or losing context.</p>
       <a href="/auth" class="cta-start hero-cta">Connect your agent →</a>
-      <p style="margin-top:1.25rem;font-size:0.85rem;"><a href="/docs" style="color:var(--accent);text-decoration:none;">Browse the docs →</a> · <a href="/faq" style="color:var(--accent);text-decoration:none;">Design FAQ →</a> · <a href="/blog" style="color:var(--accent);text-decoration:none;">Read the blog →</a></p>
+      <p style="margin-top:1.25rem;font-size:0.85rem;"><a href="/docs" style="color:var(--accent);text-decoration:none;">Browse the docs →</a> · <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;">GitHub repo →</a> · <a href="/blog" style="color:var(--accent);text-decoration:none;">Read the blog →</a></p>
     </section>
     <section id="beat-how" class="beat">
       <h2>A <span>computational</span> memory graph</h2>
@@ -337,11 +343,11 @@
     </section>
     <section id="beat-ingest" class="beat workflow">
       <h2><span class="beat-num">01</span> · Ingest</h2>
-      <p>Automatically ingest agent sessions, GitHub issues, documents, Slack messages, Linear tasks, or any other data you want to connect. Index files for faster search or extract and organize logical claims to feed your agents&rsquo; world model.</p>
+      <p>Automatically ingest agent sessions, GitHub issues, documents, chat messages, systems of record, BI, or any other data you want to connect. Index files for faster search or extract and organize logical claims to feed your agents&rsquo; world model.</p>
     </section>
     <section id="beat-reason" class="beat workflow">
       <h2><span class="beat-num">02</span> · Reason</h2>
-      <p>Turn separate facts into a world model. Skills and MCP tools to analyze sources and organize arguments, evidence, alternatives, and decisions into logical graphs. Agents can reason across complex webs of variables while new evidence automatically updates confidence throughout the graph.</p>
+      <p>Turn separate facts into a world model. Skills and MCP tools analyze sources and organize arguments, evidence, alternatives, and decisions into logical graphs. Agents can reason across complex webs of variables while new evidence automatically updates confidence throughout the graph.</p>
     </section>
     <section id="beat-recall" class="beat workflow">
       <h2><span class="beat-num">03</span> · Recall</h2>
@@ -349,7 +355,7 @@
     </section>
     <section id="beat-automate" class="beat workflow">
       <h2><span class="beat-num">04</span> · Automate</h2>
-      <p>Define confidence threshold or lifecycle events to fire webhooks. Automate investment decisions, agent actions, and more.</p>
+      <p>Define a confidence threshold or lifecycle events to fire webhooks. Automate decisions and agent actions.</p>
     </section>
   </div>
 
@@ -359,16 +365,100 @@
       <p class="pricing-sub">Start free. Scale when your agents do — you pay for usage, not seats.</p>
 
       <div class="pricing-toggle">
-        <button id="btn-monthly" class="active" aria-pressed="true" onclick="setBilling('monthly')">Monthly</button>
-        <button id="btn-annual" aria-pressed="false" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
+        <!-- The statically-ACTIVE pill follows `display.annual_default` (true), so a
+             no-JS reader is not shown Annual figures under a highlighted Monthly
+             pill. setBilling() re-applies the same state on load. -->
+        <button id="btn-monthly" aria-pressed="false" onclick="setBilling('monthly')">Monthly</button>
+        <button id="btn-annual" class="active" aria-pressed="true" onclick="setBilling('annual')"><span>Annual</span> <span class="badge" id="annual-badge">-20%</span></button>
       </div>
 
-      <div class="pricing-grid" id="pricing-grid" aria-live="polite"><!-- cards rendered by pricing.js --></div>
+      <!-- The cards are RENDERED IN THE SOURCE, not only by JS. renderPricing()
+             replaces this markup on load (and on every Monthly/Annual toggle), so
+             a JS browser sees the JS render — but a reader that does not run JS
+             (a crawler, or an AI evaluator reading the page) otherwise sees the
+             toggle above an EMPTY grid. The static cards carry the ANNUAL
+             figures because that is `display.annual_default`, so there is no
+             flash before the JS runs. Parity with the PRICING mirror is pinned by
+             tests/test_website_static.py::TestStaticPricingFallback — edit both
+             sides together. -->
+      <div class="pricing-grid" id="pricing-grid" aria-live="polite">
+        <div class="pricing-card">
+          <h3>Free</h3>
+          <div class="price">$0<span>/mo</span></div>
+          <p class="billing">Free forever</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>1 graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>1 collaborator</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>2 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="x">✕</span> <span class="muted">Overage</span></div>
+          </div>
+          <a href="/auth" class="btn secondary">Start free</a>
+        </div>
+        <div class="pricing-card">
+          <h3>Solo</h3>
+          <div class="price">$7<span>/mo</span></div>
+          <p class="billing">$84 billed annually</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>2 graphs</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>1 collaborator</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>25,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>5 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Usage-based overage</span></div>
+          </div>
+          <a href="/auth" class="btn">Get started</a>
+        </div>
+        <div class="pricing-card popular">
+          <span class="popular-tag">Most popular</span>
+          <h3>Builder</h3>
+          <div class="price">$20<span>/mo</span></div>
+          <p class="billing">$240 billed annually</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited graphs</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>2 collaborators</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>50,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>100,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>10 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Usage-based overage</span></div>
+          </div>
+          <a href="/auth" class="btn">Get started</a>
+        </div>
+        <div class="pricing-card">
+          <h3>Team</h3>
+          <div class="price">$119<span>/mo</span></div>
+          <p class="billing">$1428 billed annually</p>
+          <div class="features">
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited graphs</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited collaborators (invites + RBAC)</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>200,000 write ops/mo</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>600,000-node graph</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>20 API keys</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Unlimited integrations</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Usage-based overage</span></div>
+            <div class="feature"><span class="ck">✓</span> <span>Priority support</span></div>
+          </div>
+          <a href="/auth" class="btn">Get started</a>
+        </div>
+      </div>
 
-      <p class="pricing-usage" id="pricing-usage-line"></p>
+      <p class="pricing-usage" id="pricing-usage-line">$5 per additional 10k write ops — applies to Solo, Builder, Team</p>
       <p style="font-size:0.75rem;color:var(--text-dim);margin-top:0.75rem;">Use of the service is subject to our <a href="/tos" style="color:var(--accent);text-decoration:none;">Terms of Service</a></p>
 
-      <div class="selfhost" id="selfhost-section"></div>
+      <div class="selfhost" id="selfhost-section">
+        <h4>Self-hosted</h4>
+        <p class="license">BSL 1.1 + $5M AUG (free &lt;$5M trailing-12mo revenue); Mozilla Public License 2.0 (MPL-2.0) conversion after 4 years; hosted excluded from grant</p>
+        <div class="actions">
+          <a href="/self-hosted">Self-hosted setup guide →</a>
+          <a href="https://github.com/daniel-ospina/tortoise" target="_blank" rel="noopener">Self-host on GitHub →</a>
+          <a href="/auth">Migrate to cloud anytime →</a>
+          <a href="/license">License →</a>
+        </div>
+      </div>
   </section>
 
   <!-- CTA — normal document-flow section -->
