@@ -85,8 +85,10 @@ surface this suite never looked at.
 from __future__ import annotations
 
 import ast
+import io
 import re
 import sys
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -904,6 +906,204 @@ def test_the_inventories_hold_no_stale_entry():
         f"entries so the census stays a census: {stale}")
 
 
+#: Prose that CLASSIFIES a door by whether it gates its CACHE WRITE on the
+#: append's per-call outcome. `supersede_point`'s "ARM BY ARM" passage and
+#: `retract_point`'s "Only … on their append's return" one both carry it, and each
+#: NAMES the doors that do. That name list is a claim about code, so it is checked
+#: against the source instead of trusted. This is the #9207 review's finding:
+#: `supersede_point` still grouped `delete_point` with the append-gated doors,
+#: citing a local (`_delete_committed`) the change under review had deleted.
+#:
+#: Phrases are matched against WHITESPACE-NORMALISED, lower-cased text: this file
+#: wraps at ~78 columns, so a phrase straddling a line break ("the append's\n
+#: outcome") matched nothing when the raw paragraph was searched — measured, two
+#: of four phrases hit ZERO lines for that reason alone.
+_APPEND_GATE_PHRASES = (
+    "per-call append",
+    "append outcome",
+    "append's return",
+    "append's outcome",
+    "cache write on",
+)
+
+#: An apply-first door may still be NAMED in a gating clause, but the ASSERTION
+#: itself must be disowned. POLARITY, not vocabulary: the issue number alone does
+#: not exempt, because "since #9207, `delete_point` gates its cache write on the
+#: append's return" is the most natural way to mis-state it — a bare-substring
+#: marker passed that sentence GREEN, and so did "apply-first only in name: it
+#: gates …". So the pattern is the CLAIM ("gates [its cache] write on" /
+#: "gates on") and the exemption is a negation within `_NEGATION_WINDOW`
+#: characters of it. Measured on this tree: no clause that names an apply-first
+#: door matches the claim pattern at all, so the rule has no false positives here.
+_ASSERTIVE_GATE = re.compile(
+    r"\bgates?\s+(?:its\s+|the\s+)?(?:cache\s+)?write\s+on\b"
+    r"|\bgates?\s+on\b"
+)
+_NEGATION_WINDOW = 45
+#: Word-bounded on purpose: a SUBSTRING test let "Note:" clear a claim, because
+#: "note" contains "not" — measured, that turned a planted contradiction GREEN.
+_LOCAL_NEGATION_RE = re.compile(
+    r"\b(?:not|never|no|nothing|cannot)\b|\bn't\b|\bno longer\b|\b(?:does|is|do|are) not\b"
+)
+#: `_delete_committed` was DELETED by #9207, so citing it is a claim about a
+#: symbol a reader cannot find. A HISTORY note is legitimate (the door's own
+#: comment records its withdrawn decorator the same way), so the rule is not a
+#: blanket ban: the removal construction must be ADJACENT to the symbol, and a
+#: live-use word ("still") vetoes it outright — otherwise "the gate was never
+#: removed: `_delete_committed` still decides" would qualify as history.
+_DELETED_SYMBOL = "_delete_committed"
+_DELETED_SYMBOL_REMOVAL = r"(?:no longer|removed|deleted|gone|dropped|used to)"
+_DELETED_SYMBOL_HISTORY = re.compile(
+    _DELETED_SYMBOL_REMOVAL + r"(?:\W+\w+){0,4}?\W+" + _DELETED_SYMBOL
+    + r"|" + _DELETED_SYMBOL + r"(?:\W+\w+){0,3}?\W+" + _DELETED_SYMBOL_REMOVAL
+)
+_DELETED_SYMBOL_LIVE_USE = ("still",)
+
+
+def _prose_units(text: str):
+    """Yield ``(start_line, text)`` for every COMMENT and STRING token.
+
+    `tokenize`, not a line filter: the claim being checked is PROSE, and a
+    blank-line paragraph split cannot tell prose from code. Measured without
+    this, a CODE line could be reported as a documentation contradiction —
+    `found = self.delete_point(id)` beside a comment containing "append's return"
+    matched the door name and failed the gate. A comment may open a docstring's
+    heading or a `#:` block, and both are prose here.
+    """
+    readline = io.StringIO(text).readline
+    for token in tokenize.generate_tokens(readline):
+        if token.type in (tokenize.COMMENT, tokenize.STRING):
+            yield token.start[0], token.string
+
+
+def _prose_clauses(unit: str):
+    """Yield the CLAUSES of one prose unit, whitespace-normalised.
+
+    A gating claim is made by a SENTENCE (or a `;`-joined clause), not by the
+    block that holds it. ⚠️ Exemption is CLAUSE-scoped, never unit-scoped: a
+    docstring here carries a dozen independent claims, so a marker in one must
+    not clear a contradiction in another — round 1 of this guard exempted the
+    whole `retract_point` paragraph, which already says "not to gate", so ANY
+    later sentence added to it could never fail (the exact defect shape,
+    re-introduced one docstring over, green forever).
+    """
+    for clause in re.split(r"(?<=[.;])\s+", " ".join(unit.split())):
+        if clause.strip():
+            yield clause
+
+
+def _append_gating_claims(text: str) -> list[str]:
+    """Clauses that ASSERT an apply-first door gates its cache write on an append.
+
+    Two conditions, and the second is the one that mattered: the clause must hold
+    the CLAIM (not merely the door's name — a door named in a sentence that says
+    its gating does not apply is the correct prose), and the claim must be
+    UNNEGATED within `_NEGATION_WINDOW` characters of it. Judged on the assertion
+    rather than on the clause's vocabulary, because a clause can carry "#9207"
+    and a "never" somewhere else and still assert the inversion.
+    """
+    claims = []
+    for line, unit in _prose_units(text):
+        flat = " ".join(unit.split()).lower()
+        if not any(phrase in flat for phrase in _APPEND_GATE_PHRASES):
+            continue
+        for clause in _prose_clauses(unit):
+            low = clause.lower()
+            doors = sorted(d for d in _APPLY_FIRST_DOORS if re.search(rf"\b{d}\b", low))
+            if not doors:
+                continue
+            for assertion in _ASSERTIVE_GATE.finditer(low):
+                nearby = low[max(0, assertion.start() - _NEGATION_WINDOW):
+                             assertion.end() + _NEGATION_WINDOW]
+                if _LOCAL_NEGATION_RE.search(nearby):
+                    continue
+                claims.append(
+                    f"sdk.py:{line} names {doors} and asserts "
+                    f"{assertion.group(0)!r}: {clause!r}")
+    return claims
+
+
+def _unmarked_citations_of_the_deleted_symbol(text: str) -> list[str]:
+    """Clauses citing `_delete_committed` that do not record it as REMOVED."""
+    offenders = []
+    for line, unit in _prose_units(text):
+        for clause in _prose_clauses(unit):
+            low = clause.lower()
+            if _DELETED_SYMBOL not in low:
+                continue
+            historical = bool(_DELETED_SYMBOL_HISTORY.search(low)) and not any(
+                w in low for w in _DELETED_SYMBOL_LIVE_USE)
+            if not historical:
+                offenders.append(f"sdk.py:{line}: {clause!r}")
+    return offenders
+
+
+def test_the_deleted_symbol_rule_tells_history_from_a_live_citation():
+    """The rule above is pinned on SYNTHETIC clauses, so it is non-vacuous.
+
+    `_delete_committed` occurs zero times in `tortoise/sdk.py` today — correct,
+    and exactly why the corpus alone cannot demonstrate that the rule WORKS: a
+    rule that returned "fine" for everything would also scan a clean tree
+    cleanly. These cases are the ones a real regression takes.
+    """
+    def verdict(clause: str) -> bool:
+        low = " ".join(clause.split()).lower()
+        return bool(_DELETED_SYMBOL_HISTORY.search(low)) and not any(
+            w in low for w in _DELETED_SYMBOL_LIVE_USE)
+
+    assert not verdict(
+        "`delete_point` gates on `_delete_committed = _journal_entity_mutation(...)`."), (
+        "the PRE-FIX sentence must read as a live citation")
+    assert not verdict(
+        "# the delete gate was never removed: `_delete_committed` still decides."), (
+        "a live-use word must veto an adjacent removal verb")
+    assert verdict("note: #9207 removed the `_delete_committed` gate.")
+    assert verdict("`_delete_committed` was deleted with the reversal (#9207).")
+    assert not verdict("`_delete_committed` is the gate for this door.")
+
+
+def test_no_prose_claims_an_apply_first_door_gates_its_cache_write():
+    """The append-gating taxonomy in the source must agree with its own code.
+
+    `_APPLY_FIRST_DOORS` is apply-first BY CONSTRUCTION: the record that describes
+    the write is emitted after it. So a CLAUSE that lists one of them among the
+    doors whose CACHE WRITE is gated on the append's return states the inverse of
+    the order — the §17.1 defect this whole suite exists to measure, told as
+    documentation instead of code.
+
+    Both rules read the source, and both are clause-scoped for the reason above.
+    Deliberately NOT a general "every cited local exists" scan: almost every
+    backticked name in this file lives in a sibling module, and a guard with
+    dozens of legitimate exemptions stops being read.
+    """
+    text = SDK_PY.read_text()
+    units = list(_prose_units(text))
+    assert len(units) > 5000, (
+        "the token scan found almost no prose — an empty scan would pass every "
+        f"assertion below vacuously (found {len(units)} comment/string tokens)")
+
+    taxonomy = [
+        line for line, unit in units
+        if any(p in " ".join(unit.split()).lower() for p in _APPEND_GATE_PHRASES)
+    ]
+    assert len(taxonomy) >= 2, (
+        "the append-gating taxonomy was not found — this pin has gone asleep. "
+        "If the sentences were rewritten, re-point the phrases at the new "
+        f"wording (found {len(taxonomy)}: {taxonomy})")
+
+    claims = _append_gating_claims(text)
+    assert not claims, (
+        "an apply-first door is described as gating its cache write on its "
+        "append, which is the inverse of its order (the record follows the "
+        "write) — either drop it from the append-gated list or disown the gating "
+        "IN THE SAME CLAUSE and say why:\n  " + "\n  ".join(claims))
+
+    stale = _unmarked_citations_of_the_deleted_symbol(text)
+    assert not stale, (
+        "`_delete_committed` no longer exists in the tree (#9207 replaced the "
+        "append-gated cache write with cache-first ordering), so citing it as a "
+        "live gate describes a contract this code does not have — mark it as "
+        "history or drop it:\n  " + "\n  ".join(stale))
 def test_no_two_census_entries_share_a_bare_function_name():
     """One inventory entry must not be able to cover TWO writers (#9124 r2).
 
