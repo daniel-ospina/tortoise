@@ -1555,6 +1555,17 @@ surfaces:
   # `test_durability_posture.py`), because a docs-only `docs/ONTOLOGY.md`
   # wording edit is what this guard is FOR.
   - test_5142_ontology_record.py
+  # #5140: the two document `:Source` writers that wrote no `ingestedAt`
+  # (`entities.py::_event_plain_merge`'s `objectType='Document'` branch and
+  # `hosted_api.py::_execute_commit_writes`) — behavioural half, listed here
+  # because `tortoise/projection/` falls through to `core` and a
+  # `hosted_api.py` edit is an exact `api` match; both surfaces can break the
+  # writers this file pins. It builds its own throwaway embedded graph (no
+  # docker lane) so it is ROUTED to the URI-unset carve-out job below and
+  # mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS`. Registered at all
+  # because an unlisted file is a `manifest-integrity` red (#1262) AND runs in
+  # no leg: the #9396 review's blocking finding.
+  - test_document_source_ingested_at_5140.py
   - test_8702_identity_skip_accounting.py
   # #8738 review P2: the doc-affiliation frontmatter on the three changelog
   # companions this change adds AND on every `docs/architecture/*.md`. The
@@ -5483,6 +5494,14 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+# #5140: the behavioural half of the `ingestedAt` fix constructs its own
+# embedded `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`),
+# so under a URI lane the redirect would flip it to the shared server. Routed
+# here so the URI-unset carve-out job runs it as designed; the stem is
+# mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` (the pin is
+# `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`) and
+# the raw construction is allowlisted in `test_embedded_lifecycle.py`.
+- test_document_source_ingested_at_5140.py
 # #8488: the in-process Okapi BM25 lexical arm. Module-level `embedded_only`
 # (its subject is the embedded lane + the shipped read), so a `core`-only
 # registration would make the manifest green and run NOTHING on a docker leg.

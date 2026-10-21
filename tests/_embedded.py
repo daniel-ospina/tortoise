@@ -324,6 +324,14 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # shipped read's own fusion), so it is exempt from the docker redirect and
     # routed to the URI-unset carve-out job.
     "test_bm25_lexical_8488",
+    # #5140: the behavioural `ingestedAt` file constructs its own embedded
+    # `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`), so the
+    # construction IS the under-test input — a URI-set run would discard the
+    # path and assert against the server lane. Mirrors the `carve_out:` row in
+    # `config/ci-surfaces.yml`; a stem in only one of the two is the silent
+    # hole `test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems`
+    # catches.
+    "test_document_source_ingested_at_5140",
     "test_backup_e2e",
     "test_config",
     "test_embedded_concurrency",
