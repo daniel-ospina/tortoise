@@ -249,8 +249,9 @@ they are invisible without R3.
 handles `EntityLinked` / `DirectEdgeCreated` / `DirectEdgeRepoint`. What is **declared missing**
 (`04-projection.md` §3) is the edge set **derived from point properties** — `extractedFrom`,
 `about*`, `mitigated_by` — which live on the point row's props today, so a rebuild from the record
-alone reproduces the claims and **not the topology**. (§3 lists a fourth, `references`, which this document
-narrows: ⚠️ **`references` is in neither place** — it is not a point property and it is not journaled either (`link_source_to_entity`/`create_edge` write it bare), and the structural edge lane emits no record for
+alone reproduces the claims and **not the topology**. §3 lists a fourth, `references`, which this document
+narrows: ⚠️ **`references` is in neither place** — it is not a point property and it is not journaled
+either (`link_source_to_entity`/`create_edge` write it bare) — and the structural edge lane emits no record for
 `ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom` and the rest of that class (`projection/edges.py:735-745`,
 measured there as `edges: 0` after a rebuild; `aboutSource`/`aboutAction` ARE carried, by `EntityLinked`).
 For those the fix is a **producer** — the record type, the fold and the resolver already exist as
@@ -381,7 +382,7 @@ measured them, plus that section's date where it pins one. **`MEASURED` means a 
 |---|---|---|---|
 | resident nodes (dogfood/prod graph) | **89,701** | `MATCH (n)`, 2026-09-25 (§17.4.2) | **MEASURED** |
 | quota-counted nodes | **24,978** | the quota predicate, same date | **MEASURED** |
-| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1 — which pins 2026-09-24; the same reading is dated 2026-09-25 in §17.4.2) | **MEASURED (estimate by construction)** |
+| `GRAPH.MEMORY USAGE` | **143 MiB** (indices 46 MiB) | sampling estimate, `SAMPLES`=100; **blind to the HNSW index** (§2.1, dated 2026-09-24, carries the earlier ~140 MB reading with those caveats; the 143 MiB figure is §1's block of 2026-09-25, mirrored in §17.4.2) | **MEASURED (estimate by construction)** |
 | bytes per resident node | **1,672 B** | 143 MiB ÷ 89,701 | **MEASURED** |
 | in-graph text | **16 MB** | §2.2 breakdown | **MEASURED** |
 | in-graph embeddings | **51.6 MB** stored vectors; **45 MB** of indices | §2.2 / §12.1b | **MEASURED** |
@@ -526,6 +527,7 @@ grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              →
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 0
+grep -rn 'rebuild_from_record(' tortoise/ | grep -v 'def '                  → 0 call sites
 grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_backup.py \
   tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
