@@ -197,10 +197,11 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 Secrets Matrix and to the deploy workflow's secret-provisioning step, and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
 what makes the env tenant pair be refused rather than silently used
 (`tortoise/record_writer.py:577`; setting `=0` only restates the default).
-**What it blocks:** **everything.** Until this is set the record receives nothing and every other
-item in this list is unobservable in production.
+**What it blocks:** **everything that needs a written record.** Until this is set the record receives
+nothing, so no item in this list that depends on reading one is observable in production — R2 is the
+exception, because the schema lands on a dispatch whether or not R1 has happened.
 **Not needed:** the driver. `Dockerfile.hosted:86` installs `'.[postgres]'`, so `psycopg2` is already
-in the hosted image — checked, because the brief's naive assumption was that it is not.
+in the hosted image — checked rather than assumed, because the natural guess was that it is not.
 **Decision needed:** which Supabase project hosts the record. §4 decides **one project, tenant-scoped
 rows** — so this is the existing project, and *"one database per team"* is refused on cost grounds
 (§4's trap).
@@ -351,7 +352,7 @@ change and needs the ordering-across-three-doors question answered.
 
 ### R11 — Land the byte gate, then wire the meter, before any allowance is configured · **S/M** · code + ops/config · **FOLLOW**
 
-**What:** the byte-unit ruling (`#4495`, top of `STORAGE-ARCHITECTURE.md`) replaced the node cap, and
+**What:** the byte-unit ruling (`#4495`, **CLOSED 2026-10-19**; top of `STORAGE-ARCHITECTURE.md`) replaced the node cap, and
 its own hard rule is decisive: *"The meter must be wired into the gate before any allowance is
 configured"*. ⚠️ **The gate is NOT on `main`** — it lives on the unmerged
 `feat/5331-node-to-byte-cap` branch, where it is **fail-closed** and raises `QuotaCheckError` when no
@@ -369,7 +370,7 @@ calibrates after beta from measured consumption.
 | # | what | why it is not on the list |
 |---|---|---|
 | **N1** | **The read path and its cutover** (`#7970`) | §2.0 defers it in the owner's own words (§0.1). The instruments exist and are off. |
-| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, §12.1c **V1**, §14.3) | **NOT DECIDED — owner's call.** Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
+| **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, **CLOSED 2026-10-05** — its analysis is what this item rests on; §12.1c **V1**, §14.3) | **NOT DECIDED — owner's call.** Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
 | **N5** | **The record's failure counter has no alert** | Real (§A3: fail-soft, counted only on `monitoring.metrics()`), but **not** a gate while the cache is fully populated — a lost record is healed by replay. Becomes a gate if the cache is ever allowed to go partial. |
@@ -458,7 +459,7 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
 
 ## F. What this lane did NOT do
 
-- **No external research leg.** The brief's rung-1 (`perplexity` MCP) is not installed in this
+- **No external research leg.** The escalation ladder's rung 1 (`perplexity` MCP) is not installed in this
   harness's MCP configuration, and this lane ran no external search. **The external leg was not
   performed**, and nothing below pretends to a vendor-sourced fact. Everything in §D comes from this
   repo. The questions the external leg would have asked, left unasked and unanswered: Supabase's
@@ -467,9 +468,9 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
 - **No product code changed.** No migration, no module, no test. The **three runs in §G** (two pytest runs plus the
   PGlite validation) were run and reported; none of their files was modified.
-- **No issue filed.** An item that names an issue gives that issue's state and its closing
-  artifact where one exists; an item that names none is a candidate on this list rather than a
-  peer. A CLOSED home is named only where its closing artifact is the evidence the item rests on
+- **No issue filed.** An item that names an issue **as its home** gives that issue's state and its
+  closing artifact where one exists (a bare citation — a brief, a decision record — need not); an
+  item that names no home is a candidate on this list rather than a peer. A CLOSED home is named only where its closing artifact is the evidence the item rests on
   (N2 on #4997's analysis, N4 on #5089's journal work) — never because the item is believed fixed.
   Per the standing rule, a checklist item with no home gets a comment on the root (**#7879**)
   rather than a peer issue; R5's is [comment 6323627886](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6323627886).
