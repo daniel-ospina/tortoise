@@ -424,9 +424,11 @@ this document supersedes them): `docs/plans/2026-09-06-2304-delete-trash-can.md`
 > the draft body to appear in the served `/privacy` page, so §6/§16 (and every
 > other retained-number sentence) **must be edited in BOTH files together** —
 > updating one without the other reddens the gate. Only the G-gate
-> preface/metadata (the `## Draft metadata` block, the delete-account capability
-> check, and the LFPDPPP / outline / canonical-sentence notes above the anchor)
-> is the historical snapshot, kept for the record and not rendered.
+> preface/metadata (the `## Draft metadata` block — whose residence row carries
+> the CURRENT fact, so read it rather than assuming this block is all history —
+> the delete-account capability check, and the LFPDPPP / outline /
+> canonical-sentence / drafting-rule notes above the anchor) is the drafting
+> preface — not rendered, and not the policy — kept for the record.
 >
 > **Division of labour.** The policy copy states the **restore window** as one
 > number (7 days), the **backup horizon** as one number (four weeks), and the
