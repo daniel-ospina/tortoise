@@ -7021,7 +7021,11 @@ class TortoiseSDK:
         if _jsonl_actor is not None:
             event["actor_user_id"] = _jsonl_actor
         try:
-            log.append(event)
+            # #9190: the append REPORTS the record's journal position, and that
+            # number is the only legitimate `journal_event.seq` — `None` is a
+            # named absence, so the record is written with no position row
+            # rather than with an invented or discarded one.
+            seq = log.append(event)
         except Exception as exc:
             # The graph mutation already succeeded — a log-write failure must
             # not crash the caller or pretend the write failed. Rebuild parity
@@ -7070,10 +7074,11 @@ class TortoiseSDK:
         # for a record that persisted while killing the fold too. The loss is
         # observable instead (``monitoring.metrics()["record_write_failures"]``)
         # and ``replay`` heals it from the journal.
-        self._write_record_projection(event)
+        self._write_record_projection(event, first_seq=seq)
         return True
 
-    def _write_record_projection(self, record: dict) -> None:
+    def _write_record_projection(self, record: dict, *,
+                                first_seq: int | None = None) -> None:
         """Hand one just-appended journal record to the Postgres record (#9188).
 
         THE production call site. Until this existed, `tortoise/record_projection.py`
@@ -7107,7 +7112,11 @@ class TortoiseSDK:
         # nothing was lost (#9231 review P2).
         log = self._event_log
         durable = log is not None and getattr(log, "durable", True)
-        record_writer.write_live_record(record, durable=durable)
+        # #9190: the ordinal `log.append(…)` returned for THIS record. `None` ⇒
+        # the append did not prove a position, so the seam writes no
+        # `journal_event` row for it (never an invented one).
+        record_writer.write_live_record(record, durable=durable,
+                                        first_seq=first_seq)
 
     def _record_write_failure(self, reason: str, exc: BaseException) -> None:
         """Count and report one armed record write that did not happen (#9188).

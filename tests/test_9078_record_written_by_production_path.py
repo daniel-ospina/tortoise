@@ -319,28 +319,56 @@ def test_the_position_rule_fires_on_every_spelling_of_a_new_door(wiring, spellin
             f"{spelling}: claim 1 is blind to this spelling too")
 
 
-def test_the_declared_gap_is_pinned_and_a_stale_one_fails_the_gate(wiring,
-                                                                   monkeypatch):
+def test_the_declared_gap_is_gone_and_a_stale_one_fails_the_gate(wiring,
+                                                                monkeypatch):
     """`DECLARED_GAPS` is the ONE lever that can turn this gate from exit 1 to 0.
 
     Exempting a genuinely missing writer (simulated: `point`) removed the only
     failure the epistemic layer produced, and the tool then printed `WIRED`
     with every test green (#9231 review P2). So the exempted set is pinned
-    exactly, each entry must name its tracker, and a STALE exemption — a table
-    that has since gained a writer — is a gate FAILURE rather than a permanent
-    licence.
+    exactly, and a STALE exemption — a table that has since gained a writer —
+    is a gate FAILURE rather than a permanent licence.
+
+    The set is EMPTY now (#9231 review P1): its one entry, `journal_event`, was
+    granted on the premise that the live path had no journal ordinal — a premise
+    #9190 refuted by giving `EventLog.append` the position as its return, which
+    this PR passes through. A standing exemption for a table that IS written is
+    exactly the stale shape the tool refuses, so layer 1's writer is credited
+    from the position row instead (`position_row_tables`), and the assertion
+    below is what keeps a re-added exemption from silently re-hiding it.
     """
     check, _, report = wiring
-    assert set(check.DECLARED_GAPS) == {"journal_event"}, sorted(check.DECLARED_GAPS)
-    assert "#9190" in check.DECLARED_GAPS["journal_event"]
-    assert [gap["table"] for gap in report["declared_gaps"]] == ["journal_event"]
+    assert check.DECLARED_GAPS == {}, sorted(check.DECLARED_GAPS)
+    assert report["declared_gaps"] == [], report["declared_gaps"]
+    assert report["position_row_tables"] == ["journal_event"], (
+        "layer 1's table must be credited to the position row, not to an "
+        f"exemption: {report['position_row_tables']}"
+    )
 
-    stale = dict(check.DECLARED_GAPS)
-    stale["point"] = "a hurried exemption that would hide the epistemic layer"
+    stale = {"point": "a hurried exemption that would hide the epistemic layer"}
     monkeypatch.setattr(check, "DECLARED_GAPS", stale)
     code, stale_report = check.check()
     assert code == 1, f"a stale exemption was accepted as {stale_report['verdict']}"
     assert any("STALE" in gap for gap in stale_report["gaps"]), stale_report["gaps"]
+
+
+def test_iterating_the_live_door_is_no_longer_deferred(wiring):
+    """The closed issue may not remain the named blocker (#9231 review P1).
+
+    `POSITION_ROW_DEFERRED_ON = "#9190"` certified the empty `journal_event`
+    row as intentional on a reason that #9190 had already refuted, and the gate
+    FAILED a follower that stopped passing `position=False` — the stale shape
+    was self-certifying. The rule that replaces it is stated as what is
+    required (the append's OWN return), not as which issue is pending.
+    """
+    _, _, report = wiring
+    name = "POSITION_ROW_REQUIRES_THE_APPENDS_OWN_POSITION"
+    assert getattr(record_writer, name) == "#9190"
+    assert not hasattr(record_writer, "POSITION_ROW_DEFERRED_ON"), (
+        "the categorical deferral constant is back — it names a closed issue "
+        "as the blocker and certifies layer 1 as intentionally empty"
+    )
+    assert report["position_problems"] == [], report["position_problems"]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -566,20 +594,231 @@ def test_an_armed_capture_without_a_journal_is_counted_not_silent(
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 4. The live path never invents a journal position (#9190)
+# 4. The live path writes ONLY the position its own append returned (#9190)
 # ════════════════════════════════════════════════════════════════════════════
 
 
-def test_the_live_path_never_writes_a_journal_position(wiring):
-    """The chokepoint passes `position=False`, and the tool says so statically.
+#: Four shapes a live door can take, each WRONG in a different way, and the
+#: compliant one. Fed to the rule directly (`door_carries_the_position_problems`,
+#: `live_door_call_problems`) because a rule only ever run on the real,
+#: compliant tree cannot be told apart from `return []` (#9231 review P2).
+_WRONG_DOORS = {
+    # The shape this PR shipped before the review: take no ordinal, defer
+    # categorically. Layer 1's `journal_event` stays empty on every live write.
+    "defers-categorically": (
+        'def write_live_record(record, *, durable=True):\n'
+        '    return write_records([record], org_id="o", graph_id="g",\n'
+        '                         position=False)\n'),
+    # Accepts the ordinal but throws the flag away — same empty layer 1.
+    "ignores-the-ordinal": (
+        'def write_live_record(record, *, durable=True, first_seq=None):\n'
+        '    return write_records([record], org_id="o", graph_id="g",\n'
+        '                         first_seq=first_seq, position=False)\n'),
+    # Invents a position: `True` for a record whose append proved none.
+    "asserts-a-position": (
+        'def write_live_record(record, *, durable=True, first_seq=None):\n'
+        '    return write_records([record], org_id="o", graph_id="g",\n'
+        '                         first_seq=first_seq, position=True)\n'),
+    # Mints a number instead of carrying the caller's fact.
+    "mints-a-count": (
+        'def write_live_record(record, *, durable=True, first_seq=None):\n'
+        '    return write_records([record], org_id="o", graph_id="g",\n'
+        '                         first_seq=1, position=first_seq is not None)\n'),
+}
 
-    Two surfaces, because either alone is weak: the AST check (a live call that
-    omits the argument fails the gate) and the seam itself (the flag actually
-    removes the row from the plan).
+_COMPLIANT_DOOR = (
+    'def write_live_record(record, *, durable=True, first_seq=None):\n'
+    '    has_position = first_seq is not None\n'
+    '    return write_records([record], org_id="o", graph_id="g",\n'
+    '                         first_seq=first_seq if has_position else 1,\n'
+    '                         position=has_position)\n')
+
+
+@pytest.mark.parametrize("shape", sorted(_WRONG_DOORS))
+def test_the_door_rule_fires_on_every_wrong_position_shape(wiring, shape):
+    """The position rule must FAIL each wrong door — including the shipped one."""
+    check, _, _ = wiring
+    rel = "tortoise/record_writer.py"
+    tree = ast.parse(_WRONG_DOORS[shape], filename=rel)
+    problems = check.door_carries_the_position_problems(tree, rel)
+    assert problems, f"{shape}: the rule did not fire"
+    assert any("first_seq" in problem or "position" in problem
+               for problem in problems), problems
+    # …and the compliant shape is accepted, so the rule is not `return [...]`.
+    assert check.door_carries_the_position_problems(
+        ast.parse(_COMPLIANT_DOOR, filename=rel), rel) == [], (
+        "a compliant door must not be reported")
+
+
+_WRONG_APPEND_SITES = {
+    # No ordinal at all — the door falls back to `None`, no position row ever.
+    "omits-the-ordinal": (
+        'from . import record_writer\n'
+        'def emit(log, record):\n'
+        '    log.append(record)\n'
+        '    record_writer.write_live_record(record, durable=True)\n'),
+    # A number that is not this record's position (the `position() + 1` shape).
+    "mints-from-the-count": (
+        'from . import record_writer\n'
+        'def emit(log, record):\n'
+        '    log.append(record)\n'
+        '    record_writer.write_live_record(record, first_seq=log.position() + 1)\n'),
+    # Discards the append's return and passes a constant.
+    "passes-a-constant": (
+        'from . import record_writer\n'
+        'def emit(log, record):\n'
+        '    log.append(record)\n'
+        '    record_writer.write_live_record(record, first_seq=1)\n'),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_WRONG_APPEND_SITES))
+def test_the_append_site_rule_fires_on_every_wrong_ordinal(wiring, shape):
+    """A caller that does not hand the door its record's own append's return fails.
+
+    Half of claim 3 is the door forwarding the ordinal; without this half the
+    gate is satisfied by a door that accepts `first_seq` and three callers that
+    never pass it — layer 1 empty, gate green, which is the self-certifying
+    shape #9231 review P1 describes.
+    """
+    check, _, _ = wiring
+    rel = "tortoise/a_new_door.py"
+    tree = ast.parse(_WRONG_APPEND_SITES[shape], filename=rel)
+    problems = check.live_door_call_problems(tree, rel)
+    assert problems, f"{shape}: the append-site rule did not fire"
+    assert "append" in problems[0], problems[0]
+
+    compliant = (
+        'from . import record_writer\n'
+        'def emit(log, record):\n'
+        '    seq = log.append(record)\n'
+        '    record_writer.write_live_record(record, first_seq=seq)\n')
+    assert check.live_door_call_problems(
+        ast.parse(compliant, filename=rel), rel) == [], (
+        "a caller passing its own append's return must not be reported")
+
+
+def test_the_live_door_writes_the_position_its_append_returned(monkeypatch,
+                                                               tmp_path):
+    """END TO END, DB-free: the door's own append ordinal reaches `journal_event`.
+
+    The seam is driven through the REAL `EventAPI._emit` (the door the
+    extractor, `ingest`, `docs_miner`, `mining` and the CLI all append through),
+    against a REAL `EventLog`, with only the record's connection faked. What is
+    asserted is the SQL: the position row is emitted and its `seq` parameter is
+    the number that very record's `EventLog.append` returned. Pre-fix the live
+    door passed `position=False`, so no `journal_event` statement existed at
+    all and layer 1 stayed empty on every live write (#9231 review P1).
+    """
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    executed: list[tuple[str, tuple]] = []
+
+    class _Cursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, tuple(params)))
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    journal = tmp_path / "journal.jsonl"
+    log = EventLog(journal)
+    api = EventAPI(log, initiated_by="extractor")
+    seqs = []
+    original_append = log.append
+
+    def _spy_append(event):
+        seq = original_append(event)
+        seqs.append(seq)
+        return seq
+
+    monkeypatch.setattr(log, "append", _spy_append)
+    monkeypatch.setattr(record_writer, "_default_connect", lambda dsn: _Conn())
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+
+    with use_record_tenant(ORG, GRAPH):
+        api._emit("PointAdded",
+                  point={"id": "p1", "content": "a claim", "pointKind": "claim"})
+
+    assert seqs == [1], f"the journal append reported {seqs}"
+    rows = [(sql, params) for sql, params in executed
+            if "INSERT INTO public.journal_event" in sql]
+    assert rows, (
+        "no `journal_event` row was written by a live door — layer 1's "
+        f"relational truth set stays empty (executed: {len(executed)} stmts)"
+    )
+    assert rows[0][1][2] == seqs[0], (
+        f"the position row says seq={rows[0][1][2]}, but the record's own "
+        f"append returned {seqs[0]}")
+    assert journal.exists()
+
+
+def test_a_record_whose_append_proved_no_position_writes_no_row(monkeypatch):
+    """The deferral is PER RECORD (#9190): `append() -> None` ⇒ no position row.
+
+    `None` is a NAMED absence in `EventLog.append` (it reports six states), so
+    the live door must leave `journal_event` unwritten for THAT record rather
+    than invent a `seq`.
+    """
+    executed: list[tuple[str, tuple]] = []
+    seen: dict[str, object] = {}
+
+    class _Cursor:
+        def execute(self, sql, params=()):
+            executed.append((sql, tuple(params)))
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    def _fake_write_records(records, **kwargs):
+        seen["kwargs"] = kwargs
+        report = record_projection.replay(
+            records, _Conn(), org_id=kwargs["org_id"],
+            graph_id=kwargs["graph_id"], start_seq=kwargs["first_seq"],
+            position=kwargs["position"])
+        return record_writer.RecordWrite(
+            outcome=record_writer.RecordWriteOutcome.APPLIED,
+            events=report.events, statements=report.statements,
+            first_seq=kwargs["first_seq"],
+            last_seq=kwargs["first_seq"] + len(records) - 1)
+
+    monkeypatch.setattr(record_writer, "write_records", _fake_write_records)
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       "postgresql://record:record@127.0.0.1:1/record")
+    record = {"type": "PointAdded", "ts": "2026-10-19T00:00:00Z", "id": "p1",
+              "point": {"id": "p1", "content": "a claim", "pointKind": "claim"}}
+    with use_record_tenant(ORG, GRAPH):
+        assert record_writer.write_live_record(record, first_seq=None) is not None
+    assert seen["kwargs"]["position"] is False, seen["kwargs"]
+    assert not [sql for sql, _ in executed if "journal_event" in sql], executed
+
+
+def test_the_live_path_never_invents_a_journal_position(wiring):
+    """No constant `position` anywhere, and the plan obeys the flag it is given.
+
+    Two surfaces, because either alone is weak: the AST checks (a live call that
+    omits or asserts the argument fails the gate) and the seam itself (the flag
+    actually adds/removes the row from the plan).
     """
     _, _, report = wiring
     assert report["position_problems"] == [], report["position_problems"]
-    assert record_writer.POSITION_ROW_DEFERRED_ON == "#9190"
+    assert record_writer.POSITION_ROW_REQUIRES_THE_APPENDS_OWN_POSITION == "#9190"
 
     record = {"type": "PointAdded", "ts": "2026-10-19T00:00:00Z", "id": "p1",
               "point": {"id": "p1", "content": "a claim", "pointKind": "claim"}}
@@ -1022,8 +1261,10 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
     only ever exercised by an operator with a database. Deleting the `commit()`
     left CI green and every layer row uncommitted on an armed deployment. This
     drives the real door against a fake seam and counts the promises it makes:
-    the record reaches the seam unchanged, the position is deferred, and the
-    connection this write opened is committed once and closed once.
+    the record reaches the seam unchanged, the journal position the caller
+    supplies is the one written (#9190) — and is NOT written when the caller has
+    none — and the connection this write opened is committed once and closed
+    once.
     """
 
     class _Conn:
@@ -1052,15 +1293,26 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
     monkeypatch.setattr(record_writer, "write_records", _fake_write_records)
     record = {"type": "PointAdded", "id": "p1"}
     with use_record_tenant(ORG, GRAPH):
-        write = record_writer.write_live_record(record)
+        # #9190: the ordinal the record's own `EventLog.append` returned.
+        write = record_writer.write_live_record(record, first_seq=7)
 
     assert write is not None and write.applied
     assert seen["records"] == [record], seen["records"]
     kwargs = seen["kwargs"]
-    assert kwargs["position"] is False, "the live door invented a position"
+    assert kwargs["position"] is True, (
+        "a record whose append REPORTED its position must write the position "
+        "row — the categorical deferral left layer 1 empty (#9190)")
+    assert kwargs["first_seq"] == 7, kwargs
     assert (kwargs["org_id"], kwargs["graph_id"]) == (ORG, GRAPH), kwargs
     assert (conn.commits, conn.closes) == (1, 1), (
         "the live write must commit AND close the connection it opened, once")
+
+    # …and a record whose append proved NO position writes no row rather than
+    # inventing one: the deferral is per record, not categorical.
+    with use_record_tenant(ORG, GRAPH):
+        record_writer.write_live_record(record, first_seq=None)
+    assert seen["kwargs"]["position"] is False, seen["kwargs"]
+    assert seen["kwargs"]["first_seq"] == 1, seen["kwargs"]
 
 
 def test_a_dead_record_costs_a_capture_one_connect_not_one_per_record(monkeypatch):

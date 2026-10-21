@@ -927,7 +927,10 @@ class ConversationMiner:
         # the class. A double whose ``projection`` carries no graph handle
         # abstains, exactly as a projection-less lane does.
         EventAPI._refuse_unapproved_kinds(api, record)
-        api.log.append(record)
+        # #9190: the append reports the record's journal position — the only
+        # legitimate `journal_event.seq`. `None` ⇒ not proven, so the seam
+        # writes no position row for this record.
+        seq = api.log.append(record)
         # #9188: the Postgres record, AFTER the append (the commit point) and
         # before the fold — this miner builds its OWN envelope and appends
         # directly, so without this call every record it mines reaches the
@@ -937,7 +940,7 @@ class ConversationMiner:
         # seam must see that, or a scratch buffer files a row the journal can
         # never replay.
         record_writer.write_live_record(
-            record, durable=getattr(api.log, "durable", True))
+            record, durable=getattr(api.log, "durable", True), first_seq=seq)
         if api.projection is not None:
             # #7951 §17.1: journal-first door (its own envelope) — the append
             # above is the COMMIT POINT, so the fold runs inside the

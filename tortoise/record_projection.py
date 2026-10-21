@@ -1716,12 +1716,13 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     made before the parameter existed byte for byte.
 
     THE POSITION ROW IS OPTIONAL (#9190). ``position=False`` emits the LAYER
-    mutations and no ``journal_event`` row. The live path (#9188) needs it: a
-    journal position is a fact only a bounded replay can derive, and the live
-    chokepoint has none (`EventLog.append` reports nothing and there is no
-    count accessor), so a row written there would have to invent a number —
-    the silent collision #9190 exists to remove. ``True`` (the default) keeps
-    every caller that predates the parameter byte-identical.
+    mutations and no ``journal_event`` row. The live path (#9188,
+    `record_writer.write_live_record`) passes ``True`` with the position its own
+    `EventLog.append` RETURNED, and ``False`` only for a record whose append
+    reported no position — a `seq` invented on the live path would collide with
+    a later replay's numbering, which is the failure #9190 exists to remove.
+    ``True`` (the default) keeps every caller that predates the parameter
+    byte-identical.
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position)
@@ -1766,8 +1767,9 @@ def replay_plan(records: Sequence[Mapping[str, Any]], *, org_id: str,
     SAME offset from the same durable facts, so a retry never renumbers.
 
     `position=False` omits the per-record row entirely (see :func:`replay`):
-    it is the live path's shape until #9190 gives the chokepoint a real
-    ordinal, and the layer mutations are unaffected.
+    it is the shape for a record whose own journal append REPORTED no position
+    (`EventLog.append` → ``None``, six documented states), and the layer
+    mutations are unaffected.
     """
     if start_seq < 1:
         raise RecordProjectionError(
