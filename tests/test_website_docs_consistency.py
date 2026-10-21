@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import re
 import sys
+from html import unescape as html_unescape
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -77,6 +78,25 @@ _FABRICATED_TITLE = "Verbatim Chunks Beat Extracted Artifacts"
 def _read(path: Path) -> str:
     assert path.is_file(), f"missing public page: {path}"
     return path.read_text(encoding="utf-8")
+
+
+def _normalise(text: str) -> str:
+    """Collapse a rendered page or a draft line to comparable plain text.
+
+    Tags → space, entities unescaped, whitespace collapsed, and the markdown the
+    drafts use (bold, links, code, list bullets) stripped, so a table row written
+    as markdown can be compared with the same row as the browser sees it. This is
+    the same normalisation shape `tests/e2e/test_legal_pages.py::_clean` uses —
+    kept local because importing that module runs its module-level skip.
+    """
+    text = re.sub(r"<script.*?</script>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html_unescape(text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)  # [label](url) → label
+    text = re.sub(r"`([^`]+)`", r"\1", text)
+    text = re.sub(r"\*{1,2}(.+?)\*{1,2}", r"\1", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _canonical_statuses() -> set[str]:
@@ -468,9 +488,15 @@ def _offers_blog_entry(page: Path) -> bool:
 # leaves the public surface, that is a decision someone must take deliberately,
 # not a page that quietly disappears from coverage.
 _IN_SCOPE_AT_3950 = frozenset({
-    "aviso-privacidad.html", "contact.html", "docs.html", "dpa.html", "faq.html", "index.html",
+    "contact.html", "docs.html", "dpa.html", "faq.html", "index.html",
     "license.html", "privacy.html", "product.html", "security.html",
     "self-hosted.html", "tos.html",
+    # ⚠️ `aviso-privacidad.html` LEFT this set in #9486: the Spanish LFPDPPP
+    # notice was RETIRED because the controller's jurisdiction of residence is
+    # the United Kingdom — the document had no basis. Its route 301s to
+    # `/privacy`, which is the privacy notice. Removing it from this pin is the
+    # deliberate decision the comment above requires, not a page quietly
+    # disappearing from coverage.
     # ⚠️ `signup.html` LEFT this set in #4054: the page (the `/auth` screen)
     # moved to the app project at `website/apps/dashboard/public/signup.html`,
     # so it is no longer a page `website/` serves and no longer this guard's
@@ -646,7 +672,8 @@ def test_every_in_scope_page_is_selectable_by_ci() -> None:
     surface at all, so a PR touching ONLY that page never runs this file — the
     guard silently stops covering the page it was written for. That is the
     #1349/#3332 silent-drop class, and it bit this guard on arrival: 5 of the 12
-    in-scope pages (`security`, `tos`, `license`, `dpa`, `aviso-privacidad`) were
+    in-scope pages (`security`, `tos`, `license`, `dpa`, `aviso-privacidad` — the
+    last has since been retired, #9486) were
     absent from the `onboarding` entry, so `--changed-files website/tos.html`
     selected `surfaces=[]`.
 
@@ -1328,8 +1355,11 @@ def test_the_declared_limit_helper_fires_on_the_constructs_it_names() -> None:
 # `noindex` keeps it out of the BLOG guard's scope, not out of this one.
 # `investors.html` was ADDED (#8568, 2026-10-13): the investor one-pager, forked
 # from it. Same class of document, same reasoning — `noindex`, covered here.
+# `aviso-privacidad.html` was REMOVED (#9486): the file is deleted, so it is
+# no longer a page the id guard has a subject in — `/aviso-privacidad` now
+# 301s to `/privacy`.
 _ALL_WEBSITE_PAGES_AT_3436 = frozenset({
-    "404.html", "aviso-privacidad.html", "contact.html", "design-partners-intro.html",
+    "404.html", "contact.html", "design-partners-intro.html",
     "docs.html", "dpa.html", "faq.html",
     "index.html", "investors.html", "invite-accept.html", "license.html", "privacy.html",
     "product.html", "security.html", "self-hosted.html",
@@ -1488,6 +1518,90 @@ def test_privacy_does_not_leave_session_deletion_backups_undisclosed() -> None:
     )
 
 
+def _draft_history_rows(draft_path: Path, heading: str) -> dict[str, tuple[str, str]]:
+    """`{version: (date, normalised summary)}` from a draft's markdown table."""
+    draft = draft_path.read_text(encoding="utf-8")
+    start = draft.lower().rfind(heading)
+    assert start != -1, f"{draft_path.name} lost its '{heading}' table"
+    rows: dict[str, tuple[str, str]] = {}
+    for line in draft[start:].splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or set(stripped) <= set("|-: "):
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if len(cells) < 3 or cells[0].lower() == "version":
+            continue  # separator or header
+        rows[cells[0]] = (cells[1], _normalise(cells[2]))
+    return rows
+
+
+def _rendered_history_rows(render_path: Path) -> dict[str, tuple[str, str]]:
+    """`{version: (date, normalised summary)}` from the page's history table.
+
+    Parsed from the document rather than substring-matched: a containment check
+    passes when a draft row merely STARTS the same way, which is exactly how a row
+    can lose the sentence that makes it complete and stay green.
+    """
+    html = render_path.read_text(encoding="utf-8")
+    body = re.search(r"<tbody>(.*?)</tbody>", html, re.S)
+    assert body, f"{render_path.name} has no history table body"
+    rows: dict[str, tuple[str, str]] = {}
+    for tr in re.findall(r"<tr>(.*?)</tr>", body.group(1), re.S):
+        cells = [_normalise(td) for td in re.findall(r"<td>(.*?)</td>", tr, re.S)]
+        if len(cells) >= 3:
+            rows[cells[0]] = (cells[1], cells[2])
+    return rows
+
+
+def test_each_draft_history_row_mirrors_its_rendered_page() -> None:
+    """A draft's revision-history table and the page's must be the SAME table.
+
+    `test_draft_to_render_fidelity` (e2e) deliberately skips table rows ("changelog
+    structure — build-resolved"), so nothing else compares them. This pins the two
+    sides as parsed tables — the version SET in both directions and the summary per
+    version — because a one-directional containment check cannot see a row that
+    lost a sentence, a row the draft is missing, or a row the render is missing.
+
+    The 1.0 row's date may still be the deploy placeholder (`[Effective date: …]`):
+    that exemption covers the DATE CELL only, never the row, so its summary is
+    still compared.
+    """
+    cases = (
+        (WEBSITE.parent / "docs" / "drafts" / "2026-08-08-657-privacy-draft.md",
+         "document history / revisions", PRIVACY),
+        (WEBSITE.parent / "docs" / "drafts" / "2026-08-08-657-tos-draft.md",
+         "revision history", WEBSITE / "tos.html"),
+    )
+    for draft_path, heading, render_path in cases:
+        draft_rows = _draft_history_rows(draft_path, heading)
+        render_rows = _rendered_history_rows(render_path)
+        assert draft_rows, f"{draft_path.name} has no history rows to mirror"
+        assert set(draft_rows) == set(render_rows), (
+            f"{draft_path.name} and {render_path.name} list different versions: "
+            f"draft-only {sorted(set(draft_rows) - set(render_rows))}, "
+            f"page-only {sorted(set(render_rows) - set(draft_rows))}"
+        )
+        for version, (date, summary) in draft_rows.items():
+            r_date, r_summary = render_rows[version]
+            # A bracketed date is an unresolved deploy placeholder. Only v1.0 may
+            # still carry one; any OTHER version with one is a row that stopped
+            # being real, and a resolved date is compared for every version.
+            if date.startswith("["):
+                assert version == "1.0", (
+                    f"{draft_path.name}: v{version} still has the deploy placeholder "
+                    f"{date!r} — only the initial 1.0 row may"
+                )
+            else:
+                assert date == r_date, (
+                    f"{draft_path.name}: v{version} dated {date!r} but "
+                    f"{render_path.name} says {r_date!r}"
+                )
+            assert summary == r_summary, (
+                f"{draft_path.name}: v{version} the two texts differ.\n"
+                f"  draft: {summary}\n  page : {r_summary}"
+            )
+
+
 def test_privacy_draft_mirrors_the_session_recording_retention() -> None:
     """The canonical doc requires the draft and the published page to move together.
 
@@ -1498,7 +1612,25 @@ def test_privacy_draft_mirrors_the_session_recording_retention() -> None:
     """
     draft = _read(REPO_ROOT / "docs" / "drafts" / "2026-08-08-657-privacy-draft.md")
     assert "**Session recordings.**" in draft
-    assert "**Current version:** 1.2" in draft
+    # The version is READ from the render, not re-typed here: a hand-maintained
+    # second copy of the version number goes stale on every bump and forces a
+    # test edit that asserts nothing about the document.
+    m = re.search(r"<p><strong>Current version:</strong>\s*([0-9.]+)</p>", _read(PRIVACY))
+    assert m, "privacy.html lost its 'Current version' line"
+    # The draft carries the number TWICE (the §15 line and a `**Version:**` line in
+    # its header) and neither is compared by the history-table test, so both are
+    # pinned here against the render's single source of truth.
+    meta = re.search(r'<span class="label">Version</span>\s*<span class="value">([0-9.]+)</span>', _read(PRIVACY))
+    assert meta, "privacy.html lost its meta Version badge"
+    assert meta.group(1) == m.group(1), (
+        f"privacy.html's meta badge says {meta.group(1)} but §15 says {m.group(1)}"
+    )
+    assert f"**Version:** {m.group(1)}" in draft, (
+        "the privacy draft's header version no longer mirrors the rendered policy"
+    )
+    assert f"**Current version:** {m.group(1)}" in draft, (
+        "the privacy draft's version no longer mirrors the rendered policy — the "
+        "draft and the page move together (docs/retention-and-deletion.md)")
 
 
 def _privacy_section(heading: str) -> str:

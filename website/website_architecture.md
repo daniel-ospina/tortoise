@@ -104,7 +104,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Welcome | `website/apps/dashboard/public/welcome.html`, served at `/welcome` by `website/apps/dashboard/functions/welcome.ts` | **Recovery landing only.** The page renders `#loading` / `#error-state` / `#reset-panel` and nothing else — no team creation, no API-key reveal. Post-signup provisioning happens **in the dashboard** (first-run onboarding). `/welcome` 302s a **signed-in** visitor to the app (`/?claim=1` while a claim is pending); no cookie or a dead session 302s `/auth?next=…&stale=1`; an unreachable session store 503s. **Any `reset` present** + a valid session is the one case that renders the page — unless `env.ASSETS` is unbound, in which case it 503s instead |
 | Invite accept | `website/apps/dashboard/public/invite-accept.html` | Public team-invite accept page (`/invite-accept?token=…`), reads `/v1/invites/info` |
 | Dashboard | `website/apps/dashboard/` (React + Vite) | Session-gated app: Overview / API Keys / Graphs / Members / Billing / **Profile** (login methods + recovery banner, #1765) |
-| Legal | `privacy.html` `tos.html` `license.html` `dpa.html` `security.html` | Compliance pages, linked from the footer of the pages that carry the site footer (`index`, `product`, `contact`, `faq`, `self-hosted`) — the legal pages themselves are hand-written documents whose footer is the revisions table. `aviso-privacidad.html` (the Spanish LFPDPPP notice) is deliberately in NO footer: `privacy.html` §1 links it, next to the LFPDPPP paragraph that says when it applies |
+| Legal | `privacy.html` `tos.html` `license.html` `dpa.html` `security.html` | Compliance pages, linked from the footer of the pages that carry the site footer (`index`, `product`, `contact`, `faq`, `self-hosted`) — the legal pages themselves are hand-written documents whose footer is the revisions table. (`aviso-privacidad.html`, the Spanish LFPDPPP notice, was RETIRED in #9486: the controller is UK-resident, so `/aviso-privacidad` 301s to `/privacy`.) |
 
 ---
 
@@ -273,7 +273,7 @@ dashboard.
 | --- | --- | --- |
 | `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
 | `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
-| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/self-hosted`, `/security`, 5 legal pages (note: the auth URLs are NOT in this sitemap — `/signin` 301s to `/auth`, and `/auth` itself moved to the app origin in #4054) |
+| `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/self-hosted`, `/security`, the 4 legal pages (note: the auth URLs are NOT in this sitemap — `/signin` 301s to `/auth`, and `/auth` itself moved to the app origin in #4054) |
 | `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
 | `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/` at build time; `dist/` is itself a build artifact (untracked since #3775 — built by `deploy.sh`, `deploy-pages.yml` and the `dashboard-js-tests` CI job before it is served), so `public/` is the only committed copy |
 
