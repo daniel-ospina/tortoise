@@ -357,11 +357,21 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                 for rel in (code_entries if isinstance(code_entries, list) else []):
                     if not isinstance(rel, str) or not rel:
                         continue
+                    # ASK THE PATH RULE, per entry: its verdict is the authority
+                    # on whether this declared entry is a valid artifact at all
+                    # (shape, kind, containment, existence). `_resolve_in_repo`
+                    # only asks WHICH FILE TO READ and applies none of the kind
+                    # discipline, so an entry it resolves may still be one the
+                    # path rule REJECTED (`code: ["README.md"]` is on disk and
+                    # inside the repo). Reading that entry too would report one
+                    # defect twice — and claim a wrong-kind file "could not be
+                    # parsed" when the real verdict is "not production source".
+                    if _path_violations(mid, "code", [rel], root, "code"):
+                        continue
                     resolved = _resolve_in_repo(rel, root)
                     if resolved is None:
-                        # The PATH rule already reported this entry (missing,
-                        # wrong kind, outside the repo): one defect, one report,
-                        # and there is no file to read for the anchor.
+                        # Unprobeable between the two probes: the path rule will
+                        # report it on the next run, and there is no file to read.
                         continue
                     resolved_entries.append(rel)
                     names = _defined_names(resolved)
@@ -369,14 +379,15 @@ def gate_errors(mechanisms: list[dict], root: Path = ROOT) -> list[str]:
                         unreadable.append(rel)
                         continue
                     defined |= names
-                # ⭐ A declared source that RESOLVES — right kind, on disk,
-                # inside the repo — but cannot be read or parsed is a violation
-                # of its OWN. Nothing else reports it: `_path_violations` never
-                # opens the file, so treating "unparsable" as "the path rule
-                # already said so" left the row certifying a mechanism whose
-                # code was never read at all (the fail-open this rule exists to
-                # close, one level down). Silent only when NO declared entry
-                # resolved — that case the path rule did report.
+                # ⭐ A declared source that the PATH RULE ACCEPTED — right
+                # shape, right kind, on disk, inside the repo — but that cannot
+                # be read or parsed is a violation of its OWN. Nothing else
+                # reports it: `_path_violations` never opens the file, so
+                # treating "unparsable" as "the path rule already said so" left
+                # the row certifying a mechanism whose code was never read at
+                # all (the fail-open this rule exists to close, one level down).
+                # Silent only for entries the path rule already reported, so one
+                # defect still yields exactly one verdict.
                 for rel in unreadable:
                     errors.append(
                         f"{mid}: declared `code:` source {rel!r} could not be "
@@ -942,6 +953,13 @@ def test_gate_fails_closed_on_a_non_source_code_file() -> None:
     Cycle-5 P2: existence-only let `code: ["README.md"]`, the registry YAML, or
     a TEST file satisfy "implemented (a code path with a test)" — the same
     fail-open class cycle 4 closed for `tests:`, left unfixed on `code:`.
+
+    ⭐ ONE DEFECT, ONE VERDICT: these entries are on disk and inside the repo,
+    so `_resolve_in_repo` (which asks only WHICH FILE TO READ, and applies no
+    kind discipline) happily returns a path for them. Reading them anyway would
+    report the SAME entry twice — once as "not production source" and once as
+    "could not be read or parsed" — so the anchor consults the path rule per
+    entry first. A wrong-kind entry yields the kind verdict ALONE.
     """
     for bad in (
         ["README.md"],
@@ -956,9 +974,15 @@ def test_gate_fails_closed_on_a_non_source_code_file() -> None:
             "declared_in": ["config/v4-mechanisms.yml"],
             "code": bad,
             "tests": ["tests/test_fanout_cap.py"],
+            "symbols": ["PER_ENTITY_FANOUT_CAP"],
         }
         errors = gate_errors([row])
         assert any("production source" in e for e in errors), (bad, errors)
+        assert not any("could not be read or parsed" in e for e in errors), (
+            bad,
+            "one defect must not be reported twice",
+            errors,
+        )
 
 
 def test_gate_fails_closed_on_a_non_document_declared_in() -> None:
