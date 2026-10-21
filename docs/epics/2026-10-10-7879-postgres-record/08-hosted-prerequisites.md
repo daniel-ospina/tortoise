@@ -70,7 +70,7 @@ they are excluded as prerequisites and recorded as such:
 |---|---|---|
 | **"serve reads from Postgres / cut over the read path"** | §2.0, verbatim: *"we keep the limit in falkor high so we don't need to rush with enabling our queries to parse both falkor and postgres."* | **Deferred by the ruling** — `#7970` is OPEN and *"DEFERRED by §2.0"*. Not a first-customer gate. |
 | **"put embeddings in pgvector"** | §12.1c: *"⚠️ NOT DECIDED — owner's call."* §14.3 V1. | **A decision, not a prerequisite.** Embeddings are already durable without it (item A5). |
-| **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3, item R1); a backfill is not it. |
+| **"backfill the existing FalkorDB graph into Postgres"** | Owner scope ruling 2026-10-10: *"there are no existing customers. No migration-safety apparatus is designed or claimed here."* | **Not designed, on purpose.** The dual-write already exists by construction (§3/§17.1; item R1 arms it); a backfill is not it. |
 
 ---
 
@@ -467,13 +467,12 @@ meter → allowance wiring — gates the first *allowance*, not the first custom
   (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
 - **No product code changed.** No migration, no module, no test. The **three runs in §G** (two pytest runs plus the
   PGlite validation) were run and reported; none of their files was modified.
-- **No issue filed.** Every finding above names the issue it belongs to, with that issue's state
-  measured on 2026-10-21: **#9264** OPEN, **#7970** OPEN, **#5089** CLOSED COMPLETED
-  (2026-10-12), **#4495** CLOSED (2026-10-19), **#4997** CLOSED (2026-10-05), **#7951** CLOSED
-  (2026-10-18). A CLOSED home is named where its closing artifact is the evidence the item rests
-  on (N2 on #4997's analysis, N4 on #5089's journal work), never because the item is believed
-  fixed. Per the standing rule, a checklist item with no home gets a comment on the root
-  (**#7879**) rather than a peer issue.
+- **No issue filed.** An item that names an issue gives that issue's state and its closing
+  artifact where one exists; an item that names none is a candidate on this list rather than a
+  peer. A CLOSED home is named only where its closing artifact is the evidence the item rests on
+  (N2 on #4997's analysis, N4 on #5089's journal work) — never because the item is believed fixed.
+  Per the standing rule, a checklist item with no home gets a comment on the root (**#7879**)
+  rather than a peer issue; R5's is [comment 6323627886](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6323627886).
 - **No measurement of the live dogfood graph.** Every live figure in §D is quoted from a prior
   measurement, with its base and — for the rows that have one — its date, because this lane has no access to the production FalkorDB.
 
