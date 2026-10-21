@@ -36,6 +36,7 @@ redis_exc = pytest.importorskip("redis.exceptions")
 from tortoise import cypher_guard  # noqa: E402
 from tortoise.retry import (  # noqa: E402
     explain_instance_unavailable,
+    is_dead_reader,
     is_instance_unavailable,
     retryable_transient,
 )
@@ -465,9 +466,154 @@ def test_a_non_transport_error_is_not_explained_by_the_helper():
         ValueError("not a db error"), mutating=True) is None
 
 
+def test_a_read_racing_a_parser_teardown_is_a_transport_outcome():
+    """#6977: a torn-down parser socket IS the transport going away.
+
+    ``SocketBuffer.close()`` closes the buffer and then clears the reference, so
+    a read landing in either window raises a plain ``ValueError`` /
+    ``AttributeError``. Neither carries a transport class, so before #6977 the
+    classifier answered False and the sweep folded the teardown into a per-graph
+    DATA error — the ~20% false red on the #2823 P0 guard.
+
+    The shapes are raised through the REAL guarded handle here, because that is
+    where the difference bites: the guard appends its diagnosis IN PLACE, and a
+    classifier that compares the whole message answers False on the production
+    path while passing every synthetic test. Measured, and the reason the arm
+    matches the message HEAD.
+    """
+    teardown = (
+        ValueError("I/O operation on closed file."),
+        AttributeError("'NoneType' object has no attribute 'readline'"),
+        AttributeError("'NoneType' object has no attribute 'read'"),
+    )
+    for error in teardown:
+        exc = _raise_from_handle(error, READ_STATEMENT)
+        # The guard annotated it (the note is what the caller sees)…
+        assert "CONNECTION-LIFETIME" in str(exc), str(exc)
+        assert "graph was deleted or replaced' abort" in str(exc)
+        # …and the classification SURVIVES the annotation.
+        assert is_dead_reader(exc) is True, repr(error)
+        assert is_instance_unavailable(exc) is True, repr(error)
+
+
+#: Message text is the ONLY discriminator this arm has, so its narrowness is the
+#: contract: a different ``ValueError``/``AttributeError`` — including one about
+#: a closed file that is not the vendor's string — must stay outside the family.
+def test_only_the_vendor_teardown_strings_are_admitted():
+    for exc in (
+        ValueError("I/O operation on closed file"),  # no trailing period
+        ValueError("I/O operation on a closed file."),
+        AttributeError("'NoneType' object has no attribute 'encode'"),
+        ValueError("not a db error"),
+    ):
+        assert is_dead_reader(exc) is False, repr(exc)
+        assert is_instance_unavailable(exc) is False, repr(exc)
+
+
 def test_a_bare_local_timeout_is_not_claimed_to_be_an_instance_outage():
     """``retryable_transient`` refuses a cause-less builtin timeout — so do we."""
     assert is_instance_unavailable(TimeoutError("deadline exceeded")) is False
+
+
+def test_a_masked_teardown_is_admitted_through_its_cause_chain():
+    """#6977: the chain walk admits the shape #3813 recorded.
+
+    ``hosted_backup._is_client_read_timeout`` records a ``ValueError: I/O
+    operation on closed file`` chained behind the originating
+    ``redis.exceptions.TimeoutError``. Walking the chain through
+    ``retryable_transient`` (the module's ONE transport classifier) admits it
+    without a second predicate; the message text alone would not.
+    """
+    timeout = redis_exc.TimeoutError(SOCKET_TIMEOUT)
+    try:
+        raise ValueError("a masked shape the text arm does not know") from timeout
+    except ValueError as exc:
+        assert is_dead_reader(exc) is False          # not a vendor string
+        assert is_instance_unavailable(exc) is True  # …but its CAUSE is transport
+
+
+def test_an_answered_refusal_in_the_chain_does_not_join_the_family():
+    """#6977 review: the answered-refusal exclusion is per-EXCEPTION, not per-family.
+
+    The vendor parser maps ``-ERR max number of clients reached`` to the plain
+    ``ConnectionError`` and ``WRONGPASS`` to ``AuthenticationError``. Those must
+    not be smuggled in by a chain either: a data failure whose ``__context__``
+    happens to be a pool-exhaustion refusal is still a data failure, and calling
+    it ``transport`` sends an operator to the wrong surface (#8827's trap).
+    """
+    for refusal in (
+        redis_exc.ConnectionError("max number of clients reached"),
+        redis_exc.AuthenticationError("WRONGPASS invalid username-password pair"),
+        redis_exc.ResponseError("MISCONF Redis is configured to save RDB snapshots"),
+    ):
+        # Each is excluded on its own…
+        assert is_instance_unavailable(refusal) is False, repr(refusal)
+        # …and stays excluded when it is merely the CAUSE of another error.
+        try:
+            raise ValueError("bad row shape") from refusal
+        except ValueError as exc:
+            assert is_instance_unavailable(exc) is False, repr(refusal)
+
+
+def test_a_self_referential_chain_terminates():
+    """The walk is identity-deduplicated, so a cycle cannot hang a red run."""
+    exc = ValueError("bad row shape")
+    exc.__cause__ = exc
+    assert is_instance_unavailable(exc) is False
+
+
+def test_an_implicit_context_chain_is_admitted_too():
+    """#6977: the shape the chain walk exists for is the IMPLICIT one.
+
+    ``hosted_backup._is_client_read_timeout`` records the masked teardown as an
+    implicit ``__context__`` (redis-py raises during the ``except`` body, with no
+    ``from``), so the ``__context__`` half of the walk is the half production
+    travels — it must be pinned, not just the explicit ``from`` half.
+    """
+    try:
+        try:
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+        except redis_exc.TimeoutError:
+            # Implicit context ON PURPOSE: this is the shape production produces
+            # (redis-py raises during the ``except`` body, with no ``from``).
+            raise ValueError(  # noqa: B904
+                "a masked shape the text arm does not know")
+    except ValueError as exc:
+        assert exc.__cause__ is None and exc.__context__ is not None
+        assert is_instance_unavailable(exc) is True
+
+
+def test_a_suppressed_context_is_not_followed():
+    """``raise ... from None`` DETACHES the chain on purpose — honour it.
+
+    Python sets ``__suppress_context__`` and the author's intent is that the
+    detached error is not the explanation. Following it anyway relabels a data
+    failure as an instance outage — the very misdirection this module exists to
+    prevent.
+    """
+    try:
+        try:
+            raise redis_exc.TimeoutError(SOCKET_TIMEOUT)
+        except redis_exc.TimeoutError:
+            raise ValueError("bad row shape") from None
+    except ValueError as exc:
+        assert exc.__suppress_context__ is True
+        assert is_instance_unavailable(exc) is False
+
+
+def test_a_loading_link_stays_an_instance_event_when_chained():
+    """LOADING is the one ANSWER this module treats as an instance event.
+
+    ``BusyLoadingError`` subclasses ``ConnectionError`` on the pin, so the walk
+    would admit it via ``retryable_transient`` anyway — this pins that the
+    answered-refusal exclusion deliberately does not take it away, chained or
+    not (the command was rejected BEFORE it ran, so nothing was applied).
+    """
+    try:
+        raise ValueError("a masked shape") from redis_exc.BusyLoadingError(
+            "LOADING Redis is loading the dataset in memory")
+    except ValueError as exc:
+        assert is_instance_unavailable(exc) is True
 
 
 # ── contract the callers depend on ─────────────────────────────────────────
@@ -745,5 +891,199 @@ def test_a_failing_arm_derivation_lands_on_the_hedge_and_keeps_the_error(monkeyp
     assert message.startswith(SOCKET_TIMEOUT)
     assert "Whether the command took effect is UNKNOWN" in message
     # The mutation arm must NOT be guessed either way from a classifier failure.
+    assert "OUTCOME IS UNKNOWN" not in message
+    assert "re-issuing this statement is safe" not in message
+
+
+# ── the two in-package clients the note could not reach (#7357 residual) ────
+#
+# The module docstring's SCOPE paragraph named these two as exceptions: a bare
+# ``redis.Redis(...)`` never passes ``guarded_client`` (the #6882 seam), so
+# their commands carried neither the operator guard nor the #7357 note. The
+# #9210-series review left them as "follow-up work on THEIR seam" — these two
+# tests are that seam, driven through the REAL constructors with a dead vendor
+# class behind them (so removing the guard wiring, not merely the helper,
+# reddens them).
+
+
+class _DeadRedis:
+    """A vendor-shaped ``redis.Redis`` whose every command times out."""
+
+    error = redis_exc.TimeoutError(SOCKET_TIMEOUT)
+
+    def __init__(self, *args, **kwargs):
+        self.init_kwargs = kwargs
+        self.execute_command = self._execute
+
+    def _execute(self, *args, **kwargs):
+        # A FRESH instance per command, as a real driver does.
+        raise type(self.error)(*self.error.args)
+
+
+class _ClosedRedis(_DeadRedis):
+    """The same vendor shape, failing the way a container restart looks.
+
+    ``Connection closed by server`` is a NON-timeout transport failure, so
+    ``_is_client_read_timeout`` does NOT convert it — which makes it the one
+    leg whose annotated sentence actually reaches a restore CALLER.
+    """
+
+    error = redis_exc.ConnectionError("Connection closed by server.")
+
+
+def test_the_restore_copy_client_carries_the_note(monkeypatch):
+    """``hosted_backup._restore_copy_client`` reaches the seam, bound intact.
+
+    The client is deliberately NOT an ordinary request's client (#3813: the
+    swap's ``GRAPH.COPY`` must not inherit the request's read bound), and this
+    pins that routing it through the guard seam did not touch that: the pool
+    still receives the swap's own ``socket_timeout`` and NO retry. What it
+    gains is the #7357 note on its command channel — here over the driver's
+    ``TimeoutError``, the shape this stub raises.
+
+    ⛔ What this case does NOT pin: the note reaching a CALLER. A read timeout
+    on this path is #4233's and unchanged — ``_graph_copy_with_restore_bound``
+    proves the copy settled or raises ``RestoreCopyTimeoutError`` ("the
+    server-side GRAPH.COPY may still be running"), with the note on its
+    ``__cause__``. The leg that used to surface BARE is a NON-timeout transport
+    failure (``ConnectionError: Connection closed by server``, which
+    ``_is_client_read_timeout`` does not convert), and it is pinned end-to-end
+    through the real caller by
+    ``test_the_restore_swap_caller_keeps_the_note_on_a_closed_connection``.
+    """
+    import redis
+
+    from tortoise import hosted_backup as hb
+
+    pools: list[dict] = []
+
+    class _Pool:
+        def __init__(self, **kwargs):
+            pools.append(kwargs)
+
+    class _PoolInfo:
+        def __init__(self):
+            self.connection_kwargs = {"host": "127.0.0.1", "port": 16379}
+            self.connection_class = object
+
+    class _Db:
+        connection = type("_Conn", (), {"connection_pool": _PoolInfo()})()
+
+    monkeypatch.setattr(redis, "Redis", _DeadRedis, raising=True)
+    monkeypatch.setattr(redis, "ConnectionPool", _Pool, raising=True)
+
+    client = hb._restore_copy_client(_Db())
+
+    # #3813 stays: the restore's OWN bound, and no retry.
+    assert len(pools) == 1
+    assert pools[0]["socket_timeout"] == hb._restore_swap_timeout_s()
+    assert pools[0]["retry"].get_retries() == 0
+
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command("GRAPH.COPY", "tortoise_intact", "tortoise")
+
+    message = str(caught.value)
+    assert message.startswith(SOCKET_TIMEOUT)
+    # ``GRAPH.COPY`` carries no Cypher statement for the classifier to read, so
+    # the honest arm is the HEDGE — not the read arm's "re-issuing is safe".
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "re-issuing this statement is safe" not in message
+
+    # A statement-carrying command over the SAME channel gets the WRITE arm,
+    # which is the arm the restore's own readbacks must not be confused with.
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command("GRAPH.QUERY", "tortoise", WRITE_STATEMENT)
+    assert "OUTCOME IS UNKNOWN" in str(caught.value)
+
+
+def test_the_restore_swap_caller_keeps_the_note_on_a_closed_connection(monkeypatch):
+    """The leg #7357 actually repairs on the restore path: the CALLER's sentence.
+
+    ``_graph_copy_with_restore_bound`` converts a client READ timeout into
+    ``RestoreCopyTimeoutError`` (#4233) and re-raises anything else unchanged,
+    so only a NON-timeout transport failure carries the annotated sentence to a
+    caller. This drives the real call — not the raw channel — so a bare
+    ``redis.Redis`` (the pre-fix construction) raises the un-annotated
+    ``Connection closed by server.`` and the note assertions below fail.
+    """
+    import redis
+
+    from tortoise import hosted_backup as hb
+
+    class _Pool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _PoolInfo:
+        def __init__(self):
+            self.connection_kwargs = {"host": "127.0.0.1", "port": 16379}
+            self.connection_class = object
+
+    class _Db:
+        connection = type("_Conn", (), {"connection_pool": _PoolInfo()})()
+
+        def list_graphs(self):
+            # A destination this copy can have produced (not pre-existing).
+            return []
+
+    monkeypatch.setattr(redis, "Redis", _ClosedRedis, raising=True)
+    monkeypatch.setattr(redis, "ConnectionPool", _Pool, raising=True)
+
+    with pytest.raises(redis_exc.ConnectionError) as caught:
+        hb._graph_copy_with_restore_bound(
+            _Db(), "tortoise_intact", "tortoise",
+            role="restore swap", intact_name="tortoise_intact")
+
+    message = str(caught.value)
+    # NOT the #4233 timeout verdict: this leg is not a read timeout, so the
+    # annotated transport sentence is what the caller gets.
+    assert not isinstance(caught.value, hb.RestoreCopyTimeoutError)
+    assert message.startswith("Connection closed by server.")
+    # ``GRAPH.COPY`` carries no Cypher, so the honest arm is the HEDGE.
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "anything that mutates must be read back" in message
+    assert "OUTCOME IS UNKNOWN" not in message
+
+
+def test_the_acl_admin_client_carries_the_note(monkeypatch):
+    """``acl_graph_users._admin_client`` reaches the seam too.
+
+    Every command this module issues is in the NON-Cypher family — ``MODULE
+    LIST``, ``ACL GETUSER``/``SETUSER``/``DELUSER``/``SAVE`` — so there is no
+    statement for the classifier to read and ``_command_mutating`` returns
+    ``None``: the arm this channel really gets is the HEDGE ("Whether the
+    command took effect is UNKNOWN … anything that mutates must be read back"),
+    NOT the write-statement arm. The test therefore drives the command the
+    module actually sends; a ``GRAPH.QUERY`` statement here would pin an arm
+    this client can never produce.
+    """
+    import redis
+
+    from tortoise import acl_graph_users as acl
+
+    # The command the module really puts on the wire (``ACL SETUSER``,
+    # acl_graph_users.py:367) and the classification that decides its arm. Both
+    # are asserted because the arm assertion below DEPENDS on the classifier
+    # answering ``None``: if ACL verbs were ever taught to it as mutating, this
+    # must red rather than keep asserting a message the channel no longer emits.
+    acl_setuser = ("ACL", "SETUSER", "tenant_g", "reset", "on", ">pw")
+    assert cypher_guard._command_mutating(acl_setuser) is None
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379/tortoise")
+    monkeypatch.setattr(redis, "Redis", _DeadRedis, raising=True)
+
+    client = acl._admin_client()
+    assert client is not None
+
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command(*acl_setuser)
+
+    message = str(caught.value)
+    assert message.startswith(SOCKET_TIMEOUT)
+    # The hedge, and its instruction for a mutating shape.
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "anything that mutates must be read back" in message
+    # NOT the write-statement arm, and NOT the read arm.
     assert "OUTCOME IS UNKNOWN" not in message
     assert "re-issuing this statement is safe" not in message

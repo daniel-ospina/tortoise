@@ -199,8 +199,12 @@ def _sweep_diagnosis(body: dict) -> str:
     if isinstance(failures, list):
         for f in failures:
             if isinstance(f, dict):
+                # #6977: a named cause class rides here; show it, so a red
+                # prints the field the fix added instead of hiding it.
+                klass = f" [{f['error_kind']}]" if f.get("error_kind") else ""
                 causes.append(
-                    f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}")
+                    f"{f.get('org_id')}/{f.get('graph_id')}: {f.get('error')}"
+                    + klass)
     results = body.get("results")
     if isinstance(results, dict):
         for tid, res in results.items():
@@ -230,6 +234,79 @@ def _sweep_diagnosis(body: dict) -> str:
             f"teams={body.get('teams_backed_up')} "
             f"totals={body.get('graph_totals')} "
             f"source={body.get('source')} causes=[{'; '.join(causes)}]")
+
+
+class _TornReaderDB:
+    """Make a data-plane handle's read race a parser teardown (#6977).
+
+    Wraps a real `db` handle and raises the vendor's teardown signature on the
+    FIRST query against one named graph — the measured shape (team_s1 backed
+    up, team_s2's first read died), so a test can pin what the sweep does with
+    it instead of waiting for the ~20% race to fire.
+
+    Two signatures, one event: `SocketBuffer.close()` closes the buffer and
+    then rebinds it to `None`, so a read landing in either window raises a
+    plain `ValueError` / `AttributeError`. `times=None` keeps raising (the
+    teardown that survives the re-issue).
+    """
+
+    def __init__(self, graph_name: str, text: str, *, times: int | None = 1):
+        self.graph_name = graph_name
+        self.text = text
+        self.times = times
+        self.fired = 0
+
+    def wrap(self, db):
+        return _TornReaderHandle(db, self)
+
+
+class _TornReaderHandle:
+    def __init__(self, inner, torn: _TornReaderDB):
+        self._inner = inner
+        self._torn = torn
+
+    def select_graph(self, name: str):
+        wrapped = self._inner.select_graph(name)
+        if name != self._torn.graph_name:
+            return wrapped
+        return _TornReaderGraph(wrapped, self._torn)
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+
+class _TornReaderGraph:
+    def __init__(self, inner, torn: _TornReaderDB):
+        self._inner = inner
+        self._torn = torn
+
+    def query(self, *args, **kwargs):
+        budget = self._torn.times
+        if budget is None or self._torn.fired < budget:
+            self._torn.fired += 1
+            raise _annotated_teardown(self._torn.text)
+        return self._inner.query(*args, **kwargs)
+
+    def __getattr__(self, attr):
+        return getattr(self._inner, attr)
+
+
+def _annotated_teardown(text: str) -> BaseException:
+    """The teardown as the caller ACTUALLY receives it (#6977).
+
+    In production these reads go through `cypher_guard`'s guarded handle, whose
+    `_note_instance_outage` appends the #7357 diagnosis IN PLACE before
+    re-raising. Handing the tests a bare `ValueError` would let a whole-message
+    classifier pass here and do nothing in production (measured — that was the
+    first cut of this fix), so the shape is reproduced on purpose.
+    """
+    from tortoise.retry import explain_instance_unavailable
+
+    exc: BaseException = ValueError(text)
+    note = explain_instance_unavailable(exc, mutating=False)
+    if note is not None:
+        exc.args = (note,)
+    return exc
 
 
 def _held_proj_db():
@@ -772,6 +849,116 @@ class TestDrSweep:
             manifests = [k for k in mem_storage.list(f"backups/{tid}/")
                          if k.endswith("manifest.json")]
             assert len(manifests) == 1, tid
+
+    def _supabase_two_team_lane(self, monkeypatch):
+        """Seed the two-team Supabase lane the #6977 flake was measured on.
+
+        Returns the TEST's own held data-plane `db` (used for seeding); a test
+        that wants the sweep to see a torn reader builds a `_TornReaderDB` and
+        wraps the real `_data_plane_db` result with it.
+        """
+        from tests.fake_control_plane import FakeControlPlane
+
+        cp = FakeControlPlane().seed("organizations", [
+            {"id": "team_s1", "graph_name": "org_team_s1",
+             "tier": "pro", "backup_enabled": True},
+            {"id": "team_s2", "graph_name": "org_team_s2",
+             "tier": "pro", "backup_enabled": True},
+        ])
+        monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
+                            lambda: True)
+        monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
+                            lambda: cp)
+        db = _held_proj_db()
+        for tid in ("team_s1", "team_s2"):
+            _reset_graph(db, f"org_{tid}")
+            g = db.select_graph(f"org_{tid}")
+            g.query("CREATE (p:Point {id:'p1', content:'c', pointKind:'claim'})")
+        return db
+
+    def test_sweep_reissues_a_read_that_races_a_parser_teardown(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#6977: a read that raced a parser teardown must not red the P0 guard.
+
+        The measured flake is a read landing inside `SocketBuffer.close()`:
+        `I/O operation on closed file.` (window 1, after the buffer is closed)
+        or `'NoneType' object has no attribute 'readline'` (window 2, after the
+        reference is cleared). The read changes nothing, so re-issuing it once
+        is safe — #7405/#7685 forbid re-issuing a bare `CREATE` because its
+        outcome is UNKNOWN, which is not this shape — and the re-issue
+        reconnects, because redis-py rebuilds the parser on `on_connect`.
+
+        Before the fix the sweep folds the teardown into a per-graph data error:
+        `status=degraded`, `team_s2/default: I/O operation on closed file.` —
+        the exact CI signature the P0 guard false-redded on, ~20% of runs.
+
+        RED (mutation): drop the re-issue and this fails with that signature
+        printed by `_sweep_diagnosis`.
+        """
+        self._supabase_two_team_lane(monkeypatch)
+        torn = _TornReaderDB(
+            "org_team_s2", "I/O operation on closed file.", times=1)
+        real = ha_mod._data_plane_db
+
+        def _torn_data_plane():
+            sdk, db = real()
+            return sdk, torn.wrap(db)
+
+        monkeypatch.setattr(ha_mod, "_data_plane_db", _torn_data_plane)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "backed_up", _sweep_diagnosis(body)
+        assert body["graph_totals"]["errors"] == 0, _sweep_diagnosis(body)
+        assert body["graph_totals"]["backed_up"] == 2
+        assert torn.fired == 1, "the teardown must have fired exactly once"
+
+    def test_a_persistent_torn_reader_is_reported_as_transport(
+            self, client, dr_env, mem_storage, monkeypatch):
+        """#6977: a teardown that survives the re-issue NAMES itself as transport.
+
+        Today a torn-down reader and a genuinely unbackupable graph both arrive
+        as `errors: 1` with a message, so the run reports `degraded` and the
+        operator cannot tell a container/transport blip from a data finding —
+        the swallow-shape this repo has recorded before (#6971, #6976). The run
+        keeps the failing status (nothing was backed up) and adds `error_kind:
+        "transport"` so the mechanism is not hidden in prose.
+        """
+        self._supabase_two_team_lane(monkeypatch)
+        torn = _TornReaderDB(
+            "org_team_s2",
+            "'NoneType' object has no attribute 'readline'",
+            times=None)
+        real = ha_mod._data_plane_db
+
+        def _torn_data_plane():
+            sdk, db = real()
+            return sdk, torn.wrap(db)
+
+        monkeypatch.setattr(ha_mod, "_data_plane_db", _torn_data_plane)
+
+        r = client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "degraded", _sweep_diagnosis(body)
+        fails = [f for f in body["graph_failures"]
+                 if f.get("graph_id") == "default"]
+        assert fails, _sweep_diagnosis(body)
+        assert fails[0]["error_kind"] == "transport", fails[0]
+        assert "readline" in fails[0]["error"]
+        # The error is the ORIGINAL, never the retry helper's sentinel: the
+        # sentinel renders the original repr into its message, so the substring
+        # check above cannot tell them apart on its own.
+        assert "write-stage retries exhausted" not in fails[0]["error"], fails[0]
+        # Exactly one re-issue: two attempts, never a storm.
+        assert torn.fired == 2, torn.fired
+        # And the class survives onto the operator surface an on-call reads.
+        ls = client.get("/v1/internal/backups/status",
+                        headers=INTERNAL_HEADERS).json()["last_sweep"]
+        persisted = [f for f in ls["graph_failures"]
+                     if f.get("graph_id") == "default"]
+        assert persisted and persisted[0]["error_kind"] == "transport", persisted
 
     def test_sweep_no_teams_reports_source(self, client, dr_env, mem_storage):
         """#2823: even a 0-team run names its dialect — that field is what makes
