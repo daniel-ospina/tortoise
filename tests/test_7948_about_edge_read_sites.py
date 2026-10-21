@@ -118,6 +118,20 @@ WHAT THIS PINS
    package: row 7 cited `QueryOptions`, which is defined nowhere. The arms above
    resolved the `site` column only, so an unguarded column could name a symbol
    that never existed and stay green.
+11. **`test_the_change_chain_ends_at_the_headline_counts`** — the CHRONOLOGY.
+   §13's change chain (*eleven → fifteen → twenty → …*) explains why the count
+   moved, and at the head that added rows 19 and 20 it stopped at **twenty-two
+   sites** under a headline of **TWENTY-FOUR**: the paragraph narrating the number
+   disagreed with the number. The last increment of each unit must arrive at the
+   table's total, so a chain that stops short reds. It cannot be folded into arm
+   7 — the history numerals match none of the four asserted sentence forms, and
+   must not, because an increment is a historical claim rather than a total.
+12. **`test_the_numeral_parsing_accepts_digits`** — the SPELLINGS. `_numeral`
+   documented that digits are accepted while all five captures were words-only,
+   so `token.isdigit()` was dead code and a digit rewrite of the headline matched
+   nothing, redding arm 7 with *"no longer states its site count"* — a false
+   cause. Both spellings of the same claim are now fed through every unit and
+   through the chain form, so the arm reds if the captures regress.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -357,26 +371,43 @@ _TABLE_HEADER = "| # | site |"
 #: also carries numerals about other rulings (a `123`-hub cap), so the count arm
 #: must not read past the bullet.
 _BULLET_START = "- **`aboutObject` as a stored edge vs a derived join**"
+#: One numeral, as `_numeral` can read it: a number word (`TWENTY`), a
+#: hyphenated number word (`twenty-four`), or **digits** (`24`). The capture used
+#: to be words-only, so `token.isdigit()` in `_numeral` was unreachable code and a
+#: rewrite of the headline as `24 read sites` produced NO match at all — the arm
+#: then redded with *"§13 no longer states its site count … restore the
+#: sentence"*, a false failure naming the wrong cause for a rewrite the guard's
+#: own contract calls acceptable. The digits arm is exercised by
+#: `test_the_numeral_parsing_accepts_digits`.
+_NUMERAL = r"[A-Za-z][A-Za-z-]*|\d+"
+
 #: `<N> read sites` — the SITE count, asserted.
-_PROSE_SITES = re.compile(r"\b([A-Za-z][A-Za-z-]*)\s+read sites\b", re.IGNORECASE)
+_PROSE_SITES = re.compile(rf"\b({_NUMERAL})\s+read sites\b", re.IGNORECASE)
 #: `<N> rows` — the ROW count, asserted. The two units are different (a row may
 #: name several sites), which is why each numeral is read with its own noun.
-_PROSE_ROWS = re.compile(r"\bacross\s+([A-Za-z][A-Za-z-]*)\s+rows\b", re.IGNORECASE)
+_PROSE_ROWS = re.compile(rf"\bacross\s+({_NUMERAL})\s+rows\b", re.IGNORECASE)
 #: `<N> of those rows (<M> sites) are CUSTOMER-CALLABLE` — rows and the sites
 #: inside them, asserted separately.
 _PROSE_CALLABLE_ROWS = re.compile(
-    r"\b([A-Za-z][A-Za-z-]*)\s+of those rows\s*\(\s*([A-Za-z][A-Za-z-]*)\s+sites\s*\)"
+    rf"\b({_NUMERAL})\s+of those rows\s*\(\s*({_NUMERAL})\s+sites\s*\)"
     r"\s+are\s+CUSTOMER-CALLABLE",
     re.IGNORECASE,
 )
 #: `<N> of them are CUSTOMER-CALLABLE` — the older phrasing; still a claim.
 _PROSE_CALLABLE = re.compile(
-    r"\b([A-Za-z][A-Za-z-]*)\s+of them are customer-callable\b", re.IGNORECASE
+    rf"\b({_NUMERAL})\s+of them are customer-callable\b", re.IGNORECASE
 )
 #: `... are <N> of them` — a later sentence re-asserting the same count. Any
 #: sentence that restates the number is a claim, so it is checked too: the
 #: `#7956` erratum was exactly a second sentence contradicting the first.
-_PROSE_CALLABLE_AGAIN = re.compile(r"\bare\s+([A-Za-z][A-Za-z-]*)\s+of them\b", re.IGNORECASE)
+_PROSE_CALLABLE_AGAIN = re.compile(rf"\bare\s+({_NUMERAL})\s+of them\b", re.IGNORECASE)
+#: `<A> → <B> sites` / `<A> → <B> rows` — one increment of the CHANGE CHAIN in
+#: §13's chronology paragraphs. The chain exists to explain why the count moved,
+#: so its LAST increment must arrive at the total the headline states; a chain
+#: that stops short narrates a table two sites smaller than the one above it.
+_PROSE_CHAIN = re.compile(
+    rf"\b({_NUMERAL})\s*(?:→|->|—>)\s*({_NUMERAL})\s+(sites|rows)\b", re.IGNORECASE
+)
 
 #: The number words §13 states its counts in. Digits are accepted as well, so
 #: a rewrite that writes `6` instead of `SIX` stays checkable.
@@ -1001,25 +1032,34 @@ def _numeral(token: str) -> int | None:
 
 
 @lru_cache(maxsize=1)
-def _prose_counts() -> dict[str, tuple[str, ...]]:
-    """§13's asserted counts, verbatim, keyed by the UNIT each one counts.
+def _bullet_text() -> str:
+    """§13's `aboutObject` bullet, verbatim — the passage the ruling rests on.
 
-    `sites` / `rows` / `callable_rows` / `callable_sites` are different numbers,
-    and the headline used to mix the first and the third under one "of them".
-    The tokens are returned as written, not as numbers, so the arm can name the
-    sentence's own word when it disagrees with the table.
+    Extracted once so every arm that reads the prose agrees on what "the census
+    prose" is: the bullet starts at its own first line and ends at the next
+    top-level bullet, so the section's other numerals (a `123`-hub cap) cannot
+    be read as census claims.
     """
-    lines = STORAGE.read_text(encoding="utf-8").splitlines()
     bullet: list[str] = []
     inside = False
-    for line in lines:
+    for line in STORAGE.read_text(encoding="utf-8").splitlines():
         if not inside:
             inside = line.startswith(_BULLET_START)
             continue
         if line.startswith("- **") or line.startswith("---"):
             break
         bullet.append(line)
-    text = "\n".join(bullet)
+    return "\n".join(bullet)
+
+
+def _parse_prose_counts(text: str) -> dict[str, tuple[str, ...]]:
+    """The four unit-keyed count tokens in `text`, verbatim, in reading order.
+
+    Split out from `_prose_counts()` so the sentence forms can be exercised on
+    synthetic prose (`test_the_numeral_parsing_accepts_digits`) instead of only
+    against whatever the document happens to say today — the digits arm had no
+    such seam, which is why its unreachability went unnoticed.
+    """
     callable_rows = [m.group(1) for m in _PROSE_CALLABLE_ROWS.finditer(text)]
     callable_rows += [m.group(1) for m in _PROSE_CALLABLE.finditer(text)]
     callable_rows += [m.group(1) for m in _PROSE_CALLABLE_AGAIN.finditer(text)]
@@ -1029,6 +1069,26 @@ def _prose_counts() -> dict[str, tuple[str, ...]]:
         "callable_rows": tuple(callable_rows),
         "callable_sites": tuple(m.group(2) for m in _PROSE_CALLABLE_ROWS.finditer(text)),
     }
+
+
+def _chain_increments(text: str) -> tuple[tuple[str, str, str], ...]:
+    """The change chain's `<from> → <to> <unit>` increments, as written."""
+    return tuple(
+        (m.group(1), m.group(2), m.group(3).lower())
+        for m in _PROSE_CHAIN.finditer(text)
+    )
+
+
+@lru_cache(maxsize=1)
+def _prose_counts() -> dict[str, tuple[str, ...]]:
+    """§13's asserted counts, verbatim, keyed by the UNIT each one counts.
+
+    `sites` / `rows` / `callable_rows` / `callable_sites` are different numbers,
+    and the headline used to mix the first and the third under one "of them".
+    The tokens are returned as written, not as numbers, so the arm can name the
+    sentence's own word when it disagrees with the table.
+    """
+    return _parse_prose_counts(_bullet_text())
 
 
 def test_the_table_is_not_vacuous():
@@ -1149,6 +1209,142 @@ def test_the_prose_counts_match_the_table():
         "a stale numeral here is the ruling resting on an unmeasured claim, and "
         "a numeral checked against the WRONG unit is the same claim with a "
         "cleaner alibi:\n  - "
+        + "\n  - ".join(problems)
+    )
+
+
+def test_the_change_chain_ends_at_the_headline_counts():
+    r"""The chronology must ARRIVE at the total the headline states.
+
+    §13 carries the table, the headline numeral, and then the chronology that
+    explains *why* the count moved — eleven → fifteen → twenty → twenty-two. At
+    the head that added rows 19 and 20 (`session_link.link_entity`,
+    `subject_binding.bind_point_subjects`) the headline said TWENTY-FOUR and the
+    chain still ended at twenty-two: the paragraph whose whole purpose is to
+    explain the number disagreed with the number, in the one passage this guard
+    exists to make reconcilable. `test_the_prose_counts_match_the_table` cannot
+    see it — the history numerals (`eleven`, `fifteen`, `twenty`, `twenty-two`)
+    match none of the four asserted sentence forms, and must not, because an
+    increment is a historical claim rather than a total.
+
+    So the LAST increment of each unit is compared to the table: whatever the
+    history was, the chain has to end where the table is. That is the one thing
+    every increment's wording is free to change without making the narration
+    false, and it is the arm that was missing.
+    """
+    text = _bullet_text()
+    assert text, (
+        "§13's `aboutObject` bullet was not found, so this arm passes vacuously "
+        "— re-point `_BULLET_START` at the passage that carries the census"
+    )
+    rows = _declared_rows()
+    declared_sites = {pair for _n, _cell, _reach, pairs in rows for pair in pairs}
+    actual = {"sites": len(declared_sites), "rows": len(rows)}
+
+    increments = _chain_increments(text)
+    problems: list[str] = []
+    for unit in ("sites", "rows"):
+        of_unit = [increment for increment in increments if increment[2] == unit]
+        if not of_unit:
+            problems.append(
+                f"§13's change chain states no `<from> → <to> {unit}` increment "
+                "at all, so nothing narrates why the count moved — and the "
+                f"table states {actual[unit]} {unit} with no chronology behind it"
+            )
+            continue
+        _from, to, _unit = of_unit[-1]
+        stated = _numeral(to)
+        if stated is None:
+            problems.append(
+                f"the chain's last {unit} increment ends at `{to}`, a numeral "
+                "this guard cannot read — spell it out in words or digits"
+            )
+        elif stated != actual[unit]:
+            problems.append(
+                f"§13's change chain stops at `{to}` {unit} while its table has "
+                f"{actual[unit]} — the paragraph explaining the count narrates a "
+                "different number from the count it explains (add the closing "
+                "increment, or correct the numeral)"
+            )
+
+    assert not problems, (
+        "§13's chronology no longer reconciles with §13's table. This passage "
+        "exists to answer \"why is the number what it is\", so a chain that stops "
+        "short answers it with a smaller number — the reconciliation failure this "
+        "whole guard was written to end, one paragraph up from the table:\n  - "
+        + "\n  - ".join(problems)
+    )
+
+
+def test_the_numeral_parsing_accepts_digits():
+    r"""Both numeral SPELLINGS parse — the digits branch is reachable.
+
+    `_numeral` promised *"digits are accepted as well, so a rewrite that writes
+    `6` instead of `SIX` stays checkable"* while every capture group was
+    `([A-Za-z][A-Za-z-]*)`, so `token.isdigit()` was dead code and a digit
+    rewrite of §13's headline matched **nothing**: the count arm then redded with
+    *"§13 no longer states its site count … restore the sentence"*, a false
+    diagnosis naming a cause that is not there. It failed closed, but an
+    instrument that cannot answer its own question is exactly the shape this
+    file exists to end.
+
+    Non-vacuity is measured rather than assumed: each sentence form is fed BOTH
+    spellings of the SAME claim and both must parse to the same number — so this
+    arm reds if the captures go back to words-only, and it reds if a form is
+    dropped. It also pins the chain form (`<from> → <to> <unit>`), because that
+    is the form the change-chain arm reads.
+    """
+    word_form = (
+        "TWENTY-FOUR read sites across TWENTY rows, and SEVEN of those rows "
+        "(ten sites) are CUSTOMER-CALLABLE — seven of them are customer-callable"
+    )
+    digit_form = (
+        "24 read sites across 20 rows, and 7 of those rows (10 sites) are "
+        "CUSTOMER-CALLABLE — 7 of them are customer-callable"
+    )
+    expected = {"sites": 24, "rows": 20, "callable_rows": 7, "callable_sites": 10}
+
+    problems: list[str] = []
+    for spelling, text in (("words", word_form), ("digits", digit_form)):
+        counts = _parse_prose_counts(text)
+        for key, value in expected.items():
+            tokens = counts[key]
+            if not tokens:
+                problems.append(
+                    f"the {spelling} spelling of the `{key}` sentence did not "
+                    "parse at all — the capture no longer accepts that numeral "
+                    "form, so a rewrite in it would red with the wrong cause"
+                )
+                continue
+            for token in tokens:
+                if _numeral(token) != value:
+                    problems.append(
+                        f"`{token}` ({spelling}, {key}) reads as "
+                        f"{_numeral(token)}, expected {value}"
+                    )
+
+    word_chain = _chain_increments("moved — twenty-two → twenty-four sites and eighteen → twenty rows")
+    digit_chain = _chain_increments("moved — 22 → 24 sites and 18 → 20 rows")
+    if word_chain != (
+        ("twenty-two", "twenty-four", "sites"),
+        ("eighteen", "twenty", "rows"),
+    ):
+        problems.append(
+            "the chain form no longer parses its word spelling: "
+            f"{word_chain!r}"
+        )
+    if digit_chain != (("22", "24", "sites"), ("18", "20", "rows")):
+        problems.append(
+            f"the chain form no longer parses digits: {digit_chain!r}"
+        )
+    for chain in (word_chain, digit_chain):
+        for _from, to, unit in chain:
+            if _numeral(to) is None:
+                problems.append(f"the chain's `{to}` {unit} does not read as a number")
+
+    assert not problems, (
+        "the census's numeral parsing no longer accepts every spelling it "
+        "documents, so a legitimate rewrite reds as a missing sentence:\n  - "
         + "\n  - ".join(problems)
     )
 
