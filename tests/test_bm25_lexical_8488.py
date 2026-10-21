@@ -915,19 +915,24 @@ class TestDeclineIsNotAReadDegradation:
     baseline (which counts ``mechanism == "bm25"``) counted reads where BM25
     contributed nothing.
 
-    Mutations, each verified to red the test named beside it:
+    Mutations, each APPLIED to this tree and the decline/cap selection
+    re-run (not reasoned about), naming exactly what goes red:
 
     * restore ``degraded=True`` on the decline branch →
       ``test_a_declined_arm_does_not_report_the_read_degraded``,
       ``test_a_declined_arm_entry_is_not_itself_degraded`` and
       ``test_the_shared_trace_fold_does_not_read_the_decline_as_a_degradation``
-      red;
+      red, along with the two older decline assertions
+      (``TestCorpusCap.test_over_the_cap_the_leg_declines_instead_of_window_ranking``
+      and ``TestReadPath.test_a_windowed_corpus_read_never_replaces_the_shipped_rows``);
     * restore ``mechanism=LEXICAL_MECHANISM_BM25`` for a declined entry →
-      ``test_a_declined_arm_claims_no_bm25_mechanism`` reds;
+      ``test_a_declined_arm_claims_no_bm25_mechanism`` reds (as does
+      ``TestCorpusCap``'s mechanism assertion);
     * delete the ``declined=declined`` passthrough in ``_record`` → the
-      decline becomes invisible and the three decline tests red on their
+      decline becomes invisible and ALL FOUR decline tests above red on their
       guards (the control test below does not trigger a decline, so it is
-      deliberately unaffected — that is what makes it a control).
+      deliberately unaffected by all three mutations — that is what makes it a
+      control).
 
     Non-vacuity is claimed PER MUTATION, never as "all of these tests are red
     on the pre-fix tree": this module imports ``LEXICAL_DECLINED_KEY`` at
