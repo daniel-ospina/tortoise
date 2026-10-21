@@ -113,7 +113,8 @@ mechanisms:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §16.4; decision D12
     state: not-implemented
     tracking_issue: 5006
-    # #5010: the fan-out cap *"is the precondition for ever deduplicating"* —
+    # #5010 as #5064 summarises it: the adopted fan-out cap has no
+    # implementation "and it is the precondition for ever deduplicating" —
     # and #5064's refactor direction names this same pair as the ordering
     # example, so it is declared rather than discovered when #5006 is picked up.
     preconditions:

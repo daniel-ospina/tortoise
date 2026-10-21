@@ -1621,13 +1621,51 @@ def test_gate_accepts_a_precondition_declared_by_a_not_implemented_row() -> None
     assert gate_errors([_absent_row()]) == []
 
 
+def test_gate_pins_the_preconditions_branches_the_ordering_cases_do_not_reach() -> None:
+    """The two operands no ordering case above reaches, plus the forward reference.
+
+    ⚠️ Found by an independent review of this diff (P2, confidence 90): the
+    duplicate-entry guard and the non-string-entry operand were UNPINNED — a
+    mutation turning either into a no-op left all 45 cases green while the gate
+    silently accepted `preconditions: ["a", "a"]` or `[123]`. The rule is only
+    as real as the case that fails without it, so both are pinned here by their
+    OWN message (an `any("preconditions" in e)` assertion would pass on the
+    shape message every case above already emits).
+
+    The forward reference is the third half: a dependant row listed BEFORE its
+    precondition must be ACCEPTED — the pre-pass that resolves the declared set
+    exists for exactly that, it is the wrong-verdict direction this gate must
+    not have, and nothing exercised it.
+    """
+    duplicate = gate_errors(
+        [_implemented_row(id="a"), _implemented_row(id="b", preconditions=["a", "a"])]
+    )
+    assert any("names a mechanism twice" in e for e in duplicate), duplicate
+
+    non_string = gate_errors([_implemented_row(id="b", preconditions=[123])])
+    assert any("entries must be non-empty strings" in e for e in non_string), non_string
+
+    # The control for the two above: both rows are otherwise clean, so the
+    # verdict is about the ordering field and nothing else.
+    assert gate_errors([_implemented_row(id="a"), _implemented_row(id="b")]) == []
+
+    # A precondition declared LATER in the list than its dependant.
+    forward = gate_errors(
+        [_implemented_row(id="b", preconditions=["a"]), _implemented_row(id="a")]
+    )
+    assert forward == [], forward
+
+
 def test_registry_orders_the_fanout_precondition_under_near_dup_merge() -> None:
     """The REAL registry carries the documented ordering, not just fixtures.
 
-    #5010: the fan-out cap *"is the precondition for ever deduplicating"*;
-    #5064's refactor direction names the same pair as the ordering example. If a
-    regression drops the field, every fixture case above still passes — this is
-    the pin that the ordering survives in the file the gate actually reads.
+    #5010 ("the fan-out cap … the precondition for ever deriving `aboutObject`",
+    as #5064's own symptom table summarises it: *"the adopted fan-out cap (200)
+    has no implementation — and it is the precondition for ever deduplicating"*)
+    and #5064's refactor direction, which names the same pair as its ordering
+    example. If a regression drops the field, every fixture case above still
+    passes — this is the pin that the ordering survives in the file the gate
+    actually reads.
     """
     rows = {r["id"]: r for r in load_registry()["mechanisms"]}
     assert rows["near_dup_merge"].get("preconditions") == ["fanout_cap"]
