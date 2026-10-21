@@ -1,0 +1,164 @@
+# WORKFLOW CHANGES NOT PUSHABLE AS REF (PAT lacks `workflow` scope)
+# tree: /Users/home/eldato/tortoise/.worktrees/tm-8183  branch: feat/8183-tm-wiring  captured: 2026-10-21T13:56:32Z
+# Apply with: git apply --3way .wip-rescue/WORKFLOW-CHANGES.patch
+
+diff --git a/.github/workflows/post-merge-validation.yml b/.github/workflows/post-merge-validation.yml
+index 025e522d9..ccad57eb1 100644
+--- a/.github/workflows/post-merge-validation.yml
++++ b/.github/workflows/post-merge-validation.yml
+@@ -210,6 +210,54 @@ jobs:
+               body: `⚠️ This PR **failed post-merge ruff lint** (run ${context.runId}). CI lint only runs on PR events, so every subsequent PR's merge-ref lint is red until this is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`,
+             });
+ 
++  close-keyword-net:
++    # #8183 (secondary half). The PR-body gate (`pr-close-keyword.yml`) rejects
++    # an INERT closing keyword BEFORE the merge — but "the body declares a
++    # keyword" was never evidence that GitHub ACTED on it, and that is the whole
++    # lesson of #2892: every in-repo reader matched the keyword, GitHub did not,
++    # and the issue sat OPEN for a month with its fix already in `main`. This job
++    # is the only check that observes GitHub's actual behaviour: after the merge,
++    # every issue the body declared must be CLOSED.
++    #
++    # `needs: dedup-check` for attribution only, the same shape (and the same
++    # accepted cost) as `lint` above: the PR number comes from the merge commit
++    # message, which has no pull_request payload on push:main.
++    #
++    # `continue-on-error: true` because this workflow is warn-only by design and
++    # a stale OPEN issue is not a broken main: a red WORKFLOW here would red the
++    # merged tree's signal for every main-health instrument, when the merged tree
++    # is exactly what is not in question. The job itself still reports failure —
++    # that is the flag — and it names the issues it found.
++    needs: dedup-check
++    if: always()
++    continue-on-error: true
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          ref: ${{ github.sha }}  # deterministic — a mid-run main advance must not move the tree
++      - uses: actions/setup-python@v5
++        with:
++          python-version: '3.12'
++      - name: Every issue the merged PR declared must actually be CLOSED
++        env:
++          PR_NUMBER: ${{ needs.dedup-check.outputs.pr_number }}
++          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++        run: |
++          if [ -z "$PR_NUMBER" ]; then
++            # No attribution (a direct push or a non-merge commit) — the body
++            # this job would verify does not exist, so there is nothing to
++            # check. Saying so is not a pass: nothing was claimed.
++            echo "no PR attribution (direct push / non-merge commit) — nothing to verify"
++            exit 0
++          fi
++          # Exit 1 = a declared issue is still OPEN (the inert-keyword escape).
++          # Exit 2 = could not measure, which is ALSO a failure — an unmeasured
++          # state is never a pass (the repo-wide rule this check exists for).
++          python3 tools/pr_close_keyword.py --verify-closed \
++            --pr "$PR_NUMBER" --repo "$GITHUB_REPOSITORY"
++
+   validate:
+     # #1474: this job is the check branch protection tracks. `if: always()` +
+     # `needs: dedup-check`: if dedup-check itself fails, the suite still runs
+diff --git a/.github/workflows/pr-close-keyword.yml b/.github/workflows/pr-close-keyword.yml
+new file mode 100644
+index 000000000..740814fb4
+--- /dev/null
++++ b/.github/workflows/pr-close-keyword.yml
+@@ -0,0 +1,95 @@
++# Closing-keyword gate (#8183)
++#
++# Closes the gap behind a real incident: PR #2949 merged into `main` with a body
++# ending in `Closes #2892` — the keyword inside an INLINE CODE SPAN — so GitHub
++# never closed #2892. The issue stayed OPEN with a `P0-blocker` label for a
++# month, its fix already in `main`, until a lane was dispatched at it on
++# 2026-10-11 to fix an already-fixed defect.
++#
++# WHY A DEDICATED WORKFLOW (not a job in ci.yml / python-ci.yml)
++# --------------------------------------------------------------
++# The remedy is a body EDIT, and a `pull_request` trigger only fires `opened`,
++# `synchronize` and `reopened` by default — so a gate in ci.yml would go red,
++# the author would fix the body, and nothing would re-run: red forever, with no
++# action that clears it. Adding `edited` to ci.yml's trigger would re-run the
++# WHOLE ~20-gate matrix (and python-ci's sharded suite) on every body edit — an
++# enormous cost for a text check.
++#
++# A workflow whose trigger is `types: [opened, edited, synchronize, reopened]`
++# gets the re-trigger for free and costs ~10s of one hosted runner: stdlib-only
++# Python, no DB, no services, no matrix, no node. That is the cheap half of the
++# fix; the check itself is `tools/pr_close_keyword.py`.
++#
++# WHAT IT CHECKS
++# --------------
++# It strips exactly what GitHub ignores (fenced code blocks, inline code spans)
++# and then requires: IF the body declares a closing keyword anywhere, at least
++# one instance must SURVIVE the strip. A body with no keyword (`Refs #N`) is
++# untouched — not every PR closes an issue.
++#
++# Evidence the rule is GitHub's, not ours: #2949 (code-span keyword, never
++# closed) and #8669 (same shape; GitHub closed its issue only because a COMMIT
++# MESSAGE carried a bare keyword). Re-measured over the last 298 merged PRs on
++# 2026-10-19: 172 carry a live bare keyword, exactly 1 body is inert (#8669),
++# 125 declare none — the convention is followed almost always, which is why the
++# failure is rare and silent rather than obvious.
++#
++# NOT (YET) A REQUIRED CHECK. It reports; branch protection does not wait on it.
++# Promoting it to required means changing the live branch protection, `.mergify.yml`
++# and the declarative settings mirror TOGETHER (pinned by
++# tests/test_required_set_sync.py) — the owner's call, tracked on #8183 as the
++# remaining half.
++#
++# The mirror is described, not named (#5215 Task 4): that guard's reader scan is a
++# BYTE scan, so spelling the path in prose here is indistinguishable from this
++# workflow reading it — the repo already paid for that lesson once, and the fix is
++# to not spell it, never to exempt the file.
++name: PR closing keyword
++
++on:
++  pull_request:
++    types: [opened, edited, synchronize, reopened]
++
++permissions:
++  contents: read
++
++# Per-PR group: one in-flight run per PR, superseded on the next push or body
++# edit. `cancel-in-progress: true` is right here because the run has no side
++# effect — it only reads the body of the head it was triggered for. Fan-out is
++# bounded by the number of open PRs itself (one run per head, like
++# `ai-review-gate`), so the per-unit key cannot flood the pool the way #9115 did.
++concurrency:
++  group: pr-close-keyword-${{ github.event.pull_request.number }}
++  cancel-in-progress: true
++
++jobs:
++  closing-keyword:
++    # Bound like `manifest-integrity`: a stalled runner must not hold a check on
++    # every PR open. The work is seconds; 5 minutes is a failure signal, not a
++    # budget.
++    timeout-minutes: 5
++    # A VERSION-PINNED hosted label, not `ubuntu-latest`: on this repo
++    # `ubuntu-latest` also matches the self-hosted ARM64 pool (#7867), and this
++    # job should be deterministic — it reads one string and exits.
++    runs-on: ubuntu-24.04
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-python@v5
++        with:
++          python-version: '3.12'
++      - name: Reject a closing keyword GitHub cannot act on (#8183)
++        # The body arrives through `env:`, NOT interpolated into `run:` — a PR
++        # body pasted into a shell script is arbitrary shell (and would also
++        # trip the repo's workflow-secret/expression guards).
++        env:
++          PR_BODY: ${{ github.event.pull_request.body }}
++        run: |
++          # Deliberately NOT named `pr-` + `body.md`: that basename is a ROOT file
++          # on the #6784 non-python allowlist, and tests/test_ci_selection.py reds on
++          # ANY in-tree file that names it — a temp filename sharing the name would
++          # read as a reader of that root file and break the allowlist invariant.
++          printf '%s' "$PR_BODY" > "$RUNNER_TEMP/description.md"
++          # No `|| true`, no `; exit 0`: a non-zero exit from the guard IS the
++          # failure. Exit 1 = inert keyword; exit 2 = could not read the body,
++          # which is never a pass either.
++          python3 tools/pr_close_keyword.py --body-file "$RUNNER_TEMP/description.md"

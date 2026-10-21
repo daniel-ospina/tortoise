@@ -170,6 +170,15 @@ PER_UNIT_GROUP_OK = {
         "constant group would let one PR's review cancel another's and leave "
         "the required check pending forever."
     ),
+    "pr-close-keyword.yml": (
+        "one run per PR head, superseded on each push/edit (#8183) — the same "
+        "bound as ai-review-gate, and structurally so: the run reads ONE body, "
+        "spends ~10s of a hosted runner with no DB/services/matrix, and "
+        "`cancel-in-progress: true` replaces it on the next edit. A constant "
+        "group would let one PR's body check cancel another's pending one, "
+        "leaving no check-run on that head at all — the #9115 symptom from "
+        "the opposite door."
+    ),
     "inbound-relay.yml": (
         "the JOB is skipped before a runner is allocated for ALL internal "
         "traffic (its `if:` excludes the owner and `mergify[bot]`), so the "

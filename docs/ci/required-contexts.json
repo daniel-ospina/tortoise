@@ -110,6 +110,18 @@
         "client-build"
       ]
     ],
+    "close-keyword-net": [
+      [
+        "post-merge-validation.yml",
+        "close-keyword-net"
+      ]
+    ],
+    "closing-keyword": [
+      [
+        "pr-close-keyword.yml",
+        "closing-keyword"
+      ]
+    ],
     "dashboard-e2e": [
       [
         "ci.yml",
@@ -531,7 +543,7 @@
       ]
     ]
   },
-  "gate_digest": "d8f579fe46dd97abcd5942af5f892acbedd81843e336f5ca6ed01c654e0db36f",
+  "gate_digest": "e6d4476aea9b0e0af2d166ce3f686c72a47f8d70b42053807d7267c58e4184aa",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -555,5 +567,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-19T04:13:25Z"
+  "verified_at": "2026-10-19T05:36:14Z"
 }
