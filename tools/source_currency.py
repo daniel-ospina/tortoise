@@ -48,9 +48,9 @@ path owns a vocabulary.
 
 ⛔ An ``:Object`` reads ``unknown`` — **by decision, not by omission**: the
 2026-09-25 owner ruling (option A) keeps identity/mention ``references`` links
-property-free, so the pair is unfillable and ``currency_status`` refuses to call
-an absent note ``current``. Stamping an anchor onto those links to make this read
-return ``current`` would reverse the ruling (pinned in
+carrying no ``sourceVersion``, so the pair is unfillable and ``currency_status``
+refuses to call an absent note ``current``. Stamping an anchor onto those links
+to make this read return ``current`` would reverse the ruling (pinned in
 ``tests/test_source_version_references_5199.py``).
 
 CURRENCY IS PER LINK, AND §4.6 AGGREGATES THE POINT
@@ -217,10 +217,10 @@ def entity_currency(graph, entity_id: str) -> dict:
     which is vacuous rather than fresh).
 
     ⚠️ An ``:Object`` reads ``unknown`` **by decision**, not by omission: its
-    ``references`` link is property-free (owner ruling 2026-09-25, option A), so
-    there is no recorded version to compare. The honest answer to "is this
-    object current?" is therefore *unknown*, and this read reports it instead of
-    degrading to a false ``current``.
+    ``references`` link carries no ``sourceVersion`` (owner ruling 2026-09-25,
+    option A), so there is no recorded version to compare. The honest answer to
+    "is this object current?" is therefore *unknown*, and this read reports it
+    instead of degrading to a false ``current``.
     """
     batch = read_reference_currency_links(graph, [entity_id])
     # `None` is the read's REFUSAL state: one address named more than one node,

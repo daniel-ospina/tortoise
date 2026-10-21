@@ -213,10 +213,11 @@ WHAT IS PINNED (one entry per test, in file order)
    because there the qualifier is stated.
 7. `test_the_references_paragraph_scopes_property_freedom_to_source_version` —
    §9.6's *"identity/mention and referential-containment `references` links stay
-   property-free"* is the SAME unqualified absolute, seventy lines above the
-   §11.1 correction, for a different link class (a record-projected `references`
-   edge carries `idx` too). Scoped to the fact the paragraph establishes: those
-   links carry **no `sourceVersion`**.
+   property-free"* is the SAME unqualified absolute, above the §11.1 correction,
+   for a different link class. It is retracted as an ABSOLUTE, not because such a
+   link carries a property today (no record kind emits a `references` relation,
+   so the reached-for `idx` reason was wrong). Scoped to the fact the paragraph
+   establishes: those links carry **no `sourceVersion`**.
 8. `test_the_cheapness_rule_states_the_measured_set_and_records_the_tension`
    — §11.4 rule 1 is the rule this correction rewrote IN PLACE, and nothing
    pinned it (`#9403` review: restoring its pre-fix imperative verbatim at the
@@ -347,6 +348,28 @@ WHAT IS PINNED (one entry per test, in file order)
 28. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
    numbering is unique (it is the ledger's only index), and the fourth round's
    false record of §13's citation does not come back.
+29. `test_the_pin_index_entry_for_the_9_6_retraction_states_no_measured_distance`
+   — the entry ABOVE (7) is prose about a leg, and nothing pinned its CONTENT
+   (`test_the_pin_index_names_every_leg` owns the SET and the FILE ORDER only), so
+   it still carried both premises the leg had just retracted: the unmeasured line
+   distance and the disproved `idx` reason. No index entry may state a line
+   distance at all.
+30. `test_the_retracted_references_absolute_is_gone_from_production_docstrings`
+   — the retraction also has to reach the prose that CITES §9.6. Six production
+   docstrings (`sdk.link_source_to_entity`, `search_engine.
+   read_reference_currency_links`, `tools/source_currency.py`) still called those
+   links "property-free" and now scope the claim to the anchor. SITE-scoped on
+   BOTH halves, not file-wide: the positive half first asked whether each FILE
+   still said "carries no `sourceVersion`", which two of these files satisfy
+   twice, so one site of a pair could be emptied while the leg stayed green (the
+   silent deletion the `#9450` review measured). Each row now carries an ANCHOR
+   and the scoped fact that site must state.
+31. `test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree`
+   — leg 30's six literals are pinned as retracted, and an absence check on a
+   literal that was never there is permanently green: one mistyped character
+   would unpin all six sites without a red. Each literal is measured PRESENT at
+   `_RETRACTED_PRODUCTION_REV` (a `main` commit whose content stays immutable
+   once this lands), skipping only where the history is unreachable.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -355,9 +378,9 @@ that the rule keeps stating the measured set and keeps carrying the tension
 record, test 5). Line numbers are not
 asserted — the SYMBOL is authoritative, per the documents' own rule.
 
-Static and stdlib-only, with one non-static corner: the provenance leg measures a
-claim about HISTORY, so it shells out. Exactly what it runs, because an earlier
-revision of this paragraph said "ONE exception: `git show` … no network" and was
+Static and stdlib-only, with one non-static corner: the provenance legs measure
+claims about HISTORY, so they shell out. Exactly what each runs, because an
+earlier revision of this paragraph said "ONE exception: `git show` … no network" and was
 wrong on both halves: `git cat-file -e` (via `_has_commit`, on every `_git_show`
 call) to test reachability, `git show <rev>:<path>` for the text, and — where the
 rev is not already in the checkout — `git fetch --quiet
@@ -1730,18 +1753,23 @@ def test_the_corrected_passages_carry_no_bare_edges_line_citation():
 def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     """§9.6 said identity/mention and referential-containment `references` links
     "stay **property-free**" — the same unqualified absolute this PR retracts for
-    `aboutObject`, 70 lines above the correction (third review cycle).
+    `aboutObject`, in the §11.1 correction below (third review cycle).
 
     The absolute is retracted because it is an absolute, not because a
     `references` edge carries a property today. No writer that MINTS one of
     these links stamps a property on it: `link_source_to_entity`'s
     non-derivation branch is `MERGE (s)-[:references]->(e)` with no `SET`
-    (`projection/edges.py`), and so are the containment writers
-    (`projection/entities.py`, `hosted_api.py`'s session→external MERGE),
-    `graph-scripts/backfill_references.py`, and the bare `create_edge` escape
-    hatch (it takes no property parameter). `session_source_migration._move_out`
-    re-points an existing edge with `ON CREATE SET r2 = properties(r)` — it
-    PRESERVES attrs, never mints one.
+    (`projection/edges.py`); so are the identity/mention writer
+    (`projection/entities.py`'s connector link) and the containment one
+    (`hosted_api.py`'s session→external MERGE); and so is
+    `graph-scripts/backfill_references.py`, which mints BOTH classes — its
+    docstring declares the `aboutEvent`/`aboutDocument` DERIVATION rows beside the
+    identity ones — with a bare `MERGE` (it is an ops script, not a provenance
+    writer, so its derivation rows are not auto-anchored either). The bare
+    `create_edge` escape hatch stamps nothing by construction: it takes no
+    property parameter. `session_source_migration._move_out` re-points an
+    existing edge with `ON CREATE SET r2 = properties(r)` — it PRESERVES attrs,
+    never mints one.
 
     `cache_projection.relation_statement` *does* stamp `{idx:$idx}` +
     `SET r += $props`, but only for record-projected `public.relation` rows, and
@@ -1775,9 +1803,12 @@ def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     assert not live, (
         "§9.6 still makes the retracted absolute claim "
         f"{live} — the word is retracted because it is an ABSOLUTE, not because "
-        "a `references` edge carries a property today (no writer that mints one "
-        "stamps anything on it). Scope it to the fact the paragraph establishes: "
-        "those links carry **no `sourceVersion`**."
+        "an identity/mention or containment `references` edge carries a property "
+        "today (no writer that mints one of THOSE stamps anything on it — the "
+        "PROVENANCE derivation writers stamp `sourceVersion` by design, while the "
+        "`create_edge` escape hatch and `graph-scripts/backfill_references.py` "
+        "mint derivation edges and are not auto-anchored). Scope it to the fact "
+        "the paragraph establishes: those links carry **no `sourceVersion`**."
     )
 
 
@@ -3308,4 +3339,356 @@ def test_the_correction_ledger_numbers_each_round_once():
         "the FOURTH correction again asserts that §13's `create_about_edge` "
         "citation is qualified with `:344` — measured, §13 asserts the symbol "
         "only and `:344` appears in §11.1 alone, so the record is false"
+    )
+
+
+#: The UNMEASURED line distance the pin index carried for the §9.6 retraction
+#: before the `#9450` review (`seventy lines above the §11.1 correction`). A
+#: distance like this is true only of the revision it was measured at, and this
+#: one was wrong in every revision scanned — which is why the correction DELETES
+#: it rather than re-measuring it. Written as a rule (not one literal) so a
+#: re-typed count cannot evade it.
+_PIN_INDEX_DISTANCE = re.compile(
+    r"\b(?:\d[\d,]*|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety"
+    r"|a hundred)\s+lines?\b",
+    re.I,
+)
+
+#: The pin-index entry for that leg as it stood BEFORE the correction, verbatim
+#: (the only honest way to prove the two rules below can red at all).
+_PIN_INDEX_PRE_FIX_PROBE = (
+    "7. `test_the_references_paragraph_scopes_property_freedom_to_source_version` —\n"
+    "   §9.6's *\"identity/mention and referential-containment `references` links stay\n"
+    "   property-free\"* is the SAME unqualified absolute, seventy lines above the\n"
+    "   §11.1 correction, for a different link class (a record-projected `references`\n"
+    "   edge carries `idx` too)."
+)
+
+#: The REASON that entry reached for and the code disproves.
+_PIN_INDEX_STALE_REASON = "a record-projected `references` edge carries `idx` too"
+
+#: The fact that replaced it.
+_PIN_INDEX_TRUE_REASON = "no record kind emits a `references` relation"
+
+
+def test_the_pin_index_entry_for_the_9_6_retraction_states_no_measured_distance():
+    """The "WHAT IS PINNED" index is PROSE about each leg, and it rots like any
+    other prose — measured at the `#9450` review: entry 7 still carried BOTH
+    premises the leg it indexes had just retracted.
+
+    * the unmeasured line DISTANCE (`seventy lines above the §11.1 correction`),
+      which is false measured and which the correcting commit *said* it deleted
+      "in both places it survived" — it survived in a THIRD place, in this file;
+    * the DISPROVED reason (`a record-projected `references` edge carries `idx`
+      too`), which the leg's own docstring now contradicts in as many words: no
+      record kind emits a `references` relation.
+
+    Nothing red on either, because `test_the_pin_index_names_every_leg` pins the
+    entry SET and the FILE ORDER and never the entry CONTENT — so the index was
+    the one place a refuted reason could outlive its own retraction. A reader who
+    judges "is leg 7 still valid?" re-derives from this entry.
+
+    SCOPE: entry CONTENT only. Coverage and order stay owned by
+    `test_the_pin_index_names_every_leg`.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    start = source.index("WHAT IS PINNED")
+    block = source[start : source.index("NOT promised:", start)]
+    marks = list(_PIN_INDEX_ENTRY.finditer(block))
+    assert marks, (
+        "the pin index is not in the shape this leg reads — re-derive it before "
+        "trusting the checks below"
+    )
+    chunks: dict[str, str] = {}
+    for position, match in enumerate(marks):
+        end = marks[position + 1].start() if position + 1 < len(marks) else len(block)
+        chunks[match.group(1)] = block[match.start() : end]
+
+    # Anti-vacuity, in the shape this file already uses for its matchers: both
+    # rules must FIRE on the pre-fix entry, or neither can red on a re-introduction.
+    assert _PIN_INDEX_DISTANCE.search(_PIN_INDEX_PRE_FIX_PROBE), (
+        "the distance rule does not match the PRE-FIX entry "
+        f"({_PIN_INDEX_PRE_FIX_PROBE!r}), so it cannot red on a re-introduction"
+    )
+    assert _flat(_PIN_INDEX_STALE_REASON) in _flat(_PIN_INDEX_PRE_FIX_PROBE), (
+        "the stale-reason rule does not match the PRE-FIX entry "
+        f"({_PIN_INDEX_PRE_FIX_PROBE!r}), so it cannot red on a re-introduction"
+    )
+
+    # The distance half is file-wide WITHIN the index: an unmeasured count is not
+    # a claim the index may carry in ANY entry, not only the one that had one.
+    distances = {
+        name: found
+        for name, text in chunks.items()
+        if (found := _PIN_INDEX_DISTANCE.findall(text))
+    }
+    assert not distances, (
+        f"the pin index states a line DISTANCE: {distances}. Name the anchor "
+        "(`above the §11.1 correction`) instead of counting to it — `seventy "
+        "lines above` was wrong in every revision scanned, and a count estimated "
+        "once and copied is what this correction exists to end"
+    )
+
+    leg = "test_the_references_paragraph_scopes_property_freedom_to_source_version"
+    assert leg in chunks, (
+        f"the pin index has no entry for `{leg}`, so the leg it indexes is "
+        "unreachable from the index — re-derive this leg against the new index"
+    )
+    entry = _flat(chunks[leg])
+    assert _flat(_PIN_INDEX_STALE_REASON) not in entry, (
+        "the pin-index entry for the §9.6 retraction still gives the DISPROVED "
+        f"reason ({_PIN_INDEX_STALE_REASON!r}): `cache_projection."
+        "relation_statement` stamps `idx` only on record-projected "
+        "`public.relation` rows, and no record kind emits a `references` "
+        "relation. A reader who re-derives from the index re-derives the wrong "
+        "reason — which is how a retracted claim outlives its retraction"
+    )
+    assert _flat(_PIN_INDEX_TRUE_REASON) in entry, (
+        "the pin-index entry for the §9.6 retraction does not state the fact that "
+        f"replaced the disproved reason ({_PIN_INDEX_TRUE_REASON!r})"
+    )
+
+
+#: The revision the six production literals below are MEASURED against: the
+#: `main` commit that carries all six (the `#9484` merge, i.e. the tree the
+#: `#9450` review measured them in) and that IMMUTABLY keeps carrying them once
+#: this PR lands — a commit's content does not change when a later one edits the
+#: file, so the pin cannot invert the way `git merge-base HEAD origin/main`
+#: would. On `main`'s first-parent history, so `_ensure_commit`'s bounded fetch
+#: of `main` can reach it while it is recent; the leg SKIPS (never passes) where
+#: it has fallen out of that bound. TO RE-MEASURE: pick another `main` commit
+#: that still carries all six literals under `_flat`, confirm with
+#: `git show <rev>:<path>`, and swap it here.
+_RETRACTED_PRODUCTION_REV = "8767b1c8b"
+
+#: The six production docstrings that carried the retracted absolute (`#9450`
+#: review, P2), as (file, retracted literal, site ANCHOR, scoped fact). Pre-fix
+#: literals verbatim, so each is measurable against the revision it was removed
+#: from — and MEASURED by
+#: `test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree`,
+#: because "measurable" is not "measured": a mistyped literal here would be a
+#: permanently green dead pin, inside the guard whose subject is dead pins.
+#:
+#: ⛔ The last two elements are what keep the POSITIVE half SITE-scoped. Two of
+#: these files carry two sites each, and a per-FILE membership test collapses
+#: each pair: as long as one passage still says "carries no `sourceVersion`",
+#: the other can lose its statement entirely and the leg stays green — measured,
+#: the `#9450` review's silent deletion (empty `link_source_to_entity`'s
+#: containment clause while its anchor paragraph still states the fact). The
+#: ANCHOR is a phrase that exists ONCE and precedes the site's own scoped fact,
+#: so the assertion is bounded by the site rather than by the file.
+_RETRACTED_PRODUCTION_ABSOLUTES = (
+    (
+        "tortoise/sdk.py",
+        '``"Source"`` means referential containment and stays property-free.',
+        'The alias is NOT equivalent to ``"Source"`` for the caller',
+        '``"Source"`` means referential containment and carries no ``sourceVersion``.',
+    ),
+    (
+        "tortoise/sdk.py",
+        "``Object`` links stay property-free.",
+        "Written ``ON CREATE`` only.",
+        "``Object`` (identity/mention) and ``Source`` (containment) links carry no "
+        "``sourceVersion``",
+    ),
+    (
+        "tortoise/search_engine.py",
+        "identity/mention ``Object`` link stays property-free",
+        "owner ruling 2026-09-25, option A — ``Event``/``Document`` annotate",
+        "an identity/mention ``Object`` link carries no ``sourceVersion``",
+    ),
+    (
+        "tortoise/search_engine.py",
+        "Its link is property-free by the same ruling",
+        "AN ``Object`` READS ``unknown``, AND THAT IS THE ANSWER, NOT A BUG.",
+        "Its link carries no ``sourceVersion`` by the same ruling",
+    ),
+    (
+        "tools/source_currency.py",
+        "keeps identity/mention ``references`` links property-free",
+        "the 2026-09-25 owner ruling (option A) keeps",
+        "identity/mention ``references`` links carrying no ``sourceVersion``",
+    ),
+    (
+        "tools/source_currency.py",
+        "its ``references`` link is property-free (owner ruling 2026-09-25",
+        "An ``:Object`` reads ``unknown`` **by decision**, not by omission:",
+        "its ``references`` link carries no ``sourceVersion`` (owner ruling 2026-09-25",
+    ),
+)
+
+#: How far AFTER a site's anchor its scoped fact may sit, in flattened characters.
+#: Measured with the widest row at 172, and bounded before the NEXT site's anchor
+#: (the closest pair, in `tortoise/sdk.py`, is 488 apart), so a NEIGHBOUR passage
+#: cannot satisfy this row — which is the whole point of the window: a window
+#: wide enough to span the file would re-create the file-wide check it replaces.
+_SITE_WINDOW = 400
+
+
+def _unstated_scoped_facts(texts: dict[str, str]) -> list[str]:
+    """Rows whose SITE `texts[path]` names no scoped fact within its own window.
+
+    Split out of the leg so the anti-vacuity probe can run the SAME check over a
+    MUTATED text: a probe that re-implemented the rule could pass while the rule
+    it is supposed to prove was broken. Accepts raw source; `_flat` is applied
+    here (and is idempotent, so a caller may pre-flatten).
+    """
+    unstated: list[str] = []
+    for path, _literal, anchor, scoped in _RETRACTED_PRODUCTION_ABSOLUTES:
+        flattened = _flat(texts[path])
+        needle = _flat(anchor)
+        at = flattened.find(needle)
+        if at < 0:
+            unstated.append(f"{path}: the site anchor {anchor!r} is gone")
+            continue
+        occurrences = flattened.count(needle)
+        if occurrences > 1:
+            unstated.append(
+                f"{path}: the site anchor {anchor!r} matches {occurrences} places, so "
+                "the window no longer identifies ONE site (re-pick the anchor)"
+            )
+            continue
+        if _flat(scoped) not in flattened[at : at + _SITE_WINDOW]:
+            unstated.append(f"{path}: the site {anchor!r} lost {scoped!r}")
+    return unstated
+
+
+def test_the_retracted_references_absolute_is_gone_from_production_docstrings():
+    """The §9.6 retraction has to reach the prose that CITES it, or the next
+    reader re-derives the absolute from the code they are reading.
+
+    Measured at the `#9450` review: six production docstrings still said an
+    identity/mention or containment `references` link is "property-free" —
+    including `TortoiseSDK.link_source_to_entity`'s docstring, which cited
+    `STORAGE-ARCHITECTURE.md` §9.6, a section that by then said the opposite, and
+    `tools/source_currency.py`, which attributed the absolute to the very owner
+    ruling that scopes it to the anchor. Those are pre-existing (the PR's stated
+    indicator was `projection/edges.py`), and they are the same root: leaving
+    them is exactly the "a correction that fixes one wording and leaves three"
+    failure the changelog names.
+
+    `_flat`-matched, so rewrapping a docstring cannot evade the check; each
+    literal must also be absent from the PRODUCTION sources only — the test tree
+    is out of this leg's scope on purpose, since a guard that also scanned tests
+    would match its own table.
+
+    ⛔ BOTH halves are SITE-scoped, and the positive one was not at first: it
+    asked whether each FILE still said "carries no `sourceVersion`", which two of
+    these files satisfy twice. The `#9450` review measured the deletion that
+    survived it — empty `link_source_to_entity`'s containment clause while its
+    anchor paragraph still states the fact, no retracted literal reappearing, leg
+    green — so the table now pairs each site with an ANCHOR and the scoped fact
+    that site must state, and the fact is read only inside that site's window.
+    """
+    assert _RETRACTED_PRODUCTION_ABSOLUTES, "the table is empty — nothing is pinned"
+    texts = {path: _doc(ROOT / path) for path, *_ in _RETRACTED_PRODUCTION_ABSOLUTES}
+    live = [
+        f"{path}: {literal!r}"
+        for path, literal, _anchor, _scoped in _RETRACTED_PRODUCTION_ABSOLUTES
+        if _flat(literal) in _flat(texts[path])
+    ]
+    assert not live, (
+        "a production docstring still states the retracted absolute for a "
+        "`references` link:\n  " + "\n  ".join(live) + "\n\nIt is retracted as an "
+        "ABSOLUTE, not because such a link carries a property today — scope it to "
+        "the fact §9.6 establishes: those links carry no `sourceVersion`."
+    )
+    # The positive half: the scoped fact must be SAID at those sites, not merely
+    # have the absolute removed — a silent deletion leaves the next reader with no
+    # statement at all, which is how the absolute gets re-invented. SITE-scoped,
+    # never file-wide: two of these files carry two sites each, so a per-file
+    # `in text` test stays green while ONE of the pair is emptied — the `#9450`
+    # review's silent deletion, and the same scoping defect the `_section`
+    # docstring above records (#8639).
+    unstated = _unstated_scoped_facts(texts)
+    assert not unstated, (
+        "these production SITES dropped the absolute without stating the scoped "
+        "fact inside their own passage (the file still says it elsewhere, which is "
+        "why a file-wide check was green):\n  " + "\n  ".join(unstated)
+    )
+    # Anti-vacuity, and MEASURED rather than argued: re-run BOTH halves of the old
+    # positive half over the review's silent deletion — the containment clause of
+    # `link_source_to_entity` emptied while its anchor paragraph still states the
+    # fact. The file-wide form (the one this leg shipped first) is GREEN on it;
+    # the site-scoped form reds. `_flat` is idempotent, so the probe mutates the
+    # flattened text and the same helper still reads it.
+    emptied = {path: _flat(text) for path, text in texts.items()}
+    emptied["tortoise/sdk.py"] = emptied["tortoise/sdk.py"].replace(
+        "referential containment and carries no sourceVersion",
+        "referential containment",
+    )
+    assert emptied["tortoise/sdk.py"] != _flat(texts["tortoise/sdk.py"]), (
+        "the anti-vacuity mutation did not apply — the containment clause's "
+        "wording moved, so this probe no longer reproduces the silent deletion "
+        "it exists to prove. Re-derive it against the clause, do not delete it"
+    )
+    file_wide = [
+        path for path, text in emptied.items() if "no sourceVersion" not in _flat(text)
+    ]
+    assert not file_wide, (
+        "the anti-vacuity probe's premise no longer holds: the emptied text ALSO "
+        "loses the scoped fact from the site's neighbour, so a file-wide check "
+        f"would red too ({file_wide}) and this probe would prove nothing about "
+        "the scoping. Re-derive the mutation so only ONE of the pair is emptied"
+    )
+    assert _unstated_scoped_facts(emptied), (
+        "the SITE-scoped half does not red on the review's silent deletion — the "
+        "containment clause of `link_source_to_entity` emptied while its anchor "
+        "paragraph still says \"carries no `sourceVersion`\" — so it is a dead "
+        "pin exactly where a per-file check was"
+    )
+
+
+def test_the_retracted_production_literals_are_measured_against_the_pre_fix_tree():
+    """The table above is only a pin if each literal can MATCH the text it was
+    removed from — and this file's own discipline (legs 24/25, and leg 29's
+    `_PIN_INDEX_PRE_FIX_PROBE`) is that a provenance claim nothing compares
+    against history is exactly the defect the guard exists to stop.
+
+    Leg 30 asserts each literal is ABSENT at HEAD. That is unfalsifiable against
+    a literal that was never there: change one character and the assertion is
+    permanently green, and the six production sites it is supposed to keep
+    scoped lose their pin silently — inside the guard whose subject is dead
+    pins, which is the shape the `#9450` review named ("measurable" is not
+    "measured"). So each literal is measured PRESENT at
+    `_RETRACTED_PRODUCTION_REV`: the `main` commit the six were live at, whose
+    content is immutable once this PR lands.
+
+    SCOPE: presence at that revision only — it cannot prove the literal was
+    there for EVERY earlier revision, and it does not re-measure leg 30's HEAD
+    side. Skips, never passes, where this checkout cannot supply the history
+    (`_ensure_commit` is bounded, and a non-shallow clone missing the rev is
+    never shallow-ified to reach it).
+    """
+    assert _RETRACTED_PRODUCTION_ABSOLUTES, "the table is empty — nothing is pinned"
+    paths = sorted({path for path, *_ in _RETRACTED_PRODUCTION_ABSOLUTES})
+    texts: dict[str, str] = {}
+    missing: list[str] = []
+    for path in paths:
+        text = _git_show(_RETRACTED_PRODUCTION_REV, path)
+        if text is None:
+            missing.append(path)
+        else:
+            texts[path] = _flat(text)
+    if missing:
+        pytest.skip(
+            f"`git show {_RETRACTED_PRODUCTION_REV}:<path>` is not reachable even "
+            f"after a bounded fetch of `origin main` (depths {_SHALLOW_DEPTHS}) "
+            f"for {missing} — no git, an unreachable remote, or the rev is older "
+            "than the deepest bound, so the pre-fix presence cannot be measured "
+            "here. The leg SKIPS, it never passes on history it could not read"
+        )
+    dead = [
+        f"{path}: {literal!r}"
+        for path, literal, _anchor, _scoped in _RETRACTED_PRODUCTION_ABSOLUTES
+        if _flat(literal) not in texts[path]
+    ]
+    assert not dead, (
+        "these literals are pinned as retracted but do NOT match the text at "
+        f"{_RETRACTED_PRODUCTION_REV} — so leg 30's absence check cannot red on a "
+        "re-introduction of the real wording, and the six production sites are "
+        "unpinned:\n  " + "\n  ".join(dead) + "\nRe-quote the literal from "
+        f"`git show {_RETRACTED_PRODUCTION_REV}:<path>` (or re-pin the revision)"
     )

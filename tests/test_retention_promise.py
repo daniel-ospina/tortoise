@@ -213,8 +213,10 @@ _NAMED_CONSTANT_MODULES = {
 # exempt ONLY on lines that name a constant or link the canonical doc. A
 # whole-file exemption on a ~24k-line module hid a new independent literal
 # (#4179 review). `docs/ONTOLOGY.md` is here rather than in SCATTER_ALLOWLIST so
-# its other window prose stays gated: only the §4.6 row that names
-# `RAW_DELETION_MARKER_TTL` is exempt.
+# its other window prose stays gated: only lines that are exempt at all are
+# exempt, and the §4.6 row is exempt because it LINKS the canonical doc (it names
+# no constant — `RAW_DELETION_MARKER_TTL` is build detail the model document does
+# not carry, #9495).
 _NAMED_CONSTANT_USER_FILES = {
     "tortoise/backup_sweep.py",
     "tortoise/hosted_api.py",
