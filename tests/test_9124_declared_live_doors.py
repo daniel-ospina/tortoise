@@ -1016,6 +1016,20 @@ def _duplicate_writer_offenders(surface: dict, where: str = "") -> list[str]:
 
 # ── the live gate: every SDK entry point is declared or accounted for ─────
 
+#: The kinds this gate accepts as DECLARED — the tuple the `derived-recompute`
+#: row was missing (review MINOR, latent): `_kind` has THREE declared kinds, and
+#: accepting only two of them reported a `_derived_recompute_write_scope` door as
+#: "NO declared lane and no inventory entry", whose natural remedy is an
+#: INVENTORY row — i.e. it would have converted a declared door into an
+#: inventoried one and weakened it. No live instance (`_derived_recompute_write_scope`
+#: is opened in `tortoise/source_identity.py`, not in `sdk.py`), but a door added
+#: to `sdk.py` would have got the wrong instruction.
+#: ⛔ The producer-without-consumer mirror of the round-5 `duplicate_writer_defs`
+#: defect (four consumers, no producer).
+_DECLARED_KINDS = frozenset(
+    {"declared", "apply-first-declared", "derived-recompute"})
+
+
 def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
     """THE gate. A new mutating `sdk.py` function must declare a lane.
 
@@ -1052,7 +1066,7 @@ def test_every_mutating_sdk_entry_point_is_declared_or_inventoried():
                 "not containment; move the write inside the lane or declare one "
                 "that covers it")
             continue
-        if kind in ("declared", "apply-first-declared"):
+        if kind in _DECLARED_KINDS:
             if reason is not None:
                 offenders.append(
                     f"{name}:{fact['lineno']} is DECLARED ({fact['scopes']}) but "
@@ -3711,10 +3725,17 @@ def test_the_derived_recompute_lane_has_its_own_kind():
     and is why the kind must say so explicitly instead of borrowing the
     journal-first label.
     """
-    assert _kind({"scopes": [(1, "_derived_recompute_write_scope")],
-                  "writes": [(2, "query", "SET n.x = 1")],
+    kind = _kind({"scopes": [(1, "_derived_recompute_write_scope")],
+                 "writes": [(2, "query", "SET n.x = 1")],
                   "appends": [], "end_lineno": 3,
-                  "scope_spans": [(1, 3)]}) == "derived-recompute"
+                  "scope_spans": [(1, 3)]})
+    assert kind == "derived-recompute"
+    # …and the FLIP gate must accept that kind as declared: dropping it
+    # from `_DECLARED_KINDS` reds here (review MINOR) instead of sending
+    # the author of a declared door to add an inventory row.
+    assert kind in _DECLARED_KINDS, (
+        "`_kind` returns a declared kind the flip gate does not accept — "
+        "its remedy would be an inventory row, which weakens the door")
 
 
 #: Doors whose apply-first ORDER the census cannot prove: an append attributed
