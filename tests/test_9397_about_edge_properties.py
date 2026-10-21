@@ -796,10 +796,34 @@ def _has_commit(rev: str) -> bool:
     return done.returncode == 0
 
 
+def _is_shallow() -> bool:
+    """True when this checkout is a SHALLOW clone."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
 def _ensure_commit(rev: str) -> bool:
-    """Make `rev` reachable if the checkout is shallow — bounded, best effort."""
+    """Make `rev` reachable IF the checkout is shallow — bounded, best effort.
+
+    ⛔ `git fetch --depth=N` does not merely top up a full clone: MEASURED on a
+    non-shallow clone of this PR, running it turned `--is-shallow-repository`
+    from `false` to `true` and cut `git rev-list --count origin/main` from 6106
+    to 120, creating `.git/shallow`. On a developer's full clone that TRUNCATES
+    their history — a destructive side effect on the checkout under test, from a
+    test that runs in `tier1`/`core`. So the fetch is gated: a non-shallow clone
+    that lacks the rev SKIPS (honest — it cannot reach old history without being
+    rewritten) and is never shallow-ified.
+    """
     if _has_commit(rev):
         return True
+    if not _is_shallow():
+        return False
     for depth in _SHALLOW_DEPTHS:
         try:
             subprocess.run(
@@ -1072,6 +1096,31 @@ CORRECTED_SECTIONS: tuple[tuple[str, str, str, str], ...] = (
         "EXTRACTOR",
     ),
 )
+
+
+def test_the_unmeasured_share_retraction_is_pinned():
+    """§13 rests on a §11.1 sentence that nothing pinned.
+
+    §13 says an unbound entity link's two ids are "a statement about the row's
+    SHAPE, not about the population's share", pointing at §11.1's retraction of
+    the share claim. Measured before this leg existed: deleting that sentence
+    from §11.1 left every leg green (22 passed, 1 skipped), so §13 kept a
+    cross-reference into a sentence that no longer existed — a retraction
+    resting on an unpinned premise, which is the class this file exists to
+    stop. Section-scoped via `_section` for the same reason as the corrected
+    passages: a file-wide membership test cannot red on one section's deletion.
+    """
+    storage = (ROOT / "docs/architecture/STORAGE-ARCHITECTURE.md").read_text(
+        encoding="utf-8"
+    )
+    _label, start, end, which = CORRECTED_SECTIONS[0]
+    assert which == "STORAGE"
+    section = _flat(_section(storage, start, end))
+    assert "not measured here" in section, (
+        "§11.1 no longer states that the bare-row SHARE is not measured here — "
+        "§13's cross-reference now points at nothing, and the cost estimate "
+        "reads as if a share had been measured"
+    )
 
 
 def test_the_corrected_passages_name_the_property_bearing_class():
