@@ -1416,25 +1416,224 @@ def test_a_skipped_corpus_half_is_reported_not_hidden(capsys):
     assert "the pins match the tree" not in out
 
 
+#: The CI invocation of the ordering half, verbatim — the whole command, not a substring of it.
+ORDERING_HALF_INVOCATION = (
+    "python3 tools/capstone_preregistration_check.py "
+    "--dir docs/evidence/7949-capstone --no-corpus"
+)
+
+#: The only `if:` forms that do not drop enforcement.
+_ALWAYS_RUN = ("always()", "${{ always() }}")
+#: The only step keys that can neither skip the step nor mask its exit code. An ALLOW-list, not an
+#: enumeration of the silencing keys: `if:`/`continue-on-error:` skip a real failure, `shell:`
+#: swallows its exit code, `working-directory:` can point at a stub tree, and `env:` (a PATH shim)
+#: shadows `python3` so the real check never runs. Enumerating them one at a time is what left the
+#: next one open (`tests/test_merge_throughput.py` records that measurement for its own gate step).
+_SAFE_STEP_KEYS = {"name", "run", "id", "timeout-minutes"}
+
+
+def _code(step: dict) -> str:
+    """The step's `run:` with comment lines removed — a `#`-prefixed mention is not an invocation."""
+    return "\n".join(
+        line for line in str(step.get("run") or "").splitlines()
+        if not line.strip().startswith("#")
+    )
+
+
+def _loose_pin_holds(workflow: dict) -> bool:
+    """The PRE-FIX pin (#9075 review, ISSUE 1): a membership test over the joined `run:` scalars.
+
+    Kept only so the tests below can prove each silencing mutation really was invisible to it —
+    the point of the rewrite is that this predicate is green on a gate that can never fail a PR.
+    """
+    steps = workflow["jobs"]["changes"]["steps"]
+    runs = " ".join(str(s.get("run", "")) for s in steps)
+    return (
+        "tools/capstone_preregistration_check.py" in runs
+        and "--dir docs/evidence/7949-capstone" in runs
+    )
+
+
+def ci_ordering_half_violations(workflow: dict) -> list[str]:
+    """Every way the ordering half's enforcement can be dropped or silenced, as messages.
+
+    Returns `[]` only when, simultaneously: exactly one step invokes the gate and does so with the
+    exact expected command; that step carries no key that can skip it or mask its exit code; no
+    scope above it shims `python3` or overrides the shell; the owning job checks out at
+    `fetch-depth: 0` (the ordering half reads commit epochs) and feeds the required aggregate.
+
+    Split out of the pin so each silencing idiom can be tested in the failing direction: a
+    membership assertion cannot see `|| true`, and that is exactly the defect this closes.
+    """
+    violations: list[str] = []
+    jobs = workflow.get("jobs") or {}
+
+    owners = [
+        (name, job, step)
+        for name, job in jobs.items()
+        for step in job.get("steps") or []
+        if "tools/capstone_preregistration_check.py" in _code(step)
+    ]
+    if len(owners) != 1:
+        return [
+            f"expected exactly ONE step running tools/capstone_preregistration_check.py, found "
+            f"{len(owners)} ({[name for name, _, _ in owners]}): a second (decoy) step makes the "
+            "one that actually runs unidentifiable"
+        ]
+    job_name, job, step = owners[0]
+
+    run = _code(step).replace("\\\n", " ").strip()
+    if run != ORDERING_HALF_INVOCATION:
+        violations.append(
+            f"the gate step must invoke EXACTLY `{ORDERING_HALF_INVOCATION}` — no shell operator "
+            f"and no trailing anything, or a real failure reports green; got {run!r}"
+        )
+    extra_keys = sorted(str(k) for k in set(step) - _SAFE_STEP_KEYS)
+    if extra_keys:
+        violations.append(
+            f"the gate step may carry only {sorted(_SAFE_STEP_KEYS)}; found {extra_keys} — every "
+            "other Actions step key can skip the step or mask its exit code"
+        )
+    if step.get("if", "always()") not in _ALWAYS_RUN:
+        violations.append(
+            f"the gate step must be unconditional; got if: {step.get('if')!r}"
+        )
+
+    for scope, label in ((workflow, "python-ci.yml"), (job, f"the `{job_name}` job")):
+        for key in ("shell", "working-directory"):
+            value = ((scope.get("defaults") or {}).get("run") or {}).get(key)
+            if value:
+                violations.append(
+                    f"`defaults.run.{key}` on {label} ({value!r}) can swallow the gate's exit "
+                    "code or run it against a stub tree"
+                )
+        if (scope.get("env") or {}).get("PATH"):
+            violations.append(
+                f"a `PATH` entry in `env:` on {label} can resolve `python3` to a stub that "
+                "exits 0, leaving the step's own shape clean"
+            )
+    if "if" in job:
+        violations.append(
+            f"the `{job_name}` job must be unconditional — `if:` on the job skips the gate "
+            "entirely (a skipped leg certifies nothing)"
+        )
+    if job.get("continue-on-error"):
+        violations.append(f"`continue-on-error` on the `{job_name}` job silences the gate")
+    if "container" in job:
+        violations.append(
+            f"a `container:` on the `{job_name}` job replaces the image the gate runs in"
+        )
+
+    shims = sorted(
+        str(s.get("name") or s.get("uses") or "<unnamed>")
+        for s in job.get("steps") or []
+        if s is not step
+        and ("GITHUB_PATH" in _code(s) or "GITHUB_ENV" in _code(s))
+    )
+    if shims:
+        violations.append(
+            f"a sibling step writes `$GITHUB_PATH`/`$GITHUB_ENV` ({shims}) — appending a shim "
+            "directory makes `python3` resolve to a stub that exits 0"
+        )
+
+    checkouts = [
+        s for s in job.get("steps") or [] if str(s.get("uses", "")).startswith("actions/checkout")
+    ]
+    if not checkouts:
+        violations.append(f"the `{job_name}` job must check out the repo")
+    for checkout in checkouts:
+        depth = (checkout.get("with") or {}).get("fetch-depth")
+        if depth != 0:
+            violations.append(
+                f"the `{job_name}` job's checkout must use `fetch-depth: 0` (got {depth!r}): the "
+                "ordering half reads add-commit epochs, and a shallow clone only reports "
+                "UNPROVABLE"
+            )
+
+    gate_job = jobs.get("python-ci-gate") or {}
+    if job_name not in (gate_job.get("needs") or []):
+        violations.append(
+            f"the `{job_name}` job must be in `python-ci-gate.needs`, or the gate can red without "
+            "blocking the merge"
+        )
+    return violations
+
+
 def test_ci_runs_the_ordering_half_on_full_history():
-    """REGRESSION (#9075 review r6 P1): no automated path invoked the gate's git half.
+    """REGRESSION (#9075 review r6 P1, sharpened by the final review's ISSUE 1): no automated
+    path invoked the gate's git half — and the pin that fixed that could not see a silenced step.
 
     CI test jobs check out at `fetch-depth: 1`, so the ordering half reports the third outcome
     there and the git-dependent bounds (a)/(b) never evaluate. The full-history verdict therefore
-    lives in the `changes` job — the one checkout with `fetch-depth: 0` — and this pin keeps a
-    workflow edit from silently dropping it back to unenforced.
+    lives in the `changes` job — the one checkout with `fetch-depth: 0` — so a workflow edit must
+    not be able to (a) drop the step, (b) move it to a shallow job, or (c) leave it in place while
+    neutralising its exit code. The pre-fix pin asserted a membership test over the joined `run:`
+    scalars, which `|| true`, `continue-on-error: true`, `if: false`, a `shell:` override or a
+    `PATH` shim all satisfy.
     """
     import yaml
 
     workflow = yaml.safe_load(
         (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text())
-    steps = workflow["jobs"]["changes"]["steps"]
-    checkouts = [
-        s for s in steps if str(s.get("uses", "")).startswith("actions/checkout")
-    ]
-    assert checkouts, "the changes job must check out the repo"
-    for step in checkouts:
-        assert (step.get("with") or {}).get("fetch-depth") == 0, step
-    runs = " ".join(str(s.get("run", "")) for s in steps)
-    assert "tools/capstone_preregistration_check.py" in runs
-    assert "--dir docs/evidence/7949-capstone" in runs
+    assert ci_ordering_half_violations(workflow) == []
+
+
+def _mutations():
+    """(label, mutate) pairs — each leaves the command in place and silences it."""
+
+    def gate_step(workflow):
+        return next(
+            s for s in workflow["jobs"]["changes"]["steps"]
+            if "tools/capstone_preregistration_check.py" in (s.get("run") or "")
+        )
+
+    return {
+        "a trailing `|| true`": lambda w: gate_step(w).__setitem__(
+            "run", gate_step(w)["run"] + " || true"),
+        "a `; exit 0` tail": lambda w: gate_step(w).__setitem__(
+            "run", gate_step(w)["run"] + "; exit 0"),
+        "`continue-on-error: true`": lambda w: gate_step(w).__setitem__(
+            "continue-on-error", True),
+        "`if: false`": lambda w: gate_step(w).__setitem__("if", "false"),
+        "a `shell:` override": lambda w: gate_step(w).__setitem__("shell", "bash -c 'true'"),
+        "a `working-directory:`": lambda w: gate_step(w).__setitem__(
+            "working-directory", "tools"),
+        "a step-level PATH shim": lambda w: gate_step(w).__setitem__(
+            "env", {"PATH": "/tmp/shim:/usr/bin"}),
+        "a job-level PATH shim": lambda w: w["jobs"]["changes"].__setitem__(
+            "env", {"PATH": "/tmp/shim:/usr/bin"}),
+        "a job-level `defaults.run.shell`": lambda w: w["jobs"]["changes"].__setitem__(
+            "defaults", {"run": {"shell": "bash -c 'true'"}}),
+        "a job-level `if:`": lambda w: w["jobs"]["changes"].__setitem__("if", "false"),
+        "a second decoy gate step": lambda w: w["jobs"]["changes"]["steps"].append(
+            {"name": "decoy", "run": ORDERING_HALF_INVOCATION}),
+        "a shallow checkout": lambda w: next(
+            s for s in w["jobs"]["changes"]["steps"]
+            if str(s.get("uses", "")).startswith("actions/checkout")
+        ).__setitem__("with", {"fetch-depth": 1}),
+        "dropping it from the required aggregate": lambda w: w["jobs"][
+            "python-ci-gate"]["needs"].remove("changes"),
+    }
+
+
+@pytest.mark.parametrize("label", list(_mutations()))
+def test_the_ci_pin_rejects_every_silencing_idiom(label):
+    """The failing direction for the pin above: each mutation is invisible to the PRE-FIX pin.
+
+    Every case keeps the gate's command string present, so the old membership assertion stayed
+    green while the check could never fail a PR; the strict pin must name the violation.
+    """
+    import copy
+
+    import yaml
+
+    workflow = yaml.safe_load(
+        (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text())
+    mutated = copy.deepcopy(workflow)
+    _mutations()[label](mutated)
+    assert _loose_pin_holds(mutated), (
+        f"`{label}` must leave the PRE-FIX pin green, or this case proves nothing"
+    )
+    violations = ci_ordering_half_violations(mutated)
+    assert violations, f"`{label}` silences the gate and the strict pin missed it"
+    assert ci_ordering_half_violations(workflow) == [], "the unmutated workflow must stay clean"
