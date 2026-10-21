@@ -3,8 +3,8 @@ title: "Hosted prerequisites — what standing Postgres up as the system of reco
 type: plan
 domain: engineering
 doc_status: draft
-created: 2026-10-20
-updated: 2026-10-20
+created: 2026-10-21
+updated: 2026-10-21
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #7879, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
@@ -76,7 +76,7 @@ they are excluded as prerequisites and recorded as such:
 
 ## A. What is already in place — and which half of it is LIVE
 
-Measured on `8767b1c8b` (`origin/main`, 2026-10-20). Every claim below was read in the tree or run;
+Measured on `8767b1c8b` (`origin/main`, 2026-10-21). Every claim below was read in the tree or run;
 the runs and their output are in **§G**.
 
 ### A1. The record schema — **EXISTS, 9 tables + 3 views**, and it is the artifact §17.5 pins
@@ -146,7 +146,8 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 `embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 65
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
-appears in prose only (this document, §12.1c's open question, and the competitor notes). So the record is a **durability carrier** for vectors, not a retrieval index — which is
+appears in prose only — e.g. this document, §12.1c's open question, this epic's
+`03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
 exactly right while §2.0 keeps the cache fully populated and **V1 is undecided** (§12.1c/§14.3).
 
 ### A6. Metering / billing — **EXISTS and is live, org-scoped**
@@ -175,7 +176,7 @@ idempotent, total, and stores no EP scalar`.
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement — that capture wrote **no edge records at all**, which is the whole of what this number shows; `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*, so a capture that did emit edges would still miss that one family. | §G run 2 |
 | **the `session` record** | ⚠️ **`capture_redactions` lands NULL** — the column is `jsonb` and the producer emits an integer. Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
-| **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in tests and control-plane migrations — **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
+| **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
 | **the record's durability** | ⛔ **NOTHING BACKS UP POSTGRES.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record. | §17.1/O1: *"DURABILITY = the store's backup"*; R9 |
 
 ---
@@ -190,9 +191,9 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 **What:** set `TORTOISE_RECORD_DSN` on `tortoise-y4mjjq` to the project's **pooler** DSN
 (`postgresql://postgres.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres`, `?sslmode=require`
 — the shape `.env.example:305` already documents for `TORTOISE_AUDIT_DSN`), add it to the runbook
-Secrets Matrix and to the deploy workflow's secret-provisioning step, and declare
-`TORTOISE_RECORD_SINGLE_TENANT=0` (multi-tenant) so the env tenant pair is refused rather than
-silently used.
+Secrets Matrix and to the deploy workflow's secret-provisioning step, and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
+what makes the env tenant pair be refused rather than silently used
+(`tortoise/record_writer.py:577`; setting `=0` only restates the default).
 **What it blocks:** **everything.** Until this is set the record receives nothing and every other
 item in this list is unobservable in production.
 **Not needed:** the driver. `Dockerfile.hosted:86` installs `'.[postgres]'`, so `psycopg2` is already
@@ -280,8 +281,11 @@ shape* is open, and that is an engineering choice inside the existing schema dis
 
 **What:** `FalkorProjection.rebuild_from_record` (`projection/__init__.py:16271`) is a method with
 **no CLI verb and no production caller**; there is no runbook section and **no drill**. The repo's own
-precedent is that this is where restores fail: `#3895` is the restore re-drill that **failed** at
-9,687 / 10,000 edges, and it failed because the graph was the only durable record.
+precedent is that restores fail at the *artifact* boundary, not at the API: **`#3895`** (CLOSED
+COMPLETED, 2026-09-25) is the drill that restored **9,687 / 10,000** edges, and it failed because
+its logical dump filtered the **node** export but not the **edge** export, so **313** edges
+referenced export-skipped nodes and the artifact was unrestorable by construction — not because
+the graph was the only durable store.
 Also add the **`cache-reachable`/`not-hot`** path to the runbook — a declared-partial projection makes
 `hits == 0` no longer establish `empty` (§17.3).
 **What it blocks:** the epic's acceptance, and the ability to answer *"the graph is gone, restore it"*
@@ -323,7 +327,7 @@ so configuring `max_storage_bytes` before the meter is wired would **500 every p
 **Decision needed:** prices — explicitly *not* set by this document or that ruling; the owner
 calibrates after beta from measured consumption.
 
-### C. Not items — recorded so they are not re-proposed
+## C. Not items — recorded so they are not re-proposed
 
 | # | what | why it is not on the list |
 |---|---|---|
@@ -331,7 +335,7 @@ calibrates after beta from measured consumption.
 | **N2** | **`pgvector` / moving the vector index into Postgres** (`#4997`, §12.1c **V1**, §14.3) | **NOT DECIDED — owner's call.** Embeddings are already durable as `jsonb` (A5). Note the settled blocker if it is decided: **`pgvectorscale` is unavailable on Supabase** (§14), so it would be `pgvector` proper. |
 | **N3** | **A FalkorDB → Postgres backfill / migration-safety apparatus** | Owner scope ruling 2026-10-10: no customers, no apparatus designed. The dual-write is journal-first by construction (§3/§17.1). |
 | **N4** | **Journal completeness** (`#5089`) | A **precondition owned by another epic** (this epic's *blocked-by (soft)*) — ⚠️ **and that epic CLOSED COMPLETED on 2026-10-12**, so the soft block is discharged *as a ticket*. What is not discharged is the measurement: §17.1's surface (**387 mutating sites / 211 functions / 32 files**) is quoted here, not re-verified by this lane. Named, not re-filed: a projection replayed from an unfaithful journal is faithfully wrong. |
-| **N5** | **The record's failure counter has no alert** | Real (§8-A3: fail-soft, counted only on `monitoring.metrics()`), but **not** a gate while the cache is fully populated — a lost record is healed by replay. Becomes a gate if the cache is ever allowed to go partial. |
+| **N5** | **The record's failure counter has no alert** | Real (§A3: fail-soft, counted only on `monitoring.metrics()`), but **not** a gate while the cache is fully populated — a lost record is healed by replay. Becomes a gate if the cache is ever allowed to go partial. |
 
 ---
 
@@ -356,7 +360,7 @@ calibrates after beta from measured consumption.
 | keyed miss cost | **5.2 blocks** mean (4 median, 7 max), **2,312 B** on the wire, **0.048–0.053 ms** server | DETOASTED, 200 samples | **MEASURED** |
 | full-scope rebuild (one table) | **115,605 blocks / 947.0 MB / 2,629–2,694 ms** at 89,701 rows | DETOASTED; a per-table **floor**, not the rebuild total | **MEASURED** |
 | **edge count** | — | the only population figure in the tree is the restore drill's **10,000** edges (`#3895`); no live `MATCH ()-[r]->()` count is recorded | ⛔ **ESTIMATED / UNMEASURED** |
-| journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; 8.5–9 GB at 1,000,000) is used below | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
+| journal bytes per record | **9,176 B** per create (92% the vector's decimal text), **196 B** per revision. ⚠️ The source's headline **≈8.8 MB per 1,000 creates** does not follow from these inputs — 9,176 B × 1,000 = **9.2 MB**, and its own after-placeholder growth (8,606 B) gives **8.6 MB** — so only the order of magnitude (≈9 MB per 1,000; **8.6–9.2 GB** at 1,000,000) | `tools/journal_growth.py`; `STORAGE-ARCHITECTURE.md` §5.2, 2026-10-17 | **MEASURED** (per-record size; **the rate is not**) |
 | **writes/day** | — | **hosted capture is off by owner ruling 2026-10-14**, so the hosted write rate is **zero today and no historical rate exists**. The per-record size above is the only measured input. | ⛔ **UNMEASURED** |
 | **reads/day** | — | no tenant serves a workload. `tortoise/read_ledger.py` is the instrument; its one exercise (**f = 8.64%**, 200 proxy queries over 10,457 keys, one graph, one date) is explicitly *"NOT `f` FOR THE COST MODEL"* (§17.4.6) | ⛔ **UNMEASURED** |
 | tenants per project (density) | — | the term that decides `ρ` — **unmeasured**; `ρ` spans **3.55 → 710** across 1,000 / 40 / 5 tenants (§17.4.6) | ⛔ **UNMEASURED** |
@@ -413,15 +417,14 @@ Postgres, and §17.4 already prices both stores.
 
 ## F. What this lane did NOT do
 
-- **No external research leg.** The brief's rung-1 (`perplexity` MCP) is not installed, and rung 2
-  (`web_search` with `model="sonar"`) **is not a tool this harness exposes** — there is no
-  `web_search` in the available tool set and no MCP server configured. **The external leg was not
+- **No external research leg.** The brief's rung-1 (`perplexity` MCP) is not installed in this
+  harness's MCP configuration, and this lane ran no external search. **The external leg was not
   performed**, and nothing below pretends to a vendor-sourced fact. Everything in §D comes from this
   repo. The questions the external leg would have asked, left unasked and unanswered: Supabase's
   pooler connection limits and their interaction with session-level `SET` (R6 makes the GUC
   session-scoped, and a transaction-mode pooler is where that breaks), PITR retention by plan tier
   (R9), and `pgvector` index-build behaviour at our size (**only if V1 is decided**).
-- **No product code changed.** No migration, no module, no test. The **three runs in §G** (four pytest
+- **No product code changed.** No migration, no module, no test. The **three runs in §G** (three pytest
   invocations) were run and reported; none of their files was modified.
 - **No issue filed.** Every finding above names the issue it belongs to, with that issue's state
   measured on 2026-10-21: **#9264** OPEN, **#7970** OPEN, **#5089** CLOSED COMPLETED
