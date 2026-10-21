@@ -84,12 +84,16 @@ WHAT THIS PINS
    non-trivially populated, so none of the arms above can pass by finding
    nothing.
 5. **`test_the_census_derives_a_relationship_name_built_at_runtime`** — the
-   MECHANISM, on synthetic sources: a literal, a `+`-concatenation, an f-string,
-   `"|".join(TUPLE)`, a `for rel in TUPLE` loop and a `for rel in FROZENSET`
-   loop (the idiomatic rel-family shape in this package, which the resolver once
-   could not follow) must each derive; a `MERGE` writer must not. Without this
-   arm the resolver could regress to literal-only and the table would silently go
-   back to being un-checked in the class that produced the fourth correction.
+   MECHANISM, on synthetic sources (`_MECHANISM_CASES`): a literal, a
+   `+`-concatenation, an f-string, `"|".join(TUPLE)`, a `for rel in TUPLE` loop
+   and a parameter default must each derive; a `MERGE` writer must not. The
+   rel-FAMILY constructors (`ast.Set`, `frozenset({...})`, `set({...})`,
+   `tuple([...])`, `list([...])`) are the same resolver one branch further on and
+   are pinned by their own arm and corpus (`_FROZENSET_CASES`,
+   `test_the_resolver_follows_a_frozenset_rel_family`) — this docstring credited
+   them to `_MECHANISM_CASES`, which never held them. Without these arms the
+   resolver could regress to literal-only and the table would silently go back to
+   being un-checked in the class that produced the fourth correction.
 6. **`test_the_call_time_shape_is_derived_and_declared`** — the THIRD
    derivation, and the one this file used to DECLARE instead. A relationship
    type written as an expression (a function argument, a dict lookup, a journal
@@ -149,10 +153,43 @@ WHAT THIS PINS
    was only floor-checked, so adding or removing a member falsified the sentence
    silently — the same rot class the arms above close for the headline counts.
 14. **`test_the_empty_pattern_class_derivation_holds`** — the MECHANISM for arm 3,
-   on seven synthetic sources (`_EMPTY_PATTERN_CASES`): a bracketed traversal with
+   on the synthetic sources in `_EMPTY_PATTERN_CASES`: a bracketed traversal with
    no type must derive, and the near-misses must NOT (a named type, a `MERGE`
    writer, a docstring quoting Cypher). Without it the shape walk could regress to
-   "finds nothing" and arm 3 would report a class of size zero as complete.
+   "finds nothing" and arm 3 would report a class of size zero as complete. This
+   entry used to state a count of its own (`seven`) against a corpus of nine — the
+   exact defect class the arms below exist for, in the one place nobody read it —
+   so the count is gone rather than re-stated; arm 19 pins the corpus instead.
+15. **`test_the_sibling_paragraph_names_every_customer_callable_row`** — the SIBLING
+   SET. `EXTRACTOR-V4-ARCHITECTURE.md` §16 question 2 enumerates the
+   customer-callable surfaces, and at the head that added rows 21/22 it was two
+   rows short of §13 — the two customer doors whose addition is what moved the
+   numeral the KEEP ruling rests on. Every customer-callable row's symbol must
+   appear in that paragraph.
+16. **`test_the_callable_enumeration_lists_each_surface_once`** — the SIBLING LIST.
+   §13's `⇒` sentence is the reviewer's checklist for "did every customer-callable
+   surface get named", and it named the `tortoise_supersede` dry-run preview
+   twice — ten entries for nine surfaces, read by nothing. A duplicate entry reads
+   as a surface checked twice while another went unchecked, so the entries are
+   counted and de-duplicated against the table's customer-callable rows.
+17. **`test_a_pattern_built_entirely_from_a_variable_is_unreachable_and_says_so`**
+   — the stated LIMIT. A Cypher pattern assembled wholly from variables carries no
+   bracket text for any of the three walks, AND is undeclarable: arm 2 requires
+   every §13 row to be a site of a walk, and arm 6's reverse direction requires
+   every register entry to still derive. The docstring used to promise the
+   opposite ("must be declared by name — arm 6 checks that declaration"); the arm
+   measures the gap and pins the honest statement, so the claim cannot drift back.
+18. **`test_the_file_filter_un_sees_nothing`** — the FILTER. `_files()` is a
+   text-predicate gate in front of three walks, and the PR body's claim that it is
+   a strict superset was measured once by hand and pinned nowhere: a NARROWED gate
+   would un-see a reader silently instead of reding. The three walks are re-run
+   over every module with the gate removed and must agree, and a deliberately
+   narrowed filter (the literal carriers only) must be shown to DISAGREE — so the
+   arm proves it can see a narrowing rather than asserting it.
+19. **`test_the_case_corpora_are_not_vacuous`** — the CORPORA. Every synthetic
+   case tuple must hold both directions (something that derives and a near-miss
+   that must not), no repeated labels, and a floor on its size: a corpus silently
+   shrunk to one direction leaves the arm above it green and unmeasured.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -160,9 +197,16 @@ WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
   constant carries `aboutObject` — no scan for the NAME can find it. It is not
   left undeclared: the class is derived by arm 3's shape walk, and every member
   must be a row or an `EMPTY_PATTERN` entry. A pattern assembled **entirely from
-  a variable** (no bracket text anywhere in the source) is still out of reach of
-  that walk, so it must be declared by name — arm 6 checks that declaration —
-  while a parameter DEFAULT (the shape `link_entity` uses) is resolvable and is
+  a variable** (no bracket text anywhere in the source) is out of reach of that
+  walk — and it is **neither derived nor declarable**: a §13 row for it reds arm 2
+  ("declared as a reader but no Cypher in it traverses `aboutObject`") and a
+  `CALL_TIME_REL`/`EMPTY_PATTERN` entry for it reds arm 6's reverse direction ("the
+  call-time walk no longer derives it"). Closing that would need a NEW shape walk
+  for how the string is assembled, or a row/register exemption — not a new hand
+  entry. **This is a stated limit of the census, not a covered case**: arm 17
+  measures it and pins this sentence, because an earlier revision claimed the
+  declaration route existed and a reader who trusted it believed the census was
+  total. A parameter DEFAULT (the shape `link_entity` uses) is resolvable and is
   derived instead.
 * **Resolution is one level deep per binding.** A rel name assembled from a
   value that is itself computed at call time (a function argument, a dict
@@ -1977,6 +2021,57 @@ _NEW_READER_CASES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _declared_keys() -> set[tuple[str, str]]:
+    """Every declaration key, in ONE keyspace: `(module basename, base symbol)`.
+
+    The two declaration surfaces were keyed DIFFERENTLY — §13's rows by BASENAME
+    (`_row_site_pairs` -> `"sdk.py"`) and the registers by the FULL relative path
+    (`"tortoise/sdk.py"`) — so the "already declared" branch of the arm below
+    could not fire for a synthetic source under either spelling: the branch the
+    docstring advertised as the second failure mode was dead code. Both are folded
+    to the basename here, which is the keyspace the walks report.
+    """
+    keys = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
+    keys |= {
+        (filename.rsplit("/", 1)[-1], _last(symbol))
+        for filename, symbol, _why in CALL_TIME_REL
+    }
+    keys |= {
+        (filename.rsplit("/", 1)[-1], _last(symbol))
+        for filename, symbol, _why in EMPTY_PATTERN
+    }
+    return keys
+
+
+def _new_reader_problems(declared: set[tuple[str, str]]) -> list[str]:
+    """Run every `_NEW_READER_CASES` source through the declaration predicate.
+
+    Split out from the arm so the predicate can also be run against a
+    DELIBERATELY declared synthetic key — that control is what proves the second
+    failure mode is reachable, rather than a claim in a docstring.
+    """
+    problems: list[str] = []
+    for label, source in _NEW_READER_CASES:
+        file = _File(TORTISE / "<synthetic>", "<synthetic>", source)
+        derived = set(_sites_in(file)) | _empty_pattern_sites_in(file)
+        derived |= _call_time_sites_in(file)
+        if not derived:
+            problems.append(
+                f"{label}: no derivation sees this reader at all, so it would "
+                "ship as an unmeasured read"
+            )
+            continue
+        for symbol, _line in sorted(derived):
+            if ("<synthetic>", symbol) in declared:
+                problems.append(
+                    f"{label}: `{symbol}` is visible to a derivation AND already "
+                    "declared — a synthetic source cannot be pre-declared, so this "
+                    "means the declaration test is accepting anything and a new "
+                    "member of the class would ship green"
+                )
+    return problems
+
+
 def test_a_new_call_time_reader_cannot_ship_green():
     """NON-VACUITY of the class statement: a NEW member reds the completeness arm.
 
@@ -1991,35 +2086,59 @@ def test_a_new_call_time_reader_cannot_ship_green():
     arm's own predicate: derived as SOME class (so the reader is visible at all)
     and declared by NO row or register (so it is a genuine new member). A case
     that a derivation cannot see fails here as loudly as one that is "declared".
+
+    ⚠️ **The second failure mode is measured, not asserted.** It used to be
+    unreachable — the declared-key sets were built in two different keyspaces, so
+    no `("<synthetic>", symbol)` key could ever be a member — and an arm whose
+    half cannot fire is a PASS about nothing. `_declared_keys()` puts both
+    surfaces in the walks' keyspace, and the CONTROL below declares a synthetic
+    key deliberately and requires the predicate to REPORT it: if that control
+    stops firing, this arm's "declared" half is dead again and this test says so.
     """
-    rows = {pair for _n, _cell, _reach, pairs in _declared_rows() for pair in pairs}
-    registered = {(filename, _last(symbol)) for filename, symbol, _why in CALL_TIME_REL}
-    registered |= {(filename, _last(symbol)) for filename, symbol, _why in EMPTY_PATTERN}
-
-    problems: list[str] = []
-    for label, source in _NEW_READER_CASES:
-        file = _File(TORTISE / "<synthetic>", "<synthetic>", source)
-        derived = set(_sites_in(file)) | _empty_pattern_sites_in(file)
-        derived |= _call_time_sites_in(file)
-        if not derived:
-            problems.append(
-                f"{label}: no derivation sees this reader at all, so it would "
-                "ship as an unmeasured read"
-            )
-            continue
-        for symbol, _line in sorted(derived):
-            if ("<synthetic>", symbol) in rows or ("<synthetic>", symbol) in registered:
-                problems.append(
-                    f"{label}: `{symbol}` is visible to a derivation AND already "
-                    "declared — a synthetic source cannot be pre-declared, so this "
-                    "means the declaration test is accepting anything and a new "
-                    "member of the class would ship green"
-                )
-
-    assert not problems, (
+    declared = _declared_keys()
+    assert not _new_reader_problems(declared), (
         "a reader of a shape this PR claims to derive is not visible to the "
         "declaration test, which is exactly how the four missing members "
-        "survived four reviews:\n  - " + "\n  - ".join(problems)
+        "survived four reviews:\n  - "
+        + "\n  - ".join(_new_reader_problems(declared))
+    )
+
+    # The two surfaces must be in ONE keyspace, not merely both present: §13's rows
+    # are keyed by BASENAME and the registers by the FULL relative path, and that
+    # mismatch is what made the "already declared" branch unreachable in the first
+    # place — the CONTROL below would not notice it, because it injects the key it
+    # expects to match. So every registered reader is required to appear under its
+    # basename spelling.
+    for filename, symbol, _why in (*CALL_TIME_REL, *EMPTY_PATTERN):
+        key = (filename.rsplit("/", 1)[-1], _last(symbol))
+        assert key in declared, (
+            f"`{filename}::{symbol}` is registered and its basename key {key} is not "
+            "in the declaration set — the register and §13's rows are keyed "
+            "differently again, so the 'already declared' branch cannot fire for "
+            "any spelling a walk could report"
+        )
+
+    # CONTROL: a synthetic member that IS declared must be reported. One derived
+    # symbol from the first case is enough — the point is that the branch fires.
+    control_file = _File(TORTISE / "<synthetic>", "<synthetic>", _NEW_READER_CASES[0][1])
+    control_derived = sorted(
+        set(_sites_in(control_file))
+        | _empty_pattern_sites_in(control_file)
+        | _call_time_sites_in(control_file)
+    )
+    assert control_derived, (
+        f"{_NEW_READER_CASES[0][0]}: nothing derives, so the CONTROL below cannot "
+        "be built and the 'already declared' branch stays unexercised"
+    )
+    control_symbol = control_derived[0][0]
+    control = _new_reader_problems(declared | {("<synthetic>", control_symbol)})
+    assert any(
+        "already declared" in problem and control_symbol in problem for problem in control
+    ), (
+        "the control declared `(" + "<synthetic>, " + control_symbol + ")` and the "
+        "predicate did not report it — the 'already declared' branch is dead code "
+        "again, so half of this arm asserts nothing (the keyspaces of §13's rows "
+        "and of the registers have drifted apart): got " + repr(control)
     )
 
 
@@ -2397,4 +2516,353 @@ def test_the_reach_column_names_only_symbols_that_exist():
         "re-verifier following the row finds nothing and distrusts the passage "
         "(correct the reference to the real symbol, or drop the backticks if it "
         "is prose):\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: A backticked token in the sibling paragraph, reduced to its base symbol — so
+#: `SubgraphExpander._neighbors` satisfies a row that names `_neighbors`, and
+#: `tortoise_traverse` does NOT satisfy a row that names `traverse` (a different
+#: symbol: the MCP tool versus the SDK method).
+def _extractor_paragraph() -> str:
+    """The sibling paragraph in `EXTRACTOR-V4-ARCHITECTURE.md`, verbatim."""
+    return "\n".join(
+        line for where, _number, line in _census_prose() if where.startswith("EXTRACTOR")
+    )
+
+
+def _extractor_symbols() -> set[str]:
+    """The base symbols the sibling paragraph names in backticks."""
+    return {
+        _last(token.strip())
+        for token in re.findall(r"`([^`]+)`", _extractor_paragraph())
+        if _SYMBOL.match(token.strip())
+    }
+
+
+def test_the_sibling_paragraph_names_every_customer_callable_row():
+    r"""The sibling SET is a restatement of §13's `customer-callable` rows.
+
+    §13's count is the argument the KEEP ruling rests on, and the sibling
+    paragraph states the SET behind it: *"the customer-callable surfaces are the
+    ones §13's table marks `customer-callable`"*. At the head that added rows 21
+    (`TortoiseSDK.traverse`) and 22 (`TortoiseSDK.ingest`) the paragraph was two
+    rows short — it still enumerated the seven of the previous increment — while
+    claiming to be that set. That is an under-counted declaration of exactly the
+    kind the table itself was four times corrected for, and it is the paragraph a
+    re-verifier reads to answer "did every customer-callable surface get named".
+
+    The asserted set is the TABLE's, never a second hand list, so the paragraph
+    and the table cannot drift apart again. Extra names in the paragraph are not a
+    failure: it also narrates the default-ON and flag-gated readers, and that
+    breadth is the point of keeping it — what it may not do is OMIT a
+    customer-callable row.
+    """
+    paragraph = _extractor_paragraph()
+    assert paragraph, (
+        "the sibling paragraph was not located in `EXTRACTOR-V4-ARCHITECTURE.md` "
+        "(the opening line moved?), so this arm would pass vacuously"
+    )
+
+    names = _extractor_symbols()
+    problems: list[str] = []
+    for number, _site_cell, reach, pairs in _declared_rows():
+        if "customer-callable" not in reach.lower():
+            continue
+        if any(symbol in names for _file, symbol in pairs):
+            continue
+        problems.append(
+            f"row {number} ({', '.join(sorted({s for _f, s in pairs}))}) is "
+            "`customer-callable` in §13 and the sibling paragraph does not name it"
+        )
+
+    assert not problems, (
+        "the sibling paragraph in `EXTRACTOR-V4-ARCHITECTURE.md` states that the "
+        "customer-callable surfaces ARE §13's `customer-callable` rows, and it "
+        "omits some of them — which is how the two customer doors this pass added "
+        "stayed outside a sentence claiming to enumerate them (add the symbol, or "
+        "drop the enumeration and leave the pointer):\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: The sentence in §13 that enumerates every customer-callable surface, from the
+#: colon that opens the list to the `are <N> of them` recital that closes it.
+_CALLABLE_LIST_INTRO = "every customer-callable surface:"
+#: A parenthetical aside inside one entry — `(MCP `tortoise_recall`)`,
+#: `(SDK, and hosted REST)`. Its commas are NOT entry separators, which is why the
+#: list is de-parenthesised before it is split.
+_PARENTHETICAL = re.compile(r"\([^()]*\)")
+
+
+def _callable_enumeration() -> tuple[str, ...]:
+    """The customer-callable surfaces §13 ENUMERATES, verbatim and in order.
+
+    The `⇒` sentence is the one paragraph whose job is to be the reviewer's
+    checklist for "did every customer-callable surface get named", and nothing
+    read the list — `test_the_prose_counts_match_the_table` reads only the numeral
+    *nine*, so the sentence could list the same surface twice and still pass (it
+    did: the `tortoise_supersede` dry-run preview appeared twice, i.e. ten entries
+    standing for nine surfaces).
+    """
+    text = _bullet_text()
+    intro = text.find(_CALLABLE_LIST_INTRO)
+    if intro < 0:
+        return ()
+    rest = text[intro + len(_CALLABLE_LIST_INTRO) :]
+    closing = _PROSE_CALLABLE_AGAIN.search(rest)
+    if closing is None:
+        return ()
+    entries: list[str] = []
+    for raw in _PARENTHETICAL.sub("", rest[: closing.start()]).split(","):
+        entry = raw.strip()
+        if entry.lower().startswith("and "):
+            entry = entry[4:].strip()
+        if entry:
+            entries.append(entry)
+    return tuple(entries)
+
+
+def test_the_callable_enumeration_lists_each_surface_once():
+    """The enumerated LIST is a claim too — each surface once, and all of them.
+
+    A duplicated entry is not a cosmetic typo in this sentence: it reads as a
+    surface that was checked twice, and it means one entry was not a surface at
+    all. So the entries are counted twice — once for duplicates, once for distinct
+    surfaces against the table's `customer-callable` row count.
+    """
+    entries = _callable_enumeration()
+    assert entries, (
+        "§13 no longer ENUMERATES its customer-callable surfaces (the "
+        f"`{_CALLABLE_LIST_INTRO}` sentence is gone or re-worded), so the "
+        "reviewer's checklist for that set is unguarded — restore the list, or "
+        "delete this arm and say why in the docstring"
+    )
+
+    customer_callable = [
+        row for row in _declared_rows() if "customer-callable" in row[2].lower()
+    ]
+    duplicates = sorted({entry for entry in entries if entries.count(entry) > 1})
+
+    problems: list[str] = [
+        f"`{entry}` is listed {entries.count(entry)} times — one surface is one "
+        "entry; a duplicate stands for a ninth surface that was never named"
+        for entry in duplicates
+    ]
+    distinct = set(entries)
+    if len(distinct) != len(customer_callable):
+        problems.append(
+            f"the sentence enumerates {len(distinct)} distinct surfaces "
+            f"({len(entries)} entries) and §13 marks {len(customer_callable)} rows "
+            "`customer-callable`"
+        )
+
+    assert not problems, (
+        "the sentence §13 advertises as the checklist for its customer-callable "
+        "SET disagrees with the table it points at. The numeral beside it is "
+        "already asserted by `test_the_prose_counts_match_the_table`; this is the "
+        "list itself, which nothing read:\n  - " + "\n  - ".join(problems)
+    )
+
+
+#: Readers whose Cypher is assembled ENTIRELY from variables — no bracket text for
+#: any of the three shape walks to see, and no type slot for the name census. The
+#: tree contains none today; they are here because the docstring states the limit
+#: and a stated limit that is never measured is a claim.
+_OPAQUE_READER_CASES: tuple[tuple[str, str], ...] = (
+    (
+        "the pattern fragment passed in and concatenated into the query",
+        'def read(g, fragment):\n'
+        '    g.query("MATCH (n)" + fragment + "(m) RETURN type(r)")\n',
+    ),
+    (
+        "the whole query string built by a callee",
+        'def read(g, build):\n    g.query(build())\n',
+    ),
+)
+
+
+def test_a_pattern_built_entirely_from_a_variable_is_unreachable_and_says_so():
+    r"""The census's stated LIMIT is real, and the docstring must say so honestly.
+
+    The module docstring used to promise the escape hatch: a pattern assembled
+    entirely from a variable *"must be declared by name — arm 6 checks that
+    declaration"*. It cannot be. Arm 2 requires every §13 row to be a site of one
+    of the three derivations, and arm 6's reverse direction requires every
+    `CALL_TIME_REL`/`EMPTY_PATTERN` entry to still derive — so such a reader is
+    **neither derived nor declarable**, which is the one failure mode this file
+    exists to end. A reader who trusted the old sentence believed the census was
+    total.
+
+    Two halves, because only one of them is checkable in code:
+
+    * the GAP is measured — these sources derive nothing, in any class;
+    * the STATEMENT is pinned — the docstring must carry the honest form, so the
+      promise cannot drift back without reding here. Closing the gap for real
+      needs a new shape walk (how the string is assembled) or an explicit row /
+      register exemption; neither exists today, and this arm is what makes that
+      visible instead of assumed.
+    """
+    for label, source in _OPAQUE_READER_CASES:
+        file = _File(TORTISE / "<synthetic>", "<synthetic>", source)
+        derived = set(_sites_in(file)) | _empty_pattern_sites_in(file)
+        derived |= _call_time_sites_in(file)
+        assert not derived, (
+            f"{label}: a derivation now sees this reader ({sorted(derived)}), so "
+            "the stated limit is out of date — extend the docstring, or delete "
+            "this case"
+        )
+        assert not _may_traverse_every_type(source) and not _may_have_gap_type(source), (
+            f"{label}: the file FILTER would now admit this module, so the walks "
+            "are reachable for a shape this arm says they cannot see"
+        )
+
+    doc = __doc__ or ""
+    assert "neither derived nor declarable" in doc, (
+        "the module docstring no longer states the limit honestly — it promised "
+        "that a wholly-variable pattern 'must be declared by name — arm 6 checks "
+        "that declaration', which both declaration surfaces REJECT (a §13 row reds "
+        "arm 2; a register entry reds arm 6's reverse direction). Say it is "
+        "neither derived nor declarable, and what closing it would need"
+    )
+
+
+@lru_cache(maxsize=1)
+def _unfiltered_walks() -> tuple[
+    set[tuple[str, str]], set[tuple[str, str]], set[tuple[str, str]]
+]:
+    """The three derivations run over EVERY module, with `_files()`'s gate removed.
+
+    `_files()` is a text-predicate gate in front of the walks, so it must be a
+    SUPERSET of what they would find: a gate that is one predicate too narrow
+    un-sees a reader silently — the arm below would stay green while the census
+    stopped covering it, which is this PR's own defect class one layer down.
+    """
+    named: set[tuple[str, str]] = set()
+    empty: set[tuple[str, str]] = set()
+    call_time: set[tuple[str, str]] = set()
+    for path, source in _sources().items():
+        rel = str(path.relative_to(ROOT))
+        file = _File(path, rel, source)
+        for symbol, _line in _sites_in(file):
+            named.add((rel, symbol))
+        if _may_traverse_every_type(source):
+            for symbol, _line in _empty_pattern_sites_in(file):
+                empty.add((rel, symbol))
+        if _may_have_gap_type(source):
+            for symbol, _line in _call_time_sites_in(file):
+                call_time.add((rel, symbol))
+    return named, empty, call_time
+
+
+def test_the_file_filter_un_sees_nothing():
+    r"""`_files()` must admit every module a walk would derive a site in.
+
+    The PR body states that the four-way filter is a strict superset of the three
+    walks — measured once by hand against a full 242-module walk — and NO test
+    pinned it. A narrowed filter is the quietest failure this instrument can have:
+    the walks still work, every arm still passes, and the reader they no longer
+    reach simply stops being covered.
+
+    So the walks are re-run with the gate removed and must agree exactly, in all
+    three classes. The CONTROL matters as much as the check: the same measurement
+    is run against a deliberately narrowed gate (`_literal_files()`, the single
+    predicate the filter started from) and must DISAGREE — otherwise this arm
+    could not see a narrowing at all and would be a PASS about nothing.
+    """
+    unfiltered_named, unfiltered_empty, unfiltered_call_time = _unfiltered_walks()
+    problems: list[str] = []
+
+    for label, gated, unfiltered in (
+        ("named census", set(_census()), unfiltered_named),
+        ("empty-pattern class", set(_empty_pattern_sites()), unfiltered_empty),
+        ("call-time class", set(_call_time_sites()), unfiltered_call_time),
+    ):
+        missed = sorted(unfiltered - gated)
+        if missed:
+            problems.append(
+                f"{label}: {len(missed)} site(s) exist under `tortoise/` and the "
+                f"file filter skipped their module: {missed}"
+            )
+        if not unfiltered:
+            problems.append(
+                f"{label}: the unfiltered walk derived nothing, so this arm "
+                "passes vacuously"
+            )
+
+    # CONTROL: the narrow gate (`_literal_files()` only, the single predicate the
+    # filter started from) must MISS members of the three classes — a measurement
+    # that cannot see a narrowing proves nothing about the widened gate.
+    literal_only: set[tuple[str, str]] = set()
+    for file in _literal_files():
+        for symbol, _line in _sites_in(file):
+            literal_only.add((file.rel, symbol))
+        if _may_traverse_every_type(file.source):
+            for symbol, _line in _empty_pattern_sites_in(file):
+                literal_only.add((file.rel, symbol))
+        if _may_have_gap_type(file.source):
+            for symbol, _line in _call_time_sites_in(file):
+                literal_only.add((file.rel, symbol))
+    narrowed_away = (
+        set(_census()) | set(_empty_pattern_sites()) | set(_call_time_sites())
+    ) - literal_only
+    assert narrowed_away, (
+        "collapsing the filter to the literal carriers found every site the "
+        "four-way filter found — so this arm cannot distinguish a narrowed gate "
+        "from a correct one, and the superset property is unmeasured"
+    )
+
+    assert not problems, (
+        "`_files()` no longer admits every module the walks would derive a site "
+        "in, so a reader under `tortoise/` is silently outside the census — the "
+        "failure this whole instrument exists to prevent, one layer down:\n  - "
+        + "\n  - ".join(problems)
+    )
+
+
+#: Every synthetic corpus the mechanism arms iterate, by name. Each must hold both
+#: directions, or its arm is a PASS about nothing.
+_CASE_CORPORA = (
+    ("_MECHANISM_CASES", _MECHANISM_CASES),
+    ("_CALL_TIME_CASES", _CALL_TIME_CASES),
+    ("_FROZENSET_CASES", _FROZENSET_CASES),
+    ("_EMPTY_PATTERN_CASES", _EMPTY_PATTERN_CASES),
+)
+
+
+def test_the_case_corpora_are_not_vacuous():
+    """The synthetic CORPORA are the arms' evidence, so they are checked too.
+
+    Two docstring claims about them were false at this head — `_EMPTY_PATTERN_CASES`
+    was described as *seven* sources while it held nine, and `_MECHANISM_CASES` was
+    credited with a `for rel in FROZENSET` loop that lives in `_FROZENSET_CASES` —
+    in a file whose subject is that a count is a claim. Rather than restate the
+    counts (a copy nobody reads is the defect), the properties the arms actually
+    depend on are asserted: both directions present, no repeated label, a floor on
+    the size. A corpus quietly shrunk to its deriving half leaves the arm above it
+    green with nothing to prove.
+    """
+    problems: list[str] = []
+    for name, cases in _CASE_CORPORA:
+        labels = [label for label, _source, _should in cases]
+        if len(cases) < 4:
+            problems.append(f"{name} holds {len(cases)} cases — too few to pin a shape")
+        if not any(should for _l, _s, should in cases):
+            problems.append(f"{name} holds no case that must derive")
+        if not any(not should for _l, _s, should in cases):
+            problems.append(
+                f"{name} holds no near-miss that must NOT derive, so it cannot "
+                "pin the detector's negative direction"
+            )
+        repeated = sorted({label for label in labels if labels.count(label) > 1})
+        if repeated:
+            problems.append(f"{name} repeats a case label: {repeated}")
+
+    if len(_NEW_READER_CASES) < 2:
+        problems.append(
+            f"_NEW_READER_CASES holds {len(_NEW_READER_CASES)} case(s) — the "
+            "non-vacuity arm's evidence has shrunk to the point it measures one shape"
+        )
+
+    assert not problems, (
+        "a synthetic corpus the mechanism arms depend on is no longer able to "
+        "pin both directions of its shape:\n  - " + "\n  - ".join(problems)
     )
