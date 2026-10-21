@@ -96,13 +96,17 @@ revisions of this file recorded as re-materializers — are NOT. Its `SET r += $
 whose rows are discovered by `MATCH (old:Point {id:$old_id})-[r:IMPL|NAND]->(t)`,
 so `rtype` is provably `IMPL|NAND`; the about edge is transferred by a separate
 BARE `MERGE (new)-[:{rel}]->(t)` with no `SET`. On an about edge it writes no
-property — it DROPS `confidence` (filed as `#9417`). `_rebuild_all_replay`'s
-`SET r += $attrs` belongs to the `DirectEdgeCreated` fold, whose only producer
-(`create_direct_edge`) refuses any `op_type` outside `{IMPL, NAND}`, and its
-about/structural transfer is a separate BARE `MERGE` whose own comment says so
-(*"Structural 2b transfers are bare: NO attr SET"*); `create_about_edge` journals
-no `DirectEdgeCreated` at all, so no about edge can reach the attr fold. Both
-therefore carry NO property on an about edge. The census's whole-function
+property — it DROPS `confidence` (filed as `#9417`). `_rebuild_all_replay`
+carries TWO `SET r += $attrs` statements, and neither is protected the same way:
+the `DirectEdgeCreated` fold's producer (`create_direct_edge`) refuses any
+`op_type` outside `{IMPL, NAND}`; the structural-`DirectEdgeRepoint` fold's
+`etype` IS allowlisted and can be `aboutObject`, so what carries THAT statement
+is the map being built from a fixed attribute vocabulary — structural repoint
+descriptors carry none of those keys, the map is empty, and nothing is written.
+Its about/structural transfer is a separate BARE `MERGE` whose own comment says
+so (*"Structural 2b transfers are bare: NO attr SET"*), and `create_about_edge`
+journals no `DirectEdgeCreated` at all. Both
+functions therefore carry NO property on an about edge. The census's whole-function
 variable union cannot tell which edge the `SET` lands on, so BOTH rows are
 declared FALSE POSITIVES in `NOT_AN_ABOUT_WRITER` rather than counted as
 re-materializations — the false-POSITIVE version of this file's own defect.
@@ -153,10 +157,9 @@ returning its `{}` would report every writer it contains as a measured absence �
 the identical fail-open shape as the `rg 'aboutObject {'` zero, one level down
 (third review cycle on this file).
 
-WHAT IS PINNED (one entry per test — the set is pinned by
-`test_the_pin_index_names_every_leg`, the ORDER is not; entries have been
-appended as legs were added, so read it as an index, not as the file's order)
+WHAT IS PINNED (one entry per test, in file order)
 -----------------------------------------------
+
 1. `test_the_absolute_property_free_sentences_do_not_reappear` — the retracted
    sentences are matched MARKER-INSENSITIVELY (`*`, backticks, whitespace) against
    the live documents. Each entry records its own provenance — the pre-fix
@@ -165,7 +168,28 @@ appended as legs were added, so read it as an index, not as the file's order)
    the pre-fix revision by `test_every_retracted_literal_declares_its_true_`
    `provenance`, because a label nothing compares against the
    text is the same unmeasured claim one level up.
-2. `test_the_corrected_passages_name_the_property_bearing_class` — the
+2. `test_the_pin_index_names_every_leg` — this index is prose indexing
+   code, so it re-stales: at `#9403` review it carried 24 entries against 25
+   tests while its heading claimed "one entry per test, in file order", and the
+   merge union that produced 25 tests from two 24-test parents re-derived
+   neither the count nor the order. The leg compares the indexed SET to the
+   module's actual test functions (so it names itself too), rejects a leg listed
+   twice, and asserts the entries follow the FILE ORDER of `def test_` — which is
+   what the heading claims and what a reader mapping a failure to its entry
+   relies on.
+3. `test_the_shallow_gate_precedes_the_fetch` — the gate that stops the
+   provenance leg from shallow-ifying a full clone was unpinned: deleting it
+   left every leg green, because the only nearby assertion checked that the
+   strings `"fetch"` and `"--depth="` were still in the source. The leg parses
+   `_ensure_commit` and requires the `_is_shallow` return-False guard to appear
+   BEFORE the fetch loop, so the order is what is pinned. Structural, because
+   the destructive path is unreachable where `PRE_FIX_REV` resolves.
+4. `test_the_unmeasured_share_retraction_is_pinned` — §13's "a statement
+   about the row's SHAPE, not about the population's share" points at §11.1's
+   retraction of the share claim, and nothing pinned that sentence: deleting it
+   left every leg green, so the cross-reference could outlive its referent.
+   Section-scoped, mutation-checked (`#9403` review, P2).
+5. `test_the_corrected_passages_name_the_property_bearing_class` — the
    corrected passages must POSITIVELY name the writers and the property, so a
    silent revert reds here. The assertions are SECTION-scoped (§11.1, §13,
    §13.8 q2), not file-wide: the literals appear in more than one section, so a
@@ -174,19 +198,19 @@ appended as legs were added, so read it as an index, not as the file's order)
    also rejects an unmeasured population SHARE (`most entity links`, `for most
    links`, `bulk of the rows` …) and the retracted FORM COUNT on the originated
    set — both were live and green in the `#9403` head (`#9403` review, P1/P2).
-3. `test_the_corrected_passages_carry_no_bare_edges_line_citation` — the
+6. `test_the_corrected_passages_carry_no_bare_edges_line_citation` — the
    rewritten passages cite the generic writer by SYMBOL, not by a bare
    `projection/edges.py:<n>`: a line number is only true of the revision it was
    measured at (`:344` was `create_about_edge` at the `c79ba1cf2` pin and is a
    comment block at HEAD). §11.1's copy keeps `:344` **at the pinned revision**,
    because there the qualifier is stated.
-4. `test_the_references_paragraph_scopes_property_freedom_to_source_version` —
+7. `test_the_references_paragraph_scopes_property_freedom_to_source_version` —
    §9.6's *"identity/mention and referential-containment `references` links stay
    property-free"* is the SAME unqualified absolute, seventy lines above the
    §11.1 correction, for a different link class (a record-projected `references`
    edge carries `idx` too). Scoped to the fact the paragraph establishes: those
    links carry **no `sourceVersion`**.
-5. `test_the_cheapness_rule_states_the_measured_set_and_records_the_tension`
+8. `test_the_cheapness_rule_states_the_measured_set_and_records_the_tension`
    — §11.4 rule 1 is the rule this correction rewrote IN PLACE, and nothing
    pinned it (`#9403` review: restoring its pre-fix imperative verbatim at the
    PR head left every leg green). Section-scoped to the RULE, not to §11.4, so
@@ -194,21 +218,41 @@ appended as legs were added, so read it as an index, not as the file's order)
    keep the `#1370` tension record journaled through `EntityLinked`, and must
    keep its `RECORDED, not resolved` qualifier — a guard may not let prose
    settle a design decision by deleting the words that mark it open.
-6. `test_the_ledger_keep_row_names_both_recorded_properties` — the extractor
+9. `test_the_cost_argument_states_the_open_set_not_a_closed_pair` — §11.3 is
+   where a reader decides what the migration does to this layer, and both its
+   table row and its prose summarised the entity link as a CLOSED pair ("two
+   ids, plus the binder's `confidence` … and the projection's `idx` ordinal")
+   while the same section's §11.1 footnote and §13 say the set those names sit in
+   is open. Pinned PER PASSAGE, because a section-wide marker test stayed green
+   when only the table row was reverted (measured) — `#9403` review cycle 2.
+10. `test_the_ledger_keep_row_names_both_recorded_properties` — the extractor
    ledger's KEEP row is the reason a reader takes the layer to be cheap, and it
    named one of the two measured properties (`confidence`, not the record
    projection's `idx`). Its RETRACTED wording was pinned; any other route back to
    the one-name absolute there was not.
-7. `test_the_code_still_agrees_with_the_corrected_evidence` — each recorded
+11. `test_the_code_still_agrees_with_the_corrected_evidence` — each recorded
    writer still writes what the documents claim it writes (the named form on
    the originating writers; the property-MAP/inline forms on the re-materializing
    sites, `idx` included). If that code is removed, the document has re-rotted in the
    other direction and this reds instead of the doc quietly lying again.
-8. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
+12. `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
+   — the documents counted 5 writers as `3 originating + 2 re-materializing`,
+   and that composition is false: `projection/entities._fold_entity_linked_reason`
+   reproduces on REPLAY what the journal already carried, which is the documents'
+   own definition of RE-MATERIALIZING. The census can only see the WRITE FORM
+   (3 named + 2 map), which is why the wrong number read plausibly; the causal
+   split is 2 + 3, and the legs red if the fold is filed as an originator again
+   (`#9403` review, P2).
+13. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
+   own round-5 rule (`at HEAD` on every number that is not true at the pin) is
+   applied to the paragraph that MAKES the citations: three of them survived
+   bare, and one (`security.py:85`) is false at the declared pin `c79ba1cf2`
+   (`#9403` review, P2).
+14. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
    recorded twice, the map population has not shrunk below the shipped sites, no
    exemption is also a recorded writer, every exemption has a pinned statement
    premise, and every row (exemptions included) declares its exact name set.
-9. `test_the_declared_false_positive_premises_hold_at_the_statement` — a
+15. `test_the_declared_false_positive_premises_hold_at_the_statement` — a
    `NOT_AN_ABOUT_WRITER` row is an EXEMPTION, and an exemption nobody compares
    against is a fail-open cell: each premise is asserted at the STATEMENT the
    census attributed the property to (the about transfer carries no `SET`, and
@@ -219,7 +263,7 @@ appended as legs were added, so read it as an index, not as the file's order)
    a fail-open cell). The premise is also pinned to its mechanism: the statement
    is gated on a FIXED attribute vocabulary, so a descriptor carrying none of
    those keys writes nothing on the edge its interpolated `etype` names.
-10. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
+16. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
    every property write on an `about*` relationship pattern (named variable or
    anonymous) — named (`SET r.<prop>`), map-assigned (`SET r += $props` /
    `SET r = $p`), or an inline pattern map (`[r:aboutObject {idx:$idx}]`, which
@@ -241,39 +285,39 @@ appended as legs were added, so read it as an index, not as the file's order)
    for a token nobody has written yet. It is NOT a parse failure:
    `test_the_census_fails_closed_on_a_module_it_cannot_parse` makes
    the census STOP rather than skip.
-11. `test_the_census_reads_the_inline_pattern_map_form` — synthetic probe for the
+17. `test_the_census_reads_the_inline_pattern_map_form` — synthetic probe for the
    inline pattern map, named and anonymous.
-12. `test_the_census_bound_is_pinned_as_a_gap_not_an_absence` — one probe per
+18. `test_the_census_bound_is_pinned_as_a_gap_not_an_absence` — one probe per
    gap category 1-5, each asserting `{}` against `_writers_in_module`, beside
    a recorded control. No COUNT is stated here on purpose: an earlier
    revision of this list said "two shapes" while the leg asserted more, and
    a count in prose is a claim the code can outgrow silently.
-13. `test_the_documents_state_the_bound_as_a_detector_not_a_proof` — the
+19. `test_the_documents_state_the_bound_as_a_detector_not_a_proof` — the
    completeness claim is WITHDRAWN, not reworded a fifth time: the detector
    wording must be present in the guard's `__doc__` and at least twice in
    `STORAGE-ARCHITECTURE.md`, and the retracted absolutes absent. Measured
    without it, deleting the bound paragraphs or inserting a fresh absolute
    left every leg green — a pin that is named for a bound and does not red on
    its removal is not evidence.
-14. `test_the_census_reads_a_writer_that_never_says_about` — synthetic probe for
+20. `test_the_census_reads_a_writer_that_never_says_about` — synthetic probe for
    the allowlist-driven writer whose module never spells `about`.
-15. `test_the_census_fails_closed_on_a_module_it_cannot_parse` — a module
+21. `test_the_census_fails_closed_on_a_module_it_cannot_parse` — a module
    `ast.parse` (or the strict UTF-8 decode) rejects STOPS the census and names
    the file, instead of returning `{}` and reporting every writer inside it as a
    measured absence — the same fail-open shape as the `rg 'aboutObject {'` zero.
-16. `test_the_default_ingestion_path_reaches_the_binder` — the corrected text
+22. `test_the_default_ingestion_path_reaches_the_binder` — the corrected text
    says "default-ON, ingestion path"; if `_extract_session_v2` stops calling
    the binder, **or stops being the fall-through branch** of the
    `TORTOISE_SESSION_EXTRACTOR == "m2"` selection, that sentence becomes false
    while every other test stays green.
-17. `test_every_retracted_literal_is_still_findable_where_it_is_allowed_to_live`
+23. `test_every_retracted_literal_is_still_findable_where_it_is_allowed_to_live`
    — every RETRACTED literal is findable in the changelog that quotes it, or is
    declared pre-fix-only or introduced-and-retracted inside this PR
    (`RETRACTED_INTRODUCED_HERE`: three absolutes were written by an earlier
    revision of THIS PR, so claiming a pre-fix presence for them would be the
    same unmeasured provenance this file exists to stop). A pin that cannot match
    the pre-fix text protects nothing, and that is not a hypothesis: it shipped.
-18. `test_every_retracted_literal_declares_its_true_provenance` — the
+24. `test_every_retracted_literal_declares_its_true_provenance` — the
    CLASSIFICATION is measured, not merely declared: a literal listed in
    `RETRACTED_INTRODUCED_HERE` must be ABSENT from the pre-fix revision
    (`PRE_FIX_REV`) and every other entry PRESENT there. Without this the label
@@ -281,57 +325,17 @@ appended as legs were added, so read it as an index, not as the file's order)
    leg 1 then prints "was live pre-fix" for a sentence this PR wrote, in the
    diagnostic of the guard whose whole subject is unmeasured provenance. Skips
    (never passes silently) when the revision is unreachable.
-19. `test_the_storage_changelog_records_the_correction` — the changelog is where
+25. `test_the_storage_changelog_records_the_correction` — the changelog is where
    a reader learns that a §11.1/§13 claim moved.
-20. `test_the_guard_states_its_own_execution_and_probe_coverage_honestly` —
+26. `test_the_guard_states_its_own_execution_and_probe_coverage_honestly` —
    this file's claims about ITSELF, re-derived from the source: the header may
-   not say the suite is network-free while `_ensure_commit` fetches, and it may
-   not claim one probe per gap while gap 6 is disclosed rather than pinned.
-21. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
+   not say the suite is network-free while `_ensure_commit` fetches, it may not
+   claim one probe per gap while gap 6 is disclosed rather than pinned, and it
+   may not state a numeric leg count in prose. The pin-index coverage and order
+   moved to `test_the_pin_index_names_every_leg`, which owns that claim alone.
+27. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
    numbering is unique (it is the ledger's only index), and the fourth round's
    false record of §13's citation does not come back.
-22. `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
-   — the documents counted 5 writers as `3 originating + 2 re-materializing`,
-   and that composition is false: `projection/entities._fold_entity_linked_reason`
-   reproduces on REPLAY what the journal already carried, which is the documents'
-   own definition of RE-MATERIALIZING. The census can only see the WRITE FORM
-   (3 named + 2 map), which is why the wrong number read plausibly; the causal
-   split is 2 + 3, and the legs red if the fold is filed as an originator again
-   (`#9403` review, P2).
-23. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
-   own round-5 rule (`at HEAD` on every number that is not true at the pin) is
-   applied to the paragraph that MAKES the citations: three of them survived
-   bare, and one (`security.py:85`) is false at the declared pin `c79ba1cf2`
-   (`#9403` review, P2).
-
-24. `test_the_cost_argument_states_the_open_set_not_a_closed_pair` — §11.3 is
-   where a reader decides what the migration does to this layer, and both its
-   table row and its prose summarised the entity link as a CLOSED pair ("two
-   ids, plus the binder's `confidence` … and the projection's `idx` ordinal")
-   while the same section's §11.1 footnote and §13 say the set those names sit in
-   is open. Pinned PER PASSAGE, because a section-wide marker test stayed green
-   when only the table row was reverted (measured) — `#9403` review cycle 2.
-
-25. `test_the_unmeasured_share_retraction_is_pinned` — §13's "a statement
-   about the row's SHAPE, not about the population's share" points at §11.1's
-   retraction of the share claim, and nothing pinned that sentence: deleting it
-   left every leg green, so the cross-reference could outlive its referent.
-   Section-scoped, mutation-checked (`#9403` review, P2).
-
-26. `test_the_pin_index_names_every_leg` — this index is prose indexing
-   code, so it re-stales: at `#9403` review it carried 24 entries against 25
-   tests while its heading claimed "one entry per test, in file order". The leg
-   compares the indexed SET to the module's actual test functions (so it names
-   itself too), and the heading no longer claims an order an appended index does
-   not have.
-
-27. `test_the_shallow_gate_precedes_the_fetch` — the gate that stops the
-   provenance leg from shallow-ifying a full clone was unpinned: deleting it
-   left every leg green, because the only nearby assertion checked that the
-   strings `"fetch"` and `"--depth="` were still in the source. The leg parses
-   `_ensure_commit` and requires the `_is_shallow` return-False guard to appear
-   BEFORE the fetch loop, so the order is what is pinned. Structural, because
-   the destructive path is unreachable where `PRE_FIX_REV` resolves.
 
 NOT promised: this does not re-open stored-vs-derived (the ruling stands, and
 the edge stays), and it does not decide §11.4 rule 1's tension with `#1370`
@@ -584,14 +588,18 @@ NOT_AN_ABOUT_WRITER: dict[tuple[str, str], str] = {
         "property on an about edge (it drops `confidence`; #9417)"
     ),
     ("tortoise/projection/__init__.py", "_rebuild_all_replay"): (
-        "the `SET r += $attrs` belongs to the `DirectEdgeCreated` fold, whose "
-        "ONLY producer (`create_direct_edge`) refuses any op_type outside "
-        "{IMPL, NAND}; the about*/structural transfer is a separate BARE "
-        "`MERGE (s)-[:{etype}]->(t)` (the code says so in place: 'Structural "
-        "2b transfers are bare: NO attr SET'), and `create_about_edge` "
-        "journals no `DirectEdgeCreated` at all — so no about edge can reach "
-        "the attr fold, and this writer carries NO property on an about edge "
-        "either"
+        "it carries TWO `SET r += $attrs` statements, and the exemption depends "
+        "on each separately: the `DirectEdgeCreated` fold, whose ONLY producer "
+        "(`create_direct_edge`) refuses any op_type outside {IMPL, NAND}; and "
+        "the structural-`DirectEdgeRepoint` fold, whose interpolated `etype` "
+        "IS allowlisted and CAN be `aboutObject`, so it is the `attrs` gate "
+        "that carries it — structural repoint descriptors carry none of "
+        "{direction, confidence, weight, label, batch_id}, the map is empty, "
+        "and nothing is written. The about*/structural transfer is a separate "
+        "BARE `MERGE (s)-[:{etype}]->(t)` (the code says so in place: "
+        "'Structural 2b transfers are bare: NO attr SET'), and "
+        "`create_about_edge` journals no `DirectEdgeCreated` at all — so this "
+        "writer carries NO property on an about edge"
     ),
 }
 
@@ -611,6 +619,17 @@ FALSE_POSITIVE_STATEMENTS: dict[tuple[str, str], tuple[str, str]] = {
         "MERGE (s)-[:{etype}]->(t)",
     ),
 }
+
+#: The FIXED attribute vocabulary the false positives' `SET r += $attrs` is
+#: built from (`{k: … for k in (…)}` / `… if k in (…)}`). This is the mechanism
+#: that carries the exemption where the predicate is INTERPOLATED: a structural
+#: descriptor carries none of these keys, so the map is empty and nothing lands
+#: on whatever `etype` resolves to. Pinned as a CEILING — a statement copying a
+#: key from outside it would put that key on an interpolated edge, which is the
+#: `#9417` shape this exemption is one change away from.
+FALSE_POSITIVE_ATTR_VOCAB: frozenset[str] = frozenset(
+    {"direction", "confidence", "weight", "label", "batch_id", "source_version"}
+)
 
 #: The property. One ORIGINATED name; `idx` is the second recorded name, written
 #: by the record-layer projection as an INLINE pattern map (see `INLINE_FORM`).
@@ -819,6 +838,173 @@ def _query_calls_containing(body: str, needle: str) -> list[str]:
                     if needle in call:
                         out.append(call)
                     break
+    return out
+
+
+def _nearest_map_assignment(
+    func: ast.AST, call: ast.AST, text: str
+) -> str:
+    """The source of the map a `SET r += $attrs` call actually writes.
+
+    `params={"attrs": <name>}` → the nearest PRECEDING assignment to `<name>` in
+    the same function. Returned as source so the caller can assert on the shape
+    (a dict comprehension over a FIXED key vocabulary) rather than on a name.
+    """
+    name = None
+    for keyword in call.keywords:  # type: ignore[attr-defined]
+        if keyword.arg != "params" or not isinstance(keyword.value, ast.Dict):
+            continue
+        for key, value in zip(
+            keyword.value.keys, keyword.value.values, strict=True
+        ):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == "attrs"
+                and isinstance(value, ast.Name)
+            ):
+                name = value.id
+    assert name is not None, (
+        "the `SET r += $attrs` call no longer passes its map as "
+        "`params={'attrs': <name>}` — this premise measures nothing: "
+        f"{ast.get_source_segment(text, call) or ''}"
+    )
+    best = None
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        if not any(isinstance(t, ast.Name) and t.id == name for t in targets):
+            continue
+        if node.lineno > call.lineno:  # type: ignore[attr-defined]
+            continue
+        if best is None or node.lineno > best.lineno:  # type: ignore[attr-defined]
+            best = node
+    assert best is not None, (
+        f"`{name}` (the map written by `SET r += $attrs`) is no longer assigned "
+        "in this function, so the fixed-vocabulary premise cannot be checked"
+    )
+    return ast.get_source_segment(text, best.value) or ""
+
+
+def _fixed_key_vocabulary(source: str) -> list[str]:
+    """The literal key names a `{k: v for … if k in (…)}` map is built from.
+
+    A fixed vocabulary is what makes the exemption hold where the predicate is
+    INTERPOLATED: a descriptor carrying none of these keys yields an EMPTY map,
+    and an empty map writes nothing on whatever `etype` resolves to.
+    """
+    tree = ast.parse(source)
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.DictComp):
+            continue
+        for generator in node.generators:
+            wanted = [generator.iter, *(
+                compare.comparators[0]
+                for compare in generator.ifs
+                if isinstance(compare, ast.Compare)
+                and any(isinstance(op, ast.In) for op in compare.ops)
+            )]
+            for candidate in wanted:
+                if isinstance(candidate, (ast.Tuple, ast.List, ast.Set)):
+                    names.extend(
+                        element.value
+                        for element in candidate.elts
+                        if isinstance(element, ast.Constant)
+                        and isinstance(element.value, str)
+                    )
+    return names
+
+
+def _setter_gate_premises(
+    module: str, text: str, symbol: str, needle: str
+) -> list[tuple[str, list[str]]]:
+    """(enclosing-`if` test, fixed key vocabulary) for EVERY `needle` SET.
+
+    SCOPED TO THE STATEMENT, and that is the correction (`#9403` review, P3):
+    the previous version asserted `if k in (…)|if attrs:` against the whole
+    FUNCTION BODY, so `_rebuild_all_replay`'s second `SET r += $attrs` — the
+    structural-`DirectEdgeRepoint` fold, whose `etype` is an allowlisted
+    predicate that CAN be `aboutObject` — was covered by the OTHER fold's gate.
+    That is the same function-wide text union the plural
+    `_query_calls_containing` exists to reject for the about literal, one level
+    down. Each statement is walked to its OWN enclosing `if`, and the map it
+    writes is walked to the assignment that builds it.
+
+    Returns one pair per `needle` statement. Raises when a statement is
+    UNGATED (no enclosing `if`) or its map is not built from a fixed literal
+    key vocabulary — either way the exemption has stopped holding for that
+    statement, which is the fail-open cell this leg exists to close.
+    """
+    tree = ast.parse(text)
+    func = None
+    for name, candidate in _qualified(tree):
+        if name.split(".")[-1] == symbol:
+            func = candidate
+            break
+    assert func is not None, f"{module}::{symbol} no longer exists"
+    parents: dict[ast.AST, ast.AST] = {}
+    for parent in ast.walk(func):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+    out: list[tuple[str, list[str]]] = []
+    # Only the calls that SPAN a line carrying the needle can be matches, and the
+    # line index is built once: `get_source_segment` re-splits the whole module
+    # per call, which turned a 16k-line module into ~17 s of O(n²) slicing in the
+    # first version of this helper (measured).
+    needle_lines = {
+        number
+        for number, line in enumerate(text.splitlines(), start=1)
+        if needle in line
+    }
+    for call in ast.walk(func):
+        if not isinstance(call, ast.Call):
+            continue
+        span = range(
+            call.lineno,  # type: ignore[attr-defined]
+            (call.end_lineno or call.lineno) + 1,  # type: ignore[attr-defined]
+        )
+        if not needle_lines.intersection(span):
+            continue
+        if needle not in (ast.get_source_segment(text, call) or ""):
+            continue
+        gate = None
+        walker: ast.AST | None = call
+        while walker is not None:
+            parent = parents.get(walker)
+            if isinstance(parent, ast.If) and walker in parent.body:
+                gate = parent
+                break
+            walker = parent
+        assert gate is not None, (
+            f"the `{needle}` statement in `{module}::{symbol}` is no longer "
+            "gated by an enclosing `if` — the exemption's premise is that a "
+            "descriptor carrying none of the fixed attribute keys writes "
+            "nothing, and an UNCONDITIONAL write puts whatever the descriptor "
+            "holds onto whatever its interpolated `etype` names"
+        )
+        assert not isinstance(gate.test, ast.Constant), (
+            f"the `{needle}` statement in `{module}::{symbol}` is `if "
+            f"{ast.dump(gate.test)[:40]}`-gated, and a CONSTANT test is not a "
+            "gate: it says nothing about the attribute map, so the exemption "
+            "would rest on a condition that can never be false"
+        )
+        vocabulary = _fixed_key_vocabulary(
+            _nearest_map_assignment(func, call, text)
+        )
+        assert vocabulary, (
+            f"the map written by `{needle}` in `{module}::{symbol}` is no longer "
+            "built by filtering a FIXED literal key vocabulary ("
+            "`{k: … for k in (…)}` / `… if k in (…)}`) — the exemption rests "
+            "on that fixed list: a structural descriptor carrying none of "
+            "those keys must yield an EMPTY map"
+        )
+        out.append((ast.get_source_segment(text, gate.test) or "", vocabulary))
+    assert out, (
+        f"no `{needle}` statement found in `{module}::{symbol}` — the census "
+        "row was derived from it, and an exemption that describes code which "
+        "moved protects nothing"
+    )
     return out
 
 
@@ -1173,9 +1359,11 @@ def test_the_pin_index_names_every_leg():
     `#9403` review, it carried 24 entries against 25 tests (the share-retraction
     leg was missing) while its own heading claimed "one entry per test, in file
     order" — and neither the missing entry nor the order claim was pinned, so a
-    reader trusting the index would not learn the module had grown. This leg
-    compares the two SETS, which is the claim that can be true; the heading no
-    longer claims file order, because order is not what an appended index has.
+    reader trusting the index would not learn the module had grown. The merge
+    union that produced 25 tests from two 24-test parents re-derived neither.
+    This leg pins BOTH halves of the heading: the SET (every test exactly once)
+    and the FILE ORDER — the order is what lets a reader map a failure message to
+    its entry, and an appended index silently loses it.
     """
     source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
         encoding="utf-8"
@@ -1211,6 +1399,36 @@ def test_the_pin_index_names_every_leg():
     assert not (defined - indexed), (
         "these legs are not in the WHAT IS PINNED index, so the index no longer "
         f"describes this module: {sorted(defined - indexed)}"
+    )
+    # The ORDER half of the heading. `findall` returns the entries in the order
+    # they appear in the block, so compare it against the file's own `def test_`
+    # order: an appended (or hand-moved) entry reds here instead of quietly
+    # mapping a failure message to the wrong paragraph.
+    in_file_order = [
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    ]
+    mismatch = next(
+        (
+            (position, want, got)
+            for position, (want, got) in enumerate(
+                zip(in_file_order, matches, strict=False), start=1
+            )
+            if want != got
+        ),
+        None,
+    )
+    assert mismatch is None, (
+        "the WHAT IS PINNED index is out of FILE ORDER, so a reader maps a "
+        f"failure to the wrong entry: position {mismatch[0]} lists "
+        f"{mismatch[1]!r} but the file defines {mismatch[2]!r} there"
+    )
+    assert [int(number) for number in re.findall(r"^(\d+)\. ", block, re.M)] == (
+        list(range(1, len(matches) + 1))
+    ), (
+        "the pin index's ordinals are not 1..N in order — they are its only "
+        "index, so a gap or a duplicate makes position and number disagree"
     )
 
 
@@ -2069,13 +2287,25 @@ def test_the_declared_false_positive_premises_hold_at_the_statement():
     `SET r += $attrs` is on the 2a-DIRECT leg (`rtype` is `type(r)` of the
     `IMPL|NAND` rows) while its about edge is transferred by a BARE `MERGE` —
     so on an about edge it writes nothing and DROPS `confidence` (`#9417`); and
-    `_rebuild_all_replay`'s `SET r += $attrs` belongs to the
-    `DirectEdgeCreated` fold, whose only producer is `{IMPL, NAND}`-only, while
-    its structural transfer is a BARE `MERGE`. Each premise is asserted at the
+    `_rebuild_all_replay` carries TWO `SET r += $attrs` statements — the
+    `DirectEdgeCreated` fold, whose only producer (`create_direct_edge`)
+    refuses any `op_type` outside `{IMPL, NAND}`, and the
+    structural-`DirectEdgeRepoint` fold, whose interpolated `etype` IS
+    allowlisted (`validate_rel_type`) and can be `aboutObject` — while its
+    structural transfer is a BARE `MERGE`. Each premise is asserted at the
     STATEMENT, which is where the property would land: a function-wide
     membership test is satisfied by both literals while a `SET` sits on the
     about transfer, and then §13 / §13.8 q2's "it carries no property on an
     about edge" becomes false with every other leg green.
+
+    ⚠️ **The repoint fold's protection is NOT the producer restriction** — that
+    covers the creation fold only. It is the gate over a map built from a FIXED
+    key vocabulary: a structural repoint descriptor carries none of
+    `direction/confidence/weight/label/batch_id`, so the map is empty and
+    nothing is written. `_setter_gate_premises` therefore walks EACH statement
+    to its OWN enclosing `if` and to the assignment building its map — a
+    function-wide `if attrs:` search was satisfied by the creation fold's gate
+    and said nothing about the repoint fold (`#9403` review, P3).
     """
     for key, (set_needle, transfer_needle) in FALSE_POSITIVE_STATEMENTS.items():
         module, symbol = key
@@ -2114,23 +2344,138 @@ def test_the_declared_false_positive_premises_hold_at_the_statement():
                 f"an `about*` predicate ({setter.strip()!r}) — the property "
                 "lands on an about edge, so the exemption is stale"
             )
-            # The exemption's SECOND premise, and the one that carries it where
-            # the predicate is INTERPOLATED: the statement is gated on a
-            # non-empty `attrs` map built from a fixed key set, so a structural
-            # descriptor that carries none of those keys writes NOTHING. Both
-            # statements are `if attrs:`-guarded today; asserted here because a
-            # `SET r += $attrs` with an unconditional call would write whatever
-            # the descriptor's attribute set holds onto whatever `etype`
-            # resolves to — and `etype` is interpolated, so no about predicate
-            # can appear in the statement text.
-            assert re.search(
-                r"if k in \(|if attrs:", body
-            ), (
-                f"`{module}::{symbol}` no longer guards its `{set_needle}` "
-                "statement with a non-empty `attrs` map — the exemption's "
-                "premise is that a structural descriptor carrying no attribute "
-                "writes nothing on the edge its interpolated `etype` names"
+        # The exemption's SECOND premise, asserted PER STATEMENT: the write is
+        # gated, and the map it writes is built from a FIXED literal key
+        # vocabulary — so a descriptor carrying none of those keys yields an
+        # empty map and writes nothing on the edge its interpolated `etype`
+        # names. Bound to each statement, not to the function body (`#9403`
+        # review, P3): `_rebuild_all_replay`'s repoint fold can reach an
+        # allowlisted `aboutObject` `etype`, and a function-wide gate search
+        # said nothing about it.
+        gates = _setter_gate_premises(
+            module, (ROOT / module).read_text(encoding="utf-8"), symbol, set_needle
+        )
+        assert len(gates) == len(setters), (
+            f"`{module}::{symbol}` carries {len(setters)} `{set_needle}` "
+            f"statement(s) but {len(gates)} gate premise(s) — the two readings "
+            "of the same function disagree, so this leg measures neither"
+        )
+        for gate_test, vocabulary in gates:
+            assert gate_test, (
+                f"a `{set_needle}` statement in `{module}::{symbol}` is gated "
+                "by an `if` with no readable test — the gate IS the premise"
             )
+            assert set(vocabulary) <= FALSE_POSITIVE_ATTR_VOCAB, (
+                f"a `{set_needle}` statement in `{module}::{symbol}` copies a "
+                f"key outside the fixed attribute vocabulary the exemption "
+                f"rests on (gate {gate_test!r}, keys {sorted(vocabulary)}; the "
+                f"fixed set is {sorted(FALSE_POSITIVE_ATTR_VOCAB)}) — a "
+                "structural descriptor carrying one of those new keys would "
+                "write it on the edge its interpolated `etype` names"
+            )
+
+    # ── the probe: the per-statement rule reds where a function-wide one did not.
+    # A synthetic two-fold function — `_rebuild_all_replay`'s shape — in which
+    # only the FIRST fold is gated. The previous revision of this leg searched
+    # the whole body for `if attrs:`, which fold one satisfies, so deleting fold
+    # two's gate left every leg green (measured).
+    both_folds = (
+        "def _folds(proj, events, direct_events):\n"
+        "    for ev in events:\n"
+        "        attrs = {k: ev[k] for k in ('confidence', 'weight') if k in ev}\n"
+        "        if attrs:\n"
+        "            proj.g.query('MERGE (a)-[r:T]->(b) SET r += $attrs',\n"
+        "                         params={'attrs': attrs})\n"
+        "    for ev in direct_events:\n"
+        "        attrs = {k: ev[k] for k in ('confidence', 'weight') if k in ev}\n"
+        "        proj.g.query('MERGE (a)-[r:T]->(b) SET r += $attrs',\n"
+        "                     params={'attrs': attrs})\n"
+    )
+    assert re.search(r"if attrs:", both_folds), (
+        "the probe's own premise is gone — it must carry a function-WIDE "
+        "`if attrs:` that a body-scoped search would accept"
+    )
+    with pytest.raises(AssertionError, match="no longer gated"):
+        _setter_gate_premises(
+            "tortoise/x.py", both_folds, "_folds", "SET r += $attrs"
+        )
+    # A gate that can never be false is not a gate — the shape a lane reaches
+    # for when a query "needs" to run unconditionally without deleting the `if`.
+    constant_gate = (
+        "def _folds(proj, events):\n"
+        "    for ev in events:\n"
+        "        attrs = {k: ev[k] for k in ('confidence', 'weight') if k in ev}\n"
+        "        if True:\n"
+        "            proj.g.query('MERGE (a)-[r:T]->(b) SET r += $attrs',\n"
+        "                         params={'attrs': attrs})\n"
+    )
+    with pytest.raises(AssertionError, match="is not a gate"):
+        _setter_gate_premises(
+            "tortoise/x.py", constant_gate, "_folds", "SET r += $attrs"
+        )
+    # …and with BOTH folds gated the same source passes, so the probe pins the
+    # RULE rather than a hard-coded failure (a pin that only ever reds proves
+    # nothing about what it accepts).
+    gated_both = (
+        "def _folds(proj, events, direct_events):\n"
+        "    for ev in events:\n"
+        "        attrs = {k: ev[k] for k in ('confidence', 'weight') if k in ev}\n"
+        "        if attrs:\n"
+        "            proj.g.query('MERGE (a)-[r:T]->(b) SET r += $attrs',\n"
+        "                         params={'attrs': attrs})\n"
+        "    for ev in direct_events:\n"
+        "        attrs = {k: ev[k] for k in ('confidence', 'weight') if k in ev}\n"
+        "        if attrs:\n"
+        "            proj.g.query('MERGE (a)-[r:T]->(b) SET r += $attrs',\n"
+        "                         params={'attrs': attrs})\n"
+    )
+    assert both_folds.count("if attrs:") == 1 and gated_both.count("if attrs:") == 2, (
+        "the probe no longer differs from its control by exactly one gate"
+    )
+    assert len(
+        _setter_gate_premises(
+            "tortoise/x.py", gated_both, "_folds", "SET r += $attrs"
+        )
+    ) == 2, "the probe did not report one premise per statement"
+
+    # ── and the DOCUMENTS must carry the same two-fold story, because they are
+    # the surface a reader trusts (`#9403` review, P3). §13 said the replay's
+    # `SET r += $attrs` "belongs to the `DirectEdgeCreated` fold, whose only
+    # producer is `{IMPL, NAND}`-only" and §13.8 q2 said "each of whose … is on
+    # an `IMPL|NAND` leg" — true of the creation fold and the DIRECT function,
+    # FALSE of the repoint fold, whose allowlisted `etype` can be `aboutObject`.
+    # Neither document named `DirectEdgeRepoint` at all, so the fold `#9417`
+    # would change was the one the docs did not describe.
+    docs = {"STORAGE": _flat(_doc(STORAGE)), "EXTRACTOR": _flat(_doc(EXTRACTOR))}
+    doc_sections = {}
+    for label, start, end, which in CORRECTED_SECTIONS:
+        if label.endswith("§11.1"):
+            continue
+        doc_sections[label] = (which, _flat(_section(_doc(STORAGE if which == "STORAGE" else EXTRACTOR), start, end)))
+    for label, (_which, section) in doc_sections.items():
+        assert "DirectEdgeRepoint" in section, (
+            f"{label} no longer names the `DirectEdgeRepoint` fold. The replay "
+            "carries TWO `SET r += $attrs` statements and only the creation "
+            "fold is producer-restricted to `{IMPL, NAND}`; the repoint fold's "
+            "`etype` is allowlisted and can be `aboutObject`, so an unnamed "
+            "fold is a claim the exemption's protection does not cover"
+        )
+        assert "fixed attribute vocabulary" in section, (
+            f"{label} no longer states the mechanism that carries the repoint "
+            "fold — the map is built from a fixed attribute vocabulary that "
+            "structural repoint descriptors never populate, so it is empty and "
+            "nothing is written. The producer restriction alone does not "
+            "reach that statement"
+        )
+        assert "each of whose" not in section, (
+            f"{label} is back to the single-fold claim (`each of whose `SET r "
+            "+= $attrs` is on an `IMPL|NAND` leg`) — the retracted absolute "
+            "this round removed"
+        )
+    assert "DirectEdgeRepoint" in docs["STORAGE"], "the storage doc lost the fold name"
+    assert "DirectEdgeRepoint" in docs["EXTRACTOR"], (
+        "the extractor doc lost the fold name"
+    )
 
 
 # ── 4. no unrecorded property-bearing writer ───────────────────────────────
@@ -2717,6 +3062,10 @@ def test_the_guard_states_its_own_execution_and_probe_coverage_honestly():
         "removed, so it is an unmeasured claim in the PROSE of a guard whose "
         "subject is unmeasured claims; state how to re-measure it instead"
     )
+
+    # The pin-index coverage and ORDER are pinned by
+    # `test_the_pin_index_names_every_leg`, which owns that claim: two legs
+    # asserting one property is how a pair drifts apart.
 
 
 def test_the_correction_ledger_numbers_each_round_once():
