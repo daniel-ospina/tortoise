@@ -907,3 +907,16 @@ review's other half was still open, and it is the half no derivation can reach:
   customer-callable count is unchanged (**seven rows, ten sites**) — both new readers are on the
   default-ON write path, not customer doors. The headline's four numerals and their units are
   asserted, so the count and the table cannot drift apart.
+
+### Also corrected: "no `aboutObject` edge carries ANY property" was false (`#1370`)
+
+The §13 sentence that closes the *structural door* argument — *"no `aboutObject` edge carries any
+property, so we lose nothing semantically by deriving later"* — has been false since `#1370`:
+`session_link.link_entity` sets `r.confidence` when a binding confidence is supplied, and
+`projection/entities.py`'s replay fold restores it (a test asserts it on an `aboutObject` edge). The
+supporting measurement was a literal grep (`rg 'aboutObject \{'` → 0), and it was blind in exactly
+the class the census exists to fix: the relationship name there is a **variable**. The claim is now
+scoped to *no semantic payload, except the binding confidence*, in §13 and in §16, and §11's ruling
+wording is flagged as predating `#1370` rather than silently rewritten — reopening a ruling is a
+decision, not a copy-edit. (Surfaced by the earlier reviews of this PR; the third review's scope did
+not include it.)
