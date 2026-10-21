@@ -1255,11 +1255,20 @@ def test_a_dated_refresh_claim_inside_a_rationale_loses_only_that_clause() -> No
 def test_a_summary_less_leg_still_counts_its_failures(tmp_path: Path) -> None:
     """`outcome.failed` must not be smaller than `failed_tests`.
 
-    The shipped artifact read `failed: 5` beside SIX `failed_tests` entries: one
-    leg's log had been truncated before pytest's summary line, so it reported 0
-    of everything while its progress lines named a failure. The two fields are
-    the same event counted twice, so a truncation must not make them disagree
-    (#9134 review, P2).
+    A leg whose log has no pytest SUMMARY line reports 0 of everything, so without
+    the progress-line fallback its failures would vanish from `outcome.failed`
+    while still appearing in `failed_tests` — the two fields describe the same
+    work, so a truncation must not make them diverge (#9134 review, P2).
+
+    ⛔ This is NOT the explanation for a shipped artifact that reads `failed: 5`
+    beside SIX `failed_tests` entries: that gap is `FAILED(5) + ERROR(1)`, because
+    `outcome.failed` accumulates FAILED only while `failed_tests` takes FAILED *and*
+    ERROR (see the `⛔ outcome.failed is NOT the length of failed_tests` comment in
+    `aggregate_logs`). An earlier revision of this docstring blamed a truncated
+    leg; the shipped artifact at that head had 17 `log_sources` and every one had
+    `summary_seen: true`, so no truncated leg existed to blame (#9134 review, P3).
+    Folding `error` into `failed` (or the reverse) is NOT the fix — the two
+    counters are deliberately distinct.
 
     Non-vacuity: pre-fix `total_counts["failed"]` is 1 while `failed_tests` has
     3 entries.

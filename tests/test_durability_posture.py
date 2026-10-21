@@ -71,8 +71,10 @@ CANONICAL_DOC = REPO / CANONICAL_DOC_REL
 # a SLOT, not the literal `the`: `the journal is A durable record` and `the event
 # log is ITS durability mechanism` are the same claim, and pinning `(?:the )?`
 # made the gate see only the one reword that happened to be reviewed. Measured
-# over all 304 scanned files: no false positives (nothing in the tree attributes
-# durability to the log in any determiner form).
+# over the declared scan roots (334 files when this was written — the number
+# drifts with the tree, so the gate is the authority, not this comment): no false
+# positives (nothing in the tree attributes durability to the log in any
+# determiner form).
 _SUBJECT = r"(?:event log|journal|jsonl|\blog\b|event stream)"
 # any possessive/indefinite determiner, or none
 _DURAB_DET = r"(?:the |a |an |our |its |their |your )?"
@@ -87,9 +89,18 @@ CLAIM_RE = re.compile(
 # The two PREDICATE alternations, applied to whitespace-JOINED text. A line
 # break is not a scope: `COMMIT POINT (the journal IS the` / `truth)` is the
 # same claim as one line, and `CLAIM_RE` above — line-at-a-time like grep, so
-# `.` cannot cross a newline — reads it as clean. That is not hypothetical:
-# `tortoise/api.py` carried exactly that wrapped claim, one reflow away from
-# firing, and this gate certified the file green for it. Only the predicate
+# `.` cannot cross a newline — reads it as clean. This joined scan is a FORWARD
+# guard, and an earlier revision of this comment overstated it: it claimed
+# `tortoise/api.py` carried exactly such a wrapped claim and that the gate had
+# certified the file green for it. It did not. `api.py` carries the
+# `reconstruction source` shape, which is not one of the two predicates joined
+# here and cannot become one by reflowing — and the repo-wide scan below finds
+# **0** live wrapped instances of the covered predicates anywhere in the
+# scanned roots (see
+# `test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots`, the
+# authority; #9134 review, P3). What the guard defends is the failure mode
+# being SILENT — a reword that wraps the predicate would leave the
+# line-at-a-time scan reporting clean while the claim stands. Only the predicate
 # forms are re-scanned: the `source of truth` alternations have legitimate
 # cross-line neighbours (`corpus files (source of truth), (2) the FULL
 # `events/` JSONL directory`, `single source of truth with apply, #330` /
@@ -443,6 +454,45 @@ def test_wrapped_detector_sees_the_durability_alternation(tmp_path):
     assert [lineno for lineno, _ in hits] == [2], hits
     # The line-at-a-time gate cannot see a claim that spans the newline.
     assert _claim_lines(target) == []
+
+
+def test_the_joined_scan_does_not_join_the_source_family(tmp_path):
+    """The SCOPE the joined scan claims for itself, pinned rather than asserted in
+    prose: `source of truth` is deliberately NOT joined (#9134 review, P3).
+
+    The corrected comment above ``WRAPPED_CLAIM_RE`` and the docstring of
+    ``test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots`` both rest on
+    this fact — it is why `tortoise/api.py`'s real shape
+    (`COMMIT POINT (the journal IS the` / `reconstruction source)`) is NOT a missed
+    instance, and why today's repo-wide 0-hit reading is honest. Nothing checked
+    it, so widening the pattern to the `source` family would silently turn the
+    scan into a false-positive machine while every test stayed green.
+
+    Non-vacuity: add a `source of truth` alternation to ``WRAPPED_CLAIM_RE`` and the
+    two wrapped fixtures below red (they must stay clean) — including `api.py`'s own
+    sentence, which the scan is supposed to read as out of scope.
+    """
+    api_shaped = tmp_path / "api_shaped.py"
+    api_shaped.write_text(
+        "x = 1\n"
+        "        load-bearing: the append is this seam's COMMIT POINT (the journal IS the\n"
+        "        reconstruction source), so a refusal raised after it would leave a\n"
+        "        record,\n",
+        encoding="utf-8",
+    )
+    source_shaped = tmp_path / "source_shaped.md"
+    source_shaped.write_text(
+        "1. the corpus files (source of\n"
+        "truth), (2) the FULL `events/` JSONL directory\n",
+        encoding="utf-8",
+    )
+    assert _wrapped_claim_lines(api_shaped) == []
+    assert _wrapped_claim_lines(source_shaped) == []
+    # ...and the real file the comment names, read at its real content: the
+    # `reconstruction source` shape is present and the joined scan stays clean on it.
+    api = REPO / "tortoise" / "api.py"
+    assert "reconstruction source" in api.read_text(encoding="utf-8")
+    assert _wrapped_claim_lines(api) == []
 
 
 def test_no_wrapped_durability_claim_anywhere_in_the_scanned_roots():
