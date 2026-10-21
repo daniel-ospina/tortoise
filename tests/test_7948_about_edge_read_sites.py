@@ -100,6 +100,24 @@ WHAT THIS PINS
    them" could not hold — the six customer-callable rows carried nine symbols.
    It now states sites, rows, customer-callable rows and the sites inside them
    separately, and each numeral is checked against its own unit.
+8. **`test_the_census_prose_carries_no_line_citations`** — the LINE HINTS. §13
+   states its own rule (*the symbols are authoritative and the line numbers are
+   deliberately omitted*) and then, one document over, the sibling paragraph went
+   on carrying fifteen `file.py:NNNN` hints — six of them pointing at unrelated
+   code at the head that rewrote it. A line number is not a claim this guard can
+   check (asserting it would red on every unrelated edit), so the claim is
+   removed instead of trusted: the census prose carries none.
+9. **`test_the_prose_names_every_row_in_the_empty_pattern_class`** — the CLASS
+   SENTENCE. §13 declares the empty-pattern class *"by rows"*, and that list is
+   a prose restatement of arm 3's derived set: it said *"rows 3 and 17"* while
+   the class had three members (row 18 is the backfill census). An
+   under-counted declaration is the same defect as an under-counted table, one
+   level up, so the sentence is compared to the derived set.
+10. **`test_the_reach_column_names_only_symbols_that_exist`** — the `reach`
+   COLUMN'S SYMBOLS. Every backticked identifier in `reach` must exist in the
+   package: row 7 cited `QueryOptions`, which is defined nowhere. The arms above
+   resolved the `site` column only, so an unguarded column could name a symbol
+   that never existed and stay green.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -136,10 +154,11 @@ whole argument"*: the arm reads the numeral out of the sentence that states it
 and compares it to the `reach` column, so demoting two rows without moving the
 number — the `#7956` erratum's exact direction, and the error the KEEP ruling
 rests on — reds instead of shipping. The same arm checks the census-size
-numerals (`TWENTY-TWO read sites across EIGHTEEN rows, and SEVEN of those rows
-(ten sites) are CUSTOMER-CALLABLE`) against their own units. Only the numeral is
-read, never the prose around it, so the sentence can be rewritten freely as long
-as it stays true.
+numerals (sites, rows and the sites inside the customer-callable rows) against
+their own units, so the numerals are never restated here a second time: a copy in
+this docstring is the same circular agreement the table's sibling copy was. Only
+the numeral is read, never the prose around it, so the sentence can be rewritten
+freely as long as it stays true.
 
 Static, stdlib-only, no network / DB / graph — it reads source text and a
 document.
@@ -155,6 +174,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TORTISE = ROOT / "tortoise"
 STORAGE = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
+EXTRACTOR = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 
 #: The edge the §13 ruling is about.
 EDGE = "aboutObject"
@@ -1464,4 +1484,192 @@ def test_the_empty_pattern_class_derivation_holds():
         "the empty-pattern derivation lost a shape (or started counting one it "
         "must not), so a reader that names no type would pass undeclared:\n  - "
         + "\n  - ".join(missing)
+    )
+
+
+#: The sibling paragraph that narrates the census in `EXTRACTOR-V4-ARCHITECTURE.md`
+#: (its opening line — the paragraph itself is one long line).
+_EXTRACTOR_PASSAGE = "2. **Should `aboutObject` be a stored edge or a derived join?**"
+
+#: A `file.py:NNNN` line hint. The census prose must carry NONE: a line number is
+#: the one citation shape this guard cannot check (asserting it would red on every
+#: unrelated edit), so the honest form is to omit it, as §13 already does.
+_LINE_HINT = re.compile(r"\b[A-Za-z0-9_/]+\.py:\d[\d+-]*")
+
+#: The sentence that declares the empty-pattern class *by its rows*.
+_EMPTY_PATTERN_PROSE = re.compile(
+    r"empty relationship pattern\*\*.{0,160}?\brows?\s+"
+    r"((?:\d+)(?:[,\s]+(?:and\s+)?\d+)*)"
+)
+
+#: A backticked token in a `reach` cell that claims to be a code symbol.
+_REACH_SYMBOL = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+@lru_cache(maxsize=1)
+def _census_prose() -> tuple[tuple[str, int, str], ...]:
+    """Every line that NARRATES the census: §13's bullet and the sibling paragraph.
+
+    The census is a claim about the CODE and it is written twice — once as the
+    table, once as prose around it. Only the table was parsed, so the prose could
+    carry a stale line number, an under-counted class and a symbol that does not
+    exist while every arm stayed green: a PASS about a false artifact, which is
+    the failure mode this whole instrument exists to end.
+    """
+    lines: list[tuple[str, int, str]] = []
+    inside = False
+    for number, line in enumerate(STORAGE.read_text(encoding="utf-8").splitlines(), start=1):
+        if not inside:
+            inside = line.startswith(_BULLET_START)
+            continue
+        if line.startswith("- **") or line.startswith("---"):
+            break
+        lines.append(("STORAGE §13", number, line))
+    for number, line in enumerate(
+        EXTRACTOR.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+        if line.startswith(_EXTRACTOR_PASSAGE):
+            lines.append(("EXTRACTOR-V4 (the aboutObject decision paragraph)", number, line))
+    return tuple(lines)
+
+
+def test_the_census_prose_carries_no_line_citations():
+    """The census prose must state SYMBOLS, never `file.py:NNNN`.
+
+    §13 states the rule for the whole census — *the symbols are authoritative and
+    the line numbers are deliberately omitted*, because they rotted between
+    `c79ba1cf2` and the current head — and then the sibling paragraph in
+    `EXTRACTOR-V4-ARCHITECTURE.md` carried fifteen hints and said they were "the
+    convenience, not the authority". At the head that rewrote it, six of the
+    fifteen pointed at unrelated code (a comment inside another function, a
+    `return` statement, a bare `*,` in a signature, a docstring line), and the
+    same numbers were already different again one merge later. A re-verifier
+    following one lands in unrelated code and concludes the passage is wrong.
+
+    A line number is not something this guard can keep true — asserting it would
+    red on every unrelated edit — so the claim is REMOVED rather than trusted.
+    The symbols stay, and they are what the other arms resolve.
+    """
+    prose = _census_prose()
+    assert prose, (
+        "the census prose was not found at all, so this arm passes vacuously — "
+        "`_census_prose()` located neither §13's bullet nor the sibling "
+        "paragraph; re-point the markers at wherever the census is narrated"
+    )
+    assert any(where.startswith("EXTRACTOR") for where, _number, _line in prose), (
+        "the sibling passage in `EXTRACTOR-V4-ARCHITECTURE.md` was not located, "
+        "so half of this arm is checking nothing — the paragraph's opening line "
+        "moved or was re-worded, and the fifteen line hints this arm exists for "
+        "live in it: re-point `_EXTRACTOR_PASSAGE` at it"
+    )
+    offenders = [
+        f"{where} line {number}: `{hint}`"
+        for where, number, line in _census_prose()
+        for hint in (m.group(0) for m in _LINE_HINT.finditer(line))
+    ]
+    assert not offenders, (
+        "these `file.py:NNNN` hints are back in the census prose. Each one is a "
+        "claim that rots on every edit to the file it cites — and the passage "
+        "this arm was written for already had six of seven pointing at "
+        "unrelated code — so state the symbol and drop the number (see §13's "
+        "own sentence: the symbols are authoritative and the line numbers are "
+        "deliberately omitted):\n  - " + "\n  - ".join(offenders)
+    )
+
+
+def test_the_prose_names_every_row_in_the_empty_pattern_class():
+    r"""The class sentence is a prose RESTATEMENT of a derived set, so compare it.
+
+    §13 declares the empty-pattern class by naming its rows: *"an empty
+    relationship pattern (`MATCH (n)-[r]->(m)`, rows 3 and 17)"*. Row 18 (the
+    backfill census, `OPTIONAL MATCH (o)<-[r]-()`) is the same class, and the
+    guard's own docstring said so — so the sentence under-counted its own
+    members. That is an under-counted declaration of the exact kind the table
+    itself was four times corrected for, one level up, and it is what a
+    re-verifier reads FIRST when told the class exists.
+
+    The asserted set is derived (rows whose symbols are empty-pattern reads at
+    this head), never a second hand list, so the sentence and the class cannot
+    drift apart again.
+
+    ⚠️ The derived set is restricted to the readers the shape walk is the ONLY
+    route to — an empty-pattern reader whose about\*-relevance is gated by a
+    relationship constant (`supersede_point`, `_preview_supersede`) is reached by
+    the NAME census as well, so the sentence is not about it. That restriction is
+    derived, not asserted by hand: the rows here are the empty-pattern rows the
+    named census does not also derive.
+    """
+    named_keys = {(path.rsplit("/", 1)[-1], symbol) for path, symbol in _census()}
+    derived_keys = {
+        (path.rsplit("/", 1)[-1], symbol) for path, symbol in _empty_pattern_sites()
+    }
+    shape_only = derived_keys - named_keys
+    derived_rows = {
+        number
+        for number, _site_cell, _reach, pairs in _declared_rows()
+        if any(pair in shape_only for pair in pairs)
+    }
+
+    prose_rows: set[int] = set()
+    found = False
+    for _where, _number, line in _census_prose():
+        for match in _EMPTY_PATTERN_PROSE.finditer(line):
+            found = True
+            prose_rows.update(int(token) for token in re.findall(r"\d+", match.group(1)))
+
+    assert found, (
+        "the sentence that declares the empty-pattern class by its rows is gone "
+        "(or rewritten out of the shape this arm reads), so nothing says which "
+        "rows belong to the class and a new member's row need not appear in it — "
+        "re-word the sentence to name the rows after an `empty relationship "
+        "pattern`, or delete this arm and move the declaration somewhere it can "
+        "be checked"
+    )
+    assert prose_rows == derived_rows, (
+        "the empty-pattern class's declared rows and the class derived from the "
+        "code disagree. The sentence under-counted its own members once already "
+        "(it said rows 3 and 17 while the backfill census, row 18 — "
+        "`OPTIONAL MATCH (o)<-[r]-()` — is the same shape), which is the same "
+        "direction as the table's four corrections and reads as authoritative to "
+        "the next re-verifier. Rows only the shape walk reaches: "
+        f"{sorted(derived_rows)}; rows the sentence names: {sorted(prose_rows)}"
+    )
+
+
+def test_the_reach_column_names_only_symbols_that_exist():
+    """Every backticked symbol in a `reach` cell must exist in the package.
+
+    The other arms resolve the `site` column, so `reach` was unguarded prose — and
+    it cited `QueryOptions`, a name defined nowhere in `tortoise/` (the flag it
+    describes is a keyword parameter of `tortoise_fts_query`). A non-existent
+    symbol in the column that says WHO can reach a reader is the same defect as a
+    non-existent row: a re-verifier looks for it, finds nothing, and distrusts
+    the passage. This is deliberately a *presence* check, not a reachability
+    claim — the prose around the symbol carries the reasoning.
+    """
+    corpus = "\n".join(_sources().values())
+
+    checked = 0
+    problems: list[str] = []
+    for number, _site_cell, reach, _pairs in _declared_rows():
+        for token in re.findall(r"`([^`]+)`", reach):
+            token = token.strip()
+            if not _REACH_SYMBOL.match(token):
+                continue
+            checked += 1
+            if token not in corpus:
+                problems.append(
+                    f"row {number}: `{token}` is cited in `reach` and appears "
+                    "nowhere in `tortoise/`"
+                )
+
+    assert checked >= 3, (
+        f"only {checked} backticked symbols found in any `reach` cell — the "
+        "column's shape changed and this arm would pass vacuously"
+    )
+    assert not problems, (
+        "these `reach` cells cite symbols that do not exist in the package, so a "
+        "re-verifier following the row finds nothing and distrusts the passage "
+        "(correct the reference to the real symbol, or drop the backticks if it "
+        "is prose):\n  - " + "\n  - ".join(problems)
     )
