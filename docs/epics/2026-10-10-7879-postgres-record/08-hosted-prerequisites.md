@@ -22,7 +22,7 @@ system of record *for the hosted product*, each item stating what it blocks, its
 **What this document is NOT.** It is not a re-litigation of §2.0, and it is not a migration plan.
 Two things are decided and are not reopened here: **Postgres is the record and FalkorDB is a derived
 hot cache** (§2.0), and **there are no existing customers, so no migration-safety apparatus is
-designed** (owner scope ruling, 2026-10-10, quoted in `04-projection.md` §0). A reader who finds an
+designed** (owner scope ruling, 2026-10-10, quoted at `04-projection.md:24`). A reader who finds an
 item below implying either has found a defect in this document, not a proposal.
 
 ---
@@ -420,7 +420,8 @@ Postgres, and §17.4 already prices both stores.
 2. **R2** land the schema → *R1 without R2 is a 500*
 3. **R3** CI proof → *so items 4–9 cannot regress silently; measured, this is how a NEW #9264-class disagreement would hide*
 4. **R4** the two schema↔producer disagreements → *so the session/point record is complete*
-5. **R6** tenancy enforced → *before a second customer's data exists*
+5. **R6** tenancy enforced → *the bypass rule must be answered before the first hosted customer's data
+exists*
 6. **R5** the edge/operator family → *before the "destroy the graph" claim can be made*
 7. **R7** raw text + S1 narrative in Postgres → *for the same claim: the record has no narrative-first
 home — the text is carried as data (an episodic `point.content` row and its `journal_event.payload`),
