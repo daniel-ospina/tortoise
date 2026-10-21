@@ -63,29 +63,39 @@ Every layer row is keyed by `(org_id, graph_id)` with a foreign key to
 here (:func:`mutations_for`, :func:`replay_plan`, :func:`replay`), and of the
 seam that drives them (`record_writer.RecordWriter.write`, #9194): at this
 layer there is deliberately no module-level default, no ContextVar and no
-environment fallback. `test_this_module_has_no_ambient_tenant_READER` executes
-the half of that a scan can execute — no environment reader and no
-`contextvars` — while the parameter half (each coordinate required on its own)
-is executed by the refusal leg in `tests/test_record_projection.py` for these
-three entry points, and by
+environment fallback. Two scans execute what prose cannot. The first forbids an
+ambient READER (`test_this_module_has_no_ambient_tenant_READER`: no environment
+reader and no `contextvars` in this module), and the parameter half (each
+coordinate required on its own) is executed by the refusal leg in
+`tests/test_record_projection.py` for these three entry points, and by
 `test_the_seam_refuses_a_call_that_cannot_name_its_tenant` for
 `RecordWriter.write` / `write_records`, which is what a production caller
-touches. What defeats the SCAN, and only the scan, is an ACTIVE obfuscated
+touches. The second forbids the one fallback shape none of those can see
+(`test_no_entry_point_rebinds_the_tenant_it_was_given`): a body may not REBIND
+a coordinate it was given — `org_id = org_id or _DEFAULT_TENANT[0]`,
+`org_id = org_id or "a-literal"`, a `ContextVar` read applied in the body, a
+loop unpack, a walrus, a `with … as` — while a re-derivation of the caller's
+own value (`org_id.strip()`, `str(graph_id)`) stays green. Every fallback
+reaches the pair as an assignment to it, so forbidding the assignment bounds
+the class rather than one spelling of it.
+What defeats the ambient SCAN, and only the scan, is an ACTIVE obfuscated
 read (`org_id = getattr(os, "environ").get("TORTOISE_RECORD_ORG_ID") or
 org_id`, `__import__("os")`): spelled that way it still reds the same value
 legs as the plain spelling (measured, three of them) — while a DORMANT
-spelling of it defeats both, like any dormant read (measured, all green). What
-escapes BOTH instruments is a read that never fires on a fixture path — a
-body-local fallback to a module constant (`org_id = org_id or
-_DEFAULT_TENANT[0]`, signature still required), or a carrier DEFINED ELSEWHERE
-(a `ContextVar` imported from another module: the `record_writer.use_record_tenant`
-that #9192 names, which this tree does not carry and whose production owner is
-#9188): the scan parses this file only, and no fixture arms that carrier.
-Measured: all legs stay green on both. A signature default, however, IS
-caught — by the refusal leg on these entry points, and by the seam leg on
+spelling of it defeats the value legs and still reds one of the two scans,
+because a read assigned to a tenant parameter is a rebinding (measured, 2 of
+121). What escapes both instruments is a fallback that names NO tenant
+parameter: a resolver that hands a pair to the fold
+(`replay_plan(records, org_id=_ambient()[0], …)`) is invisible to the
+rebinding rule — in this module the env read it needs reds the ambient scan
+(measured, 1 of 121), and one layer up it is the ambient carrier itself. A
+carrier DEFINED ELSEWHERE and applied through a parameter IS caught now
+(measured, planted in `mutations_for` and in `RecordWriter.write`, each reds
+the rebinding leg alone — 1 of 121), as is a body-local fallback to a module
+constant, which is the shape #9192's ask 2 is about. A signature default is
+caught by the refusal leg on these entry points and by the seam leg on
 `RecordWriter.write` / `write_records`. These limits are SUMMARISED here and
-MEASURED in `tests/test_record_projection.py`, except the signature one, which
-is pinned in both test files.
+MEASURED in `tests/test_record_projection.py`.
 
 The reason is the failure mode, not taste. The hosted lane builds one SDK per
 tenant graph and its capture executor is process-wide, so a tenant resolved
@@ -116,8 +126,13 @@ the same value for every tenant it serves. Until that fallback is pinned,
 production caller, is what makes the fallback unnecessary in the first place.
 The regression pins for THIS layer are
 `test_two_tenants_in_one_process_do_not_cross_write` and
-`test_two_tenants_through_the_seam_never_cross_write`; the pin for the arming
-surface belongs with #9231.
+`test_two_tenants_through_the_seam_never_cross_write`; what THIS layer can pin
+of ask 2's refusal half is already pinned —
+`test_no_entry_point_rebinds_the_tenant_it_was_given` forbids any body in this
+module or in `record_writer` from replacing the pair it was handed, so a
+fallback cannot land here without a build going red. The pin for the arming
+surface — the carrier's own env fallback, reachable with NO caller-supplied
+pair — belongs with #9231.
 """
 
 from __future__ import annotations
