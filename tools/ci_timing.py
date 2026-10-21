@@ -429,7 +429,14 @@ COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 _V = r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)"
 V_PROGRESS_RE = re.compile(
     rf"^(?P<nodeid>tests/\S+?\.py::.+?)\s+(?P<verdict>{_V})"
-    rf"(?:\s+\(.*\))?\s*\[\s*\d+%\]\s*$")
+    rf"(?:\s+\(.*\))?\s*\[\s*\d+%\]"
+    # The line's LAST marker decides; text after it is allowed. A child process can
+    # concatenate its own stderr onto the verdict line with no newline — real, in the
+    # shipped sample: `...test_import_deleted_team_410 PASSED [ 58%]11265:C 20 Oct 2026
+    # 17:50:42.598 # Fatal error, can't open config file` — and an end-anchor `\s*$`
+    # silently dropped that line, so on a leg truncated before the summary block a real
+    # FAILED vanished from `failed_tests` AND from the count (#9134 review, P1).
+    rf"(?!.*\[\s*\d+%\]).*$")
 # Some logs carry a bare `id VERDICT` line with no percentage marker (a hand-trimmed capture, an
 # extract, the suite's own fixture). Accepting only the marked form dropped every outcome in such a
 # leg, so this alternative reads them. It is deliberately narrow: the id may not contain a space,

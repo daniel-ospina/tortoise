@@ -1736,6 +1736,26 @@ def test_a_reason_truncated_between_verdict_and_marker_is_still_recorded(tmp_pat
     assert parsed["outcomes"] == {"tests/test_x.py::test_skipped": "SKIPPED"}
 
 
+def test_a_verdict_line_with_trailing_output_is_still_a_verdict(tmp_path: Path) -> None:
+    """A child process that writes to stderr with no newline lands ON the verdict line.
+
+    Real output in the shipped sample: `...::test_import_deleted_team_410 PASSED [ 58%]11265:C
+    20 Oct 2026 17:50:42.598 # Fatal error, can't open config file` (three such lines across the
+    run's logs). An end-anchored `\\s*$` after the marker dropped the whole line, so on a leg
+    truncated before the summary block — the killed shape this artifact must publish honestly —
+    a real FAILED disappeared from `failed_tests` AND from the count (#9134 review, P1). The
+    line's LAST marker decides; text after it is not a second verdict.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_a FAILED [ 10%]1526:C 20 Oct 2026 17:50:42.598 # Fatal error,"
+        " can't open config file\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_a"}
+    assert agg["total_counts"]["failed"] == 1
+
+
 def test_a_parseable_id_with_unbalanced_brackets_is_still_a_failure(tmp_path: Path) -> None:
     """An id whose PARAMETER contains `[` is unbalanced, and is still a real failure.
 
@@ -1771,10 +1791,10 @@ def test_the_banner_is_the_measurement_and_is_not_inflated(tmp_path: Path) -> No
 def test_a_verdict_word_as_a_parameter_is_not_a_second_test(tmp_path: Path) -> None:
     """`test_handler_level[ERROR]` is ONE test whose PARAMETER spells a verdict.
 
-    The discriminator for an embedded nodeid is the `VERDICT [ NN%]` progress MARKER, not the
-    verdict word: counting words dropped every real failure whose id or message happened to
-    contain `ERROR`/`FAILED`/`SKIPPED`, and on a summary-less leg it dropped the count too
-    (#9134 review, P1).
+    The rule is POSITIONAL: the id is everything before the line's FINAL `VERDICT [ NN%]`
+    marker and the verdict is the last verdict word before it. Counting verdict WORDS dropped
+    this failure; counting markers skipped `test_p[FAILED[100%]]` as if it were two tests —
+    both were measured wrong (#9134 review, P1).
     """
     leg = tmp_path / "logs" / "pytest-log-test-a"
     leg.mkdir(parents=True)
