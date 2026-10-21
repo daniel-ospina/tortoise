@@ -1897,21 +1897,32 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
     only advises (`PROVENANCE ADVISORY`, #8171).
     """
     text = _normalise(_read(FAQ))
-    for refuted in ("verbatim and authoritative", "the source is never rewritten"):
+    for refuted in (
+        "verbatim and authoritative",
+        "the source is never rewritten",
+        "verbatim evidence",
+        "kept verbatim",
+    ):
         assert refuted not in text, (
             f"website/faq.html restates {refuted!r}, which is false of the shipped "
             f"capture path (5000-character clip with a truncation marker, plus "
             f"credential redaction, both applied before the write)."
         )
-    for stated, home in (
-        ("5,000 characters", "_CAPTURE_TURN_CAP"),
-        ("truncation marker", "_clip_capture_turn_content"),
-        ("credential-shaped spans are redacted", "_redact_turn_contents"),
-    ):
-        assert stated in text, (
-            f"website/faq.html no longer states {stated!r} ({home}) — the page must "
-            f"describe the shaping it actually applies, not omit it."
-        )
+    # The NUMBER is pinned as a fact (it must follow `_CAPTURE_TURN_CAP` = 5000,
+    # sdk.py:1134); the other two are pinned as STEMS, not sentences — a future
+    # editor rewording "credential-shaped spans are redacted" to "credentials are
+    # redacted" has not broken anything, and a pin that reds true copy gets
+    # deleted by the first person it blocks.
+    assert "5,000 characters" in text, (
+        "website/faq.html no longer states the capture window (_CAPTURE_TURN_CAP)"
+    )
+    assert "truncat" in text.lower(), (
+        "website/faq.html no longer says an over-cap turn is marked (_clip_capture_turn_content)"
+    )
+    assert "redact" in text.lower(), (
+        "website/faq.html no longer says credential-shaped spans are redacted "
+        "(_redact_turn_contents, #4911)"
+    )
     assert "every extracted claim carries the source it was drawn from" in text, (
         "the scoped traceability claim was dropped along with the false universal"
     )
