@@ -678,22 +678,27 @@ def test_the_clear_gates_are_fail_closed(monkeypatch):
                      {"converged": True, "truncated": False, "iterations": 1},
                      run_ep=None)
             # The epoch guard is the ONE row that reaches the sweep: it is
-            # per-node (`ep_dirty_at <= run_ep`), and `_sweep_dirty_roots`
-            # subtracts the whole run set from the in-flight mirror BEFORE the
-            # graph clear. So the graph flag survives (asserted above) while the
-            # mirror entry is dropped — pre-existing behaviour of the shared
-            # sweep, inherited here, and recorded as its own finding rather than
-            # silently asserted away.
+            # per-node (`ep_dirty_at <= run_ep`), and since #9362 the sweep takes
+            # the graph's verdict before it touches the in-flight mirror. So the
+            # graph flag survives (asserted above) AND the mirror keeps the root
+            # — the two halves now move together, instead of the mirror dropping
+            # a root the graph still held dirty.
             _attempt("older-than-the-marking",
                      {"converged": True, "truncated": False, "iterations": 1},
                      reaches_sweep=True, run_ep=sdk._ep_epoch() - 1)
 
             # …and the same call with every gate satisfied DOES clear, so the
             # matrix above cannot pass by the method being inert. Driven on the
-            # SECOND root: the `older-than-the-marking` row above reaches the
-            # sweep, which drops the whole run set from the mirror before its
-            # per-node graph guard refuses — so `ids[0]`'s mirror entry is
-            # already gone and asserting on it here would pass on residue.
+            # SECOND root only to keep this assertion independent of the
+            # `older-than-the-marking` row's own state; that row's root is now
+            # asserted directly, because #9362's whole point is that a
+            # graph-retained root cannot be dropped from the mirror behind the
+            # gate matrix's back.
+            assert ids[0] in sdk._dirty_roots, (
+                "#9362: the sweep retained this root in the graph (the epoch "
+                "guard refused to clear it), so the mirror must still hold it "
+                "— dropping it blocks re-hydration for the life of the SDK"
+            )
             sdk._mark_dirty([ids[1]])
             assert ids[1] in _ep_dirty_ids(sdk)
             assert ids[1] in sdk._dirty_roots
@@ -828,16 +833,21 @@ def test_a_failed_sweep_does_not_fail_the_pass(monkeypatch):
     into a raised pass.
 
     A failed clear must also leave the flags SET (the safe, W4 direction) AND
-    restore the in-memory mirror EXACTLY. `_sweep_dirty_roots` subtracts
-    `affected | _unsweepable_dirty_roots(affected)` from the mirror BEFORE it
-    issues the graph write, and `_hydrate_dirty_roots` returns early while the
-    mirror is non-empty — so anything not restored is unretryable for the life
-    of this SDK. The failure is injected AFTER that subtraction (by a shim that
-    performs it and then raises), because stubbing the whole method would raise
-    before the subtraction and leave every mirror assertion trivially true. The
-    fixture includes a NEUTRAL-LINK root (#7505: the mitigation `mid`, whose
-    only edge is `(mid)-[:IMPL]->(op)`), which is part of `swept` but NOT of
-    `affected` — so a restore keyed on `affected` alone is red here.
+    restore the in-memory mirror EXACTLY. Since #9362 the sweep takes the
+    graph's verdict before it touches the mirror, so a real abort leaves the
+    mirror untouched and this restore is the identity; `_hydrate_dirty_roots`
+    still returns early while the mirror is non-empty, so the handler is kept as
+    a defensive identity and its coverage is what this test pins. The failure is
+    injected by a shim that performs the PRE-#9362 mirror subtraction and then
+    raises, i.e. it models the superseded ordering — which is exactly what makes
+    the restore non-trivial to assert: stubbing the whole method without the
+    subtraction would leave every mirror assertion trivially true, and only that
+    shim can show the handler covers `swept` in full. The fixture includes a
+    NEUTRAL-LINK root (#7505: the mitigation `mid`, whose only edge is
+    `(mid)-[:IMPL]->(op)`), which is part of `swept` but NOT of `affected` — so
+    a restore keyed on `affected` alone is red here. It would also be red if a
+    future change put the subtraction back in front of the write and kept this
+    handler.
     """
     with _db() as db:
         sdk = _open(db)
@@ -853,9 +863,12 @@ def test_a_failed_sweep_does_not_fail_the_pass(monkeypatch):
                 "precondition: and it is in the in-memory mirror"
 
             def _subtract_then_boom(self, affected, run_ep=None):
-                # The real ordering: the mirror is mutated, THEN the graph write
-                # is attempted. The simulated abort happens where a real engine
-                # abort would (on the `SET n.ep_dirty = null`).
+                # The PRE-#9362 ordering, reproduced deliberately: the mirror is
+                # mutated, THEN the graph write is attempted. The real sweep is
+                # write-first since #9362, so this shim is the only way to prove
+                # the restore handler still covers every root the sweep holds.
+                # The simulated abort happens where a real engine abort would (on
+                # the `SET n.ep_dirty`).
                 self._dirty_roots -= set(affected) | \
                     self._unsweepable_dirty_roots(affected)
                 raise RuntimeError("simulated engine abort on the sweep write")
