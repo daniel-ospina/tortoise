@@ -292,7 +292,7 @@ _NO_JOURNAL = {
     "_mark_dirty",
     "_reapply_operator_promotion",
     "_record_embedding_marker",
-    "_register_failed_attempt",
+    "_retry_cap_verdict",
     "_stamp_authored_word",
     "_sweep_dirty_roots",
     "_touch_inherited_at",
