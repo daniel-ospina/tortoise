@@ -416,9 +416,8 @@ DEFAULT_CONTAINER_MEMORY = "2g"
 #: in-process copy counted INSIDE the ceiling, and ``BGSAVE`` cannot fork at all
 #: here because the container runs `--save ''`. They are still a reason to keep a
 #: margin, but as headroom used *by this container*, not as RSS the ceiling
-#: ignores. It
-#: must stay STRICTLY BELOW the cap: a ``--maxmemory`` at or above it is no
-#: ceiling at all — RSS would reach the cgroup limit first and the kernel would
+#: ignores. It must stay STRICTLY BELOW the cap: a ``--maxmemory`` at or above
+#: it is no ceiling at all — RSS would reach the cgroup limit first and the kernel would
 #: ``SIGKILL`` the container, which is the death this ordering exists to replace.
 #: MEASURED ordinary peaks are 37-390 MiB against a 2g cap, so 1536 MiB is ~4x
 #: headroom over a normal suite run and can only fire on a genuine runaway.
@@ -486,12 +485,16 @@ def _spec_is_positive(spec: str) -> bool:
     The test is on BYTES, not on the number: docker truncates the parsed spec to
     an int64, so `0.0000000001g` (0.107 B) and `0.1b` install as Memory=0 —
     a positive NUMBER that becomes an UNCAPPED container (#7357 review).
+
+    The unit is sliced from the SAME normalised string the regex matched, as in
+    `_spec_bytes`: slicing the RAW spec made a padded spelling (`" 2g "`) match
+    the grammar and then miss the unit table (#7357 review, nit).
     """
-    m = _MEMORY_SPEC_RE.match(spec)
+    normalised = spec.strip().lower()
+    m = _MEMORY_SPEC_RE.match(normalised)
     if not m:
         return False
-    unit = spec[m.end(1):].lower()
-    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[unit]) >= 1
+    return int(float(m.group(1)) * _MEMORY_UNIT_BYTES[normalised[m.end(1):]]) >= 1
 
 
 def _spec_bytes(spec: str) -> int | None:
@@ -500,9 +503,11 @@ def _spec_bytes(spec: str) -> int | None:
     ⛔ DOCKER'S GRAMMAR ONLY. Every spelling is 1024-based to docker, but to
     Redis the bare `k`/`m`/`g` are DECIMAL — so a value read out of a
     container's `REDIS_ARGS` belongs in `_redis_spec_bytes`, not here (#7357
-    review, round 5). All three call sites here pass docker specs:
-    `container_dataset_ceiling`, `_memory_cap_args`/`container_memory_cap`, and
-    `_termination_report`'s `wanted`.
+    review, round 5). BOTH call sites here pass docker specs:
+    `container_dataset_ceiling` and `_termination_report`'s normalised
+    `wanted`. `container_memory_cap`/`_memory_cap_args` validate the grammar
+    with `_MEMORY_SPEC_RE`/`_spec_is_positive` and never count bytes, so they
+    are not call sites (#7357 review, nit).
 
     CASE-INSENSITIVE on purpose: docker's grammar is lowercase, and the cap is
     normalised before it gets here (`container_memory_cap`), so a permissive
@@ -721,11 +726,11 @@ def _container_live_maxmemory(name: str) -> int | None:
     if r.returncode != 0:
         return None
     lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-    if len(lines) < 2:  # pragma: no cover - `--raw` emits name then value
+    if len(lines) < 2:
         return None
     try:
         return int(lines[1])
-    except ValueError:  # pragma: no cover - redis answers an integer or an error
+    except ValueError:
         return None
 
 
@@ -755,7 +760,12 @@ def _note_missing_dataset_ceiling(name: str) -> None:
     never fire. The configured value therefore takes NO part in this function.
 
     THREE read outcomes of that limit, never collapsed: an int is the cap,
-    `0` is "NO cgroup cap at all", and `None` is "could not be read".
+    `0` is "NO cgroup cap at all", and `None` is "could not be read". Every
+    branch that names what happens on an overshoot derives that claim from this
+    read (`fate`) — "SIGKILLed by the cgroup cap" is only true when a cap WAS
+    read, and the env fallback used to assert it unconditionally (or, for
+    `--maxmemory 0`, to name the cap and then call the overshoot uncaught)
+    (#7357 review, round 6).
 
     ⛔ THE CEILING COMES FROM THE LIVE INSTANCE when it answers
     (`CONFIG GET maxmemory`), with the creation env as the fallback: a
@@ -791,18 +801,22 @@ def _note_missing_dataset_ceiling(name: str) -> None:
         else:
             cap_bytes = limit
             cap_note = f"its own cgroup cap ({limit})"
+        # ⛔ The SIGKILL claim needs a cap to make it true: when the cgroup cap
+        # is unreadable or ABSENT (`_note_uncapped_existing` prints that beside
+        # this note), saying "SIGKILLed by the cgroup cap" asserts a limit no
+        # branch read. ONE spelling, used by EVERY branch that names the
+        # overshoot's fate — the live branch had it first, and the two
+        # env-fallback branches asserted the SIGKILL unconditionally (or denied
+        # a cap they had just named), which is the same collapse (#7357 review,
+        # round 6: round 5 fixed it for the live branch only).
+        fate = ("an overshoot is SIGKILLed by the cgroup cap"
+                if cap_bytes is not None else
+                "an overshoot goes uncaught")
         live = _container_live_maxmemory(name)
         if live is not None:
             if live >= 1 and cap_bytes is not None and 0 < live < cap_bytes:
                 return
             if live < 1:
-                # ⛔ The SIGKILL claim needs a cap to make it true: when the
-                # cgroup cap is unreadable or ABSENT (`_note_uncapped_existing`
-                # prints that beside this note), saying "SIGKILLed by the cgroup
-                # cap" asserts a limit this branch did not read (#7357 review).
-                fate = ("an overshoot is SIGKILLed by the cgroup cap"
-                        if cap_bytes is not None else
-                        "an overshoot goes uncaught")
                 reason = (
                     "has NO dataset ceiling in effect (`CONFIG GET maxmemory` "
                     f"answers `{live}`, i.e. unbounded, so {fate} and the caller "
@@ -836,10 +850,14 @@ def _note_missing_dataset_ceiling(name: str) -> None:
                 return
             m = re.search(r"--maxmemory(?:=|\s+)(\S+)", raw)
             if m is None:
+                # ⛔ `fate`, never the bare SIGKILL claim: this fallback is
+                # reached with `cap_bytes is None` too (the cap read failed, or
+                # there is NO cgroup cap), and then there is no kernel limit for
+                # a SIGKILL to come from — the overshoot pages the host, which
+                # is #7357's own outage (#7357 review, round 6).
                 reason = (
                     "was created with NO dataset ceiling (`REDIS_ARGS` carries no "
-                    "`--maxmemory`, so an overshoot is SIGKILLed by the cgroup cap "
-                    "and the caller is told nothing)"
+                    f"`--maxmemory`, so {fate} and the caller is told nothing)"
                 )
             else:
                 # ⛔ REDIS's grammar, not docker's: this token is Redis's to
@@ -851,10 +869,15 @@ def _note_missing_dataset_ceiling(name: str) -> None:
                     # ``--maxmemory 0`` is NOT unreadable: it is Redis's spelling
                     # for NO LIMIT, the one value this note exists to catch, and
                     # reporting it as "unreadable" understates it (#7357 review).
+                    # ⛔ `fate`, not a hard-coded "uncaught": with a positive
+                    # `HostConfig.Memory` the overshoot IS caught (by the
+                    # kernel, just illegibly), and the old wording named the cap
+                    # in `cap_note` and then denied it in the same sentence
+                    # (#7357 review, round 6). "Uncaught" is true only when no
+                    # cap was read.
                     reason = (
                         "was created with `--maxmemory 0`, which means NO LIMIT "
-                        f"— {cap_note}, so an overshoot goes uncaught and the "
-                        f"caller is told nothing"
+                        f"— {cap_note}, so {fate} and the caller is told nothing"
                     )
                 elif ceiling_bytes is None or ceiling_bytes < 1:
                     reason = (

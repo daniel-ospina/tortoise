@@ -1435,6 +1435,14 @@ def test_start_reuses_a_running_container_without_removing_it(lane, monkeypatch)
     # property — "the reuse path never runs `docker run`" — instead of the read,
     # whose own behaviour is covered below.
     monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
+    # …and so do the TWO reads `_note_missing_dataset_ceiling` makes (the live
+    # ceiling and the creation env). They must be stubbed too, or the `_boom`
+    # below stops meaning what it says: that note wraps its whole body in
+    # `except Exception`, so an `AssertionError` raised by `_boom` is caught and
+    # the test stays green while the reuse path DOES reach docker (#7357 review,
+    # round 6). The ceiling is stubbed as healthy, so the note returns early.
+    monkeypatch.setattr(tl, "_container_live_maxmemory", lambda _n: 1536 << 20)
+    monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
     monkeypatch.setattr(tl, "_remove_and_describe",
                         lambda n: removed.append(n) or "removed it")
 
@@ -2147,16 +2155,42 @@ def test_a_reused_container_with_a_valid_ceiling_says_nothing(
     """The warning must be ACTIONABLE, so a correctly bounded container is silent.
 
     A note that fires on a healthy container is noise, and noise is how the real
-    one stops being read.
+    one stops being read. This drives the HEALTHY comparison (`0 < live < cap`,
+    the branch that returns silently on a live read) rather than an unreadable
+    one: a stubbed `exec` that answers a single line made the note silent through
+    the `cap_bytes is None` early return instead, so the docstring's property was
+    not the one exercised (#7357 review, nit).
     """
-    def fake(*a, **k):
-        if a[0] == "inspect" and a[1] == "--format" and "Config.Env" in a[2]:
-            return _R(0, '["REDIS_ARGS=--appendonly no --maxmemory 1536mb"]\n', "")
-        return _R(0, "2147483648\n", "")
-
-    monkeypatch.setattr(tl, "_docker", fake)
+    monkeypatch.setattr(tl, "_docker", _exec_fake("1610612736"))
     tl._note_missing_dataset_ceiling("fdb-lane-deadbeef03")
     assert capsys.readouterr().err == ""
+
+
+def test_the_live_ceiling_read_answers_None_when_the_reply_is_unusable(
+        monkeypatch):
+    """`None` is "could not read", never a ceiling (#7357).
+
+    The property of `_container_live_maxmemory` itself, tested directly: the
+    caller branches on `is not None`, so a failed exec, a truncated `--raw`
+    reply or a non-numeric value must all be indistinguishable from "no answer"
+    — and must never be read as "it is fine". These are also the branches the
+    `# pragma: no cover` markers used to hide while a test DID reach one of them
+    (#7357 review, nit).
+    """
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(1, "", "daemon down"))
+    assert tl._container_live_maxmemory("fdb-lane-x") is None
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "", ""))
+    assert tl._container_live_maxmemory("fdb-lane-x") is None
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: _R(0, "maxmemory\n", ""))
+    assert tl._container_live_maxmemory("fdb-lane-x") is None
+    monkeypatch.setattr(tl, "_docker",
+                        lambda *a, **k: _R(0, "maxmemory\nnot-a-number\n", ""))
+    assert tl._container_live_maxmemory("fdb-lane-x") is None
+    # …and a real reply is the byte count, so the distinguishing half is pinned
+    # too (an all-None function would satisfy every assertion above).
+    monkeypatch.setattr(tl, "_docker",
+                        lambda *a, **k: _R(0, "maxmemory\n1610612736\n", ""))
+    assert tl._container_live_maxmemory("fdb-lane-x") == 1610612736
 
 
 def _exec_fake(live_maxmemory: str, *, limit: str = "2147483648",
@@ -2322,6 +2356,44 @@ def test_a_quoted_reuse_ceiling_is_read_not_called_unreadable(
     assert err == "", err
 
 
+def test_the_start_reuse_path_reports_a_container_with_no_dataset_ceiling(
+        lane, monkeypatch, capsys):
+    """#7357 review round 6 P2 — the note's only PRODUCTION wiring.
+
+    Every other test of `_note_missing_dataset_ceiling` calls it DIRECTLY, so the
+    single line that reaches it in `start()` was unpinned: deleting it left the
+    whole suite green while the reuse path went silent again — #7357's own defect
+    ("the failure is not reported") restored with no failing test. The counter
+    makes that deletion fail; `capsys` makes the warning's presence the property,
+    not the call.
+    """
+    monkeypatch.setattr(tl, "_created_image", lambda _n: tl.IMAGE)
+    monkeypatch.setattr(tl, "container_state", lambda _n: "running")
+    monkeypatch.setattr(tl, "_published_port", lambda _n: (True, 16390))
+    monkeypatch.setattr(tl, "_wait_ready", lambda _n, _host_port=None: True)
+    monkeypatch.setattr(tl, "_remove_and_describe", lambda n: "removed it")
+    # The container is 2g-born and UNBOUNDED — the measured shape of the
+    # container this note exists for (`fdb-lane-1555b57be7`).
+    monkeypatch.setattr(tl, "_container_memory_limit", lambda _n: 2 << 30)
+    read: list[str] = []
+
+    def unbounded(name):
+        read.append(name)
+        return 0                     # `CONFIG GET maxmemory` -> 0, NO LIMIT
+
+    monkeypatch.setattr(tl, "_container_live_maxmemory", unbounded)
+    monkeypatch.setattr(tl, "_container_redis_args", lambda _n: "")
+
+    assert tl.start() == ("fdb-lane-0123456789", 16390)
+    err = capsys.readouterr().err
+    assert "NO dataset ceiling in effect" in err, err
+    assert "down" in err, err
+    assert read == ["fdb-lane-0123456789"], (
+        "start() must ASK the reused container for its live ceiling: without that "
+        f"call the note is dead code on the only path that needs it, got {read}"
+    )
+
+
 def test_the_docker_spec_parser_reads_a_padded_spec():
     """The unit is sliced from the SAME normalised string the regex matched.
 
@@ -2332,6 +2404,12 @@ def test_the_docker_spec_parser_reads_a_padded_spec():
     assert tl._spec_bytes(" 2g ") == 2 << 30
     assert tl._spec_bytes("2G") == 2 << 30
     assert tl._spec_bytes("2g") == 2 << 30
+    # `_spec_is_positive` slices the RAW spec unless it normalises first — the
+    # same defect one function over, harmless only because its one caller
+    # pre-normalises (#7357 review, nit).
+    assert tl._spec_is_positive(" 2g ") is True
+    assert tl._spec_is_positive("2G") is True
+    assert tl._spec_is_positive(" 0.0g ") is False
 
 
 def test_an_unbounded_ceiling_does_not_invent_a_cgroup_cap_to_blame(
@@ -2864,6 +2942,68 @@ def test_an_env_ceiling_of_zero_is_reported_as_unbounded_not_unreadable(
     err = capsys.readouterr().err
     assert "means NO LIMIT" in err, err
     assert "unreadable" not in err, err
+    # ⛔ …and the FATE half is read from the cap: with a 2g cap the overshoot IS
+    # caught (by the kernel, illegibly). The old wording named that cap in
+    # `cap_note` and then denied it — "so an overshoot goes uncaught" — in the
+    # same sentence (#7357 review, round 6).
+    assert "SIGKILLed by the cgroup cap" in err, err
+    assert "goes uncaught" not in err, err
+
+
+def test_a_zero_env_ceiling_with_no_cap_is_called_uncaught(monkeypatch, capsys):
+    """The other half of the same branch: NO cap read means "uncaught" is true.
+
+    Without it the fix above could be "always claim the SIGKILL", which is the
+    mirror-image error: with `HostConfig.Memory=0` there is no kernel limit, and
+    an overshoot pages the host — #7357's own outage (#7357 review, round 6).
+    """
+    monkeypatch.setattr(tl, "_docker", lambda *a, **k: (
+        _R(1, "", "no exec") if a[0] == "exec"
+        else _R(0, '["REDIS_ARGS=--maxmemory 0"]\n', "")
+        if "Config.Env" in a[2] else _R(0, "0\n", "")))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef18")
+    err = capsys.readouterr().err
+    assert "means NO LIMIT" in err, err
+    assert "goes uncaught" in err, err
+    assert "SIGKILLed by the cgroup cap" not in err, err
+
+
+def test_the_env_fallback_does_not_invent_a_cgroup_cap_to_blame(
+        monkeypatch, capsys):
+    """#7357 review round 6 P2 — the env-fallback sibling of the live-branch fix.
+
+    With the live read failing, the "no `--maxmemory` at all" branch asserted
+    "an overshoot is SIGKILLed by the cgroup cap" UNCONDITIONALLY — naming a cap
+    that the same run's three-way read had just found absent or unreadable. The
+    consequence is not cosmetic: with no cgroup cap the overshoot is not caught,
+    it pages the host ("#7357's fleet outage), so the message understated the
+    defect in the one place it is supposed to name it.
+    """
+    def env_with_no_ceiling(limit):
+        def fake(*a, **k):
+            if a[0] == "exec":
+                return _R(1, "", "redis wedged")   # force the env fallback
+            if a[0] == "inspect" and "Config.Env" in a[2]:
+                return _R(0, '["REDIS_ARGS=--appendonly no --save \'\'"]\n', "")
+            return _R(0, f"{limit}\n", "")
+        return fake
+
+    # (1) NO cgroup cap at all: there is no kernel limit for a SIGKILL to come
+    # from, and the note is beside `_note_uncapped_existing`'s own report.
+    monkeypatch.setattr(tl, "_docker", env_with_no_ceiling("0"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef19")
+    err = capsys.readouterr().err
+    assert "NO dataset ceiling" in err, err
+    assert "goes uncaught" in err, err
+    assert "SIGKILLed by the cgroup cap" not in err, err
+
+    # (2) …and where a cap WAS read, the claim is true and stays.
+    monkeypatch.setattr(tl, "_docker", env_with_no_ceiling("2147483648"))
+    tl._note_missing_dataset_ceiling("fdb-lane-deadbeef20")
+    err = capsys.readouterr().err
+    assert "NO dataset ceiling" in err, err
+    assert "SIGKILLed by the cgroup cap" in err, err
+    assert "goes uncaught" not in err, err
 
 
 def test_the_env_fallback_does_not_call_a_readable_ceiling_unreadable(
