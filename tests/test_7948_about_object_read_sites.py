@@ -181,13 +181,36 @@ WHAT THIS PINS
    is the class that was wrong five times running — each pass re-applied §13's
    inclusion rule by hand and reached a different count, the last one finding 27
    sites where the tree had 33 (the backup's all-edge dump and the
-   `backfill_v25` count among the six).
+   `backfill_v25` count among the six). **The same arm also censuses the
+   FRAGMENT half of that class** — a dash-delimited part carrying no clause of
+   its own (`_WALK = "-[r]->"`, then `"MATCH (n)" + _WALK + "(m)"`), which the
+   query-shaped census cannot see and which is owned by a row, an exclusion, or a
+   `_NON_LITERAL` pin. That census existed for three review cycles and was never
+   CALLED, so its docstring was a claim nothing executed and the bypass it
+   describes stayed open; it is wired here, with a synthetic part-assembled
+   fixture so the detection is falsifiable.
 17. `test_every_stated_exclusion_is_still_true` — an exclusion is not a
    promise: its code facts are asserted inside the excluded symbol's span, and
    (16) requires the fact that bounds THIS walk to sit in the walk's own clause —
    so removing the constraint reds as an unowned read rather than silently
    re-entering the class, and a second walk cannot inherit the first one's
    exclusion.
+18. `test_a_docstring_is_prose_and_not_a_read_site` — a docstring is prose, not
+   a query. The literal halves used to accept every string constant while the
+   untyped census filtered prose, so a row kept *"the named symbol really reads
+   the edge"* after the code stopped reading it (paste the old query into the
+   docstring — measured green on the pre-fix predicate). One rule now, both
+   directions: prose is dropped, the same query in the body is still counted.
+19. `test_the_prior_art_points_at_the_table_instead_of_restating_the_count` —
+   B2.7 of `REVIEW-CONSOLIDATED-2026-09-23.md` is cited as prior art and stated
+   the customer-callable count a third time; this PR corrected §13 and §13.8 and
+   left that copy stale. The durable form is a POINTER, so the row must name
+   §13's table and mark its own figure superseded.
+20. The mechanical floors: every arm that iterates a derived set asserts it
+   EXAMINED something (`assert census`, `assert pins`, `assert _EXCLUDED_UNTYPED`,
+   `assert fragments`, and the carrier arm's `assert checked`). A predicate that
+   silently stops recognising its candidates turns the arm green on an assertion
+   it never made — the carrier arm was exactly that before its floor.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -695,9 +718,22 @@ def _reads_literally(value: str) -> bool:
 
 
 def _reads_naming_the_edge(tree: ast.Module, lo: int, hi: int) -> bool:
-    """True when a Cypher READ clause inside [lo, hi] names the edge literally."""
+    """True when a Cypher READ clause inside [lo, hi] names the edge literally.
+
+    ⚠️ **A DOCSTRING is prose, not a query, and it is skipped here** — the same
+    `_docstring_ids()` filter `_untyped_read_sites()` has always applied, threaded
+    through so the two halves of this census agree on what a read is. Without it
+    a row kept its *"the named symbol really reads the edge"* verdict after the
+    code stopped reading it: paste the old query into the function's docstring and
+    this arm went green on prose (measured on the pre-fix predicate — the row 9
+    probe the review ran). The other direction matters too: an example query in a
+    docstring would become a phantom SITE and force a spurious row or exclusion.
+    """
+    docstrings = _docstring_ids(tree)
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in docstrings:
             continue
         if not lo <= getattr(node, "lineno", 0) <= hi:
             continue
@@ -730,6 +766,66 @@ def _about_family_dominates(elements: tuple[str, ...]) -> bool:
     return bool(elements) and about * 2 > len(elements)
 
 
+def _spliced_rel_family(node: ast.AST | None) -> tuple[str, ...] | None:
+    """The rel family a constant's VALUE can be spliced into `-[a:<value>]->` as.
+
+    Two forms qualify: a tuple/list/set of string literals and an `a|b|c`
+    alternation string, optionally wrapped in `set(...)` / `frozenset(...)` /
+    `tuple(...)` / `list(...)`. ⚠️ **Nothing else does — a CONCATENATION
+    (`_SHARED + ("aboutObject",)`) returns None**, which is a real limit of the
+    candidate set and the reason the carrier arm carries a non-vacuity FLOOR: a
+    carrier refactored into a `BinOp` disappears from the set, and without the
+    floor the arm would assert nothing while staying green.
+    """
+    # `frozenset({...})` / `set({...})` counts too: `DERIVABLE_STRUCTURAL_RELS`
+    # is the replay's rel filter and is spelled that way.
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"frozenset", "set", "tuple", "list"}
+        and len(node.args) == 1
+    ):
+        return _spliced_rel_family(node.args[0])
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return tuple(node.value.split("|")) if "|" in node.value else None
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        elements: list[str] = []
+        for element in node.elts:
+            if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                return None
+            elements.append(element.value)
+        return tuple(elements)
+    return None
+
+
+def _carrier_shaped_in(tree: ast.Module) -> dict[str, tuple[str, ...]]:
+    """`_carrier_shaped_constants()` for an ALREADY-PARSED module.
+
+    Split out so the shape rule can be asserted on a synthetic tree — the
+    carrier arm's floor ("this arm examined at least one pair") is only
+    meaningful beside a fixture that shows WHICH refactors empty the candidate
+    set, and a filesystem-bound scan cannot be handed one.
+    """
+    carriers: dict[str, tuple[str, ...]] = {}
+
+    def scan(body, prefix: str = "") -> None:
+        for node in body:
+            if isinstance(node, ast.ClassDef):
+                scan(node.body, prefix=f"{node.name}.")
+                continue
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                name = _bound_name(node)
+                if name is None:
+                    continue
+                elements = _spliced_rel_family(node.value)
+                if not elements or not _about_family_dominates(elements):
+                    continue
+                carriers[prefix + name] = elements
+
+    scan(tree.body)
+    return carriers
+
+
 @functools.cache
 def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     """module/class-level constants that can be SPLICED INTO a rel pattern.
@@ -750,50 +846,11 @@ def _carrier_shaped_constants(rel: str) -> dict[str, tuple[str, ...]]:
     where it can actually fail.
 
     The family test is a MAJORITY, not a prefix hit on any element — see
-    `_about_family_dominates()` for why the loose form is wrong.
+    `_about_family_dominates()` for why the loose form is wrong. The shape rule
+    itself is `_spliced_rel_family()`, and a candidate set that empties makes the
+    carrying arm RED on its floor rather than silently vacuous.
     """
-
-    def splices(node: ast.AST | None) -> tuple[str, ...] | None:
-        # `frozenset({...})` / `set({...})` counts too: `DERIVABLE_STRUCTURAL_RELS`
-        # is the replay's rel filter and is spelled that way.
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id in {"frozenset", "set", "tuple", "list"}
-            and len(node.args) == 1
-        ):
-            return splices(node.args[0])
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return tuple(node.value.split("|")) if "|" in node.value else None
-        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
-            elements: list[str] = []
-            for element in node.elts:
-                if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
-                    return None
-                elements.append(element.value)
-            return tuple(elements)
-        return None
-
-    path = _module_path(rel)
-    tree = _parsed(str(path))
-    carriers: dict[str, tuple[str, ...]] = {}
-
-    def scan(body, prefix: str = "") -> None:
-        for node in body:
-            if isinstance(node, ast.ClassDef):
-                scan(node.body, prefix=f"{node.name}.")
-                continue
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                name = _bound_name(node)
-                if name is None:
-                    continue
-                elements = splices(node.value)
-                if not elements or not _about_family_dominates(elements):
-                    continue
-                carriers[prefix + name] = elements
-
-    scan(tree.body)
-    return carriers
+    return _carrier_shaped_in(_parsed(str(_module_path(rel))))
 
 
 def _imported_module(rel: str, node: ast.ImportFrom) -> str | None:
@@ -841,6 +898,29 @@ def _carrier_declarations(rel: str) -> dict[str, tuple[str, str]]:
     return declarations
 
 
+def _literal_read_lines(tree: ast.Module) -> list[int]:
+    """Line numbers of each literal Cypher READ of the edge in one module.
+
+    Split out of the census so the same rule can be asserted on a SYNTHETIC tree
+    — the module walk is filesystem-bound, and an arm that decides whether
+    docstring prose is a read has to be reachable from a fixture that can turn
+    red. ⚠️ **Docstrings are filtered out** (`_docstring_ids()`), because the
+    literal halves and the untyped census must not disagree about what a read
+    is: prose inside a docstring is not a query the driver ever receives.
+    """
+    docstrings = _docstring_ids(tree)
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in docstrings:
+            continue
+        if not _reads_literally(node.value):
+            continue
+        lines.append(getattr(node, "lineno", 0))
+    return lines
+
+
 def _literal_read_sites() -> dict[str, list[int]]:
     """Census: module → line numbers of each literal Cypher READ of the edge."""
     found: dict[str, list[int]] = {}
@@ -850,15 +930,9 @@ def _literal_read_sites() -> dict[str, list[int]]:
         # relationship bracket cannot contain a literal read of it.
         if not _EDGE_PATTERN.search(text):
             continue
-        tree = _parsed(str(path))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
-                continue
-            if not _reads_literally(node.value):
-                continue
-            found.setdefault(str(path.relative_to(PKG)), []).append(
-                getattr(node, "lineno", 0)
-            )
+        lines = _literal_read_lines(_parsed(str(path)))
+        if lines:
+            found[str(path.relative_to(PKG))] = lines
     return found
 
 
@@ -1153,6 +1227,30 @@ def _fragment_brackets(value: str) -> list[int]:
     ]
 
 
+def _fragment_sites_in(tree: ast.Module) -> list[tuple[int, str]]:
+    """`(line, text)` of every FRAGMENT in ONE module that supplies an untyped walk.
+
+    Split out of the census so the fixture can assert the detection on a
+    SYNTHETIC tree: the bypass this closes is a shape (`_WALK = "-[r]->"` beside
+    `"MATCH (n)" + _WALK + "(m)"`), and a fixture that builds exactly that shape
+    is what proves the arm measures something. See `_untyped_fragment_sites`.
+    """
+    docstrings = _docstring_ids(tree)
+    sites: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
+            continue
+        rebuilt = _query_text(node, docstrings)
+        if rebuilt is None:
+            continue
+        value, lineno = rebuilt
+        if not _fragment_brackets(value):
+            continue
+        if all(lineno != line for line, _ in sites):
+            sites.append((lineno, value))
+    return sites
+
+
 def _untyped_fragment_sites() -> dict[str, list[tuple[int, str]]]:
     """Census: module → `(line, text)` of a FRAGMENT that supplies an untyped walk.
 
@@ -1171,34 +1269,30 @@ def _untyped_fragment_sites() -> dict[str, list[tuple[int, str]]]:
     requirement is unconditional ownership, so a part-assembled walk cannot be
     introduced silently.
 
+    ⚠️ **This census is WIRED IN, not documentation.** It was defined and never
+    called, which made its docstring a claim the suite never executed — the very
+    defect class this file exists to end, inside this file. Its owner check (and
+    a floor, so it cannot go vacuous) is in
+    `test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion`.
+
     **Limit, stated rather than implied.** This arm sees a DASH-DELIMITED
     fragment (`"-[r]->"`, `"(n)-[r]->(o)"`) — Cypher's own relationship
     delimiter, which is what makes the bracket a relationship at all. A fragment
     carrying only `"[r]"` is not distinguishable from a list index or a JSON
     array without knowing the caller, so it is not counted here; a reader built
     that way is held by the PINS (`_NON_LITERAL`), not by this census. That is
-    why §13 states the derived class as *relationship brackets, in a query or in
-    a dash-delimited fragment* — not as *every possible assembly*.
+    why §13 states the derived class as *relationship brackets, in a read clause
+    or assembled from a dash-delimited fragment* — not as *every possible
+    assembly*.
     """
     found: dict[str, list[tuple[int, str]]] = {}
     for path in sorted(PKG.rglob("*.py")):
         text = path.read_text(encoding="utf-8")
         if "match" not in text.lower() and "[" not in text:
             continue
-        tree = _parsed(str(path))
-        docstrings = _docstring_ids(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
-                continue
-            rebuilt = _query_text(node, docstrings)
-            if rebuilt is None:
-                continue
-            value, lineno = rebuilt
-            if not _fragment_brackets(value):
-                continue
-            sites = found.setdefault(str(path.relative_to(PKG)), [])
-            if all(lineno != line for line, _ in sites):
-                sites.append((lineno, value))
+        sites = _fragment_sites_in(_parsed(str(path)))
+        if sites:
+            found[str(path.relative_to(PKG))] = sites
     return found
 
 
@@ -1593,6 +1687,69 @@ def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
         "code fact that puts the edge out of this walk's result set."
     )
 
+    # ── the FRAGMENT half of the same class ────────────────────────────────
+    #
+    # ⚠️ **This census existed and was never called, so the bypass it documents
+    # was still open and its docstring was an unbacked claim.** A walk assembled
+    # from parts keeps the bracket in a different string constant from its
+    # `MATCH`, so the query-shaped census above sees no bracket at all: append
+    # `_WALK = "-[r]->"` beside `query("MATCH (n)" + _WALK + "(m)")` to any
+    # module and all seventeen arms stayed green. It is now wired here, with the
+    # ownership rule the docstring states (a row, an exclusion, or a
+    # `_NON_LITERAL` pin — the last of which the query-shaped arm never
+    # consults).
+    part_assembled = ast.parse(
+        '_WALK = "-[r]->"\n'
+        "\n"
+        "\n"
+        "def _probe_part_assembled_walk(query):\n"
+        '    return query("MATCH (n)" + _WALK + "(m)")\n'
+    )
+    assert _fragment_sites_in(part_assembled), (
+        "a part-assembled walk (`\"MATCH (n)\" + _WALK + \"(m)\"`, with the "
+        "bracket in its own clause-free constant) is not counted as a site — "
+        "that is the bypass this half of the census exists to close, and the "
+        "fixture is what makes it falsifiable."
+    )
+    assembled = ast.parse(
+        "def _probe_assembled_walk(query):\n"
+        '    return query("MATCH (n)-[r]->(m)")\n'
+    )
+    assert not _fragment_sites_in(assembled), (
+        "an ASSEMBLED walk is being read as a FRAGMENT — the fragment rule must "
+        "fire only where the bracket carries no clause of its own, or every "
+        "ordinary query becomes a phantom site."
+    )
+
+    fragments = _untyped_fragment_sites()
+    assert fragments, (
+        "the fragment census found NOTHING under tortoise/ — either the rule "
+        "changed or the part-assembled shape it exists for is gone. Re-point "
+        "this arm, or delete it with the claim; do not leave it vacuous."
+    )
+    pins = set(_NON_LITERAL) | set(_NON_LITERAL_SIBLINGS)
+    unowned_fragments: list[str] = []
+    for module, sites in sorted(fragments.items()):
+        symbols = _row_symbols(_module_tree(_module_path(module)))
+        for line, text in sites:
+            candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
+            keys = [f"{module}::{name}" for name in candidates]
+            if any(key in named or key in _EXCLUDED_UNTYPED or key in pins for key in keys):
+                continue
+            unowned_fragments.append(
+                f"{module}:{line}  (inside {', '.join(candidates) or 'module level'})"
+                f"  — fragment {text!r}"
+            )
+    assert not unowned_fragments, (
+        "these DASH-DELIMITED relationship fragments supply an untyped walk — "
+        "the `aboutObject` edge reaches the result set of whatever assembles "
+        "them — and no §13 row, stated exclusion or `_NON_LITERAL` pin owns the "
+        "symbol they sit in:\n  " + "\n  ".join(unowned_fragments) + "\nA walk "
+        "can be split across string parts to stay invisible to the query-shaped "
+        "census; the ownership requirement is unconditional, so add the row (or "
+        "the exclusion, with the code fact that earns it), or state the pin."
+    )
+
 
 def test_every_stated_exclusion_is_still_true():
     """An exclusion must stay earned: its code facts are asserted where they live.
@@ -1716,6 +1873,54 @@ def test_no_read_site_lacks_a_row():
         + "\n§13's list is the evidence the KEEP ruling rests on. A reader added "
         "beside an existing row is the drift B2.7 and #7956 both under-reported, "
         "and it is invisible to a module-level census."
+    )
+
+
+def test_a_docstring_is_prose_and_not_a_read_site():
+    """Docstring prose is not a query, and the census must not count it as one.
+
+    ⚠️ **The two halves of this file disagreed about what a read is.** The untyped
+    census filtered prose through `_docstring_ids()`; the literal census and the
+    row check accepted every string constant. Measured on the pre-fix predicate:
+    replacing row 9's link query with `CONTAINS` and pasting the old query into
+    `audit_session_retrofit`'s DOCSTRING left the whole suite green — a row kept
+    its *"the named symbol really reads the edge"* verdict after the code stopped
+    reading it, in the one arm whose stated job is exactly that claim. The other
+    direction is a phantom site: a docstring EXAMPLE would force a spurious row or
+    exclusion on the real census.
+
+    Non-vacuous both ways: the same query MOVED from the docstring into the body
+    is still counted, so the filter drops prose and only prose.
+    """
+    prose = ast.parse(
+        "def f():\n"
+        '    """MATCH (p:Point)-[:aboutObject]->(o:Object) RETURN o"""\n'
+        "    return 1\n"
+    )
+    assert _docstring_ids(prose), (
+        "`_docstring_ids()` no longer recognises a plain function docstring, so "
+        "the filter below (and in the untyped census) measures nothing."
+    )
+    assert not _literal_read_lines(prose), (
+        "a docstring carrying a Cypher read was counted as a READ SITE — the "
+        "driver never receives a docstring, so this is prose masquerading as "
+        "code, and it is how a row kept a stale verdict."
+    )
+    assert not _reads_naming_the_edge(prose, 1, 3), (
+        "a row whose reader kept its old query only in its DOCSTRING is reported "
+        "as still reading the edge — the row's claim is about code, not prose."
+    )
+
+    real = ast.parse(
+        "def f():\n"
+        '    return graph.query("MATCH (p:Point)-[:aboutObject]->(o:Object) RETURN o")\n'
+    )
+    assert _literal_read_lines(real), (
+        "the SAME query in the function BODY is no longer counted — the docstring "
+        "filter is dropping real reads, which would empty the census."
+    )
+    assert _reads_naming_the_edge(real, 1, 2), (
+        "the SAME query in the function BODY no longer satisfies the row check."
     )
 
 
@@ -2158,8 +2363,37 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
     `TORTOISE_TEST_CARVE_OUT=1 uv run pytest
     tests/test_7948_about_object_read_sites.py -q` → 1 failed with
     `row 17: … ABOUT_EDGE_TYPES`.
+
+    ⚠️ **`assert not broken` alone was a false PASS, and the FLOOR at the end is
+    the fix.** The pairs are built by nested loops; if the candidate set empties
+    (a carrier refactored to `ABOUT_EDGE_TYPES = _SHARED_ABOUT + ("aboutObject",)`
+    is no longer SPLICE-shaped, so `_carrier_declarations()` yields `{}`) the
+    loops run zero times, `broken` stays empty, and the arm reports green on an
+    assertion it never made — while the `_NON_LITERAL` pins those rows carry
+    survive the edge leaving the constant, so nothing else covers this claim. The
+    sibling arms (`assert census`, `assert pins`, `assert _EXCLUDED_UNTYPED`)
+    already guard the same way; this one now does too, and the synthetic fixture
+    below pins WHICH shape empties the set.
     """
+    # The shape rule, asserted where a fixture can falsify it: a tuple/set of
+    # literals or an `a|b|c` string is carrier-shaped; a CONCATENATION is not.
+    shaped = ast.parse('ABOUT_EDGE_TYPES = ("aboutSubject", "aboutObject")\n')
+    assert "ABOUT_EDGE_TYPES" in _carrier_shaped_in(shaped), (
+        "a tuple of string literals is no longer recognised as a carrier — the "
+        "shape rule changed and every row that reads the edge through a constant "
+        "is now unasserted."
+    )
+    concatenated = ast.parse(
+        'ABOUT_EDGE_TYPES = _SHARED_ABOUT + ("aboutObject",)\n'
+    )
+    assert not _carrier_shaped_in(concatenated), (
+        "a CONCATENATED carrier is being read as carrier-shaped — that changes "
+        "what this arm's floor can detect; re-derive the shape rule (and update "
+        "`_spliced_rel_family`'s stated limit) rather than widening it silently."
+    )
+
     broken: list[str] = []
+    checked = 0
     for row in _rows():
         module = str(row["module"])
         tree = _module_tree(_module_path(module))
@@ -2174,6 +2408,7 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
         ):
             if not re.search(rf"\b{re.escape(bare)}\b", source):
                 continue
+            checked += 1
             declared_tree = _module_tree(_module_path(declaring))
             declaration = _span(declared_tree, qualified)
             assert declaration is not None, f"{declaring}::{qualified} does not resolve"
@@ -2190,6 +2425,13 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
     assert not broken, (
         "these readers name the edge through a constant that NO LONGER contains "
         "`aboutObject`:\n  " + "\n  ".join(broken)
+    )
+    assert checked, (
+        "no row resolved a carrier-shaped constant — `_carrier_shaped_in()` (the "
+        "shape rule) or `_about_family_dominates()` (the family rule) no longer "
+        "recognises the constants rows 17-23 read through, so this arm is "
+        "measuring NOTHING. Measured 7 (row, carrier) pairs at the head this "
+        "floor was added; fix the rule, or delete this arm with its claim."
     )
 
 
@@ -2331,6 +2573,47 @@ def test_the_extractor_document_agrees_on_the_count():
         "customer-callable readers §13's table carries:\n  - " + "\n  - ".join(missing)
         + "\nA count is only as good as the list under it — the sibling is the "
         "second copy of this ruling, so it must enumerate the same readers."
+    )
+
+
+# ── 7b. the prior art points at the table, it does not restate it ─────────
+
+#: The consolidated review this PR cites as prior art for the read-site census.
+_PRIOR_ART = ROOT / "docs" / "architecture" / "REVIEW-CONSOLIDATED-2026-09-23.md"
+
+
+def test_the_prior_art_points_at_the_table_instead_of_restating_the_count():
+    """B2.7 is cited as prior art, so its figure must not read as current.
+
+    ⚠️ **A THIRD copy of the count, and the one this PR left stale.** B2.7's
+    erratum closed with *"⇒ the customer-callable count is four, not two"* while
+    §13 and §13.8 state SEVENTEEN, and nothing read this file — the same defect
+    this PR corrects twice, one copy further out, in the document the PR body
+    names as prior art. §13.8's own paragraph names the mechanism: *each copy
+    looked confirmed by the other*.
+
+    The durable form is a POINTER, not a fourth number: restating the count here
+    would mint a copy that rots on the next re-derivation. So the row must name
+    §13's table and mark its own figure superseded — and this arm keeps both.
+    """
+    text = _PRIOR_ART.read_text(encoding="utf-8")
+    row = next((line for line in text.splitlines() if line.startswith("| B2.7 |")), "")
+    assert row, (
+        "REVIEW-CONSOLIDATED-2026-09-23.md no longer carries the B2.7 row this "
+        "guard reads — re-point the guard at the finding that carries the "
+        "read-site count, or drop it with the citation that needs it."
+    )
+    assert "STORAGE-ARCHITECTURE.md" in row and "§13" in row, (
+        "B2.7 states a customer-callable count without pointing at "
+        "`STORAGE-ARCHITECTURE.md` §13's table, which is the authoritative, "
+        "executable copy — a reader who lands on this row takes a figure nothing "
+        "re-derives. Point at §13 instead of restating a number."
+    )
+    assert "SUPERSEDED" in row, (
+        "B2.7's customer-callable figure is presented as CURRENT — §13's table "
+        "supersedes it by a wide margin. Mark it superseded and point at §13, "
+        "or delete the figure; a stale copy next to a corrected one is how this "
+        "under-count survived three reviews."
     )
 
 

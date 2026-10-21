@@ -721,3 +721,45 @@ lane the three files bound and names the module and the door outside it;
 `tests/test_9399_search_path_claim_scope.py` holds it there by parsing the file
 list OUT of the sentence and re-running the scan over it, so widening the list or
 reverting the qualification reds.
+
+## §13's derived class now covers the FRAGMENT half, and three claims in the guard became executable (2026-10-21, `#7948`)
+
+Review cycle 5 found four defects, all inside the guard that makes §13 executable rather than anything
+in the table it pins. Each is closed by making the claim run.
+
+**The fragment census existed and was never CALLED.** `_untyped_fragment_sites()` carried a 40-line
+docstring stating that *any string expression holding a dash-delimited relationship bracket with no rel
+type and no clause at all is itself a site, and its enclosing symbol must account for it (a row, an
+exclusion, or a `_NON_LITERAL` pin)* — and no test invoked it. So the bypass it documents was open:
+`_WALK = "-[r]->"` beside `query("MATCH (n)" + _WALK + "(m)")` enters neither census (the bracket and
+its clause live in different constants), and the whole suite stayed green. It is now wired into
+`test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion` with exactly the ownership rule its docstring
+states — row, `_EXCLUDED_UNTYPED`, or `_NON_LITERAL` pin — a floor so it cannot go vacuous, and a
+synthetic part-assembled fixture so the detection itself is falsifiable. **Non-vacuity measured**: the
+probe above, appended to `tortoise/fanout.py`, reds naming `fanout.py (inside _WALK_FRAGMENT)`; it was
+green on the pre-fix tree. §13's sentence now states that half of the class (*in a read clause, or
+assembled from a dash-delimited fragment part that carries no clause of its own*), so the document and
+the instrument say one thing.
+
+**A docstring is prose, not a query — and the two halves of the census disagreed about it.** The untyped
+census filtered prose through `_docstring_ids()`; `_literal_read_sites()` and `_reads_naming_the_edge()`
+accepted every string constant. Measured on the pre-fix predicate: replace row 9's link query with
+`CONTAINS` and paste the old query into `audit_session_retrofit`'s **docstring** → every arm green, so a
+row kept its *"the named symbol really reads the edge"* verdict after the code stopped reading it. One
+rule now, asserted both ways by `test_a_docstring_is_prose_and_not_a_read_site`: prose is dropped, and
+the same query in the function BODY is still counted.
+
+**The carrier arm had no floor, so it could report green having asserted nothing.** It is the only arm
+asserting *"the constant IS the read"* (rows 17–21, 23), and it built its pairs in nested loops ending
+`assert not broken`. A carrier refactored to `ABOUT_EDGE_TYPES = _SHARED_ABOUT + ("aboutObject",)` is no
+longer splice-shaped, so `_carrier_declarations()` yields `{}`, the loops run zero times, and the arm
+passes while the `_NON_LITERAL` pins those rows carry keep the other arms green. It now counts the pairs
+it examined (`assert checked`; 7 at this head) and pins which refactor empties the candidate set, the way
+the sibling arms already guard (`assert census`, `assert pins`, `assert _EXCLUDED_UNTYPED`).
+
+**A third copy of the count was left stale — in the prior art this PR cites.** B2.7 of
+`REVIEW-CONSOLIDATED-2026-09-23.md` closed with *"⇒ the customer-callable count is four, not two"* while
+§13 and §13.8 state SEVENTEEN, and nothing read that file. The durable form is a POINTER, not a fourth
+number, so the row now marks its figure superseded and sends the reader to §13's table — and
+`test_the_prior_art_points_at_the_table_instead_of_restating_the_count` keeps the pointer there, because
+a restated count is a copy that rots on the next pass.
