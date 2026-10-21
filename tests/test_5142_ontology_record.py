@@ -350,27 +350,31 @@ def _document_writers_in_source(text: str, filename: str) -> dict[str, str]:
     except SyntaxError:  # pragma: no cover — a syntax error fails elsewhere
         return {}
     module_consts = _module_string_consts(tree)
+    # #9396 review P2: a DOCSTRING is an `ast.Constant` string too, so `ast.walk`
+    # alone let prose satisfy a caller's assertion — a writer whose MERGE lost
+    # the clause but whose docstring still quoted it went green, which is the
+    # false PASS this scanner exists to prevent. The exclusion is EVERY bare
+    # string EXPRESSION statement in the tree (any function's or class's
+    # docstring, at any nesting depth, plus a dead string statement), not just
+    # the outer function's `body[0]`: a nested helper's docstring is walked by
+    # `ast.walk(node)` exactly like the outer one, so excluding only `body[0]`
+    # would leave the same hole one `def` deeper. What may speak for the query
+    # are the string VALUES this function actually evaluates.
+    prose_nodes = {
+        id(child.value)
+        for child in ast.walk(tree)
+        if isinstance(child, ast.Expr)
+        and isinstance(child.value, ast.Constant)
+        and isinstance(child.value.value, str)
+    }
     writers: dict[str, str] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        # #9396 review P2: a DOCSTRING is an `ast.Constant` string too, so
-        # `ast.walk` alone let prose satisfy a caller's assertion — a writer
-        # whose MERGE lost the clause but whose docstring still quoted it went
-        # green, which is the false PASS this scanner exists to prevent. Only
-        # the executed string literals may speak for the query.
-        docstring_node = (
-            node.body[0].value
-            if node.body
-            and isinstance(node.body[0], ast.Expr)
-            and isinstance(node.body[0].value, ast.Constant)
-            and isinstance(node.body[0].value.value, str)
-            else None
-        )
         parts: list[str] = [
             child.value
             for child in ast.walk(node)
-            if child is not docstring_node
+            if id(child) not in prose_nodes
             and isinstance(child, ast.Constant) and isinstance(child.value, str)
         ]
         parts += [
@@ -524,4 +528,33 @@ def _docstring_only_writer():
     assert "coalesce(s.ingestedAt" not in derived, (
         "a docstring quoting the clause was counted as the query — the stamp "
         "assertion would pass on a writer that no longer stamps the field"
+    )
+
+
+def test_writer_scanner_ignores_a_NESTED_docstring_too() -> None:
+    """The exclusion is per-string-statement, not the outer function's `body[0]`.
+
+    #9396 re-review P2. `ast.walk(node)` reaches a NESTED function's docstring
+    exactly like the outer one's, so excluding only `node.body[0]` left the
+    same false PASS one `def` deeper: a helper whose docstring quoted the
+    clause credited the outer writer with a write it does not perform.
+    """
+    text = '''\
+def _outer_writer():
+    """The writer."""
+    def _helper():
+        """s.ingestedAt=coalesce(s.ingestedAt, $iat)"""
+        return None
+    return (
+        "MERGE (s:Source {url:$id}) "
+        "SET s.documentKind='transcript'"
+    )
+'''
+    derived = _document_writers_in_source(text, "synthetic.py").get(
+        "synthetic.py::_outer_writer", ""
+    )
+    assert "documentKind" in derived, "the outer writer must still be derived"
+    assert "coalesce(s.ingestedAt" not in derived, (
+        "a NESTED helper's docstring was counted as the query text — the outer "
+        "writer is credited with a stamp it never writes"
     )

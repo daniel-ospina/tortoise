@@ -114,16 +114,17 @@ def test_event_document_branch_fills_a_pre_fix_null_and_never_clobbers():
         proj.close()
 
 
-def test_a_corrupt_record_ts_falls_back_instead_of_aborting_the_fold():
+def test_a_corrupt_record_ts_falls_back_instead_of_being_silently_nulled():
     """Input: a journal line whose `ts` is not a driver-writable instant.
 
-    FAILS IF the fold hands the RAW record value to the driver (#5048): the new
-    `$iat` rides as a Cypher parameter, so an ungated value raises
-    `ResponseError: Property values can only be of primitive types` — from
-    inside a `rebuild_all` replay that has ALREADY wiped the graph, which is
-    why `_usable_instant` exists and why this slot must not be the exception.
-    This is the mutation the #9396 review's P1 named: restore
-    `record_ts or _now_iso()` and this test errors instead of stamping.
+    FAILS IF the fold hands the RAW record value to the driver. The failure is
+    SILENT, not a raise: `self.g`'s parameter boundary (`_journal_safe_params`)
+    degrades an unwritable value to `None` rather than aborting the replay, and
+    `None` in this DIRECT SET is a CLEAR — so the document `:Source` is created
+    with NO `ingestedAt`, a §4.6-REQUIRED field, with only a WARNING logged.
+    That is the D10 sweep red (#5140) this clause exists to close, which is why
+    `_usable_instant` is the gate here and not the boundary. Mutation: restore
+    `record_ts or _now_iso()` and this test fails on `got None`.
     """
     proj = _proj()
     try:

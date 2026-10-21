@@ -4767,10 +4767,17 @@ class _EntityHandlers:
             # the record's own `ts` when it carries a USABLE one — deterministic
             # on replay — falling back to the write clock only for a synthetic
             # event applied without one (legacy lines, test fixtures). "Usable"
-            # is `_usable_instant`, not truthiness: this value rides as a Cypher
-            # parameter (#5048), so a corrupt line's `ts={"evil": 1}` would raise
-            # `ResponseError: Property values can only be of primitive types`
-            # from inside a replay that has ALREADY wiped the graph.
+            # is `_usable_instant`, the policy every other record-derived instant
+            # in this module already goes through (:3341, :3463, :4117).
+            #
+            # The reason is NOT a raise: `self.g`'s parameter boundary
+            # (`_journal_safe_params`) DEGRADES an unwritable value to `None`
+            # rather than aborting the replay. `None` in this DIRECT SET is a
+            # CLEAR, so an ungated corrupt `ts` leaves a §4.6-REQUIRED field
+            # absent — silently, with only a WARNING logged — which is exactly
+            # the D10 sweep red (#5140) this clause exists to close. The gate
+            # is the only place that loss becomes a stated instant instead of a
+            # driver-dependent null.
             self.g.query(
                 "MERGE (s:Source {url:$id}) "
                 "ON CREATE SET s.id=$id, s.title=$id, "
