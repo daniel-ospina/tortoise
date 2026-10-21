@@ -177,7 +177,7 @@ idempotent, total, and stores no EP scalar`.
 | **the `session` record** | ⚠️ **`capture_redactions` lands NULL** — the column is `jsonb` and the producer emits an integer. Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**, so the record connects as the DB owner and §4's own bypass rule applies. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
-| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record, and nothing in the tree records the Supabase project's plan or its PITR state — that is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
+| **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** `tortoise/backup.py` (local JSONL + BGSAVE), `tortoise/hosted_backup.py` (logical Cypher dump, AES-256-GCM, to R2) and `backup_sweep.py` (the cron driver) all archive the **graph**; no module archives the record, and the tree's only statement about the project's backups is a 2026-08-08 **plan assumption** (*"Supabase Pro PITR covers control-plane tables adequately"*, `docs/plans/2026-08-08-669-align.md:63`), never verified against the live project — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
 ---
 
@@ -301,8 +301,9 @@ at 03:00.
 **What:** no module of ours backs up the record. `tortoise/backup.py` (module docstring: *"JSONL archiver +
 FalkorDB BGSAVE"*), `hosted_backup.py` (R2), `backup_sweep.py` (the cron driver) are all graph-only.
 §3 and §14.1's **O1** record the decision: **durability = the store's backup; rebuildability = the journal** —
-so promoting Postgres to the record **moves the durability obligation onto Postgres**, and it is
-currently unheld. Two halves: Supabase's PITR (a plan-tier fact, and therefore an owner decision on
+so promoting Postgres to the record **moves the durability obligation onto Postgres**, and no
+module of ours holds it (whether the paid plan does is unverified — the tree's only statement is
+the plan assumption cited in A8). Two halves: Supabase's PITR (a plan-tier fact, and therefore an owner decision on
 cost) **plus** an off-box logical dump to R2 on the existing sweep, **plus** a drill that proves it.
 **What it blocks:** durability of the new system of record. This is the item most likely to be
 mistaken for "already done" because the backup machinery *looks* present — it is present, for the
@@ -391,7 +392,7 @@ Postgres, and §17.4 already prices both stores.
 7. **R7** raw text + S1 narrative in Postgres → *for the same claim: it is the largest thing still
    only in the graph*
 8. **R8** a restore verb + a drill → *a restore that has never been run is not a restore*
-9. **R9** back up the record → *the durability obligation moved and is currently unheld*
+9. **R9** back up the record → *the durability obligation moved, and no module of ours holds it*
 
 **What can wait:** **R10** (pooling — gated on a measured write rate, not a date), **R11** (the meter
 → allowance wiring — gates the first *allowance*, not the first customer), **N1** (the read path, by
