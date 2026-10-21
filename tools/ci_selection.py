@@ -477,7 +477,7 @@ SOURCE_PATTERNS = {
                    # and §17.1's own door ledger. Reviewer-measured: both were
                    # WITHOUT the residual, and an auditor reading either concludes
                    # the onboarding class has no second writer, which the five
-                   # `eager_init_query()` sites disprove (`#9157`; they
+                   # `eager_init_query()` sites used to disprove (`#9157`; they
                    # now ride `run_eager_init` and the pin asserts that route in
                    # the AST for all five). `docs/` is in
                    # NON_PYTHON_PREFIXES and is not itself a pattern, so without

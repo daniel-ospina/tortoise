@@ -223,6 +223,12 @@ surfaces:
   # `tortoise/projection/__init__.py` needs no arm: it is in SHARED_MODULES
   # (full matrix).
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   - test_7951_write_doors.py
   # #7951 (steps 1-3, the ENFORCEMENT): DUAL-REGISTERED with the same six
   # surfaces as the door inventory above, for the same reason — the guard's
@@ -1765,6 +1771,12 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   # #9195 (§17.1's FOURTH declaration child): the SDK's structural-edge write
   # lane (`create_edge` and `create_about_edge`, each with ONE `MERGE`, plus
   # `create_edge`'s three typed wrappers — the lane mints no node, no property
@@ -4341,6 +4353,12 @@ surfaces:
   # otherwise run this suite never — the #1349/#2938/#3154 silent-drop class.
   - test_9079_onboarding_declared_lane.py
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   - test_7951_write_doors.py
   # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
@@ -4951,6 +4969,12 @@ surfaces:
   # otherwise never run it (the #1349/#2938 silent-drop class; full rationale in
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
+  # #9157 (§17.1): the eager-init CREATE found its declared route. Same
+  # multi-surface argument as #9121 above — the routes it pins live in
+  # `tortoise/onboarding/state.py` (onboarding), the host mint lanes
+  # (`tortoise/hosted_api.py` -> api), the guarded handle it must use
+  # (`tortoise/projection/__init__.py` -> core) and `TortoiseSDK.org_create` (sdk).
+  - test_9157_eager_init_declared.py
   classify:
   # Issue #1695 (extractor-v3 classify-later): the kind-classification and
   # chain-enforcement surface. Pure-logic files (stub encoders, golden
@@ -5840,6 +5864,7 @@ durations_captured_at: "2026-10-17T15:43:47Z"
 durations:
   test_9362_sweep_mirror_order.py: 2.0  # unmeasured — new in #9362; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and the local whole-file reading here (135.6s) is ~124s of SESSION cost that lands on whichever test runs first (measured both ways: `-k stale_epoch` alone 125.2s, `-k peer_already_cleared` alone 123.9s, and the same two cost ~1s each when not first — the #3400 attribution the map's header warns about), so a locally derived row would misstate the file by whatever order the shard happens to run. It matters here rather than being cosmetic: at b76de57c the map sat at 96/961 missing = coverage 0.900104 against the 0.90 floor with ZERO headroom, so one more unweighted fast file reds `--integrity`'s `duration_coverage_issues`. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 15 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
+  test_9157_eager_init_declared.py: 2.0  # unmeasured — new in #9157; no CI sweep has collected it yet, so it carries the same flat default as its siblings (test_9121_onboarding_residual_pins.py, test_9079_ep_epoch_declared.py) rather than a local timing, which this map forbids as a SHARD-LAYOUT input: a local reading here is dominated by the #3400 first-fixture session cost (~124 s), not by this file's weight, and substituting it would pack a real graph fixture into an already-heavy shard. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch
