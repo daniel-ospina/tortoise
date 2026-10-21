@@ -174,6 +174,13 @@ Read the caveats with the number, because they decide whether it applies to you:
 - **It is one box under variable load.** The profile's own measurement records
   absolute milliseconds moving 2–3× between runs with host load, and states that
   the *shares* are the robust output.
+- **The 345–460 ms row has no lineage.** An end-to-end retrieval p95 of
+  **345–460 ms on a development box** — above the ≤ 300 ms band — was quoted on
+  `/faq` until 2026-10-21, with no run, harness invocation or artifact named
+  behind it (`git show ade1cd0c0:website/faq.html` is that revision). It is
+  recorded here so the retired sentence was not the only copy of the number, and
+  it stays out of the measured table above for the same reason it is listed: an
+  unattributed number is a hint about the band, not a result to plan against.
 - It is the retrieval path with a deterministic stub reader, so no model call is
   inside it. The LLM leg is measured separately in the same profile.
 - 533 Points is a small corpus. It is a shape, not a scale test.
