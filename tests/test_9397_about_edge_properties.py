@@ -155,6 +155,7 @@ the identical fail-open shape as the `rg 'aboutObject {'` zero, one level down
 
 WHAT IS PINNED (one entry per test, in file order)
 -----------------------------------------------
+
 1. `test_the_absolute_property_free_sentences_do_not_reappear` — the retracted
    sentences are matched MARKER-INSENSITIVELY (`*`, backticks, whitespace) against
    the live documents. Each entry records its own provenance — the pre-fix
@@ -163,15 +164,24 @@ WHAT IS PINNED (one entry per test, in file order)
    the pre-fix revision by `test_every_retracted_literal_declares_its_true_`
    `provenance`, because a label nothing compares against the
    text is the same unmeasured claim one level up.
-2. `test_the_unmeasured_share_retraction_is_pinned` — §13 rests on a §11.1
-   sentence nothing pinned: the retraction of the unbound-link SHARE claim ("a
-   statement about the row's SHAPE, not about the population's share"). Before
-   this leg existed, deleting that sentence left every leg green (22 passed, 1
-   skipped), so §13 kept a cross-reference into a sentence that no longer
-   existed — a retraction resting on an unpinned premise. Section-scoped via
-   `_section`, like the corrected passages, because a file-wide membership test
-   cannot red on one section's deletion.
-3. `test_the_corrected_passages_name_the_property_bearing_class` — the
+
+2. `test_the_pin_index_names_every_leg` — this index is prose indexing
+   code, so it re-stales: at `#9403` review it carried 24 entries against 25
+   tests while its heading claimed "one entry per test, in file order", and the
+   merge union that produced 25 tests from two 24-test parents re-derived
+   neither the count nor the order. The leg compares the indexed SET to the
+   module's actual test functions (so it names itself too), rejects a leg listed
+   twice, and asserts the entries follow the FILE ORDER of `def test_` — which is
+   what the heading claims and what a reader mapping a failure to its entry
+   relies on.
+
+3. `test_the_unmeasured_share_retraction_is_pinned` — §13's "a statement
+   about the row's SHAPE, not about the population's share" points at §11.1's
+   retraction of the share claim, and nothing pinned that sentence: deleting it
+   left every leg green, so the cross-reference could outlive its referent.
+   Section-scoped, mutation-checked (`#9403` review, P2).
+
+4. `test_the_corrected_passages_name_the_property_bearing_class` — the
    corrected passages must POSITIVELY name the writers and the property, so a
    silent revert reds here. The assertions are SECTION-scoped (§11.1, §13,
    §13.8 q2), not file-wide: the literals appear in more than one section, so a
@@ -180,19 +190,22 @@ WHAT IS PINNED (one entry per test, in file order)
    also rejects an unmeasured population SHARE (`most entity links`, `for most
    links`, `bulk of the rows` …) and the retracted FORM COUNT on the originated
    set — both were live and green in the `#9403` head (`#9403` review, P1/P2).
-4. `test_the_corrected_passages_carry_no_bare_edges_line_citation` — the
+
+5. `test_the_corrected_passages_carry_no_bare_edges_line_citation` — the
    rewritten passages cite the generic writer by SYMBOL, not by a bare
    `projection/edges.py:<n>`: a line number is only true of the revision it was
    measured at (`:344` was `create_about_edge` at the `c79ba1cf2` pin and is a
    comment block at HEAD). §11.1's copy keeps `:344` **at the pinned revision**,
    because there the qualifier is stated.
-5. `test_the_references_paragraph_scopes_property_freedom_to_source_version` —
+
+6. `test_the_references_paragraph_scopes_property_freedom_to_source_version` —
    §9.6's *"identity/mention and referential-containment `references` links stay
    property-free"* is the SAME unqualified absolute, seventy lines above the
    §11.1 correction, for a different link class (a record-projected `references`
    edge carries `idx` too). Scoped to the fact the paragraph establishes: those
    links carry **no `sourceVersion`**.
-6. `test_the_cheapness_rule_states_the_measured_set_and_records_the_tension`
+
+7. `test_the_cheapness_rule_states_the_measured_set_and_records_the_tension`
    — §11.4 rule 1 is the rule this correction rewrote IN PLACE, and nothing
    pinned it (`#9403` review: restoring its pre-fix imperative verbatim at the
    PR head left every leg green). Section-scoped to the RULE, not to §11.4, so
@@ -200,24 +213,28 @@ WHAT IS PINNED (one entry per test, in file order)
    keep the `#1370` tension record journaled through `EntityLinked`, and must
    keep its `RECORDED, not resolved` qualifier — a guard may not let prose
    settle a design decision by deleting the words that mark it open.
-7. `test_the_cost_argument_states_the_open_set_not_a_closed_pair` — §11.3 is
+
+8. `test_the_cost_argument_states_the_open_set_not_a_closed_pair` — §11.3 is
    where a reader decides what the migration does to this layer, and both its
    table row and its prose summarised the entity link as a CLOSED pair ("two
    ids, plus the binder's `confidence` … and the projection's `idx` ordinal")
    while the same section's §11.1 footnote and §13 say the set those names sit in
    is open. Pinned PER PASSAGE, because a section-wide marker test stayed green
    when only the table row was reverted (measured) — `#9403` review cycle 2.
-8. `test_the_ledger_keep_row_names_both_recorded_properties` — the extractor
+
+9. `test_the_ledger_keep_row_names_both_recorded_properties` — the extractor
    ledger's KEEP row is the reason a reader takes the layer to be cheap, and it
    named one of the two measured properties (`confidence`, not the record
    projection's `idx`). Its RETRACTED wording was pinned; any other route back to
    the one-name absolute there was not.
-9. `test_the_code_still_agrees_with_the_corrected_evidence` — each recorded
-   writer still writes what the documents claim it writes (`confidence` for the
-   originating three; the map/inline forms for the re-materializing two, `idx`
-   included). If that code is removed, the document has re-rotted in the
+
+10. `test_the_code_still_agrees_with_the_corrected_evidence` — each recorded
+   writer still writes what the documents claim it writes (the named form on
+   the originating writers; the property-MAP/inline forms on the re-materializing
+   sites, `idx` included). If that code is removed, the document has re-rotted in the
    other direction and this reds instead of the doc quietly lying again.
-10. `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
+
+11. `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
    — the documents counted 5 writers as `3 originating + 2 re-materializing`,
    and that composition is false: `projection/entities._fold_entity_linked_reason`
    reproduces on REPLAY what the journal already carried, which is the documents'
@@ -225,16 +242,19 @@ WHAT IS PINNED (one entry per test, in file order)
    (3 named + 2 map), which is why the wrong number read plausibly; the causal
    split is 2 + 3, and the legs red if the fold is filed as an originator again
    (`#9403` review, P2).
-11. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
+
+12. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
    own round-5 rule (`at HEAD` on every number that is not true at the pin) is
    applied to the paragraph that MAKES the citations: three of them survived
    bare, and one (`security.py:85`) is false at the declared pin `c79ba1cf2`
    (`#9403` review, P2).
-12. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
+
+13. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
    recorded twice, the map population has not shrunk below the shipped sites, no
    exemption is also a recorded writer, every exemption has a pinned statement
    premise, and every row (exemptions included) declares its exact name set.
-13. `test_the_declared_false_positive_premises_hold_at_the_statement` — a
+
+14. `test_the_declared_false_positive_premises_hold_at_the_statement` — a
    `NOT_AN_ABOUT_WRITER` row is an EXEMPTION, and an exemption nobody compares
    against is a fail-open cell: each premise is asserted at the STATEMENT the
    census attributed the property to (the about transfer carries no `SET`, and
@@ -245,7 +265,8 @@ WHAT IS PINNED (one entry per test, in file order)
    a fail-open cell). The premise is also pinned to its mechanism: the statement
    is gated on a FIXED attribute vocabulary, so a descriptor carrying none of
    those keys writes nothing on the edge its interpolated `etype` names.
-14. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
+
+15. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
    every property write on an `about*` relationship pattern (named variable or
    anonymous) — named (`SET r.<prop>`), map-assigned (`SET r += $props` /
    `SET r = $p`), or an inline pattern map (`[r:aboutObject {idx:$idx}]`, which
@@ -267,39 +288,47 @@ WHAT IS PINNED (one entry per test, in file order)
    for a token nobody has written yet. It is NOT a parse failure:
    `test_the_census_fails_closed_on_a_module_it_cannot_parse` makes
    the census STOP rather than skip.
-15. `test_the_census_reads_the_inline_pattern_map_form` — synthetic probe for the
+
+16. `test_the_census_reads_the_inline_pattern_map_form` — synthetic probe for the
    inline pattern map, named and anonymous.
-16. `test_the_census_bound_is_pinned_as_a_gap_not_an_absence` — one probe per
+
+17. `test_the_census_bound_is_pinned_as_a_gap_not_an_absence` — one probe per
    gap category 1-5, each asserting `{}` against `_writers_in_module`, beside
    a recorded control. No COUNT is stated here on purpose: an earlier
    revision of this list said "two shapes" while the leg asserted more, and
    a count in prose is a claim the code can outgrow silently.
-17. `test_the_documents_state_the_bound_as_a_detector_not_a_proof` — the
+
+18. `test_the_documents_state_the_bound_as_a_detector_not_a_proof` — the
    completeness claim is WITHDRAWN, not reworded a fifth time: the detector
    wording must be present in the guard's `__doc__` and at least twice in
    `STORAGE-ARCHITECTURE.md`, and the retracted absolutes absent. Measured
    without it, deleting the bound paragraphs or inserting a fresh absolute
    left every leg green — a pin that is named for a bound and does not red on
    its removal is not evidence.
-18. `test_the_census_reads_a_writer_that_never_says_about` — synthetic probe for
+
+19. `test_the_census_reads_a_writer_that_never_says_about` — synthetic probe for
    the allowlist-driven writer whose module never spells `about`.
-19. `test_the_census_fails_closed_on_a_module_it_cannot_parse` — a module
+
+20. `test_the_census_fails_closed_on_a_module_it_cannot_parse` — a module
    `ast.parse` (or the strict UTF-8 decode) rejects STOPS the census and names
    the file, instead of returning `{}` and reporting every writer inside it as a
    measured absence — the same fail-open shape as the `rg 'aboutObject {'` zero.
-20. `test_the_default_ingestion_path_reaches_the_binder` — the corrected text
+
+21. `test_the_default_ingestion_path_reaches_the_binder` — the corrected text
    says "default-ON, ingestion path"; if `_extract_session_v2` stops calling
    the binder, **or stops being the fall-through branch** of the
    `TORTOISE_SESSION_EXTRACTOR == "m2"` selection, that sentence becomes false
    while every other test stays green.
-21. `test_every_retracted_literal_is_still_findable_where_it_is_allowed_to_live`
+
+22. `test_every_retracted_literal_is_still_findable_where_it_is_allowed_to_live`
    — every RETRACTED literal is findable in the changelog that quotes it, or is
    declared pre-fix-only or introduced-and-retracted inside this PR
    (`RETRACTED_INTRODUCED_HERE`: three absolutes were written by an earlier
    revision of THIS PR, so claiming a pre-fix presence for them would be the
    same unmeasured provenance this file exists to stop). A pin that cannot match
    the pre-fix text protects nothing, and that is not a hypothesis: it shipped.
-22. `test_every_retracted_literal_declares_its_true_provenance` — the
+
+23. `test_every_retracted_literal_declares_its_true_provenance` — the
    CLASSIFICATION is measured, not merely declared: a literal listed in
    `RETRACTED_INTRODUCED_HERE` must be ABSENT from the pre-fix revision
    (`PRE_FIX_REV`) and every other entry PRESENT there. Without this the label
@@ -307,18 +336,18 @@ WHAT IS PINNED (one entry per test, in file order)
    leg 1 then prints "was live pre-fix" for a sentence this PR wrote, in the
    diagnostic of the guard whose whole subject is unmeasured provenance. Skips
    (never passes silently) when the revision is unreachable.
-23. `test_the_storage_changelog_records_the_correction` — the changelog is where
+
+24. `test_the_storage_changelog_records_the_correction` — the changelog is where
    a reader learns that a §11.1/§13 claim moved.
-24. `test_the_guard_states_its_own_execution_and_probe_coverage_honestly` —
+
+25. `test_the_guard_states_its_own_execution_and_probe_coverage_honestly` —
    this file's claims about ITSELF, re-derived from the source: the header may
-   not say the suite is network-free while `_ensure_commit` fetches, and it may
-   not claim one probe per gap while gap 6 is disclosed rather than pinned. It
-   ALSO holds the list ABOVE to what the file collects — one entry per test, in
-   file order — because a prose inventory the code outgrows silently is the same
-   unmeasured claim one level up (measured at the `#9403` merge head: 24 entries
-   for 25 tests, and the last entry described the 7th test, so every mapping from
-   a failure to its entry was off by one).
-25. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
+   not say the suite is network-free while `_ensure_commit` fetches, it may not
+   claim one probe per gap while gap 6 is disclosed rather than pinned, and it
+   may not state a numeric leg count in prose. The pin-index coverage and order
+   moved to `test_the_pin_index_names_every_leg`, which owns that claim alone.
+
+26. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
    numbering is unique (it is the ledger's only index), and the fourth round's
    false record of §13's citation does not come back.
 
@@ -518,8 +547,14 @@ RETRACTED_INTRODUCED_HERE: frozenset[str] = frozenset({
 })
 
 #: The writers the corrected passages must NAME, and the code shape that makes
-#: each one a property-bearing `about*` writer. These are the ORIGINATORS — the
-#: sites that put the named property on the edge.
+#: each one a property-bearing `about*` writer. The axis here is the WRITE FORM — a
+#: literal `SET r.<name>` in the source — and nothing else. This comment used to
+#: classify them causally ("the ORIGINATORS") and carried the retracted 3+2
+#: split; it must not restate a split at all, because no leg compares THIS
+#: comment to the causal classes, so any count written here is unpinned prose.
+#: Causality is pinned where it belongs: by
+#: `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`,
+#: against the documents.
 RECORDED_WRITERS: dict[tuple[str, str], tuple[str, ...]] = {
     ("tortoise/session_link.py", "link_entity"): (
         'MERGE (s)-[r:{edge_type}]->(t) SET r.confidence=$conf',
@@ -1009,6 +1044,9 @@ def _query_call_containing(body: str, needle: str) -> str:
 #: main` makes `01b5486ec` reachable. Depth is raised only until the rev resolves,
 #: so the cost is one shallow branch fetch and the bound is the point at which
 #: `01b5486ec` is genuinely too old to reach — reported by the skip message.
+#: One numbered entry of the "WHAT IS PINNED" index.
+_PIN_INDEX_ENTRY = re.compile(r"^\d+\. `(test_[A-Za-z0-9_]+)`", re.M)
+
 _SHALLOW_DEPTHS = (120, 400, 1500)
 
 
@@ -1326,6 +1364,86 @@ CORRECTED_SECTIONS: tuple[tuple[str, str, str, str], ...] = (
         "EXTRACTOR",
     ),
 )
+
+
+def test_the_pin_index_names_every_leg():
+    """The "WHAT IS PINNED" index must name every test in this module.
+
+    The index is prose, and prose that indexes code re-stales: measured at
+    `#9403` review, it carried 24 entries against 25 tests (the share-retraction
+    leg was missing) while its own heading claimed "one entry per test, in file
+    order" — and neither the missing entry nor the order claim was pinned, so a
+    reader trusting the index would not learn the module had grown. The merge
+    union that produced 25 tests from two 24-test parents re-derived neither.
+    This leg pins BOTH halves of the heading: the SET (every test exactly once)
+    and the FILE ORDER — the order is what lets a reader map a failure message to
+    its entry, and an appended index silently loses it.
+    """
+    source = (ROOT / "tests/test_9397_about_edge_properties.py").read_text(
+        encoding="utf-8"
+    )
+    defined = {
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    }
+    # ⛔ The match must be confined to the INDEX BLOCK, not file-wide: measured
+    # at `#9403` review, deleting an index entry while adding one
+    # `^\d+\. \`test_…\`` line anywhere else (this module's docstring already
+    # carries such a numbered list) left the leg GREEN — the drift it exists to
+    # catch had a green path. And the count must be compared, not only the set:
+    # `findall` collapses duplicates into a set, so two entries for one name and
+    # none for another also passed.
+    start = source.index("WHAT IS PINNED")
+    block = source[start : source.index("NOT promised:", start)]
+    matches = _PIN_INDEX_ENTRY.findall(block)
+    indexed = set(matches)
+    assert len(matches) == len(indexed), (
+        "the pin index lists a leg more than once: "
+        f"{sorted({n for n in matches if matches.count(n) > 1})}"
+    )
+    assert len(matches) == len(defined), (
+        f"the pin index has {len(matches)} entries for {len(defined)} tests — "
+        "one test per entry"
+    )
+    assert indexed <= defined, (
+        "the pin index names legs that do not exist: "
+        f"{sorted(indexed - defined)}"
+    )
+    assert not (defined - indexed), (
+        "these legs are not in the WHAT IS PINNED index, so the index no longer "
+        f"describes this module: {sorted(defined - indexed)}"
+    )
+    # The ORDER half of the heading. `findall` returns the entries in the order
+    # they appear in the block, so compare it against the file's own `def test_`
+    # order: an appended (or hand-moved) entry reds here instead of quietly
+    # mapping a failure message to the wrong paragraph.
+    in_file_order = [
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")
+    ]
+    mismatch = next(
+        (
+            (position, want, got)
+            for position, (want, got) in enumerate(
+                zip(in_file_order, matches, strict=False), start=1
+            )
+            if want != got
+        ),
+        None,
+    )
+    assert mismatch is None, (
+        "the WHAT IS PINNED index is out of FILE ORDER, so a reader maps a "
+        f"failure to the wrong entry: position {mismatch[0]} lists "
+        f"{mismatch[1]!r} but the file defines {mismatch[2]!r} there"
+    )
+    assert [int(number) for number in re.findall(r"^(\d+)\. ", block, re.M)] == (
+        list(range(1, len(matches) + 1))
+    ), (
+        "the pin index's ordinals are not 1..N in order — they are its only "
+        "index, so a gap or a duplicate makes position and number disagree"
+    )
 
 
 def test_the_unmeasured_share_retraction_is_pinned():
@@ -2871,55 +2989,9 @@ def test_the_guard_states_its_own_execution_and_probe_coverage_honestly():
         "subject is unmeasured claims; state how to re-measure it instead"
     )
 
-    # A PIN-LIST COVERAGE pin (`#9403` review, P3). The header claims "one entry
-    # per test, in file order"; measured at the `#9403` merge head it carried 24
-    # entries for 25 tests, and the missing one was the 2nd test in the file — so
-    # every later entry described the wrong test, and a reader mapping a failure
-    # message to its entry read the wrong paragraph. The merge is where it went
-    # stale: two parents carried 24 tests each but DIFFERENT sets, the resolution
-    # unioned them and re-derived neither count. Prose cannot enforce that, so
-    # this does — adding a leg without a list entry reds here.
-    pin_anchor = header_block.find("WHAT IS PINNED")
-    assert pin_anchor >= 0, (
-        "the `WHAT IS PINNED` block is gone — this coverage check measures nothing"
-    )
-    pin_end = header_block.find("\nNOT promised:")
-    assert pin_end > pin_anchor, (
-        "the pin list's `NOT promised:` terminator moved or vanished, so the "
-        "block under test has no boundary"
-    )
-    pin_block = header_block[pin_anchor:pin_end]
-    listed = re.findall(r"^\s*(\d+)\.\s+`(test_\w+)`", pin_block, re.M)
-    collected = re.findall(r"^def (test_\w+)\(", src, re.M)
-    assert listed, "the pin list parsed no entries at all"
-    assert [int(ordinal) for ordinal, _ in listed] == list(
-        range(1, len(listed) + 1)
-    ), (
-        "the pin list's ordinals are not 1..N in order: "
-        f"{[o for o, _ in listed]}"
-    )
-    assert len(listed) == len(collected), (
-        f"the header claims one pin entry per test, but it lists {len(listed)} "
-        f"entries for {len(collected)} tests — the legs it omits are pinned by "
-        f"nothing a reader can find: {sorted(set(collected) - {n for _, n in listed})}"
-    )
-    mismatch = next(
-        (
-            (index + 1, want, got)
-            for index, (want, got) in enumerate(
-                zip(
-                    [name for _, name in listed], collected, strict=False
-                )
-            )
-            if want != got
-        ),
-        None,
-    )
-    assert mismatch is None, (
-        "the pin list is out of FILE ORDER, so a failure message maps to the "
-        f"wrong entry: position {mismatch[0]} lists {mismatch[1]!r} but the file "
-        f"defines {mismatch[2]!r} there"
-    )
+    # The pin-index coverage and ORDER are pinned by
+    # `test_the_pin_index_names_every_leg`, which owns that claim: two legs
+    # asserting one property is how a pair drifts apart.
 
 
 def test_the_correction_ledger_numbers_each_round_once():
