@@ -9440,7 +9440,14 @@ async def list_points(
         if kind not in allowed:
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
     _require_scope(org, "graphs:read", "list_points")
-    sdk = _data_sdk(org)
+    # #3718 (construction half of #4660): the per-request SDK is BUILT off the
+    # loop, not just used off it. In embedded mode `_make_sdk` probes the
+    # keepalive anchor (`_anchor_usable`) and may eagerly connect with the
+    # socket held, so an inline construction froze the loop on this handler's
+    # first statement even though the query below was already off-loaded. Same
+    # `_data_sdk_offloaded` twin the write lane uses (#3773) — it returns the
+    # identical SDK (`_data_sdk`), so only WHERE the call runs changes.
+    sdk = await _data_sdk_offloaded(org)
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
     # default listing surface — tombstone contract: retrievable by id via
@@ -9485,7 +9492,8 @@ async def list_points(
 async def get_point(point_id: str, org: dict = Depends(get_current_org_gated)):  # noqa: B008
     """Get a single Point by ID."""
     _require_scope(org, "graphs:read", "get_point")
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points).
+    sdk = await _data_sdk_offloaded(org)
     # #3718 residual 2: sync FalkorDB read off the loop (see list_points).
     rows = await asyncio.to_thread(
         lambda: sdk._get_proj().g.query(
@@ -9623,7 +9631,9 @@ async def dream_health(
     backlog, alarm verdict (zero-output silent-death detection, A8),
     region_attempts (C5) and warm-start savings (C4)."""
     _require_scope(org, "graphs:read", "dream_health")
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points) — the pass below
+    # already ran on the dream pool, but the SDK it takes was built inline.
+    sdk = await _data_sdk_offloaded(org)
     # #3718 residual 2 (code review): `dream_health_check` first runs
     # `_hydrate_dirty_roots()` — an UNBOUNDED all-`Point` `ep_dirty` scan with
     # no index — so it is the "long/stallable" class the module's #3060
@@ -9775,7 +9785,13 @@ async def org_info(org: dict = Depends(get_current_org_session_ungated)):  # noq
     P1: ungated — overview reads stay reachable for tt_ keys on flag-off
     orgs (the #1148 gate stays scoped to the management set)."""
     _reject_graph_bound_org_surface(org, "team overview")
-    sdk = _make_sdk(namespace=org["org_id"])
+    # #3718: this body builds its SDK directly (not through `_data_sdk`), so it
+    # uses the raw `_graph_offload` seam rather than the `_data_sdk_offloaded`
+    # twin. The CALL is unchanged — only which thread runs it — so the
+    # namespace, the embedded anchor probe and every reader below are
+    # byte-identical.
+    sdk = await _graph_offload(
+        lambda: _make_sdk(namespace=org["org_id"]), op="org_sdk")
     # Count REAL Points in default graph. #2360: demo/sample Points
     # (_seed_demo_graph: the 12 sample Points + _demo_sentinel) are EXCLUDED
     # — the Overview memory digest (this count) presents the user's own
@@ -16825,7 +16841,8 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # against stored canonical hyphenated actor_user_id).
         import uuid as _canon_uuid
         actor_filter = str(_canon_uuid.UUID(actor_filter))
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points).
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
         # CONTAINS so the count(p) grouping semantics hold); the appended
@@ -16986,7 +17003,8 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
     _session_user_org (?org_id= → non-member 403); keys are org-scoped.
     """
     _require_scope(org, "graphs:read", "get_session_detail")
-    sdk = _data_sdk(org)
+    # #3718: the construction is off the loop (see list_points).
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #3718 residual 2: `_get_proj()` opens/attaches the SYNC FalkorDB
         # client — off-load the attach as well as the reads below, so the
