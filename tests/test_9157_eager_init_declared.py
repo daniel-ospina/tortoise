@@ -30,7 +30,11 @@ import pytest
 
 import tortoise.projection as projection
 from tortoise.onboarding import state as _os
-from tortoise.projection import DirectCacheWriteRefused, _GuardedGraph
+from tortoise.projection import (
+    DirectCacheWriteRefused,
+    FalkorProjection,
+    _GuardedGraph,
+)
 from tortoise.sdk import TortoiseSDK
 
 
@@ -366,3 +370,95 @@ def test_the_door_inventory_does_not_call_teammeta_an_escaped_sibling():
             f"the `:TeamMeta` sibling argument no longer names {phrase!r} — a "
             "door inventory must be able to check the claim, not trust it"
         )
+
+
+# ── the factory's own rule: L2 names the graph the HANDLE writes ──────────
+
+class _NamedHandle:
+    """A vendor-shaped handle that carries `name` and records its statements."""
+
+    def __init__(self, name: str):
+        self.name = name
+        self.queries: list[str] = []
+
+    def query(self, cypher, params=None, timeout=None):
+        self.queries.append(cypher)
+        return "OK"
+
+
+class _HandleDB:
+    """Only what `guarded_write_handle` uses: `select_graph(name)`."""
+
+    def __init__(self):
+        self.handles: dict[str, _NamedHandle] = {}
+
+    def select_graph(self, name: str) -> _NamedHandle:
+        return self.handles.setdefault(name, _NamedHandle(name))
+
+
+def _server_projection(graph_name: str) -> FalkorProjection:
+    """A SERVER-lane projection with no I/O (L2's name rule only runs there)."""
+    proj = object.__new__(FalkorProjection)
+    proj._journal_backed = True
+    proj._is_embedded = False
+    proj._graph_name = graph_name
+    proj._path = None
+    proj._replay_mint_seq = None
+    proj.db = _HandleDB()
+    return proj
+
+
+def test_guarded_write_handle_judges_the_graph_IT_writes_on_a_bulk_wipe():
+    """#9409 review: the factory is not a way to launder a foreign-graph wipe.
+
+    `guarded_write_handle(proj, name)` exists to bind a graph that is NOT the
+    projection's own, which is exactly why L2 must judge the HANDLE's name: a
+    statement door reading `proj._graph_name` approves a graph it never touches.
+    Measured on the head before this pin:
+
+        guarded_write_handle(proj_on_test_x, "prod_tenant").query(
+            "MATCH (n) DETACH DELETE n")          # dispatched — prod_tenant wiped
+
+    MUTATION: drop `graph_name=self._statement_graph_name()` from
+    `_GuardedGraph.query` and the foreign half fails; the own-graph half keeps
+    this from being satisfied by refusing the factory outright.
+    """
+    proj = _server_projection("test_9157")
+
+    foreign = projection.guarded_write_handle(proj, "prod_tenant")
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        foreign.query("MATCH (n) DETACH DELETE n")
+    assert proj.db.handles["prod_tenant"].queries == [], (
+        "a foreign-graph wipe was dispatched on the strength of the projection's "
+        "`test_`-named graph — the #9209 defect one verb over (#9409 review)"
+    )
+
+    own = projection.guarded_write_handle(proj, "test_9157")
+    own.query("MATCH (n) DETACH DELETE n")
+    assert proj.db.handles["test_9157"].queries == ["MATCH (n) DETACH DELETE n"], (
+        "the rule must not become a wall: a disposable graph named like the "
+        "projection's still wipes"
+    )
+
+
+def test_the_factory_does_not_refuse_the_eager_init_lane_it_was_built_for():
+    """The no-over-refusal half: the org mint is not a bulk wipe.
+
+    Judging the handle's own name (`org_<id>`, never `test_*`) must not turn the
+    five production sites into refusals — the statement they issue is a CREATE,
+    so L2's classifier does not fire on it. This drives the factory end to end,
+    on a foreign graph, through the declared runner.
+    """
+    proj = _server_projection("test_9157")
+    graph_name = "org_9157_factory"
+    _init_q, _init_p = _os.eager_init_query(
+        "CREATE (:TeamMeta {name:$name, created:$now})",
+        {"name": "team-9157", "now": "2026-10-21T00:00:00Z"},
+        org_id="org-9157",
+    )
+    _os.run_eager_init(
+        projection.guarded_write_handle(proj, graph_name), _init_q, _init_p
+    )
+    assert proj.db.handles[graph_name].queries == [_init_q], (
+        "the eager-init CREATE must reach the factory's handle on the org graph"
+    )

@@ -203,6 +203,20 @@ class _NamedRecordingGraph(_RecordingGraph):
         self.name = name
 
 
+class _QueryRecordingGraph(_NamedRecordingGraph):
+    """A named handle that also RECORDS `query` (the statement door).
+
+    `_RecordingGraph.query` raises `AssertionError("no query may run in these
+    cases")`, which is right for the command-channel cases and useless here:
+    the statement door's own-graph half must prove the wipe WAS dispatched on a
+    disposable graph, not merely that nothing raised.
+    """
+
+    def query(self, cypher, params=None, timeout=None):
+        self.calls.append(("query", cypher, params))
+        return "OK"
+
+
 class _EncodeLiar(str):
     """A ``str`` whose ``encode()`` puts a DIFFERENT command on the wire.
 
@@ -653,6 +667,88 @@ def test_an_unreadable_head_is_refused_on_an_unarmed_server_projection():
         "embedded exemption) — pinning it so a later edit cannot widen or "
         f"silently narrow it; calls={handle.calls!r}"
     )
+
+
+def test_the_bulk_wipe_statement_door_judges_the_handles_own_graph():
+    """#9409 review, now a pin: `query`/`call_procedure` name the graph they WIPE.
+
+    `delete()` got this rule in round 8 (`graph_name=target`); the two
+    STATEMENT doors still asked `_assert_test_graph` about
+    `proj._graph_name`, so a handle built over ANOTHER graph was approved on the
+    strength of a name it does not touch. The review measured the shape on the
+    new sanctioned factory:
+
+        guarded_write_handle(proj_on_test_x, "prod_tenant").query(
+            "MATCH (n) DETACH DELETE n")        # approved, wiped prod_tenant
+
+    That is the #9209 defect one verb over, and `guarded_write_handle` is what
+    made the foreign handle a documented, first-class shape for future writers.
+
+    MUTATION: drop `graph_name=self._statement_graph_name()` from
+    `_GuardedGraph.query` (or from `call_procedure`) and the foreign half of
+    the matching case fails — the wipe reaches the handle because L2 "approved"
+    `test_9209`, a graph this statement never names.
+    """
+    proj = _armed_projection(graph_name="test_9209", embedded=False)
+
+    # (a) the statement door: a FOREIGN non-test graph is refused...
+    foreign = _QueryRecordingGraph("prod_tenant")
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        _GuardedGraph(foreign, proj).query("MATCH (n) DETACH DELETE n")
+    assert foreign.calls == [], (
+        f"a bulk wipe of a foreign non-test graph was dispatched: {foreign.calls!r}"
+    )
+
+    # ...while a disposable graph named like the projection's still runs, so
+    # the rule is "judge the handle's name", not "refuse every foreign handle".
+    own = _QueryRecordingGraph("test_9209")
+    _GuardedGraph(own, proj).query("MATCH (n) DETACH DELETE n")
+    assert [c[0] for c in own.calls] == ["query"], (
+        "the declared lane must still reach a disposable graph named like the "
+        f"projection's; calls={own.calls!r}"
+    )
+
+    # (b) the procedure door builds its own statement and must use the same
+    # name — it is the verb that hands the vendor a caller-controlled string.
+    proj_foreign = _armed_projection(graph_name="test_9209", embedded=False)
+    proc_foreign = _QueryRecordingGraph("prod_tenant")
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        _GuardedGraph(proc_foreign, proj_foreign).call_procedure(
+            "db.labels() MATCH (n) DETACH DELETE n //", read_only=False
+        )
+    assert proc_foreign.calls == [], (
+        f"a procedure-formed wipe of a foreign graph was dispatched: "
+        f"{proc_foreign.calls!r}"
+    )
+
+
+def test_a_nameless_statement_handle_keeps_L2s_projection_name():
+    """The fallback polarity, pinned so it stays a DECISION and not a hole.
+
+    `delete()` REFUSES a handle that exposes no `name` (round 9: the graph it
+    removes cannot be identified). The statement doors deliberately do not: a
+    handle with no usable name is a duck-typed stub (every real handle carries
+    the pinned vendor's `Graph.name`, and the `cypher_guard` proxy forwards
+    it), and refusing those would red the existing pins that drive L2's
+    test-named ALLOWANCE through a stub — a false positive that protects no
+    server graph.
+
+    So `_statement_graph_name()` answers `None` there, and L2 keeps its
+    pre-existing meaning (judge the projection). This test is the ledger entry
+    that says so; a future edit that swaps in `delete()`'s refusal must change
+    this test and the `test_destructive_wipe_guard.py` stub cases together.
+    """
+    nameless = _RecordingGraph()
+    allowed = _GuardedGraph(nameless, _armed_projection(
+        graph_name="test_nameless", embedded=False))
+    assert allowed._statement_graph_name() is None, (
+        "a nameless stub must report no name — not invent one"
+    )
+
+    refused = _GuardedGraph(_RecordingGraph(), _armed_projection(
+        graph_name="prod_tortoise", embedded=False))
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        refused.query("MATCH (n) DETACH DELETE n")
 
 
 def test_the_shared_decoder_sees_a_memoryview_payload():

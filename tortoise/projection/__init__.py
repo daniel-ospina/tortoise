@@ -3684,6 +3684,16 @@ def guarded_write_handle(proj: FalkorProjection, graph_name: str) -> _GuardedGra
     "this cache is the derived cache of THAT journal" means. An unbound
     projection therefore yields an unguarded-but-harmless handle (the guard's
     arming rule is the same one the fold uses).
+
+    ⛔ AND THE HANDLE'S OWN GRAPH IS THE ONE L2 JUDGES (#9409 review). Because
+    this factory exists precisely to bind a graph that is NOT ``proj``'s own,
+    the handle's bulk-wipe name rule must name the graph it wipes: a statement
+    door judged by ``proj._graph_name`` approves a name it is not touching, and
+    ``guarded_write_handle(proj_on_test_x, "prod_tenant")`` would then
+    "approve" a whole-graph wipe of ``prod_tenant`` on the strength of
+    ``test_x``. ``_GuardedGraph._statement_graph_name`` reads ``self._g.name``
+    for exactly that reason; this paragraph is here because a writer taught the
+    factory is the reader that has to know it.
     """
     return _GuardedGraph(proj.db.select_graph(graph_name), proj)
 
@@ -4794,8 +4804,15 @@ class _GuardedGraph:
         # statement's own TEXT, which no param map can carry.
         _guard_numeric_literals(cypher)
         if _is_bulk_wipe(cypher):
+            # #9409 review: judge the graph THIS handle wipes, not the
+            # projection's. The wrapper is built in-tree over a graph that is
+            # not the projection's own (`guarded_write_handle`, and
+            # `hosted_api`'s raw form), so judging `proj._graph_name` approves
+            # a name this statement never touches — the #9209 defect one verb
+            # over, generalized by the new factory.
             self._proj._assert_test_graph(
-                "REFUSING to run bulk DETACH DELETE on non-test graph"
+                "REFUSING to run bulk DETACH DELETE on non-test graph",
+                graph_name=self._statement_graph_name(),
             )
         # #3359: count the op as ISSUED to the raw handle, AFTER the destructive
         # guard — a refused bulk wipe is not work the capture caused, and the
@@ -5110,8 +5127,12 @@ class _GuardedGraph:
         # as `proj.g.query`'s statement would be.
         self._refuse_unauthorized_cache_write(statement)
         if _is_bulk_wipe(statement):
+            # Same name rule as `query` — the statement is built by the vendor
+            # from a caller string, and this handle may front a graph that is
+            # not the projection's own (#9409 review).
             self._proj._assert_test_graph(
-                "REFUSING to run bulk DETACH DELETE on non-test graph"
+                "REFUSING to run bulk DETACH DELETE on non-test graph",
+                graph_name=self._statement_graph_name(),
             )
         return self._g.call_procedure(
             procedure, read_only=read_only, args=args, emit=emit
@@ -5352,6 +5373,30 @@ class _GuardedGraph:
 
     def __getattr__(self, name):
         return getattr(self._g, name)
+
+    def _statement_graph_name(self) -> str | None:
+        """The graph a STATEMENT on this handle writes, for L2's name rule.
+
+        ``delete()`` passes ``self._g.name`` explicitly (it REFUSES a handle
+        that cannot name itself, #9209 round 9); the two statement doors cannot
+        pass a command argument, so the handle's own name is the only source
+        that is about the graph actually written.
+
+        Returning ``None`` for a handle with no usable ``name`` deliberately
+        keeps L2's pre-existing meaning (judge the projection). That is not the
+        ``delete()`` polarity, and the difference is measured rather than
+        stylistic: every real handle this wrapper fronts carries a string
+        ``name`` (the pinned vendor's ``Graph.name`` property; the
+        ``cypher_guard`` proxy forwards it), so a missing/non-string name means
+        a duck-typed STUB — which cannot reach a server graph, and which L2's
+        existing pins drive as the *allowed* half of the name rule on a
+        ``test_``-named projection (``test_destructive_wipe_guard.py``).
+        Refusing those would turn a stub into a false positive while protecting
+        no server graph; the foreign-handle case this fix is for always HAS a
+        name.
+        """
+        name = getattr(self._g, "name", None)
+        return name if isinstance(name, str) else None
 
     def _bar(self, cypher: str) -> str:
         """#7162: the `WITH *` barrier, when this handle's engine needs it.
