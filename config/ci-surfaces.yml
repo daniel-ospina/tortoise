@@ -1983,6 +1983,18 @@ surfaces:
   # that stops reporting the coordinate still runs this guard. No hosted route
   # emits it yet (`#7970` is the consumer), so `core` alone is correct.
   - test_residency_router.py
+  # #5199 (read half): the ENTITY-addressed currency read — the
+  # `(Source)-[:references]->(:Object|:Event|:Source)` hop, whose targets never
+  # carry an `extractedFrom` link. Registered under `core` because both changed
+  # source files fall through to it (`tortoise/search_engine.py` owns the pair +
+  # the §4.6 aggregate) and the tool it wraps (`tools/source_currency.py`) is a
+  # CORE_ALSO path. Lane: the sibling `test_source_version_references_5199.py`
+  # file (registered in `api` above) — URI-less-runnable (`TortoiseSDK(<tmp path>)`, embedded
+  # FalkorDBLite per test), so `TORTOISE_TEST_CARVE_OUT=1` runs it locally, and
+  # on a URI lane the #1647 test-mode redirect sends it to a per-path derived
+  # graph. Deliberately NOT carve_out-registered, for the same reason the two
+  # rows above are not: it is not embedded-ONLY.
+  - test_source_version_entity_currency_5199.py
   # #5009 (§12.4 / §12.5): the SUFFICIENCY ROUTER and the ESCALATION WRITE-BACK.
   # It pins tortoise/sufficiency_router.py, which matches no SOURCE_PATTERN rule
   # and therefore falls back to `core` — the decision layer is hermetic (no DB,
@@ -7493,6 +7505,7 @@ durations:
   test_source_identity.py: 0.2
   test_source_kind_runtime_registration.py: 0.3
   test_source_version_read_wiring_5199.py: 0.6
+  test_source_version_entity_currency_5199.py: 7.5  # unmeasured — #5199: 13 tests, embedded lane (`TORTOISE_TEST_CARVE_OUT=1`); locally measured 5.9-7.0s per run (SDK/engine startup dominates, fleet-contention sensitive). This row is the branch's LOCAL reading under the `# unmeasured` convention, NOT the flat-default case and NOT a claim of a CI measurement: a file ADDED BY A PR can never have a junit measurement (the refresher samples push-to-main runs only), and this map's neighbouring rows take the same shape — `test_8702_identity_skip_accounting.py` 5.0, `test_9256_lane_probe_attribution.py` 6.8, `test_8098_webhook_retry_sweep.py` 8.8, `test_9233_webhook_declared_lane.py` 14.0 (all `# unmeasured`, all local). The WEIGHT is the HIGHER end of the observed range on the rows' stated rule (never correct a weight downward without a CI junit reading, so a loaded leg cannot under-pack), not a hand-picked number. The flat 2.0s default is a row with NO reading; an absent row packs the file at it. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_source_version_references_5199.py: 1.1
   test_subject_binding_1370.py: 7.1
   test_subject_layer_read_surfaces_4889.py: 0.9
@@ -7525,6 +7538,7 @@ durations:
 
   test_9079_handle_write_authority.py: 10.0  # unmeasured — new in #9124 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and this PR's two new fast files tipped `duration_coverage_issues()` to 848/943 = 89.9% (red against the 90% floor) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 9.2s (23 tests) out of the 22.4s both new files took; setup dominates (each test builds its own journal-backed SDK) and the one `rebuild_all`/sweep test pays the FTS drop→recreate. Declared above the local reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_9124_declared_live_doors.py: 32.6  # new in #9124 (#3400 trap): same class as the row above — a new fast file, so it had no CI measurement AT PR TIME. Local embedded-lane reading 13.2s (13 tests), of which `test_arming_the_guard_requires_a_fully_declared_surface` alone is 9.2s: it parses and censuses EVERY module in the package that reaches the write handle, so it tracks the package's size rather than the box's load. Declared above the local reading so a cold leg cannot under-pack; the first post-merge refresh then measured it — see the capture note at the end. — ci-timing top-15 2026-10-20 (run 39467226356); was 14.0
+  test_9124_declared_live_doors.py: 90.0  # unmeasured — new in #9124 (#3400 trap): same class as the row above (new fast file, no CI measurement). The 13.2s/13-test reading this row was declared from no longer describes the file: #9315 takes it from 29 test functions (`origin/main`) to 62 (`def test_` definitions at this head, 72 collected cases once `test_every_declared_accumulator_shape_is_reported` is parametrised — 58 in the reading quoted below, so every figure here predates the last three commits), and the same class of cost (it parses and censuses EVERY module in the package that reaches the write handle, so it tracks the package's size rather than the box's load) is now paid by several pins. Per-file readings recorded in that PR's commit messages: 43 tests in 74.7s, 49 tests in 53.7s and 68.3s on a second box. The 57.9s figure is NOT a per-file reading — it is the TWO-FILE leg (`3 failed, 57 passed in 57.91s` = this file's 58 tests + `test_8066_served_skill_relay_ratchet.py`'s 2, i.e. 60 test functions combined), which is why it is not quoted as this row's weight evidence. Declared above the slowest per-file local reading so a cold leg cannot under-pack — at 62/72 cases, 90.0 is an EXTRAPOLATION from those readings, not a measurement at this head. Refresh from the first post-merge run that includes it (`tools/ci_timing.py --refresh-durations`).
   test_9079_client_handle_door.py: 12.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default and reds `duration_coverage_issues()`. Collected count at this head: 37 cases (25 at the first review head; the review fixes add the split-spelling, the barrier/procedure/bytes-graph census shapes and the raw-command-shape pins — the `close()` pin replaces its predecessor rather than adding one). Local docker-lane wall readings at this head: 6.4 s, 6.5 s and 7.0 s over three runs (the file is registered in `core`, which is the docker lane; each test builds its own journal-backed SDK, one `rebuild_all`/sweep test pays the FTS drop->recreate, and the barrier case seeds a node first). Declared above the local readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
 
 # ── ON-DEMAND LANE: runs the pipeline, does not gate the merge ────────────
