@@ -138,9 +138,11 @@ REACH_VOCAB: tuple[str, ...] = (
 )
 
 #: Readers whose edge name is COMPUTED, so no literal pattern can carry it.
-#: Each maps to the code facts that make the read real — asserted literally,
-#: because these two rows are the table's sharpest claim (a grep cannot find
-#: them, which is precisely why the enumeration was understated twice).
+#: Each maps to the code facts that make the read real — asserted literally and
+#: IN THE READER'S OWN SPAN, because these rows are the table's sharpest claim
+#: (a grep cannot find them, which is precisely why the enumeration was
+#: understated twice). A module-wide substring test would let the fact survive
+#: somewhere else in the file; the span is what makes it this reader's read.
 _NON_LITERAL: dict[str, tuple[str, ...]] = {
     "ranking.py::SubgraphExpander._neighbors": (
         'f"[r{rel_pattern}]"',
@@ -257,7 +259,7 @@ def _module_tree(path: Path) -> ast.Module:
     return _parsed(str(path))
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _parsed(path: str) -> ast.Module:
     return ast.parse(Path(path).read_text(encoding="utf-8"))
 
@@ -315,7 +317,7 @@ def _reads_naming_the_edge(tree: ast.Module, lo: int, hi: int) -> bool:
     return False
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _carrier_constants(rel: str) -> dict[str, str]:
     # qualified name -> the bare name its readers use
     """module/class-level constants whose SOURCE names the edge.
@@ -424,27 +426,31 @@ def test_every_named_reader_still_reads_the_edge():
             continue
         if _reads_naming_the_edge(tree, span[0], span[1]):
             continue
-        via_carrier = _reads_via_carrier(
-            str(row["module"]),
-            "\n".join(module_path.read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]),
+        span_text = "\n".join(
+            module_path.read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
         )
-        if via_carrier:
-            continue
+        # A computed-name row is decided by ITS OWN FACTS, IN ITS OWN SPAN,
+        # BEFORE the carrier fallback gets a chance to short-circuit it.
+        #
+        # Order matters, and it was wrong: `_fetch_object_signals` sits in a
+        # module whose `ABOUT_EDGE_TYPES` constant carries the edge name, so
+        # the carrier branch went green on a name that merely APPEARS in the
+        # symbol — two unrelated `MATCH (o:Object)` / `ABOUT_EDGE_TYPES` lines
+        # were enough. The consuming line
+        # (`"OPTIONAL MATCH (p)-[a:" + about_types + "]->(o) "`) could be
+        # deleted and all eight tests stayed green, leaving row 17 naming code
+        # that no longer reads the edge. The facts are the read here, so they
+        # are asserted first, and only inside the span — a fact found elsewhere
+        # in the module is not evidence about THIS reader.
         if key in _NON_LITERAL:
-            text = module_path.read_text(encoding="utf-8")
-            missing = [
-                fact
-                for fact in _NON_LITERAL[key]
-                if fact not in "\n".join(
-                    text.splitlines()[span[0] - 1 : span[1]]
-                )
-                and fact not in text
-            ]
+            missing = [fact for fact in _NON_LITERAL[key] if fact not in span_text]
             if missing:
                 stale.append(
                     f"row {row['n']}: {key} — computed-name reader lost the "
                     f"fact that makes it a read: {missing!r}"
                 )
+            continue
+        if _reads_via_carrier(str(row["module"]), span_text):
             continue
         stale.append(
             f"row {row['n']}: {key} — the named symbol does not read the edge"
