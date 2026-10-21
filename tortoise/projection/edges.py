@@ -124,7 +124,9 @@ def _mint_subject_stub(g, name: str) -> None:
     )
 
 
-def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None:
+def _mint_source_stub(
+    g, url: str, source_kind: str | None = None, now: str | None = None,
+) -> str | None:
     """MERGE the Source stub _link_source creates — single create path for live
     + replay (mirror _link_source's ON CREATE exactly: title=url, empty
     contentHash, ingestedAt now; session: refs carry is_episodic=true so the
@@ -146,6 +148,15 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None
     correct, and the eval ingest lane (which never materializes session sources)
     stops mislabelling every session Source as a document. Callers that know
     better still pass it explicitly.
+
+    ``now`` (#8501) is the capture's OWN instant. The capture path calls this
+    stub mint FIRST now (before extraction), so for a capture that creates no
+    Point this mint is the ONLY writer of ``ingestedAt`` — and its twin
+    ``SourceCreated`` record carries the capture's instant. Minting from
+    ``_now_iso()`` there would put a LATER clock on the live node than the
+    replay folds in, a live≠replay divergence on a path (a keyless capture) that
+    previously had none. ``None`` keeps the historical clock read for every
+    other caller.
     """
     if source_kind is None:
         source_kind = "agentSession" if str(url).startswith("session:") else "document"
@@ -159,7 +170,7 @@ def _mint_source_stub(g, url: str, source_kind: str | None = None) -> str | None
         return None
     canonical = normalize_source_url(key)
     params = {"url": key, "raw_url": url, "cu": canonical,
-              "sk": source_kind, "now": _now_iso()}
+              "sk": source_kind, "now": now or _now_iso()}
     ep_clause = ""
     if str(key).startswith("session:"):
         params["ep"] = True
