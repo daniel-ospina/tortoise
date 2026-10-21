@@ -418,7 +418,10 @@ def about_document_target_reason(label: str | None,
 # Referential-containment links (Source→Source) carry no `sourceVersion`: a "Source"
 # caller lands in the un-anchored branch below, and the in-repo containment
 # writers (the session→external MERGE in `hosted_api.py`) write them outside this
-# method. `references` is in NEITHER `STRUCTURAL_REL_LABELS` nor
+# method. That absence is PRODUCER-side, not a schema guarantee — no edge record
+# carries a `source_version` payload key, though `public.relation` HAS the column
+# (`link_source_to_entity` spells out the two halves).
+# `references` is in NEITHER `STRUCTURAL_REL_LABELS` nor
 # `DERIVABLE_STRUCTURAL_RELS`, so this anchor adds nothing to the replay surface.
 #
 # The discriminator is the caller-supplied RELATION spelling (`entity_label`), not the
@@ -2013,9 +2016,22 @@ class _EdgeHandlers:
         it was read from as ``sourceVersion`` — the source's current
         ``contentHash``, read HERE so that no caller passes it and the public SDK
         signature is unchanged. Identity/mention links (``Object``) carry no
-        ``sourceVersion`` — the edge is not otherwise empty: ``idx`` and the
-        allowlisted predicates are still written. Written ``ON CREATE`` only:
-        a re-link must NOT advance the recorded version, or staleness would
+        ``sourceVersion``, and that is the WHOLE of the claim: this method's
+        non-derivation branch emits a BARE ``MERGE (s)-[:references]->(e)`` with
+        no property map at all — no ``idx``, no attributes. Nor is there a
+        record-materialized form for it to disagree with: no journal payload
+        supplies a ``references`` relation at all, because that predicate is in
+        none of the sets a relation record is emitted over (``EntityLinked``'s
+        about* family, ``create_direct_edge``'s IMPL/NAND, or
+        ``SUPERSEDE_STRUCTURAL_RELS``) — even though ``public.relation`` HAS a
+        ``source_version`` column that ``relation_statement`` applies and
+        ``RelationUpsert.attrs`` would forward if a payload ever carried it —
+        no edge record does, and ``_props_from_row`` drops the NULL. The
+        DERIVATION anchor is therefore stamped graph-side, never carried by a
+        record — ``_DERIVATION_ANCHOR_SET`` here, ``_BACKFILL_ANCHOR_SET`` on the
+        repair path (:meth:`link_source_to_legacy_event`, where ``s.contentHash``
+        would report a stale Event as current). Written ``ON CREATE`` only: a
+        re-link must NOT advance the recorded version, or staleness would
         silently read as current.
 
         Raises:
@@ -2095,10 +2111,11 @@ class _EdgeHandlers:
         writer of a DERIVATION link stamps, so such an edge cannot be anchored on one
         such path and unanchored on another (the generic ``create_edge`` escape hatch
         and ``graph-scripts/backfill_references.py`` are not provenance writers and are
-        not auto-anchored; nor are the CONTAINMENT writers — the session->external
-        link in ``hosted_api.py`` and the connector ``Source``->``Object`` link in
-        ``projection/entities.py`` — which are deliberately left without a
-        ``sourceVersion`` anchor; see ``STORAGE-ARCHITECTURE.md`` §9.6).
+        not auto-anchored; nor are the NON-DERIVATION writers — the session->external
+        CONTAINMENT link in ``hosted_api.py`` and the identity/mention connector
+        ``Source``->``Object`` link in ``projection/entities.py`` — which are
+        deliberately left without a ``sourceVersion`` anchor; see
+        ``STORAGE-ARCHITECTURE.md`` §9.6).
 
         ``source_key`` is passed through AS the Source key — callers pass the same
         value they used for the Source MERGE, so this adds no new resolution step.
