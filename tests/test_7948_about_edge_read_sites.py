@@ -12,7 +12,10 @@ owner, 2026-09-23) is safe; the **table** is not.
 It is a hand-maintained prose list of `file.py (symbol)` pinned to
 `c79ba1cf2`, and it has been found incomplete **four separate times**:
 
-1. the issue body (`#7948`, 13 sites claimed to be the envelope);
+1. the issue body (`#7948`) — the envelope, whose site count is stated in that
+   issue's owner-decision comment and recorded in
+   `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md`, NOT in the body and not
+   here: this line restated the numeral and it was wrong (arm 24 bans the shape);
 2. review finding `B2.7` (`REVIEW-CONSOLIDATED-2026-09-23.md`) — named three
    further readers and under-classed two of them;
 3. the `#7956` erratum on `B2.7`, which found that finding *itself* incomplete
@@ -88,7 +91,10 @@ WHAT THIS PINS
    `+`-concatenation, an f-string, a constant FRAGMENT interpolated into the type
    slot (`{_REL}Object`), `"|".join(TUPLE)`, a `for rel in TUPLE` loop and a
    parameter default must each derive; a `MERGE` writer and a docstring that only
-   QUOTES the pattern must not. The
+   QUOTES the pattern must not. One pair is about the CLAUSE rather than the name:
+   a lowercase `match` must derive and a lowercase `merge` must not, because the
+   clause detector was case-sensitive and such a reader derived in NO class —
+   neither derivable nor declarable — while every arm stayed green. The
    rel-FAMILY constructors (`ast.Set`, `frozenset({...})`, `set({...})`,
    `tuple([...])`, `list([...])`) are the same resolver one branch further on and
    are pinned by their own arm and corpus (`_FROZENSET_CASES`,
@@ -158,7 +164,9 @@ WHAT THIS PINS
 14. **`test_the_empty_pattern_class_derivation_holds`** — the MECHANISM for arm 3,
    on the synthetic sources in `_EMPTY_PATTERN_CASES`: a bracketed traversal with
    no type must derive, and the near-misses must NOT (a named type, a `MERGE`
-   writer, a docstring quoting Cypher). Without it the shape walk could regress to
+   writer, a docstring quoting Cypher). The lowercase spelling of the governing
+   clause is in here too, for the same reason as arm 5's: `match (n)-[r]->(m)` is
+   the same read as the uppercase form, and the clause detector could not see it. Without it the shape walk could regress to
    "finds nothing" and arm 3 would report a class of size zero as complete. This
    entry used to state a count of its own (`seven`) against a corpus of nine — the
    exact defect class the arms below exist for, in the one place nobody read it —
@@ -237,7 +245,10 @@ WHAT THIS PINS
    arm stayed green, and `_MIN_CALL_TIME` carried the same kind of copy for the
    call-time walk's member count, one numeral behind. Both are now stated as
    properties that point at the arm which measures them, and this arm bans the
-   copies so they cannot come back: a count is asserted, or it is rot.
+   copies so they cannot come back: a count is asserted, or it is rot. The same
+   ban covers the `#7948` envelope's site count, which lives in that issue's
+   owner-decision comment and in the changelog — the docstring restated it in two
+   spellings the original ban could not see, and both are matched now.
 
 WHAT THE CENSUS CANNOT SEE (stated, not silently excluded)
 ---------------------------------------------------------
@@ -316,7 +327,20 @@ EDGE = "aboutObject"
 
 #: The Cypher clauses that can govern a relationship pattern. `MERGE`/`CREATE`
 #: mint the edge, so they are writers; `MATCH`/`OPTIONAL MATCH` are the readers.
-_CLAUSE = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE)\b")
+#: `re.IGNORECASE` is load-bearing, not decoration: Cypher keywords are
+#: case-insensitive, so `match (n)-[:aboutObject]->(m)` is the same read as the
+#: uppercase spelling. Without the flag such a reader derived in NO class — both
+#: consumers `.upper()` a capture the regex could never lowercase, so the
+#: normalization was dead code — and the completeness arm stayed green over it.
+#: The trailing `\(` is load-bearing for the same reason and was measured, not
+#: assumed: a clause in Cypher is always followed by a node pattern, while a prose
+#: sentence is not. Case-insensitivity alone derived a FALSE site in
+#: `value_extractor.GROUNDING_SYSTEM` — an LLM prompt whose prose says "match
+#: summary items" and whose JSON schema then carries `[{"edge":
+#: "aboutObject|…"}]`, so the English verb governed a bracket. A guard that reads
+#: prose as Cypher is the same defect pointing the other way, and both
+#: directions are pinned in `_MECHANISM_CASES`.
+_CLAUSE = re.compile(r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE)\b\s*\(", re.IGNORECASE)
 #: A traversal: an opening `[` or `-` shortly before the relationship name, so
 #: prose ("an ``aboutObject`` edge") is not mistaken for Cypher.
 _TRAVERSAL = re.compile(rf"[-\[][^\n]{{0,140}}?{EDGE}", re.IGNORECASE)
@@ -1948,8 +1972,24 @@ _MECHANISM_CASES: tuple[tuple[str, str, bool], ...] = (
         True,
     ),
     (
+        "lowercase MATCH clause (Cypher keywords are case-insensitive)",
+        'def read(g):\n    g.query("match (n)-[:aboutObject]->(m) RETURN n")\n',
+        True,
+    ),
+    (
         "MERGE writer",
         'def write(g):\n    g.query("MERGE (n)-[:aboutObject]->(m) RETURN n")\n',
+        False,
+    ),
+    (
+        "lowercase merge writer (case-insensitivity must not turn a writer into a read)",
+        'def write(g):\n    g.query("merge (n)-[:aboutObject]->(m) RETURN n")\n',
+        False,
+    ),
+    (
+        "the English verb `match` in prose is not a Cypher clause",
+        'PROMPT = """\nIDENTITY MATCHING: match summary items to existing ones.\n'
+        'Output: {"connections": [{"edge": "aboutObject|IMPL"}]}\n"""\n',
         False,
     ),
     (
@@ -2447,6 +2487,11 @@ _EMPTY_PATTERN_CASES: tuple[tuple[str, str, bool], ...] = (
     (
         "bracket-less both-directions traversal",
         'def read(g):\n    g.query("MATCH (n)<-->(m) RETURN n.id")\n',
+        True,
+    ),
+    (
+        "lowercase MATCH clause with an empty pattern",
+        'def read(g):\n    g.query("match (n)-[r]->(m) RETURN type(r)")\n',
         True,
     ),
     (
@@ -3259,13 +3304,20 @@ def test_the_extractor_section_keeps_its_three_questions():
 
 #: A count stated in THIS file's prose about a set this file does not measure
 #: there: the `EMPTY_PATTERN` register's size (which belongs to §13 and to
-#: `test_the_empty_pattern_register_count_matches_the_prose`, the one reader of it)
-#: and a walk's member count (which the class arm asserts against the derived set).
-#: Both were restated here and both went stale — the register one in three places
-#: while the arm went on asserting the document's numeral, which is why the copy a
-#: reader trusts was the unread one.
+#: `test_the_empty_pattern_register_count_matches_the_prose`, the one reader of it),
+#: a walk's member count (which the class arm asserts against the derived set), and
+#: the `#7948` envelope's site count (which lives in that issue's owner-decision
+#: comment and in `STORAGE-ARCHITECTURE-CHANGELOG.md` — neither of which this arm
+#: can compare a restated numeral to, so a copy here is rot with a decoder ring).
+#: All of them were restated here and all of them went stale — the register one in
+#: three places while the arm went on asserting the document's numeral, and the
+#: envelope one stated a figure that nothing claimed at all, which the ninth review
+#: of PR #9398 found while this arm stayed green.
 _SELF_COUNT_CLAIM = re.compile(
-    rf"(?:{_NUMERAL})\s+members today|today's census:\s*(?:{_NUMERAL})\s+members",
+    rf"(?:{_NUMERAL})\s+members today"
+    rf"|today's census:\s*(?:{_NUMERAL})\s+members"
+    rf"|(?:{_NUMERAL})[- ]site envelope"
+    rf"|(?:{_NUMERAL})\s+sites? claimed",
     re.IGNORECASE,
 )
 
@@ -3286,6 +3338,13 @@ def test_the_file_states_no_count_it_does_not_measure():
     and point at the arm that measures it (`entry 14` in `WHAT THIS PINS` deleted
     its own count for exactly this reason). So the copies are banned rather than
     corrected: a count here is either asserted, or it is rot with a decoder ring.
+
+    The fourth subject is the `#7948` envelope's site count, which nothing in this
+    file measures: it is stated in that issue's owner-decision comment and recorded
+    in `STORAGE-ARCHITECTURE-CHANGELOG.md`, and the docstring above restated it as a
+    number neither of them claimed — in two spellings the original ban could not see
+    (`<N>-site envelope`, `<N> sites claimed`). Both are matched now, so the copy
+    cannot come back in a third shape.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     offenders = [
@@ -3305,6 +3364,21 @@ def test_the_file_states_no_count_it_does_not_measure():
     assert _SELF_COUNT_CLAIM.search("(" + "seven" + " members today"), (
         "the banned-count pattern no longer matches `(<N> members today`, so half "
         "of this arm asserts nothing"
+    )
+    # The two shapes this arm was WIDENED for: the docstring stated an envelope
+    # count that nothing claimed, and `STORAGE-ARCHITECTURE-CHANGELOG.md` states
+    # the same historical fact in the hyphaned form. Both samples are the pre-fix
+    # text itself, built from parts, so "the ban can see that spelling" is a
+    # measurement rather than a claim about the regex.
+    assert _SELF_COUNT_CLAIM.search(
+        "(`#7948`, " + "thirteen" + " sites claimed to be the envelope)"
+    ), (
+        "the banned-count pattern no longer matches `<N> sites claimed`, so the "
+        "shape the ninth review found in this file's docstring can come back green"
+    )
+    assert _SELF_COUNT_CLAIM.search("the first " + "eleven" + "-site envelope"), (
+        "the banned-count pattern no longer matches `<N>-site envelope`, so the "
+        "changelog's spelling of the same claim is not covered by this ban"
     )
     assert not offenders, (
         "this file restates a census count it does not assert, so the copy will "
