@@ -894,8 +894,9 @@ when a reader under `tortoise/` is undeclared or a declared symbol does not perf
 the fifth correction is a red test rather than a fifth audit.
 
 - **Row 8 cited `collect_slices`** — which orchestrates the connected-assembly read and never
-  traverses the edge. The reads are in **`spine_rows`** (Object→Points at `assembly.py:2235`,
-  Object→Events at `:2258`), inside `docker_walker_port`. A re-verifier following the row found no
+  traverses the edge. The reads are in **`spine_rows`** (Object→Points and Object→Events, both inside
+  `docker_walker_port`) — the symbol is what the arm resolves; no line number is offered here, per the
+  rule stated below. A re-verifier following the row found no
   traversal and could only conclude the row was wrong.
 - **Row 9 cited `build_subgraph`** — the Cypher is the module constants `_CYPHER_ABOUT` /
   `_CYPHER_SIBLINGS`, executed by **`_collect_raw`** at `subgraph.py:439`/`:440`.
@@ -925,7 +926,7 @@ the fifth correction is a red test rather than a fifth audit.
   at `26aff163c` (36 at the pin; 41 recorded by the `#7956` pass at `1e5fc00ca`). All three count
   files that **mention** the edge, which is the only thing a grep can measure — the sentence said
   *"assert"*, which overstated what was behind the number.
-- **The sibling passage in `EXTRACTOR-V4-ARCHITECTURE.md` §16 was corrected in the same pass** (its
+- **The sibling passage in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 was corrected in the same pass** (its
   `assembly.py:573`/`:789`/`:809` pointer, its `:NNNN` citations and its test-file count), because
   a repair that fixes one copy and leaves the other is how this drift survived the previous three.
 
@@ -1047,7 +1048,7 @@ not name, and a number that read as a count of something it did not count.
   **TWENTY-TWO read sites across EIGHTEEN rows, and SEVEN of those rows (ten sites) are
   CUSTOMER-CALLABLE**, and `test_the_prose_counts_match_the_table` checks four numerals, each
   against the set its own noun names.
-- **The sibling copy in `EXTRACTOR-V4-ARCHITECTURE.md` §16 stopped restating the counts.** It
+- **The sibling copy in `EXTRACTOR-V4-ARCHITECTURE.md` §13.8 stopped restating the counts.** It
   asserted an unguarded *"SIX sites are customer-callable"* and *"four customer-callable sites DO"*,
   plus a "TWENTY-site table" pointer, and nothing executed any of them (the citation guard resolves
   symbols, not counts) — so the two documents agreed on numbers neither checked, which is the
@@ -1118,7 +1119,7 @@ were **prose that a machine could have caught and no machine was catching**, whi
 subject one level up:
 
 - **The line hints were still there, in the one paragraph that says they are not the authority.** The
-  §16 passage in `EXTRACTOR-V4-ARCHITECTURE.md` opened with *"These line numbers are the convenience,
+  §13.8 passage in `EXTRACTOR-V4-ARCHITECTURE.md` opened with *"These line numbers are the convenience,
   not the authority"* while carrying fifteen `file.py:NNNN` hints — and six of them pointed at
   unrelated code **at the PR head and at `origin/main`** (the reviewer measured each as a symbol
   grep vs a `sed -n 'Np'`, the two-command comparison the paragraph itself invites). §13 had already
@@ -1177,7 +1178,7 @@ worth naming: both were **prose asserting a fact about prose**, which no arm was
   are named here as numbers in prose rather than as a `file.py:NNNN` hint, so the passage that says
   they rot does not hand a re-verifier a fresh one to copy. ⚠️ **This block is deliberately not
   guarded by a no-hints arm**, and the reason is structural rather than an omission: two of its
-  hints exist **as examples of rot** (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §16
+  hints exist **as examples of rot** (`assembly.py:573`/`:789`/`:809`, the `EXTRACTOR-V4` §13.8
   pointer the fourth correction replaced, and `sdk.py:20154`, the `_connect_issue_objects` citation
   that was wrong when written), so a blanket arm would red on the passage that *documents* the
   defect. What the arm enforces — *the symbols are authoritative, the line number is a
@@ -1315,7 +1316,7 @@ named census, and prose claims nothing read.
   §13 promises *"reds the guard until it gets a row here"* — derived nothing. It also made the
   superset arm unfalsifiable: that arm re-uses this walk as its own proof, so a narrowing here was
   invisible to the arm written to catch narrowings.
-- **§16 lost a question.** The rewrite of `EXTRACTOR-V4-ARCHITECTURE.md` §16's question 2 removed the
+- **§13.8 lost a question.** The rewrite of `EXTRACTOR-V4-ARCHITECTURE.md` §13.8's question 2 removed the
   newline before question 3, which became the tail of the paragraph above it (`…cheap to keep.**3.
   **Should every expansion…`). The list rendered one item short while the sentence that introduces
   it still said *"The three questions below"*, and §15 still cross-references *"question 3"*.
@@ -1333,7 +1334,7 @@ not an executed read; a docstring naming the edge would otherwise have demanded 
 comment). Two cases are added: a `{_REL}Object` fragment to `_MECHANISM_CASES` and to
 `_NEW_READER_CASES`, and a docstring case to `_MECHANISM_CASES`, all asserted *through the walk*
 rather than through the resolver alone — `_resolve` was already correct, which is why the gate hid
-the member. §16's newline is restored, and the copy in each stale comment is replaced by the property
+the member. §13.8's newline is restored, and the copy in each stale comment is replaced by the property
 plus a pointer at the arm that measures it. Two arms make both prose defects executable:
 `test_the_extractor_section_keeps_its_three_questions` compares the count the sentence states to the
 items that start their own line (its predicate is run on a glued sample and a clean one, so the
@@ -1342,7 +1343,7 @@ restated census numeral in this test file altogether.
 
 **Measured.** Restoring the gate reds two arms (`test_the_census_derives_a_relationship_name_built_at_runtime`
 on the fragment case and `test_a_new_call_time_reader_cannot_ship_green` on the new reader); dropping
-the docstring exclusion reds the mechanism arm; re-gluing §16's item 3 reds the new list arm; putting
+the docstring exclusion reds the mechanism arm; re-gluing §13.8's item 3 reds the new list arm; putting
 the stale count back in a comment reds the count-copy arm. Counts are unchanged — **twenty-six sites,
 twenty-two rows, nine customer-callable rows (twelve sites)** — the gate was hiding no member at
 this head, which is the point: it would have hidden the next one.
