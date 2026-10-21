@@ -37321,16 +37321,20 @@ class TortoiseSDK:
                 ⚠️ The alias is NOT equivalent to ``"Source"`` for the caller:
                 it also selects the DERIVATION relation, so the link takes the
                 optional ``sourceVersion`` anchor described below, while
-                ``"Source"`` means referential containment and stays
-                property-free. Pass ``"Document"`` when the link's meaning is
+                ``"Source"`` means referential containment and carries no
+                ``sourceVersion``. Pass ``"Document"`` when the link's meaning is
                 "this target was read from that source".
             source_kind: sourceKind to set on auto-created Source (default: "document")
 
         Anchor (#5199): a DERIVATION link (``Event`` | ``Document``) records the
         source version its target was read from as an optional ``sourceVersion``,
         read HERE from the source's own ``contentHash`` so no caller passes it and
-        this signature is unchanged. Written ``ON CREATE`` only. ``Object`` links
-        stay property-free. See ``docs/architecture/STORAGE-ARCHITECTURE.md`` §9.6.
+        this signature is unchanged. Written ``ON CREATE`` only. ``Object``
+        (identity/mention) and ``Source`` (containment) links carry no
+        ``sourceVersion`` — the ruling scopes the claim to the ANCHOR, not to a
+        general emptiness claim on those edges, so do not restate it as "these
+        links are property-free". See ``docs/architecture/STORAGE-ARCHITECTURE.md``
+        §9.6.
 
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object

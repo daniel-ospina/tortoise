@@ -601,10 +601,10 @@ def read_reference_currency_links(
     source through ``(Source)-[:references]->(entity)`` (§3.4), which is the
     link that carries the ``sourceVersion`` note for the DERIVATION classes
     (owner ruling 2026-09-25, option A — ``Event``/``Document`` annotate, an
-    identity/mention ``Object`` link stays property-free). Without this read the
-    question *"are the entities we reason about still about the content we
-    hold?"* is unanswerable for every class except ``:Point``, which is the gap
-    #5199 names.
+    identity/mention ``Object`` link carries no ``sourceVersion``). Without this
+    read the question *"are the entities we reason about still about the content
+    we hold?"* is unanswerable for every class except ``:Point``, which is the
+    gap #5199 names.
 
     Returns ``{entity_id: [link, ...]}`` — the same row shape as
     :func:`read_currency_links` (``source``, ``recorded``, ``current``,
@@ -621,10 +621,10 @@ def read_reference_currency_links(
       declined to pick a node", so the refusal keeps its key.
 
     ⛔ AN ``Object`` READS ``unknown``, AND THAT IS THE ANSWER, NOT A BUG. Its
-    link is property-free by the same ruling, so the pair is unfillable and
-    :func:`currency_status` returns ``unknown`` — deliberately never
-    ``current``. Do not "fix" this by stamping an anchor onto an identity link:
-    that reverses the ruling and is pinned against in
+    link carries no ``sourceVersion`` by the same ruling, so the pair is
+    unfillable and :func:`currency_status` returns ``unknown`` — deliberately
+    never ``current``. Do not "fix" this by stamping an anchor onto an identity
+    link: that reverses the ruling and is pinned against in
     ``tests/test_source_version_references_5199.py``.
 
     Identity: a row is attributed to the COORDINATES THE CALLER USED, never to
