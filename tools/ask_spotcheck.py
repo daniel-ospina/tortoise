@@ -88,9 +88,15 @@ rather than inferring one from the other:
   not read the store (``None``) — a retrieval GAP / UNMEASURED case: the run
   FAILS. An unmeasured gate is never a pass.
 
-``excluded`` is never inferred from a failed text match alone: a distilled
-claim rendered in a shape the matcher cannot attribute is UNMEASURED, not
-excluded (see ``_superseded_live_state``). ``TORTOISE_SPOTCHECK_JUDGE=mock``
+``excluded`` is never inferred from a failed text match alone. Absence is only
+readable from an instrument PROVEN able to see the claim, so the leg first
+CALIBRATES the detector (``_detector_attributes_the_claim``): it renders the
+superseded claim's own pool hit through the product's renderer and requires
+the block detector to attribute it. A claim whose text reaches the evidence
+only OUTSIDE a claim body (the successor's ``[SUPERSEDES: <old>]`` snippet) is
+a MENTION, not an observation; and a claim the detector cannot attribute even
+in its own render is UNMEASURED — never excluded, never a pass (see
+``_superseded_live_state``). ``TORTOISE_SPOTCHECK_JUDGE=mock``
 grades the leg key-free (CI); the composition path's #2071 fail-fast
 judge-key rule is not widened.
 """
@@ -1013,6 +1019,9 @@ def superseded_claim_retrievable(sdk: TortoiseSDK, case: dict,
                                  ) -> bool | None:
     """Is the superseded claim in the ask lane's OWN retrieval pool? (#9095)
 
+    The boolean half of :func:`_superseded_pool_probe` — the reading callers
+    assert on.
+
     The D8 product gate (``docs/product-success-eval.md``: "0% of superseded
     points appear as live answers — **must be flagged or excluded**") admits
     TWO compliant states, and a claim that is not served looks the same in
@@ -1043,8 +1052,24 @@ def superseded_claim_retrievable(sdk: TortoiseSDK, case: dict,
     probe's candidate rows would bias ``f`` HIGH — the direction that removes
     the saving the instrument measures (#7983's pool-caller rule).
     """
+    return _superseded_pool_probe(sdk, case, old_point_id, question_date)[0]
+
+
+def _superseded_pool_probe(sdk: TortoiseSDK, case: dict,
+                           old_point_id: str | None,
+                           question_date: str | None = None
+                           ) -> tuple[bool | None, dict | None]:
+    """``(retrievable, hit)`` — the FULL reading behind
+    :func:`superseded_claim_retrievable`.
+
+    The matching ROW comes back with the boolean because ``excluded`` needs
+    more than "is the id in the pool": it needs the claim's own hit to render,
+    so the detector's ability to attribute it can be PROVEN before the
+    detector's silence is read as an exclusion
+    (:func:`_detector_attributes_the_claim`).
+    """
     if not old_point_id:
-        return None
+        return None, None
     # Lazy import: the probe is a measurement helper, not a module-load cost.
     from tortoise.retrieval import (
         ASK_FUSION_K_ENV,
@@ -1068,8 +1093,45 @@ def superseded_claim_retrievable(sdk: TortoiseSDK, case: dict,
             fusion_k=ask_env_int(ASK_FUSION_K_ENV, 60),
             _record_reads=False)
     except Exception:  # noqa: BLE001, RUF100 — an unreadable probe is UNKNOWN
-        return None
-    return any(str(h.get("id") or "") == str(old_point_id) for h in hits)
+        return None, None
+    for hit in hits or []:
+        if str(hit.get("id") or "") == str(old_point_id):
+            return True, hit
+    return False, None
+
+
+def _detector_attributes_the_claim(case: dict, hit: dict | None) -> bool:
+    """Can this instrument's block detector actually SEE this claim? (#9095)
+
+    ``excluded`` is a claim about ABSENCE, and absence is only readable from a
+    detector PROVEN able to attribute the thing it is looking for. Without
+    that proof a claim SERVED in a shape the matcher cannot attribute and a
+    claim that was never served are the SAME observation — and the gate can
+    then report D8's compliant PASS on exactly the failure it exists to catch.
+
+    The proof is mechanical, per case, against the product itself: render the
+    superseded claim's OWN pool hit through the reader's renderer
+    (``render_context`` — the same path the reader's evidence takes) and
+    require ``_superseded_live_state`` to OBSERVE the claim in it, as a body
+    (flagged or live). A multi-paragraph body, a fence the detector cannot
+    undo, or a renderer change that moves the block tail all make this
+    ``False``, and the caller then reports UNMEASURED rather than inferring an
+    exclusion from a silence it cannot rule out.
+
+    ``None`` (no probe row, or a probe that could not read the store) is NOT
+    proof: the caller fails closed on it.
+    """
+    if not isinstance(hit, dict):
+        return False
+    # Lazy import: same reason as the probe's — no module-load cost.
+    from tortoise.retrieval import render_context
+    try:
+        rendered = render_context([hit])
+    except Exception:  # noqa: BLE001, RUF100 — cannot prove => not proven
+        return False
+    _seen, rendered_live, flagged = _superseded_live_state(
+        rendered, case["old_claim"]["text"])
+    return bool(rendered_live or flagged)
 
 
 def _run_one_arm(sdk: TortoiseSDK, case: dict, arm: str, judge,
@@ -1089,9 +1151,10 @@ def _run_one_arm(sdk: TortoiseSDK, case: dict, arm: str, judge,
         # (same posture as the 21-question loop). Nothing was OBSERVED, so
         # the D8 leg fails CLOSED rather than passing on an unread case.
         return {"ok": False, "answer": "", "committed": False,
-                "old_seen": False, "observed": False,
+                "old_seen": False, "observed": False, "mentioned": False,
                 "rendered_live": False, "flagged": False,
-                "retrievable": None, "excluded": False,
+                "retrievable": None, "detector_attributed": False,
+                "excluded": False,
                 "note": f"ask unavailable: {type(exc).__name__}"}
     evidence = result.get("evidence") or ""
     seen, rendered_live, flagged = _superseded_live_state(
@@ -1100,24 +1163,39 @@ def _run_one_arm(sdk: TortoiseSDK, case: dict, arm: str, judge,
     # either flagged (pass) or live (the D8 failure). A mere MENTION (the
     # successor's ``[SUPERSEDES: <old>]`` snippet) is not observation.
     observed = bool(rendered_live or flagged)
+    mentioned = bool(seen and not observed)
     # The RAW arm has no superseded claim to probe — there is nothing there to
     # retrieve — so it reports ``retrievable: None``.
-    retrievable = (superseded_claim_retrievable(
-        sdk, case, (ids or {}).get("old"), qdate) if ids else None)
+    retrievable, hit = (
+        _superseded_pool_probe(sdk, case, (ids or {}).get("old"), qdate)
+        if ids else (None, None))
     # D8's "flagged OR excluded": EXCLUDED is only ever claimed on POSITIVE
-    # evidence — the claim is in the lane's own pool AND its body appeared
-    # nowhere in the reader's evidence. A claim that is absent AND not
-    # retrievable stays the retrieval gap it is.
+    # evidence of ABSENCE, and absence is only readable from a detector PROVEN
+    # able to see the claim. Both halves are required:
+    #   * the claim IS in the lane's own pool (``retrievable is True``) — it
+    #     could have been served, so its absence is an exclusion rather than a
+    #     retrieval gap; and
+    #   * the block detector ATTRIBUTES the claim in its own render
+    #     (``_detector_attributes_the_claim``) — so "not observed" is a fact
+    #     about the reader's evidence, not about the matcher's blind spot.
+    # The second half is what closes the fail-open: without it, a claim served
+    # live in a shape the matcher cannot attribute (a multi-line body, a moved
+    # block tail) read as a D8 PASS. ``not observed`` alone is never enough.
+    detector_attributed = bool(observed or _detector_attributes_the_claim(
+        case, hit))
     return {
         "ok": True,
         "answer": result.get("answer") or "",
         "committed": _judge_committed(case, result, judge),
         "old_seen": seen,
         "observed": observed,
+        "mentioned": mentioned,
         "rendered_live": rendered_live,
         "flagged": flagged,
         "retrievable": retrievable,
-        "excluded": bool(not observed and retrievable is True),
+        "detector_attributed": detector_attributed,
+        "excluded": bool(not observed and retrievable is True
+                         and detector_attributed),
         "note": "",
     }
 
@@ -1128,13 +1206,14 @@ def _arm_totals(cases: list[dict], arm: str) -> tuple[dict, dict]:
     committed = sum(1 for r in rows if r["committed"])
     seen = sum(1 for r in rows if r["old_seen"])
     observed = sum(1 for r in rows if r.get("observed"))
+    mentioned = sum(1 for r in rows if r.get("mentioned"))
     live = sum(1 for r in rows if r["rendered_live"])
     excluded = sum(1 for r in rows if r.get("excluded"))
     return (
         {"committed": committed, "n": n,
          "rate": (committed / n) if n else 0.0},
-        {"seen": seen, "observed": observed, "rendered_live": live,
-         "excluded": excluded, "n": n,
+        {"seen": seen, "observed": observed, "mentioned": mentioned,
+         "rendered_live": live, "excluded": excluded, "n": n,
          "rate": (live / n) if n else 0.0},
     )
 
@@ -1152,13 +1231,23 @@ def _distilled_gate_failures(records: list[dict]) -> list[str]:
        claim never came out of the store: a retrieval GAP, so the gate was
        never exercised (UNMEASURED, never a pass);
     4. NOT observed, with the probe unreadable (``None``) — UNKNOWN, and an
-       unreadable probe is not evidence of a pass.
+       unreadable probe is not evidence of a pass;
+    5. NOT observed and retrievable, but the block detector cannot attribute
+       the claim even in its OWN render (``detector_attributed is False``) —
+       the instrument is BLIND on this case, so "not observed" says nothing
+       about whether the claim was served. Exit 0 here would be the fail-open
+       this leg exists to close: a claim served live in an unattributable
+       shape (multi-line body, moved block tail) would read as a D8 PASS.
 
-    A NOT-observed claim with ``retrievable is True`` is D8's other compliant
-    outcome ("must be flagged or **excluded**") and is a PASS, reported in
-    ``superseded_live.excluded`` so the pass is visible rather than an absence
-    that looks like a miss. ``current_state`` is NEVER a gate: D8 gives the
-    knowledge-update rate no threshold, the first run sets it.
+    A NOT-observed claim that IS retrievable and IS attributable is D8's other
+    compliant outcome ("must be flagged or **excluded**") and is a PASS,
+    reported in ``superseded_live.excluded`` so the pass is visible rather
+    than an absence that looks like a miss. A claim that reached the evidence
+    only as a MENTION (``mentioned`` — outside every claim body) is scored the
+    same way, deliberately: with the detector PROVEN able to see it, a
+    mention outside a body is the snippet trap, not the claim being served.
+    ``current_state`` is NEVER a gate: D8 gives the knowledge-update rate no
+    threshold, the first run sets it.
     """
     failures: list[str] = []
     for record in records:
@@ -1185,11 +1274,24 @@ def _distilled_gate_failures(records: list[dict]) -> list[str]:
                 f"{cid}: the superseded claim was never observed and the "
                 f"retrievability probe could not read the store — the D8 "
                 f"gate is UNMEASURED, not passed")
-        else:
+        elif retrievable is False:
             failures.append(
                 f"{cid}: the superseded claim was NEVER RETRIEVED from the "
                 f"store (absent from the lane's own pool) — a retrieval "
                 f"GAP: the D8 gate is UNMEASURED, not passed")
+        else:
+            # Retrievable, not observed, and not attributable: the detector
+            # cannot see this claim even in its own render, so its silence is
+            # blind, not an exclusion.
+            failures.append(
+                f"{cid}: the superseded claim is retrievable but the block "
+                f"detector cannot attribute it even in its OWN render — the "
+                f"instrument is BLIND on this case, so an unobserved claim "
+                f"cannot be told from an EXCLUDED one: the D8 gate is "
+                f"UNMEASURED, not passed"
+                + (" (the claim's text reached the evidence only as a "
+                   "supersedes MENTION, never as a body)"
+                   if arm.get("mentioned") else ""))
     return failures
 
 
@@ -1219,13 +1321,16 @@ def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
       * ``current_state {committed, n, rate}`` — the knowledge-update class:
         how often the reader committed the CURRENT state. No pass threshold
         (D8: the first run sets it).
-      * ``superseded_live {seen, observed, rendered_live, excluded, rate}`` —
-        the D8 product gate. ``rendered_live > 0`` is a hard failure of the
-        run. So is a claim that was NOT observed without being proven
-        excluded: a claim the instrument could not observe was not shown to be
-        flagged, it was merely not seen (``_distilled_gate_failures``).
-        ``excluded`` counts D8's other compliant outcome, so a pass by
-        exclusion is reported rather than read as a silent absence.
+      * ``superseded_live {seen, observed, mentioned, rendered_live,
+        excluded, rate}`` — the D8 product gate. ``rendered_live > 0`` is a
+        hard failure of the run. So is a claim that was NOT observed without
+        being proven excluded: a claim the instrument could not observe was
+        not shown to be flagged, it was merely not seen
+        (``_distilled_gate_failures``). ``excluded`` counts D8's other
+        compliant outcome, so a pass by exclusion is reported rather than read
+        as a silent absence — and it is only claimed once the detector has
+        PROVEN it can attribute the claim's own render, so an instrument that
+        has gone blind fails closed instead of reading green.
 
     ``mutate`` is the mutation hook (the falsification probe: drop the
     supersession and the gate must go RED). It runs on the distilled arm after
@@ -1250,7 +1355,9 @@ def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
         records.append({"case_id": case["case_id"], "arms": arms})
         raw, dist = arms["raw"], arms[_DISTILLED_GATE_ARM]
         # D8's two compliant outcomes are named separately in the human line:
-        # a pass by EXCLUSION must not read like a case that went unobserved.
+        # a pass by EXCLUSION must not read like a case that went unobserved,
+        # and a claim seen only as a MENTION (outside every body) is named so
+        # the exclusion it may be scored as is legible rather than silent.
         outcome = ("LIVE" if dist["rendered_live"]
                    else "flagged" if dist["flagged"]
                    else "excluded" if dist.get("excluded")
@@ -1261,7 +1368,9 @@ def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
             f"seen={raw['old_seen']} live={raw['rendered_live']} | "
             f"distilled: committed={dist['committed']} "
             f"seen={dist['old_seen']} live={dist['rendered_live']} "
-            f"flagged={dist['flagged']} excluded={dist.get('excluded')} "
+            f"flagged={dist['flagged']} "
+            f"mentioned={dist.get('mentioned')} "
+            f"excluded={dist.get('excluded')} "
             f"[{outcome}]",
             file=out)
 
@@ -1298,6 +1407,7 @@ def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
     print(f"superseded-live (D8 gate, {_DISTILLED_GATE_ARM} arm): "
           f"{dist_live['rendered_live']}/{n} rendered live, "
           f"{dist_live['observed']}/{n} observed, "
+          f"{dist_live['mentioned']}/{n} mentioned-only, "
           f"{dist_live['excluded']}/{n} excluded — "
           f"{'PASS' if ok else 'FAIL'} (must be 0 rendered live, {n} "
           f"observed-or-excluded)", file=out)

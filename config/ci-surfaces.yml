@@ -6025,11 +6025,14 @@ durations:
   test_ask_eval_only.py: 4.6
   test_ask_seed_shape.py: 0.6
   test_ask_spotcheck_seed_shape.py: 0.3
-  # Measured locally 2026-10-19 (10 tests, 8 embedded stores; sum of junit
-  # testcase times = 8.71s — 2.17s of it is the first test paying the
-  # `tortoise` import). Refresh from the first post-merge CI run that measures
-  # it.
-  test_ask_spotcheck_distilled_corpus.py: 8.7
+  # Measured locally 2026-10-19 (21 tests; every leg construction builds two
+  # embedded stores, 3 planted cases x 2 arms per leg test). Sum of junit
+  # testcase times = 52.19s on the FIX lane, whose first test pays ~11s for
+  # the `tortoise` import — ~5x the 2.17s of the original 8.71s (10-test)
+  # measurement, so the compute is normalised down to 10.5s here. The number
+  # is a normalised FLOOR, not a CI measurement: refresh it from the first
+  # post-merge CI run that measures it.
+  test_ask_spotcheck_distilled_corpus.py: 10.5
   test_battery_recall_wiring.py: 0.3
   test_blog_agent_delete_guard.py: 2.5
   test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact
