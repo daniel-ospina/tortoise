@@ -20,6 +20,7 @@ sys.path.insert(0, str(TOOLS.parent))
 
 import calibration_harness as ch  # noqa: E402, I001
 import probe_extractor as pe  # noqa: E402
+from tortoise.pack_registry import CANONICAL_OBJECT_KINDS  # noqa: E402
 
 
 # ── S0 reference mask ───────────────────────────────────────────────────────
@@ -78,7 +79,7 @@ class TestValidateStream:
             "events": [{"id": "e1", "eventKind": "occurrence"}],
             "claims": [{"id": "c1", "kind": "statement", "quote": "q",
                         "source_ref": "s1"}],
-            "entities": [{"name": "X", "kind": "core:concept"}],
+            "entities": [{"name": "X", "kind": "core:standard"}],
             "relations": [{"src": "c1", "target_edge": {"src": "c1", "dst": "c2",
                           "op_type": "IMPL"}, "op_type": "MITIGATES",
                           "strength": 0.3}],
@@ -125,7 +126,7 @@ class TestMetrics:
     def test_counts(self):
         d = {"events": [{"eventKind": "decision"}, {"eventKind": "occurrence"}],
              "claims": [{"id": "c1"}], "process": [{"id": "p1"}],
-             "entities": [{"name": "X", "kind": "core:concept"},
+             "entities": [{"name": "X", "kind": "core:standard"},
                           {"name": "Y", "kind": "madeup:k"}],
              "relations": [{"src": "c1", "target_edge": {"src": "c1",
                            "dst": "c2", "op_type": "IMPL"},
@@ -164,8 +165,8 @@ class TestSourceEvents:
     def test_connection_name_resolution(self):
         events = [{"id": "e1", "content": "PR #1016 merged: state-centric memory"}]
         items = {"entities": [
-            {"name": "state-centric memory", "kind": "core:concept"},
-            {"name": "pricing", "kind": "core:concept"}]}
+            {"name": "state-centric memory", "kind": "core:standard"},
+            {"name": "pricing", "kind": "core:standard"}]}
         conns = ch.connect_events_to_items(events, items)
         assert conns[0]["connects_to"] == ["state-centric memory"]
 
@@ -174,7 +175,16 @@ class TestSourceEvents:
 
 class TestOntologyAlignment:
     def test_probe_vocab_is_subset_of_packs_and_core(self):
-        """Every kind the probe emits must exist in the ontology/packs."""
+        """Every kind the probe emits must exist in the ontology/packs.
+
+        ⛔ The core half is IMPORTED (#2786), never transcribed. It used to be a hand copy of
+        the same list the harness carried, so both sides held the same retired entries
+        (``core:document``/``core:concept``) and this assertion could not fire — it compared
+        two hand copies against each other and never against the canonical source. Equality
+        with ``CANONICAL_OBJECT_KINDS`` is now asserted in
+        ``tests/test_kind_vocabulary_consistency.py``; what this leg keeps is the PACK side,
+        which only this test can see.
+        """
         from tortoise.pack_registry import PackRegistry
         reg = PackRegistry(Path(__file__).resolve().parent.parent / "packs")
         reg.load_all()
@@ -190,11 +200,7 @@ class TestOntologyAlignment:
             ont = raw.get("ontology", {})
             for k in ont.get("objectKinds", []) + ont.get("pointKinds", []):
                 pack_kinds.add(f"{ns}:{k}")
-        core = {"core:concept", "core:standard", "core:other", "core:WorkItem",
-                "core:document", "core:tool", "core:workflow", "core:Project",
-                "core:tag", "core:user", "core:skill", "core:agent",
-                "core:agreement", "core:strategy", "core:plan", "core:goal",
-                "core:target"}
+        core = {f"core:{k}" for k in CANONICAL_OBJECT_KINDS}
         for kind in ch.VOCAB:
             assert kind in core or kind in pack_kinds, f"{kind} not in ontology/packs"
 

@@ -660,7 +660,9 @@ window, independent of when Tortoise learned it. Canonical pair:
 >   `validTo == validFrom` (#5374), so a zero-length `[t, t]` window is already
 >   persistable and this closed `_covers` covers exactly one instant: at `t` the
 >   read answers `status="found"` with the point as `valid_point` (measured
->   against `get_historical_knowledge`'s `_covers`, which rejects only `vT < t`).
+>   against `get_historical_knowledge`'s `_covers`, which rejects only `vT < t`,
+>   and only once `vT` names an instant (#9202 — a bound that names none is not
+>   a bound, so it can reject nothing).
 >   Under `[vF, vT)` that window covers **no** instant and the
 >   same read answers `status="absent"` — the shape of honest absence — while
 >   #5361's `malformed` flag stays **silent**, because that detection is strictly
@@ -688,10 +690,16 @@ window, independent of when Tortoise learned it. Canonical pair:
 > Pinned by `tests/test_validity_windows.py`
 > (`test_a_start_naming_no_instant_leaves_the_window_open`,
 > `test_restore_read_path_treats_falsey_but_present_valid_from_as_present` part b).
-> The END is deliberately **not** symmetric and not flagged: an unorderable
-> `validTo` covers every later instant and still reports `end_state: "known"`
+> The END agrees on the **gate** and differs only on the **state**: an
+> unorderable `validTo` bounds nothing either — `_covers` skips the arm, because
+> ordering a value that names no instant answers from a lexicographic comparison
+> rather than from the data, so a probe that itself names no instant is covered
+> too (#9202's coverage half) — and it still reports `end_state: "known"`
 > (the `END_UNKNOWN` marker requires an absent end plus an `"unknown"`
-> declaration), so no reply field says the window is unbounded.
+> declaration), so no reply field says the window is unbounded. Whether that
+> state should instead read `unknown` / `open` is **#9202's owner decision** and
+> is NOT settled by the gate. Pinned by `tests/test_validity_windows.py`
+> (`test_an_end_naming_no_instant_bounds_no_instant_even_for_an_unparseable_probe`).
 >
 **Per-end precision and the 3-state end (#2350, E-prec).** The window pair
 above carries an **additive** precision layer: `validFromPrecision` /

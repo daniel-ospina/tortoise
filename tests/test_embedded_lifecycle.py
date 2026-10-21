@@ -118,6 +118,11 @@ RAW_EMBEDDED_ALLOWLIST = {
     "test_derived_names.py",  # epic #1647 Task 7 — the path= construction IS the derived-name-under-test input
     "test_divergence_conformance.py",  # epic #1647 E2E-8 — both legs construct the projection as the input
     "test_embedded_concurrency.py",
+    # #5140: the behavioural `ingestedAt` file constructs its own embedded
+    # `FalkorProjection` per test (`tempfile.mkdtemp` + `graph_name=`) as the
+    # under-test input, so it is carve-out by its `carve_out:` row and needs
+    # this entry — a redirected construction would assert against the server.
+    "test_document_source_ingested_at_5140.py",
     "test_embedded_lifecycle.py",
     "test_export_cli.py",  # embedded-file-contract (P4 divergence from the plan's 13-migrate-out list): the `tortoise export` CLI reads a LOCAL DB file — the redirect would void the seed→CLI parity; a module-scoped autouse fixture pops TORTOISE_DB_URI so the file runs embedded on both lanes
     "test_index_cli.py",  # embedded-file-contract (CI-fix PR #1684): E2E-15 is a two-process embedded choreography (hook child owns the local db, parent reopens fresh after) — the redirect would split child-write vs parent-read; module-scoped autouse fixture pops TORTOISE_DB_URI

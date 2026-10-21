@@ -893,3 +893,197 @@ def test_a_failing_arm_derivation_lands_on_the_hedge_and_keeps_the_error(monkeyp
     # The mutation arm must NOT be guessed either way from a classifier failure.
     assert "OUTCOME IS UNKNOWN" not in message
     assert "re-issuing this statement is safe" not in message
+
+
+# ── the two in-package clients the note could not reach (#7357 residual) ────
+#
+# The module docstring's SCOPE paragraph named these two as exceptions: a bare
+# ``redis.Redis(...)`` never passes ``guarded_client`` (the #6882 seam), so
+# their commands carried neither the operator guard nor the #7357 note. The
+# #9210-series review left them as "follow-up work on THEIR seam" — these two
+# tests are that seam, driven through the REAL constructors with a dead vendor
+# class behind them (so removing the guard wiring, not merely the helper,
+# reddens them).
+
+
+class _DeadRedis:
+    """A vendor-shaped ``redis.Redis`` whose every command times out."""
+
+    error = redis_exc.TimeoutError(SOCKET_TIMEOUT)
+
+    def __init__(self, *args, **kwargs):
+        self.init_kwargs = kwargs
+        self.execute_command = self._execute
+
+    def _execute(self, *args, **kwargs):
+        # A FRESH instance per command, as a real driver does.
+        raise type(self.error)(*self.error.args)
+
+
+class _ClosedRedis(_DeadRedis):
+    """The same vendor shape, failing the way a container restart looks.
+
+    ``Connection closed by server`` is a NON-timeout transport failure, so
+    ``_is_client_read_timeout`` does NOT convert it — which makes it the one
+    leg whose annotated sentence actually reaches a restore CALLER.
+    """
+
+    error = redis_exc.ConnectionError("Connection closed by server.")
+
+
+def test_the_restore_copy_client_carries_the_note(monkeypatch):
+    """``hosted_backup._restore_copy_client`` reaches the seam, bound intact.
+
+    The client is deliberately NOT an ordinary request's client (#3813: the
+    swap's ``GRAPH.COPY`` must not inherit the request's read bound), and this
+    pins that routing it through the guard seam did not touch that: the pool
+    still receives the swap's own ``socket_timeout`` and NO retry. What it
+    gains is the #7357 note on its command channel — here over the driver's
+    ``TimeoutError``, the shape this stub raises.
+
+    ⛔ What this case does NOT pin: the note reaching a CALLER. A read timeout
+    on this path is #4233's and unchanged — ``_graph_copy_with_restore_bound``
+    proves the copy settled or raises ``RestoreCopyTimeoutError`` ("the
+    server-side GRAPH.COPY may still be running"), with the note on its
+    ``__cause__``. The leg that used to surface BARE is a NON-timeout transport
+    failure (``ConnectionError: Connection closed by server``, which
+    ``_is_client_read_timeout`` does not convert), and it is pinned end-to-end
+    through the real caller by
+    ``test_the_restore_swap_caller_keeps_the_note_on_a_closed_connection``.
+    """
+    import redis
+
+    from tortoise import hosted_backup as hb
+
+    pools: list[dict] = []
+
+    class _Pool:
+        def __init__(self, **kwargs):
+            pools.append(kwargs)
+
+    class _PoolInfo:
+        def __init__(self):
+            self.connection_kwargs = {"host": "127.0.0.1", "port": 16379}
+            self.connection_class = object
+
+    class _Db:
+        connection = type("_Conn", (), {"connection_pool": _PoolInfo()})()
+
+    monkeypatch.setattr(redis, "Redis", _DeadRedis, raising=True)
+    monkeypatch.setattr(redis, "ConnectionPool", _Pool, raising=True)
+
+    client = hb._restore_copy_client(_Db())
+
+    # #3813 stays: the restore's OWN bound, and no retry.
+    assert len(pools) == 1
+    assert pools[0]["socket_timeout"] == hb._restore_swap_timeout_s()
+    assert pools[0]["retry"].get_retries() == 0
+
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command("GRAPH.COPY", "tortoise_intact", "tortoise")
+
+    message = str(caught.value)
+    assert message.startswith(SOCKET_TIMEOUT)
+    # ``GRAPH.COPY`` carries no Cypher statement for the classifier to read, so
+    # the honest arm is the HEDGE — not the read arm's "re-issuing is safe".
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "re-issuing this statement is safe" not in message
+
+    # A statement-carrying command over the SAME channel gets the WRITE arm,
+    # which is the arm the restore's own readbacks must not be confused with.
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command("GRAPH.QUERY", "tortoise", WRITE_STATEMENT)
+    assert "OUTCOME IS UNKNOWN" in str(caught.value)
+
+
+def test_the_restore_swap_caller_keeps_the_note_on_a_closed_connection(monkeypatch):
+    """The leg #7357 actually repairs on the restore path: the CALLER's sentence.
+
+    ``_graph_copy_with_restore_bound`` converts a client READ timeout into
+    ``RestoreCopyTimeoutError`` (#4233) and re-raises anything else unchanged,
+    so only a NON-timeout transport failure carries the annotated sentence to a
+    caller. This drives the real call — not the raw channel — so a bare
+    ``redis.Redis`` (the pre-fix construction) raises the un-annotated
+    ``Connection closed by server.`` and the note assertions below fail.
+    """
+    import redis
+
+    from tortoise import hosted_backup as hb
+
+    class _Pool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _PoolInfo:
+        def __init__(self):
+            self.connection_kwargs = {"host": "127.0.0.1", "port": 16379}
+            self.connection_class = object
+
+    class _Db:
+        connection = type("_Conn", (), {"connection_pool": _PoolInfo()})()
+
+        def list_graphs(self):
+            # A destination this copy can have produced (not pre-existing).
+            return []
+
+    monkeypatch.setattr(redis, "Redis", _ClosedRedis, raising=True)
+    monkeypatch.setattr(redis, "ConnectionPool", _Pool, raising=True)
+
+    with pytest.raises(redis_exc.ConnectionError) as caught:
+        hb._graph_copy_with_restore_bound(
+            _Db(), "tortoise_intact", "tortoise",
+            role="restore swap", intact_name="tortoise_intact")
+
+    message = str(caught.value)
+    # NOT the #4233 timeout verdict: this leg is not a read timeout, so the
+    # annotated transport sentence is what the caller gets.
+    assert not isinstance(caught.value, hb.RestoreCopyTimeoutError)
+    assert message.startswith("Connection closed by server.")
+    # ``GRAPH.COPY`` carries no Cypher, so the honest arm is the HEDGE.
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "anything that mutates must be read back" in message
+    assert "OUTCOME IS UNKNOWN" not in message
+
+
+def test_the_acl_admin_client_carries_the_note(monkeypatch):
+    """``acl_graph_users._admin_client`` reaches the seam too.
+
+    Every command this module issues is in the NON-Cypher family — ``MODULE
+    LIST``, ``ACL GETUSER``/``SETUSER``/``DELUSER``/``SAVE`` — so there is no
+    statement for the classifier to read and ``_command_mutating`` returns
+    ``None``: the arm this channel really gets is the HEDGE ("Whether the
+    command took effect is UNKNOWN … anything that mutates must be read back"),
+    NOT the write-statement arm. The test therefore drives the command the
+    module actually sends; a ``GRAPH.QUERY`` statement here would pin an arm
+    this client can never produce.
+    """
+    import redis
+
+    from tortoise import acl_graph_users as acl
+
+    # The command the module really puts on the wire (``ACL SETUSER``,
+    # acl_graph_users.py:367) and the classification that decides its arm. Both
+    # are asserted because the arm assertion below DEPENDS on the classifier
+    # answering ``None``: if ACL verbs were ever taught to it as mutating, this
+    # must red rather than keep asserting a message the channel no longer emits.
+    acl_setuser = ("ACL", "SETUSER", "tenant_g", "reset", "on", ">pw")
+    assert cypher_guard._command_mutating(acl_setuser) is None
+
+    monkeypatch.setenv(
+        "TORTOISE_DB_URI", "docker://:pw@127.0.0.1:16379/tortoise")
+    monkeypatch.setattr(redis, "Redis", _DeadRedis, raising=True)
+
+    client = acl._admin_client()
+    assert client is not None
+
+    with pytest.raises(redis_exc.TimeoutError) as caught:
+        client.execute_command(*acl_setuser)
+
+    message = str(caught.value)
+    assert message.startswith(SOCKET_TIMEOUT)
+    # The hedge, and its instruction for a mutating shape.
+    assert "Whether the command took effect is UNKNOWN" in message
+    assert "anything that mutates must be read back" in message
+    # NOT the write-statement arm, and NOT the read arm.
+    assert "OUTCOME IS UNKNOWN" not in message
+    assert "re-issuing this statement is safe" not in message

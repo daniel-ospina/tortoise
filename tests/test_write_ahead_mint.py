@@ -417,15 +417,33 @@ def _eager_bound_names(fn: ast.AST) -> set[str]:
 
 
 def _is_mint_create(call: ast.Call, eager_names: set[str]) -> bool:
-    """A `X.query(...)` that materializes a TeamMeta: the eager-init binding
-    (any name bound from `eager_init_query`, incl. `_init_q`) or an inline
+    """A call that materializes a TeamMeta: the eager-init binding (any name
+    bound from `eager_init_query`, incl. `_init_q`) or an inline
     `CREATE ... :TeamMeta` string. The `MATCH (m:TeamMeta)` probe is NOT a
-    create."""
-    if not (isinstance(call.func, ast.Attribute) and call.func.attr == "query"):
+    create.
+
+    ⛔ TWO SINKS, because the statement has two legal shapes (#9157): it used to
+    be issued as `handle.query(_init_q, ...)` — escape (3) — and since #9157 it
+    is issued as `_os.run_eager_init(handle, _init_q, _init_p)`, the DECLARED
+    route. Measuring only `.query(...)` made this pin VACUOUS at all five sites
+    after that change: no `create` event was collected, so assertion (b) had
+    nothing to check while the test stayed green. A new sink shape must be added
+    here, or the ordering guarantee silently stops being measured — which is the
+    #3390 orphan class itself.
+    """
+    f = call.func
+    if not isinstance(f, ast.Attribute):
         return False
-    if not call.args:
+    if f.attr == "query":
+        arg_index = 0
+    elif f.attr == "run_eager_init":
+        # `run_eager_init(handle, cypher, params)` — the statement is arg 1.
+        arg_index = 1
+    else:
         return False
-    a0 = call.args[0]
+    if len(call.args) <= arg_index:
+        return False
+    a0 = call.args[arg_index]
     if isinstance(a0, ast.Name) and a0.id in eager_names:
         return True
     return (
@@ -563,4 +581,52 @@ def test_no_teammeta_create_outside_the_guarded_mint_files():
         "TeamMeta CREATE outside the guarded mint files — journal it via "
         "journal_mint_write_ahead and add the file to _GUARDED_FILES + the "
         f"site to _MINT_SITES: {offenders}"
+    )
+
+
+def test_the_mint_create_reader_sees_the_declared_sink_and_reads_its_order():
+    """Instrument check for `_is_mint_create` — it must SEE the #9157 route.
+
+    Measured on the first version of this change: the eager-init statement moved
+    from `handle.query(_init_q, ...)` to `_os.run_eager_init(handle, _init_q,
+    _init_p)`, which the reader did not recognise as a create — so no `create`
+    event was collected at ANY of the five sites and assertion (b) of the pin
+    above ran on an empty list. The pin stayed green while measuring nothing.
+    Both halves are asserted here: the sink is RECOGNISED, and a journal placed
+    AFTER it is an offender rather than a vacuous pass.
+    """
+    source = """
+        def good(proj, graph_name):
+            _init_q, _init_p = _os.eager_init_query(
+                "CREATE (:TeamMeta {name:$name})", {}, org_id="x")
+            journal_mint_write_ahead(graph_name)
+            _os.run_eager_init(handle, _init_q, _init_p)
+
+        def bad(proj, graph_name):
+            _init_q, _init_p = _os.eager_init_query(
+                "CREATE (:TeamMeta {name:$name})", {}, org_id="x")
+            _os.run_eager_init(handle, _init_q, _init_p)
+            journal_mint_write_ahead(graph_name)
+    """
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(source))
+    sites = _collect_sites(tree)
+
+    for fn in ("good", "bad"):
+        events = sorted(sites[fn])
+        creates = [ln for ln, kind in events if kind == "create"]
+        assert creates, (
+            f"{fn}: the eager-init statement issued through `run_eager_init` is "
+            f"not recognised as a TeamMeta CREATE — the ordering pin is vacuous "
+            f"at every site that uses the declared route (#9157). Events: {events}"
+        )
+    good_events = sorted(sites["good"])
+    bad_events = sorted(sites["bad"])
+    good_kinds = [k for _l, k in good_events if k != "eager_init"]
+    bad_kinds = [k for _l, k in bad_events if k != "eager_init"]
+    assert good_kinds == ["journal", "create"]
+    assert bad_kinds == ["create", "journal"], (
+        "the reader cannot tell the two orders apart, so the pin above cannot "
+        f"fail on a reversed site: {bad_events}"
     )
