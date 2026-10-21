@@ -339,7 +339,8 @@ def test_the_deletion_set_rows_cite_live_sites() -> None:
 #:
 #: ⛔ SO THERE IS NOW EXACTLY ONE NORMALISER AND ONE SCAN. `_fold_doc` turns the WHOLE document
 #: into one text — blockquote markers stripped the way the block parser strips them, HTML entities
-#: decoded, NFKC-folded, zero-width/combining characters dropped, whitespace runs folded to one
+#: decoded, NFKC-folded, zero-width/combining characters dropped WITHOUT a word break, whitespace
+#: runs folded to one
 #: space, the fullwidth colon folded to ASCII — while keeping, per character, the RAW LINE and the
 #: BLOCK (blank-line-separated paragraph or table) it came from. Every rule is then decided by
 #: POSITION on that single text:
@@ -441,11 +442,20 @@ def _fold_doc(raw: str) -> tuple[str, list[int], list[int]]:
             gap = True
             continue
         for char in unicodedata.normalize("NFKC", html.unescape(stripped)):
-            # `Cf` covers every zero-width form this doc could carry (space, joiners, BOM), and
-            # NFKC has already turned the fullwidth colon into `:` — so there is no separate
-            # character list to drift out of date (a list was here, and every one of its members
-            # was already `Cf`: removing either left the same joiner row red).
-            if char in " \t" or unicodedata.category(char) in ("Cf", "Mn"):
+            # `Cf` covers every zero-width form this doc could carry (space, joiners, BOM) and `Mn`
+            # a combining mark, and NFKC has already turned the fullwidth colon into `:` — so there
+            # is no separate character list to drift out of date (a list was here, and every one of
+            # its members was already `Cf`: removing either left the same joiner row red).
+            #
+            # ⚠️ DROPPED, never GAPPED. A zero-width character INSIDE the file name is exactly how a
+            # citation survives a paste — `hosted_api.py` carrying a soft hyphen, a ZWJ or a
+            # word-joiner — and it still RENDERS as `hosted_api.py:39205`. Treating it as a gap
+            # re-split the token this fold exists to rejoin, so all five spellings were GREEN (the
+            # `_EVASION_SHAPES` rows below pin each one). Whitespace is the only thing that gaps;
+            # a combining mark never separates two words, so it needs no gap either.
+            if unicodedata.category(char) in ("Cf", "Mn"):
+                continue
+            if char in " \t":
                 gap = True
                 continue
             if gap and out:
@@ -747,6 +757,16 @@ _EVASION_SHAPES = (
     # render as `hosted_api.py:39286` to a reader, so both are the same citation
     ("See `hosted_api&#46;py:39286`.", [1]),
     ("See `hosted_api.py:\u200b39286`.", [1]),
+    # …and the same zero-width character INSIDE the name, which is the paste artifact that renders
+    # as the citation. `_fold_doc` drops it WITHOUT gapping, so the token stays one word; the
+    # earlier `gap = True` split it into `hosted _api.py`, and every one of these five was GREEN
+    # (measured at the #9485 review). Whitespace is the only gap — a leading zero-width before the
+    # digits above never showed the defect, because the arm's `\s*` happened to rescue it.
+    ("See `hosted\u200b_api.py:39205`.", [1]),
+    ("See `hosted\u200c_api.py:39205`.", [1]),
+    ("See `hosted\u200d_api.py:39205`.", [1]),
+    ("See `hosted\u2060_api.py:39205`.", [1]),
+    ("See `hosted\u00ad_api.py:39205`.", [1]),
 )
 
 
@@ -766,7 +786,10 @@ def test_the_anchor_scan_catches_every_shape_at_any_offset(fragment: str, expect
     tokens is not a digit and the owner search still finds `hosted_api.py` to its left (measured: a
     strip revert leaves it green at `[2]`).
     Reverting `_file_basename`'s escape strip reds the escaped-continuation row — those are
-    single-mechanism rows. `html.unescape` and the `Cf` drop are each pinned by one row here;
+    single-mechanism rows. `html.unescape` is pinned by one row here; the `Cf` drop by SIX — a
+    joiner before the digits and the same joiner, ZWNJ, ZWJ, word-joiner and soft hyphen INSIDE the
+    name, which red only once the drop stops gapping the token in two (measured at the #9485
+    review: with `gap = True` on the `Cf`/`Mn` branch all five INSIDE rows are GREEN);
     NFKC is pinned by the fullwidth-colon row of the form test below. The `IGNORECASE` flags and the case FOLD are NOT
     individually load-bearing, because the two arms overlap: `HOSTED_API.PY:39286` is caught by
     the explicit arm even if the continuation arm's regex is case-sensitive, and vice versa. So
