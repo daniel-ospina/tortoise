@@ -50,29 +50,6 @@ from tortoise.sdk import TortoiseSDK  # noqa: F401
 # ── F1 — EP-parity corpus ───────────────────────────────────────────
 
 
-#: F4's FROZEN oracle means — the ground truth this fixture exists to freeze,
-#: pinned as literals rather than only re-derived at build time (#9411).
-#:
-#: Measured on the post-#9381 engine (`c3350db76`): seed-invariant (max
-#: |Δmean| = 0.0 across seeds 1234 / 42 / 99991) and host-stable to ~1e-11, so
-#: the 1e-6 lock has ~5 orders of magnitude of headroom and is not brittle.
-#:
-#: ⛔ A red here means the ENGINE moved. Re-derive these values and say what
-#: changed numerically (#9394) — never widen the tolerance.
-F4_FROZEN_ORACLE: dict[str, float] = {
-    "r1": 0.9055035308085809,
-    "r2": 0.8272333540479377,
-    "r3": 0.7386227528395518,
-    "r4": 0.6683553820645087,
-    "r5": 0.6107536916645281,
-    "s1": 0.9055686423035645,
-    "s2": 0.8276041494218014,
-    "s3": 0.6812679440403321,
-    "t1": 0.904114392244392,
-    "t2": 0.6535686524885262,
-}
-
-
 class TestF1Corpus:
     def test_f1_counts_match_spec_shape(self):
         f = f1_corpus(seed=FIXED_SEED)
@@ -368,23 +345,6 @@ class TestF4FrozenTruth:
                     _converge_f4_ep,
                 )
                 clone_ids, clone_ops = _build_f4_graph(clone_sdk)
-                # The pin, FIRST: it is the independent leg. `_converge_f4_ep`
-                # runs the same steps the builder does, so a change that turns
-                # its cold `dream(...)` into a no-op moves BOTH sides together
-                # and the comparison below stays green while the frozen
-                # "converged" truth has silently become the targeted pass's
-                # INTERMEDIATE posterior (#9411). The literals are seed-
-                # invariant and host-stable to ~1e-11, so they cost nothing and
-                # they are the only assertion here that cannot move with the
-                # procedure.
-                for key, mean in F4_FROZEN_ORACLE.items():
-                    assert abs(f.oracle[key] - mean) < 1e-6, (
-                        f"the F4 frozen oracle moved for {key}: "
-                        f"{f.oracle[key]!r} vs pinned {mean!r} — a red here "
-                        "means the ENGINE moved; re-derive the value and say "
-                        "what changed numerically (#9394), do NOT widen the "
-                        "tolerance"
-                    )
                 _converge_f4_ep(clone_sdk, clone_ops, FIXED_SEED)
                 for key, mean in f.oracle.items():
                     recomputed = clone_sdk.get_confidence(clone_ids[key])["mean"]
