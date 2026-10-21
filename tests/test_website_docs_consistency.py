@@ -380,10 +380,12 @@ def test_the_belief_mechanism_is_documented_on_docs_first() -> None:
     )
     sample = _normalise(
         "<p>A <strong>NAND</strong> is a joint-truth penalty and carries its own "
-        "weight and direction: <code>exp(-w&middot;c<sub>a</sub>&middot;c<sub>b</sub>)</code>.</p>"
+        "weight and direction; an <strong>IMPL</strong> is a difference coupling: "
+        "<code>exp(-w&middot;c<sub>a</sub>&middot;c<sub>b</sub>)</code>.</p>"
     )
     assert _mechanism_hits(sample) == [
         "joint-truth penalty",
+        "difference coupling",
         "own weight and direction",
         "exp(-w",
     ], (
@@ -1896,6 +1898,10 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
     "extracted" is deliberate — `sdk.create_point` takes an unsourced claim and
     only advises (`PROVENANCE ADVISORY`, #8171).
     """
+    # `"verbatim evidence"` never shipped on `origin/main`, but it DID exist in this
+    # branch at 5a6c8fa86 ("verbatim evidence underneath") and was the defect this
+    # test's own cycle removed, so it is pinned against reintroduction, not against
+    # history.
     text = _normalise(_read(FAQ))
     for refuted in (
         "verbatim and authoritative",
