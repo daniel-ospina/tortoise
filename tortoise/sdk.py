@@ -20890,6 +20890,13 @@ class TortoiseSDK:
           (fail SAFE) and logs, because a silently inert cap would restore the
           immortal-retry class #1243 bounds.
 
+        ⛔ A snapshot of ``0`` is NOT an ordering claim: ``_ep_epoch()`` returns 0
+        for "no ``:EpMeta``" (a rebuilt graph, whose replayed stamps sit ahead of
+        the reset counter — #5166), so the caller passes ``None`` instead and the
+        cap retires, audibly. ``<= 0`` can never hold, so a literal 0 would make
+        the cap retain every stamped root for the whole re-climb: bounded retry
+        is the cap's entire job, and an unbounded, silent one is inert.
+
         An UNSTAMPED flag is retired (``n.ep_dirty_at IS NULL``): the cap's job
         is to stop this process retrying a root it has failed on repeatedly, and
         a peer that does not stamp has no marking to preserve.
@@ -20906,7 +20913,24 @@ class TortoiseSDK:
                 # this run's snapshot is not this process's to drop, and a root
                 # that is already gone from the graph (deleted, or cleared by a
                 # peer) leaves the mirror with its retry state.
-                verdict, verdict_error = self._retry_cap_verdict(root, run_ep)
+                # ⛔ A snapshot of ``0`` is NO ORDERING CLAIM, not "older than
+                # everything" (#9362 review, P2). ``_ep_epoch()`` returns 0 for
+                # "there is no ``:EpMeta``" — exactly the state a journal
+                # ``rebuild`` leaves, with the replayed ``ep_dirty_at`` stamps
+                # still ahead of the reset counter (#5166, documented on
+                # :meth:`_advance_ep_version`). ``n.ep_dirty_at <= 0`` can never
+                # hold, so passing 0 through as a claim would make the cap
+                # retain EVERY stamped root in that window: no ``capped``
+                # record, no log, no drain of ``stale_backlog``, and the retry
+                # loop unbounded for the whole climb — an inert cap is #1243's
+                # immortal-retry class returning silently. 0 therefore carries
+                # the same meaning as ``None`` (the cap retires), and the retire
+                # is ANNOUNCED, because the run is giving up on a stamp it could
+                # not order. The SWEEP keeps its ``<=`` guard untouched: this is
+                # the cap's bound, not the sweep's delayed clear.
+                snapshot_unusable = run_ep == 0
+                verdict, verdict_error = self._retry_cap_verdict(
+                    root, None if snapshot_unusable else run_ep)
                 if verdict == "retained":
                     # Another process's newer marking. Keep the root AND its
                     # attempts (so the next cap attempt is one pass away), and
@@ -20949,6 +20973,18 @@ class TortoiseSDK:
                     "backoff_state": "capped",
                     "reason": "non_converged",
                 }
+                if snapshot_unusable:
+                    # Audible, because on a rebuilt graph (#5166) this retire is
+                    # decided without an ordering the run could read: the cap
+                    # stops retrying a root it cannot prove is stale, and the
+                    # `capped` record above is what C7 reports it by.
+                    _logger.warning(
+                        "#9362: retiring capped dirty root %s with no usable "
+                        "epoch snapshot (run_ep=0 — no :EpMeta, e.g. a rebuilt "
+                        "graph): a stamp this run cannot order is not a marking "
+                        "it can prove is newer, so the cap retires it rather "
+                        "than retry it forever (attempt %d)",
+                        root, attempts)
             else:
                 self._retry_attempts[root] = attempts
                 self._retry_backoff_until[root] = now + min(

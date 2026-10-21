@@ -441,8 +441,13 @@ now visible to a programmatic caller instead of to a human reading stderr:
   three freshly-written claims left all three `ep_dirty`, while a no-arg pass on
   the same graph cleared them. (The flag's two other writers are lifecycle
   events, not this rule: `_mark_dirty` clears it for terminal points as it
-  re-marks them, and `_retry_cap_verdict` clears it when a root hits the
-  retry cap.) Both targeted branches now retire the flags they recomputed,
+  re-marks them, and `_retry_cap_verdict` clears it when a root hits the retry
+  cap — where a snapshot of **`0`** carries NO ordering claim, because `0` means
+  "no `:EpMeta`" (a rebuilt graph, whose replayed stamps sit ahead of the reset
+  counter — `#5166`) and `ep_dirty_at <= 0` matches no stamp at all: the cap
+  **retires and logs** there rather than retaining silently, since bounding
+  retries is the cap's whole job and an unbounded, silent one is inert (`#9362`
+  review).) Both targeted branches now retire the flags they recomputed,
   through `_clear_targeted_pass_dirty`.
   The gates are NOT simply "the Dreamer's". **Two are shared** — `converged`,
   and the `#1163` stale-run guard — and **three are this path's own and

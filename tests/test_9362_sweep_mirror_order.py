@@ -653,3 +653,80 @@ def test_retry_cap_fails_safe_and_logs_when_the_verdict_cannot_be_read(caplog):
             )
         finally:
             sdk.close()
+
+
+def test_retry_cap_retires_and_announces_when_the_epoch_snapshot_is_unusable(caplog):
+    """A snapshot of ``0`` is NO ordering claim — the cap must still terminate.
+
+    ``_ep_epoch()`` returns 0 for "there is no ``:EpMeta``", which is exactly the
+    state a journal ``rebuild`` leaves: the counter does not come back, while
+    each Point's replayed ``ep_dirty_at`` stamp does, so those stamps sit AHEAD
+    of the reset counter until it re-climbs (#5166 — documented on
+    ``_advance_ep_version`` and pinned by ``test_9079_ep_epoch_declared.py``).
+
+    ``n.ep_dirty_at <= 0`` can never hold, so treating 0 as an ordering claim
+    would make the cap retain EVERY stamped root for that entire window: no
+    ``capped`` record for C7, no drain of ``dream_health_check``'s
+    ``stale_backlog`` (so ``_auto_dream_mode`` stays pinned to ``'local'``), and
+    no log — an inert cap, i.e. #1243's immortal-retry class returning silently.
+    The cap's whole job is to BOUND retries, so a value that cannot order
+    anything must carry no claim (``None`` semantics: retire) — and the retire
+    is announced, because the run is giving up on a stamp it could not order.
+
+    Pre-fix this reds on the first assertion: the flag survives, the mirror
+    keeps the root, nothing is recorded capped, and the arm is silent.
+    """
+    import logging
+
+    with _db() as db:
+        sdk = TortoiseSDK(db)
+        try:
+            ids = _chain(sdk, 2)
+            sdk.dream(mode="local")
+            sdk._mark_dirty([ids[1]])
+            # A rebuilt graph: the counter is gone, the stamp is not.
+            sdk._get_proj().g.query("MATCH (m:EpMeta) DELETE m")
+            sdk._get_proj().g.query(
+                "MATCH (n:Point {id:$id}) "
+                "SET n.ep_dirty = true, n.ep_dirty_at = 1",
+                params={"id": ids[1]},
+            )
+            assert sdk._ep_epoch() == 0, (
+                "the fixture did not reach the no-`:EpMeta` state, so it proves "
+                "nothing about the #5166 window"
+            )
+
+            cap = sdk.retry_attempt_cap
+            sdk._dirty_roots.add(ids[1])
+            sdk._retry_attempts[ids[1]] = cap
+            with caplog.at_level(logging.WARNING):
+                sdk._register_failed_attempt({ids[1]}, run_ep=0)
+
+            # Read the ROOT's own stamp, not the whole graph: `_mark_dirty`
+            # marks the reverse-BFS neighbourhood, so a sibling root is
+            # legitimately dirty here.
+            assert _ep_dirty_at(sdk, ids[1]) is None, (
+                "the cap retained a root on the strength of a snapshot of 0, "
+                "which can never order anything: the root is now retried "
+                "forever in the rebuild window (#1243's immortal retry)"
+            )
+            assert ids[1] not in sdk._dirty_roots, (
+                "the graph flag was cleared but the mirror kept the root, so "
+                "`stale_backlog` never drains and auto dream mode stays 'local'"
+            )
+            assert ids[1] in sdk._stale_unresolved, (
+                "a capped root must be reported to C7 — a cap that terminates "
+                "but leaves no `capped` record is invisible to the health check"
+            )
+            warnings = [r for r in caplog.records
+                        if r.levelno >= logging.WARNING
+                        and "#9362" in r.getMessage()]
+            assert warnings, (
+                "retiring on an unusable snapshot is silent: the reader cannot "
+                "tell a bounded cap from an inert one"
+            )
+            assert ids[1] in warnings[0].getMessage(), (
+                "the warning does not name the root it retired"
+            )
+        finally:
+            sdk.close()
