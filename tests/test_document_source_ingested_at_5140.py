@@ -156,3 +156,88 @@ def test_the_d10_requirement_sweep_finds_no_violating_source():
         assert rows == [], f"§4.6 REQUIRED-field violations: {rows!r}"
     finally:
         proj.close()
+
+
+# ── #9419 — the SDK door that folds BEFORE it journals ───────────────────────
+#
+# #5140's fix made this field read the RECORD's own `ts` — which is
+# deterministic only for the doors that STAMP that `ts` on the dict they fold.
+# `TortoiseSDK._create_entity` (the funnel behind `create_event` /
+# `create_entity`, and therefore the `tortoise_create_event` tool) folds first
+# and journals after, so `_emit_event` minted the envelope `ts` a second time:
+# the document `:Source` took the FOLD clock live and the APPEND clock on
+# replay. Measured before the fix — live `…54.719525` vs rebuilt `…54.784866`.
+#
+# The tests below live in this file because they are the same field and the
+# same fix shape; the door is the difference.
+
+
+def _journaled_sdk():
+    """A journal-backed SDK on a throwaway embedded graph (no docker lane)."""
+    from tortoise.sdk import TortoiseSDK
+
+    tmp = tempfile.mkdtemp(prefix="tortoise_9419_")
+    events = os.path.join(tmp, "events")
+    os.makedirs(events, exist_ok=True)
+    log = os.path.join(events, "events.jsonl")
+    return TortoiseSDK(os.path.join(tmp, "doc.db"), event_log_path=log), log
+
+
+def test_create_entity_document_does_not_diverge_live_vs_rebuild():
+    """Input: `create_event(objectType='Document')` on a journal-backed SDK.
+
+    FAILS IF live and rebuilt disagree on the minted document `:Source`'s
+    `ingestedAt`. That is #9419: the fold read no record `ts` (none existed
+    yet), so it stamped `_now_iso()` at fold time while the append stamped the
+    record's own instant a microsecond later — and a rebuild replays the
+    record. Mutation: drop the `event["ts"] = _record_ts` stamp (or the
+    `recorded_ts=` argument) and the two values differ again.
+    """
+    from tortoise.log import EventLog
+
+    sdk, log = _journaled_sdk()
+    try:
+        sdk.create_event("evt-9419", "sessionCaptured", object="doc-9419.md",
+                         objectType="Document")
+        proj = sdk._get_proj()
+        live = _ingested_at(proj, "doc-9419.md")
+        assert live, "the document :Source must be stamped at all (§4.6 REQUIRED)"
+        proj.rebuild_all(os.path.dirname(log), confirm_destructive=True)
+        rebuilt = _ingested_at(proj, "doc-9419.md")
+        assert live == rebuilt, (
+            "`derived = replay(journal)` must hold for this field: the live "
+            f"write stamped {live!r} and the rebuild {rebuilt!r}")
+        # ...and the equality must come from the RECORD, not from two clocks
+        # that happened to agree: the one instant is the envelope `ts`.
+        rec = [e for e in EventLog(log).read_all()
+               if e.get("type") == "EventRecorded"]
+        assert len(rec) == 1, f"expected one EventRecorded line, got {len(rec)}"
+        assert rec[0]["ts"] == live, (
+            "the fold instant and the record's `ts` must be ONE clock read — "
+            f"record ts {rec[0]['ts']!r} vs live ingestedAt {live!r}")
+    finally:
+        sdk.close()
+
+
+def test_the_single_clock_stamp_never_becomes_an_event_property():
+    """Input: the same create, read back off the `:Event` node.
+
+    FAILS IF the envelope `ts` stamped for #9419 leaks onto the node. `ts` is a
+    `_META_KEYS` member, so `_persist_extra_props` must skip it — and
+    `_journal_record_payload` drops it from the payload, so a live-only `ts`
+    property would be a NEW live/rebuild divergence, i.e. this fix rebuilding
+    the defect it closes.
+    """
+    sdk, _log = _journaled_sdk()
+    try:
+        ev = sdk.create_event("evt-9419-ts", "sessionCaptured", object="doc-9419-ts.md",
+                              objectType="Document")
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN e.ts",
+            params={"eid": ev["id"]},
+        ).result_set
+        assert len(rows) == 1, f"expected exactly one Event node, got {rows!r}"
+        assert rows[0][0] is None, (
+            f"envelope `ts` must never be a node property; got {rows!r}")
+    finally:
+        sdk.close()
