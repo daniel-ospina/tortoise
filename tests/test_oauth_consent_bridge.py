@@ -1031,22 +1031,19 @@ def test_the_provenance_note_rejects_an_anchor_wrapped_across_its_own_lines(
     """The note may quote ONLY the explicit `#3524` pair — including when the anchor is wrapped."""
     lines = SPEC.read_text().splitlines()
     note_start, note_end = _provenance_note_bounds(lines)
+    injected = lines[:note_end - 1] + ["> " + part if not part.startswith(">") else part
+                                      for part in smuggle.splitlines()] + lines[note_end - 1:]
     # The `N` injected lines push the note's own last line from `note_end - 1` to
     # `note_end + N - 1`, so the half-open span becomes `[note_start, note_end + N)`.
     #
-    # ⛔ ONE bound, used by BOTH calls below (#9485 review: the first call used
-    # `note_end + N` and the second recomputed the same value inline, so nothing constrained the
-    # variable the first call was given — shortening it alone left every assertion green). The
-    # second call's assertion IS the constraint: it places an anchor on the note's original last
-    # line and requires it in a note bucket, which only holds while `shifted_end - 1` is that
-    # line's index. Shorten the bound by one and the line reads as BODY, the anchor lands in
-    # `stray`, and the assertion reds (measured).
-    injected = lines[:note_end - 1] + ["> " + part if not part.startswith(">") else part
-                                      for part in smuggle.splitlines()] + lines[note_end - 1:]
-    # ⛔ `last_note_index` is derived from the INJECTION, never from the bound — deriving it from
-    # the bound (`shifted_end - 1`) is what made the off-by-one invisible: shortening the bound
-    # moved the probed index with it, so both stayed consistent and every assertion stayed green
-    # (#9485 review, re-measured here before this line existed).
+    # ⛔ The probed index comes from the INJECTION and the bound from that index, never the other
+    # way round (#9485 review): deriving it from the bound (`shifted_end - 1`) let the bound and
+    # the probe move together, so shortening the bound by one kept every assertion green —
+    # re-measured here, the shortened bound left all 49 tests passing. ONE `shifted_end`, used by
+    # BOTH calls below, with the assertion at the end as its constraint: it anchors the note's
+    # original last line and requires it in a note bucket, which only holds while the bound still
+    # covers that line. Shorten it by one and the line reads as BODY, the anchor lands in `stray`,
+    # and the assertion reds (measured).
     last_note_index = note_end - 1 + len(smuggle.splitlines())
     assert injected[last_note_index] == lines[note_end - 1], (
         "the note's original last line must sit at this index after the injection, or the probe "
