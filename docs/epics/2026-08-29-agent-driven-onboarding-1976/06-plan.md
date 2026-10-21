@@ -638,11 +638,16 @@ Dedup once per org (analytics.py pattern); dashboard + server records; no thresh
 **Steps:** run universal command per harness.
 **Assert:** 4 CLI harnesses self-install (config written correctly — validated by re-read); 2 manual harnesses receive correct teach-human steps; connection verified via tortoise_health; harness-connected checkpoint set; **install skill contracts: SKILL.md exists at the defined path, reads OnboardingState; AGENT_ONBOARDING.md archived — exactly ONE live onboarding script** (P2 fix — M8 asserted, a two-live-scripts regression must fail this test); **decide-protocol availability: SKILL.md's generic MCP-tool decide protocol (options→criteria→findings→EP ranking via existing tortoise MCP tools) produces a ranking on each of the 6 harnesses WITHOUT the local tortoise-decide skill file** (P2 fix — I-4's provisioning claim actually tested).
 
-### DE2E-6 — Graph-held resumption [1,2,10] — E2E-6
+### DE2E-6 — Graph-held resumption [1, 2, 9, 10] — E2E-6
+
+> Surfaces are copied from `04-test-design.md` (see the derivation note at the head of §7), and
+> `tests/test_test_design_1992_traceability.py` fails the row whose bracket drifts from the map. This
+> bracket was `[1,2,10]` until #9013 added surface 9 — the Overview door the scope names in E2E-6
+> ("the Settings Setup guide **or the Continue-setup card**").
 
 **Setup:** (a) org where agent connected but no decide (incomplete, NEW flow); (b) legacy org with jsonb onboarding_state pre-seeded (for backfill assertions).
-**Steps:** re-enter via Settings Setup guide; run backfill on (b).
-**Assert:** resumes at "first decision" (never restarts); state read from OnboardingState node (not jsonb) for FLOW keys; Setup guide card renders same state; **legacy backfill: (b)'s jsonb → node is a no-op on re-run; grandfathered orgs keep onboarding_complete; operational keys (github_*, session_recording) still read from jsonb and work** (P1 fix — backfill now actually tested).
+**Steps:** re-enter via the Settings Setup guide (door 1, surface 10); re-enter again from Overview through the zero-point arm of door 2 — the re-entry card's `Continue setup →` button (`openResumeWizard`); with points already on the graph the same door is the next-action element (`OverviewNextActionCard`, one next step + a CTA into the guide); run backfill on (b).
+**Assert:** resumes at "first decision" (never restarts); state read from OnboardingState node (not jsonb) for FLOW keys; **Settings Setup guide (surface 10) renders the counted N-of-M checklist from that same state, collapses to compact status when complete and re-opens from Settings**; **the Continue-setup card (surface 9, zero-point arm) resumes through `Continue setup →` → `openResumeWizard` and never returns the user to org-create**; **Overview next action (surface 9, points>0 arm) renders ONE next step plus a CTA into the Settings guide — never a counted checklist of its own and never a second, independently-tracked setup list, because `completed_steps` is a read projection, never a second store** (P2 fix — a surface cited in the bracket and never asserted in `Assert` is how surface 9's Key Failure Mode went untested; the two arms are different cards in `main.jsx`, so both are named); **legacy backfill: (b)'s jsonb → node is a no-op on re-run; grandfathered orgs keep onboarding_complete; operational keys (github_*, session_recording) still read from jsonb and work** (P1 fix — backfill now actually tested).
 
 ### DE2E-7 — Invite fusion [12] — E2E-7 (most failure-prone)
 

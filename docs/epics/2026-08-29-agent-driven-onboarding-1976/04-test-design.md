@@ -129,6 +129,18 @@ at least one surface, and every one of the 17 surfaces is reachable from at leas
 | E2E-11 capture disclosure | 11 |
 | E2E-12 cross-W journey | 1-17 (all) |
 
+Every surface is reached by at least one **single-scenario** row above, with **one documented exception.**
+**Surface 14 (Onboarding telemetry)** is named by no scenario of its own: `03-scope.md` §4 asserts the W11 events in
+**E2E-12**'s `Then` ("W11 fires seed_complete + decide_complete once per org (deduped)"), so the cross-W journey is the
+scenario that exercises it, and the dedup-at-write-path behaviour is verified by that surface's own
+`Expected Verification` row in the checklist below.
+That makes the E2E-12 catch-all load-bearing rather than decorative — and it is **not** allowed to hide a second hole:
+`tests/test_test_design_1992_traceability.py`
+(`test_every_surface_is_exercised_by_at_least_one_specific_e2e_row`) unions only the single-scenario rows, carries this
+exemption **explicitly and anchored in `03-scope.md` §4 E2E-12**, pins the exempt surfaces to this paragraph, and fails
+on a stale exemption as well as a missing one. A surface that loses its last single-scenario row fails there rather
+than disappearing behind `1-17 (all)`.
+
 ## Verification Checklist (for child issues)
 
 | Surface | Test Layer | Expected Verification |
@@ -146,4 +158,4 @@ at least one surface, and every one of the 17 surfaces is reachable from at leas
 | 16 wizard shrink | hosted-e2e + manual | 5 human steps; Organization copy; chooser archived; legacy wizard archived-not-deleted |
 | 17 cross-W journey | hosted-e2e + walk-through | full journey one sitting; completion on aha; friction test passes; A0 gate scheduled; fork-aware gates per type (self/build/compact) |
 
-> **Consumed by:** epic plan (04-plan.md) + every child issue's verification checklist (epic-decompose).
+> **Consumed by:** epic plan (06-plan.md) + every child issue's verification checklist (epic-decompose).

@@ -74,22 +74,55 @@ the invariants that were being checked by hand are checked here instead:
    `00-align-and-scope.md` (both places) and in `05-ux-decisions.md`'s `Visual
    affordances` row. Live text states the corrected reading; wording kept as
    history carries a supersession note beside it.
+12. **Every surface is exercised by at least one SINGLE-SCENARIO E2E row, and
+   the catch-all cannot stand in for that.** The previous version of this check
+   unioned every row, including `E2E-12 cross-W journey | 1-17 (all)` — whose
+   cell expands to the whole surface set, making the union `{1..17}` BY
+   CONSTRUCTION. It therefore passed with `E2E-6` reverted to `1, 2, 10` and
+   would have passed if any surface vanished from every scenario row: the same
+   defect shape it was written to replace. The catch-all is now excluded and one
+   exemption is carried explicitly — surface 14 (telemetry), which the scope's
+   E2E-12 `Then` exercises ("W11 fires seed_complete + decide_complete once per
+   org") — with the exemption anchored in the scope and re-checked for
+   staleness, and with the non-vacuity receipt in
+   `test_the_specific_e2e_guard_rejects_the_catch_all_it_replaces`.
+13. **The epic plan's `DE2E-N [...]` brackets are the map's E2E rows, copied.**
+   `06-plan.md` §7 declares the derivation in its own words — "Test-design surface
+   refs [#N] from `04-test-design.md`" — and 11 of the 12 DE2E headers already
+   agreed, so the one that did not (`DE2E-6` said `[1,2,10]` while the map now
+   says `1, 2, 9, 10`) was the map's own correction stopping one document short.
+   The same class the capstone's `Surfaces` column is pinned for, one consumer
+   over. `DE2E-6` must also assert every door it cites in its **`Assert:` line
+   only** — naming a door in `Steps:` walks it, but the claim that can fail is the
+   assertion, and a surface cited in a header with no assertion is how surface 9's
+   failure mode went untested. Both of its Overview arms are named, because they
+   are different cards: the zero-point re-entry card (`Continue setup →`) and the
+   next-action element (`OverviewNextActionCard`).
 
 Every surface is also exercised by at least one high-level E2E row (the E2E-side
 reverse direction) — a surface no scenario touches has no scenario that would
-catch its regression.
+catch its regression. Read that against check 12: the union is over
+SINGLE-SCENARIO rows, so the claim is not satisfiable by `E2E-12`'s catch-all
+alone.
 
 NON-VACUITY
 -----------
-Checks 4, 5, 6, 8, 10 and 11 fail on the reviewed head's document/text (each
-docstring names the pre-fix text; check 10 additionally replays the exact
-self-contradicting sentence through the guard in-suite). Checks 1-3 are the
-standing invariants the earlier cycles established, check 9 is a parser-shape
-guard and check 7 is a guard whose detector is proved non-blind — guard rails,
-not defect pins. The pre-fix blobs are replayed by pointing this module's pure
-functions at them (`git show <sha>:<path>`), which is how the non-vacuity claims
-were measured; reverting the four docs to `fe06e3a98` fails checks 10 and 11
-(five tests) and nothing else.
+Checks 4, 5, 6, 8, 10, 11, 12 and 13 fail on the reviewed head's document/text
+(each docstring names the pre-fix text; check 10 additionally replays the exact
+self-contradicting sentence through the guard in-suite, and check 13 carries both
+receipts — the plan's `[1,2,10]` bracket and a deleted door `Assert:` clause —
+through the comparison itself). Check 12's receipt drives the comparison with
+synthetic rows but reads the live document's exemption paragraph and the live
+scope anchor, so it is not hermetic: the same check also fails on any blob that
+predates that paragraph. Checks 1-3 are the standing invariants the earlier cycles
+established, check 9 is a parser-shape guard and check 7 is a guard whose detector
+is proved non-blind — guard rails, not defect pins. The pre-fix blobs are replayed
+by pointing this module's pure functions at them (`git show <sha>:<path>`); clear
+`_doc_lines` / `_plan_lines` first, since those two are keyed on the PATH — the
+helpers built on them are keyed on the content they receive. That is how the
+non-vacuity claims were measured; reverting the four docs to `fe06e3a98` fails
+checks 10 and 11 (five tests) and 12 (two tests — that blob predates the E2E
+exception note 12 reads), and nothing else.
 Static: doc-text scans plus one file read per doc. No network, DB or graph.
 """
 
@@ -104,6 +137,7 @@ EPIC = ROOT / "docs" / "epics" / "2026-08-29-agent-driven-onboarding-1976"
 DOC = EPIC / "04-test-design.md"
 SCOPE = EPIC / "03-scope.md"
 UX = EPIC / "05-ux-decisions.md"
+PLAN = EPIC / "06-plan.md"
 
 # `03-scope.md` §4 E2E-6 is the AUTHORITY for which re-entry doors exist:
 # "**When:** they re-enter via the Settings Setup guide or the Continue-setup
@@ -240,6 +274,86 @@ def _e2e_rows() -> dict[str, set[int]]:
     return out
 
 
+def _catch_all_rows(
+    rows: dict[str, set[int]], surfaces: dict[int, dict[str, str]]
+) -> set[str]:
+    """E2E rows whose cell names every surface — today only `E2E-12 | 1-17 (all)`.
+
+    A catch-all row is traceability, not a scenario: it cannot be the only thing
+    that exercises a surface, or the E2E-side reverse direction is satisfied by
+    construction and every single-scenario drop is invisible.
+    """
+    return {name for name, cited in rows.items() if set(surfaces) <= cited}
+
+
+def _specific_union(rows: dict[str, set[int]], surfaces) -> set[int]:
+    """Surfaces cited by at least one SINGLE-SCENARIO row (catch-alls excluded)."""
+    out: set[int] = set()
+    for cited in rows.values():
+        if set(surfaces) - cited:  # not a catch-all
+            out |= cited
+    return out
+
+
+#: The one surface the E2E table reaches only through the `E2E-12` catch-all,
+#: carried EXPLICITLY rather than absorbed: `03-scope.md` §4 E2E-12's `Then` is
+#: where the W11 events are asserted ("W11 fires seed_complete + decide_complete
+#: once per org (deduped)"), so the cross-W journey IS surface 14's scenario — it
+#: simply runs through the catch-all cell instead of a row of its own. The
+#: exemption is re-validated against the scope below, so rewording the authority
+#: fails here instead of silently licensing it.
+E2E_CATCH_ALL_EXEMPT_SURFACES = {14}
+
+
+def _doc_catch_all_note() -> str:
+    """The exception paragraph the map carries beside its E2E table.
+
+    The document promises "one documented exception" and names it, so the note and
+    the constant below have to move together: a second exempt surface added to
+    `E2E_CATCH_ALL_EXEMPT_SURFACES` while the map still says one is the silent
+    divergence this reads for.
+    """
+    lines = list(_doc_lines())
+    start = next(
+        (i for i, ln in enumerate(lines)
+         if ln.startswith("Every surface is reached by at least one")), None)
+    if start is None:
+        raise AssertionError(
+            "the map no longer carries the single-scenario/exception note beside "
+            "its E2E table — the guard's claim and the document must move together")
+    out = [lines[start]]
+    for ln in lines[start + 1 :]:
+        if not ln.strip():
+            break
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _e2e_catch_all_exemptions(surfaces: dict[int, dict[str, str]]) -> set[int]:
+    """The catch-all exemptions, re-anchored in `03-scope.md`, the surface name and
+    the map's own exception note.
+
+    Three facts make "E2E-12 exercises surface 14" true, and all three are checked:
+    the scope's E2E-12 `Then` still asserts the W11 events, surface 14 is still the
+    telemetry surface, and the map's note still names exactly the exempted
+    surfaces. Any of them can be reworded independently of this module.
+    """
+    e2e12 = _scope_section("### E2E-12")
+    assert "W11" in e2e12 and "seed_complete" in e2e12, (
+        "`03-scope.md` E2E-12 no longer asserts the W11 telemetry events — the "
+        "anchor for the surface-14 exemption moved; name surface 14 in a "
+        "single-scenario E2E row and drop E2E_CATCH_ALL_EXEMPT_SURFACES")
+    assert "telemetry" in surfaces[14]["name"].lower(), (
+        "surface 14 is no longer the telemetry surface — the exemption's binding "
+        f"moved: {surfaces[14]['name']!r}")
+    named = {int(n) for n in re.findall(r"\bsurface (\d{1,2})", _doc_catch_all_note(), re.I)}
+    assert named == set(E2E_CATCH_ALL_EXEMPT_SURFACES), (
+        "the map's exception note and E2E_CATCH_ALL_EXEMPT_SURFACES disagree — "
+        f"the note names {sorted(named)}, the constant exempts "
+        f"{sorted(E2E_CATCH_ALL_EXEMPT_SURFACES)}")
+    return set(E2E_CATCH_ALL_EXEMPT_SURFACES)
+
+
 def _section_text(prefix: str, *, stop_at_blank_after: bool = True) -> str:
     """The lines of one `- **<prefix>**` bullet in the rationale list."""
     lines = list(_doc_lines())
@@ -299,6 +413,101 @@ def _scope_section(heading: str) -> str:
     start = text.index(heading)
     end = text.find("\n### ", start + len(heading))
     return text[start:] if end == -1 else text[start:end]
+
+
+#: `06-plan.md` §7 header: `### DE2E-6 — Graph-held resumption [1, 2, 9, 10] — E2E-6`.
+_DE2E_HEADING = re.compile(r"^###\s+(DE2E-\d+)\s+[^[]*\[([^\]]*)\]")
+
+#: Door name as `03-scope.md` states it → the phrases `06-plan.md` DE2E-6 must
+#: ASSERT for that door's surface. The Settings door owns the counted checklist;
+#: the Continue-setup card is surface 9, whose name appears on BOTH of its arms
+#: (the zero-point re-entry card and the next-action element), so the assertion
+#: has to name the card and the next action rather than one of them. Keyed to the
+#: same door names as `SCOPE_E2E6_DOOR_SURFACES`, and the test asserts the two
+#: tables cover the same doors — a new scope door must not be silently covered by
+#: check 5 and skipped here.
+PLAN_DE2E6_DOOR_ASSERTIONS = {
+    "the Settings Setup guide": ("Settings Setup guide", "counted N-of-M checklist"),
+    "the Continue-setup card": ("Continue-setup card", "next action"),
+}
+
+
+def _plan_assert_lines(section: str) -> str:
+    """Only the `**Assert:**` line of a DE2E section.
+
+    A door named in `**Steps:**` ("re-enter via the Settings Setup guide") is only
+    WALKED; the claim that can fail is the one in `**Assert:**`. Measured on a copy
+    of the plan: deleting surface 10's whole Assert clause left a Steps-or-Assert
+    scan green, because Steps still names the door — so the assertion, not the
+    mention, is what this reads. The note beside the header names both doors too
+    (it quotes the scope), which is why the whole section is not scanned either.
+    """
+    return "\n".join(
+        ln for ln in section.splitlines() if ln.startswith("**Assert:**"))
+
+
+@lru_cache(maxsize=1)
+def _plan_lines() -> tuple[str, ...]:
+    """The plan's lines. Cached on the PATH, so a replay that re-points `PLAN`
+    must `clear()` this first — everything downstream is keyed on the CONTENT."""
+    return tuple(PLAN.read_text(encoding="utf-8").splitlines())
+
+
+def _plan_section(heading_prefix: str) -> str:
+    """The body of one `### <heading_prefix> …` section of `06-plan.md`."""
+    lines = list(_plan_lines())
+    start = next(
+        (i for i, ln in enumerate(lines) if ln.startswith(f"### {heading_prefix}")),
+        None)
+    if start is None:
+        raise AssertionError(f"no `### {heading_prefix}` section in {PLAN.name}")
+    out = [lines[start]]
+    for ln in lines[start + 1 :]:
+        if ln.startswith("### "):
+            break
+        out.append(ln)
+    return "\n".join(out)
+
+
+@lru_cache(maxsize=8)
+def _plan_de2e_surfaces(lines: tuple[str, ...]) -> dict[str, set[int]]:
+    """`DE2E-N` → the surfaces its header bracket names (`[1, 2, 9, 10]`, `[1-17]`).
+
+    Keyed on the LINES rather than on nothing: an argument-free `lru_cache` would
+    return the live plan for a replay that only re-pointed `PLAN`, i.e. report "no
+    drift" on the very pre-fix state this exists to catch.
+    """
+    out: dict[str, set[int]] = {}
+    for line in lines:
+        m = _DE2E_HEADING.match(line)
+        if not m:
+            continue
+        numbers: set[int] = set()
+        for chunk in re.findall(r"\d+\s*-\s*\d+|\d+", m.group(2)):
+            if "-" in chunk:
+                lo, hi = (int(p) for p in chunk.split("-"))
+                numbers.update(range(lo, hi + 1))
+            else:
+                numbers.add(int(chunk))
+        out[m.group(1)] = numbers
+    return out
+
+
+def _de2e_drift(
+    plan: dict[str, set[int]], mapped: dict[str, set[int]]
+) -> dict[str, tuple[set[int], set[int]]]:
+    """`DE2E-N` → (plan surfaces, map surfaces) for every bracket whose surface
+    set DIFFERS from the map's row.
+
+    A `DE2E-N` with no map counterpart is skipped rather than reported here — key
+    parity is the caller's check, so a removed map row cannot pass as "no drift".
+    """
+    out: dict[str, tuple[set[int], set[int]]] = {}
+    for name, cited in plan.items():
+        e2e = f"E2E-{name.split('-')[1]}"
+        if e2e in mapped and mapped[e2e] != cited:
+            out[name] = (cited, mapped[e2e])
+    return out
 
 
 def _missing_e2e6_doors(
@@ -430,17 +639,168 @@ def test_every_surface_is_reachable_from_a_capability():
         f"surfaces cited by no capability: {sorted(set(_surfaces()) - cited)}")
 
 
-def test_every_surface_is_exercised_by_at_least_one_e2e_row():
+def test_every_surface_is_exercised_by_at_least_one_specific_e2e_row():
     """The E2E-side reverse direction: a surface no high-level scenario walks has
     no scenario that would catch its regression.
 
-    This replaces an assertion that was implied by the capability-direction check
-    above (`{n for c in ...} <= set(_surfaces())` holds whenever the union equals
-    the surface set) and could never fail independently while reading as a second
-    direction."""
-    exercised = set().union(*_e2e_rows().values())
-    assert exercised == set(_surfaces()), (
-        f"surfaces no E2E row exercises: {sorted(set(_surfaces()) - exercised)}")
+    PRE-FIX (and the reason this was rewritten): the check unioned EVERY row,
+    including `E2E-12 cross-W journey | 1-17 (all)`, whose cell expands to
+    `{1..17}` — so the union equalled the surface set by construction, whatever
+    the other eleven rows said. It passed with `E2E-6` reverted to `1, 2, 10` and
+    would pass if a surface disappeared from every scenario row: the same "cannot
+    fail independently" shape it replaced.
+
+    The union is now over SINGLE-SCENARIO rows only (the catch-all excluded), and
+    the one surface the table legitimately reaches only through `E2E-12` —
+    surface 14, telemetry, which the scope's E2E-12 `Then` asserts — is carried as
+    an explicit, scope-anchored exemption rather than being absorbed silently.
+    """
+    surfaces = _surfaces()
+    rows = _e2e_rows()
+    catch_all = _catch_all_rows(rows, surfaces)
+    assert catch_all == {"E2E-12"}, (
+        "the cross-W journey row `1-17 (all)` is what this guard must exclude — "
+        f"the rows citing every surface are {sorted(catch_all)}")
+    specific = _specific_union(rows, surfaces)
+    exempt = _e2e_catch_all_exemptions(surfaces)
+    missing = set(surfaces) - specific - exempt
+    assert not missing, (
+        f"surfaces no SINGLE-SCENARIO E2E row exercises: {sorted(missing)} — "
+        "`1-17 (all)` is not a scenario for a surface; name it in one or state "
+        "the exemption here with the scope anchor that justifies it")
+    assert not (exempt & specific), (
+        f"stale exemption: surface(s) {sorted(exempt & specific)} are exempted "
+        "from the single-scenario rule but a single-scenario row now exercises "
+        "them — remove the exemption (and the doc's exception note)")
+
+
+def test_the_specific_e2e_guard_rejects_the_catch_all_it_replaces():
+    """Non-vacuity, measured on the parser rather than asserted.
+
+    Three receipts:
+      1. the OLD assertion (union over every row) is green on the map even with
+         `E2E-6` reverted — i.e. it could not have failed for its stated reason;
+      2. it is also green when a surface is deleted from every single-scenario
+         row, because `1-17 (all)` puts it back;
+      3. the new union sees exactly that deletion.
+    """
+    surfaces = set(_surfaces())
+    rows = _e2e_rows()
+    # 1 — the pre-fix row state: the old union is blind to it
+    reverted = {**rows, "E2E-6": {1, 2, 10}}
+    assert set().union(*reverted.values()) == surfaces
+    # 2/3 — surface 13's only single-scenario row is E2E-9; drop it everywhere a
+    # single scenario would carry it
+    no_13 = {k: (v if v >= surfaces else v - {13}) for k, v in rows.items()}
+    assert set().union(*no_13.values()) == surfaces, (
+        "the old union still equals the surface set — that is the vacuity")
+    missing = surfaces - _specific_union(no_13, surfaces) - _e2e_catch_all_exemptions(
+        _surfaces())
+    assert missing == {13}, missing
+
+
+def test_de2e6_exercises_every_door_it_cites():
+    """A surface named in a `DE2E-N` header and never asserted in `Steps`/`Assert`
+    is a scenario that cannot fail for that surface. PRE-FIX: `DE2E-6` cited
+    `[1,2,10]` and its steps re-entered "via Settings Setup guide" only, so the
+    failure mode the map writes into surface 9's Key Failure Modes — the next
+    action rendering a second, independently-tracked setup list — was the one
+    assertion no implementation-ready E2E would ever make.
+
+    The scan is limited to `Steps`/`Assert` on purpose: the note beside the header
+    quotes the scope and therefore names both doors, which would satisfy a
+    whole-section search for a door whose assertion had been deleted.
+    """
+    section = _plan_section("DE2E-6")
+    scope = _scope_section("### E2E-6")
+    assert set(PLAN_DE2E6_DOOR_ASSERTIONS) == set(SCOPE_E2E6_DOOR_SURFACES), (
+        "the plan's door table and the scope's door table must cover the same "
+        f"doors: plan {sorted(PLAN_DE2E6_DOOR_ASSERTIONS)}, "
+        f"scope {sorted(SCOPE_E2E6_DOOR_SURFACES)} — check 5 pins a door this "
+        "check would then skip")
+    exercised = _plan_assert_lines(section)
+    for door, phrases in PLAN_DE2E6_DOOR_ASSERTIONS.items():
+        assert door in scope, (
+            f"`03-scope.md` E2E-6 no longer names {door!r} — the door authority "
+            "moved; update SCOPE_E2E6_DOOR_SURFACES and this table together")
+        for phrase in phrases:
+            assert phrase in exercised, (
+                f"`06-plan.md` DE2E-6 never ASSERTS {phrase!r} ({door}) — naming "
+                "the door in Steps walks it; the claim that can fail is the "
+                "Assert line, and it is missing")
+
+
+def test_the_plan_door_pin_rejects_a_deleted_door_assertion():
+    """Non-vacuity, on the shapes a looser scan accepts.
+
+    1. Deleting surface 10's whole `**Assert:**` clause must fail — while the door
+       survives in `**Steps:**` and in the note beside the header (a whole-section
+       scan, and a Steps-or-Assert scan, are both green on that state).
+    2. Deleting surface 9's next-action arm must fail even though the
+       Continue-setup arm still names the surface.
+    """
+    section = _plan_section("DE2E-6")
+    without_assert_clause = re.sub(
+        r"\*\*Settings Setup guide \(surface 10\).*?\*\*;", "", section)
+    assert without_assert_clause != section, (
+        "the surface-10 Assert clause the replay deletes is gone from the plan — "
+        "update this receipt")
+    assert "Settings Setup guide" in without_assert_clause, (
+        "the door still appears in Steps and in the note — that is the trap a "
+        "whole-section scan and a Steps-or-Assert scan fall into")
+    assert "Settings Setup guide" not in _plan_assert_lines(without_assert_clause), (
+        "the guard did not notice the deleted Assert clause")
+    without_next_action = re.sub(
+        r"\*\*Overview next action \(surface 9, points>0 arm\).*?\*\*[^;]*;", "",
+        section)
+    assert without_next_action != section, (
+        "the surface-9 next-action arm the replay deletes is gone from the plan")
+    assert "Continue-setup card" in _plan_assert_lines(without_next_action), (
+        "surface 9's other arm still names it — the trap")
+    assert "next action" not in _plan_assert_lines(without_next_action).lower(), (
+        "the guard did not notice the deleted next-action arm")
+    asserted = _plan_assert_lines(section)
+    assert "Settings Setup guide" in asserted, "the live plan must ASSERT door 1"
+    assert "Continue-setup card" in asserted and "next action" in asserted.lower(), (
+        "the live plan must ASSERT both of surface 9's arms")
+
+
+def test_every_de2e_row_cites_the_maps_e2e_surfaces():
+    """`06-plan.md` §7 derives its DE2E rows from this map in its own words ("Test-
+    design surface refs [#N] from `04-test-design.md`"), so each header bracket is
+    a COPY of the map's E2E row — the same claim the capstone's `Surfaces` column
+    makes, one consumer over, where nothing read it.
+
+    PRE-FIX: `### DE2E-6 — Graph-held resumption [1,2,10]` while the map says
+    `1, 2, 9, 10`. Eleven of the twelve agreed, so the disagreement was this
+    map's own correction stopping one document short.
+    """
+    plan, mapped = _plan_de2e_surfaces(_plan_lines()), _e2e_rows()
+    assert len(plan) == 12, f"could not parse the plan's 12 DE2E rows: {sorted(plan)}"
+    plan_keys = {f"E2E-{name.split('-')[1]}" for name in plan}
+    assert plan_keys == set(mapped), (
+        "the plan's DE2E rows drifted from the map — "
+        f"missing {sorted(set(mapped) - plan_keys)}, "
+        f"extra {sorted(plan_keys - set(mapped))}")
+    drifted = _de2e_drift(plan, mapped)
+    assert not drifted, (
+        "`06-plan.md` copies its DE2E surface brackets from the map but disagrees "
+        "(plan vs map): "
+        + "; ".join(f"{k}: {sorted(v[0])} vs {sorted(v[1])}"
+                    for k, v in sorted(drifted.items())))
+
+
+def test_the_de2e_pin_rejects_the_pre_fix_bracket():
+    """Non-vacuity: the comparison above must fail on the exact pre-fix state
+    (`[1,2,10]` against the map's `1, 2, 9, 10`) and must not fire on a copy,
+    including the range form `1-17` the map writes as `1-17 (all)`."""
+    mapped = {"E2E-6": {1, 2, 9, 10}, "E2E-12": set(range(1, 18))}
+    assert _de2e_drift({"DE2E-6": {1, 2, 10}, "DE2E-12": set(range(1, 18))},
+                       mapped) == {"DE2E-6": ({1, 2, 10}, {1, 2, 9, 10})}
+    assert not _de2e_drift({"DE2E-6": {1, 2, 9, 10},
+                            "DE2E-12": set(range(1, 18))}, mapped)
+    # the live documents, read through their own parsers, agree
+    assert not _de2e_drift(_plan_de2e_surfaces(_plan_lines()), _e2e_rows())
 
 
 def test_capability_rows_are_the_scopes_rows_in_order():
