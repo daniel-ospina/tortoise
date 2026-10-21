@@ -841,10 +841,10 @@ silently-empty cell.
 | `client_captured_at_source` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `source` | `_write_session_and_turns`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `capture_redactions` | `_TURN_WRITE_CYPHER`, `_fold_session_recorded`, `merge_capture_session`, `_rebuild_all_replay` |
-| `capture_ok` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
-| `capture_extractor` | `_capture_session_impl`, `capture_session`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
-| `entity_links_attempted` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |
-| `entity_links_created` | `_capture_session_impl`, `capture_session`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `capture_ok` | `_capture_session_impl`, `_stamp_capture_attempt_state`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `capture_extractor` | `_capture_session_impl`, `_stamp_capture_attempt_state`, `_capture_abandoned_marker`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `entity_links_attempted` | `_capture_session_impl`, `_stamp_entity_link_counters`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |
+| `entity_links_created` | `_capture_session_impl`, `_stamp_entity_link_counters`, `_relink_sessions_after_index`, `_fold_session_recorded`, `_rebuild_all_replay` |
 | `value_nodes_created` | `_execute_commit_writes`, `_rebuild_all_replay` |
 | `value_nodes_held` | `_commit_region`, `_rebuild_all_replay` |
 | `draft_count` | `_execute_commit_writes`, `_rebuild_all_replay` |

@@ -223,21 +223,37 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "when the pass attempted a link and are OVERWRITTEN by the "
             "index-run writer below, so the counter is non-monotone."),
     ),
+    # #9349 split the SDK capture's stamps into two doors (#9206 review): with
+    # §17.1's handle ARMED the inline SETs raised `DirectCacheWriteRefused`, and
+    # the caller's deliberate `except Exception` swallowed it into
+    # `extraction_warnings`. The row therefore names the DOORS, not the caller —
+    # a stale `capture_session` row would claim the old shape still writes.
     SessionWriter(
-        key="tortoise/sdk.py::capture_session",
+        key="tortoise/sdk.py::_stamp_capture_attempt_state",
+        kind="capture-aux",
+        lane="sdk capture",
+        properties=frozenset({"capture_ok", "capture_extractor"}),
+        note=(
+            "The #2335 WI-2b attempt outcome. `capture_ok` here is computed "
+            "BEFORE the surfaced-verification read, and a verification failure "
+            "appends a warning (True stays) — the DOCUMENTED lane divergence "
+            "from `hosted_api.py::_capture_session_impl`. The two orderings are "
+            "internally consistent and deliberately not force-aligned; "
+            "`RETROFIT_VERDICTS['ordering_ambiguous']` records why the "
+            "divergence is not retro-attributable."),
+    ),
+    SessionWriter(
+        key="tortoise/sdk.py::_stamp_entity_link_counters",
         kind="capture-aux",
         lane="sdk capture",
         properties=frozenset({
-            "capture_ok", "capture_extractor",
             "entity_links_attempted", "entity_links_created",
         }),
         note=(
-            "The SDK twin of the hosted record. `capture_ok` here is computed "
-            "BEFORE the surfaced-verification read, and a verification failure "
-            "appends a warning (True stays) — the DOCUMENTED lane divergence. "
-            "The two orderings are internally consistent and deliberately not "
-            "force-aligned; `RETROFIT_VERDICTS['ordering_ambiguous']` records "
-            "why the divergence is not retro-attributable."),
+            "The #7405 entity-link counters for this pass, written only when the "
+            "pass attempted a link and OVERWRITTEN by the index-run writer below, "
+            "so the counter is non-monotone (the hosted twin records the same "
+            "caveat).",),
     ),
     SessionWriter(
         key="tortoise/hosted_api.py::_capture_abandoned_marker",
