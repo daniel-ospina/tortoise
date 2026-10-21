@@ -78,11 +78,41 @@ class TestPackNew:
             assert "reserved starter pack" in r.stderr, r.stderr
 
     def test_invalid_namespaces_rejected(self, tmp_path):
-        for ns, msg in (("BadCase", "camelCase"), ("bad:ns", "must not contain"),
-                        ("document", "canonical kind")):
+        """The scaffolder must refuse what the validator refuses (#2786).
+
+        Every case here would otherwise produce a manifest its OWN validator
+        rejects — `my domain` did exactly that before the whitespace leg landed on
+        the writer side.
+        """
+        for ns, msg in (
+            ("BadCase", "camelCase"),
+            ("bad:ns", "must not contain"),
+            ("my domain", "whitespace"),
+            ("document", "canonical kind"),
+            # #2786: an ACTION-axis word. The pre-#2786 hand-rolled union here
+            # omitted CANONICAL_ACTION_KINDS, so this is the case that
+            # discriminates `canonical_kind_words()` from it.
+            ("implement", "canonical kind"),
+        ):
             r = _run_cli("pack", "new", ns, "--dir", str(tmp_path / "packs"))
             assert r.returncode == 1, f"{ns} should be rejected"
             assert msg in r.stderr, r.stderr
+
+    def test_reserved_words_cover_every_owned_axis(self):
+        """One definition (#2786): the CLI reads `canonical_kind_words()`.
+
+        The reservation used to be hand-rolled here, and it had drifted — the
+        action axis (`CANONICAL_ACTION_KINDS`, which `CANONICAL_KINDS` deliberately
+        omits) was missing, so `pack new implement` scaffolded a namespace that
+        collides with a core word. This pins the set against the owner map, so a
+        future hand-rolled copy cannot silently drop an axis again.
+        """
+        from tortoise.pack_registry import KIND_OWNER_AXES, canonical_kind_words
+
+        words = canonical_kind_words()
+        for axis, kinds in KIND_OWNER_AXES.items():
+            missing = {k for k in kinds if k.lower() not in words}
+            assert not missing, f"{axis} missing from the reserved words: {missing}"
 
     def test_existing_dir_rejected(self, tmp_path):
         _scaffold("mydomain", tmp_path)
