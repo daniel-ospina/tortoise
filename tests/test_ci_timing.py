@@ -1665,6 +1665,54 @@ def test_the_banner_is_the_measurement_and_is_not_inflated(tmp_path: Path) -> No
     assert agg["total_counts"]["failed"] == 5
 
 
+def test_a_verdict_word_as_a_parameter_is_not_a_second_test(tmp_path: Path) -> None:
+    """`test_handler_level[ERROR]` is ONE test whose PARAMETER spells a verdict.
+
+    The discriminator for an embedded nodeid is the `VERDICT [ NN%]` progress MARKER, not the
+    verdict word: counting words dropped every real failure whose id or message happened to
+    contain `ERROR`/`FAILED`/`SKIPPED`, and on a summary-less leg it dropped the count too
+    (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text("tests/test_x.py::test_handler_level[ERROR] FAILED [ 50%]\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_handler_level[ERROR]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_a_short_summary_quoting_a_verdict_is_still_a_failure(tmp_path: Path) -> None:
+    """A failure MESSAGE that quotes a verdict word must not hide the failure."""
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_a - AssertionError: assert 'SKIPPED' in ''\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_a"}
+
+
+def test_a_spaced_param_is_not_truncated_at_the_space(tmp_path: Path) -> None:
+    """Three spaced parameters are three failures, not one truncated id.
+
+    The short-summary id capture ran to the first whitespace, so `test_spaced[server lane]` and
+    its siblings collapsed into a single nodeid that does not exist — which also made the flake
+    proxy diff names pytest never reports (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "".join(f"FAILED tests/test_x.py::test_spaced[{p}] - AssertionError: x\n"
+                for p in ("server lane", "server box", "server bay"))
+        + "= 3 failed in 1.00s =\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_spaced[server lane]",
+        "tests/test_x.py::test_spaced[server box]",
+        "tests/test_x.py::test_spaced[server bay]",
+    }
+    assert agg["total_counts"]["failed"] == 3
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 

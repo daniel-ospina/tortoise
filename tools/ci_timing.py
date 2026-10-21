@@ -408,15 +408,18 @@ COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
 # than guessed at.
 V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
 # ⛔ ONE PROGRESS LINE REPORTS ONE TEST (#9134 review, P1). A parametrized id can EMBED
-# another nodeid, and then the line carries a SECOND verdict word that is the inner test's:
-# `...t[tests/x.py::...::test_y FAILED [ 86%] ...] PASSED [ 75%]`. Reading the first verdict
-# published a failure for a test that had passed. The bracket-balance rule that replaced it is
-# WRONG in the other direction: pytest appends the closing `]` to the parameter verbatim, so a
-# legitimate id whose parameter contains `[` (`test_x[False-[server lane-False]`) has MORE
-# opens than closes, and the aggregate-side filters SILENTLY DROPPED those real failures from
-# both the count and the list. Counting verdict words is the shape the defect actually has: a
-# well-formed progress line carries exactly one, however unbalanced its id is.
-_VERDICT_TOKEN_RE = re.compile(r"\b(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
+# another nodeid, and then the line carries a SECOND `VERDICT [ NN%]` marker that is the inner
+# test's: `...t[tests/x.py::...::test_y FAILED [ 86%] ...] PASSED [ 75%]`. Reading the first
+# verdict published a failure for a test that had passed.
+#
+# The discriminator is the PROGRESS MARKER (`VERDICT [ NN%]`), not the verdict WORD and not
+# bracket balance — both were measured wrong. A well-formed progress line carries exactly ONE
+# marker; an embedded nodeid carries two; a parameter that happens to spell a verdict
+# (`test_handler_level[ERROR]`) carries none, and counting words dropped those real failures
+# silently. Bracket balance is wrong too: pytest appends its closing `]` to the parameter
+# verbatim, so a parameter containing `[` yields an unbalanced id and the balance filter dropped
+# it from both the count and the list.
+_PROGRESS_MARKER_RE = re.compile(r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\s*\[\s*\d+%\]")
 # The session-summary line reports how long the session took, and it must also NAME
 # what happened — see `_is_summary_line`. Matching any line that merely mentions a
 # duration certified truncated legs as complete: pytest echoes a failing test's
@@ -472,7 +475,10 @@ def _is_summary_line(line: str) -> bool:
                 or " deselected" in stripped)
 
 
-R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::[^\s]+)")
+# The id runs to the ` - <message>` separator, NOT to the first space: a parametrized id
+# may CONTAIN a space (`test_spaced[server lane]`), and truncating at whitespace published a
+# nodeid that does not exist and collapsed distinct failures into one (#9134 review, P2).
+R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::.+?)(?:\s+-\s+.*)?$")
 
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
@@ -599,8 +605,8 @@ def parse_log(path: Path) -> dict:
                         seen.add(nodeid)
                         target["total_ms"] += ms
                         target["max_ms"] = max(target["max_ms"], ms)
-        if len(_VERDICT_TOKEN_RE.findall(line)) > 1:
-            continue          # a second verdict word means an EMBEDDED nodeid
+        if len(_PROGRESS_MARKER_RE.findall(line)) > 1:
+            continue          # two `VERDICT [ NN%]` markers = an EMBEDDED nodeid, not two tests
         m = V_PROGRESS_RE.match(line)
         if m:
             outcomes[m.group(1)] = m.group(2)
@@ -2785,13 +2791,11 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                             "counts": parsed["counts"],
                             "killed": parsed["killed"],
                             "summary_seen": parsed["summary_seen"]})
-    # A watchdog-killed leg reports failures only through progress lines, so the
-    # summed total can sit below the list beside it. Never claim fewer than we list.
-    # Reconcile against FAILED ids only: failed_tests also collects ERROR ids, and
-    # pytest keeps failed and error as separate columns (#9134 review, P2).
-    # No up-reconcile: it was masking a phantom FAILED read out of a parametrized id, and
-    # a banner that says 5 failures is the measurement. A genuinely truncated leg still
-    # contributes its progress-line failures through the summary-less path above.
+    # The BANNER is the count; `failed_tests` is the union of failures the progress lines
+    # NAME, so it may be longer than the count (a collection error is counted in `error`
+    # but never named; a re-run can name a test twice under two ids). There is deliberately NO
+    # up-reconcile: it existed to mask a phantom FAILED read out of an embedded nodeid, and a
+    # banner that says 5 failures is the measurement (#9134 review, P1).
 
     return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
             "failed_tests": failed_tests, "log_sources": log_sources}
