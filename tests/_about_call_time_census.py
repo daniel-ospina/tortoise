@@ -793,10 +793,15 @@ def _site_symbol(node: ast.AST, file: _File) -> list[str]:
 
     const_name = None
     for stmt in file.tree.body:
-        # `AnnAssign` carries the SAME shape as `Assign` (`NAME: str = "..."`), and a
-        # constant written that way is a module constant the census must still be able
-        # to name — omitting it is what made the `<module>` fallback below unreachable
-        # for every input the tree contains, i.e. a branch no arm could exercise.
+        # `AnnAssign` carries the SAME shape as `Assign` (`NAME: str = "..."`), so a
+        # module constant written that way must be attributable to its consumer like
+        # any other — without this branch it fell through to the `<module>` fallback
+        # and the read lost its symbol. ⚠️ This is NOT what makes the fallback
+        # reachable (an annotated constant lands in the branch BELOW); the fallback is
+        # reached by a root that sits in no module-level constant statement at all — a
+        # `class` body or an `if` block. Both input classes are now exercised on
+        # synthetic sources by `test_a_module_constant_is_attributed_to_its_consumer`,
+        # so neither branch is a line no arm can reach.
         if isinstance(stmt, ast.AnnAssign):
             if (
                 stmt.value is not None
@@ -897,16 +902,8 @@ def _empty_pattern_sites() -> dict[tuple[str, str], tuple[int, ...]]:
     for file in _files():
         if not _may_traverse_every_type(file.source):
             continue
-        docstrings = _docstrings(file)
-        for node in _roots(file):
-            if id(node) in docstrings:
-                continue
-            candidates = _resolve(node, _scope(file, node), file)
-            if not any(_is_empty_pattern_read(text) for text in candidates):
-                continue
-            line = getattr(node, "lineno", 0)
-            for symbol in _site_symbol(node, file):
-                sites.setdefault((file.rel, symbol), []).append(line)
+        for symbol, line in sorted(_empty_pattern_sites_in(file)):
+            sites.setdefault((file.rel, symbol), []).append(line)
     return {key: tuple(sorted(value)) for key, value in sites.items()}
 
 
@@ -928,6 +925,16 @@ def _ungated_walk_sites() -> tuple[
     part of the gate, so they are NOT applied here either: a predicate one type
     narrow is the same defect one level down, and it shows up as a site in this
     difference too.
+
+    ⚠️ **The ONLY difference from the gated path is WHICH modules are walked.** The
+    per-module derivations are the SAME functions the gated walks call
+    (`_sites_in`, `_empty_pattern_sites_in`, `_call_time_sites_in`); this function
+    must never grow an inline copy of one. A copy is a blindness channel in the very
+    instrument that exists to un-blind: if the copy were later narrowed the gate's
+    widening would under-detect instead of reding, and if the gated side changed
+    alone the arm would red spuriously — after which its red no longer means "the
+    gate is narrow". `test_the_ungated_walk_reuses_the_gated_derivations` pins this
+    structurally, by recording which of the helpers ran per module.
     """
     named: set[tuple[str, str]] = set()
     empty: set[tuple[str, str]] = set()
@@ -936,17 +943,10 @@ def _ungated_walk_sites() -> tuple[
         file = _File(path, str(path.relative_to(ROOT)), source)
         for symbol, _line in _sites_in(file):
             named.add((file.rel, symbol))
-        docstrings = _docstrings(file)
-        for node in _roots(file):
-            if id(node) in docstrings:
-                continue
-            candidates = _resolve(node, _scope(file, node), file)
-            if any(_is_empty_pattern_read(text) for text in candidates):
-                for symbol in _site_symbol(node, file):
-                    empty.add((file.rel, symbol))
-            if any(_is_gap_type_read(text) for text in candidates):
-                for symbol in _site_symbol(node, file):
-                    call_time.add((file.rel, symbol))
+        for symbol, _line in _empty_pattern_sites_in(file):
+            empty.add((file.rel, symbol))
+        for symbol, _line in _call_time_sites_in(file):
+            call_time.add((file.rel, symbol))
     return named, empty, call_time
 
 
@@ -980,7 +980,12 @@ def _narrow_gate_walk_sites() -> tuple[
 
 
 def _empty_pattern_sites_in(file: _File) -> set[tuple[str, int]]:
-    """`_empty_pattern_sites()` restricted to one module (the control's need)."""
+    """The empty-pattern derivation for ONE module — the single definition.
+
+    `_empty_pattern_sites()` (gated), `_ungated_walk_sites()` (every module) and
+    `_narrow_gate_walk_sites()` (the control) all call this, so no two halves of a
+    comparison can drift: the only thing that varies between them is the module set.
+    """
     docstrings = _docstrings(file)
     sites: set[tuple[str, int]] = set()
     for node in _roots(file):
@@ -994,8 +999,9 @@ def _empty_pattern_sites_in(file: _File) -> set[tuple[str, int]]:
             sites.add((symbol, line))
     return sites
 
+
 def _call_time_sites_in(file: _File) -> set[tuple[str, int]]:
-    """`_call_time_sites()` restricted to one (usually synthetic) module.
+    """The call-time derivation for ONE module (usually synthetic).
 
     The mechanism arm's harness: it lets a synthetic source — a reader of a shape
     the tree does not contain — be run through the SAME derivation the real

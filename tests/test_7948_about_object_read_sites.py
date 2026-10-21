@@ -3540,3 +3540,127 @@ def test_the_file_filter_un_sees_nothing():
         "detect a narrowing — the control has gone blind and the arm above is a "
         "PASS about nothing"
     )
+
+
+def test_the_ungated_walk_reuses_the_gated_derivations():
+    """The ungated walk must WALK the gate, not re-implement the derivations.
+
+    ⚠️ **A second, hand-maintained copy of a derivation is a blindness channel in the
+    instrument that exists to un-blind.** `_ungated_walk_sites` originally inlined the
+    exact bodies of the empty-pattern and call-time walks while `_narrow_gate_walk_sites`
+    called the per-module helpers, so the two halves of the comparison the arm above
+    turns on were maintained independently: narrow the inline copy and a genuine gate
+    widening UNDER-detects (green); change the gated copy alone and the arm reds
+    spuriously — after which its red no longer means "the gate is narrow". The only
+    legitimate difference between the walks is WHICH modules are visited.
+
+    Falsifiable by construction: the per-module helpers are instrumented and the walk
+    is run over a truncated module set, so an inline copy records NOTHING and reds.
+    """
+    census = _call_time_census()
+    sources = census._sources()
+    assert len(sources) > 2, "the package has too few modules to run this arm"
+    subset = dict(sorted(sources.items())[:2])
+
+    recorded: dict[str, set[str]] = {
+        "_sites_in": set(),
+        "_empty_pattern_sites_in": set(),
+        "_call_time_sites_in": set(),
+    }
+    originals = {name: getattr(census, name) for name in (*recorded, "_sources")}
+
+    def _recording(name: str, real):
+        def wrapper(file):
+            recorded[name].add(file.rel)
+            return real(file)
+
+        return wrapper
+
+    patched: dict[str, object] = {
+        name: _recording(name, getattr(census, name)) for name in recorded
+    }
+    patched["_sources"] = lambda: subset
+    try:
+        for name, value in patched.items():
+            setattr(census, name, value)
+        ungated = census._ungated_walk_sites()
+    finally:
+        for name, value in originals.items():
+            setattr(census, name, value)
+
+    # The walk that ran is the SUBSET (no cache to invalidate — it is not cached).
+    expected = {str(path.relative_to(census.ROOT)) for path in subset}
+    for name, seen in sorted(recorded.items()):
+        assert seen == expected, (
+            f"`_ungated_walk_sites` did not run `{name}` over every module — it reached "
+            f"{sorted(seen)} of {sorted(expected)}, so the ungated side of the gate "
+            "comparison is a second, independently maintained copy of the derivation "
+            "and the comparison can drift instead of measuring the gate"
+        )
+
+    # …and the values it reports are exactly what those helpers return per module.
+    for label, helper, walked in (
+        ("named", originals["_sites_in"], ungated[0]),
+        ("empty-pattern", originals["_empty_pattern_sites_in"], ungated[1]),
+        ("call-time", originals["_call_time_sites_in"], ungated[2]),
+    ):
+        rebuilt = set()
+        for path, source in subset.items():
+            file = census._File(path, str(path.relative_to(census.ROOT)), source)
+            rebuilt |= {(file.rel, symbol) for symbol, _line in helper(file)}
+        assert walked == rebuilt, (
+            f"the ungated walk's {label} class disagrees with the per-module derivation "
+            "it is supposed to be a loop over — the walk carries logic the gated side "
+            "does not"
+        )
+
+
+def test_a_module_constant_is_attributed_to_its_consumer():
+    """Both halves of `_site_symbol`'s module-constant rule, on synthetic sources.
+
+    The tree contains neither shape, so an arm that only walked the corpus could not
+    tell the branches apart — which is how `ast.AnnAssign` came to be unhandled while
+    the `<module>` fallback was presented as unreachable. Two input classes, one per
+    branch:
+
+    * an ANNOTATED module constant (`NAME: str = "..."`) must be attributed to the
+      function that consumes it — the `ast.AnnAssign` branch;
+    * a root that sits in NO module-level constant statement (an `if` block, a class
+      body) has no constant to attribute and falls back to `<module>` — the branch the
+      first case does NOT reach.
+
+    Any pre-`AnnAssign` version of `_site_symbol` returns `<module>` for the first
+    source, so this arm fails on it.
+    """
+    census = _call_time_census()
+    annotated = (
+        'PATTERN: str = "MATCH (n)-[:aboutObject]->(m) RETURN m"\n'
+        "\n"
+        "\n"
+        "def reader(query):\n"
+        "    return query(PATTERN)\n"
+    )
+    file = census._File(Path("synthetic_annotated.py"), "synthetic_annotated.py", annotated)
+    derived = {symbol for symbol, _line in census._sites_in(file)}
+    assert derived == {"reader"}, (
+        "an ANNOTATED module constant is not attributed to the function that consumes "
+        f"it — derived {sorted(derived)}. `<module>` here means the `ast.AnnAssign` "
+        "branch is gone and §13 loses the reader behind a constant written with a "
+        "type annotation"
+    )
+
+    nested = (
+        "if True:\n"
+        '    PATTERN = "MATCH (n)-[:aboutObject]->(m) RETURN m"\n'
+        "\n"
+        "\n"
+        "def reader(query):\n"
+        "    return query(PATTERN)\n"
+    )
+    file = census._File(Path("synthetic_if.py"), "synthetic_if.py", nested)
+    derived = {symbol for symbol, _line in census._sites_in(file)}
+    assert derived == {"<module>"}, (
+        "a root in no module-level constant statement must fall back to `<module>`, "
+        f"derived {sorted(derived)} — either the fallback is unreachable again (the "
+        "line the review flagged) or the rule now attributes an unattributable read"
+    )
