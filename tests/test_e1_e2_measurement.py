@@ -1377,6 +1377,71 @@ def test_checker_refuses_a_binding_denominator_the_run_did_not_produce(monkeypat
     assert any("[V15]" in f and "did not produce" in f for f in findings), findings
 
 
+def test_checker_refuses_a_matched_binding_that_names_no_pin(log_text):
+    """A MATCHED bar that names NO pin is the UNPINNED case relabelled (P2).
+
+    The probe's `prereg_binding` contract is `MATCHED` only when a pin exists,
+    it agrees, and no floor is violated; the absence of a pin is `UNPINNED`.
+    V15 used to read only `reason` and `objects`/`declared_floor` in its MATCHED
+    branch, so `declared_path=n/a declared_sha256=n/a` — an unbound bar with the
+    right status word — passed every rule: the status is in the tuple, the sha
+    reconciles with `corpus=`, `reason=n/a` is what a MATCHED line says, and the
+    denominator meets the floor. That is a relabel, not an absent line.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    tampered = scored.replace(f"declared_path={_CORPUS_REL}",
+                              "declared_path=n/a")
+    assert "declared_path=n/a declared_sha256=n/a" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "names no pin" in f for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_with_an_unreadable_floor(log_text):
+    """`declared_floor=30.0` must not SKIP the arithmetic (P2).
+
+    The floor comparison was gated on `isdigit()`, so a non-integer floor made it
+    fall through as acceptable while the same value under `BELOW_FLOOR` was a
+    finding — one log judged differently depending on the word its own line
+    claimed. That is the permissive read the probe's `_declared_floor` was fixed
+    to refuse ("present but unreadable is not absent"), applied one level up.
+    """
+    scored = _scored(log_text)
+    assert "declared_floor=20" in scored
+    tampered = scored.replace("declared_floor=20", "declared_floor=30.0", 1)
+    assert "declared_floor=30.0" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "unreadable is not absent" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_with_an_unreadable_denominator(
+        log_text):
+    """`objects=25.0` is a denominator the gate cannot read — refused (P2)."""
+    scored = _scored(log_text)
+    tampered = scored.replace("objects=25 reason=n/a", "objects=25.0 reason=n/a", 1)
+    assert "objects=25.0 reason=n/a" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "not a plain integer" in f
+               for f in findings), findings
+
+
+def test_a_matched_binding_with_no_declared_floor_still_passes(monkeypatch):
+    """ABSENT is not unreadable: no `denominator_floors` is a legal MATCHED run.
+
+    Pins the boundary of the refusal above — an artifact that pins its corpus and
+    states no floor yields `declared_floor=n/a`, which must keep scoring.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {"e1": {"min_share_reduction": 0.0},
+                      "corpus": {"path": _CORPUS_REL}})
+    assert code == 0, text
+    assert "prereg-binding status=MATCHED" in text, text
+    assert "declared_floor=n/a" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
 def test_a_corpus_sha_pin_that_is_not_this_corpus_never_scores(monkeypatch):
     """An exact-bytes pin is the stronger identity, and a wrong one is refused."""
     code, text = _run_with_prereg(

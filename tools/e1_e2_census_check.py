@@ -887,11 +887,40 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V15] the binding is MATCHED but states reason="
                     f"{bind.get('reason')!r} — a matched bar has nothing to refuse")
             nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
-            if all(n.isdigit() for n in nums) and int(nums[0]) < int(nums[1]):
+            # MATCHED means "a pin EXISTS, it agrees, and no floor is violated"
+            # (the probe's own contract), so a MATCHED line that names no pin at
+            # all is the UNPINNED case RELABELLED — a relabel, not an absent
+            # line, so every other rule here accepted it (#9513 review P2).
+            pins = (bind.get("declared_path", ""),
+                    bind.get("declared_sha256", ""))
+            if all(not p or p == "n/a" for p in pins):
                 findings.append(
-                    f"[V15] the binding is MATCHED while objects={nums[0]} is "
-                    f"under declared_floor={nums[1]} — a below-floor run cannot be "
-                    f"bound-ready")
+                    f"[V15] the binding is MATCHED but names no pin "
+                    f"(declared_path={pins[0]!r}, declared_sha256={pins[1]!r}) — "
+                    f"a bar matched to nothing is an unbound bar relabelled")
+            # The floor arithmetic is NOT gated on `isdigit()` (#9513 review P2):
+            # skipping the comparison whenever a number cannot be read is the
+            # permissive read `_declared_floor` was fixed to refuse in the probe,
+            # and applying it to the refusal statuses while sparing MATCHED judged
+            # the same log differently depending on the word its own line
+            # claimed. `n/a` is the ONE legal non-integer floor: the artifact
+            # states no floor at all, which is ABSENT, not unreadable.
+            if not nums[0].isdigit():
+                findings.append(
+                    f"[V15] the binding is MATCHED but its denominator "
+                    f"objects={nums[0]!r} is not a plain integer — a denominator "
+                    f"the gate cannot read is refused, not skipped")
+            if nums[1].isdigit():
+                if nums[0].isdigit() and int(nums[0]) < int(nums[1]):
+                    findings.append(
+                        f"[V15] the binding is MATCHED while objects={nums[0]} is "
+                        f"under declared_floor={nums[1]} — a below-floor run cannot "
+                        f"be bound-ready")
+            elif nums[1] not in ("n/a", ""):
+                findings.append(
+                    f"[V15] the binding is MATCHED but declares_floor={nums[1]!r} "
+                    f"is neither a plain integer nor `n/a` — present but "
+                    f"unreadable is not absent")
         if bind.get("status") == "UNREADABLE" and \
                 "floor-unreadable" not in bind.get("reason", ""):
             findings.append("[V15] an UNREADABLE binding does not attribute it to "
