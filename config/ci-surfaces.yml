@@ -4928,19 +4928,27 @@ tier1:
 - test_entity_attachment_brief_claims.py
 # #9080: the extractor-v4 capstone's gate + run probe (`core` above) — a pure,
 # no-DB file/JSON read plus `git cat-file`/`merge-base`. Dual-registered with
-# `core`, and this `tier1` arm is LOAD-BEARING, not belt-and-braces: measured at
-# this head, a `docs/`-only `pull_request` diff returns
-# `{"surfaces": [], "full": false, test_files: <the tier-1 set>}` — the docs-only
-# early return selects tier1 and NOTHING else, so this row is the only reason the
-# pin runs on the very diff that can rot the bundle it holds
-# (`docs/evidence/7949-capstone/**` — a shipped log whose refusal rows are tidied
-# into a green one, or a probe whose observation surface moves). Do not delete it
-# as "one cheap redundant row". The `core` half is what `--integrity` reads, and
-# `tools/ci_selection.py::CORE_ALSO` carries `docs/evidence/7949-capstone/probes/`
-# so a PROBE-ONLY diff selects `core` too — the same entry its siblings
-# (`docs/evidence/7950-capstone/probes/`, `docs/evidence/5612-journal-growth/probes/`)
-# carry. Pinned by
-# tests/test_ci_selection.py::test_7949_capstone_probe_change_selects_core_not_tier1.
+# `core`, and this `tier1` arm is genuine belt-and-braces, NOT load-bearing —
+# ⛔ corrected after #9089 review P2, which caught the earlier text claiming the
+# opposite. The claim was: "a `docs/`-only diff selects tier1 and NOTHING else,
+# so this row is the only reason the pin runs on `docs/evidence/7949-capstone/**`".
+# That is false at head for the exact paths it named: `tools/ci_selection.py::`
+# `CORE_ALSO` carries the broad `docs/evidence/7949-capstone/` prefix (landed
+# with #9076, present in the merge base) and BOTH consumers match with
+# `path.startswith(...)`, so those paths are KEPT by `_keep_changed`, the surface
+# loop selects `core`, and they never reach the docs-only early return at all.
+# (An earlier revision of this PR ALSO added a narrower
+# `docs/evidence/7949-capstone/probes/` row; that one was dead config — measured
+# 2026-10-20, deleting it left the selection IDENTICAL — and has been removed.)
+#
+# What this arm still buys: a genuinely `docs/`-only diff (a prose file under
+# `docs/` that no CORE_ALSO prefix claims) selects tier1 and nothing else, so
+# this row is how the capstone gate runs on a pure-docs PR. Keep it as
+# belt-and-braces; do NOT describe it as the reason the evidence bundle is
+# covered — that reason is the `core` CORE_ALSO prefix. `core` is also the half
+# `--integrity` reads. Pinned by
+# tests/test_ci_selection.py::test_7949_capstone_probe_change_selects_core_not_tier1
+# (which names the COVERING prefix and records the mutation measurement).
 - test_7949_capstone_verdict_check.py
 # ── #9017 (2026-10-18): the slow pool's weights and its leg split are MEASURED
 #

@@ -2078,21 +2078,29 @@ def test_7949_capstone_probe_change_selects_core_not_tier1():
     # tests/test_7949_capstone_verdict_check.py (`core`), the DB-free pin on the
     # run's refusal chain and the pure observers every row is derived from.
     #
-    # PR #9089 review P2: `docs/` is a flat NON_PYTHON_PREFIXES entry and no
-    # SOURCE_PATTERNS row matches the probe, so a PROBE-ONLY change came back
-    # with `changed == []` and took the docs-only early return — `select()`
-    # returned NO `core` surface, so the pin's `core` registration never reached
-    # the file it guards (the #1349/#3332/#3616 silent-drop class, the same
-    # shape as `docs/evidence/7950-capstone/probes/` above).
+    # PR #9089 review P2 caught TWO wrong claims here. The first was that a
+    # PROBE-ONLY change came back with `changed == []` and took the docs-only
+    # early return — true when nothing claimed the path, but the claim "mutation
+    # check: removing the CORE_ALSO entry fails assert 1 below" was FALSE, because
+    # the entry it referred to was a second, narrower
+    # `docs/evidence/7949-capstone/probes/` row and the BROAD
+    # `docs/evidence/7949-capstone/` prefix (landed with #9076, in the merge base)
+    # was doing the work all along — both consumers match with
+    # `path.startswith(...)`.
     #
-    # Measured before the CORE_ALSO entry (2026-10-19):
-    # `_sel(["docs/evidence/7949-capstone/probes/capstone_run.py"])` ->
-    # surfaces=[], full=False, the pin present only through `tier1`.
-    # Mutation check: removing the CORE_ALSO entry fails assert 1 below.
+    # Measured 2026-10-20, in this worktree, with `_sel([path])`:
+    #   shipped (both rows)              -> surfaces=['core'], 599 test files
+    #   minus the narrow `probes/` row   -> IDENTICAL  (so that row was dead)
+    #   minus the broad `…/7949-capstone/` row too
+    #                                    -> surfaces=[], 52 test files, the pin
+    #                                       reachable only through `tier1`
+    # So the BROAD prefix is the covering entry, and it is what this test names.
     for path in (
         "docs/evidence/7949-capstone/probes/capstone_run.py",
         "docs/evidence/7949-capstone/probes/README.md",
     ):
+        assert path.startswith("docs/evidence/7949-capstone/"), (
+            path, "the covering CORE_ALSO prefix is the broad 7949-capstone/ one")
         r = _sel([path])
         assert "core" in r["surfaces"], (path, r)
         assert "test_7949_capstone_verdict_check.py" in r["test_files"], (path, r)
