@@ -166,22 +166,34 @@ def point_currency(graph, point_id: str) -> dict:
     }
 
 
-def read_entity_links(graph, entity_id: str) -> list[dict]:
+def read_entity_links(graph, entity_id: str) -> list[dict] | None:
     """Every inbound ``references`` link of one **entity**, with its verdict.
 
     The single-entity convenience wrapper over
     :func:`tortoise.search_engine.read_reference_currency_links` (the ONE home,
     and a batch query), exactly as :func:`read_links` wraps
-    ``read_currency_links`` for a Point. An entity no Source references returns
-    ``[]`` — ``unknown`` territory, never ``current`` (see
-    :func:`entity_currency`).
+    ``read_currency_links`` for a Point.
 
-    ⚠️ An AMBIGUOUS address (one string naming more than one node) also renders
-    as ``[]`` here, because a refusal is not a link set. Use
-    :func:`entity_currency`, whose ``ambiguous`` flag distinguishes the two —
-    never infer "nothing references this entity" from an empty list.
+    THREE states, and they are deliberately distinguishable — the wrapper
+    forwards the read's own refusal rather than flattening it:
+
+    * ``[link, ...]`` — the entity's links, in ``(source, recorded)`` order;
+    * ``[]`` — **nothing references this entity** (``unknown`` territory, never
+      ``current``; see :func:`entity_currency`);
+    * ``None`` — the address was REFUSED: one string named more than one
+      referenced node, so no verdict can honestly be given for it.
+
+    ⚠️ Never infer "nothing references this entity" from a falsey answer alone:
+    ``None`` is the refusal, and only ``[]`` is the empty link set. This is the
+    one place the Point analogue (:func:`read_links`) does not carry over — a
+    Point has no refusal state, so its ``[]`` is unambiguous.
     """
-    return read_reference_currency_links(graph, [entity_id]).get(entity_id) or []
+    batch = read_reference_currency_links(graph, [entity_id])
+    # `in` + index, NOT `.get()`: `.get()` returns `None` for an absent key too,
+    # which would make "no inbound reference" and "refused" the same answer.
+    if entity_id not in batch:
+        return []
+    return batch[entity_id]
 
 
 def entity_currency(graph, entity_id: str) -> dict:

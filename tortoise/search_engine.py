@@ -706,7 +706,11 @@ def read_reference_currency_links(
         for key in dict.fromkeys((nid, neid, nurl)):
             if key and key in wanted:
                 out.setdefault(key, []).append(dict(row))
-                idents.setdefault(key, set()).add(ident or "")
+                # `ident` goes in AS the engine returned it. Coercing it through
+                # `or ""` would turn node id 0 into the empty string and fold it
+                # with any other falsey id — an accidental VALUE fingerprint,
+                # which is exactly what this set must never be.
+                idents.setdefault(key, set()).add(ident)
     # ONE ADDRESS, ONE NODE — OR NO ANSWER (see the docstring). An address that
     # named more than one node keeps its KEY with a ``None`` value: a verdict
     # assembled from a node the caller may not have addressed is not an answer,

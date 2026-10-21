@@ -7492,7 +7492,7 @@ durations:
   test_source_identity.py: 0.2
   test_source_kind_runtime_registration.py: 0.3
   test_source_version_read_wiring_5199.py: 0.6
-  test_source_version_entity_currency_5199.py: 7.5  # unmeasured — #5199: 13 tests, embedded lane (`TORTOISE_TEST_CARVE_OUT=1`); locally measured 5.9-7.0s per run (SDK/engine startup dominates, fleet-contention sensitive)
+  test_source_version_entity_currency_5199.py: 7.5  # unmeasured — #5199: 13 tests, embedded lane (`TORTOISE_TEST_CARVE_OUT=1`); locally measured 5.9-7.0s per run (SDK/engine startup dominates, fleet-contention sensitive). This row is the branch's LOCAL reading under the `# unmeasured` convention, NOT the flat-default case and NOT a claim of a CI measurement: a file ADDED BY A PR can never have a junit measurement (the refresher samples push-to-main runs only), and this map's neighbouring rows take the same shape — `test_8702_identity_skip_accounting.py` 5.0, `test_9256_lane_probe_attribution.py` 6.8, `test_8098_webhook_retry_sweep.py` 8.8, `test_9233_webhook_declared_lane.py` 14.0 (all `# unmeasured`, all local). The WEIGHT is the HIGHER end of the observed range on the rows' stated rule (never correct a weight downward without a CI junit reading, so a loaded leg cannot under-pack), not a hand-picked number. The flat 2.0s default is a row with NO reading; an absent row packs the file at it. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_source_version_references_5199.py: 1.1
   test_subject_binding_1370.py: 7.1
   test_subject_layer_read_surfaces_4889.py: 0.9

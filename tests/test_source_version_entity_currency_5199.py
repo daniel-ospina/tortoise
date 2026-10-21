@@ -33,9 +33,11 @@ Every test names the input that makes it FAIL.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
 import io
 import os
+import shutil
 import sys
 import tempfile
 
@@ -50,12 +52,23 @@ from tools.source_currency import (
 from tools.source_currency import (
     main as cli_main,
 )
+from tortoise.projection.edges import _mint_source_stub
 from tortoise.sdk import TortoiseSDK
 from tortoise.search_engine import read_reference_currency_links
 
 
 def _tmp(name: str) -> str:
-    return os.path.join(tempfile.mkdtemp(prefix="tortoise_test_"), name)
+    """A per-test store path, in a directory removed when the run ends.
+
+    `mkdtemp` per case and no cleanup left 13 embedded DB trees behind on every
+    run (a dev box accumulates them; CI is ephemeral). `atexit` keeps the
+    per-test isolation — each case still gets its OWN directory — while the
+    removal happens after the last SDK has closed, so no case can delete a
+    store another case is reading.
+    """
+    d = tempfile.mkdtemp(prefix="tortoise_test_")
+    atexit.register(shutil.rmtree, d, ignore_errors=True)
+    return os.path.join(d, name)
 
 
 def _fixture(sdk: TortoiseSDK, *, content_hash: str = "h1"):
@@ -210,6 +223,10 @@ def test_entity_with_no_reference_is_unknown():
         verdict = entity_currency(proj.g, "ev-1")
         assert verdict["status"] == "unknown", verdict
         assert verdict["links"] == [], verdict["links"]
+        # The single-entity wrapper's ABSENT state is `[]` — nothing references
+        # this entity — and it must stay a real list, not become the refusal's
+        # `None` (the two are pinned apart in the ambiguity test below).
+        assert read_entity_links(proj.g, "ev-1") == []
     finally:
         sdk.close()
 
@@ -326,15 +343,23 @@ def test_a_document_derivation_target_is_addressed_by_url():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        # (a) the `_upsert_document` shape: id AND url
-        proj.g.query(
-            "CREATE (d:Source {id:'doc.md', url:'doc.md', sourceKind:'document', "
-            "title:'doc.md', contentHash:'d1', ingestedAt:'2024-01-01'})")
+        # Both document nodes are built by the PRODUCTION WRITERS, not by this
+        # test's own `CREATE`: the claim under test is a claim about what those
+        # writers mint, so a hand-built fixture would pin nothing but itself
+        # (it would stay green if either writer changed shape tomorrow).
+        # (a) the `_upsert_document` shape: url AND id.
+        proj._upsert_document({
+            "id": "doc.md",
+            "title": "doc.md",
+            "content_hash": "d1",
+            "suppress_embedding": True,
+        })
         sdk.link_source_to_entity("src.txt", "doc.md", "Document")
-        # (b) the `_mint_source_stub` shape: url only, NO id
-        proj.g.query(
-            "CREATE (st:Source {url:'stub.md', sourceKind:'document', "
-            "title:'stub.md', contentHash:'s1', ingestedAt:'2024-01-01'})")
+        # (b) the stub-minted shape: `link_source_to_entity` auto-creates only
+        # the SOURCE side, so the document node is minted by the writer that
+        # actually owns that shape — `_mint_source_stub` (the Point provenance
+        # path's create path) writes url with NO id.
+        _mint_source_stub(proj.g, "stub.md")
         sdk.link_source_to_entity("src.txt", "stub.md", "Document")
 
         rows = proj.g.query(
@@ -402,6 +427,12 @@ def test_an_ambiguous_address_reads_unknown_not_a_folded_verdict():
         assert batch == {"shared": None}, batch
         assert entity_currency(proj.g, "shared").get("ambiguous") is True, (
             "the refusal must be flagged, not rendered as an empty link list")
+        # …and the single-entity WRAPPER must not fold the refusal into the
+        # empty list: `None` vs `[]` is the only thing separating "this read
+        # declined to pick a node" from "nothing references this entity", and
+        # collapsing them is what makes absence read as a mintable fact.
+        assert read_entity_links(proj.g, "shared") is None, (
+            "the wrapper collapsed the REFUSED state into an empty link list")
     finally:
         sdk.close()
 
@@ -461,13 +492,21 @@ def test_the_cli_entity_door_reports_a_verdict():
     would leave the whole deliverable unexercised.
     """
     sdk = TortoiseSDK(_tmp("test.db"))
-    path = sdk._path if hasattr(sdk, "_path") else None
+    # The path must be the SDK's OWN field, not something probed off the
+    # projection: `TortoiseSDK` has no `_path` at all (its attribute is
+    # `_db_path`), and `proj._path` is `None` on a URI lane BY CONSTRUCTION —
+    # the #1647 test-mode redirect nulls it and falls through to the server's
+    # derived graph (`tests/_embedded.py` records the same mechanism as #9209's
+    # measured casualty). `sdk._db_path` is the path this SDK was handed on
+    # EVERY lane, and the redirect derives its graph name from exactly that
+    # path plus the session nonce, so the CLI's own in-process
+    # `TortoiseSDK(path)` lands on the same derived graph the fixture wrote.
+    db = sdk._db_path
+    assert db, "the SDK must expose the store path for the CLI door"
     try:
         proj = _fixture(sdk, content_hash="h1")
         sdk.link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
-        db = path or proj._path
-        assert db, "the SDK must expose the store path for the CLI door"
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             assert cli_main(["--entity", "ev-1", "--db", db]) == 0
