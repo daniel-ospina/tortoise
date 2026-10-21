@@ -42,10 +42,12 @@ parallel-edge ordinal — as an INLINE pattern property, unconditionally; and
 `hosted_backup.restore_graph` the dump's (`SET r = $p`). The measured set is
 therefore `confidence` (originated) plus `idx` (re-materialized): one semantic
 attribute and one identity coordinate, not one property name. **The measured
-population is 5 writers the census can SEE — 3 in the NAMED form (`SET
-r.<prop>`) and 2 by property MAP, which is the axis the census reads; on the
-CAUSAL axis those same 5 split 2 ORIGINATING + 3 RE-MATERIALIZING — and it is
-blind to a sixth SHIPPED site, which the count must not hide:**
+population splits by WRITE FORM — the NAMED form (`SET r.<prop>`) and the
+property MAP — which is the axis the census reads, and on the CAUSAL axis it
+splits differently again — and the census is blind to a SHIPPED site outside
+its walk, a gap the count must not hide:** the numbers for both axes live in
+`test_the_document_population_counts_match_the_census`, because a count written
+here is prose nothing compares.
 `session_source_migration._move_in` moves an edge by
 `MERGE ({src})-[r2:`{rel}`]->(new) ON CREATE SET r2 = properties(r)`, i.e. it
 copies the WHOLE property map, and `rel` is handed to it from
@@ -133,7 +135,9 @@ A census that reads only `SET r.<prop>` repeats the error: the property-MAP
 form `SET r += $props` / `SET r = $p` is structurally invisible to it, and two
 shipped sites already use that form on an allowlisted `aboutObject` predicate
 (listed above) — two MORE use it on an `IMPL|NAND` leg and are the declared
-false positives below, which is why the population is 5 writers, not 7. So the census reads all three write forms **where `_PATTERN`
+false positives below, which is why the population it must NOT count is the
+exemptions rather than the census rows (the pinned numbers are in
+`test_the_document_population_counts_match_the_census`). So the census reads all three write forms **where `_PATTERN`
 recognises the spelling** (the gap list above names the spellings it does not),
 and an interpolated
 predicate counts as about-bearing when its writer takes it from the shared about
@@ -235,7 +239,11 @@ WHAT IS PINNED (one entry per test, in file order)
    the originating writers; the property-MAP/inline forms on the re-materializing
    sites, `idx` included). If that code is removed, the document has re-rotted in the
    other direction and this reds instead of the doc quietly lying again.
-12. `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
+12. `test_the_document_population_counts_match_the_census` — the numbers §13 and
+   §11.1 state (population width, NAMED vs MAP split, causal split) are compared
+   to `RECORDED_WRITERS` / `MAP_WRITERS` / `NOT_AN_ABOUT_WRITER`, so a writer
+   added to the census cannot leave the documents claiming an old width.
+13. `test_the_writer_classification_separates_the_causal_axis_from_the_write_form`
    — the documents counted 5 writers as `3 originating + 2 re-materializing`,
    and that composition is false: `projection/entities._fold_entity_linked_reason`
    reproduces on REPLAY what the journal already carried, which is the documents'
@@ -243,16 +251,16 @@ WHAT IS PINNED (one entry per test, in file order)
    (3 named + 2 map), which is why the wrong number read plausibly; the causal
    split is 2 + 3, and the legs red if the fold is filed as an originator again
    (`#9403` review, P2).
-13. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
+14. `test_the_correction_changelog_qualifies_its_line_citations` — the entry's
    own round-5 rule (`at HEAD` on every number that is not true at the pin) is
    applied to the paragraph that MAKES the citations: three of them survived
    bare, and one (`security.py:85`) is false at the declared pin `c79ba1cf2`
    (`#9403` review, P2).
-14. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
+15. `test_the_named_and_map_form_writer_populations_are_disjoint` — no site is
    recorded twice, the map population has not shrunk below the shipped sites, no
    exemption is also a recorded writer, every exemption has a pinned statement
    premise, and every row (exemptions included) declares its exact name set.
-15. `test_the_declared_false_positive_premises_hold_at_the_statement` — a
+16. `test_the_declared_false_positive_premises_hold_at_the_statement` — a
    `NOT_AN_ABOUT_WRITER` row is an EXEMPTION, and an exemption nobody compares
    against is a fail-open cell: each premise is asserted at the STATEMENT the
    census attributed the property to (the about transfer carries no `SET`, and
@@ -263,7 +271,7 @@ WHAT IS PINNED (one entry per test, in file order)
    a fail-open cell). The premise is also pinned to its mechanism: the statement
    is gated on a FIXED attribute vocabulary, so a descriptor carrying none of
    those keys writes nothing on the edge its interpolated `etype` names.
-16. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
+17. `test_no_unrecorded_property_bearing_about_edge_writer` — the census half:
    every property write on an `about*` relationship pattern (named variable or
    anonymous) — named (`SET r.<prop>`), map-assigned (`SET r += $props` /
    `SET r = $p`), or an inline pattern map (`[r:aboutObject {idx:$idx}]`, which
@@ -285,39 +293,39 @@ WHAT IS PINNED (one entry per test, in file order)
    for a token nobody has written yet. It is NOT a parse failure:
    `test_the_census_fails_closed_on_a_module_it_cannot_parse` makes
    the census STOP rather than skip.
-17. `test_the_census_reads_the_inline_pattern_map_form` — synthetic probe for the
+18. `test_the_census_reads_the_inline_pattern_map_form` — synthetic probe for the
    inline pattern map, named and anonymous.
-18. `test_the_census_bound_is_pinned_as_a_gap_not_an_absence` — one probe per
+19. `test_the_census_bound_is_pinned_as_a_gap_not_an_absence` — one probe per
    gap category 1-5, each asserting `{}` against `_writers_in_module`, beside
    a recorded control. No COUNT is stated here on purpose: an earlier
    revision of this list said "two shapes" while the leg asserted more, and
    a count in prose is a claim the code can outgrow silently.
-19. `test_the_documents_state_the_bound_as_a_detector_not_a_proof` — the
+20. `test_the_documents_state_the_bound_as_a_detector_not_a_proof` — the
    completeness claim is WITHDRAWN, not reworded a fifth time: the detector
    wording must be present in the guard's `__doc__` and at least twice in
    `STORAGE-ARCHITECTURE.md`, and the retracted absolutes absent. Measured
    without it, deleting the bound paragraphs or inserting a fresh absolute
    left every leg green — a pin that is named for a bound and does not red on
    its removal is not evidence.
-20. `test_the_census_reads_a_writer_that_never_says_about` — synthetic probe for
+21. `test_the_census_reads_a_writer_that_never_says_about` — synthetic probe for
    the allowlist-driven writer whose module never spells `about`.
-21. `test_the_census_fails_closed_on_a_module_it_cannot_parse` — a module
+22. `test_the_census_fails_closed_on_a_module_it_cannot_parse` — a module
    `ast.parse` (or the strict UTF-8 decode) rejects STOPS the census and names
    the file, instead of returning `{}` and reporting every writer inside it as a
    measured absence — the same fail-open shape as the `rg 'aboutObject {'` zero.
-22. `test_the_default_ingestion_path_reaches_the_binder` — the corrected text
+23. `test_the_default_ingestion_path_reaches_the_binder` — the corrected text
    says "default-ON, ingestion path"; if `_extract_session_v2` stops calling
    the binder, **or stops being the fall-through branch** of the
    `TORTOISE_SESSION_EXTRACTOR == "m2"` selection, that sentence becomes false
    while every other test stays green.
-23. `test_every_retracted_literal_is_still_findable_where_it_is_allowed_to_live`
+24. `test_every_retracted_literal_is_still_findable_where_it_is_allowed_to_live`
    — every RETRACTED literal is findable in the changelog that quotes it, or is
    declared pre-fix-only or introduced-and-retracted inside this PR
    (`RETRACTED_INTRODUCED_HERE`: three absolutes were written by an earlier
    revision of THIS PR, so claiming a pre-fix presence for them would be the
    same unmeasured provenance this file exists to stop). A pin that cannot match
    the pre-fix text protects nothing, and that is not a hypothesis: it shipped.
-24. `test_every_retracted_literal_declares_its_true_provenance` — the
+25. `test_every_retracted_literal_declares_its_true_provenance` — the
    CLASSIFICATION is measured, not merely declared: a literal listed in
    `RETRACTED_INTRODUCED_HERE` must be ABSENT from the pre-fix revision
    (`PRE_FIX_REV`) and every other entry PRESENT there. Without this the label
@@ -325,15 +333,15 @@ WHAT IS PINNED (one entry per test, in file order)
    leg 1 then prints "was live pre-fix" for a sentence this PR wrote, in the
    diagnostic of the guard whose whole subject is unmeasured provenance. Skips
    (never passes silently) when the revision is unreachable.
-25. `test_the_storage_changelog_records_the_correction` — the changelog is where
+26. `test_the_storage_changelog_records_the_correction` — the changelog is where
    a reader learns that a §11.1/§13 claim moved.
-26. `test_the_guard_states_its_own_execution_and_probe_coverage_honestly` —
+27. `test_the_guard_states_its_own_execution_and_probe_coverage_honestly` —
    this file's claims about ITSELF, re-derived from the source: the header may
    not say the suite is network-free while `_ensure_commit` fetches, it may not
    claim one probe per gap while gap 6 is disclosed rather than pinned, and it
    may not state a numeric leg count in prose. The pin-index coverage and order
    moved to `test_the_pin_index_names_every_leg`, which owns that claim alone.
-27. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
+28. `test_the_correction_ledger_numbers_each_round_once` — the ledger's round
    numbering is unique (it is the ledger's only index), and the fourth round's
    false record of §13's citation does not come back.
 
@@ -2091,6 +2099,61 @@ def _unqualified_line_citations(text: str) -> list[str]:
             continue
         out.append(m.group(0))
     return out
+
+
+def test_the_document_population_counts_match_the_census():
+    """§13's population numbers must equal what this file's tables actually hold.
+
+    §13 tells a reader how wide the property-bearing population is and how it
+    splits, and §11.1 says how much of it ORIGINATES the property. MEASURED at
+    `#9403` review: editing §13 to "6 writers the census can see … sees four of
+    the five" stayed GREEN, and adding a fourth NAMED-form writer to the census
+    (the procedure this file's own failure message prescribes) also stayed
+    green, leaving §13 and §11.1 false. So the numbers are pinned to the TABLES:
+    a writer added or removed there now reds here and forces the documents to be
+    corrected in the same commit.
+    """
+    named = len(RECORDED_WRITERS)
+    mapped = len(MAP_WRITERS)
+    total = named + mapped
+    storage = _flat(_doc(STORAGE))
+    extractor = _flat(_doc(EXTRACTOR))
+
+    assert f"{total} writers" in storage, (
+        f"§13 no longer states the census population of {total} writers "
+        f"(NAMED {named} + MAP {mapped}); the tables hold {total}"
+    )
+    assert f"{named} that write it in the NAMED form" in storage, (
+        f"§13 no longer states {named} NAMED-form writers, which is what "
+        f"`RECORDED_WRITERS` holds ({named})"
+    )
+    assert f"{mapped} that write it by property MAP" in storage, (
+        f"§13 no longer states {mapped} property-MAP writers, which is what "
+        f"`MAP_WRITERS` holds ({mapped})"
+    )
+    # The causal axis must PARTITION the same population, not exceed it.
+    # the two counts are stated with their parenthetical explanations between them,
+    # so the window has to allow prose: "2 ORIGINATING (the two writers that write it
+    # first) and 3 RE-MATERIALIZING (the replay fold, …)"
+    # `_flat` normalises the hyphen out, so match the space form too
+    split = re.search(
+        r"(\d+) ORIGINATING.{0,200}?(\d+) RE[ -]MATERIALIZING", storage, re.S
+    )
+    assert split, "§13 no longer states the causal split"
+    originating, rematerializing = int(split.group(1)), int(split.group(2))
+    assert originating + rematerializing == total, (
+        f"§13's causal split {originating} + {rematerializing} does not add up "
+        f"to the census population of {total}"
+    )
+    assert (originating == 2 and "the two that ORIGINATE it" in storage) or (
+        f"the {originating} that ORIGINATE it" in storage
+    ), (
+        f"§11.1 no longer states that {originating} writers ORIGINATE the property"
+    )
+    assert len(NOT_AN_ABOUT_WRITER) == 2, (
+        "the exemption table changed size; §13's '5, not 7' arithmetic and the "
+        "declared-false-positive prose were written for two exemptions"
+    )
 
 
 def test_the_writer_classification_separates_the_causal_axis_from_the_write_form():
