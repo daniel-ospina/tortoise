@@ -564,6 +564,29 @@ def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
     return bool(rows)
 
 
+#: #5140: THE definition of "this `:Source` is a metered document" — the
+#: `documents` resource's predicate (#1726 slice 1, re-pointed by D10).
+#: `count_org_usage` counts with it, and the WRITE-side guard that refuses a
+#: caller demotion out of this class (`sdk._refuse_document_kind_demotion`)
+#: tests with :func:`is_metered_document_kind`. They are two halves of one
+#: rule and must be edited together — the escape in #5140 existed because the
+#: predicate had a single consumer (the counter) and no defender.
+DOCUMENT_METER_PREDICATE = (
+    "s.documentKind IS NOT NULL AND s.documentKind <> 'transcript'"
+)
+
+
+def is_metered_document_kind(kind: str | None) -> bool:
+    """Python half of :data:`DOCUMENT_METER_PREDICATE`.
+
+    A `:Source` counts against the `documents` cap iff its `documentKind` is
+    non-NULL and is not the `transcript` genre. ``None`` is NOT a document
+    (no COALESCE-to-empty: that would meter every session/connector/provenance
+    Source — the #1726 price change D10 forbids).
+    """
+    return kind is not None and kind != "transcript"
+
+
 def count_org_usage(org_id: str, resource: str, sdk=None) -> int:
     """Count current usage for a resource. Raises QuotaCheckError on failure.
 
@@ -733,8 +756,7 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
             # on /v1/index/docs ONLY).
             rows = sdk._get_proj().g.query(
                 "MATCH (s:Source) "
-                "WHERE s.documentKind IS NOT NULL "
-                "AND s.documentKind <> 'transcript' "
+                f"WHERE {DOCUMENT_METER_PREDICATE} "
                 "RETURN count(s)",
             ).result_set
             return int(rows[0][0])

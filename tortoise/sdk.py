@@ -143,7 +143,12 @@ from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
-from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
+from .quota import (
+    DOCUMENT_METER_PREDICATE,
+    MAX_EXTRACTIONS_PER_TURN,
+    MAX_SESSION_TURNS,
+    is_metered_document_kind,
+)
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
 # (no `tortoise` imports), so this adds no import-cycle risk to this hot module.
@@ -3961,6 +3966,77 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # because the SHARED projection writer (`_upsert_point_props`) is the door every
 # write reaches and it needs the same rule (#8006). `create_point`,
 # `update_point` and `update_entity` still call it here, under this name.
+
+
+def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
+                                   none_demotes: bool = False) -> None:
+    """#5140 P1: `documentKind` is the documenthood/METER key, not metadata.
+
+    THE DEFECT THIS CLOSES. The `documents` cap counts
+    ``MATCH (s:Source) WHERE s.documentKind IS NOT NULL AND
+    s.documentKind <> 'transcript'`` (`quota.DOCUMENT_METER_PREDICATE`) — that
+    predicate is what decides whether a node is a document at all (the #5013
+    Q-S2 ruling, Option B). Under D10 a document IS a `:Source` keyed
+    ``url = <doc id>``, which is the node `create_source`/`update_entity` merge
+    by `url`/`id`, and `documentKind` is caller-settable on both surfaces
+    (`_SOURCE_EXTRA_PROPS` on the passthrough, `_SOURCE_NODE_PROPS` on the
+    generic entity surface). So ONE caller call rewrote an existing document's
+    genre to `transcript` and the meter dropped out from under it — repeatable
+    per document, so the cap did not hold. MEASURED before this guard, 3 seeded
+    document Sources: meter 3 -> 2 via
+    ``create_source(did, 'document', documentKind='transcript')``, then 2 -> 1
+    via ``update_entity(did, documentKind='transcript')``.
+
+    THE RULE. A write may SET a genre where none is stored (promotion — that is
+    how a document `:Source` is minted through these surfaces) and may retarget
+    one metered genre to another (`report` -> `brief`, both metered), but a
+    caller surface may not move a metered document OUT of the metered class
+    (`None` / `'transcript'`). Demotion is the escape; the forgery direction
+    (`documentKind` added to a provenance Source) only over-counts — it fails
+    closed — and is deliberately left alone.
+
+    Both spellings are refused: a `document_kind` disagreeing with the stored
+    camelCase genre is the same demotion one document-path write later
+    (`_upsert_document` reads `$dk` from the snake spelling and overwrites the
+    camelCase one), so admitting it would only hide the escape behind a step.
+
+    Deliberately NOT in `_DOC_RETIRED_KEYS`: `documentKind` is LIVE (D10 §4.4,
+    the genre axis) and a member there is SCRUBBED off every document. It is an
+    identity-class key owned by the document writer (`_upsert_document`'s fixed
+    clause), so the caller surfaces REFUSE the demotion rather than the
+    projection silently dropping it — a no-op would leave the caller believing
+    it wrote.
+    """
+    incoming = [(k, props[k]) for k in ("documentKind", "document_kind")
+                if k in props]
+    if not incoming:
+        return
+    if not is_metered_document_kind(stored_kind):
+        # Nothing metered stored to demote: a fresh node, a transcript, or a
+        # non-document `:Source`. Setting/promoting the genre is allowed.
+        return
+    for key, value in incoming:
+        if is_metered_document_kind(value):
+            continue
+        if value is None and not none_demotes:
+            # `None` is PRESERVE on a passthrough that skips null values
+            # (`_persist_extra_props`: "None values are excluded — Cypher null
+            # semantics in SET maps are unreliable"), so it writes nothing and
+            # is not a demotion. On a `SET n += $p` surface it REMOVES the
+            # property, which is, and the caller passes `none_demotes=True`.
+            continue
+        raise ValueError(
+            f"`{key}={value!r}` would move this :Source out of the metered "
+            f"`documents` set (stored documentKind={stored_kind!r}; the "
+            f"`documents` cap counts "
+            f"`{DOCUMENT_METER_PREDICATE}`). `documentKind` is the "
+            f"documenthood key, not metadata: it cannot be demoted to "
+            f"`transcript`/empty through `{surface}` (#5140 — metering a node "
+            f"a caller can un-meter is not a cap). Report the document's "
+            f"removal with `create_source(..., raw_state=...)`, or write the "
+            f"genre through the document writer that owns it "
+            f"(`create_document`/`add_document`)."
+        )
 
 
 def _coerce_props(props: dict) -> dict:
@@ -32134,6 +32210,27 @@ class TortoiseSDK:
                     "`rebuild_all` to scrub them.", id_val, len(_denied), _denied)
         return _props
 
+    def _stored_source_document_kind(self, g, id_val: str):
+        """The `documentKind` the write below would PRESERVE, or ``None``.
+
+        #5140: resolves with the SAME key discipline as the write (primary key
+        then secondary — `_source_reachable_by`'s rule and its #5196 rationale),
+        so a url-only STUB cannot hide a stored genre from the guard the way it
+        once hid its identity from the `:Source` allowlist.
+        """
+        from tortoise.projection import secondary_entity_id_props
+
+        _keys = (_ENTITY_ID_PROP.get("Source", "id"),
+                 *secondary_entity_id_props("Source"))
+        for _k in _keys:
+            _rows = g.query(
+                f"MATCH (n:Source {{{_k}:$id}}) RETURN n.documentKind",
+                params={"id": id_val},
+            ).result_set
+            if _rows:
+                return _rows[0][0]
+        return None
+
     def _source_reachable_by(self, g, id_val: str) -> int:
         """Count the `:Source` nodes the WRITE below would reach for `id_val`.
 
@@ -32308,6 +32405,15 @@ class TortoiseSDK:
             # itself satisfied.
             _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
+                # #5140 P1: the `documents` METER KEY (#1726 predicate) cannot
+                # be demoted through the generic entity surface either — it
+                # merges the SAME `:Source` node `create_source` does, so a
+                # guard on one door and not the other is decoration (#5135's
+                # third-door lesson).
+                _refuse_document_kind_demotion(
+                    self._stored_source_document_kind(
+                        self._get_proj().g, id_val),
+                    props, surface="update_entity", none_demotes=True)
                 _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
                 if _managed:
                     # #3998: the STATE and the merge TOKEN are refused through the
@@ -36151,6 +36257,13 @@ class TortoiseSDK:
         for _emit_name in (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS,
                            *_RESERVED_ACTOR_PROPS):
             ev.pop(_emit_name, None)
+        # #5140 P1: the documents METER KEY is not caller-writable IN THE
+        # DEMOTION DIRECTION. Runs BEFORE the journal append below, so a
+        # refused write leaves no record to replay.
+        _refuse_document_kind_demotion(
+            self._stored_source_document_kind(
+                self._get_proj().g, self._resolve_source_url(url)),
+            ev, surface="create_source")
         if is_episodic is not None:
             # #1488: server-managed quota discriminator — explicit param only
             # (mirrors create_point). The props passthrough is rejected above.
