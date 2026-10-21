@@ -564,18 +564,22 @@ def snapshot_session(sdk, session_id: str) -> dict:
 #: counted as a definite description — needs a visible `.search` change.
 _THE_DEFINITE_DESCRIPTION = re.compile(r"the\s+\S", re.IGNORECASE)
 
+#: Objects are deduped and re-addressed by their BACKEND id, not by `o.id`:
+#: `:Object` always carries an `id` on the write path, but a legacy or
+#: connector-minted node may not, and `DISTINCT NULL` would then collapse two
+#: real Objects into one row (an undercount that would read as E1 moving).
 SESSION_OBJECT_QUERY = (
     "MATCH (p:Point)-[:aboutObject]->(o:Object) WHERE p.id IN $pids "
-    "RETURN DISTINCT o.id, o.name"
+    "RETURN DISTINCT ID(o), o.name"
 )
 #: Does the Object carry a link to the artifact it was derived from at all?
 #: `extractedFrom` is the #5256 derivation predicate; `references` is the
 #: #5199 identity/mention surface (property-free for Objects by the owner's
 #: option-A ruling — this query counts the LINK, never its properties).
 OBJECT_DERIVATION_LINK_QUERY = (
-    "MATCH (o:Object) WHERE o.id IN $oids "
+    "MATCH (o:Object) WHERE ID(o) IN $nids "
     "MATCH (o)-[:extractedFrom|references]->() "
-    "RETURN count(DISTINCT o.id)"
+    "RETURN count(DISTINCT ID(o))"
 )
 #: Anchored/total for one derivation predicate out of this session's nodes.
 #: The anchored predicate is the writer's own (`_anchor_on_create`).
@@ -624,11 +628,12 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
     names = [name or "" for _oid, name in object_rows]
     the_prefixed = sum(
         1 for name in names if _THE_DEFINITE_DESCRIPTION.match(name))
-    oids = [oid for oid, _name in object_rows if oid]
+    node_ids = [nid for nid, _name in object_rows if nid is not None]
     with_derivation_link = 0
-    if oids:
+    if node_ids:
         rows = g.query(
-            OBJECT_DERIVATION_LINK_QUERY, params={"oids": oids}).result_set
+            OBJECT_DERIVATION_LINK_QUERY,
+            params={"nids": node_ids}).result_set
         with_derivation_link = int(rows[0][0] or 0) if rows else 0
     derivation_edges: dict[str, dict[str, int]] = {}
     extracted_rows = g.query(

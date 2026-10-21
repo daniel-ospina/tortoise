@@ -72,7 +72,7 @@ def test_the_census_counts_the_objects_the_capture_wrote(captured):
     # and the share is the arithmetic of the two numbers it reports.
     names = [row[1] or "" for row in sdk._get_proj().g.query(
         "MATCH (p:Point)-[:aboutObject]->(o:Object) WHERE p.id IN $pids "
-        "RETURN DISTINCT o.id, o.name",
+        "RETURN DISTINCT ID(o), o.name",
         params={"pids": _point_ids(snap)}).result_set]
     assert objects["total"] == len(names)
     assert objects["the_share"] == pytest.approx(
@@ -87,13 +87,13 @@ def test_a_definite_description_is_counted_and_a_bare_name_is_not(captured):
     g = sdk._get_proj().g
     oid_rows = g.query(
         "MATCH (p:Point)-[:aboutObject]->(o:Object) WHERE p.id IN $pids "
-        "RETURN o.id LIMIT 1", params={"pids": _point_ids(snap)}).result_set
+        "RETURN ID(o) LIMIT 1", params={"pids": _point_ids(snap)}).result_set
     assert oid_rows, "the capture minted no Object — guard failed"
-    oid = oid_rows[0][0]
+    nid = oid_rows[0][0]
 
     def census_the_count(name: str) -> int:
-        g.query("MATCH (o:Object {id:$id}) SET o.name = $name",
-                params={"id": oid, "name": name})
+        g.query("MATCH (o:Object) WHERE ID(o) = $nid SET o.name = $name",
+                params={"nid": nid, "name": name})
         return runner.graph_census(
             sdk, session_id, _point_ids(snap))["objects"]["the_prefixed"]
 
