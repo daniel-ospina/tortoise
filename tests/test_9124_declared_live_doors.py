@@ -281,6 +281,13 @@ _UNRESOLVED = {
     "_find_point_by_content",
     "_find_points_by_key",
     "_find_terminal_dedup_hit",
+    # #9350: `_capture_stamp_targets` runs the CALLER's statement prefix (it is
+    # handed the shared `MATCH … WHERE` half so the read and the guarded write
+    # cannot drift), so the resolver cannot unfold it. Checked by hand: the
+    # resolvable part is a `MATCH … RETURN DISTINCT <id>` read with no write
+    # keyword — it lists the ids a no-clobber provenance stamp WOULD write,
+    # appends no record of its own, and writes nothing.
+    "_capture_stamp_targets",
     "_read_capture_passthrough_props",
     "_reachable_claim_count",
     "_review_pool",

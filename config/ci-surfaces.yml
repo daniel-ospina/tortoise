@@ -751,6 +751,16 @@ surfaces:
   # is exactly the PR that could silently drop the receipt. Same #2938
   # dual-membership convention as the two entries above.
   - test_capture_secret_redaction_4911.py
+  # #9350: the capture provenance stamp is JOURNALLED before its cache write,
+  # and the hosted twin journals + replays the same four fields.
+  # DUAL-REGISTERED (also under `core`, where its primary entry carries the
+  # full rationale): `tortoise/hosted_api.py` SELECTS the `api` surface, and a
+  # named-surface match REPLACES the `core` fallback — so a
+  # hosted_api.py-only PR would run `test_hosted_api.py` and never
+  # `test_the_hosted_capture_journals_and_replays_the_same_provenance`, the
+  # only assertion in the tree that the hosted lane journals provenance BEFORE
+  # the write. Same #2938 dual-membership convention as the #4911 entry above.
+  - test_9350_capture_provenance_journalled.py
   # #3551: the shared `_write_session_and_turns` primitive (Session MERGE +
   # turn store). DUAL-REGISTERED (`api` + `core`): the `api` entry is the one
   # that carries a PR-shape requirement — the primitive is called from
@@ -3549,6 +3559,13 @@ surfaces:
   # test_4997_vector_index_parity.py above. DB-free: the guard precedes all
   # database work, which is what makes the entry placement observable.
   - test_5404_entity_type_guard.py
+  # #8450 (lane L4 / #5096): a retrieval leg that RAISES must not abandon the
+  # rows of the legs that succeeded. Pins the unpatterned engine module
+  # `tortoise/search_engine.py` (degradation_chain's collector), which falls to
+  # the `core` fallback — same rationale as test_5404_entity_type_guard.py
+  # above. DB-free: every runner is a monkeypatched double and `graph=None`, so
+  # the file also runs in the docker legs.
+  - test_8450_leg_raise_keeps_other_legs.py
   # #5407: the range/full-text label sets the index sweep creates must not
   # drift from the labels the VECTOR leg's declared routing resolves to.
   # `_ensure_indexes` declared its sets as inline literals with nothing tying
@@ -3601,6 +3618,20 @@ surfaces:
   # `test_pipeline_2792`/`test_semantics_write_path_7852`, so it is registered in
   # `carve_out:` below and in `tests/_embedded.py`.
   - test_5097_capture_source_replay.py
+  # #9350: the capture provenance stamp's journal carrier, one record per
+  # minted id, and the two replay engines restoring `eventId` /
+  # `source_session` / `source_harness` / `ingested_at` on a minted Point that
+  # is never promoted. DUAL-REGISTERED (also under `api`, see the entry there):
+  # the SDK half (`tortoise/sdk.py`, a SHARED_MODULE, so its diff selects the
+  # full matrix) and the two folds' provenance clauses
+  # (`projection/__init__.py`, a `core` fallback) are what `core` claims here;
+  # the HOSTED writer `tortoise/hosted_api.py` SELECTS `api` instead, and a
+  # named-surface match REPLACES the `core` fallback, so it cannot be covered
+  # from this list alone.
+  # CARVE-OUT: the fixtures build EMBEDDED stores by db path and drive
+  # `rebuild()` / `rebuild_all()`, so it is registered in `carve_out:` below
+  # and in `tests/_embedded.py`.
+  - test_9350_capture_provenance_journalled.py
   - test_connection_url_redaction_5326.py  # #5326: the password-bearing connection URL (`postgres://user:pw@host`) — the `connection_url` rule in tortoise/security.py: the closed scheme allow-list anchor, the URL-grammar confirmation, each removed #4911 revision answered (no-password class, no dotted-host gate, no greedy span), and the documented residuals. NOT dual-registered under `api`: it asserts nothing about hosted_api.py, and its end-to-end capture half is the DUAL-REGISTERED #4911 file
   - test_security.py
   - test_semantic_extractor.py
@@ -5566,6 +5597,15 @@ carve_out:
 # registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_5097_capture_source_replay.py
+# #9350: the capture provenance stamp's journal carrier. The fixtures build
+# `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines against that embedded
+# store, so a URI-set lane would redirect the construction and the embedded
+# replay under test would be gone. Mirror of the
+# `test_9350_capture_provenance_journalled.py` rows in the `core` and `api`
+# surfaces above (dual-registered, #2938);
+# the two registries are one set in two homes
+# (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_9350_capture_provenance_journalled.py
 # #7852 W1: the Layer-2 `semantics` write-path guard is embedded-only — the
 # fixture builds `TortoiseSDK(<tmpfile>)` and drives the real `rebuild_all`
 # replay, so the carve-out is load-bearing (a URI-set lane would redirect it).
@@ -7126,6 +7166,7 @@ durations:
   test_4716_capture_operator_ref_remap.py: 1.2
   test_4921_construct_lock.py: 105.3  # #4921: MEASURED (3 tests) — the two forced-interleave tests (two real embedded servers per arm) dominate, so the weight still moves with box load. The run this note used to cite (114.13s summed, 60.06s slowest) is not this value's basis any more and is dropped rather than left pointing at a superseded sample (see the provenance rule above the block). The registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
   test_4999_vector_mechanism.py: 0.1
+  test_8450_leg_raise_keeps_other_legs.py: 0.1  # #8450: 6 tests, DETERMINISTIC and hermetic (no DB, no embedder — the legs are monkeypatched doubles and `as_completed` is substituted, so nothing races the 500 ms cap). Test-time sum is under 0.05 s; the only wall the file adds is the shared conftest/embedder warm-up, which is not a per-file junit duration. Registration is load-bearing in BOTH halves: the surface entry alone leaves durations coverage below the 90% floor and `tools/ci_selection.py --integrity` reds (#4348 trap — do not drop without re-deriving the floor at that head).
   test_5359_unchecked_window_writers.py: 0.6
   test_5361_inverted_window_audit.py: 0.4
   test_5361_inverted_window_read_path.py: 0.2

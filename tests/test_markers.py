@@ -810,6 +810,16 @@ def test_no_redirect_stems_registry_exact():
         # on the addition is the pin working as designed, so the stem is
         # DECLARED here rather than exempted.
         "test_5097_capture_source_replay",
+        # #9350: the capture provenance stamp's journal carrier. The fixtures
+        # build `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines
+        # (`rebuild()` and `rebuild_all()`) against that embedded store, so the
+        # load-bearing reason is the REDIRECT: a URI-set lane would discard the
+        # path and connect the construction to the server, and the embedded
+        # replay this file exists to prove would never happen. Registered in
+        # all three homes — config/ci-surfaces.yml `carve_out:`, the `core`
+        # surface row, TEST_NO_REDIRECT_STEMS and this declaration — so the pin
+        # reding on the addition is the pin working as designed.
+        "test_9350_capture_provenance_journalled",
         # #8488: the in-process Okapi BM25 lexical arm. The module carries
         # module-level `pytestmark = pytest.mark.embedded_only`, so the
         # exemption's load-bearing reason is the SKIP (a URI-set lane skips
