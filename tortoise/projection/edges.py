@@ -415,8 +415,8 @@ def about_document_target_reason(label: str | None,
 # `Object` is deliberately ABSENT. Every in-repo writer of a Source→Object
 # `references` link is identity/mention — a connector artifact whose Source `url`
 # IS the artifact — so a version there would be a non-answer, not a stale mark.
-# Referential-containment links (Source→Source) stay property-free: a `"Source"`
-# caller lands in the property-free branch below, and the in-repo containment
+# Referential-containment links (Source→Source) carry no `sourceVersion`: a "Source"
+# caller lands in the un-anchored branch below, and the in-repo containment
 # writers (the session→external MERGE in `hosted_api.py`) write them outside this
 # method. `references` is in NEITHER `STRUCTURAL_REL_LABELS` nor
 # `DERIVABLE_STRUCTURAL_RELS`, so this anchor adds nothing to the replay surface.
@@ -2012,9 +2012,11 @@ class _EdgeHandlers:
         (``entity_label`` in ``_DERIVATION_REFERENCES_LABELS``) records the version
         it was read from as ``sourceVersion`` — the source's current
         ``contentHash``, read HERE so that no caller passes it and the public SDK
-        signature is unchanged. Identity/mention links (``Object``) stay
-        property-free. Written ``ON CREATE`` only: a re-link must NOT advance the
-        recorded version, or staleness would silently read as current.
+        signature is unchanged. Identity/mention links (``Object``) carry no
+        ``sourceVersion`` — the edge is not otherwise empty: ``idx`` and the
+        allowlisted predicates are still written. Written ``ON CREATE`` only:
+        a re-link must NOT advance the recorded version, or staleness would
+        silently read as current.
 
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
@@ -2028,7 +2030,8 @@ class _EdgeHandlers:
         # derivation link and would silently stop being anchored (caught by
         # ``test_document_link_records_the_version_read``). Anchoring by the
         # remapped label instead would wrongly stamp every ``Source -> Source``
-        # referential-containment link, which the model keeps property-free.
+        # referential-containment link, which the model leaves without a
+        # ``sourceVersion`` anchor.
         _is_derivation = entity_label in _DERIVATION_REFERENCES_LABELS
         if entity_label == "Document":
             # D10: :Document is retired — a document is a :Source. Kept as a
@@ -2094,8 +2097,8 @@ class _EdgeHandlers:
         and ``graph-scripts/backfill_references.py`` are not provenance writers and are
         not auto-anchored; nor are the CONTAINMENT writers — the session->external
         link in ``hosted_api.py`` and the connector ``Source``->``Object`` link in
-        ``projection/entities.py`` — which are deliberately left property-free; see
-        ``STORAGE-ARCHITECTURE.md`` §9.6).
+        ``projection/entities.py`` — which are deliberately left without a
+        ``sourceVersion`` anchor; see ``STORAGE-ARCHITECTURE.md`` §9.6).
 
         ``source_key`` is passed through AS the Source key — callers pass the same
         value they used for the Source MERGE, so this adds no new resolution step.
