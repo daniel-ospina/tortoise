@@ -67,11 +67,13 @@ from pathlib import Path
 
 import pytest
 
+from tests._declared_lane_probe import (
+    LaneProbe,
+    assert_no_foreign_undeclared,
+)
 from tortoise.projection import (
     _CACHE_WRITE_AUTHORIZED,
     DirectCacheWriteRefused,
-    _GuardedGraph,
-    _statement_writes,
 )
 from tortoise.projection.edges import (
     _VALID_ABOUT_EDGE_PREDICATES,
@@ -133,35 +135,25 @@ def sdk_with_journal(tmp_path):
         sdk.close()
 
 
-def _instrument(monkeypatch, *, refuse: bool):
-    """Install the #9124 predicate on `_GuardedGraph.query`; record every
-    statement the edge writers issue as `(statement, reason, writes)`.
+def _instrument(monkeypatch, *, refuse: bool, owner) -> LaneProbe:
+    """Install the #9124 predicate on `_GuardedGraph.query`, ATTRIBUTED to `owner`.
 
-    `reason` is `_CACHE_WRITE_AUTHORIZED` AT THE WRITE — read inside the handle
-    dispatch, which is where #9124's guard will read it.
+    The recorder is `tests/_declared_lane_probe.LaneProbe` (#9256), adopted here
+    because this suite carried a verbatim copy of the pre-fix recorder: the patch
+    is on the CLASS (the handle is `__slots__`-restricted and read-only, so an
+    instance patch cannot be installed), so the recorder sees every projection
+    in the process. A PEER projection opening while it is installed —
+    `hosted_api._acquire_probe_sdk` does that from `monitoring._loop` —
+    contributes its own `_ensure_indexes` burst, correctly declared under
+    `schema-ddl` for THAT projection; recorded without handle identity it was
+    attributed to the edge lane, which then red on a statement no edge writer
+    issues (the #9256 false red). Assertions here read `probe.own()`.
 
-    ⛔ The statement is recorded IN FULL (normalized whitespace only):
-    truncating it would let the class checks read a PREFIX of the statement they
-    are checking (the fail-open direction #9121 measured on its own suite).
+    ⛔ The attribution must not become a blindfold: `refuse` still applies to
+    ANY journal-backed handle, and `assert_no_foreign_undeclared()` keeps a peer
+    projection's UNDECLARED write loud rather than filtered away.
     """
-    original = _GuardedGraph.query
-    seen: list[tuple[str, str | None, bool]] = []
-
-    def instrumented(self, cypher, params=None, timeout=None):
-        writes = _statement_writes(cypher)
-        reason = _CACHE_WRITE_AUTHORIZED.get()
-        seen.append((" ".join((cypher or "").split()), reason, writes))
-        if (refuse and writes and reason is None
-                and getattr(self._proj, "_journal_backed", False)):
-            raise DirectCacheWriteRefused(
-                "§17.1 third door (#9079/#9124): a mutating statement reached "
-                "`proj.g` with no declaration in flight — statement="
-                + seen[-1][0][:160]
-            )
-        return original(self, cypher, params=params, timeout=timeout)
-
-    monkeypatch.setattr(_GuardedGraph, "query", instrumented)
-    return seen
+    return LaneProbe(owner).install(monkeypatch, refuse=refuse)
 
 
 def _endpoints(sdk) -> dict:
@@ -219,10 +211,10 @@ def test_every_edge_mint_declares_its_lane(sdk_with_journal, monkeypatch):
     )
     endpoints = _endpoints(sdk_with_journal)
 
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     _walk_the_edge_lane(proj, endpoints)
 
-    writes = [(c, r) for c, r, w in seen if w]
+    writes = [(c, r) for c, r, w in probe.own() if w]
     assert len(writes) >= len(STRUCTURAL_EDGE_LANE_PREDICATES), (
         f"the walk issued {len(writes)} mutating statement(s) for the lane's "
         f"{len(STRUCTURAL_EDGE_LANE_PREDICATES)} writable predicates; the lane "
@@ -241,6 +233,62 @@ def test_every_edge_mint_declares_its_lane(sdk_with_journal, monkeypatch):
         f"drift about which lane authorized a write; saw "
         f"{sorted({r for _c, r in writes})}"
     )
+    # ⛔ Attribution is not a blindfold: a PEER projection that wrote with NO
+    # declaration in flight is still a §17.1 violation, on product code too.
+    assert_no_foreign_undeclared(probe)
+
+
+def test_a_peer_projection_opening_mid_walk_is_not_attributed_to_this_lane(
+        sdk_with_journal, monkeypatch, tmp_path):
+    """#9256, reproduced on THIS suite: a SECOND projection is not this lane.
+
+    `_GuardedGraph.query` is patched on the CLASS, so a peer projection that
+    opens while the instrument is installed puts its own `_ensure_indexes` burst
+    (`CREATE INDEX FOR (n:Point) …`) in the record set. Those statements ARE
+    declared, under `_ensure_indexes_declared`'s `schema-ddl` lane, for THEIR
+    projection; before this suite adopted `LaneProbe` its census read the whole
+    record set and red above with `saw ['schema-ddl', 'structural-edge…']` —
+    the same false red the onboarding suite reported.
+
+    MUTATION: make `LaneProbe.own()` return every record (the pre-fix
+    behaviour, i.e. this suite's own deleted `_instrument` copy) and the
+    set-equality below fails.
+    """
+    proj = sdk_with_journal._get_proj()
+    endpoints = _endpoints(sdk_with_journal)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
+
+    # A PEER projection opens mid-walk — a real one, so its index DDL really is
+    # issued through the patched class.
+    from tortoise.sdk import TortoiseSDK
+
+    peer_sdk = TortoiseSDK(str(tmp_path / "peer9256.db"),
+                           event_log_path=str(tmp_path / "peer9256.jsonl"))
+    try:
+        peer_sdk._get_proj()
+    finally:
+        peer_sdk.close()
+
+    _walk_the_edge_lane(proj, endpoints)
+
+    writes = [(c, r) for c, r, w in probe.own() if w]
+    assert writes, "the walk issued no mutating statement — vacuous"
+    assert not [c for c, r in writes if r is None], (
+        "an edge-lane write ran outside its declaration: "
+        f"{[c for c, r in writes if r is None]}"
+    )
+    assert {r for _c, r in writes} == {STRUCTURAL_EDGE_WRITE_LANE}, (
+        "the lane's own view carries a peer projection's declaration: "
+        f"saw {sorted({r for _c, r in writes})}"
+    )
+
+    # ⛔ and the filter is not a blindfold: the peer's DDL really was recorded.
+    assert any("CREATE INDEX FOR (n:Point)" in statement
+               for statement, _r, _w in probe.foreign()), (
+        "the peer projection contributed no statement, so this pin would pass "
+        "on an instrument that had simply gone blind"
+    )
+    assert_no_foreign_undeclared(probe)
 
 
 @pytest.mark.parametrize("mint", ["create_edge", "create_about_edge"])
@@ -259,14 +307,14 @@ def test_a_read_on_this_path_is_not_declared(sdk_with_journal, monkeypatch, mint
     proj = sdk_with_journal._get_proj()
     endpoints = _endpoints(sdk_with_journal)
 
-    seen = _instrument(monkeypatch, refuse=False)
+    probe = _instrument(monkeypatch, refuse=False, owner=proj)
     if mint == "create_edge":
         proj.create_edge(endpoints["source"], endpoints["target"], "ownedBy")
     else:
         assert proj.create_about_edge(
             endpoints["source"], endpoints["target"], "aboutObject") is True
 
-    reads = [(c, r) for c, r, w in seen if not w]
+    reads = [(c, r) for c, r, w in probe.own() if not w]
     assert reads, "the walk issued no read — this pin would be vacuous"
     declared_reads = [(c, r) for c, r in reads if r is not None]
     assert not declared_reads, (
@@ -286,7 +334,7 @@ def test_the_edges_still_land_when_the_handle_guard_is_armed(
     proj = sdk_with_journal._get_proj()
     endpoints = _endpoints(sdk_with_journal)
 
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
     _walk_the_edge_lane(proj, endpoints)
 
     def count(rel: str) -> int:
@@ -318,7 +366,7 @@ def test_the_declaration_is_not_a_bypass(sdk_with_journal, monkeypatch):
     proj = sdk_with_journal._get_proj()
     endpoints = _endpoints(sdk_with_journal)
 
-    _instrument(monkeypatch, refuse=True)
+    _instrument(monkeypatch, refuse=True, owner=proj)
     proj.create_edge(endpoints["source"], endpoints["target"], "related")
 
     assert _CACHE_WRITE_AUTHORIZED.get() is None, (
@@ -721,7 +769,7 @@ def test_the_about_name_path_is_still_refused_until_its_lane_lands(
     assert proj._journal_backed is True, "the fixture did not arm §17.1"
     sdk.create_object("residual-target-9195", "release")
 
-    seen = _instrument(monkeypatch, refuse=True)
+    probe = _instrument(monkeypatch, refuse=True, owner=proj)
     with pytest.raises(DirectCacheWriteRefused) as refused:
         sdk.create_event("residual-probe-9195", "meeting",
                          aboutObject="residual-target-9195")
@@ -729,10 +777,11 @@ def test_the_about_name_path_is_still_refused_until_its_lane_lands(
         "the refusal must name the guard that will fire (#9124), so the failure "
         f"mode is unambiguous: {refused.value}"
     )
-    assert seen and "MERGE (n)-[:aboutObject]->(t)" in seen[-1][0], (
+    own = probe.own()
+    assert own and "MERGE (n)-[:aboutObject]->(t)" in own[-1][0], (
         "the refusal must come from the about-LINK merge this lane does not "
         "own (the residual), not from an unrelated write on the event path: "
-        f"{seen[-1][0] if seen else None}"
+        f"{own[-1][0] if own else None}"
     )
     # ⚠️ WHEN THIS ASSERTION FLIPS: the about lane is scoped by its own
     # declaration (or #9124's census exempts it) and the `raises` above stops
