@@ -602,10 +602,16 @@ def parse_log(path: Path) -> dict:
     # such as `...[= 1 error in 0.44s =]` or a trailing teardown echo was credited as
     # the real summary (#9134 review, P2). Only the keys that line names are set —
     # zeroing the rest erased passes the run really had.
-    _banner = [ln for ln in lines
-               if ln.strip().startswith("=") and "[" not in ln and COUNT_RE.search(ln)]
-    if _banner:
-        for _n, _key in COUNT_RE.findall(_banner[-1]):
+    # Exactly ONE line decides the counts: the last line pytest printed as a SESSION
+    # SUMMARY — a banner (`= 10 passed in 3s =`) or the banner-less `-q` form — and never
+    # one containing `[`, which is a parametrized id echoed into the log. Every key is
+    # reset first, so a column the genuine summary omits is genuinely zero (#9134 review,
+    # P1: crediting a quoted id fabricated an error the run never had).
+    _cand = [ln for ln in lines if "[" not in ln and COUNT_RE.search(ln)
+             and (ln.strip().startswith("=") or _SUMMARY_IN_RE.search(ln))]
+    counts = {k: 0 for k in counts}
+    if _cand:
+        for _n, _key in COUNT_RE.findall(_cand[-1]):
             if _key in counts:
                 counts[_key] = int(_n)
 

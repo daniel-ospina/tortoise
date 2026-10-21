@@ -575,11 +575,11 @@
       "branch": "main",
       "conclusion": "failure",
       "counts": {
-        "error": 1,
+        "error": 0,
         "failed": 6,
         "passed": 35291,
         "skipped": 146,
-        "xfailed": 12,
+        "xfailed": 10,
         "xpassed": 0
       },
       "created_at": "2026-10-20T17:34:10Z",
@@ -786,11 +786,11 @@
     },
     {
       "counts": {
-        "error": 1,
+        "error": 0,
         "failed": 2,
         "passed": 3534,
         "skipped": 11,
-        "xfailed": 2,
+        "xfailed": 0,
         "xpassed": 0
       },
       "error": null,
@@ -921,12 +921,12 @@
     }
   ],
   "outcome": {
-    "error": 1,
+    "error": 0,
     "failed": 6,
     "killed": false,
     "passed": 35291,
     "skipped": 146,
-    "xfailed": 12,
+    "xfailed": 10,
     "xpassed": 0
   },
   "sampled_run": {
