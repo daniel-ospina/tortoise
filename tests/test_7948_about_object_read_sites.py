@@ -1163,6 +1163,27 @@ def test_every_customer_callable_row_reaches_a_declared_door():
 #: noun, and it describes a past state rather than the table in front of it.
 _STATED_DOOR_COUNT = re.compile(r"\b([A-Z]+(?:-[A-Z]+)?|\d+) (?:distinct )?doors?\b")
 
+#: Case-INSENSITIVE, for the one place the figure is stated inside a sentence
+#: (`... across twelve doors`): the residue that survived the first fix was
+#: lower-case and the capital-only pattern above could not see it.
+_ANY_DOOR_COUNT = re.compile(r"\b([A-Za-z]+|\d+) (?:distinct )?doors?\b", re.I)
+
+
+def _blast_radius_door_count(document: str) -> int | None:
+    """The door figure in the sentence that states the CONSEQUENCE of a derive.
+
+    ⚠️ This is the number the ruling's argument turns on (*"a count that names
+    only the doors understates the blast radius"*), and it was the one written
+    in lower case — `across twelve doors` — after the total had been corrected
+    to SIXTEEN, so the capital-only scan above could not see it. Scoped to the
+    sentence that states the consequence, so the document's historical figures
+    (*"five doors / eight sites"*, and a row reaching a reader through *"two or
+    three doors"*) are not mistaken for the claim.
+    """
+    start = document.index("Deleting the edge")
+    match = _ANY_DOOR_COUNT.search(document, start)
+    return _as_count(match.group(1)) if match else None
+
 
 def _as_count(token: str) -> int | None:
     """`SIXTEEN` / `16` / `TWENTY-SIX` -> int; anything else (a NOUN that
@@ -1273,6 +1294,18 @@ def test_the_stated_door_count_matches_the_table():
         "the three `dry_run` delete tools counted as three); without it the total "
         "is not reproducible from the table."
     )
+    for name, document in (
+        ("STORAGE-ARCHITECTURE.md §13", _doc()),
+        ("EXTRACTOR-V4-ARCHITECTURE.md §13.8", _extractor_doc()),
+    ):
+        claim = _blast_radius_door_count(document)
+        assert claim == total, (
+            f"{name}'s blast-radius sentence states {claim!r} doors and the table "
+            f"derives {total} ({spelled}) — the number the ruling's argument turns "
+            "on is that sentence, so it is asserted there too (this is where a "
+            "lower-case `twelve doors` survived a corrected total)."
+        )
+
     sibling = _stated_door_counts(_section_13_8())
     assert sibling == {total}, (
         f"EXTRACTOR-V4-ARCHITECTURE.md §13.8 states {sorted(sibling)} distinct "
