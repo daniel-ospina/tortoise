@@ -956,7 +956,8 @@ subject one level up:
 
 **The three new arms, and why each is non-vacuous.** `tests/test_7948_about_edge_read_sites.py`
 gained `test_the_census_prose_carries_no_line_citations` (reds on the pre-fix document, which
-carried nineteen hints across the two passages), `test_the_prose_names_every_row_in_the_empty_pattern_class`
+carried twenty hints across the two passages — four in §13's bullet and sixteen in the sibling
+paragraph, measured with the arm's own `_LINE_HINT`), `test_the_prose_names_every_row_in_the_empty_pattern_class`
 (reds on *rows 3 and 17*, naming the missing row 18 by deriving it), and
 `test_the_reach_column_names_only_symbols_that_exist` (reds on `QueryOptions`). The lesson the three
 share: the guard resolved the `site` column and nothing else, so the prose around the table could
