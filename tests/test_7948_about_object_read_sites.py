@@ -155,6 +155,14 @@ WHAT THIS PINS
    must see a LONG `about*` alternation, not only one that fits a
    character window. The pattern decides the census, the row check and the
    module pre-filter at once, so a narrow window was a three-way false PASS.
+13. `test_section_13_pins_every_count_to_a_ref` — a figure §13 states about a
+   MOVING ref (the branch tip) is a figure with no pin, so it rots on the next
+   merge and nothing here re-derives it. Measured: the test-file count was
+   written down as "60" for the lane's tip and the merge head measured 62, the
+   delta being one unrelated test file that landed on `main` — the same
+   unguarded hand-copy this whole section exists to end, in the one sentence of
+   the changed passage no other arm read. Now every count is quoted with the
+   sha or date it was measured at, and a `… at the head` form reds.
 
 ⚠️ **What this deliberately does NOT claim.** The census is a LOWER BOUND: it
 sees a literal relationship pattern naming the edge, so a reader that
@@ -1544,4 +1552,55 @@ def test_section_13_carries_no_line_citations():
         "promises, because a line in a design document rots and nothing "
         "re-derives it:\n  - "
         + "\n  - ".join(f"line {line}: `{cite}`" for line, cite in surplus)
+    )
+
+
+# ── §13 quotes every count with the ref it was measured at ─────────────────
+
+#: A count anchored to a MOVING ref: a digit, then within the same clause a
+#: `at this PR's head` / `at the merge head` / `at the head`. §13 may state a
+#: number only with the sha or date it was measured at — a figure tied to a
+#: branch tip carries no pin, so it rots on the next merge and nothing in this
+#: file re-derives it. Measured: the test-file count was written down as 60 for
+#: the lane's tip and the merge head measured 62 (one unrelated test file landed
+#: on `main`), while every other figure in the passage was already sha-pinned.
+_HEAD_RELATIVE_COUNT = re.compile(
+    r"\b\d+\b[^.;\n]{0,80}?\bat\s+(?:this\s+PR(?:'s)?|the\s+merge|the)\s+head\b",
+    re.IGNORECASE,
+)
+
+
+def test_section_13_pins_every_count_to_a_ref():
+    """A stated count must name the ref it was measured at, never a moving head.
+
+    ⚠️ **This is the one figure in the changed passage that nothing read.** §13
+    pins "59 test files … at the `26aff163c` pin" correctly and then added the
+    same fact for a MOVING ref — the lane's tip — and by the time the branch
+    merged, that number was two files out (a test file landed on `main` in
+    between, plus this census's own file). Every other count in the passage is
+    either derived from the table by this file or quoted with its sha; this one
+    was a hand copy with no pin, which is the document's own recorded defect
+    class. The rule is therefore uniform: quote the sha or the date, or state
+    the command and let the reader measure it.
+
+    Non-vacuous: the pre-fix sentence (`60 at this PR's head`) reds here.
+    """
+    section = _section_13()
+    assert "test files asserted the edge" in section, (
+        "§13 no longer carries the test-file count this guard exists to keep "
+        "pinned — re-read the paragraph: restore it with its sha, or delete "
+        "this test with a reason."
+    )
+    text = _doc()
+    offset = text.index("## 13. Filed from this document")
+    unpinned = [
+        (text.count("\n", 0, offset + match.start()) + 1, match.group(0))
+        for match in _HEAD_RELATIVE_COUNT.finditer(section)
+    ]
+    assert not unpinned, (
+        "§13 states a count against a MOVING ref, so the number has no pin and "
+        "nothing re-derives it — the test-file count written this way was two "
+        "files out by the time the branch merged. Quote the sha or the date it "
+        "was measured at, or state the command and let the reader measure it:\n  - "
+        + "\n  - ".join(f"line {line}: {frag!r}" for line, frag in unpinned)
     )
