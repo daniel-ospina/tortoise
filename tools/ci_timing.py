@@ -508,33 +508,47 @@ def _is_summary_line(line: str) -> bool:
 R_SUMMARY_RE = re.compile(r"^(FAILED|ERROR)\s+(tests/\S+?\.py::.+)$")
 
 
-def _short_summary_id(tail: str, known: set[str]) -> str:
-    """Split `<id> - <message>` when neither the id nor the message can be told from punctuation.
+def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
+    """Split `<id> - <message>` when neither side can be told from punctuation alone.
 
     The id may contain a space (`test_spaced[server lane]`), the separator itself (`test_p[a - b]`)
     and BRACKETS THAT DO NOT BALANCE (`test_open[a[b]`, because pytest appends the closing `]` to
-    the parameter verbatim), and the message is free text that may also contain ` - `. No pattern
-    resolves that, so the order is: a nodeid the PROGRESS lines already named and that the tail
-    starts with (authoritative — the progress line is unambiguous, and pytest writes the progress
-    lines before the summary); else the first ` - ` at bracket DEPTH 0; else the LAST ` - `, since a
-    message is likelier to contain one than an id pytest itself reports. Never the whole tail: that
-    would publish `<id> - <message>` as a nodeid pytest never reports.
+    the parameter verbatim); the message is free text that may also contain ` - ` and brackets. So
+    the ladder is: a nodeid a PROGRESS line already named (authoritative — those lines are
+    unambiguous, and pytest writes them before the summary); then a separator whose head has the
+    SAME bracket delta as the whole tail (the message's brackets are what makes the tail's delta
+    differ from the id's, so a matching head is the id); then a separator at depth 0; then the last
+    one. Never the whole tail — that publishes `<id> - <message>` as a nodeid pytest never reports.
     """
-    for nodeid in sorted(known, key=len, reverse=True):
-        if tail.startswith(nodeid) and tail[len(nodeid):].startswith(" - "):
-            return nodeid
+    # Longest-first over the ids a progress line named, without re-sorting a growing set on every
+    # summary line: lengths are bucketed by the caller, and membership is a set lookup.
+    for width in sorted(known_by_len, reverse=True):
+        if (tail[:width] in known_by_len[width]
+                and tail[width:].startswith(" - ")):
+            return tail[:width]
+    whole = tail.count("[") - tail.count("]")
+    cands: list[tuple[int, int, bool]] = []
     at = tail.find(" - ")
     while at != -1:
-        depth = 0
+        depth, clean = 0, True
         for ch in tail[:at]:
             depth += (ch == "[") - (ch == "]")
             if depth < 0:
+                clean = False
                 break
+        cands.append((at, depth, clean))
+        at = tail.find(" - ", at + 3)
+    for at, _depth, clean in cands:
+        if clean and tail[:at].count("[") - tail[:at].count("]") == whole:
+            return tail[:at]
+    for at, _depth, _clean in cands:
+        if tail[:at].count("[") - tail[:at].count("]") == whole:
+            return tail[:at]
+    for at, depth, _clean in cands:
         if depth == 0:
             return tail[:at]
-        at = tail.find(" - ", at + 3)
-    last = tail.rfind(" - ")
-    return tail[:last] if last != -1 else tail
+    return tail[:cands[-1][0]] if cands else tail
+
 
 COUNT_KEYS = ("passed", "failed", "error", "skipped", "xfailed", "xpassed")
 
@@ -574,7 +588,7 @@ def parse_log(path: Path) -> dict:
     path_nodeids: dict[str, set[str]] = {}
     counts = {k: 0 for k in COUNT_KEYS}
     outcomes: dict[str, str] = {}
-    known_ids: set[str] = set()
+    known_by_len: dict[int, set[str]] = {}
     killed = False
     # A summary line is `=== <n> <state>`; `no tests ran in 0.30s` is one of those
     # with every count zero. Absence of a summary is a DIFFERENT event from a
@@ -674,11 +688,11 @@ def parse_log(path: Path) -> dict:
         m = V_PROGRESS_RE.match(line) or V_PROGRESS_BARE_RE.match(line)
         if m:
             outcomes[m.group("nodeid")] = m.group("verdict")
-            known_ids.add(m.group("nodeid"))
+            known_by_len.setdefault(len(m.group("nodeid")), set()).add(m.group("nodeid"))
             continue
         m = R_SUMMARY_RE.match(line)
         if m:
-            outcomes[_short_summary_id(m.group(2), known_ids)] = m.group(1)
+            outcomes[_short_summary_id(m.group(2), known_by_len)] = m.group(1)
             continue
         # ⛔ The counts are NOT credited here. Exactly ONE site decides them — `_cand`
         # below, after this loop — and it resets every key before it sets one. A

@@ -1920,6 +1920,49 @@ def test_a_progress_line_resolves_an_id_that_contains_the_separator_and_a_bracke
     assert agg["total_counts"]["failed"] == 1
 
 
+def test_a_message_with_its_own_dashes_does_not_extend_the_id(tmp_path: Path) -> None:
+    """`1 - 1 != 0` is the most common assertion text, and it is not part of the id.
+
+    The splitter's last-separator fallback still published `<id> - <message prefix>` for an
+    unbalanced id whose message contains ` - ` — a nodeid pytest never reports. The head whose
+    bracket DELTA equals the whole tail's is the id: the message's brackets are what make the two
+    differ (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_open[a[b] - AssertionError: 1 - 1 != 0\n"
+        "FAILED tests/test_x.py::test_open[a[b - c] - assert 3 - 1 == 1\n"
+        "FAILED tests/test_x.py::test_pb[a] - b] - AssertionError: 1 - 1 != 0\n"
+        "FAILED tests/test_x.py::test_p[a - b] - AssertionError: 1 - 1 != 0\n"
+        "FAILED tests/test_x.py::test_a - AssertionError: 1 - 1 != 0\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_open[a[b]",
+        "tests/test_x.py::test_open[a[b - c]",
+        "tests/test_x.py::test_pb[a] - b]",
+        "tests/test_x.py::test_p[a - b]",
+        "tests/test_x.py::test_a",
+    }
+    assert agg["total_counts"]["failed"] == 5
+
+
+def test_a_named_progress_id_beats_a_shorter_named_prefix(tmp_path: Path) -> None:
+    """Two progress ids can PREFIX each other; the summary line names the longer one.
+
+    Known ids are bucketed by length and probed longest-first, so `test_a[1]` wins over `test_a`
+    without re-sorting a growing set on every summary line (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_a PASSED [ 10%]\n"
+        "tests/test_x.py::test_a[1] PASSED [ 20%]\n"
+        "FAILED tests/test_x.py::test_a[1] - AssertionError: 1 - 1 != 0\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_a[1]"}
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 
