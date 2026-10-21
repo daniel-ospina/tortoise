@@ -25,6 +25,17 @@ with the ``vet-warning=`` lines that report each downgrade. Both held on the
 committed log when they were added; a future drift in either direction is now a
 finding instead of a differently-worded story (#9110 review P2).
 
+**V15 is the bar's POPULATION half** (#9076). V9 checks that the threshold the run
+used is the one the artifact froze; V15 checks that the artifact's bar was frozen
+over the population this log MEASURED — a matching ``corpus_sha256``, a named pin
+(``declared_path``/``declared_sha256``, with the declared sha reconciled against
+the measured bytes when one is given), and a denominator reconciled with the scored
+arm's own ``denominator=``. A SCORED log must carry a ``MATCHED`` binding, and a
+``MATCHED`` binding must carry no refusal reason, so a refusal relabelled
+``MATCHED`` is a finding rather than a verdict; a floor the binding could not
+evaluate is printed on ``floor_unconsumed=`` and must be the reason it refused,
+because a silently dropped floor is a bar its author did not write.
+
 Printing is not enough on its own: every finding below fails the run, because a
 log that omits its denominator is exactly the artifact this epic exists to refuse.
 That includes OMITTING IT ENTIRELY: the disclosure set is REQUIRED (four arms by
@@ -898,6 +909,39 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V15] the binding is MATCHED but names no pin "
                     f"(declared_path={pins[0]!r}, declared_sha256={pins[1]!r}) — "
                     f"a bar matched to nothing is an unbound bar relabelled")
+            elif pins[1] not in ("", "n/a") and \
+                    pins[1].lower().removeprefix("sha256:") != measured_sha:
+                findings.append(
+                    f"[V15] the binding is MATCHED but its declared pin "
+                    f"declared_sha256={pins[1]} is not the corpus this log "
+                    f"measured ({measured_sha}) — a matched pin that names other "
+                    f"bytes is not this run's bar")
+            # `declared_path` is deliberately NOT reconciled: the log prints only
+            # the corpus BASENAME (`corpus=`), and a symlinked `--corpus` resolves
+            # to the declared file under a different name, so a name comparison
+            # would refuse a legitimate binding. The sha is the checkable half —
+            # MATCHED means "the pin agrees", and the probe compares a declared
+            # sha ALONE. The asymmetry is stated here so it is not read as an
+            # omission (#9513 review P2).
+            # The floors the binding REFUSED because it cannot evaluate them must
+            # be named on the line and be the reason it refused: a refusal that
+            # does not say which floor it dropped is not auditable, and a line that
+            # names dropped floors while claiming a clean `reason=n/a` is the same
+            # silent-drop shape one field over (#9513 review P2).
+            dropped = bind.get("floor_unconsumed", "")
+            refused_for_dropped = "floor-unconsumed" in [
+                r for r in bind.get("reason", "").split(",")]
+            if refused_for_dropped and dropped in ("", "n/a"):
+                findings.append(
+                    f"[V15] the binding refuses for floor-unconsumed but names no "
+                    f"floor it dropped (floor_unconsumed={dropped!r}) — the "
+                    f"refusal is then unauditable")
+            elif dropped not in ("", "n/a") and not refused_for_dropped:
+                findings.append(
+                    f"[V15] the binding names floors it did not evaluate "
+                    f"(floor_unconsumed={dropped}) while stating "
+                    f"reason={bind.get('reason')!r} — a dropped floor is a bar "
+                    f"its author did not write")
             # The floor arithmetic is NOT gated on `isdigit()` (#9513 review P2):
             # skipping the comparison whenever a number cannot be read is the
             # permissive read `_declared_floor` was fixed to refuse in the probe,
@@ -936,7 +980,8 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"is not under declared_floor={nums[1]}")
         if bind.get("status") == "MISMATCH" and not (
                 set(bind.get("reason", "").split(","))
-                & {"corpus-sha256", "corpus-path", "below-floor"}):
+                & {"corpus-sha256", "corpus-path", "below-floor",
+                   "floor-unconsumed"}):
             findings.append(f"[V15] a MISMATCH states no recognised reason "
                             f"(reason={bind.get('reason')!r}) — the refusal is "
                             f"then unauditable")

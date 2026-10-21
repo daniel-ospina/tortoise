@@ -98,7 +98,13 @@ the numerator/denominator mismatch the issue's own Research Needed §1.2 refuses
 one level up. A *declared* denominator floor the probe cannot read as an integer is REFUSED
 too (``UNREADABLE``), never read as "no floor stated" — the same fail-closed rule
 the threshold gets, because a bar whose floor is silently dropped is a bar the
-author did not write. ``prereg_binding`` therefore compares the artifact's corpus pin
+author did not write. That rule covers the floor's KEY as well as its value: the
+real ``capstone-preregistration/v1`` record declares five ``denominator_floors``
+and this probe can evaluate exactly one (``e1_objects``), so any other key is
+REFUSED (``floor-unconsumed``, naming the keys) instead of being dropped while the
+bar is stamped ``MATCHED`` — otherwise a run that violates the record's own
+``e1_min_before_share`` floor would score as if the floor did not exist (#9513
+review P2). ``prereg_binding`` therefore compares the artifact's corpus pin
 (path and/or sha256) and its ``denominator_floors.e1_objects`` against THIS run,
 prints the comparison on ``prereg-binding``, and refuses to score when they do
 not agree or the denominator is under the frozen floor (the artifact's own rule:
@@ -582,8 +588,14 @@ def _declared_corpus_path(prereg: Mapping) -> str:
     return path if isinstance(path, str) else ""
 
 
-def _declared_floor(prereg: Mapping) -> tuple[bool, int | None, object]:
-    """``(declared, value, raw)`` — DECLARED, not merely readable.
+#: The ``denominator_floors`` keys this probe can actually evaluate. A floor it
+#: cannot evaluate is refused, not dropped (#9513 review P2).
+CONSUMED_FLOORS = frozenset({"e1_objects"})
+
+
+def _declared_floor(
+        prereg: Mapping) -> tuple[bool, int | None, object, tuple[str, ...]]:
+    """``(declared, value, raw, unconsumed)`` — DECLARED, not merely readable.
 
     "Absent" and "present but unreadable" are different states, and collapsing
     them into ``None`` is a fail-open (#9513 review P2): an artifact that writes
@@ -591,24 +603,36 @@ def _declared_floor(prereg: Mapping) -> tuple[bool, int | None, object]:
     silently, and a below-floor run would then be scored against a bar whose
     author explicitly refused it — the very mismatch this module exists to
     refuse. So a *declared* floor that is not a plain ``int`` raises, exactly as a
-    malformed threshold does in ``prereg_threshold``; ``(False, None, None)``
+    malformed threshold does in ``prereg_threshold``; ``(False, None, None, ())``
     means the artifact states no floor at all, which is what makes the run
     ``MATCHED`` on the corpus half alone.
+
+    The fourth element is the flip side of the same rule on the floor's KEY: the
+    real record declares five ``denominator_floors`` and only ``e1_objects`` is
+    consumed here, so every other key is returned as UNCONSUMED for the caller to
+    refuse. Reading "no ``e1_objects`` in a NON-EMPTY mapping" as "this artifact
+    states no floor" is the silent drop this docstring exists to prevent — the
+    artifact's ``e1_min_before_share: 0.2`` floor on a quantity this probe prints
+    would simply vanish (#9513 review P2).
     """
     floors = prereg.get("denominator_floors")
     if floors is None:
-        return (False, None, None)
+        return (False, None, None, ())
     if not isinstance(floors, Mapping):
         raise TypeError(
             f"`denominator_floors` is a {type(floors).__name__}, not an object")
+    unconsumed = tuple(sorted(str(k) for k in floors
+                              if k not in CONSUMED_FLOORS))
+    if not floors:
+        return (False, None, None, ())
     if "e1_objects" not in floors:
-        return (False, None, None)
+        return (False, None, None, unconsumed)
     floor = floors["e1_objects"]
     # `bool` is an `int` in Python; `true` is not a floor.
     if isinstance(floor, bool) or not isinstance(floor, int):
         raise TypeError(
             f"`denominator_floors.e1_objects` is {floor!r}, not an integer")
-    return (True, floor, floor)
+    return (True, floor, floor, unconsumed)
 
 
 def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
@@ -620,7 +644,10 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     corpus, which is the same failure as choosing the bar after the numbers — the
     epic's rule is about a number that was fixed *before*, over *this* population.
 
-    Three ways the binding fails, each REFUSED rather than scored:
+    Four ways the binding fails, each REFUSED rather than scored (#9513 review P2
+    added ``UNREADABLE``/``floor-unreadable``; a floor declared on a key this probe
+    cannot evaluate is refused as ``floor-unconsumed`` and surfaces as
+    ``MISMATCH``):
 
     * ``UNPINNED`` — the artifact names no corpus at all, so it cannot say which
       population its bar covers;
@@ -643,8 +670,9 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
         declared_sha = _normalise_sha(corpus["sha256"])
     floor = None
     floor_error = ""
+    floor_unconsumed: tuple[str, ...] = ()
     try:
-        _declared, floor, floor_raw = _declared_floor(
+        _declared, floor, floor_raw, floor_unconsumed = _declared_floor(
             prereg if isinstance(prereg, Mapping) else {})
     except (TypeError, ValueError) as e:
         # REFUSED, never "no floor": a floor the probe cannot read is a floor it
@@ -682,6 +710,11 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
         reasons.append("corpus-unpinned")
     if floor_error:
         reasons.append("floor-unreadable")
+    if floor_unconsumed:
+        # A floor this binding cannot check is not a floor it may skip: leaving it
+        # out would stamp the run MATCHED while the artifact's own anti-gaming
+        # floor (e.g. `e1_min_before_share`) went unread (#9513 review P2).
+        reasons.append("floor-unconsumed")
     if floor is not None and objects < floor:
         reasons.append("below-floor")
 
@@ -698,6 +731,7 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     return {"status": status, "reasons": reasons, "declared_path": declared_path,
             "declared_sha256": declared_sha, "floor": floor,
             "floor_error": floor_error, "floor_raw": floor_raw,
+            "floor_unconsumed": floor_unconsumed,
             "corpus": corpus_path.name, "corpus_sha256": corpus_sha256,
             "objects": objects}
 
@@ -710,6 +744,7 @@ def binding_line(bind: dict) -> str:
             f"declared_sha256={bind['declared_sha256'] or 'n/a'} "
             f"declared_floor={bind['floor'] if bind['floor'] is not None else ('n/a' if bind['floor_raw'] is None else json.dumps(bind['floor_raw']))} "
             f"objects={bind['objects']} "
+            f"floor_unconsumed={','.join(bind['floor_unconsumed']) or 'n/a'} "
             f"reason={','.join(bind['reasons']) or 'n/a'}")
 
 
