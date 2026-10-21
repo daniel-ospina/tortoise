@@ -1775,9 +1775,10 @@ def test_the_references_paragraph_scopes_property_freedom_to_source_version():
     assert not live, (
         "§9.6 still makes the retracted absolute claim "
         f"{live} — the word is retracted because it is an ABSOLUTE, not because "
-        "a `references` edge carries a property today (no writer that mints one "
-        "stamps anything on it). Scope it to the fact the paragraph establishes: "
-        "those links carry **no `sourceVersion`**."
+        "an identity/mention or containment `references` edge carries a property "
+        "today (no writer that mints one of THOSE stamps anything on it — the "
+        "derivation writers stamp `sourceVersion` by design). Scope it to the fact "
+        "the paragraph establishes: those links carry **no `sourceVersion`**."
     )
 
 
