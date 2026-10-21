@@ -2008,7 +2008,9 @@ tracked as **#5798**.
   The escalation leg's idempotency stamp lives in the incident body, so on a
   path that deliberately refuses to rewrite that body — the corrupt-`restarts=`
   refusal, which refuses because rewriting would erase the ledger it cannot
-  trust, plus the `search`/body-read/create/body-write failure exits — the leg
+  trust, plus the `search`/body-read/create/body-write failure exits — with the
+  one exception recorded in the #9480 bullet below, where the recovery-path
+  search was *rate limited* and the run stays GREEN by design) — the leg
   cannot run: without a durable stamp a send would repeat on every run. Those
   paths already end in a loud `fail` (and, on a first occurrence, a body
   explaining the refusal), and the corrupt-ledger message now says explicitly
@@ -2068,6 +2070,28 @@ tracked as **#5798**.
   **cross-kind flap** is unchanged: `any_open` treats either kind as the standing
   alert, so this path files no new incident either, and the incident's kind can
   understate the observed failure until the next genuine DOWN/DEGRADED run.
+- **A GREEN run can leave an incident OPEN — the rate-limited recovery search
+  (#9480).** When the service has been confirmed **UP** (the primary probe plus
+  every `RECOVERY_CONFIRM_PROBES` confirmation returned UP) and the *search* that
+  finds our own open incident is rejected by GitHub with a **secondary rate
+  limit** (`rate limit` / `too many requests` / `abuse detection`), the recovery
+  pass **cannot** verify or close the incident. It therefore leaves it OPEN — the
+  safe state, since the next pass that can search closes it — logs a `RATE
+  LIMITED` warning, **does not** page, **does not** restart, and **exits 0**. So a
+  GREEN `probe` run no longer implies "nothing is open": for as long as the
+  throttle persists (a `*/5` schedule with ~15 min measured delivery) the
+  incident stays open on a green run and nothing pages. That is a deliberate
+  trade, not an oversight: not closing already leaves it open, so a RED run adds
+  no safety — it only adds a false *outage* report on a service that was just
+  measured UP, and it fires exactly when our own request rate is highest (a
+  secondary limit is a function of OUR traffic — the same pressure that moved the
+  open-PR surface to REST, #9402). The carve-out is **narrow**: every other
+  search error (`401`, `5xx`, `404`, malformed body) still reaches a loud `fail`
+  and `exit 1`, because a monitor that cannot read its own state is broken even
+  when the service is up. Both directions are pinned by harness cases
+  46b/46c/46d.
+  Read the run log for `RATE LIMITED` before treating a green run as "no
+  incident": the incident body is the source of truth, not the run colour.
 - **This leg covers the PAGER, not the MONITOR.** If the workflow is disabled,
   the schedule is dropped, or the job never reaches the failing path, no
   escalation can fire and there is no run log to read — “the pager is dead” then
