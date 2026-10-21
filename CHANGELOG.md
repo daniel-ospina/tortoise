@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### The commit payload's three uncapped collections are now bounded (#4051)
+
+`POST /v1/sessions/commit` bounds its payload per type — points, entities,
+operators, supersessions — but three collections had **no count cap at all**:
+`events[]`, `sources[]` and `provenance_refs[]`. These are what make one
+request's stored growth unbounded, and the write path
+(`_execute_commit_writes`) consumes them an entry at a time: `events[]` → one
+`:Event` node plus its `produces` edge (and one `MERGE` per `about_entities`
+name) per entry; `sources[]` → one `:Source` per entry; `provenance_refs[]` →
+one session `:Source` regardless of count, but its stored `provenance_spans`
+property is **every** ref's `spans` concatenated and its basenames fill the
+`session_ref_urls` extraction map. With no count cap, the only remaining bound
+was the 8 MiB request body — at the 1000-char event-content cap that is ~8k
+`:Event` nodes from a single legal request, at 300 requests/min/key. That is
+the per-request multiplier on the unbounded growth #4051 files.
+
+- `MAX_EVENTS` / `MAX_SOURCES` / `MAX_PROVENANCE_REFS = 500` (`quota.py`),
+enforced as Layer-1 → 422 with a per-field reason exactly like
+`MAX_ENTITIES` / `MAX_OPERATORS`, so an over-cap payload is refused BEFORE any
+write (no half-written session).
+- **A request-SHAPE bound, not a retention bound.** What a tenant may keep is
+unchanged: sessions stay unlimited (#4010) and there is still no eviction
+window (#3853). These caps bound ONE request's node minting; they do **not**
+close #4051 — the total-growth bound on the two session lanes is a separate,
+owner-facing question (the issue's §4).
+- No MCP tool or SDK method is added, removed or renamed.
+- **Recorded residual:** `MAX_PROVENANCE_REFS` bounds the NUMBER of refs, not
+  the SIZE each carries — `ProvenanceRef.spans` has no item cap, so
+  `provenance_spans` is still bounded only by the 8 MiB body. Capping `spans`
+  would reject a legitimately long document's span list; that is one node's
+  property size, not the node-minting multiplier the `events`/`sources` caps
+  close.
+- **Two further per-entry growths are deliberately not bounded here**, because
+  neither adds a graph node and both are pre-existing on surfaces of their own:
+  `Point.slots` nested lists grow the **event journal** (one
+  `EntityBindingRefused`/`EntityLinked` record per slot entry), and the `spans`
+  list above grows one node's property. (`CommitEvent.slots` is validated but
+  never written — the write phase consumes `Point.slots` only.) Recorded so the
+  next reader does not mistake this cap set for "the commit payload is fully
+  bounded".
+
 ### `ingest()` and the SDK agree on which endpoints a connection may carry (#7925)
 
 `create_direct_edge('IMPL', <Subject>, <Object>)` wrote the edge while

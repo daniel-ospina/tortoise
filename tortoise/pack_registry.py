@@ -116,11 +116,25 @@ CANONICAL_DOCUMENT_KINDS = frozenset({
 # Action kinds are still valid in pack manifests but the centralized 17-value
 # frozenset is unnecessary — packs declare their own actionKinds.
 # Kept for backward compatibility; will be removed in a future version.
+#
+# ⚠️ "Packs declare their own" means pack-OWNED names (`myAction`), NOT these
+# 17: the set is still part of the resolution universe — `CORE_KINDS` unions it
+# and `_build_kind_expansions` roots it — so every name here is core-owned and a
+# manifest declaring one (on this axis or any other) is refused by the #2786
+# guard, which DROPS the pack. Retirement of the *constant* must keep the names
+# in `KIND_OWNER_AXES` until nothing resolves them any more.
 CANONICAL_ACTION_KINDS = frozenset({
     "research", "scope", "plan", "implement", "verify", "reflect",
     "decompose", "delegate", "loop", "brainstorm", "decide", "agree",
     "meet", "experiment", "deploy", "review", "other",
 })
+
+# The five manifest kind axes, in the order the validator walks them. ONE list:
+# the declaration loop, the `all_pack_kinds` union and the two-category leg all
+# read it, so an axis cannot silently lose a rule (a second hardcoded copy is
+# what let `actionKinds` fall out of the guard during review).
+KIND_FIELDS = ("objectKinds", "eventKinds", "pointKinds", "documentKinds",
+               "actionKinds")
 
 # Pack-DECLARATION entity vocabulary — NOT the graph-label vocabulary. This is the
 # type a pack's edge (`from`/`to`) and a bare kind reference may name, and it is
@@ -269,6 +283,63 @@ def registered_source_types() -> frozenset[str]:
     the escape hatch — the validation site unions that separately.
     """
     return KNOWN_SOURCE_TYPES | frozenset(SOURCE_KIND_DEFAULTS)
+
+
+# The OWNER map — every KIND name core already owns, with the axis that owns it.
+# This is NOT ``CANONICAL_KINDS`` alone: that dict deliberately has no
+# ``actionKinds`` entry (#122 retired the axis's *canonical* status) while
+# ``CORE_KINDS`` and ``_build_kind_expansions`` still treat the action names as
+# core — bare-reference resolution and expansion roots. The owner map must cover
+# every kind name the resolution universe owns: otherwise
+# ``objectKinds: [implement]`` validates clean while ``expand_kind("implement")``
+# merges core's action kind with the pack's object kind, which is the #2786
+# divergence class one axis over (and a fail-open guard).
+#
+# ``CORE_ENTITY_TYPES`` (Object/Point/Event/Document/…) is deliberately ABSENT:
+# an entity type is PascalCase, so the camelCase shape rule refuses a manifest
+# declaring it before the owner check ever runs (and `pack new event` is NOT
+# reserved — a namespace is a lowercase word, a different question).
+KIND_OWNER_AXES: dict[str, frozenset[str]] = {
+    **CANONICAL_KINDS,
+    "actionKinds": CANONICAL_ACTION_KINDS,
+}
+
+
+def canonical_kind_axes(kind: str) -> tuple[str, ...]:
+    """Every category that ALREADY owns ``kind`` — empty when the name is free.
+
+    ONE definition of "does core own this name", read by the pack-manifest
+    collision check and by the CLI's namespace reservation
+    (:func:`canonical_kind_words`). A name can be owned twice (`decision` is both
+    a ``pointKinds`` and an ``eventKinds`` kind in ONTOLOGY §5), so this returns
+    ALL owners rather than the first: naming one axis would send a pack author
+    to declare a kind that core already owns elsewhere.
+
+    The source axis is read LIVE through :func:`registered_source_types` (a
+    connector may call ``register_source_kind_default`` at load time) and is
+    reported as ``sourceKinds``. No caching on purpose — #2742 is the defect an
+    import-time snapshot of that mutable registry caused. The canonical axes
+    themselves are immutable frozensets, so reading them directly is not a
+    snapshot of anything mutable.
+    """
+    axes = tuple(axis for axis, kinds in KIND_OWNER_AXES.items() if kind in kinds)
+    if kind in registered_source_types():
+        axes += ("sourceKinds",)
+    return axes
+
+
+def canonical_kind_words() -> frozenset[str]:
+    """The casefolded view of :func:`canonical_kind_axes`' universe.
+
+    For callers that compare a BARE WORD rather than a kind declaration — the
+    CLI's namespace reservation, which must not collide with any word core owns
+    on any axis. Derived from the same map so the two cannot drift (#2786); the
+    live source registry is folded in here because a namespace must not shadow a
+    connector's source kind either.
+    """
+    return frozenset([k.lower() for kinds in KIND_OWNER_AXES.values() for k in kinds]
+                     + [k.lower() for k in registered_source_types()])
+
 
 # Core mechanism predicates — valid chain-edge / enforcement targets without a
 # pack relation. IMPL/NAND ONLY. `MITIGATES` is not a predicate: the F1 ruling
@@ -1119,9 +1190,16 @@ class PackRegistry:
 
         ns = raw.get("namespace", "")
 
-        # Namespace format: no colons (would corrupt kind prefixing)
+        # Namespace format: no colons (would corrupt kind prefixing) and no
+        # whitespace — `_validate` composes the kind form as `f"{ns}:{kind}"`,
+        # so a space in the namespace produces exactly the whitespace-bearing
+        # kind form the #2786 shape check refuses on the kind side. The hosted
+        # path already rejects it (`pack_manifest_store._safe_namespace`); the
+        # filesystem/`TORTOISE_PACKS_DIR` path did not.
         if ns and ":" in ns:
             errors.append("namespace must not contain ':'")
+        if ns and any(ch.isspace() for ch in ns):
+            errors.append("namespace must not contain whitespace")
 
         ont = raw.get("ontology", {})
 
@@ -1133,12 +1211,12 @@ class PackRegistry:
         # Validate ontology section
         if ont:
             # extends: core is a marker — no actual 'core' manifest file exists.
-            # Validation is against CANONICAL_OBJECT_KINDS (see subclassOf checks).
+            # Kind declarations are validated against every canonical category
+            # (``canonical_kind_axes``) and the subclassOf checks below.
             if ont.get("extends") != "core":
                 errors.append("ontology.extends must be 'core'")
 
-            for kind_field in ["objectKinds", "eventKinds", "pointKinds",
-                               "documentKinds", "actionKinds"]:
+            for kind_field in KIND_FIELDS:
                 kinds = ont.get(kind_field, [])
                 if not isinstance(kinds, list):
                     errors.append(f"ontology.{kind_field} must be a list")
@@ -1152,6 +1230,19 @@ class PackRegistry:
                             f"ontology.{kind_field}: '{k}' should be camelCase "
                             f"(lowercase first letter)"
                         )
+                    # A declared kind is a BARE identifier: the registry prefixes it
+                    # with the namespace (`f"{ns}:{k}"`), so a `:` double-prefixes, and
+                    # whitespace/prose makes a name that cannot match a canonical word
+                    # or a Cypher literal. Both spellings slipped past the collision
+                    # check below — `" deployment"` and `"dev:deployment"` validated
+                    # clean while carrying the #7848 deformation — so the shape check
+                    # runs BEFORE the owner check, not instead of it.
+                    elif any(ch.isspace() for ch in k) or ":" in k:
+                        errors.append(
+                            f"ontology.{kind_field}: '{k}' must be a bare kind name — "
+                            f"no whitespace and no ':' (the registry prefixes the "
+                            f"manifest's namespace)"
+                        )
                     # D10 (#5013, ONTOLOGY v3.15, #5022) moved `document` from
                     # the object-kind axis to the SOURCE-kind axis (a document is
                     # a `:Source`), so the canonical-collision check must read that
@@ -1159,17 +1250,59 @@ class PackRegistry:
                     # `objectKinds: [document]`, and `pack.object_kinds` feeds
                     # extractor_v2's writable kind forms and the classification
                     # index — i.e. the retired kind would be writable again.
-                    elif k in CANONICAL_KINDS.get(kind_field, set()) \
-                            or k in registered_source_types():
-                        errors.append(
-                            f"ontology.{kind_field}: '{k}' is already in canonical "
-                            f"vocabulary — no need to register"
-                        )
+                    #
+                    # #2786 (the durable half of #7848): the check reads EVERY
+                    # category, not just the one being declared. Reading only the
+                    # same axis let the shipped `dev` pack declare `deployment` —
+                    # an ONTOLOGY §5 **eventKind** — in `objectKinds` and validate
+                    # clean, which is why #7848 had to fix the declaration by hand
+                    # with nothing to refuse the next one. `pack.object_kinds` is
+                    # not inert (it feeds extractor_v2's writable kind forms and
+                    # the classification index), and `_build_kind_expansions` keys
+                    # expansion on the bare literal — so a deformed name is
+                    # writable, and expandable, under the wrong axis.
+                    else:
+                        owners = canonical_kind_axes(k)
+                        if owners:
+                            errors.append(
+                                f"ontology.{kind_field}: '{k}' is already in "
+                                f"canonical vocabulary — no need to register "
+                                f"(core owns it as {' and '.join(owners)})"
+                            )
+
+            # #2786: one bare kind name belongs to exactly ONE category inside a
+            # pack. Two declarations claim two meanings for one word, and
+            # `store_as()` resolves the collision by silent precedence (point
+            # before event/document/object), so for the point-vs-rest pairs the
+            # writer mints a :Point for a kind the same manifest declared an
+            # :Object — a choice the manifest author never made. The rule is
+            # per-manifest on purpose: the expansion table is keyed
+            # `f"{ns}:{kind}"`, so the same bare name in the SAME category across
+            # two packs collapses to one key and stays legal (§7 `equivalentTo`
+            # exists for exactly that).
+            category_of: dict[str, list[str]] = {}
+            for kind_field in KIND_FIELDS:
+                declared = ont.get(kind_field, [])
+                if not isinstance(declared, list):
+                    continue  # already reported above
+                for k in declared:
+                    if isinstance(k, str) and k:
+                        category_of.setdefault(k, []).append(kind_field)
+            for k, fields in category_of.items():
+                # len(SET), not len(list): a kind listed twice in ONE axis is a
+                # legal (if redundant) declaration — every consumer dedupes through
+                # a set — and reporting it as "more than one category" would name
+                # one category in the message.
+                if len(set(fields)) > 1:
+                    errors.append(
+                        f"kind '{k}' is declared in more than one category "
+                        f"({', '.join(sorted(set(fields)))}) — one bare name has "
+                        f"one category (#2786)"
+                    )
 
             # Collect all pack-declared kinds (used by relation, subclassOf,
             # kindDefs, and extraction validation)
-            for kf in ["objectKinds", "eventKinds", "pointKinds",
-                        "documentKinds", "actionKinds"]:
+            for kf in KIND_FIELDS:
                 all_pack_kinds.update(ont.get(kf, []))
 
             # Pre-built core kind set for relation validation

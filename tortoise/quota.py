@@ -114,6 +114,43 @@ MAX_PAYLOAD_POINTS = 50
 # Layer-1 per-type payload caps → 422 (independent, not summed).
 MAX_ENTITIES = 500
 MAX_OPERATORS = 500
+# #4051: the three COLLECTION caps the per-type set was missing. These
+# arrays are what make a single request's stored-growth unbounded; the write
+# path (``_execute_commit_writes``) consumes them ONE ENTRY at a time:
+#   ``events[]``           → one ``:Event`` node + its ``produces`` edge (+ one
+#                            ``MERGE`` per ``about_entities`` name) PER ENTRY
+#   ``sources[]``          → one ``:Source`` PER ENTRY
+#   ``provenance_refs[]``  → ONE session ``:Source`` regardless of count, but
+#                            its stored ``provenance_spans`` property is EVERY
+#                            ref's ``spans`` concatenated and its basenames
+#                            fill the ``session_ref_urls`` extraction map, so
+#                            the array still grows stored data per entry
+# With no count cap the only bound was the 8 MiB request body: at the 1000-
+# char event-content cap that is ~8k event nodes from ONE legal request, at
+# 300 requests/min/key. Same number as MAX_ENTITIES/MAX_OPERATORS — and the
+# same KIND of bound: a request-SHAPE bound (Layer-1 → 422), never a
+# retention bound. It does not cap what a tenant may keep, so the unlimited-
+# retention rulings (#4010 sessions, #3853 no eviction window) stand.
+#
+# RESIDUAL (known, deliberate): ``MAX_PROVENANCE_REFS`` bounds the NUMBER of
+# refs, not the SIZE each carries — ``ProvenanceRef.spans`` has no item cap
+# (``commit_schema.py`` ``class ProvenanceRef``), so ``provenance_spans`` is
+# still bounded only by the 8 MiB body. Capping ``spans`` would reject a
+# legitimately long document's span list, so the count cap is the honest bound
+# here: it grows ONE node's property, not the node-minting multiplier the
+# events/sources caps close.
+# TWO further per-entry growths are deliberately NOT bounded here, because
+# neither adds a graph node and both are pre-existing on surfaces of their own:
+# ``Point.slots`` nested lists grow the EVENT JOURNAL (one
+# EntityBindingRefused/EntityLinked record per slot entry,
+# ``bind_point_subjects``), and ``ProvenanceRef.spans`` grows the property
+# above. (``CommitEvent.slots`` is validated but never written — the write
+# phase consumes ``Point.slots`` only, ``hosted_api.py:16461``.) Recorded so
+# the next reader does not mistake this cap set for "the commit payload is
+# fully bounded".
+MAX_EVENTS = 500
+MAX_SOURCES = 500
+MAX_PROVENANCE_REFS = 500
 
 # ── Default limits ──────────────────────────────────────────────────────────
 # max_points/max_api_keys have NO constant here — they resolve from
