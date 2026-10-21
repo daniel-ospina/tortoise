@@ -1612,25 +1612,83 @@ def test_a_quoted_summary_is_not_the_session_summary(tmp_path: Path) -> None:
 
 
 def test_an_embedded_nodeid_is_not_a_verdict(tmp_path: Path) -> None:
-    """A parametrized id that EMBEDS another nodeid carries two verdicts, not two tests.
+    """A parametrized id that EMBEDS another nodeid names the OUTER test, not the inner one.
 
-    `…test_p[tests/x.py::…::test_y FAILED [ 86%] …] PASSED [ 75%]` is ONE progress line for
-    ONE test; taking its first verdict published a failure for a test that had passed, and the
-    up-reconcile then inflated `outcome.failed` to the length of that list. One progress line
-    reports one test, so a SECOND verdict word means the id is an embedded nodeid — skip the
-    LINE rather than guess (#9134 review, P1).
+    `…test_p[tests/x.py::…::test_y FAILED [ 86%] …] PASSED [ 75%]` is ONE progress line for ONE
+    test: the verdict is the LAST one before the line's final `[ NN%]` marker, and the id is
+    everything before it — here the outer test's own (PASSED). Reading the FIRST verdict
+    published a failure for a test that had passed, and the up-reconcile then inflated
+    `outcome.failed` to the length of that list. Both discriminators tried before this one
+    dropped REAL failures (bracket balance: a parameter containing `[`; verdict-word counting: a
+    parameter or message that spells a verdict), which is why the rule is positional (#9134
+    review, P1).
     """
     leg = tmp_path / "logs" / "pytest-log-test-a"
     leg.mkdir(parents=True)
     (leg / "pytest.log").write_text(
-        "tests/test_a.py::test_p[tests/test_x.py::test_y FAILED [ 86%] tail PASSED [ 75%]\n"
-        "tests/test_a.py::test_ok PASSED\n"
+        "tests/test_a.py::test_p[tests/test_x.py::test_y FAILED [ 86%] tail] PASSED [100%]\n"
+        "tests/test_a.py::test_ok PASSED [100%]\n"
         "= 1 passed in 1.00s =\n")
     parsed = ci_timing.parse_log(leg / "pytest.log")
-    assert parsed["outcomes"] == {"tests/test_a.py::test_ok": "PASSED"}
+    assert parsed["outcomes"] == {
+        "tests/test_a.py::test_p[tests/test_x.py::test_y FAILED [ 86%] tail]": "PASSED",
+        "tests/test_a.py::test_ok": "PASSED",
+    }
     agg = ci_timing.aggregate_logs(tmp_path / "logs")
     assert agg["failed_tests"] == set()
     assert agg["total_counts"]["failed"] == 0
+
+
+def test_a_spaced_param_survives_a_summary_less_leg(tmp_path: Path) -> None:
+    """A progress line is the ONLY evidence on a killed leg, and a spaced id must survive it.
+
+    The short-summary capture was widened but `V_PROGRESS_RE` kept `[^\s]+` for the id, so a
+    parameter containing a space was still lost from `failed_tests` AND from the count whenever
+    the log is truncated before the summary block — which is exactly the watchdog-killed shape
+    this artifact has to publish honestly (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "".join(f"tests/test_x.py::test_spaced[{p}] FAILED [ 10%]\n"
+                for p in ("server lane", "server box", "server bay")))
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_spaced[server lane]",
+        "tests/test_x.py::test_spaced[server box]",
+        "tests/test_x.py::test_spaced[server bay]",
+    }
+    assert agg["total_counts"]["failed"] == 3
+
+
+def test_a_parameter_holding_a_marker_fragment_is_not_two_tests(tmp_path: Path) -> None:
+    """`test_p[FAILED[100%]]` is ONE test, however much it looks like a marker.
+
+    Counting `VERDICT [ NN%]` markers dropped this real failure, because a parameter may contain
+    a marker fragment. The positional rule has no such case: the marker that matters is the
+    line's FINAL one (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text("tests/test_x.py::test_p[FAILED[100%]] FAILED [ 20%]\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[FAILED[100%]]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_a_reason_truncated_between_verdict_and_marker_is_still_recorded(tmp_path: Path) -> None:
+    """pytest truncates a skip reason IN PLACE, between the verdict and the marker.
+
+    `…::test_x SKIPPED (rea...) [ 37%]` — real output from the shipped sample's own logs — broke
+    a rule that required the marker immediately after the verdict, silently losing those ids from
+    the per-file census (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_skipped SKIPPED (rea...) [ 37%]\n")
+    parsed = ci_timing.parse_log(leg / "pytest.log")
+    assert parsed["outcomes"] == {"tests/test_x.py::test_skipped": "SKIPPED"}
 
 
 def test_a_parseable_id_with_unbalanced_brackets_is_still_a_failure(tmp_path: Path) -> None:

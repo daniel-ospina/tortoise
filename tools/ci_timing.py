@@ -401,25 +401,40 @@ def paid_vs_selected(jobs: list[dict], selection: dict, durations: dict,
 
 DURATION_RE = re.compile(r"^(\d+\.\d+)s\s+(call|setup|teardown)\s+(\S+)")
 COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|error|skipped|xfailed|xpassed)")
-# A parametrized id can EMBED another nodeid, and then an INNER verdict word is the first
-# one on the line: `...t[tests/x.py::...::test_y FAILED [ 86%]` ends `PASSED [ 75%]`, and
-# reading the inner FAILED published a failure for a test that passed (#9134 review, P1).
-# Such an id is malformed (a `[` with no `]` before the verdict), so it is skipped rather
-# than guessed at.
-V_PROGRESS_RE = re.compile(r"^(tests/\S+?\.py::[^\s]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b")
-# ⛔ ONE PROGRESS LINE REPORTS ONE TEST (#9134 review, P1). A parametrized id can EMBED
-# another nodeid, and then the line carries a SECOND `VERDICT [ NN%]` marker that is the inner
-# test's: `...t[tests/x.py::...::test_y FAILED [ 86%] ...] PASSED [ 75%]`. Reading the first
-# verdict published a failure for a test that had passed.
+# ⛔ ONE PROGRESS LINE REPORTS ONE TEST: its id is everything before the line's FINAL
+# `VERDICT [ NN%]` marker, and its verdict is the LAST verdict word before that marker
+# (#9134 review, P1).
 #
-# The discriminator is the PROGRESS MARKER (`VERDICT [ NN%]`), not the verdict WORD and not
-# bracket balance — both were measured wrong. A well-formed progress line carries exactly ONE
-# marker; an embedded nodeid carries two; a parameter that happens to spell a verdict
-# (`test_handler_level[ERROR]`) carries none, and counting words dropped those real failures
-# silently. Bracket balance is wrong too: pytest appends its closing `]` to the parameter
-# verbatim, so a parameter containing `[` yields an unbalanced id and the balance filter dropped
-# it from both the count and the list.
-_PROGRESS_MARKER_RE = re.compile(r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\s*\[\s*\d+%\]")
+# A parametrized id can EMBED another nodeid and then carry the INNER test's verdict too:
+# `tests/a.py::test_p[tests/x.py::test_y FAILED [ 86%] tail] PASSED [100%]`. Only the final marker
+# belongs to the outer test, so reading the FIRST verdict published a failure for a passed test.
+#
+# Three cheaper discriminators were measured, and each DROPS real failures — which is why this one
+# is positional:
+#   * bracket balance — pytest appends its closing `]` to the parameter verbatim, so a parameter
+#     containing `[` (`test_p[a[b]`) is unbalanced; filtering on balance dropped it from the count
+#     and the list alike;
+#   * counting verdict WORDS — a parameter may spell one (`test_handler_level[ERROR]`) and a
+#     failure MESSAGE may quote one (`assert 'SKIPPED' in ''`); those failures vanished silently;
+#   * counting `VERDICT [ NN%]` MARKERS — a parameter may contain a marker fragment
+#     (`test_p[FAILED[100%]]`), which was skipped as if it were two tests.
+#
+# Two shapes the rule must keep: the id is captured with `.+?`, so a parameter containing
+# whitespace (`test_spaced[server lane]`) survives rather than truncating to a nodeid pytest never
+# reports; and anything between the verdict and the marker is allowed EXCEPT another verdict word,
+# because pytest truncates a skip reason IN PLACE (`SKIPPED (rea...) [ 37%]`).
+_V = r"(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)"
+V_PROGRESS_RE = re.compile(
+    rf"^(?P<nodeid>tests/\S+?\.py::.+?)\s+(?P<verdict>{_V})"
+    rf"(?:(?!{_V}\b).)*?\[\s*\d+%\]\s*$")
+# Not every progress line carries a marker: a plugin-free `-v` fixture log, and the `-rA` short
+# summary, both print a bare `id VERDICT`. Accepting only the marked form silently dropped whole
+# legs of the per-file census (caught by the suite's own fixture, #9134 review, P2). A bare id
+# cannot contain a space here, which is what keeps this alternative from re-reading an embedded
+# nodeid as a bare line.
+V_PROGRESS_BARE_RE = re.compile(
+    rf"^(?P<nodeid>tests/\S+?\.py::\S+?)\s+(?P<verdict>{_V})\s*$")
+
 # The session-summary line reports how long the session took, and it must also NAME
 # what happened — see `_is_summary_line`. Matching any line that merely mentions a
 # duration certified truncated legs as complete: pytest echoes a failing test's
@@ -605,11 +620,9 @@ def parse_log(path: Path) -> dict:
                         seen.add(nodeid)
                         target["total_ms"] += ms
                         target["max_ms"] = max(target["max_ms"], ms)
-        if len(_PROGRESS_MARKER_RE.findall(line)) > 1:
-            continue          # two `VERDICT [ NN%]` markers = an EMBEDDED nodeid, not two tests
-        m = V_PROGRESS_RE.match(line)
+        m = V_PROGRESS_RE.match(line) or V_PROGRESS_BARE_RE.match(line)
         if m:
-            outcomes[m.group(1)] = m.group(2)
+            outcomes[m.group("nodeid")] = m.group("verdict")
             continue
         m = R_SUMMARY_RE.match(line)
         if m:
@@ -2792,10 +2805,11 @@ def aggregate_logs(logs_dir: Path | str) -> dict:
                             "killed": parsed["killed"],
                             "summary_seen": parsed["summary_seen"]})
     # The BANNER is the count; `failed_tests` is the union of failures the progress lines
-    # NAME, so it may be longer than the count (a collection error is counted in `error`
-    # but never named; a re-run can name a test twice under two ids). There is deliberately NO
-    # up-reconcile: it existed to mask a phantom FAILED read out of an embedded nodeid, and a
-    # banner that says 5 failures is the measurement (#9134 review, P1).
+    # NAME, so the LIST may be LONGER than the count (a re-run names a test twice, under two
+    # ids) or SHORTER (a collection error is counted in `error` but never named). Both
+    # directions are real, which is why nothing is reconciled between them. There is
+    # deliberately NO up-reconcile: it existed to mask a phantom FAILED read out of an embedded
+    # nodeid, and a banner that says 5 failures is the measurement (#9134 review, P1).
 
     return {"files": files, "total_counts": total_counts, "killed_any": killed_any,
             "failed_tests": failed_tests, "log_sources": log_sources}
