@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands only when a **journaled edge record** carries the edge: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede. Everything else is R5's work: the point-property-derived families (`extractedFrom`, `about*`, `mitigated_by`), `CONTAINS` (its `contains_session` rides the journal envelope and the record projection drops it, `record_projection.py:978`), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates with no carrier at all (`projection/edges.py:736-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands only when a **journaled edge record** carries the edge: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede. Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), `CONTAINS` (its `contains_session` rides the journal envelope and the record projection drops it, `record_projection.py:978`), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:736-745`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -247,12 +247,13 @@ they are invisible without R3.
 handles `EntityLinked` / `DirectEdgeCreated` / `DirectEdgeRepoint`. What is **declared missing**
 (`04-projection.md` §3) is the edge set **derived from point properties** — `extractedFrom`,
 `about*`, `mitigated_by` — which live on the point row's props today, so a rebuild from the record
-alone reproduces the claims and **not the topology**. ⚠️ **`references` is in neither place**: it is not
-a point property and it is not journaled either (`link_source_to_entity`/`create_edge` write it bare), and
-`projection/edges.py:736-745` records the same for the whole structural-predicate class (`ownedBy`, `hasPart`,
-`dependsOn`, `wasDerivedFrom`, `aboutSource`, …) — measured there as `edges: 0` after a rebuild. For those the
-fix is a **producer** (the record type, the fold and the resolver exist as `DirectEdgeCreated`; nothing emits
-them from those doors — tracked on `#9079`), and that half belongs to this item too. ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
+alone reproduces the claims and **not the topology**. (§3 lists a fourth, `references`, which this document
+correction narrows: ⚠️ **`references` is in neither place** — it is not a point property and it is not journaled either (`link_source_to_entity`/`create_edge` write it bare), and the structural edge lane emits no record for
+`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom` and the rest of that class (`projection/edges.py:736-745`,
+measured there as `edges: 0` after a rebuild; `aboutSource`/`aboutAction` ARE carried, by `EntityLinked`).
+For those the fix is a **producer** — the record type, the fold and the resolver already exist as
+`DirectEdgeCreated`, and nothing emits them from those doors. That half has **no live home**: `#9079` closed
+on 2026-10-21 with the §17.1 write-door fix, not this one, so it is recorded on the root (**#7879**). ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
 rides the **journal envelope**, so a *journal* rebuild restores the edge — a *record*-sourced rebuild cannot,
 because the projection drops that key (`record_projection.py:978`) and emits no `relation` row for it. And an
 **operator's** `IMPL`/`NAND`/`INPUT` edges: `OperatorAdded` is a `point`-row upsert whose inputs sit in
@@ -343,7 +344,7 @@ change and needs the ordering-across-three-doors question answered.
 its own hard rule is decisive: *"The meter must be wired into the gate before any allowance is
 configured"*. ⚠️ **The gate is NOT on `main`** — it lives on the unmerged
 `feat/5331-node-to-byte-cap` branch, where it is **fail-closed** and raises `QuotaCheckError` when no
-reading is supplied (`STORAGE-ARCHITECTURE-CHANGELOG.md` §1 implementation-status block), and
+reading is supplied (`STORAGE-ARCHITECTURE-CHANGELOG.md:334-347`, the `#4495` entry's "Status of the implementation" bullet), and
 `grep` finds `max_storage_bytes` in **no** module here. So the item has two ordered halves:
 land the gate (code, from that branch), then wire the meter into it — and only then configure
 an allowance. Configuring the key today is inert rather than a 500; configuring it after the gate
