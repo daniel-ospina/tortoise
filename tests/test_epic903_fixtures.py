@@ -20,13 +20,15 @@ from __future__ import annotations
 import os
 import random
 import sys
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pytest  # noqa: F401, I001
+import pytest  # noqa: I001
 
 from tests.epic903_fixtures import (
     EP_MAX_ITER,
+    F4_ORACLE_PINNED,
     FIXED_SEED,
     F5_FAN_OUT,
     F5_N_CLAIMS,
@@ -35,6 +37,7 @@ from tests.epic903_fixtures import (
     STAMP_FRESH,
     STAMP_MEDIUM,
     STAMP_OLD,
+    capture_f4_oracle,
     compute_diagnostics_stats,
     f1_corpus,
     f2_staleness_regions,
@@ -321,26 +324,53 @@ class TestF4FrozenTruth:
             f.sdk.close()
 
     def test_f4_oracle_reproducible_from_scratch(self):
-        """Frozen ground truth must be reproducible: a from-scratch recompute
-        on a SECOND sandboxed clone matches the oracle (tight tolerance — the
-        corpus converges to a fixed point, calibrated |Δ| = 0.0)."""
+        """Frozen ground truth must be reproducible — and PINNED.
+
+        A from-scratch recompute on a SECOND sandboxed clone must match the
+        pinned vector (``F4_ORACLE_PINNED``) inside the 1e-6 lock, and so must
+        the fixture's own oracle. The corpus is a CONTRACTING sequence, not a
+        fixed point (a further full pass still creeps < 3e-7), so the lock is
+        on *agreement*, not on accuracy; the measured agreement is |Δ| = 0.0 on
+        the deriving host (~1 ULP, ≈1e-16, elsewhere — absorbed by the lock).
+
+        Both sides go through ``capture_f4_oracle`` — the ONE definition of the
+        capture — instead of the check hand-rolling the passes: #9394 was this
+        check replaying only the targeted pass while the oracle carried the
+        stabilization pass too, so it compared two different convergence points
+        (|Δ| = 2.756e-6) the moment #9381 retired the ``ep_dirty`` flags that
+        used to make the read trigger that pass.
+
+        Comparing against the PIN is what keeps the check discriminating: with
+        only the replay compared to a runtime-computed oracle, an engine change
+        moves both by the same amount and the test cannot go red (measured: EP
+        damping 0.5→0.6 moves the worst key by 2.85e-5 yet agreed exactly).
+        The tolerance is NOT widened (#9394) — a legitimate move is re-derived
+        into the pin deliberately and explained, never absorbed."""
         f = f4_frozen_truth(seed=FIXED_SEED)
         try:
             clone_sdk, clone_db = fresh_sdk(prefix="tortoise_epic903_f4_check_")  # noqa: RUF059
             try:
                 from tests.epic903_fixtures import _build_f4_graph  # noqa: PLC0415, RUF100
                 clone_ids, clone_ops = _build_f4_graph(clone_sdk)
-                random.seed(FIXED_SEED)
-                clone_sdk.compute_confidence(factors=clone_ops,
-                                             require_calibration=False)
-                for key, mean in f.oracle.items():
-                    recomputed = clone_sdk.get_confidence(clone_ids[key])["mean"]
-                    assert abs(recomputed - mean) < 1e-6, (
-                        f"oracle not reproducible for {key}: "
-                        f"recomputed {recomputed} vs oracle {mean}"
-                    )
+                recomputed = capture_f4_oracle(clone_sdk, clone_ids,
+                                               clone_ops, seed=FIXED_SEED)
             finally:
                 clone_sdk.close()
+            # No key may quietly drop out of the lock (a shrunken pin or a
+            # builder that stopped minting a claim would otherwise pass).
+            assert (set(recomputed) == set(F4_ORACLE_PINNED) == set(f.oracle)), (
+                f"F4 key sets diverge: replay {sorted(recomputed)} vs pinned "
+                f"{sorted(F4_ORACLE_PINNED)} vs fixture oracle {sorted(f.oracle)}"
+            )
+            for key, pinned in F4_ORACLE_PINNED.items():
+                for label, got in (("recomputed", recomputed[key]),
+                                   ("fixture oracle", f.oracle[key])):
+                    assert abs(got - pinned) < 1e-6, (
+                        f"frozen F4 oracle moved for {key}: {label} {got} vs "
+                        f"pinned {pinned} (|Δ| = {abs(got - pinned):.3e}) — a "
+                        "legitimate move is RE-DERIVED and explained (#9394), "
+                        "never absorbed by widening this 1e-6 lock"
+                    )
         finally:
             f.sdk.close()
 
@@ -386,3 +416,159 @@ class TestF5Diagnostics:
             assert stats2 == f.stats
         finally:
             f.sdk.close()
+
+
+class TestF4CaptureGuards:
+    """The capture's own preconditions are load-bearing (#9394), so a future
+    edit cannot silently weaken them.
+
+    These arm the two guards on a duck-typed SDK — no graph needed. The pin
+    alone would only say "the number moved" (a silent no-op leaves the vector
+    up to 2.7e-5 off, 27x the lock); the guards are the diagnosis, and they are
+    the thing a well-meaning "the router moved, update the guard" edit is most
+    likely to hollow out.
+    """
+
+    class _Duck:
+        def __init__(self, targeted, stabilized):
+            self._targeted, self._stabilized = targeted, stabilized
+            self.calls: list[tuple[str, dict]] = []
+
+        def compute_confidence(self, **kw):
+            self.calls.append(("compute_confidence", kw))
+            return self._targeted
+
+        def dream(self, **kw):
+            self.calls.append(("dream", kw))
+            return self._stabilized
+
+        def get_confidence(self, _pid, **kw):
+            self.calls.append(("get_confidence", kw))
+            return {"mean": 0.5}
+
+    _CLEAN_TARGETED: ClassVar[dict[str, object]] = {
+        "converged": True, "truncated": False}
+
+    def test_clean_capture_is_accepted(self):
+        duck = self._Duck(self._CLEAN_TARGETED,
+                          {"mode": "full", "converged_all": True, "budget_used": 7})
+        out = capture_f4_oracle(duck, {"r1": "x", "r2": "y"}, ["op"])
+        assert out == {"r1": 0.5, "r2": 0.5}
+        # The capture's own posture, not the ambient env: every leg must opt out
+        # of the fail-closed calibration gate explicitly, or the capture is only
+        # hermetic by accident (fresh_sdk's setdefault).
+        assert [name for name, _ in duck.calls] == [
+            "compute_confidence", "dream", "get_confidence", "get_confidence"]
+        assert all(kw.get("require_calibration") is False for _, kw in duck.calls)
+        assert duck.calls[1][1].get("warm_start") is False  # Epic 903-C4 (#1242)
+
+    def test_missing_truncated_is_refused(self):
+        """A missing `truncated` key must not read as "not truncated"."""
+        with pytest.raises(AssertionError, match="did not converge cleanly"):
+            capture_f4_oracle(
+                self._Duck({"converged": True},
+                           {"mode": "full", "converged_all": True, "budget_used": 7}),
+                {"r1": "x"}, ["op"],
+            )
+
+    def test_no_op_stabilization_is_refused(self):
+        """The #9381 shape: nothing recomputed, so the vector is the targeted
+        pass's, not the frozen truth."""
+        with pytest.raises(AssertionError, match="did not recompute"):
+            capture_f4_oracle(
+                self._Duck(self._CLEAN_TARGETED,
+                           {"mode": "local", "converged": True,
+                            "budget_used": 0, "affected_claims": []}),
+                {"r1": "x"}, ["op"],
+            )
+
+    def test_missing_converged_is_refused(self):
+        """A missing `converged` key must not read as "converged"."""
+        with pytest.raises(AssertionError, match="did not converge cleanly"):
+            capture_f4_oracle(
+                self._Duck({"truncated": False},
+                           {"mode": "full", "converged_all": True, "budget_used": 7}),
+                {"r1": "x"}, ["op"],
+            )
+
+    def test_explicitly_unconverged_stabilization_is_refused(self):
+        """This arm DID recompute, so it must be refused for the true reason —
+        and it is the arm a "the router moved, update the guard" edit would
+        delete first."""
+        with pytest.raises(AssertionError, match=r"did not converge.*affected=10"):
+            capture_f4_oracle(
+                self._Duck(self._CLEAN_TARGETED,
+                           {"mode": "full", "converged_all": False,
+                            "budget_used": 7, "total_affected": 10}),
+                {"r1": "x"}, ["op"],
+            )
+
+    def test_capture_restores_the_callers_rng_state(self):
+        """The helper is exported; it must not advance the caller's stream.
+
+        The state is perturbed OFF every seed this module uses first: the duck
+        capture reseeds with FIXED_SEED, so a snapshot taken at `state(903)`
+        would also match the state a NON-restoring helper leaves behind, and the
+        contract would only be pinned when this test happens to run first.
+        """
+        random.seed(2026)
+        random.random()
+        before = random.getstate()
+        capture_f4_oracle(
+            self._Duck(self._CLEAN_TARGETED,
+                       {"mode": "full", "converged_all": True, "budget_used": 7}),
+            {"r1": "x"}, ["op"],
+        )
+        assert random.getstate() == before
+
+    def test_capture_restores_the_rng_state_when_a_pass_raises(self):
+        """`finally`, not "at the end of the happy path": the contract is about
+        a caller mid-assertion, and a pass that raises must not leave the
+        caller's stream advanced."""
+        random.seed(2026)
+        random.random()
+        before = random.getstate()
+
+        class _Boom(self._Duck):
+            def dream(self, **kw):
+                raise RuntimeError("pass blew up")
+
+        with pytest.raises(RuntimeError, match="pass blew up"):
+            capture_f4_oracle(
+                _Boom(self._CLEAN_TARGETED, {}), {"r1": "x"}, ["op"],
+            )
+        assert random.getstate() == before
+
+    def test_a_local_route_that_recomputes_is_accepted(self):
+        """The guard speaks about RECOMPUTATION, not the route: the pre-#9381
+        read route is `local` over the dirty roots, it recomputes, and it lands
+        on the pin — refusing it would be a false red."""
+        out = capture_f4_oracle(
+            self._Duck(self._CLEAN_TARGETED,
+                       {"mode": "local", "converged": True,
+                        "budget_used": 7, "affected_claims": ["a"]}),
+            {"r1": "x"}, ["op"],
+        )
+        assert out == {"r1": 0.5}
+
+    def test_local_mode_unconverged_is_refused(self):
+        """`local` reports `converged`, `full` reports `converged_all`: both
+        arms of the unconverged clause need their own case, or one arm can be
+        deleted with the suite green."""
+        with pytest.raises(AssertionError, match="did not converge"):
+            capture_f4_oracle(
+                self._Duck(self._CLEAN_TARGETED,
+                           {"mode": "local", "converged": False,
+                            "budget_used": 7, "affected_claims": ["a"]}),
+                {"r1": "x"}, ["op"],
+            )
+
+    def test_a_non_integer_budget_is_refused(self):
+        """`budget_used` must be a real count (bool is an int subclass, so the
+        guard pins the exact type)."""
+        with pytest.raises(AssertionError, match="did not recompute"):
+            capture_f4_oracle(
+                self._Duck(self._CLEAN_TARGETED,
+                           {"mode": "full", "converged_all": True, "budget_used": True}),
+                {"r1": "x"}, ["op"],
+            )
