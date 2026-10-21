@@ -4775,18 +4775,22 @@ class _EntityHandlers:
             # writers of one node disagreeing on a REQUIRED field, while the
             # sibling `_upsert_document` stamps
             # `s.ingestedAt=coalesce(s.ingestedAt, $now)`.
-            # `coalesce` on BOTH arms: create stamps it, and a node minted by
+            # `coalesce` on MATCH, a plain stamp on CREATE: a node minted by
             # this writer before the fix (or replayed from an old journal line)
-            # is repaired by the next fold — while an instant a writer already
+            # is repaired by the next fold, while an instant a writer already
             # recorded is never overwritten (#398's never-overwrite contract;
             # the field means when Tortoise FIRST saw this source). The value is
             # the record's own `ts` when it carries a USABLE one — deterministic
             # on replay — falling back to the write clock only for a synthetic
             # event applied without one (legacy lines, test fixtures). "Usable"
-            # is `_usable_instant`, the policy every other record-derived instant
-            # in this module already goes through — `_journal_instant`, the helper
-            # that wraps it, is the one form to copy. Cited by NAME, not by line:
-            # a number here is stale the next time anything above it moves.
+            # is `_usable_instant` — the policy `_journal_instant` wraps, and the
+            # form to copy. It is a choice made HERE, not a guarantee inherited
+            # from the file: `valid_to` (the retract/invalidate folds) and
+            # `_upsert_source`'s `ingestedAt`/`updatedAt`/`rawStateAt` still ride
+            # ungated (#7369), so nothing else gates this slot for you. Cited by
+            # NAME, never by line — a number here is stale the next time
+            # anything above it moves (this branch has already paid for that
+            # twice).
             #
             # The reason is NOT a raise: `self.g`'s parameter boundary
             # (`_journal_safe_params`) DEGRADES an unwritable value to `None`
