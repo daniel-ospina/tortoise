@@ -201,6 +201,7 @@ revision, which is what this file is for.
 
 - `EXTRACTOR-V4-ARCHITECTURE.md:1304` — | connection fan-out | bounded everywhere, with a timeout that drops an arm | ✅ Cap adopted AND implemented — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.p…
 - `EXTRACTOR-V4-ARCHITECTURE.md:1306` — ⇒ One of the three questions below is still the owner's (question 1). Question 2 is measured, ruled and deferred; question 3 was adopted and is CLOSED — `#5010` (`PER_ENTITY_FANOUT_CAP = …
+- `EXTRACTOR-V4-ARCHITECTURE.md` §13.8, question 2 — **CORRECTED 2026-10-20 (`#7948`): TEN sites are customer-callable, behind EIGHT doors — the four counted here missed the whole state-recall path, and a later pass added three more readers that no module-level census could see.** Moved here verbatim on 2026-10-21: the design document now states only the count (*"TEN sites are customer-callable, behind EIGHT doors"*), because a dated `CORRECTED` stamp and the narrative of what an earlier pass missed are change history, not design — and `tests/test_extractor_v4_citation_rot.py` pins that class in the design documents. What the count moves from and why: the paragraph counted FOUR customer-callable sites; re-deriving it at `26aff163c` found eight behind five doors (the whole `recall_state` path was missing, on four code paths), and a second pass found three more readers that sat INSIDE modules the table already named — `navigation._hop_query`, `mcp_server._preview_supersede` and `projection.FalkorProjection._rebuild_all_replay` — which is the drift a module-level census cannot see, and why `STORAGE-ARCHITECTURE.md` §13's census is now keyed on `module.py::symbol`. The ruling itself is unchanged: KEEP the stored edges, deferred to post-launch.
 
 ### 16. Decision protocol run (AGENTS.md, 2026-09-23)
 
@@ -637,34 +638,21 @@ re-derived (run 2 still regenerates byte-identically — now pinned by a test, n
   run 2 still regenerates byte-identically (the artifact pin is what proves it), and the fix is pinned by
   four tests that fail on the pre-fix code (two of them on the `TypeError`, verified by reverting the module).
 
-## §13.8 question 2 — the read-site correction's narration moved here (2026-10-20, `#7948`)
+## §13.8 question 2 — the guard's false PASS closed, and two citations re-pointed (2026-10-21, `#7948`)
 
-The design document states the fact; the story of how the figure moved belongs here, per the rule the
-design-language pass (#8542) established and `tests/test_extractor_v4_citation_rot.py` pins.
+Companion to the §13.8 entry above, and a separate defect from it.
 
-**The removed stamp, verbatim:**
+**The guard that forbids dated correction stamps had a false PASS.** `_CHANGE_NARRATION` in
+`tests/test_extractor_v4_citation_rot.py` required `CORRECTED 20xx-` with a single space, so
+`CORRECTED (2026-10-20, #7948)` — the parenthesised form the §13.8 stamp actually used — was reported
+clean. The separator now admits one short non-digit run, which also covers `CORRECTED AGAIN 20xx-` and
+`amended on 20xx-xx-xx`; the instrument's both-directions fixture pins the parenthesised stamp as a
+`must_flag` and `STORAGE-ARCHITECTURE.md` §14.1's `(… O2, AMENDED)` — a design word closed by a paren,
+not a stamp — as a `must_not_flag`. Non-vacuity was measured: under the pre-fix arm the new fixture is
+unflagged and the instrument's own test reds.
 
-> ⚠️ **CORRECTED (2026-10-20, `#7948`): TEN sites are customer-callable, behind EIGHT doors — the four
-> counted here missed the whole state-recall path, and a later pass added three more readers that no
-> module-level census could see.**
-
-**What it recorded.** §13.8 question 2 previously counted four customer-callable sites (`belief_timeline`,
-`topic_summarize`, `recall_subgraph`, graph-ordered `search`). That count missed the whole state-recall
-path — `recall_state` alone reads the edge on four code paths, three of them through an `about*`
-alternation CONSTANT — and a later pass added three readers that no module-level census could see: an
-all-edge walk in `navigation.py` behind two further MCP tools, the supersede dry run in `mcp_server.py`,
-and the replay delete-leg in `projection/__init__.py`. The document now states only the resulting fact
-(**TEN customer-callable read sites, behind EIGHT distinct doors**); the authoritative enumeration is
-`STORAGE-ARCHITECTURE.md` §13's table, resolved against the code by
-`tests/test_7948_about_object_read_sites.py`.
-
-**Two citations in §13.8 were also re-pointed, and this is the rot class the citation guard cannot see:**
-`create_about_edge` (`projection/edges.py:344` → `:1447`) and, in `STORAGE-ARCHITECTURE.md` §13,
-`_connect_issue_objects` (`sdk.py:20154`) — both numbers named something else entirely at HEAD. §13's
-citations are now symbol-keyed (`projection/edges.py::_EdgeHandlers.create_about_edge`,
-`sdk.py::TortoiseSDK._connect_issue_objects`), matching §13's own statement that it carries no line numbers.
-
-**And the guard that forbids this shape had a false PASS, now closed.** Its date arm was pinned to the
-space-separated form (`CORRECTED 20xx-`), so the parenthesized stamp above — the form this document's own
-corrections actually take — read as clean. The separator now accepts a short non-digit run, and the
-instrument's own both-directions test carries the parenthesized form as a `must_flag` fixture.
+**Two citations in §13.8/§13 named something else at HEAD, and were re-pointed:**
+`create_about_edge` (`projection/edges.py:344` → `:1447`, its `def`) and, in `STORAGE-ARCHITECTURE.md`
+§13, `_connect_issue_objects` (`sdk.py:20154` → the symbol, `sdk.py::TortoiseSDK._connect_issue_objects`).
+§13's prose now states no line numbers at all, matching its own sentence that it carries none; the
+sibling `tests/test_extractor_v4_citation_rot.py` asserts every remaining quoted-symbol citation resolves.
