@@ -1008,10 +1008,14 @@ _ONBOARDING_OFFLOAD_BOUNDARIES = OFFLOAD_BOUNDARY_CALLEES | frozenset({
 #: reviewed residual of #4625 — every entry is either the WRITE path (which
 #: needs a bounded-mutation design: a bounded ``wait_for`` abandons a worker
 #: mid-write, CPython #87185 / #2863) or a read site not in this unit's scope.
-#: The two FIXED read legs are asserted per-CALLEE (leg 12 in
+#: The three FIXED read legs are asserted per-CALLEE (leg 12 in
 #: ``test_capture_session_recording_gate_is_offloaded`` here, leg 62 in
-#: ``test_read_routes_loop_responsiveness.py``), so this body-level set can
-#: never hide their regression. Burn down under #4625.
+#: ``test_read_routes_loop_responsiveness.py::test_capture_session_leg62_probe_is_offloaded``,
+#: and leg 72 by that same pin's ``_data_sdk == 0`` arm plus
+#: ``test_capture_loop_responsiveness.py::test_capture_points_estimate_reads_off_the_event_loop``),
+#: so this body-level set can never hide their regression. ``_capture_session_impl``
+#: remains listed for its other reads and the WRITE path — not for leg 72, whose
+#: ``count_org_usage`` callee is no longer called on the loop. Burn down under #4625.
 _KNOWN_ONBOARDING_INLINE_RESIDUAL = frozenset({
     # capture path — remaining reads + the WRITE path (the receipt/last-error
     # writers and the onboarding jsonb read-modify-write); #4625 writes only.

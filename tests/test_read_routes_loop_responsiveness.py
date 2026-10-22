@@ -2442,10 +2442,14 @@ def test_capture_session_leg62_probe_is_offloaded():
       reverting it to ``_data_sdk`` used to leave every test green — the
       behavioural probe records only ``_get_proj``, and this pin scanned only
       ``_capture_session_impl``);
-    * exactly ONE inline ``_data_sdk`` may remain: the leg-72
-      (``count_org_usage``) site, which is a DECLARED residual because the
-      required #4282 collision pre-flight returned COLLISION, so that leg is
-      skipped in this unit.
+    * ZERO inline ``_data_sdk``: the leg-72 (``count_org_usage``) site was the
+      last one, declared a residual because the required #4282 collision
+      pre-flight returned COLLISION. It now reuses the SDK leg 62 already
+      opened off-loop and rides ``_graph_offload``, so the residual is closed
+      and this pin tightened from ``== 1`` to ``== 0`` — reverting that leg
+      re-reds HERE as well as in the behavioural case
+      (``test_capture_loop_responsiveness.py::
+      test_capture_points_estimate_reads_off_the_event_loop``).
     """
     node = _async_body_named("_capture_session_impl")
     callees = _inline_calls_to(node, frozenset({
@@ -2459,11 +2463,11 @@ def test_capture_session_leg62_probe_is_offloaded():
         "#4625 leg 62 regressed: `_capture_session_impl` attaches the "
         "projection inline — it must ride the off-loop wrapper"
     )
-    assert callees.count("_data_sdk") == 1, (
+    assert callees.count("_data_sdk") == 0, (
         "#4625: `_capture_session_impl` has "
-        f"{callees.count('_data_sdk')} inline `_data_sdk` call(s); the leg-62 "
-        "open must use `_data_sdk_offloaded` and the ONE remaining site is the "
-        "declared leg-72 residual (count_org_usage)"
+        f"{callees.count('_data_sdk')} inline `_data_sdk` call(s); leg 62 must "
+        "use `_data_sdk_offloaded` and leg 72 must reuse the SDK that opened, "
+        "not re-resolve tenancy on the loop (the leg-72 residual is closed)"
     )
 
     probe = _async_body_named("_capture_session_probe_off_loop")
