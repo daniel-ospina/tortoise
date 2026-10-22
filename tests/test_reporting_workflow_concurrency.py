@@ -1600,6 +1600,29 @@ _CHECKOUT_WITH_KEYS = frozenset(
 _STATUS_FUNCTIONS = frozenset({"failure()", "always()", "success()", "cancelled()"})
 _STATUS_SCAN = re.compile(r"\b(failure|always|success|cancelled)\(\)")
 _JS_COMMENTS = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+_JS_LITERALS = re.compile(
+    r'"(?:[^"\\\n]|\\.)*"' r"|'(?:[^'\\\n]|\\.)*'" r"|`(?:[^`\\]|\\.)*`",
+    re.S,
+)
+
+
+def _pattern_list_problem(value: object, key: str) -> str | None:
+    """Why ``value`` is not a valid ``branches``/``branches-ignore`` selector, or ``None``.
+
+    GitHub requires a sequence of glob strings (or a single string). A MAPPING is
+    iterated as its keys — so `{"main": null}` read as "selects main" and the pin
+    went green on a workflow GitHub refuses to run; an int escaped as an uncaught
+    `TypeError` out of a function whose contract is to RETURN the reason.
+    """
+    if isinstance(value, str):
+        return None
+    if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
+        return None
+    return (
+        f"its `push:` trigger's `{key}:` is {value!r}, which is not a sequence of glob "
+        "strings — GitHub rejects the workflow, so no run exists at all and nothing "
+        "reports red"
+    )
 
 
 def _balanced(expression: str) -> bool:
@@ -1727,6 +1750,9 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             # branches` becomes a substring test and `branches: main-next` reads as
             # selecting main. `_triggers` already normalises a scalar `on:` for the
             # same reason.
+            branches_types = _pattern_list_problem(branches, "branches")
+            if branches_types is not None:
+                return branches_types
             branches = [branches] if isinstance(branches, str) else list(branches)
             # GitHub reads `!pattern` as NEGATION, so `branches: [main, '!main']`
             # selects nothing — while a membership test sees "main" present.
@@ -1745,6 +1771,9 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "match `main` — the guard's whole subject is the merged tree"
                 )
         ignore_raw = push.get("branches-ignore") or []
+        ignore_types = _pattern_list_problem(ignore_raw, "branches-ignore")
+        if ignore_types is not None:
+            return ignore_types
         ignore = [ignore_raw] if isinstance(ignore_raw, str) else [str(entry) for entry in ignore_raw]
         if any(fnmatch.fnmatchcase("main", pattern) for pattern in ignore):
             return (
@@ -1752,10 +1781,17 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "merged trees it exists to guard are the ones it never sees"
             )
     conc = doc.get("concurrency")
+    if isinstance(conc, str):
+        # GitHub's documented shorthand: `concurrency: <group>` IS a group with
+        # `cancel-in-progress: false` (the same value the workflow documents as
+        # load-bearing), and `_concurrency_group` in this module already accepts
+        # both spellings. Rejecting it claimed runs were "unbounded", which was
+        # false about the artifact.
+        conc = {"group": conc, "cancel-in-progress": False}
     if not isinstance(conc, dict):
         return (
-            "it declares no `concurrency:` mapping, so its runs are unbounded and "
-            "one can still supersede another"
+            "it declares no `concurrency:`, so its runs are unbounded and one can "
+            "still supersede another"
         )
     group = str(conc.get("group", ""))
     # `||` returns the FIRST TRUTHY operand, so a starveable term AHEAD of the sha
@@ -2005,7 +2041,13 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "github-script step that POSTS the comment; any other step "
                     "satisfies the shape while notifying nobody"
                 )
-            script = _JS_COMMENTS.sub("", str((other.get("with") or {}).get("script", "")))
+            # Comments AND string/template literals are stripped: the membership
+            # test was satisfied by `core.info("see the issues.createComment docs")`,
+            # a valid no-op — the same class as the commented-out call, one spelling
+            # further on. What remains is code.
+            script = _JS_LITERALS.sub(
+                "", _JS_COMMENTS.sub("", str((other.get("with") or {}).get("script", "")))
+            )
             if "issues.createComment" not in script:
                 return (
                     f"the github-script step keyed on `steps.{step_id}.outcome` never "
@@ -2548,6 +2590,28 @@ def _set_commented_create_comment(doc: dict) -> None:
             step["with"]["script"] = script
 
 
+def _set_string_literal_create_comment(doc: dict) -> None:
+    """A quoted mention is not a call — the no-op that notifies nobody."""
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["with"]["script"] = 'core.info("see the issues.createComment docs");\nreturn;\n'
+
+
+def _set_mapping_branches(doc: dict) -> None:
+    """A mapping is iterated as its keys; GitHub rejects it outright."""
+    _trigger_block(doc)["push"]["branches"] = {"main": None}
+
+
+def _set_int_branches(doc: dict) -> None:
+    _trigger_block(doc)["push"]["branches"] = 123
+
+
+def _set_bare_string_concurrency(doc: dict) -> None:
+    """The docs' own shorthand, with the same per-sha group — must be ACCEPTED."""
+    doc["concurrency"] = "main-lint-${{ github.sha }}"
+
+
 def _set_notifier_disjunction(doc: dict) -> None:
     step_id = _ruff_step(doc)["id"]
     for step in doc["jobs"]["lint"]["steps"]:
@@ -2832,6 +2896,11 @@ _STARVED_SHAPES = [
     # ── the notification is commented out, or made a disjunction ──
     ("a commented-out `createComment`", _set_commented_create_comment),
     ("a notifier using `||`", _set_notifier_disjunction),
+    # ── the notification is a string literal, not a call ──
+    ("a `createComment` mention inside a string", _set_string_literal_create_comment),
+    # ── a selector GitHub cannot parse means no run exists at all ──
+    ("a mapping `branches:`", _set_mapping_branches),
+    ("an integer `branches:`", _set_int_branches),
 ]
 
 
@@ -2909,6 +2978,7 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
         ("a checkout `with.path` subdirectory", _set_checkout_path_subdir),
         ("`branches: ['*']`", _set_glob_branches),
         ("the whole notifier condition parenthesised", _set_whole_condition_parens),
+        ("a bare-string `concurrency:` group", _set_bare_string_concurrency),
         ("`continue-on-error: false` on the ruff step", _set_inert_continue_on_error),
         ("`shell: bash` on the ruff step", _set_inert_shell),
         ("`uv run ruff check .`", _set_uv_run),
