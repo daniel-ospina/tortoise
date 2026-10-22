@@ -93,6 +93,20 @@ NON_SDK_READ_BINDINGS: dict[str, str] = {
     "get_tenant_packs": "tortoise_packs_list",
 }
 
+# Tools that are `read` yet perform SYSTEM-owned RETENTION housekeeping through a
+# helper OUTSIDE the `sdk.py` derivation boundary — so `sdk_graph_mutators()` cannot
+# see the mutation and no structural guard can decide it. Declared here so the
+# decision is visible and re-decided rather than inherited by a future read-tier
+# tool that purges through another module (#4122 review). The tier stays `read`
+# because the alternatives are worse: `writes=True` would take a polling read away
+# from read keys, and `maintenance` would drop the read hint on a tool agents poll
+# in a loop (a confirmation prompt per poll).
+RETENTION_CARVEOUTS: dict[str, str] = {
+    "tortoise_events_poll":
+        "poll_events -> event_store.purge_expired/purge_overflow: DETACH DELETE of "
+        "expired :GraphEvent rows (interval-gated, system-owned) — #4122",
+}
+
 # Registry `sdk_method` labels that do not resolve to a TortoiseSDK attribute.
 # These are the #3994 `fix-declaration` rows (declared-SDK-link drift, not
 # missing features).  Kept exact so a *new* dangling declaration fails.
@@ -1195,6 +1209,20 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
+    # RETENTION_CARVEOUTS is live AND exact: a carved-out tool that no longer
+    # exists, or that has moved off the `read` tier, means the carve-out is stale
+    # and must be deleted deliberately (#4122).
+    for name in sorted(RETENTION_CARVEOUTS):
+        e = by_name.get(name)
+        if e is None:
+            out.append(
+                f"RETENTION_CARVEOUTS entry {name!r} names no served tool — "
+                f"delete the carve-out")
+        elif e.risk != "read":
+            out.append(
+                f"{name}: RETENTION_CARVEOUTS records a `read` carve-out for "
+                f"retention housekeeping, but its tier is {e.risk!r} — delete the "
+                f"carve-out entry (#4122)")
     # DECLARED_BINDING_DIVERGENCES liveness (#4337).  The divergence arm iterates
     # the ENTRIES, so a ledger key whose registry entry was removed or renamed is
     # never visited and would persist unexamined.  This function is the home for

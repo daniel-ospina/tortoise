@@ -125,8 +125,11 @@ read permission can be granted generously with no path to a destructive action.
 > read-low / write-high default — the owner ruled (2026-10-21, on #4122) that a tool is
 > classified by **user-perceived risk**, not by whether its handler writes, so a confined,
 > idempotent, **derived-value write is permissioned as read** (`maintenance`). The precedent
-> is PostgreSQL 16's `MAINTAIN` privilege (refresh runs under definer rights, so the caller
-> needs only read). `tortoise_get_confidence`, `tortoise_compute_confidence` and
+> is PostgreSQL **17**'s `MAINTAIN` privilege (`GRANT MAINTAIN ON <table>` plus the
+> `pg_maintain` role, added in 17 — a SEPARATE grant from SELECT/INSERT/UPDATE/DELETE).
+> PostgreSQL mints its own grant; we deliberately do not, because a new scope would be a
+> surface change, so the read key stays and only the read-only CLAIM is dropped.
+> `tortoise_get_confidence`, `tortoise_compute_confidence` and
 > `tortoise_packs_list` are `maintenance`: a `graphs:read` key may call them, they never
 > require `graphs:write`, and they do NOT declare `readOnlyHint: true` (that literal hint is
 > what clients auto-approve on). The declaration is `risk` on the registry entry; `writes`,

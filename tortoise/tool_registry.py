@@ -133,15 +133,31 @@ class ToolDefinition:
 #
 # THE TIER AXIS, in one sentence each, so the next lane does not re-litigate a
 # row (the split is what `destructiveHint` means to a client):
-#   read        — reads only; no stored state changes.
-#   maintenance — a DERIVED value it owns is refreshed (the trio above). Idempotent
-#                 by default; an entry overrides `idempotent` when measurement says
-#                 otherwise (`tortoise_compute_confidence`).
-#   write       — ADDITIVE only: creates nodes/edges, adds a derived artifact, or
-#                 starts a job. Nothing user-authored is replaced or removed.
+#   read        — reads only, plus system-owned RETENTION housekeeping on the one
+#                 recorded carve-out (`tortoise_events_poll` → `purge_expired`,
+#                 declared in `tests/tool_surface_capabilities.py` →
+#                 RETENTION_CARVEOUTS so the guard sees it). It stays `read`
+#                 because `writes=True` would take a poll away from read keys and
+#                 `maintenance` would drop the read hint on a tool agents poll in a
+#                 loop (a confirmation prompt per poll). Reopen #4122 rather than
+#                 re-tiering it silently.
+#   maintenance — a DERIVED value it owns is refreshed (the trio above, plus a
+#                 confined housekeeping pass). Idempotent by default; an entry
+#                 overrides `idempotent` where the behaviour differs (both
+#                 confidence tools DO re-store on a repeat call).
+#   write       — ADDITIVE, and it may also apply THE CALLER'S OWN properties to the
+#                 row THIS CALL identified (identity upsert: `create_subject` /
+#                 `create_object` / `create_entity` `MERGE` on a name-derived id;
+#                 `create_source` sets `credibilityTier`). It never removes a row and
+#                 never rewrites a row the caller did not name — but it is a WRITER,
+#                 so "additive" must not be read as "cannot change anything".
 #   destructive — removes, or overwrites in place, stored state that a user
 #                 authored (delete family, in-place update family, terminal status
-#                 writes, whole-graph rewrites) — `destructiveHint: true`.
+#                 writes, whole-graph rewrites, re-ingest that rewrites an existing
+#                 corpus) — `destructiveHint: true`. A tool belongs here whenever a
+#                 REPEAT or a WRAPPER call reaches one of these (`mitigate_operator`
+#                 updates its mitigation point; `index_sessions` wraps the corpus
+#                 re-index).
 #   admin       — changes what the product DOES for the org/graph/install:
 #                 provisioning, pack install, credentials, recording/monitoring and
 #                 source switches. `destructiveHint: true`.
