@@ -2203,3 +2203,148 @@ class TestWorkflowScriptDependenciesAreOnTheRunner:
         assert any(w == "billing-reconcile-cron.yml" for w, _j, _r, _c in cases), (
             "the billing reconcile driver must be among the covered jobs"
         )
+
+
+# ── R1 (#9548, epic #7879): the Postgres record must be ARMABLE from the deploy ─
+# The record's seam is presence-based on `TORTOISE_RECORD_DSN`: unset ⇒
+# NOT_ARMED ⇒ zero statements, no connection attempt, nothing red (§A8 of
+# `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` measured
+# exactly that state on the live deployment). Every other part of the record was
+# already built and CI-green, so the remaining defect was that NO deploy surface
+# named the variable — a capability that could only be switched on with an
+# out-of-band `fly secrets set`, which the provenance gate then correctly reports
+# as unsourced. These two tests pin the surfaces R1 changed, because each one can
+# be reverted with the rest of the suite still green.
+
+_RECORD_DSN_ENV = "TORTOISE_RECORD_DSN"
+_PROVENANCE_STEP = "Check Fly secret provenance (fail-closed)"
+_REPO_ROOT = _WORKFLOW.parents[2]
+_SECRET_MANIFEST = _REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
+_RUNBOOK = _REPO_ROOT / "docs" / "infra-runbook.md"
+
+#: A Secrets Matrix row, same shape the #8614 guard reads.
+_MATRIX_ROW = re.compile(
+    r"^\|\s*([A-Z][A-Z0-9_]*)\s*\|([^|]*)\|([^|]*)\|([^|]*)\|\s*$", re.MULTILINE
+)
+
+
+def _manifest_declarations() -> dict[str, str]:
+    """`{Fly variable: source token}` for every shipped manifest declaration."""
+    declared: dict[str, str] = {}
+    for line in _SECRET_MANIFEST.read_text(encoding="utf-8").splitlines():
+        parts = line.split("#", 1)[0].split()
+        if len(parts) == 2:
+            declared[parts[0]] = parts[1]
+    return declared
+
+
+def _matrix_rows() -> dict[str, tuple[str, str, str]]:
+    """`{name: (fly, falkordb, github)}` for the runbook's Secrets Matrix rows."""
+    section = _RUNBOOK.read_text(encoding="utf-8").split("## Secrets Matrix", 1)
+    assert len(section) == 2, "docs/infra-runbook.md has no `## Secrets Matrix` section"
+    body = section[1].split("\n## ", 1)[0]
+    return {
+        name: (fly.strip(), fdb.strip(), gh.strip())
+        for name, fly, fdb, gh in _MATRIX_ROW.findall(body)
+    }
+
+
+def test_record_arming_secret_is_staged_from_its_own_github_secret():
+    """#9548 R1 target (c): every deploy surface names `TORTOISE_RECORD_DSN`.
+
+    Three surfaces, and each one is load-bearing on its own:
+
+    * the payload step must BIND and APPEND it (from its own same-named GitHub
+      secret) — otherwise the value stays on GitHub and the app keeps answering
+      `NOT_ARMED`;
+    * the provenance gate must PROBE it into `GH_SECRETS_PRESENT` — a `gh-secret:`
+      declaration with no probe line reads as ABSENT and hard-fails the deploy, so
+      the three have to move together;
+    * the manifest must DECLARE it and the runbook's Secrets Matrix must show the
+      GitHub home — a declaration the runbook contradicts is how an operator gets
+      told to rotate Fly-only, which the next deploy then silently reverts
+      (#8614).
+    """
+    gate = _steps()[_PROVENANCE_STEP]
+    payload = _steps()[_SET_STEP]
+    # Bound in BOTH steps, from the SAME-named GitHub secret (a cross-wired
+    # binding passes name presence while shipping the wrong value, #4334).
+    for step in (gate, payload):
+        assert _env_bindings(step).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
+            f"{_RECORD_DSN_ENV} is not bound to secrets.{_RECORD_DSN_ENV} in the "
+            "step that must carry it — the record stays unarmed in production "
+            "while every test here is green"
+        )
+    assert f'[ -n "${_RECORD_DSN_ENV}" ] && GH_PRESENT="$GH_PRESENT {_RECORD_DSN_ENV}"' in gate["run"], (
+        "the provenance gate does not probe TORTOISE_RECORD_DSN into "
+        "GH_SECRETS_PRESENT — the declaration then reads as ABSENT and the "
+        "deploy fails on the manifest entry instead of propagating the value"
+    )
+    # Appended to the flyctl argv behind the `-n` guard every optional secret uses
+    # (an unguarded append pushes `K=` and clobbers an out-of-band value).
+    assert _array_pairs(payload["run"]).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
+        f"the secrets-set step never appends {_RECORD_DSN_ENV} to the flyctl "
+        "array — the GitHub secret would never reach Fly"
+    )
+    assert _manifest_declarations().get(_RECORD_DSN_ENV) == f"gh-secret:{_RECORD_DSN_ENV}", (
+        f"{_RECORD_DSN_ENV} is not declared gh-secret:{_RECORD_DSN_ENV} in "
+        ".github/scripts/fly-managed-secrets.txt — the provenance gate then "
+        "reports it UNDECLARED the moment it exists on Fly"
+    )
+    rows = _matrix_rows()
+    assert _RECORD_DSN_ENV in rows, (
+        f"{_RECORD_DSN_ENV} has no Secrets Matrix row in docs/infra-runbook.md — "
+        "an operator cannot find where the record is armed"
+    )
+    assert "✅" in rows[_RECORD_DSN_ENV][2], (
+        "the Secrets Matrix shows TORTOISE_RECORD_DSN with no GitHub Actions home, "
+        "while the manifest declares it `gh-secret:` — the Fly-only rotation recipe "
+        "looks correct for a name the next deploy overwrites"
+    )
+
+
+def test_the_record_is_not_armed_single_tenant_on_the_hosted_app():
+    """#9548 R1: `TORTOISE_RECORD_SINGLE_TENANT` and the env tenant pair stay UNSET.
+
+    The hosted lane is MULTI-tenant and carries its tenant **per request**, which
+    always wins (`record_writer.record_tenant`). The `_ORG_ID`/`_GRAPH_ID` pair is
+    PROCESS-GLOBAL, so on this app it is not a weaker answer than the request
+    scope — it is a WRONG one: with the declaration absent the pair is refused
+    (`no_tenant`, counted), and with it present every tenant's rows are filed
+    under one graph (#9192) — a well-formed row under the wrong organisation,
+    which nothing downstream can detect. So the arming act must not grow a
+    "make it work" declaration.
+
+    Asserted on ASSIGNMENTS, never on mentions: the runbook and `fly.toml`'s
+    `[env]` comment both NAME these variables precisely to forbid setting them,
+    and a prose-mention test would force that warning out of the tree.
+    """
+    import importlib.util
+
+    sys.path.insert(0, str(_REPO_ROOT / ".github" / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "check_fly_secret_drift_r1", _REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    # The gate's OWN `[env]` parser, so this test and the deploy cannot disagree
+    # about what counts as an assignment (a comment does not).
+    env_keys = module.fly_toml_env_keys((_REPO_ROOT / "fly.toml").read_text(encoding="utf-8"))
+
+    declared = _manifest_declarations()
+    argv_keys = _array_pairs(_steps()[_SET_STEP]["run"])
+    env_bound = {
+        name
+        for step in _steps().values()
+        for name in _env_bindings(step)
+    }
+    for name in (
+        "TORTOISE_RECORD_SINGLE_TENANT",
+        "TORTOISE_RECORD_ORG_ID",
+        "TORTOISE_RECORD_GRAPH_ID",
+    ):
+        assert name not in env_keys, f"{name} is an assigned key in fly.toml [env]"
+        assert name not in argv_keys, f"the deploy stages {name} to Fly"
+        assert name not in env_bound, f"the deploy binds {name} from a GitHub secret"
+        assert name not in declared, f"{name} is declared in fly-managed-secrets.txt"

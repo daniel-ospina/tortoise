@@ -187,6 +187,18 @@ kill_timeout = 30
   destination = "/data"
 
 [env]
+  # ⛔ TORTOISE_RECORD_DSN is a Fly SECRET, not an [env] key (#9548, epic #7879
+  # R1) — and must never be added here. Its value is a Postgres DSN carrying a
+  # password, so an [env] entry would commit a credential; and a Fly secret
+  # SHADOWS [env], so the versioned value would not even be what the app reads.
+  # It is staged by deploy-hosted.yml from the GitHub secret of the same name and
+  # declared `gh-secret:` in .github/scripts/fly-managed-secrets.txt (the
+  # provenance gate rejects the `fly-toml-env` route for it). Arming it is what
+  # turns the record on — unset ⇒ NOT_ARMED ⇒ zero statements, nothing red.
+  # Provisioning + verification: docs/infra-runbook.md §"Secrets Matrix".
+  # ⛔ TORTOISE_RECORD_SINGLE_TENANT (and the _ORG_ID/_GRAPH_ID pair) must stay
+  # UNSET here too: the hosted lane is multi-tenant and carries its tenant per
+  # request, so a process-global pair would misfile every tenant's rows (#9192).
   TORTOISE_DB_URI = ""  # Constructed at runtime by entrypoint.sh from FALKORDB_CLOUD_URI → FalkorDB Cloud
   FASTAPI_INTERNAL_KEY = ""  # Set via fly secrets
   # #1081/#985: only the Fly-proxied hosted deployment may trust forwarded

@@ -174,7 +174,7 @@ idempotent, total, and stores no EP scalar`.
 
 | thing that looks live | its actual state | evidence |
 |---|---|---|
-| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → empty |
+| **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appeared **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. **#9548 (2026-10-23) landed the arming surfaces** (deploy stages it from its own GitHub secret, manifest declares it, runbook + `fly.toml` document it) — the remaining half is the secret itself, a credential only the operator can create, so the LIVE state is still `NOT_ARMED` until it exists. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → empty **before #9548** |
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert`, `record_projection.py:732`), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
@@ -205,6 +205,19 @@ in the hosted image — checked rather than assumed, because the natural guess w
 **Decision needed:** which Supabase project hosts the record. §4 decides **one project, tenant-scoped
 rows** — so this is the existing project, and *"one database per team"* is refused on cost grounds
 (§4's trap).
+
+**Progress (2026-10-23, #9548) — the surfaces landed; the value is the residual.** The three
+non-secret halves of this item are in the tree: `deploy-hosted.yml` binds and stages the variable
+from its own same-named GitHub secret (guarded `-n`, like every other optional secret) and probes it
+into `GH_SECRETS_PRESENT`; `fly-managed-secrets.txt` declares it `gh-secret:`; the runbook's Secrets
+Matrix carries a row plus an "Arming the Postgres record" section (DSN shape, the two
+never-do-this rules, the verify recipe); `fly.toml`'s `[env]` block documents that it is a SECRET and
+must never be an `[env]` key. What remains is **the provisioning act itself**, which no lane can
+perform — the value is a credential in the operator's Supabase console. ⚠️ While the GitHub secret
+is absent the append is a no-op and the record stays `NOT_ARMED` (the §A8 state); a value hand-set on
+Fly instead is reported `UNSOURCED` and **blocks the deploy**, so the correct order is GitHub secret
+first. `TORTOISE_RECORD_SINGLE_TENANT` is deliberately staged nowhere and a test pins that
+(`tests/test_deploy_workflow.py::test_the_record_is_not_armed_single_tenant_on_the_hosted_app`).
 
 ### R2 — Land the schema on the hosted project, and keep the name gate honest · **S** · ops · **BLOCKER**
 
@@ -540,3 +553,11 @@ grep -rn 'rebuild_from_record(' tortoise/ | grep -v 'def '                  → 
 grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_backup.py \
   tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
+
+⚠️ **The first census line is superseded by #9548 (2026-10-23)** — it now returns the deploy
+workflow's bind/probe/stage lines, the manifest declaration, the runbook's row and section, and
+`fly.toml`'s `[env]` comment. `entrypoint.sh` is deliberately still empty: R1's components are the
+three surfaces above, and boot-time arming output is not part of it. What the old grep stood in for
+(`NOT_ARMED`) is unchanged until the GitHub secret exists; only its evidence moved, from *"the name
+is written nowhere"* to *"the name is staged and the secret is absent"*. The other six lines were
+re-measured 2026-10-23 and are unchanged.

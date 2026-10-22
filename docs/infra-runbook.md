@@ -2587,6 +2587,75 @@ run (#2706).
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
+| TORTOISE_RECORD_DSN | ⚠️ **arms the Postgres record** (epic #7879 R1) — set via GitHub secret → Fly; absent ⇒ `NOT_ARMED` and the record writes nothing | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ (Supabase pooler DSN) |
+
+### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
+
+**What the variable is.** The Postgres record's own connection string, read by
+`tortoise/record_writer.py` (`RECORD_DSN_ENV`). The seam is **presence-based**:
+unset or blank ⇒ `NOT_ARMED` ⇒ *zero statements, no connection attempt, no
+exception* — the record path is inert and capture is byte-identical to a
+deployment that never had it. That is why an unstaged name is invisible instead
+of broken: nothing goes red, the record simply never receives a row
+(`docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` §A8).
+
+**The value.** The project's **pooler** DSN — the same shape `.env.example`
+documents for `TORTOISE_AUDIT_DSN`:
+`postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`.
+§4 of `docs/architecture/STORAGE-ARCHITECTURE.md` decides **one project with
+tenant-scoped rows**, so this is the existing Supabase project — *not* a second
+database per team (refused on cost grounds).
+
+**Provisioning — one operator act, then the deploy does the rest.**
+
+```bash
+# 1. the value's ONLY home (never a file, never a shell history):
+gh secret set TORTOISE_RECORD_DSN --repo daniel-ospina/tortoise   # paste the pooler DSN
+# 2. any deploy stages it (push to main, or: gh workflow run deploy-hosted.yml)
+# 3. confirm the machine carries it — NAME only, never the value:
+fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
+```
+
+**Verify it is ARMED, not merely set** — a set variable that reaches an
+unreachable or misconfigured database is the one failure this cannot show you.
+Capture one session, then on the record project:
+
+```sql
+select count(*) from journal_event;  -- >0 after a capture
+select count(*) from point;          -- >0 when the capture added points
+```
+
+and read the seam's own counters (served by the 9090 health listener, §6.7):
+
+```bash
+fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:9090/metrics | grep record_write_failures"
+```
+
+`record_write_failures` must stay **0** across that capture. Non-zero is NOT
+silent by design — an armed write that did not happen is counted and logged
+(`monitoring.RECORD_WRITE_FAILURE_COUNT`) — but a *migrated-away* DSN, a
+`DatatypeMismatch` refusal (#9264), or a refused tenant
+(`no_tenant`) will land there rather than in a red deploy.
+
+⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
+versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
+`[env]`, so the versioned value would not even be what the app reads. The
+provenance gate refuses the `fly-toml-env` route for exactly this name
+(`.github/scripts/fly-managed-secrets.txt`).
+
+⛔ **Do NOT set `TORTOISE_RECORD_SINGLE_TENANT`** (nor the
+`TORTOISE_RECORD_ORG_ID`/`TORTOISE_RECORD_GRAPH_ID` pair) on this app. The hosted
+lane is **multi-tenant** and carries its tenant **per request**, which always
+wins; env is process-global, so the pair is only correct on a single-graph
+deployment. Unset is the fail-closed default: the pair is then IGNORED. Setting
+it here would either be refused (`no_tenant`, if the declaration is absent) or
+file every tenant's rows under one graph (#9192) — a well-formed row under the
+wrong organisation, which nothing downstream can detect.
+
+**Related, and out of scope here:** landing the record's *schema* on the project
+is R2 (`supabase-deploy.yml`, `workflow_dispatch` only); the two known
+schema↔producer disagreements are R4 (#9264, open); and **no module of ours backs
+the record up** — that is R9's owner decision, not a claim this section makes.
 
 ### Runtime Config (non-secret)
 
