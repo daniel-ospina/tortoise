@@ -8490,9 +8490,11 @@ async def _capture_session_probe_off_loop(org: dict, session_id: str):
     ``asyncio.to_thread`` and the dream pools throughout).
 
     Leg 72 of the same profile — the SDK open in the extraction-estimate quota
-    block a few lines below (``count_org_usage``) — is deliberately NOT folded
-    in: the required #4282 collision pre-flight returned COLLISION, so that leg
-    is skipped in this unit and declared residual by the #4625 guard.
+    block a few lines below (``count_org_usage``) — was declared a residual in
+    this unit because the required #4282 collision pre-flight returned
+    COLLISION at the time. It is now CLOSED: that block reuses the ``sdk``
+    returned here (rather than re-resolving tenancy) and reads the count
+    through ``_graph_offload``, so this wrapper's SDK is consumed by both legs.
     """
     sdk = await _data_sdk_offloaded(org)
 
@@ -13847,9 +13849,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if (not session_existed or retry_failed_capture) and not store_only:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
-        sdk_org = _data_sdk(org)
+        # #4625 leg 72: this read is a SYNC full-graph FalkorDB count, and the
+        # SDK it needs was itself resolved with `_data_sdk(org)` — tenancy
+        # resolution plus, for a graph-bound key, `_assert_graph_owned`'s
+        # ownership query. Both used to run INLINE here, so every non-replay
+        # capture THAT EXTRACTS parked the single event loop on a cold or large
+        # graph (the #3718/#2988 class this file already off-loads everywhere
+        # else). The store-only lanes (keyless #3892, extraction disabled
+        # #4258) never reach this block — `store_only` skips the estimate — so
+        # they were never exposed to this leg.
+        # `sdk` is the SDK the #4625 leg-62 probe opened OFF-LOOP above —
+        # equivalent to what `_data_sdk(org)` builds for this org (same graph,
+        # same actor/record-tenant binds already applied), NOT a cached one:
+        # `_data_sdk` is not memoised (`_make_sdk` mints a fresh
+        # `TortoiseSDK` per call), so using this one removes a redundant
+        # construction and a redundant tenancy resolution rather than
+        # preserving an identity invariant. The read rides `_graph_offload`,
+        # and the `org_info` twin (`:9883-9885`) already off-loads this same
+        # count.
+        #
+        # The bound covers the WAIT, not the scan: a miss abandons the await and
+        # the worker keeps holding a graph-pool slot until the count returns
+        # (CPython #87185 — `wait_for` cancels the await, not the thread). That
+        # is strictly better than today's unbounded loop block, and it is the
+        # house posture for every graph read here, but it is a trade-off worth
+        # naming: `count_org_usage("points")` is a full-node scan, so on a very
+        # large graph several abandoned counts can occupy the graph pool that
+        # every read route shares. A miss surfaces as the house 503
+        # `graph_unavailable` — never a silently uncovered quota gate and never
+        # a hung request.
         try:
-            count = count_org_usage(org["org_id"], "points", sdk=sdk_org)
+            count = await _graph_offload(
+                lambda: count_org_usage(org["org_id"], "points", sdk=sdk),
+                op="count_org_usage")
         except QuotaCheckError as e:
             raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
         max_points = org.get("max_points")
@@ -15963,11 +15995,33 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # mints as a violation — the same class #5082 closed for `sourceKind` here.
     # `$now` is this commit's own instant, the transaction-time value §4.6 asks
     # for; `coalesce` keeps an instant a prior writer recorded.
+    # #5140 (P1 finding 7 — the FOURTH writer): `documentKind` is the `documents`
+    # METER key (`quota.DOCUMENT_METER_PREDICATE`), and this MERGE overwrote it
+    # on MATCH. `doc_id` is fully caller-computable —
+    # `doc_<sha256(f'{session_id}:{captured_at}')>` from two request-body fields
+    # (commit_schema.CommitPayload) — so a tenant could seed a metered document
+    # `:Source` at that url and then demote it with one commit, freeing a
+    # `documents` slot per call. MEASURED on the pre-fix statement: a
+    # `documentKind='report'` Source at the derived id became `'transcript'`.
+    # The genre is therefore CLAMPED in the same statement, exactly as
+    # `entities.py::_upsert_document`'s clause does: a transcript MINT,
+    # a repeat write on a transcript, and a node with no genre all still land
+    # `'transcript'`; an existing METERED document keeps the genre it had, and a
+    # pre-existing demotion is not re-applied. This is the same
+    # never-overwrite discipline the `sourceKind`/`ingestedAt` `coalesce` calls
+    # on this statement already follow (#5082, #5140 P2 finding 5) — the genre
+    # is simply not coalesced because `'transcript'` must stay writable on a
+    # node that has none.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
         "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
-        "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
+        "    s.documentKind=CASE "
+        "        WHEN s.documentKind IS NOT NULL "
+        "             AND s.documentKind <> 'transcript' "
+        "        THEN s.documentKind "
+        "        ELSE 'transcript' END, "
+        "    s.title=$title, s.summary=$summary, "
         "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
         "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
