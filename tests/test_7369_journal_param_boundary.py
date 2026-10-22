@@ -919,6 +919,22 @@ def test_a_BLANK_container_identity_states_the_TRUE_cause(caplog):
         "a BLANK identity was reported as carrying a lone surrogate — a false "
         f"cause steers the operator at a corruption that is not there: {caplog.text!r}"
     )
+    # ⛔ AND THE CONSEQUENCE IS NOT OVERSTATED (#9553 review). `_link_session`
+    # refuses ONE derived edge after the Point is already in the graph; the
+    # record is not dropped there, and `consistency`'s `reason` says so. A
+    # message claiming a dropped record at a nested site is the same "false for
+    # the record it describes" class as a false cause.
+    assert "the record is dropped" not in caplog.text, (
+        "a nested skip claimed the whole record was dropped — only the "
+        f"CONTAINS edge is missing here: {caplog.text!r}"
+    )
+    assert "only this derived edge/stub is missing" in caplog.text, caplog.text
+
+    # The DECLARED-dropped site keeps the stronger sentence.
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Point", "bad\x00id", "point id", drops_record=True)
+    assert "the record is dropped" in caplog.text, caplog.text
 
 
 def test_a_corrupt_entity_identity_skip_is_LOGGED_on_rebuild(superseded, caplog):

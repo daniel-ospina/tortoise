@@ -7101,14 +7101,26 @@ def _log_identity_skip(what: str, value, label: str = "identity", *,
                                  where=where, drops_record=drops_record)
     # The cause comes from `IdentitySkip.describe()`, NOT a sentence written
     # here: it names the refused SHAPE (a non-str / a NUL-bearing str / a
-    # lone-surrogate-bearing str), so the "true cause" claim holds for every
-    # value `_writable_id` refuses. Asserting "NUL/lone-surrogate bearing" for
-    # a non-str id was false for a live journal shape (#8840 review P3).
+    # lone-surrogate-bearing str / a BLANK str — the last one refused by
+    # `_writable_container_id`, see `_unwritable_shape`), so the "true cause"
+    # claim holds for every value `_writable_id` refuses. Asserting
+    # "NUL/lone-surrogate bearing" for a non-str id was false for a live journal
+    # shape (#8840 review P3).
+    #
+    # ⛔ THE CONSEQUENCE IS CONDITIONAL TOO (#9553 review). 21 of this reporter's
+    # 26 call sites do not drop the record — they refuse ONE derived edge or stub
+    # AFTER the record itself was written (`_link_session` is one: the Point is in
+    # the graph and only the CONTAINS edge is missing). A sentence asserting "the
+    # record is dropped" at those sites is the #8018 class this module cites
+    # throughout, and it contradicted `consistency`'s own `reason` for the same
+    # skip. `drops_record` is the caller's declaration; the message now reads it.
     logger.warning(
-        "%s#7369/#8702: skipping %s — %s; the record is dropped rather "
-        "than reaching FalkorDB and aborting a replay that has already wiped "
-        "the graph%s",
+        "%s#7369/#8702: skipping %s — %s; %s%s",
         f"{where}: " if where else "", what, entry.describe(),
+        "the record is dropped rather than reaching FalkorDB and aborting a "
+        "replay that has already wiped the graph"
+        if drops_record else
+        "the record still folds — only this derived edge/stub is missing",
         f" (event_id={event_id})" if event_id else "",
     )
 
