@@ -200,32 +200,35 @@ async def test_the_real_recall_tool_is_classified_through_its_wider_payload(
 
 
 @pytest.mark.asyncio
-async def test_a_plain_dict_refusal_is_still_recorded_ok_this_is_the_boundary(
+async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
         events, stdio):
-    """SCOPE, pinned: this fix covers `_SafeError` payloads, not plain dicts.
+    """WHY #9084 had to move the producers, not the seam.
 
-    The issue's second sample — `tortoise_recall`'s unrecognised-mode refusal —
-    is measured HERE as what it actually is: a PLAIN dict built by the tool body
-    (``mcp_server.py::tortoise_recall``), NOT an `_SafeError`. It belongs to a
-    separate producer class (40+ tool-level refusals) and is deliberately out of
-    this fix's scope: that class cannot be discriminated by key presence without
-    re-creating the #3926 defect, so it needs the refusals to BE `_SafeError`s.
+    Since #9084 the tool surface answers a refusal with an `_SafeError`
+    (`tests/test_mcp_refusal_telemetry_9084.py` pins that, per tool). This test
+    pins the seam's OTHER half, which did not change: a payload that is NOT an
+    `_SafeError` still reads ``ok`` even when it carries an ``error`` key.
 
-    Tracked as #9084. This test exists so the boundary is visible rather than
-    implied, and it will be deleted (not fixed) when that issue lands — the
-    recording already hangs off the type, so converting the refusals to
-    `_SafeError` is all that takes.
+    That is deliberate, not a residual. The seam cannot key on ``"error" in
+    payload`` — a *successful* write returns the created node's own props and a
+    user prop may be literally named ``error`` (#3926, pinned in the next test).
+    There is no way to tell those two payloads apart AT THE SEAM, so the fix
+    belongs where the tool author chooses the payload shape. If a producer is
+    ever added that answers a refusal with a plain dict, THIS is the test that
+    explains why it reads ``ok`` — and
+    ``tests/test_mcp_refusal_telemetry_9084.py::test_no_tool_body_returns_a_plain_dict_refusal``
+    is the gate that refuses one.
     """
-    def plain_refusal() -> dict:
+    def plain_dict_tool() -> dict:
         return {"mode": "bogus",
                 "error": "recall mode 'bogus' not recognized — use state|gaps"}
 
-    await _call("_8135_plain", plain_refusal)
+    await _call("_8135_plain", plain_dict_tool)
 
     row = events[-1]
     assert row["status"] == "ok", (
-        "a plain-dict refusal is outside this fix's scope; if this now asserts "
-        f"exec_error, update the docstring's scope claim: {row}")
+        "the type, not key presence, is the discriminator (#3926) — a payload "
+        f"that is not an _SafeError must stay ok: {row}")
 
 
 @pytest.mark.asyncio

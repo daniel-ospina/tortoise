@@ -1020,6 +1020,14 @@ surfaces:
   # stale — matches no named pattern and falls to the `core` fallback. One
   # surface would leave the guard asleep on the other half of the diff.
   - test_mcp_safe_error_telemetry_8135.py
+  # #9084: the OTHER producer of the same false `ok` — a tool-level refusal the
+  # tool body answered with a plain dict (the unrecognised recall mode is one).
+  # Registered on `api` with its #8135 sibling because `tortoise/mcp_server.py`
+  # is a SHARED_MODULE and its changes select the full matrix anyway; this entry
+  # is what makes the producer gate RUN when a new refusal site is written. The
+  # `core` half is registered with the #8135 entry there (same consumer:
+  # `tortoise/activation_scorecard.py`'s LIMITATIONS text).
+  - test_mcp_refusal_telemetry_9084.py
   - test_metering.py
   - test_oauth_consent_pkce.py  # #3496: EXECUTES the MCP consent page's inline auth client (rendered by consent_page_html) under Node `vm` against the vendored supabase bundle — grant type actually used, PKCE verifier store routing, single-origin completion, refusal UX. Registered on `api` because the file it guards most (tortoise/oauth.py) selects that surface.
   - test_oauth_consent_bridge.py  # #3524: the consent identity bridge's spec guards — RFC 8414 `authorization_endpoint` stability (task 2), the four session-flow properties' confirmed anchors (task 3), the redirect-allowlist record covering the consent page's off-origin sign-in fallback (task 5). DUAL-REGISTERED with `onboarding` (see the entry there): `tortoise/oauth.py` + `tortoise/hosted_api.py` select `api`, but the task-3 half reads `website/apps/dashboard/functions/_shared/auth/token.ts`, and `website/apps/dashboard/functions/` is an `onboarding` SOURCE_PATTERN that does NOT select `api` (a named-surface match replaces the `core` fallback) — so an `api`-only registration leaves the token.ts guard asleep exactly when token.ts moves. It also reads `docs/` records, which the `onboarding` arm selects via the SOURCE_PATTERNS entries added with this fix.
@@ -2281,6 +2289,11 @@ surfaces:
   # LIMITATIONS text, which claimed a failed call cannot be told apart in the
   # series because `_safe` swallows the exception.
   - test_mcp_safe_error_telemetry_8135.py
+  # #9084: the tool-body refusal half of the same claim (with the `api` half —
+  # see there). `tortoise/activation_scorecard.py`'s LIMITATIONS text named that
+  # plain-dict class as still reading `ok`; this fix corrects it, so the pin has
+  # to run on a change to EITHER side.
+  - test_mcp_refusal_telemetry_9084.py
   # #6138: the queue-conflict census. Hermetic (no DB, no network — every live
   # read is injected through a fixture), so `core` can run it on engine-wide
   # changes; it pins tools/queue_conflict_census.py, the instrument that makes
@@ -5567,8 +5580,9 @@ tier1:
 # takes the docs-only early return — tier1 ONLY. The pin originally lived in
 # `tests/test_activation_scorecard.py`, which is registered on `api`/`core` and
 # NOT here, so it was asleep on the ONE change that can break it: re-introducing
-# "`ok` means only that the tool did not raise", or dropping the #9084
-# plain-dict clause, merged green. Fast, no-DB, one doc read (carried at the
+# "`ok` means only that the tool did not raise", or re-introducing the
+# pre-#9084 claim that a plain-dict tool refusal still reads `ok`, merged
+# green. Fast, no-DB, one doc read (carried at the
 # flat 2.0 default in the durations map), so tier1 is the correct lane. Pinned by
 # tests/test_ci_selection.py::test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff.
 - test_b7_runbook_ok_semantics_8135.py
@@ -7089,6 +7103,7 @@ durations:
   test_invites.py: 0.3
   test_joint_index_ingest.py: 0.5
   test_mcp_telemetry.py: 0.4
+  test_mcp_refusal_telemetry_9084.py: 3.0  # unmeasured — #9084 (#3400 trap): a file ADDED BY a PR has no CI junit measurement, because the refresher samples push-to-main runs only, so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host on 2026-10-22 at the PR head, docker-free embedded lane (`TORTOISE_TEST_CARVE_OUT=1`, `--junitxml`): **9 tests**, sum of `testcase/@time` = 1.24s, wall 2.66s. The 3.0 WEIGHT is the higher/conservative reading on purpose — it is the SHARD-LAYOUT input, not a publication of the local sum (#8098/#3429 convention); refresh from the first post-merge run that includes it. The tail must LEAD with `# unmeasured` or `tools/ci_timing.py::render_refreshed_manifest` preserves it verbatim through the first sweep (#8254 review P3).
   test_mcp_safe_error_telemetry_8135.py: 5.0  # unmeasured — #8135 (#3400 trap): a file ADDED BY a PR has no CI junit measurement, because the refresher samples push-to-main runs only, so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED on this host on 2026-10-19 at the PR head, docker-free embedded lane (`TORTOISE_TEST_CARVE_OUT=1`, `--junitxml`): **15 tests**, sum of `testcase/@time` = 3.21s, wall 6.02s. The 5.0 WEIGHT is kept as the higher/conservative reading on purpose — it is the SHARD-LAYOUT input, so the value is not "corrected" down to a local sum (the #8098/#3429 convention); refresh from the first post-merge run that includes it. The tail must LEAD with `# unmeasured` or `tools/ci_timing.py::render_refreshed_manifest` preserves it verbatim through the first sweep, leaving a stale local-basis note attached to a CI value (the #8254 review P3 finding).
   test_monitoring.py: 40.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 5.1
   test_cost_allocation.py: 20.3

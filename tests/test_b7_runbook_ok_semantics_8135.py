@@ -46,7 +46,17 @@ CORRECTED_CLAIM = 'means only that the dispatch neither raised nor returned a fa
 # The #9084 boundary, asserted as the CLAUSE rather than as a bare "#9084"
 # substring: a `#9084` mention anywhere in the file would satisfy a substring
 # check while the plain-dict clause it stands for was deleted (review P3).
-PLAIN_DICT_CLAUSE = 'a tool-level refusal returned as a **plain dict**'
+#
+# ⚠️ REVERSED when #9084 landed. While #9084 was open this clause was asserted
+# PRESENT ("one failure class does still read `ok`"); the issue closed that
+# class on the producers, so the same sentence is now STALE and is asserted
+# ABSENT — an operator who read it would filter on `status` to find "the rows
+# that still read ok" and believe the filter was complete.
+STALE_PLAIN_DICT_CLAIM = 'a tool-level refusal returned as a **plain dict**'
+
+# The post-#9084 statement, asserted PRESENT.
+CLOSED_REFUSAL_CLAIM = ('since #9084 a tool-level refusal is answered as an '
+                       '`_SafeError` and recorded')
 
 
 def _flat_runbook() -> str:
@@ -77,13 +87,16 @@ def test_the_runbook_states_the_meaning_of_ok_the_emitter_has() -> None:
         "the runbook must state that `ok` means the dispatch NEITHER raised NOR "
         "returned a failure `_safe` swallowed (#8135)"
     )
-    assert PLAIN_DICT_CLAUSE in flat, (
-        "the runbook must name the class that still reads `ok` — a tool-level "
-        "refusal returned as a plain dict (#9084) — or an operator will read a "
-        "`status` filter as complete"
+    assert STALE_PLAIN_DICT_CLAIM not in flat, (
+        "the runbook still says a tool-level refusal returned as a plain dict "
+        "reads `ok`. That class is closed (#9084): the tool bodies answer a "
+        "refusal with an `_SafeError`, so the row is `exec_error`/`safe_error` "
+        "like every other refusal"
     )
-    assert "#9084" in flat, (
-        "the plain-dict clause must carry the #9084 pointer that tracks it"
+    assert CLOSED_REFUSAL_CLAIM in flat, (
+        "the runbook must state that a tool-level refusal is recorded as a "
+        "failure since #9084 — otherwise an operator reads `status == ok` as "
+        "excluding only the `_safe` class"
     )
 
 

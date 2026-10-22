@@ -115,9 +115,12 @@ instant. If you change one leg's bounds, the other must move with it.
 "ok"` means only that the dispatch neither raised nor returned a failure `_safe`
 swallowed — since #8135 such a call is recorded `status: 'exec_error'` /
 `error_kind: 'safe_error'` — and a search that returned zero points is still
-`ok`. One failure class does still read `ok`: a tool-level refusal returned as a
-**plain dict** rather than through `_safe` (the unrecognised recall mode is one),
-which is tracked in #9084. Do not filter on `status` to find those rows.
+`ok`. The one class that still read `ok` while #9084 was open — a tool-level
+refusal the tool body answered with a plain dict — is CLOSED: since #9084 a
+tool-level refusal is answered as an `_SafeError` and recorded `exec_error` /
+`safe_error` like every other refusal, and a gate on the producers (not a
+`status` filter) keeps it closed. Do not read a `status` filter as "the
+retrieval answered".
 
 **`recall_returned` is a RETURN, not an answer.** Since #3675 the
 `mcp_tool_call` props carry `result_count` — the number of items the call

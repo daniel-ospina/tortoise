@@ -2168,7 +2168,7 @@ def tortoise_create_point(kind: str, content: str,
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     merged = dict(props or {})
     if authoredBy:
         merged["authoredBy"] = authoredBy
@@ -2179,10 +2179,12 @@ def tortoise_create_point(kind: str, content: str,
     tags = merged.get("tags") or []
     if isinstance(tags, list):
         if len(tags) > MAX_TAGS_PER_POINT:
-            return {"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})", "code": ERR_QUOTA}
+            return _SafeError({"error": f"tags exceed the cap ({MAX_TAGS_PER_POINT})",
+                               "code": ERR_QUOTA})
         for t in tags:
             if not isinstance(t, str) or not t.strip() or len(t) > 200:
-                return {"error": f"invalid tag value: {t!r} (must be a non-empty string ≤ 200 chars)"}
+                return _SafeError({"error": f"invalid tag value: {t!r} (must be a "
+                                            f"non-empty string ≤ 200 chars)"})
     merged["dedup"] = dedup
     result = _safe(_quota_gated(_get_org_sdk().create_point, "points", abuse_weight=1), kind, content, **merged)
     # #3926: gate on the typed failure result, never on key presence — a user
@@ -2271,11 +2273,11 @@ def tortoise_query(kind: str | None = None,
     """
     filters = _parse(filters)
     if page is not None and page < 1:
-        return {"error": "page must be >= 1 (1-based), got " + str(page)}
+        return _SafeError({"error": "page must be >= 1 (1-based), got " + str(page)})
     if offset is not None and offset < 0:
-        return {"error": "offset must be >= 0, got " + str(offset)}
+        return _SafeError({"error": "offset must be >= 0, got " + str(offset)})
     if limit is not None and limit < 1:
-        return {"error": "limit must be >= 1, got " + str(limit)}
+        return _SafeError({"error": "limit must be >= 1, got " + str(limit)})
     # Resolve include_retracted (#888): explicit param wins; else the filters-dict
     # value (don't silently drop a caller's True intent — review P2-2); else False.
     # Guard non-dict filters: a malformed-JSON string from _parse passes the substring
@@ -2314,7 +2316,8 @@ def tortoise_query(kind: str | None = None,
                 "hasMore": eff_offset + eff_limit < total}
     if text:
         if paginated:
-            return {"error": "offset/page not supported with text — use limit only, or tortoise_search"}
+            return _SafeError({"error": "offset/page not supported with text — "
+                                        "use limit only, or tortoise_search"})
         return _safe(_get_org_sdk().tortoise_fts_query, text, kind=kind,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
@@ -2439,8 +2442,8 @@ def tortoise_packs_list() -> list[dict]:
     # introspection — pack state is per-tenant. (stdio/selfhost keeps the
     # base SDK: single-tenant, the base graph IS the tenant.)
     if _current_org_id.get() is None and _transport_mode.get() == "http":
-        return {"error": "Authentication required. No team context.",
-                "code": ERR_UNAUTHORIZED}
+        return _SafeError({"error": "Authentication required. No team context.",
+                           "code": ERR_UNAUTHORIZED})
     from tortoise.pack_state import get_tenant_packs
     return _safe(lambda: get_tenant_packs(_get_org_sdk()))
 
@@ -2467,15 +2470,15 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
 
     from tortoise.pack_manifest_store import upsert_tenant_manifest
     if _sys.modules.get("tortoise.hosted_api") is None:
-        return {
-            "installed": False,
-            "error": "tortoise_pack_install is HOSTED-only — on self-host add "
-                      "custom packs via the filesystem packs dir "
-                      "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
-        }
+        return _SafeError({
+                       "installed": False,
+                       "error": "tortoise_pack_install is HOSTED-only — on self-host add "
+                                 "custom packs via the filesystem packs dir "
+                                 "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
+                   })
     if _transport_mode.get() != "http":
-        return {"installed": False,
-                "error": "pack install requires the HTTP transport."}
+        return _SafeError({"installed": False,
+                           "error": "pack install requires the HTTP transport."})
     try:
         record = upsert_tenant_manifest(_get_org_sdk(), manifest_yaml)
     except ValueError as e:
@@ -2674,11 +2677,11 @@ def tortoise_recall(query: str | None = None,
     "edges": [...], "stats": {...}}.
     """
     if mode not in _RECALL_MODES:
-        return {
-            "mode": mode,
-            "error": f"recall mode {mode!r} not recognized — use "
-                     f"state|gaps|subgraph|custom.",
-        }
+        return _SafeError({
+                       "mode": mode,
+                       "error": f"recall mode {mode!r} not recognized — use "
+                                f"state|gaps|subgraph|custom.",
+                   })
 
     if mode == "gaps":
         results = _safe(
@@ -2837,9 +2840,9 @@ def tortoise_dream(full: bool = False, dirty_only: bool = True,
     # exceptions into plain error dicts) — unknown mode → ERR_INVALID
     # (E2E-8.3 convention — named valid values in the message).
     if mode is not None and mode not in ("local", "stale-first", "full"):
-        return {"error": (
-            f"unknown dream mode {mode!r} — expected one of "
-            "'local', 'stale-first', 'full'"), "code": ERR_INVALID}
+        return _SafeError({"error": (
+                       f"unknown dream mode {mode!r} — expected one of "
+                       "'local', 'stale-first', 'full'"), "code": ERR_INVALID})
     return _safe(_get_org_sdk().dream, dirty_only=dirty_only, full=full,
                  max_hops=max_hops,
                  require_calibration=require_calibration,
@@ -2861,7 +2864,7 @@ def tortoise_update_point(id: str, props: Any) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().update_point, "points"), id, **(props or {}))
 
 def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
@@ -2893,8 +2896,9 @@ def tortoise_create_operator(op_type: str, source_id: str, target_ids: Any,
     # #329 batch cap on operator target fan-out
     from tortoise.quota import MAX_OPERATOR_TARGETS
     if isinstance(target_ids, list) and len(target_ids) > MAX_OPERATOR_TARGETS:
-        return {"error": f"create_operator target_ids exceed the cap ({MAX_OPERATOR_TARGETS})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"create_operator target_ids exceed the cap "
+                                    f"({MAX_OPERATOR_TARGETS})",
+                           "code": ERR_QUOTA})
     return _safe(_quota_gated(_get_org_sdk().create_operator, "points", abuse_weight=1), op_type, source_id, target_ids,
                  direction=direction, semantics=semantics)
 
@@ -2972,11 +2976,13 @@ def tortoise_file_decision(options: Any, evidence: Any,
     # #329 batch caps
     from tortoise.quota import MAX_FILE_DECISION_EVIDENCE, MAX_FILE_DECISION_OPTIONS
     if isinstance(options, list) and len(options) > MAX_FILE_DECISION_OPTIONS:
-        return {"error": f"file_decision options exceed the cap ({MAX_FILE_DECISION_OPTIONS})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"file_decision options exceed the cap "
+                                    f"({MAX_FILE_DECISION_OPTIONS})",
+                           "code": ERR_QUOTA})
     if isinstance(evidence, list) and len(evidence) > MAX_FILE_DECISION_EVIDENCE:
-        return {"error": f"file_decision evidence exceeds the cap ({MAX_FILE_DECISION_EVIDENCE})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"file_decision evidence exceeds the cap "
+                                    f"({MAX_FILE_DECISION_EVIDENCE})",
+                           "code": ERR_QUOTA})
     result = _safe(_quota_gated(_get_org_sdk().file_decision, "points",
                           abuse_weight=lambda r, a, k: 1 + len(a[0] or []) + len(a[1] or [])), options, evidence, choice)
     # #3926: gate on the typed failure result, never on key presence.
@@ -3232,8 +3238,9 @@ def tortoise_checkpoint(items: Any,
     # #329 batch cap: a single checkpoint call must not create unbounded nodes
     from tortoise.quota import MAX_CHECKPOINT_ITEMS
     if isinstance(items, list) and len(items) > MAX_CHECKPOINT_ITEMS:
-        return {"error": f"checkpoint items exceed the batch cap ({MAX_CHECKPOINT_ITEMS})",
-                "code": ERR_QUOTA}
+        return _SafeError({"error": f"checkpoint items exceed the batch cap "
+                                    f"({MAX_CHECKPOINT_ITEMS})",
+                           "code": ERR_QUOTA})
     return _safe(_quota_gated(_get_org_sdk().checkpoint, "points",
                           abuse_weight=lambda r, a, k: int((r or {}).get("filed") or 0)), items,
                  agent_name=agent_name, threshold=threshold)
@@ -3610,7 +3617,7 @@ def tortoise_create_entity(type: str, name: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_entity, "points"),
                  type, name, **(props or {}))
 
@@ -3623,7 +3630,7 @@ def tortoise_update(id: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().update, "points"),
                  id, **(props or {}))
 
@@ -3657,18 +3664,18 @@ def tortoise_operator_action(action: str, id: str, reason: str | None = None,
     """
     if action == "mitigate":
         if not reason:
-            return {"error": "operator_action(action='mitigate') requires 'reason'"}
+            return _SafeError({"error": "operator_action(action='mitigate') requires 'reason'"})
         return _safe(_quota_gated(_get_org_sdk().mitigate_operator, "points", abuse_weight=1),
                      id, reason, strength)
     if action == "annotate":
         dims = (bias, precision, consistency, directness)
         if any(d is None for d in dims):
-            return {"error": "operator_action(action='annotate') requires "
-                              "bias, precision, consistency, directness"}
+            return _SafeError({"error": "operator_action(action='annotate') requires "
+                                         "bias, precision, consistency, directness"})
         return _safe(_quota_gated(_get_org_sdk().annotate_operator, "points"),
                      id, *dims)
-    return {"error": f"operator_action: unknown action {action!r} — "
-                      f"must be 'mitigate' or 'annotate'"}
+    return _SafeError({"error": f"operator_action: unknown action {action!r} — "
+                                 f"must be 'mitigate' or 'annotate'"})
 
 
 def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> dict:
@@ -3676,7 +3683,7 @@ def tortoise_create_subject(name: str, subjectKind: str, props: Any = None) -> d
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_subject, "points"), name, subjectKind, **(props or {}))
 
 def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dict:
@@ -3684,7 +3691,7 @@ def tortoise_create_object(name: str, objectKind: str, props: Any = None) -> dic
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_object, "points"), name, objectKind, **(props or {}))
 
 def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
@@ -3692,7 +3699,7 @@ def tortoise_create_event(name: str, eventKind: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_event, "points"), name, eventKind, **(props or {}))
 
 
@@ -3734,8 +3741,8 @@ def tortoise_index_files(directory: str, corpus_name: str | None = None,
     if _transport_mode.get() == "http":
         return _http_excluded_error()
     if not os.path.isdir(directory):
-        return {"error": f"Directory not found: {directory!r}. Provide a valid "
-                         f"path to a directory containing .md files."}
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid "
+                                    f"path to a directory containing .md files."})
     return _safe(_quota_gated(_get_org_sdk().index_directory, "points"),
                  directory, corpus_name=corpus_name,
                  extract_metadata=extract_metadata)
@@ -3767,7 +3774,7 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
@@ -3782,7 +3789,7 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
     props = _parse(props) or {}
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     # tier/sourceDate are first-class kwargs (#398) — pop from props if a legacy
     # caller passed them there (kwarg wins; avoids TypeError on splat).
     props.pop("tier", None)
@@ -3853,7 +3860,7 @@ def tortoise_update_entity(id: str, props: Any = None) -> dict:
     props = _parse(props)
     _reject = _reject_server_managed_props(props)
     if _reject:
-        return {"error": _reject, "code": ERR_INVALID}
+        return _SafeError({"error": _reject, "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().update_entity, "points"), id, **(props or {}))
 
 def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
@@ -3917,14 +3924,14 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     if bundle is None:
         bundle = {}
     if not isinstance(bundle, dict):
-        return {"error": "bundle must be a dict with points/entities/sources/"
-                          "connections sections", "code": ERR_INVALID}
+        return _SafeError({"error": "bundle must be a dict with points/entities/sources/"
+                                     "connections sections", "code": ERR_INVALID})
     if granularity not in INGEST_GRANULARITIES:
-        return {"error": f"granularity must be 'bulk' or 'granular', got "
-                          f"{granularity!r}", "code": ERR_INVALID}
+        return _SafeError({"error": f"granularity must be 'bulk' or 'granular', got "
+                                     f"{granularity!r}", "code": ERR_INVALID})
     if promotion_policy not in INGEST_PROMOTION_POLICIES:
-        return {"error": f"promotion_policy must be 'gated' or 'auto', got "
-                          f"{promotion_policy!r}", "code": ERR_INVALID}
+        return _SafeError({"error": f"promotion_policy must be 'gated' or 'auto', got "
+                                     f"{promotion_policy!r}", "code": ERR_INVALID})
     # Row-9 guard — the same reader and per-door depth as the SDK's
     # `_check_gated_status` (#7925): under gated, points must stay draft — ANY
     # effective status other than the exact canonical "draft" (top-level or
@@ -3933,13 +3940,13 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
         bad = _first_non_draft_status(bundle.get("points"))
         if bad is not None:
             i, st = bad
-            return {"error": f"points[{i}] status:{st!r} is not allowed "
-                              f"under promotion_policy 'gated' — under "
-                              f"gated points stay draft; pass "
-                              f"promotion_policy='auto' for explicit live, "
-                              f"or keep draft and promote via "
-                              f"update_point(status='live')",
-                    "code": ERR_INVALID}
+            return _SafeError({"error": f"points[{i}] status:{st!r} is not allowed "
+                                         f"under promotion_policy 'gated' — under "
+                                         f"gated points stay draft; pass "
+                                         f"promotion_policy='auto' for explicit live, "
+                                         f"or keep draft and promote via "
+                                         f"update_point(status='live')",
+                               "code": ERR_INVALID})
     return _safe(_quota_gated(_get_org_sdk().ingest, "points",
                           abuse_weight=lambda r, a, k: int(((r or {}).get("created") or {}).get("points") or 0)),
                  bundle, granularity=granularity, promotion_policy=promotion_policy)
@@ -4173,7 +4180,8 @@ def tortoise_overview(section: str | None = None,
             combined[sec] = result
         return combined
     if not isinstance(section, str):
-        return {"error": f"overview: section must be a string, got {type(section).__name__}"}
+        return _SafeError({"error": f"overview: section must be a string, got "
+                                    f"{type(section).__name__}"})
     return _overview_section(section.strip().lower(), entity_id, days, limit)
 
 
@@ -4283,8 +4291,8 @@ def tortoise_mine_conversations(transcript: str | None = None,
         return _safe(sdk.mine_corpus, corpus_dir,
                      extract_entities=extract_entities)
     if not transcript or not source_id:
-        return {"error": "transcript= and source_id= are required "
-                         "(or corpus_dir= for a batch)"}
+        return _SafeError({"error": "transcript= and source_id= are required "
+                                    "(or corpus_dir= for a batch)"})
     try:
         from tortoise.api import EventAPI  # noqa: I001
         from tortoise.log import EventLog
@@ -4303,7 +4311,7 @@ def tortoise_mine_conversations(transcript: str | None = None,
         api = EventAPI(log, initiated_by="extractor", agent_id="mcp",
                        projection=sdk._get_proj())
     except Exception as exc:
-        return {"error": f"mine setup failed: {exc}"}
+        return _SafeError({"error": f"mine setup failed: {exc}"})
     return _safe(mine_conversation, transcript, source_id, api,
                  extract_entities=extract_entities,
                  content_dedup=content_dedup,
@@ -4535,7 +4543,7 @@ def tortoise_onboarding_demo_create() -> dict:
     from tortoise.hosted_api import _seed_demo_graph
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     # C5 #2114 (re-review 3): the demo seeds the org's DEFAULT graph —
     # graph-bound keys rejected (REST twin public_demo parity).
     _reject_graph_bound_mcp_org_surface("demo seed")
@@ -4581,7 +4589,7 @@ def tortoise_onboarding_seed(org_name: str | None = None,
     _reject_graph_bound_mcp_org_surface("onboarding seed")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     from tortoise.hosted_api import (
         HTTPException as _HTTPException,
     )
@@ -4596,10 +4604,10 @@ def tortoise_onboarding_seed(org_name: str | None = None,
     except _HTTPException as exc:
         # 503 graph-down (fail-loud FLOW write) etc. — surfaced honestly,
         # never a silent skip (agent retries when the graph is back).
-        return {"error": str(exc.detail),
-                "status": getattr(exc, "status_code", 500)}
+        return _SafeError({"error": str(exc.detail),
+                           "status": getattr(exc, "status_code", 500)})
     except Exception as exc:  # pragma: no cover - defensive
-        return {"error": f"seed failed: {exc}"}
+        return _SafeError({"error": f"seed failed: {exc}"})
 
 
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
@@ -5173,7 +5181,7 @@ def tortoise_manage_sources(action: str,
     _reject_graph_bound_mcp_org_surface("manage sources")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
 
     act = (action or "").strip().lower()
     if act == "list":
@@ -5182,16 +5190,16 @@ def tortoise_manage_sources(action: str,
         # A refusal is an ATTEMPT too (attributability): it is logged, not just
         # returned, so a caller probing for a write path leaves a record.
         _log_source_change(org_id, source or "?", str(action), "refused_action")
-        return {
-            "error": f"action must be one of list|enable|disable; got {action!r}"
-        }
+        return _SafeError({
+                       "error": f"action must be one of list|enable|disable; got {action!r}"
+                   })
     if source not in _SOURCE_ROSTER:
         _log_source_change(org_id, str(source), act, "refused_source")
-        return {
-            "error": (
-                f"source must be one of {sorted(_SOURCE_ROSTER)}; got {source!r}"
-            )
-        }
+        return _SafeError({
+                       "error": (
+                           f"source must be one of {sorted(_SOURCE_ROSTER)}; got {source!r}"
+                       )
+                   })
     return _set_source_state(source, act == "enable")
 
 
@@ -5204,7 +5212,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     _reject_graph_bound_mcp_org_surface("github connect")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     import secrets  # noqa: I001
     from urllib.parse import urlencode
     import os as _os
@@ -5214,7 +5222,7 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
         # In self-host HTTP the env never exists — match the prompt's documented
         # recovery anchor instead of the misleading "OAuth not configured".
         # (hosted_api.py REST endpoints keep the 503 ops signal.)
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     state = secrets.token_urlsafe(24)
     # Store CSRF state so the callback can validate it (P2 review fix) —
     # must be visible to the REST callback handler in the same process.
@@ -5238,7 +5246,7 @@ def tortoise_onboarding_github_status() -> dict:
     _reject_graph_bound_mcp_org_surface("github status")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     # Follows the hosted seam (plan Task 6): Supabase orgs row via the
     # service-role control plane in Supabase mode, registry for selfhost.
     from tortoise.hosted_api import _github_credentials
@@ -5251,7 +5259,7 @@ def tortoise_onboarding_github_status() -> dict:
         # selfhost operators aren't misled (code-review P2, PR #861).
         from tortoise.supabase_control import is_supabase_enabled
         plane = "Supabase control plane" if is_supabase_enabled() else "registry"
-        return {"error": f"{plane} unavailable"}
+        return _SafeError({"error": f"{plane} unavailable"})
     except Exception:
         return {"connected": False, "org": None, "repos_count": None}
     if not enc:
@@ -5449,10 +5457,10 @@ def tortoise_session_capture(conversation: list[dict],
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
         # local fallback that bypasses the server-enforced capture gates.
-        return {"error": "session capture requires hosted mode — the "
-                          "tortoise_session_capture tool files to Tortoise "
-                          "Cloud (server-enforced recording + receipts); "
-                          "self-hosted stdio capture is not available."}
+        return _SafeError({"error": "session capture requires hosted mode — the "
+                                     "tortoise_session_capture tool files to Tortoise "
+                                     "Cloud (server-enforced recording + receipts); "
+                                     "self-hosted stdio capture is not available."})
     from tortoise.session_attribution import (
         derive_machine_id,
         sanitize_attribution_field,
@@ -5514,7 +5522,7 @@ def tortoise_session_capture(conversation: list[dict],
                               machine_id=machine_id, model=model)
     except Exception as e:
         # Pydantic 422-equivalent (invalid harness / conversation shape).
-        return {"error": f"invalid capture payload: {e}", "status": 422}
+        return _SafeError({"error": f"invalid capture payload: {e}", "status": 422})
     try:
         import asyncio
         # #3060: the SAME admission reservation as the REST endpoint. This
@@ -5632,17 +5640,17 @@ def tortoise_graph_set_recording(recording: bool | None,
         # stdio / self-host HTTP: the per-graph override is control-plane
         # state with no local registry row to write — honest error, never a
         # silent local no-op (capture-tool parity).
-        return {"error": "graph recording is a hosted control-plane "
-                           "setting — requires hosted mode"}
+        return _SafeError({"error": "graph recording is a hosted control-plane "
+                                      "setting — requires hosted mode"})
     gid = graph_id or (_current_graph_id.get() or "default")
     # Permission gate mirrors the REST PATCH key branch: team:manage (or
     # the legacy full-access class). Graph data scopes alone 403.
     scopes = _current_scopes.get()
     legacy = bool(_current_legacy_full_access.get())
     if not (legacy or scopes is None or "team:manage" in (scopes or [])):
-        return {"error": "Missing team:manage scope — per-graph recording "
-                           "is a team-management setting (mirror of "
-                           "PATCH /v1/graphs/{graph_id})", "status": 403}
+        return _SafeError({"error": "Missing team:manage scope — per-graph recording "
+                                      "is a team-management setting (mirror of "
+                                      "PATCH /v1/graphs/{graph_id})", "status": 403})
     from tortoise.hosted_api import (
         GraphRecordingPatch,
         _apply_graph_recording_override,
@@ -5658,8 +5666,8 @@ def tortoise_graph_set_recording(recording: bool | None,
         # Strict bool/null (no truthy-string coercion) — REST body parity.
         body = GraphRecordingPatch(recording=recording)
     except Exception as e:
-        return {"error": f"recording must be true, false or null ({e})",
-                "status": 422}
+        return _SafeError({"error": f"recording must be true, false or null ({e})",
+                           "status": 422})
     try:
         import asyncio
         return asyncio.run(
@@ -5667,7 +5675,7 @@ def tortoise_graph_set_recording(recording: bool | None,
     except Exception as e:
         status = getattr(e, "status_code", 500)
         detail = getattr(e, "detail", str(e))
-        return {"error": str(detail), "status": status}
+        return _SafeError({"error": str(detail), "status": status})
 
 
 def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
