@@ -1,5 +1,5 @@
 -- ============================================================================
--- Migration 20261022000001: IndexNow submission stamp on blog_posts — #9680
+-- Migration 20261023000001: IndexNow submission stamp on blog_posts — #9680
 --
 -- IndexNow (#9680) notifies Bing / Yandex / Seznam / Naver / Amazon / Yep when an
 -- article is published. ⛔ It does NOT reach Google — Google does not consume
