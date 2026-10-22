@@ -6429,12 +6429,15 @@ durations:
   # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
   test_6211_ep_result_shape.py: 19.0
   test_6211_ep_scale.py: 19.0
-  # #6211 (hop anchoring): locally measured on this host, whole file, 7 tests /
-  # 5.4-7.6 s (it builds an 8k-edge fixture and profiles one hop). The count is
+  # #6211 (hop anchoring): locally measured on this host, whole file, 8 tests /
+  # 5.6-9.0 s (6 readings; the spread is fleet load. It builds an 8k-edge
+  # fixture and profiles one hop; the 8th test,
+  # #9304's journal-read plan pin, builds its own 5-node fixture). The count is
   # re-derived at every revision, never carried forward — an earlier revision of
   # this row read "5 tests" for a file that already defined six, and
   # `tests/test_6211_ep_anchor.py::test_the_records_that_state_this_files_size_are_true`
-  # now pins the count against the file's own `def test_` list (#9282 review).
+  # now pins the count against the file's own `def test_` list (#9282 review;
+  # it reddened for #9304's added test, which is how this line was re-derived).
   # The 9.0 weight is KEPT rather than raised: a 14.1 s whole-file reading was
   # also taken, but on a host under fleet load (the same class of reading the
   # #8098/#3429 rows record and deliberately do not adopt), and the weight is a

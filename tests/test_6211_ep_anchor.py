@@ -25,8 +25,9 @@ WHAT IS PINNED HERE, and why each test is discriminating:
    queries the four captured entry points of ``ep.py`` actually EMIT (captured
    off the graph handle, not re-written in the test) plan through ``Node By
    Index Scan`` and contain no ``Node By Label Scan``. (``run()``'s own
-   evidence-prewrite journal read is not captured and is not index-planned —
-   it names no label, so no per-label index can anchor it; #9304.) Measured
+   evidence-prewrite journal read is not reached by this capture — the four
+   entry points below never call ``run()`` — so it is pinned by its own
+   ``run()`` capture, item 5.) Measured
    discriminating power, per site: removing
    the barrier reddens it at the seed neighbourhood, the plain-seed direct-edge
    expansion, the bridge hop, Batch 1 and — in the selector test — all four
@@ -63,7 +64,20 @@ WHAT IS PINNED HERE, and why each test is discriminating:
    Measured ``All Node Scan (t)`` at 242.5 ms -> ``Node By Index Scan (op)``
    at 12.6 ms on the same fixture, and 1.4-1.5 s -> under 0.1 s for the whole
    selection (best of 3).
-5. ``test_the_records_that_state_this_files_size_are_true`` — the manifest row
+5. ``test_the_evidence_prewrite_journal_read_is_planned_as_an_index_read`` —
+   #9304: the pass's LAST unanchored id-set leg, and the one that is not a
+   ``WITH *`` barrier fix. The evidence pre-write's journal read was a
+   LABEL-FREE disjunction (``MATCH (n) WHERE (n:Point OR …) AND n.id IN $ids``),
+   and a label-free match has no per-``(label, property)`` index to anchor on,
+   so it was planned ``All Node Scan | (n)`` with the id predicate applied per
+   record — cost tracking the GRAPH. It is now a per-label sweep anchored by
+   the label+id pattern (``Node By Index Scan``), and #7853's "a
+   ``:Point:Object`` node is journaled exactly ONCE" is carried by a node-keyed
+   dedupe over the swept rows instead of by the label-free form. Both halves
+   are asserted on a 5-node ``run()`` fixture: the PLAN of every journal read,
+   and the ROWS (non-baseline evidence ids once each, the double-labelled id
+   once rather than twice, the baseline'd id and the absent id not at all).
+6. ``test_the_records_that_state_this_files_size_are_true`` — the manifest row
    that carries this file's ``durations`` weight states its test COUNT in the
    comment above it, and that count was wrong when it was written (#9282
    review): a measured row whose stated count does not match what was measured
