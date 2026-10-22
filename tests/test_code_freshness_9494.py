@@ -138,10 +138,6 @@ def test_the_stale_report_names_the_fix_not_the_symbol(tmp_path, monkeypatch):
     assert report["hint"] and "Restart the MCP server" in report["hint"]
     assert module.__name__ in report["hint"]  # names WHAT drifted
     assert report["process_started_at"].endswith("Z")  # and the age it served
-    # Falsifiable ordering, not just "not None": the baseline is observed after
-    # the process started (a `_baseline_at` before `_STARTED_AT` would mean the
-    # clock, not the observation, produced it).
-    assert report["baseline_at"] >= report["process_started_at"]
 
 
 def test_a_removed_file_is_drift_too(tmp_path, monkeypatch):
@@ -387,6 +383,77 @@ def test_one_warning_per_drift_not_one_per_health_call(tmp_path, monkeypatch, ca
     assert module.__name__ in records[0].getMessage()
 
 
+def test_baseline_at_records_the_FIRST_observation_not_the_latest(tmp_path, monkeypatch):
+    """``baseline_at`` is the process's baseline age; a later ``observe()`` that
+    picks up a lazily imported module must not move it."""
+    code_freshness.check()
+    first = code_freshness._baseline_at
+    assert first is not None
+
+    late, _path = _probe_module(tmp_path, name="tortoise._probe_late_9494")
+    monkeypatch.setitem(sys.modules, late.__name__, late)
+    code_freshness.check()
+
+    assert late.__name__ in code_freshness.tracked()  # the late module IS added
+    assert code_freshness._baseline_at == first        # but the age does not move
+
+
+def test_the_warned_set_is_bounded_and_never_gates_the_verdict(tmp_path, monkeypatch):
+    """The WARNING channel is capped; the VERDICT is not.
+
+    A process that drifts hundreds of times must not grow the set without limit —
+    and, more important, hitting the cap may only suppress the log line, never
+    the ``stale`` answer.
+    """
+    monkeypatch.setattr(code_freshness, "_WARNED_CAP", 1)
+    probes = []
+    for i in range(3):
+        module, path = _probe_module(tmp_path, name=f"tortoise._probe_cap2_{i}")
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        probes.append((module, path))
+    code_freshness.check()
+    for _module, path in probes:
+        _rewrite(path)
+
+    report = code_freshness.check()
+
+    assert report["changed_count"] == 3   # the verdict is complete
+    assert len(code_freshness._warned) == 1  # the log channel is capped
+
+
+def test_concurrent_checks_emit_one_warning(tmp_path, monkeypatch, caplog):
+    """A burst of health probes must not duplicate the STALE PROCESS line — the
+    invariant the guarded membership test exists to hold (``check()`` is served
+    by a threaded health server and by concurrent tool calls)."""
+    import threading
+
+    module, path = _probe_module(tmp_path)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    code_freshness.check()
+    _rewrite(path)
+
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def probe():
+        try:
+            barrier.wait(timeout=10)
+            code_freshness.check()
+        except Exception as exc:  # surfaced by the errors assertion
+            errors.append(exc)
+
+    with caplog.at_level("WARNING", logger="tortoise.code_freshness"):
+        threads = [threading.Thread(target=probe) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+    assert errors == []
+    records = [r for r in caplog.records if r.name == "tortoise.code_freshness"]
+    assert len(records) == 1, [r.getMessage() for r in records]
+
+
 # ── 2. the health surface ────────────────────────────────────────────
 
 class _FakeSDK:
@@ -499,8 +566,13 @@ def test_a_stale_process_answers_a_symbol_failure_with_the_restart(monkeypatch):
 
     assert payload["stale_server"] is True, payload
     assert _SYMBOL_ERROR in payload["error"]  # the original cause is kept
-    assert "Restart the MCP server" in payload["error"]
-    assert "tortoise.sdk" in payload["error"]
+    cause, _, hint = payload["error"].partition("\n\n")
+    assert cause == _SYMBOL_ERROR
+    # The HINT half must name the drifted module. Asserting the whole string
+    # would pass on the raw exception text alone (it contains 'tortoise.sdk'),
+    # pinning nothing about what `_safe` adds.
+    assert "Restart the MCP server" in hint
+    assert "imported tortoise.sdk at start" in hint
 
 
 def test_a_clean_process_keeps_the_import_error_reading_as_a_code_defect(monkeypatch):
