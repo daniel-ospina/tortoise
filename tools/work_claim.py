@@ -451,13 +451,15 @@ def canonical_key(key: str) -> str:
     already anticipates that split). So the shape is enforced at every boundary and the
     spelling is collapsed: lowercased, surrounding whitespace stripped.
 
-    The BODY is opaque, not numeric: the live legs mint a per-run `issue-<12 hex>` key on
+    The BODY is opaque, not numeric-only: the live legs mint a per-run `issue-<12 hex>` key on
     purpose (a fixed key let concurrent runs fence each other — see `_probe_key` in the test
-    file), so a numeric-only rule would delete that property, and a leading-zero rule would
-    reject a legitimate hex body one run in ~200. The numeric form is produced by
-    `normalise_key` from an int; a caller that invents a body has invented a DIFFERENT key,
-    which is a legitimate thing to do — what may not happen is two spellings of the SAME key
-    becoming two claims. `ValueError` is the caller's to turn into `EXIT_USAGE`.
+    file), so a numeric-ONLY rule would delete that property. But the one spelling class that
+    IS objectively decidable is collapsed: a decimal body normalises to its integer form, so
+    `issue-7` and `issue-007` are ONE claim (two ids for issue 7 is the same double grant this
+    function exists to remove). The numeric form is produced by `normalise_key` from an int; a
+    caller that invents a body has invented a DIFFERENT key, which is a legitimate thing to do
+    — what may not happen is two spellings of the SAME key becoming two claims. `ValueError`
+    is the caller's to turn into `EXIT_USAGE`.
     """
     text = (key or "").strip().lower()
     kind, sep, body = text.partition("-")
@@ -469,13 +471,21 @@ def canonical_key(key: str) -> str:
         or any(c.isspace() for c in body)
     ):
         raise ValueError(
-            f"claim key must be <issue|pr>-<body> (one '-', a non-empty body with no spaces), "
+            f"claim key must be <issue|pr>-<body> (a non-empty body with no spaces), "
             f"got {key!r} — the key is half of the claim identity, so a different spelling is "
             "a different claim"
         )
+    # The bound is checked BEFORE the decimal collapse: an absurd digit body would otherwise
+    # hit CPython's 4300-digit `int()` conversion limit and raise a DIFFERENT ValueError.
     if len(text) > MAX_KEY_LEN:
         raise ValueError(f"claim key {text!r} is longer than {MAX_KEY_LEN} characters")
-    return text
+    # Decimal collapse. It rejects nothing: a body carrying any non-digit — the live legs'
+    # `issue-<12 hex>` — is left exactly as minted, so per-run uniqueness survives (an
+    # all-digit probe body, (10/16)^12 ≈ 1 run in 280, normalises to its decimal form and is
+    # still unique).
+    if body.isascii() and body.isdigit():
+        body = str(int(body))
+    return f"{kind}-{body}"
 
 
 def claim_id(repo: str, key: str) -> str:

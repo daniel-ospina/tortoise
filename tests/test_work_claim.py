@@ -1324,13 +1324,17 @@ def test_the_documented_case_counts_match_what_this_file_collects():
     # the session URI GATE, it does not clear `TORTOISE_DB_URI`, and the live legs skip on URI
     # absence ALONE. So a hermetic command that merely inherits an exported URI reproduces
     # "90 passed", not "87 passed, 3 skipped" — the pin asserted the flag and stayed green on
-    # exactly the state where the documented output cannot occur.
+    # exactly the state where the documented output cannot occur. The SKIP clause is asserted
+    # as well: without it a line narrowed by `-k "not live"` satisfies the pin while no longer
+    # proving the skip.
     expected = [ln for ln in readme.splitlines() if "test_work_claim.py -q" in ln]
     assert expected, "the reproduction command is gone"
     hermetic_lines = [ln for ln in expected if f"# {hermetic} passed at this head" in ln]
     assert hermetic_lines, expected
     assert any(
-        "env -u TORTOISE_DB_URI" in ln and "TORTOISE_TEST_CARVE_OUT=1" in ln
+        "env -u TORTOISE_DB_URI" in ln
+        and "TORTOISE_TEST_CARVE_OUT=1" in ln
+        and f"{live_cases} skipped" in ln
         for ln in hermetic_lines
     ), expected
     assert not any("TORTOISE_DB_URI=" in ln for ln in expected), (
@@ -1585,6 +1589,17 @@ def test_claim_id_is_one_id_per_unit_of_work_whatever_the_spelling():
     assert wc.claim_id("daniel-ospina/tortoise", "ISSUE-5052") == canonical
     assert wc.claim_id("daniel-ospina/tortoise", "issue-5052 ") == canonical
     assert wc.claim_id("daniel-ospina/tortoise", " Issue-5052\t") == canonical
+    # ...including the one spelling class that is objectively decidable: a DECIMAL body.
+    # `issue-7` vs `issue-0007` was two ids — and two grants — for issue 7 (review round 3).
+    assert wc.claim_id("daniel-ospina/tortoise", "issue-0007") == wc.claim_id(
+        "daniel-ospina/tortoise", "issue-7"
+    )
+    assert wc.claim_id("daniel-ospina/tortoise", "PR-0005052") == wc.claim_id(
+        "daniel-ospina/tortoise", "pr-5052"
+    )
+    # ...while a NON-decimal body stays opaque: the live legs mint `issue-<12 hex>` per run and
+    # that uniqueness is what stops two concurrent runs fencing each other (#5084).
+    assert wc.canonical_key("issue-0a3f5c9d1b2e") == "issue-0a3f5c9d1b2e"
     # the digest is still a real digest: a DIFFERENT unit is a different id
     assert wc.claim_id("daniel-ospina/tortoise", "issue-5053") != canonical
     assert wc.claim_id("daniel-ospina/tortoise", "pr-5052") != canonical
@@ -1632,6 +1647,11 @@ def test_the_key_half_is_the_same_claim_through_the_library_entry_points():
     assert second.rc == wc.EXIT_HELD == 1, second
     assert second.status == "held", second
     assert second.owner == "cell-1:100", second
+    # ...and so is a ZERO-PADDED DECIMAL spelling of the same key (review round 3): pre-fix
+    # this was a second id, so it re-granted the unit and split the board in two.
+    padded = wc.acquire(store, _record(owner="cell-5:300", key="issue-0005052"), now=NOW)
+    assert padded.rc == wc.EXIT_HELD == 1, padded
+    assert padded.owner == "cell-1:100", padded
     # exactly one row exists, addressed by the canonical id
     assert list(store.points) == [wc.claim_id("daniel-ospina/tortoise", "issue-5052")]
     # `status` under a variant spelling reads that row (pre-fix: `free` — the answer a
