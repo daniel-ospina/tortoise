@@ -45,7 +45,10 @@ projection write and ``_upsert_source``'s ON MATCH arm had no ``ingestedAt``
 clause — same unjournaled-writer class, one writer upstream). #9451 closed it:
 the record carries the instant the write STORED (``#398`` never-overwrite — the
 earlier writer's when the stub pre-existed) and the ON MATCH arm applies it under
-the ``$stub_completion`` gate, so the whole-bag comparison below includes the key
+the ``$stub_completion AND $ingestedAtStored`` gate — the second half of that gate
+is what keeps a PRE-#9451 capture line (``_stub_completion`` set, no stored-instant
+marker) the no-op it always was, on both engines. So the whole-bag comparison
+below includes the key
 again (``REPLAY_RESIDUAL_KEYS`` is empty, and the named constant is kept so a
 future residual cannot slip in unremarked). Also outside this slice: the ``references`` (Source→Event) and
 ``CONTAINS`` (Session→derived Point) edges, which have no journal carrier at
