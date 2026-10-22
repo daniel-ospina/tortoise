@@ -27,10 +27,10 @@ So the proof here is deliberately not "the fold can write". It is:
    deployment), and the live path writes layer 1 (`journal_event`) from the
    ordinal the journal's own append reported — never a number it derives
    (#9190).
-4. **A loss is OBSERVABLE.** Two record shapes still cannot be projected because
+4. **A loss is OBSERVABLE.** One record shape still cannot be projected because
    the SCHEMA's column type disagrees with what the producer emits (measured
-   below). They are pinned by EQUALITY, so this file goes red the moment they
-   are fixed and the named-away pair must be re-measured — a permanent
+   below). It is pinned by EQUALITY, so this file goes red the moment it is
+   fixed and the named-away entry must be re-measured — a permanent
    exclusion could otherwise go stale in silence, which is the class of defect
    this epic exists to remove.
 
@@ -136,9 +136,7 @@ def tenant() -> tuple[str, str]:
 #:     `20261022000001_record_session_capture_redactions_integer.sql`, so the
 #:     entry and its detection are gone: every other counter on
 #:     `public.session` is `integer`, which made `jsonb` the anomaly rather than
-#:     a decision. The pin below is what made this a two-way obligation — with
-#:     the column narrowed, a re-added tolerance reds on "now projects
-#:     cleanly".
+#:     a decision.
 #:
 #: Measured at #9200's head (`62ec432a8`) + this diff, against a real Postgres.
 #: Reported on #9200 (the producer-accuracy class it belongs to): the fix is a

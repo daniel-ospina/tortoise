@@ -6,9 +6,11 @@
 -- of it emits an INTEGER COUNT:
 --
 --   * `hosted_api._capture_session_impl` — `_capture_redactions =
---     _capture_write["redacted_total"]` (`tortoise/hosted_api.py:14116`), carried
---     on the capture receipt as `"capture_redactions": <int>`
---     (`tortoise/hosted_api.py:15334`);
+--     _capture_write["redacted_total"]`, carried on the capture receipt as
+--     `"capture_redactions": <int>`; both sites are inside that one function
+--     and are cited by SYMBOL, which `STORAGE-ARCHITECTURE.md` §11.1 makes the
+--     authoritative form — a `file.py:NNNN` here drifted by 67 lines in the
+--     merge that carried this migration to its landing base;
 --   * `session_schema` — an additive INTEGER property on the Session lane
 --     (`tortoise/session_schema.py:157,201`);
 --   * `security.redact` — the count it reports ("records on the Session
@@ -44,11 +46,14 @@
 -- a landed file). `USING` converts the shapes a `jsonb` column could already
 -- hold — a bare integer, or an object carrying the count — so a database that
 -- applied the earlier migration is not left unreadable. Each arm is GATED on the
--- value literally being an integer literal (`~ '^-?[0-9]+$'`): anything else — a
--- non-integral number such as `3.7`, a word, a nested object — becomes NULL
--- instead of aborting the ALTER (a bare cast would raise
--- `invalid input syntax for type integer`) and instead of a fabricated count,
--- because a redaction total is not reconstructible from the structure. The table
+-- value literally being an integer literal (`~ '^-?[0-9]+$'`): a non-integral
+-- number such as `3.7`, a word, or a nested object becomes NULL instead of
+-- aborting the ALTER (a bare cast would raise `invalid input syntax for type
+-- integer`) and instead of a fabricated count, because a redaction total is not
+-- reconstructible from the structure. An integral literal OUTSIDE the int4 range
+-- still aborts (`value "3000000000" is out of range for type integer`): the arm
+-- fails closed rather than clamp, and no row can hold such a value today because
+-- every producer write was refused with `DatatypeMismatch`. The table
 -- is empty in every deployment that has not armed the record
 -- (`TORTOISE_RECORD_DSN`, #9548), so this is a shape correction, not a data
 -- migration.
