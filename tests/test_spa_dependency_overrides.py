@@ -38,7 +38,13 @@ So this file pins five properties, all mechanical, no `npm` binary and no DB:
    performs — `config/ci-surfaces.yml`'s two registration comments and its
    `durations` row said "no network" for a file that runs `git fetch`, the exact
    record class `test_9397_about_edge_properties.py` pins for the sibling this
-   helper was adopted from (round 5 ISSUE 2).
+   helper was adopted from (round 5 ISSUE 2);
+6. the two figures quoted ABOUT this file — `RECORDED_CASE_COUNT` and
+   `RECORDED_NON_VACUITY_REDS` — are held to the file itself: the count against
+   `pytest`'s own collection, the red set against the non-vacuity experiment RUN
+   rather than reasoned about. Round 6 found both stale in the PR body ("23
+   cases … 4 failed"), each describing an earlier revision, so neither figure is
+   prose any more: one literal each, and a leg that recomputes it.
 
 Exactly one corner is not offline, and it is named rather than hidden: the
 `base` column of `RESOLUTIONS` is read from `PRE_FIX_REVISION`'s locks, and a
@@ -47,7 +53,19 @@ that revision. `_ensure_commit` therefore runs `git fetch --depth={120,400,1500}
 origin main` there — a NETWORK call with a side effect on the checkout under
 test — and the leg SKIPS, never passes, when the revision stays unreachable. A
 `git show` that merely returned `None` in CI left this whole half dark on every
-PR run (PR #9524 review, round 3 I3 / round 4 ISSUE 1). The ladder is MEMOISED
+PR run (PR #9524 review, round 3 I3 / round 4 ISSUE 1). The summary lines
+the PR body may quote are then DERIVED, not copied: there are exactly two
+shapes, and both are stated here as expressions over this file's own records so
+they cannot drift the way a literal did in rounds 3 and 6. The ladder reaches
+the revision (a full clone; and CI, where `origin main` still carries it within
+120 commits) → every collected case runs, `RECORDED_CASE_COUNT` passed and 0
+skipped. It does not reach it (no git, no network, or a history that cannot
+reach it) → 5 cases SKIP and never pass, `len(RESOLUTIONS)` base-lock cases +
+this record's own experiment leg, which needs the same revision's manifests. Both
+shapes were measured 2026-10-22 in real depth-1 clones of this branch (one whose
+`origin` had a reachable `main`, one whose did not), not inferred.
+
+The ladder is MEMOISED
 per revision (`_ENSURE_COMMIT_RESULTS`), so the eight per-(package, app)
 readers cost ONE ladder per run rather than eight — which is what makes the
 manifest's `durations` weight a bounded claim instead of an assertion.
@@ -225,6 +243,60 @@ _RETRACTED_NETWORK_FREE = (
     "no network",
     "network-free",
     "over-estimates rather than under-estimates",
+)
+
+# ---- The verification record, COMPUTED rather than remembered -------------- #
+# Both figures below are what a reader (and the PR body) quotes about THIS file,
+# and both were wrong once in exactly the class of defect this file exists to
+# stop: round 6 of the #9524 review found the body saying "23 cases … 4 failed"
+# while the shipped file collected 26 and red 5 on the same experiment — each
+# figure describing an earlier revision of the file. So neither number is prose:
+# one literal each, and a leg at the bottom of this file RECOMPUTES it — the
+# count from `pytest`'s own collection, the red set by RUNNING the experiment
+# against `PRE_FIX_REVISION`'s manifests instead of describing it.
+
+# Every collected case in this file: test functions + their parametrisations.
+RECORDED_CASE_COUNT = 28
+
+# The non-vacuity experiment: `PRE_FIX_REVISION`'s manifests restored over THIS
+# tree's locks (the locks are NOT restored — a manifest-only diff is the state
+# the review asked about). Named by CASE ID because a case id is what a summary
+# line prints, and the two parametrisations differ in granularity:
+# `test_shared_transitive_floors_are_declared` is per APP (three reds), while
+# `test_direct_dependency_floors_clear_their_advisory` is per PACKAGE — ONE
+# `vite` case whose slug loop stops at the first red, so the three apps that fail
+# its floor compare appear here as a single case. A "7 failed" figure counts arms
+# nobody's summary line prints; 5 is what the run says.
+RECORDED_NON_VACUITY_REDS = (
+    "test_direct_dependency_floors_clear_their_advisory[vite]",
+    "test_no_recorded_override_is_stale",
+    "test_shared_transitive_floors_are_declared[apps/graph-viz]",
+    "test_shared_transitive_floors_are_declared[website/apps/blog-admin]",
+    "test_shared_transitive_floors_are_declared[website/apps/dashboard]",
+)
+
+# Every test in this file sits in exactly one bucket, so a NEW leg cannot escape
+# the model silently: a leg that reads an app manifest has a base-tree behaviour
+# the experiment below must model, and adding one without recording it reds
+# `test_the_recorded_non_vacuity_experiment_matches_the_shipped_file`. The
+# buckets are what make the record refutable instead of merely plausible.
+_MANIFEST_READING_LEGS = (
+    "test_direct_dependency_floors_clear_their_advisory",
+    "test_every_declared_floor_is_met_by_the_committed_lock",
+    "test_every_override_names_what_it_clears",
+    "test_no_recorded_override_is_stale",
+    "test_no_retired_no_op_override_is_reintroduced",
+    "test_shared_transitive_floors_are_declared",
+)
+_LOCK_OR_STRUCTURE_LEGS = (
+    "test_every_recorded_override_has_a_measured_resolution",
+    "test_recorded_head_resolution_matches_the_committed_lock",
+    "test_recorded_pre_fix_resolution_matches_the_pre_fix_lock",
+    "test_the_base_half_is_reachable_in_a_shallow_checkout",
+    "test_the_fetch_ladder_runs_at_most_once_per_revision",
+    "test_the_manifest_states_the_fetch_it_cannot_hide",
+    "test_the_recorded_case_count_matches_the_shipped_file",
+    "test_the_recorded_non_vacuity_experiment_matches_the_shipped_file",
 )
 
 _MARKUP_RE = re.compile(r"[*`\"]+")
@@ -798,4 +870,137 @@ def test_the_base_half_is_reachable_in_a_shallow_checkout() -> None:
     assert "is-shallow-repository" in ast.dump(funcs["_is_shallow"]), (
         "`_is_shallow` no longer asks git `--is-shallow-repository`, so the gate "
         "above does not mean what it assumes"
+    )
+
+
+def _manifest_at_revision(slug: str, revision: str) -> dict | None:
+    """The app's `package.json` AT a git revision, or None where git cannot read it.
+
+    `None` — never `{}` — for the reason `_resolved_versions_at_revision` gives:
+    a manifest that could not be read is not a manifest that declares no
+    `overrides`, and reporting the latter would make the non-vacuity experiment
+    below pass on an unreadable history.
+    """
+    _ensure_commit(revision)
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{revision}:{slug}/package.json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):  # no git binary
+        return None
+    if done.returncode != 0:
+        return None
+    return json.loads(done.stdout)
+
+
+def _cases_of(func) -> list[tuple[str, tuple]]:
+    """`(pytest id suffix, args)` for every case `func` contributes.
+
+    The suffix is what a summary line prints after the function name (`[vite]`,
+    `[apps/graph-viz]`), so a record keyed by case ID is a record of the run.
+    This file parametrises ONE argument per leg; anything richer raises rather
+    than guessing at pytest's id synthesis.
+    """
+    marks = [mark for mark in getattr(func, "pytestmark", ()) if mark.name == "parametrize"]
+    if not marks:
+        return [("", ())]
+    assert len(marks) == 1, (
+        f"{func.__name__} stacks parametrisations — teach `_cases_of` the id "
+        "synthesis before trusting a count derived from it"
+    )
+    names, values = marks[0].args
+    assert isinstance(names, str), (
+        f"{func.__name__} parametrises several arguments at once — the case id is "
+        "then synthetic (`a-b`), and a record built from this helper would not "
+        "read like a summary line"
+    )
+    return [(f"[{value}]", (value,)) for value in values]
+
+
+def test_the_recorded_case_count_matches_the_shipped_file() -> None:
+    """The count a record quotes is `pytest`'s collection, never a recollection.
+
+    Round 6 of the #9524 review: the PR body said "23 cases" for a file that
+    collects 26 — the 23 described the pre-`RESOLUTIONS` revision. Counting from
+    the module's own test functions and their parametrisations means a leg cannot
+    be added without the figure moving, so the stale copy reds instead of shipping
+    (the same record discipline as `RESOLUTIONS` and the manifest pins above).
+    """
+    module = sys.modules[__name__]
+    counted = {
+        name: len(_cases_of(obj))
+        for name, obj in sorted(vars(module).items())
+        if name.startswith("test_") and callable(obj)
+    }
+    total = sum(counted.values())
+    assert total == RECORDED_CASE_COUNT, (
+        f"this file collects {total} cases ({counted}), but RECORDED_CASE_COUNT "
+        f"says {RECORDED_CASE_COUNT}. Re-measure with `pytest --collect-only -q "
+        "tests/test_spa_dependency_overrides.py` and correct the record: a count "
+        "carried in prose is exactly what went stale in round 6 (PR #9524 review, "
+        "ISSUE 1)"
+    )
+
+
+def test_the_recorded_non_vacuity_experiment_matches_the_shipped_file(
+    monkeypatch,
+) -> None:
+    """RUN the non-vacuity experiment instead of describing it (round 6, ISSUE 2).
+
+    The record has now been wrong three ways in prose: round 3's "3 failed" (the
+    13-case file), round 6's "4 failed" (true only before the round-5 `vite` floor
+    leg existed) and round 6's "7 failed" (arms a summary line never prints — the
+    app loop lives INSIDE one `[vite]` case). So the experiment is code: restore
+    `PRE_FIX_REVISION`'s MANIFESTS over this tree's locks (the locks stay as
+    shipped — a manifest-only diff is the state under review), call the
+    manifest-reading legs for real, and compare the failures observed with
+    `RECORDED_NON_VACUITY_REDS`.
+
+    The legs are CALLED, not re-implemented, so a leg whose base-tree behaviour
+    changes moves this record with it; the two buckets above are what keep a NEW
+    manifest-reading leg from being invisible to the experiment.
+    """
+    module = sys.modules[__name__]
+    defined = {
+        name
+        for name, obj in vars(module).items()
+        if name.startswith("test_") and callable(obj)
+    }
+    bucketed = list(_MANIFEST_READING_LEGS) + list(_LOCK_OR_STRUCTURE_LEGS)
+    assert sorted(bucketed) == sorted(defined), (
+        "every test in this file must sit in exactly one of the two buckets, so a "
+        f"manifest-reading leg cannot skip the experiment. Unbucketed: "
+        f"{sorted(defined - set(bucketed))}; bucketed but absent: "
+        f"{sorted(set(bucketed) - defined)}; declared twice: "
+        f"{sorted({name for name in bucketed if bucketed.count(name) > 1})}"
+    )
+
+    base = {slug: _manifest_at_revision(slug, PRE_FIX_REVISION) for slug in sorted(SPAS)}
+    if any(manifest is None for manifest in base.values()):
+        pytest.skip(
+            f"git cannot read {PRE_FIX_REVISION}'s app manifests even after the "
+            "bounded `_ensure_commit` fetch (no git binary, no network, or a full "
+            "clone that lacks the revision) — the non-vacuity record is "
+            "unverified here; `git fetch --unshallow` verifies it"
+        )
+    monkeypatch.setattr(module, "_manifest", lambda slug: base[slug])
+
+    observed: list[str] = []
+    for name in _MANIFEST_READING_LEGS:
+        func = getattr(module, name)
+        for suffix, args in _cases_of(func):
+            try:
+                func(*args)
+            except AssertionError:
+                observed.append(f"{name}{suffix}")
+
+    assert sorted(observed) == sorted(RECORDED_NON_VACUITY_REDS), (
+        f"with PRE_FIX_REVISION's manifests over this tree's locks the "
+        f"manifest-reading legs fail {sorted(observed)}, but the record says "
+        f"{sorted(RECORDED_NON_VACUITY_REDS)}. Correct the record from a run, not "
+        "from reasoning: round 6 quoted a red set belonging to an earlier "
+        "revision of this file (PR #9524 review, ISSUE 2)"
     )
