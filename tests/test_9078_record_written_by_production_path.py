@@ -159,6 +159,19 @@ def _disagreement(record: dict) -> str | None:
 RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
                           for name in record_projection.RECORD_MIGRATIONS]
 
+#: The record migrations that NARROW an already-created column. They are the one
+#: class the "`journal_event` present ⇒ already migrated" shortcut below cannot
+#: stand in for: a container first migrated by a pre-#9264 tree carries
+#: `session.capture_redactions` as `jsonb`, and no re-apply of the `CREATE TABLE`
+#: files changes it. Each file carries its own `DO` guard, so re-applying it on a
+#: narrowed column is a no-op — apply unconditionally, never by asking the DB
+#: which shape it is in (`_ensure_record_schema`'s job is to reach the shape this
+#: TREE expects, and a reader that trusts the container to report it can be told
+#: "already fine" by exactly the container that is stale).
+RECORD_NARROWING_FILES = [
+    REPO_ROOT / "supabase" / "migrations"
+    / "20261022000001_record_session_capture_redactions_integer.sql"]
+
 #: The minimum Supabase-shaped substrate the record migrations need: the three
 #: roles they GRANT to, and the two control-plane tables their tenancy FKs
 #: point at (`public.organizations`, `public.graphs`). Deliberately minimal —
@@ -1700,11 +1713,22 @@ def _ensure_record_schema(conn) -> None:
     """Apply the record migrations if the database does not carry them yet.
 
     Idempotent by inspection (`journal_event` present ⇒ done), so it works both
-    on a throwaway container and on one a previous run already migrated.
+    on a throwaway container and on one a previous run already migrated — with
+    ONE exception, the column narrowings (#9602 review P2-2): "migrated" is not
+    the same question as "migrated by THIS tree". A container first migrated by
+    a pre-#9264 tree has `journal_event` AND `session.capture_redactions jsonb`,
+    so the shortcut returns without narrowing it; the production INSERT then
+    fails with `DatatypeMismatch`, and with the tolerance deleted the residue
+    pass reports *"That is a NEW defect"* — blaming the current tree for a
+    schema it predates, with re-adding the tolerance (the defect this tree
+    correctly deleted) as the cheapest route back to green. The narrowings are
+    therefore re-applied on the already-migrated path too.
     """
     with conn.cursor() as cur:
         cur.execute("SELECT to_regclass('public.journal_event')")
         if cur.fetchone()[0] is not None:
+            for path in RECORD_NARROWING_FILES:
+                cur.execute(path.read_text(encoding="utf-8"))
             return
         # ONE statement: the preamble's role guards are `DO $$ … $$` blocks, and
         # splitting on ';' would shred them into unterminated dollar quotes.
@@ -2266,3 +2290,66 @@ def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
                     task.cancel()
 
     asyncio.run(_drive())
+
+# ── #9602 review P2-2: a container migrated by an OLDER tree gets narrowed ────
+#
+# `_ensure_record_schema` decides "already migrated" from `public.journal_event`
+# alone. That is the right question for the CREATE TABLE files and the WRONG one
+# for a column narrowing: a container first migrated by a pre-#9264 tree has
+# `journal_event` AND `session.capture_redactions jsonb`, so the shortcut would
+# return without narrowing it. These two cases pin both halves of the branch
+# without a Postgres (the DB legs of this file skip where psycopg2 is absent,
+# which is every CI job — so a stub is the only automated witness there is).
+
+
+class _StubCursor:
+    """Records every statement `_ensure_record_schema` executes."""
+
+    def __init__(self, log, journal_present):
+        self._log = log
+        self._journal_present = journal_present
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, *args):
+        self._log.append(sql)
+
+    def fetchone(self):
+        return ("public.journal_event",) if self._journal_present else (None,)
+
+
+class _StubConn:
+    def __init__(self, journal_present):
+        self.log = []
+        self._journal_present = journal_present
+
+    def cursor(self):
+        return _StubCursor(self.log, self._journal_present)
+
+
+def test_ensure_record_schema_narrows_a_container_migrated_by_an_older_tree():
+    conn = _StubConn(journal_present=True)
+    _ensure_record_schema(conn)
+
+    executed = "\n".join(conn.log)
+    assert "capture_redactions TYPE integer" in executed, (
+        "an already-migrated container was left with its pre-#9264 column "
+        "shape: every SessionRecorded row is then refused DatatypeMismatch and "
+        "the capture receipt still reports ok: True (review finding P2-2)")
+    assert "CREATE ROLE anon" not in executed, (
+        "the role preamble must not be re-run on a container that already "
+        "carries the record schema")
+
+
+def test_ensure_record_schema_applies_everything_on_a_fresh_container():
+    conn = _StubConn(journal_present=False)
+    _ensure_record_schema(conn)
+
+    executed = "\n".join(conn.log)
+    assert "CREATE ROLE anon" in executed
+    for path in RECORD_MIGRATION_FILES:
+        assert path.read_text(encoding="utf-8") in executed, path.name
