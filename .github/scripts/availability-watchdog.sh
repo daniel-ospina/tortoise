@@ -264,7 +264,8 @@
 # Usage:  bash .github/scripts/availability-watchdog.sh
 # Env:    see the defaults below (all overridable; the test harness drives them)
 # Test:   bash .github/scripts/availability-watchdog.test.sh  (self-contained,
-#         stubs curl/gh/flyctl; runs in CI job availability-watchdog)
+#         stubs curl/gh/flyctl; runs in CI as the `Availability watchdog state machine
+#         (#2850)` step of ci.yml's `ops-harnesses` job)
 # ============================================================================
 
 set -euo pipefail

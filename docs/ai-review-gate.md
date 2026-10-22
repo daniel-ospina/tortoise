@@ -30,7 +30,7 @@ so the live half is a deliberate step rather than something CI keeps in sync.
 
 ⚠️ **Qualified by #3091:** the check is required, its *harness* is not. Because the gate is
 `pull_request_target`, a PR that weakens it is evaluated by the base revision; with a recorded
-marker it can merge while `ai-review-gate-tests` is red-but-unrequired, after which the weakened
+marker it can merge while the `AI review gate shell harness` step of `ci.yml`'s `repo-harnesses` job is red-but-unrequired, after which the weakened
 required check reports Success on later PRs. The enforcement therefore holds only while the gate
 itself is uncompromised — that detection is #3091's open item.
 
@@ -242,7 +242,7 @@ non-runtime invariants — the job carries no
 with no `paths:` filter, the permissions still grant `pull-requests: read`, and
 the step declares `GH_TOKEN`.
 
-The harness is wired into `ci.yml` as `ai-review-gate-tests`. That job is **not
+The harness is wired into `ci.yml` as the `AI review gate shell harness (#2982)` step of the `repo-harnesses` job (it was `ai-review-gate-tests`). That step is **not
 (yet) a required check**, so a red harness does not block a merge — see #3091 to
 add it to branch protection.
 

@@ -239,7 +239,8 @@ queue_rules:
 #   `required_contexts`) is what keeps it from being removed quietly. Re-read the
 #   live branch-protection API before restating whether the check is required.
 #   ⚠️ #3091 qualifier: the check is required, its HARNESS
-#   (`ai-review-gate-tests`) is not — a PR that weakens the gate is evaluated by
+#   (the `AI review gate shell harness` step of ci.yml's `repo-harnesses` job) is
+#   not — a PR that weakens the gate is evaluated by
 #   the base revision, so it can merge with that harness red-but-unrequired.
 merge_protections_settings:
   auto_merge_conditions: true

@@ -55,7 +55,8 @@ check_version
 #     therefore lands AFTER it (until then the guard exits 2 on an unknown argument).
 #   · a missing guard WARNS instead of skipping silently. A silent skip is the very
 #     failure this guard exists to catch (#6937 P2-3), and `scripts/` is a machine-local
-#     symlink that can dangle; the `sigpipe-guard` CI job runs it unconditionally.
+#     symlink that can dangle; the SIGPIPE guard step of `ci.yml`'s `repo-harnesses`
+#     job runs it unconditionally.
 #   · a guard that is PRESENT BUT TOO OLD is named as such. `--dirs` is new (agent-infra#1643);
 #     without this probe an older guard exits 2 with `unknown argument: --dirs`, which reaches
 #     the developer as a hard commit block whose message names no idiom — indistinguishable
@@ -73,7 +74,7 @@ if [ -f "$SIGPIPE_GUARD" ]; then
 else
   echo "[sigpipe-guard] scripts/check-no-sigpipe-grep.sh not found — NOT checked locally." >&2
   echo "   Fix: set AGENT_INFRA_PATH and re-link scripts/. CI runs this guard regardless" >&2
-  echo "   (job: sigpipe-guard), so this warning is not a pass for the committed tree." >&2
+  echo "   (ci.yml job: repo-harnesses), so this warning is not a pass for the committed tree." >&2
 fi
 
 # Test-surface auto-registration (#1429) — new tests/test_*.py must be in
