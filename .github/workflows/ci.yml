@@ -2381,11 +2381,16 @@ jobs:
       # pointer reads `✅ scripts/`. If materialisation fails the check still runs and fails
       # on the same line, so a broken setup cannot read as green.
       #
-      # The second line is the reusable workflow's own default invocation, verbatim; if that
-      # default changes, this override must follow it.
-      check-command: |
-        if ! python3 tools/link_agent_infra_scripts.py --quiet --infra "$AGENT_INFRA_PATH"; then
-          echo "::error::could not materialise the machine-local scripts pointer (#9475). The drift check below will report it as drift, but this is an environment/tool fault, not drift." >&2
-        fi
-        node "$AGENT_INFRA_PATH/bin/agent-infra.js" check . --ci
+      # ⛔ ONE quote-free command, on ONE line, and NOT the script inline (#9541 review,
+      # round 6 P1). The reusable workflow consumes this input as
+      # `cmd="${{ inputs.check-command }}"` then `bash -c "$cmd"` — `${{ }}` substitution is
+      # textual and escapes nothing, so a `"`, `(`, `)` or backtick anywhere in the override
+      # closes the assignment early and dies at PARSE time (`syntax error near unexpected
+      # token '('`), before `drift_exit` is recorded: the gate then reds forever with "the
+      # drift check produced NO result", for every drift-gated PR, while verifying nothing.
+      # The wrapper holds the quoting-needing logic and re-states the reusable workflow's own
+      # default invocation (`node <infra>/bin/agent-infra.js check . --ci`); if that default
+      # changes, follow it in tools/agent_infra_drift_check.py. Pinned by
+      # tests/test_link_agent_infra_scripts.py::test_check_command_survives_the_reusable_workflows_interpolation.
+      check-command: python3 tools/agent_infra_drift_check.py
     secrets: inherit

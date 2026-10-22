@@ -12,7 +12,7 @@
 >
 > ```bash
 > uv run python tools/link_agent_infra_scripts.py           # create/repair scripts/ -> $AGENT_INFRA_PATH/scripts
-> uv run python tools/link_agent_infra_scripts.py --check   # assert it (exit 0 = resolves, 2 = no agent-infra)
+> uv run python tools/link_agent_infra_scripts.py --check   # assert it (exit 0 = resolves, 1 = missing/dangling/wrong target, 2 = no agent-infra checkout)
 > ```
 
 ---

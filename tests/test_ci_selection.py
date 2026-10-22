@@ -927,6 +927,14 @@ _CENSUS_ROOTS = ("tests", "tools", "scripts/", ".github", "tortoise")
 # the reader gets the REMEDY, not only the fact.
 _SCRIPTS_MATERIALISER = "tools/link_agent_infra_scripts.py"
 
+# Census losses already announced, keyed by the absent-root tuple (#9541 review round 6,
+# minor 3). `test_no_allowlisted_root_file_has_a_reader` calls `_readers_of` TWICE per
+# allowlisted name (~30 calls on a fresh clone), so an unconditional print emitted ~30
+# identical `::warning::` annotations for ONE fact. Announcing once per distinct loss keeps
+# the loss audible without burying the log; the register is per-process because a pytest
+# session is the unit that reads it.
+_CENSUS_ANNOUNCED: set[tuple[tuple[str, ...], int | None]] = set()
+
 
 def _readers_of(name: str) -> list[str]:
     """Non-self files under tests/tools/scripts/.github/tortoise naming `name`.
@@ -948,6 +956,11 @@ def _readers_of(name: str) -> list[str]:
     restores it. Before this, the root vanished from every fresh checkout
     without a word while the ratchets stayed green.
 
+    ⛔ ANNOUNCED ONCE per distinct loss, not once per call (#9541 review round 6,
+    minor 3): the ratchets call this twice per allowlisted name, so an
+    unconditional print emitted ~30 identical `::warning::` annotations for one
+    fact and buried it. See `_CENSUS_ANNOUNCED`.
+
     SCOPE: a LITERAL-NAME grep. It does not see a reader that finds `name` by
     GLOB or directory walk, nor one outside these five roots.
     """
@@ -958,7 +971,12 @@ def _readers_of(name: str) -> list[str]:
     # grep exits 1 for "no match" (normal here) and 2 for "a root could not be
     # read". Any other non-zero, with every root present, is a fault that must
     # not read as "no readers" — the same silent-narrowing class as an absent root.
-    if absent or result.returncode not in (0, 1):
+    # Announced ONCE per distinct loss: the ratchets above call this twice per
+    # allowlisted name, and ~30 identical annotations for one fact is noise that buries
+    # it (#9541 review round 6, minor 3).
+    loss = (tuple(absent), result.returncode if not absent else None)
+    if (absent or result.returncode not in (0, 1)) and loss not in _CENSUS_ANNOUNCED:
+        _CENSUS_ANNOUNCED.add(loss)
         missing = (
             f"{', '.join(absent)} absent from this checkout — a machine-local pointer that has "
             f"not been materialised (#9475: `scripts` is gitignored, not tracked; run `uv run "
@@ -991,11 +1009,15 @@ def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypat
     The second half is the discriminator: with every root present the same call
     says nothing, so the message tracks the ABSENCE rather than being emitted
     unconditionally.
+
+    The register is cleared first: the announcement is once-per-process, and an
+    earlier test may already have announced the same absent root.
     """
     for root in ("tests", "tools", ".github", "tortoise"):
         (tmp_path / root).mkdir()
     # `_readers_of` greps at `REPO`, the module global in THIS file — patch that one.
     monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
     assert REPO == tmp_path, "the census must run against the throwaway tree"
 
     # `scripts/` deliberately ABSENT — the fresh-clone / runner / new-lane state.
@@ -1014,6 +1036,37 @@ def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypat
     (tmp_path / "scripts").mkdir()
     _readers_of("AGENTS.md")
     assert capsys.readouterr().err == ""
+
+
+def test_the_mention_census_announces_an_absent_root_ONCE(tmp_path, monkeypatch, capsys):
+    """#9541 review round 6, minor 3: the announcement must not repeat per call.
+
+    `test_no_allowlisted_root_file_has_a_reader` calls `_readers_of` twice for each
+    allowlisted root file, so on a fresh clone / runner the unconditional print emitted
+    ~30 identical `::warning::MENTION CENSUS INCOMPLETE` annotations for ONE absent root
+    — the signal buried in its own repetitions, which is how an announcement stops being
+    read. RED before the fix: the second call printed the message again.
+    """
+    for root in ("tests", "tools", ".github", "tortoise"):
+        (tmp_path / root).mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
+
+    _readers_of("AGENTS.md")
+    first = capsys.readouterr().err
+    assert "MENTION CENSUS INCOMPLETE" in first, first
+
+    _readers_of("AGENTS.md")
+    assert capsys.readouterr().err == "", (
+        "the absent-root announcement repeated on a second call — the ratchets call this "
+        "twice per allowlisted name (~30 identical ::warning:: lines for one fact)"
+    )
+    # A DIFFERENT loss is still announced: dedupe must not mute a new fact.
+    (tmp_path / "tests").rmdir()
+    _readers_of("AGENTS.md")
+    assert "MENTION CENSUS INCOMPLETE" in capsys.readouterr().err, (
+        "a newly-absent root was not announced — the dedupe keyed on the wrong thing"
+    )
 
 
 def test_no_allowlisted_root_file_has_a_reader():
@@ -2544,6 +2597,27 @@ def test_link_agent_infra_scripts_tool_change_selects_core_not_tier1():
     # #1349/#3332/#3616 silent-drop class as #5084/#6138/#4174 above.
     # Mutation check: removing the CORE_ALSO entry fails the asserts below.
     r = _sel(["tools/link_agent_infra_scripts.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_link_agent_infra_scripts.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_agent_infra_drift_check_tool_change_selects_core_not_tier1():
+    # PR #9541 review (round 6 P1): tools/agent_infra_drift_check.py is the single
+    # quote-free command ci.yml's drift-check job passes as `check-command` — it
+    # materialises the machine-local `scripts` pointer and then runs agent-infra's
+    # checker. If its quoting breaks, the reusable workflow's textual `${{ }}`
+    # interpolation makes the step die at PARSE time and the gate reds forever with
+    # "produced NO result" while verifying nothing; if its exit contract breaks, the
+    # gate can read green over a pointer that was never written. Same silent-drop
+    # seam as the materialiser entry above: `tools/` is swallowed by
+    # NON_PYTHON_PREFIXES, so a WRAPPER-ONLY change selected NO surface and took the
+    # docs-only early return, and the cases pinning it would not run on the one PR
+    # that can break them — while `--integrity` stayed green, because the TEST file
+    # is classified.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/agent_infra_drift_check.py"])
     assert r["full"] is False, r
     assert "core" in r["surfaces"], r
     assert "test_link_agent_infra_scripts.py" in r["test_files"], r

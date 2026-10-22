@@ -30,6 +30,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "link_agent_infra_scripts.py"
+#: The CI wrapper `.github/workflows/ci.yml`'s `drift-check` job passes as `check-command`
+#: (PR #9541 review round 6 P1) — it materialises the pointer, then runs agent-infra's check.
+DRIFT_TOOL = REPO_ROOT / "tools" / "agent_infra_drift_check.py"
 
 # The trees a reader consults to learn what the `scripts` pointer IS. `docs/` is deliberately
 # OUT of scope: it holds dated records (`docs/scoping/2026-09-17-3863-…` says the pointer "is a
@@ -78,6 +81,22 @@ def run_tool(
     )
 
 
+def run_wrapper(
+    *args: str,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the drift-gate wrapper (`tools/agent_infra_drift_check.py`) as the shell would."""
+    assert DRIFT_TOOL.is_file(), f"missing {DRIFT_TOOL} — the drift gate's CI entry point"
+    return subprocess.run(
+        [sys.executable, str(DRIFT_TOOL), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=None if cwd is None else str(cwd),
+    )
+
+
 def git(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True
@@ -86,14 +105,38 @@ def git(*args: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture()
 def fake_infra(tmp_path: Path) -> Path:
-    """An agent-infra checkout with the three tools this repo's docs name."""
+    """An agent-infra checkout with the three tools this repo's docs name, plus its CLI."""
     scripts = tmp_path / "agent-infra" / "scripts"
     scripts.mkdir(parents=True)
     for name in ("admin-merge.sh", "record-review.sh", "ci-failure-set.sh"):
         body = scripts / name
         body.write_text(f"#!/bin/sh\necho ran-{name}\n")
         body.chmod(0o755)
+    # agent-infra's drift CLI — the wrapper execs it (`check . --ci`). Never actually run by
+    # these tests: the `node` on PATH is a recording shim (see `node_shim`).
+    bin_dir = tmp_path / "agent-infra" / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "agent-infra.js").write_text("// agent-infra's CLI\n")
     return tmp_path / "agent-infra"
+
+
+@pytest.fixture()
+def node_shim(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """A `node` on PATH that records its argv and exits with `$FAKE_NODE_EXIT`.
+
+    The wrapper must run the checker UNCHANGED (`<infra>/bin/agent-infra.js check . --ci`)
+    and must return the checker's verdict; a real node/agent-infra is neither available nor
+    wanted in a hermetic test.
+    """
+    shim_dir = tmp_path / "node-shim"
+    shim_dir.mkdir()
+    node = shim_dir / "node"
+    node.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$FAKE_NODE_ARGS"\nexit "${FAKE_NODE_EXIT:-0}"\n')
+    node.chmod(0o755)
+    return shim_dir, {
+        "FAKE_NODE_ARGS": str(tmp_path / "node-args.txt"),
+        "FAKE_NODE_EXIT": "0",
+    }
 
 
 @pytest.fixture()
@@ -320,8 +363,16 @@ class TestMaterialise:
 
 
 class TestDiagnostics:
-    def test_missing_agent_infra_is_exit_2_not_1(self, repo: Path, tmp_path: Path) -> None:
-        """'Nothing to point at' is a config error, never a link failure."""
+    def test_explicit_infra_without_a_scripts_dir_is_exit_2(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """'Nothing to point at' is a config error, never a link failure.
+
+        Formerly `test_missing_agent_infra_is_exit_2_not_1`, which passed `--infra <empty>` and
+        so exercised the EXPLICIT-`--infra` error branch, not the "nothing on this machine"
+        fallback its name described (PR #9541 review round 6, minor 1). The fallback branch is
+        now covered by `test_nothing_on_this_machine_is_exit_2_and_names_both_candidates`.
+        """
         empty = tmp_path / "no-infra-here"
         empty.mkdir()
         # HOME is redirected too: the tool's documented fallback is `~/agent-infra`, so a real
@@ -338,6 +389,34 @@ class TestDiagnostics:
         )
         assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
         assert "AGENT_INFRA_PATH" in result.stderr
+
+    def test_nothing_on_this_machine_is_exit_2_and_names_both_candidates(
+        self, repo: Path, tmp_path: Path
+    ) -> None:
+        """PR #9541 review round 6, minor 1: the FALLBACK branch had no assertion at all.
+
+        Every other `exit 2` test passes `--infra`, so the "nothing passed explicitly → try
+        `$AGENT_INFRA_PATH`, then `~/agent-infra`" loop — the branch a fresh lane with no
+        agent-infra actually hits — was only ever reached as a side effect. This asserts it
+        directly, including that the message names BOTH candidates, so a regression that drops
+        the `~/agent-infra` fallback (or reports it as a link failure, exit 1) is caught.
+        """
+        home = tmp_path / "home"
+        home.mkdir()
+        result = run_tool(
+            "--repo",
+            str(repo),
+            env={**os.environ, "AGENT_INFRA_PATH": "", "HOME": str(home)},
+        )
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        assert "no agent-infra checkout with a scripts/ directory" in result.stderr, result.stderr
+        assert str(home / "agent-infra") in result.stderr, (
+            "the fallback's `~/agent-infra` candidate is not named, so the operator cannot tell "
+            f"what was tried: {result.stderr}"
+        )
+        assert not os.path.lexists(repo / "scripts"), (
+            "a config error still materialised a pointer"
+        )
 
     def test_stale_checkout_is_named_not_hidden(
         self, repo: Path, fake_infra: Path
@@ -460,3 +539,132 @@ class TestPreCommitWiring:
         )
         assert ran.returncode == 0, (ran.stdout, ran.stderr)
         assert not os.path.lexists(root / "scripts")
+
+
+class TestDriftGateCheckCommand:
+    """PR #9541 review (round 6, P1): the drift gate's override was invalid SHELL.
+
+    `.github/workflows/ci.yml`'s `drift-check` job calls agent-infra's reusable
+    `drift-check.yml` with a `check-command` override (an inline two-statement script that
+    materialised the pointer and then ran `node … check . --ci`). The reusable workflow
+    consumes that input as `cmd="${{ inputs.check-command }}"` … `bash -c "$cmd"`, and
+    `${{ }}` substitution is TEXTUAL — so the override's own `"` closed the assignment early
+    and the surviving `(`, in `(#9475)`, was parsed as a subshell: `bash -n` on the composed
+    step exits 2 with `syntax error near unexpected token '('`. The step then dies at PARSE
+    time, `drift_exit` is never recorded, and the gate takes its no-result branch — red
+    forever, on every drift-gated PR, having verified nothing.
+
+    The fix is a single quote-free command (this file's sibling tool), so the ratchet below
+    recomposes the step EXACTLY as the reusable workflow does and asserts it parses. It is
+    RED on the pre-fix override and GREEN on the single command.
+    """
+
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+
+    def _check_command(self) -> str:
+        import yaml  # local: only this class needs to parse a workflow
+
+        workflow = yaml.safe_load(self.WORKFLOW.read_text())
+        return workflow["jobs"]["drift-check"]["with"]["check-command"]
+
+    def test_check_command_survives_the_reusable_workflows_interpolation(
+        self, tmp_path: Path
+    ) -> None:
+        """RED before the fix: the composed step was a bash syntax error (exit 2)."""
+        command = self._check_command()
+        # agent-infra's drift-check.yml@main, verbatim: the input is interpolated inside a
+        # double-quoted assignment, then executed with `bash -c "$cmd"`.
+        composed = tmp_path / "composed-step.sh"
+        composed.write_text(f'cmd="{command}"\nbash -c "$cmd"\n')
+
+        parsed = subprocess.run(["bash", "-n", str(composed)], capture_output=True, text=True)
+        assert parsed.returncode == 0, (
+            "the `check-command` override does not survive the reusable workflow's textual "
+            "`${{ }}` interpolation: a `\"`, `(`, `)` or backtick in it closes "
+            '`cmd="${{ inputs.check-command }}"` early, and the step dies at PARSE time. The '
+            "gate then reports \"the drift check produced NO result\" forever — red on every "
+            "drift-gated PR while verifying nothing. Keep the override a SINGLE quote-free "
+            "command (tools/agent_infra_drift_check.py holds the logic).\n"
+            f"composed step:\n{composed.read_text()}\nbash -n stderr:\n{parsed.stderr}"
+        )
+
+    def test_the_override_is_one_line_and_quote_free(self) -> None:
+        """The property that makes the parse above robust, asserted directly."""
+        command = self._check_command().strip()
+        assert "\n" not in command, (
+            f"the drift gate's `check-command` must be ONE line, not a script: {command!r}"
+        )
+        offenders = sorted({ch for ch in command if ch in "\"'`(){}"})
+        assert not offenders, (
+            f"the drift gate's `check-command` contains shell quoting characters {offenders} "
+            f"({command!r}) — each one can terminate the reusable workflow's `cmd=\"…\"` "
+            "assignment early and turn the step into a parse error"
+        )
+        assert "tools/agent_infra_drift_check.py" in command, (
+            f"the override no longer names the wrapper that materialises the pointer and runs "
+            f"the check: {command!r}"
+        )
+
+    def _env(self, shim: Path, extra: dict[str, str]) -> dict[str, str]:
+        return {
+            **os.environ,
+            "PATH": f"{shim}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+            **extra,
+        }
+
+    def test_the_wrapper_materialises_the_pointer_then_runs_the_check_unchanged(
+        self, repo: Path, fake_infra: Path, node_shim: tuple[Path, dict[str, str]]
+    ) -> None:
+        """The gate keeps its coverage: the pointer is written AND the checker still runs.
+
+        The checker invocation must be the reusable workflow's own default
+        (`node <infra>/bin/agent-infra.js check . --ci`) — a wrapper that quietly changed the
+        arguments would be the gate bypassing itself.
+        """
+        shim, extra = node_shim
+        env = self._env(shim, extra)
+        result = run_wrapper("--repo", str(repo), "--infra", str(fake_infra), env=env)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+
+        link = repo / "scripts"
+        assert link.is_symlink(), result.stdout
+        assert link.resolve() == (fake_infra / "scripts").resolve()
+
+        argv = Path(extra["FAKE_NODE_ARGS"]).read_text().split("\n")[:-1]
+        assert argv == [str(fake_infra / "bin" / "agent-infra.js"), "check", ".", "--ci"], argv
+
+    def test_the_checkers_verdict_is_returned_unchanged(
+        self, repo: Path, fake_infra: Path, node_shim: tuple[Path, dict[str, str]]
+    ) -> None:
+        """A drifting repo must still fail the gate — the wrapper never masks the verdict."""
+        shim, extra = node_shim
+        env = self._env(shim, {**extra, "FAKE_NODE_EXIT": "3"})
+        result = run_wrapper("--repo", str(repo), "--infra", str(fake_infra), env=env)
+        assert result.returncode == 3, (result.returncode, result.stdout, result.stderr)
+
+    def test_a_failed_materialisation_still_runs_the_check_and_never_reads_green(
+        self, repo: Path, fake_infra: Path, node_shim: tuple[Path, dict[str, str]]
+    ) -> None:
+        """FAIL CLOSED: a vendored copy is refused, the check still runs, and exit is non-zero.
+
+        The pointer is a surface this job gates, so "the checker passed" must not be reported
+        as success over a pointer the wrapper failed to write — that is the #9475 symptom
+        (a healthy-looking exit over a broken link) one layer up.
+        """
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "local-tool.sh").write_text("#!/bin/sh\n")
+        shim, extra = node_shim
+        env = self._env(shim, extra)
+
+        result = run_wrapper("--repo", str(repo), "--infra", str(fake_infra), env=env)
+        assert result.returncode != 0, (
+            "the wrapper reported success although the `scripts` pointer could not be "
+            f"materialised: {result.stdout}"
+        )
+        # The check still ran — a broken setup must not silently skip the gate.
+        assert Path(extra["FAKE_NODE_ARGS"]).exists(), (
+            "the wrapper skipped agent-infra's drift check when materialisation failed, so a "
+            "broken setup reads as 'no result' instead of naming the problem"
+        )
+        # And the vendored copy was respected, not deleted.
+        assert (repo / "scripts" / "local-tool.sh").exists()

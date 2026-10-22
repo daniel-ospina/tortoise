@@ -1608,7 +1608,19 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tmp_path repo root plus a fake agent-infra checkout) and `core` is
              # where it is registered. Pinned by
              # tests/test_ci_selection.py::test_link_agent_infra_scripts_tool_change_selects_core_not_tier1.
-             "tools/link_agent_infra_scripts.py")
+             "tools/link_agent_infra_scripts.py",
+             # PR #9541 review (round 6 P1): tools/agent_infra_drift_check.py is the CI
+             # entry point of the SAME fix — it is what `.github/workflows/ci.yml`'s
+             # `drift-check` job passes as `check-command`, so it decides whether the
+             # drift gate verifies anything at all (or, mis-quoted, reds forever with
+             # "produced NO result"). Its guard lives in the same core-registered suite
+             # (`tests/test_link_agent_infra_scripts.py`), and exactly the same
+             # silent-drop seam applies: `tools/` is swallowed by NON_PYTHON_PREFIXES, so
+             # a WRAPPER-ONLY change filtered to `changed == []`, took the docs-only early
+             # return, and the interpolation/exit-code cases that pin it never ran while
+             # `--integrity` stayed green. Pinned by
+             # tests/test_ci_selection.py::test_agent_infra_drift_check_tool_change_selects_core_not_tier1.
+             "tools/agent_infra_drift_check.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
