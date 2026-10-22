@@ -172,6 +172,28 @@ def observe(deep: bool = False) -> int:
     """
     global _baseline_at
     added = 0
+    if deep:
+        # Upgrade an entry the SHALLOW import-time observe() recorded with no
+        # digest. Without this, `deep=True` could only hash modules that were
+        # not yet known — and the import-time call runs first, so the boot hash
+        # would never reach the modules loaded before `monitoring` imported this
+        # file, `tortoise.sdk` (the file #9494 was about) among them. A stat
+        # that still matches the baseline is the same proof `_drifted()` uses:
+        # the on-disk bytes are the bytes that were loaded.
+        with _lock:
+            pending = [(name, entry[0], entry[1], entry[2])
+                       for name, entry in _baseline.items() if entry[3] is None]
+        for name, path, mtime_ns, size in pending:
+            if _stat(path) != (mtime_ns, size):
+                continue  # cannot prove it any more — leave it unverified
+            digest = _digest(path)
+            if digest is None:
+                continue
+            with _lock:
+                current = _baseline.get(name)
+                if (current is not None and current[1] == mtime_ns
+                        and current[2] == size and current[3] is None):
+                    _baseline[name] = (path, mtime_ns, size, digest)
     with _lock:
         for name, path in _package_files():
             if name in _baseline:

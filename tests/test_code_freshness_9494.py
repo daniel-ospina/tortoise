@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -200,6 +201,27 @@ def test_the_startup_graph_is_baselined_at_import_not_at_first_health_call():
     assert "tortoise.sdk" in tracked
     assert "tortoise.tool_registry" in tracked
     assert "tortoise.mcp_auth" in tracked
+
+
+def test_the_boot_deep_observe_hashes_what_the_import_already_baselined():
+    """``observe(deep=True)`` must upgrade entries the shallow import-time call
+    already recorded — most importantly ``tortoise.sdk``, loaded BEFORE
+    ``monitoring`` pulls ``code_freshness`` in.
+
+    Without the upgrade the boot hash covers only the modules that arrive after
+    the import, so a byte-identical rewrite of ``sdk.py`` before the first health
+    call would read as unprovable drift for the process's whole life.
+    """
+    tracked = _subprocess_tracked(
+        "import tortoise.mcp_server\n"
+        "from tortoise import code_freshness as cf\n"
+        "missing = [n for n, e in cf._baseline.items() if e[3] is None]\n"
+        "print('UNHASHED=' + str(len(missing)))\n"
+        "print('SDK_HASHED=' + str(cf._baseline['tortoise.sdk'][3] is not None))\n"
+    )
+
+    assert "UNHASHED=0" in tracked, tracked
+    assert "SDK_HASHED=True" in tracked
 
 
 def test_the_module_import_itself_observes_its_caller():
@@ -421,6 +443,23 @@ def test_the_warned_set_is_bounded_and_never_gates_the_verdict(tmp_path, monkeyp
     assert len(code_freshness._warned) == 1  # the log channel is capped
 
 
+class _SlowSet(set):
+    """A set that HESITATES inside ``__contains__``.
+
+    The real race window between "is this drift already warned about" and "mark
+    it warned" is a few bytecodes, and eight threads are staggered long before
+    they reach it by the stat/hash loop — measured: 150 trials never produced a
+    duplicate, i.e. a plain barrier test passes with the lock REMOVED. The delay
+    makes every thread sit inside the window simultaneously, so the locked
+    version still emits one record while the unlocked one emits eight.
+    """
+
+    def __contains__(self, item):
+        found = super().__contains__(item)
+        time.sleep(0.05)
+        return found
+
+
 def test_concurrent_checks_emit_one_warning(tmp_path, monkeypatch, caplog):
     """A burst of health probes must not duplicate the STALE PROCESS line — the
     invariant the guarded membership test exists to hold (``check()`` is served
@@ -431,6 +470,7 @@ def test_concurrent_checks_emit_one_warning(tmp_path, monkeypatch, caplog):
     monkeypatch.setitem(sys.modules, module.__name__, module)
     code_freshness.check()
     _rewrite(path)
+    monkeypatch.setattr(code_freshness, "_warned", _SlowSet())
 
     barrier = threading.Barrier(8)
     errors = []
@@ -443,13 +483,14 @@ def test_concurrent_checks_emit_one_warning(tmp_path, monkeypatch, caplog):
             errors.append(exc)
 
     with caplog.at_level("WARNING", logger="tortoise.code_freshness"):
-        threads = [threading.Thread(target=probe) for _ in range(8)]
+        threads = [threading.Thread(target=probe, daemon=True) for _ in range(8)]
         for thread in threads:
             thread.start()
         for thread in threads:
             thread.join(timeout=30)
 
     assert errors == []
+    assert not any(t.is_alive() for t in threads)  # a hung thread cannot pass
     records = [r for r in caplog.records if r.name == "tortoise.code_freshness"]
     assert len(records) == 1, [r.getMessage() for r in records]
 
