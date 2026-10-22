@@ -4693,13 +4693,18 @@ surfaces:
   # pin in this suite reads `website/apps/dashboard/src/captureStatus.js` — the
   # JS reader that CANNOT import the Python formatter, so its receipt-family
   # template literals are a deliberate second spelling held to the formatter's
-  # prefix from the test. `website/apps/dashboard/` is a SOURCE_PATTERNS entry
-  # for `onboarding`, and a named-surface match REPLACES the `core` fallback in
-  # `select()`, so a `captureStatus.js`-only diff (the drift where the dashboard
-  # spelling moves and every per-harness status row goes blank) selected
-  # `onboarding` alone and never ran the pin. Measured before this arm
-  # (2026-10-17): `website/apps/dashboard/src/captureStatus.js` ->
-  # surfaces=['onboarding'], pin ABSENT. Full rationale in the `api` entry.
+  # prefix from the test. `website/apps/dashboard/src/` is the SOURCE_PATTERNS
+  # entry for `onboarding` — the `src/` PREFIX, NOT `website/apps/dashboard/`:
+  # the dashboard's `package.json` / `package-lock.json` match no `onboarding`
+  # pattern and fall back to `core` (the #9524 note below). Pinned by
+  # `tests/test_ci_selection.py::
+  # test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_it`.
+  # A named-surface match REPLACES the `core` fallback in `select()`, so a
+  # `captureStatus.js`-only diff (the drift where the dashboard spelling moves
+  # and every per-harness status row goes blank) selected `onboarding` alone and
+  # never ran the pin. Measured before this arm (2026-10-17):
+  # `website/apps/dashboard/src/captureStatus.js` -> surfaces=['onboarding'],
+  # pin ABSENT. Full rationale in the `api` entry.
   - test_5051_capture_receipt_key_registry.py
   - test_7951_write_doors.py
   # #9524 review I1/I3 (the SPA `overrides` record): DUAL-REGISTERED with

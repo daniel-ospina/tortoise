@@ -2493,6 +2493,15 @@ def test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_i
             "run (#1349/#2938/#3154 silent-drop class)"
         )
 
+    # The `onboarding` arm covers the `website/apps/dashboard/src/` PREFIX, not
+    # the dashboard root: its `package.json` / `package-lock.json` match no
+    # `onboarding` pattern and fall back to `core` (the #9524 note in
+    # `config/ci-surfaces.yml`). Pinned because the #9668 comment on that arm
+    # said `website/apps/dashboard/` was the pattern — a claim that would read
+    # as "a dashboard MANIFEST dependency is already covered" long after it
+    # stopped being true.
+    assert _sel(["website/apps/dashboard/package.json"])["surfaces"] == ["core"]
+
 
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
