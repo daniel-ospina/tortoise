@@ -435,6 +435,102 @@ def test_forged_payload_contains_session_cannot_create_a_link(tmp_path):
         sdk.close()
 
 
+def _craft_container_journal(tmp_path, sid: str, pid: str) -> str:
+    """A journal holding `SessionRecorded(sid)` then the turn's `PointAdded`.
+
+    The LIVE order (`sdk._write_session_and_turns`): the container is
+    journaled before the turn loop emits any `PointAdded`. The point's
+    `contains_session` rides the RAW envelope — never the payload — so the
+    fold's `_link_session` is the only thing that can write the edge.
+    """
+    d = tmp_path / "crafted-container"
+    d.mkdir()
+    records = [
+        {"event_id": "s1", "ts": "2026-01-01T00:00:00Z",
+         "type": "SessionRecorded", "initiated_by": "sdk",
+         "projection_version": 2, "id": sid, "capture_redactions": 0},
+        {"event_id": "e1", "ts": "2026-01-01T00:00:01Z", "type": "PointAdded",
+         "initiated_by": "sdk", "projection_version": 2,
+         "contains_session": sid,
+         "point": {"id": pid, "content": "[user] hi", "pointKind": "event",
+                   "is_episodic": True}},
+    ]
+    path = d / "journal.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records),
+                    encoding="utf-8")
+    return str(path)
+
+
+def _contains_pairs(proj, sid: str, pid: str) -> int:
+    return proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point {id:$tid}) "
+        "RETURN count(*)", params={"sid": sid, "tid": pid}
+    ).result_set[0][0]
+
+
+def test_the_fold_refuses_a_whitespace_only_session_id(tmp_path):
+    """A BLANK `contains_session` is not an identity — both folds refuse it.
+
+    Measured, and the reason the refusal lives in `projection._writable_container_id`
+    rather than only in the record projection (#9553 review P2): on an indexed
+    graph (`_ensure_indexes` creates `:Session(id)`) FalkorDB's equality filter
+    does not match a whitespace-only string — the node is there, the exact
+    MATCH is not — so `_link_session` used to MERGE a DUPLICATE `:Session` and
+    then fail its own `MATCH … (s:Session {id:$sid})`, landing no edge, while
+    the Postgres record would have landed the row. Refusing at the shared gate
+    is what keeps the two routes equal instead of engine-dependent.
+
+    Falsifier: drop the blank clause from `_writable_container_id` and this leg
+    reports the duplicate `:Session` (and, on an unindexed engine, the edge)
+    the record refuses — the divergence the review named.
+    """
+    sid, pid = "   ", "p-whitespace-turn"
+    journal = _craft_container_journal(tmp_path, sid, pid)
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild(EventLog(journal), confirm_destructive=True)
+        assert _contains_pairs(proj, sid, pid) == 0
+        # ONE `:Session` — the one `SessionRecorded` minted. Without the blank
+        # clause `_link_session` MERGEs a SECOND node with the same id (the
+        # indexed equality filter above misses the first), which is the
+        # duplicate-container half of the bug.
+        assert proj.g.query(
+            "MATCH (s:Session) RETURN count(*)").result_set == [[1]], (
+            "`_link_session` minted a duplicate `:Session` for a blank "
+            "`contains_session` — `_writable_container_id` is not applied")
+    finally:
+        sdk.close()
+
+
+def test_the_fold_writes_contains_when_the_session_id_equals_the_point_id(tmp_path):
+    """A same-id pair IS an edge — the two MATCH clauses bind TWO nodes.
+
+    `_link_session` runs `MATCH (s:Session {id:$sid}), (t:Point {id:$tid})
+    MERGE (s)-[:CONTAINS]->(t)`: with `sid == tid` the differing LABELS still
+    bind two distinct nodes, so the MERGE writes the edge. This executes the
+    claim `record_projection` used to deny by refusing the pair (`relation`
+    can hold it too — `node_identity` is keyed on `(label, key)`). Today's
+    producer cannot emit it (`_capture_turn_id` suffixes the session id), which
+    is exactly why the record follows the FOLD rather than the producer.
+    """
+    sid = "same-key-container"
+    journal = _craft_container_journal(tmp_path, sid, sid)
+    sdk = TortoiseSDK(str(tmp_path / "tortoise.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj.rebuild(EventLog(journal), confirm_destructive=True)
+        assert _contains_pairs(proj, sid, sid) == 1, (
+            "the fold wrote no CONTAINS edge for a session whose id equals "
+            "its point's id — the 'one node cannot be both ends' premise is "
+            "false for two differently-labelled nodes, and the record "
+            "projection must not refuse the pair either")
+    finally:
+        sdk.close()
+
+
 def test_sdk_rejects_contains_session_prop():
     """The boundary backstop for the same key (#3947 review F1)."""
     with pytest.raises(ValueError, match="contains_session"):

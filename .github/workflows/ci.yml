@@ -67,6 +67,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       migrations: ${{ steps.gate.outputs.migrations }}
+      pglite: ${{ steps.gate.outputs.pglite }}
       dashboard: ${{ steps.gate.outputs.dashboard }}
       dashboard_e2e: ${{ steps.gate.outputs.dashboard_e2e }}
       uv_lock: ${{ steps.gate.outputs.uv_lock }}
@@ -110,7 +111,7 @@ jobs:
           # always-on required jobs run, so every gated surface is explicitly
           # false. (`MAIN_HEALTH` is empty on a `pull_request` event.)
           if [ "$MAIN_HEALTH" = "true" ]; then
-            for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
+            for key in migrations pglite dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
                        driver_scripts ai_review_gate watchdog_scripts \
                        orphan_bound_scripts; do
@@ -165,6 +166,31 @@ jobs:
               "migrations": any_file(
                   startswith("supabase/migrations/"),
                   startswith(".github/scripts/check-migration-"),
+              ),
+              # schema-drill's PGlite harness (#9553 review P2). It used to be
+              # gated on `migrations` ALONE, and that was wrong in the
+              # fail-open direction: the harness is the DB-level half of the
+              # record projection's guard (`validate.mjs` replays the journal
+              # through `tortoise/record_projection.py`, which it spawns as
+              # PROJECTION_PY, and reads the SHIPPED journal fixture), so a
+              # projection-only change — the exact shape of #9553 — skipped
+              # the job and its legs could only fail where a human ran them.
+              # Name the inputs it reads, not the surface they happen to look
+              # like: the assertion suites + the harness dir it walks
+              # (`supabase/tests/` whole — `validate.mjs` reads
+              # `TESTS_DIR = supabase/tests` for every entry of its explicit
+              # `suites` list AND for `C1_SUITE`, so a suite-only edit is an
+              # input too), the module it executes, the fixture it replays. A
+              # migration change still reaches the job through `migrations`
+              # (schema-drill's `if:` ORs the two).
+              # (#9553 review P2: the first entry was `supabase/tests/pglite/`
+              # alone, so a `supabase/tests/*.sql`-only edit set BOTH outputs
+              # false and skipped the only job that executes those suites.)
+              "pglite": any_file(
+                  startswith("supabase/tests/"),
+                  isfile("tortoise/record_projection.py"),
+                  isfile("supabase/tests/fixtures/"
+                         "record_projection_journal.jsonl"),
               ),
               # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard).
               # #3775: the suite BUILDS the bundle before testing it, and
@@ -574,10 +600,13 @@ jobs:
   # round trip (apply → rollback → re-apply) for the multi-graph migration:
   # drop graphs + the api_keys graph columns restores the pre-C1 shape, and
   # re-applying migration 20260901000001 restores the invariants (verified
-  # by re-running its assertion suite). Runs whenever a migration changes.
+  # by re-running its assertion suite). Runs whenever a migration changes,
+  # and — #9553 review P2 — whenever the harness or the record projection it
+  # replays changes, which `migrations` alone never covered (a
+  # projection-only PR left this guard unrunnable in CI).
   schema-drill:
     needs: changes
-    if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
+    if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.pglite == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

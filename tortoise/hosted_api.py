@@ -30,6 +30,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
@@ -12327,6 +12328,76 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     return resp
 
 
+# #4356 (code-review P2): the invisible class, declared ONCE.
+#
+# `Default_Ignorable_Code_Point` is a Unicode BINARY property, and neither
+# `unicodedata` nor stdlib `re` can ask it (and the `regex` package is not a
+# declared dependency of this module — importing it here to get `\p{...}`
+# would add an undeclared runtime dep to the hosted API). So the guard is the
+# category rule PLUS this set of named exceptions. It must be exactly the code
+# points the category rule would otherwise wave through while a human sees
+# nothing: the four `Lo` members of `Default_Ignorable` (the Hangul fillers —
+# its `M`-category members are already refused by the category rule) and
+# BRAILLE PATTERN BLANK (U+2800), which is in NEITHER `Cf` nor
+# `Default_Ignorable`.
+#
+# This set is pinned as an EQUALITY, not a subset, by
+# `test_the_blank_class_enumeration_is_complete` (it derives the whole class
+# from the property's ranges and the category rule), so a partial enumeration
+# cannot recur silently — see the P2 that added the four fillers.
+_NON_REVEALABLE_BLANKS = frozenset(
+    "\u115f\u1160\u3164\uffa0"   # Hangul fillers — Default_Ignorable, category Lo
+    "\u2800"                     # BRAILLE PATTERN BLANK — category So, not Default_Ignorable
+)
+
+
+def _revealable_plaintext(value) -> bool:
+    """#4356: is this a secret a human — or a Copy button — can actually use?
+
+    The SERVER half of the predicate the dashboard already owns in
+    ``website/apps/dashboard/src/sessionKey.js::revealablePlaintext`` (#4342),
+    same polarity and same reason: a shown-once secret is useless if it is
+    blank or invisible, so "we handed back a string" is not the question — "can
+    it be read/copied" is. ``str.strip()`` alone is NOT a blankness test: it
+    strips whitespace but not zero-width / format characters, so a value of
+    only those would pass and reproduce the exact symptom (a visually empty
+    reveal, or an agent that cannot use the key).
+
+    A value is revealable when it contains at least ONE character a person can
+    see — a letter, number, punctuation or symbol. That rule is total over the
+    invisible classes that are NOT in the visible categories (whitespace /
+    separators, ``Cf`` format such as U+200B/U+FEFF, ``Cc`` controls, ``Cn``
+    unassigned, and ``Mn`` combining marks such as the variation selectors),
+    because none of those categories is in ``LNPS``.
+
+    ⛔ But the category rule is NOT total over the invisible class on its own,
+    and this predicate says so instead of implying otherwise:
+    ``Default_Ignorable_Code_Point`` has four members in category ``Lo`` —
+    U+115F, U+1160, U+3164, U+FFA0 (Hangul fillers) — which are visually blank
+    and would pass as "a letter". Those four are named in
+    ``_NON_REVEALABLE_BLANKS`` along with BRAILLE PATTERN BLANK (U+2800, ``So``,
+    in neither ``Cf`` nor ``Default_Ignorable``). Without them the predicate is
+    FAIL-OPEN on exactly the shape it exists to refuse — and out of step with
+    the dashboard predicate it is the server half of, which strips
+    ``\\p{Default_Ignorable_Code_Point}`` and refuses all four.
+
+    Only the DECISION reads a copy; nothing here rewrites the secret.
+
+    Deliberately fail-CLOSED and deliberately not a format check: refusing a
+    rotation is recoverable (the old key keeps working), destroying one is not.
+    It must never become a validator for the token FORMAT — a legitimate
+    non-ASCII or future-format secret must be waived through, not refused.
+    """
+    if not isinstance(value, str):
+        return False
+    return any(
+        not ch.isspace()
+        and unicodedata.category(ch)[0] in "LNPS"
+        and ch not in _NON_REVEALABLE_BLANKS
+        for ch in value
+    )
+
+
 @app.post("/v1/team/keys/{key_id}/rotate")
 async def rotate_api_key(key_id: str, request: Request, response: Response,
                          org: dict = Depends(get_current_org_session)):  # noqa: B008
@@ -12374,6 +12445,22 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     plaintext is still returned (reveal-once: the only alternative is losing a
     live secret). There is NO cross-lane transaction and none is claimed — see
     the #4355 scoping comment for the declared residuals.
+
+    #4356 — a revealable replacement is a PRECONDITION of the destructive leg.
+    Create-first is not enough on its own: a create that returns a ROW but no
+    usable secret (the silent-falsy shape — no raise, empty/unrevealable
+    plaintext) would otherwise revoke the displaced key and hand back a
+    credential nobody can use, which is strictly worse than refusing. So the
+    mint envelope is tested for a revealable plaintext immediately after the
+    mint and BEFORE `_claim_key_revocation`: falsy ⇒ the destructive leg is not
+    attempted at all, the displaced row is left untouched, and the call refuses
+    with a truthful 500 naming the unusable replacement row. The unusable
+    replacement is NOT auto-revoked — #4356's AC(3) pins that a
+    plaintext-less rotate fires no revoke of its own, so the cleanup stays
+    manual (disclosed in the detail, and named there by its prefix so the user
+    does not revoke the WRONG row: the mint carries the displaced row's label
+    over, so two live rows can share one name). Success-path ordering is
+    unchanged: `mint → revoke`.
     """
     from tortoise.quota import api_key_occupies_slot
 
@@ -12488,9 +12575,50 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
         ) from None
 
     kid = minted["id"]
-    api_key = minted["key_plaintext"]
+    # `.get` on purpose: an ABSENT field is the same failure as a falsy one and
+    # must take the same refusal, not raise a KeyError/500 with no explanation.
+    api_key = minted.get("key_plaintext")
     key_prefix = minted["key_prefix"]
     now = minted["created_at"]
+
+    # ── #4356: is the replacement USABLE? A precondition of the destructive
+    # leg, so it is tested BEFORE it. #4342's client-side guard sat after the
+    # revoke: truthful about the wreckage, but too late — the old key was dead
+    # and the replacement's secret was gone. A failed replacement must never
+    # destroy a working credential.
+    if not _revealable_plaintext(api_key):
+        _logger.error(
+            "rotate: replacement %s for %s (org %s, prefix %r) minted with no "
+            "revealable plaintext — refusing to revoke the displaced key",
+            kid, key_id, org["org_id"], key_prefix)
+        # The row was created, so the trail must say so — otherwise the only
+        # record of the unused replacement is a log line that rotates away.
+        await _async_audit(
+            request, org["org_id"], "api_key_rotate",
+            resource_type="api_key", resource_id=kid,
+            detail={
+                "replaced_key_id": key_id,
+                "replaced_revoked": False,
+                "destructive_leg": "not_attempted",
+                "reason": "replacement_plaintext_not_revealable",
+            },
+        )
+        prefix_note = (
+            f" (its prefix is {key_prefix}; the replacement carries this key's "
+            "name, so use the prefix to tell them apart)"
+            if key_prefix else ""
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "The rotation did not complete: the replacement key was "
+                "created but its value could not be shown, so it would be "
+                "unusable. Nothing was revoked — the key you rotated is "
+                "unchanged and behaves exactly as before. An unusable "
+                f"replacement row now exists{prefix_note}: revoke that row "
+                "from the key table, then retry the rotation."
+            ),
+        )
 
     # ── Destructive leg: a CLAIM, so exactly one concurrent rotate wins ──
     replaced_revoked = True
@@ -18532,6 +18660,23 @@ def _session_count_by_harness(proj, harness: str | None) -> int:
     return int(rows[0][0]) if rows else 0
 
 
+def _capture_receipt_buckets() -> list[tuple[str | None, str]]:
+    """The (harness, receipt-key) buckets the reconcile pass clears (#5051).
+
+    Kept CALLABLE and module-level so the derivation is testable WITHOUT a
+    graph: this bucket list used to spell ``session_capture_receipt_{h}``
+    inline, a second source of truth for the key FORMAT that
+    ``tortoise/capture_receipts.py`` owns. Drift there is silent and one-sided
+    — a changed format leaves this pass looking up key names no writer
+    produces, so ``state.get(key)`` is always falsy and an orphaned receipt is
+    never cleared (a leak the delete path is the only sweep for). Pinned to the
+    formatter by ``tests/test_5051_capture_receipt_key_registry.py``.
+    """
+    return [(None, _capture_receipt_key(None))] + [
+        (h, _capture_receipt_key(h)) for h in sorted(_SESSION_HARNESS_VALUES)
+    ]
+
+
 def _reconcile_capture_receipts(proj, org_id: str) -> list[str]:
     """Receipt cleanup by recompute (the delete-side half of the T1-P12
     receipt↔Session invariant): a receipt is an orphan iff zero Sessions
@@ -18551,9 +18696,7 @@ def _reconcile_capture_receipts(proj, org_id: str) -> list[str]:
         logging.getLogger("tortoise.api").exception(
             "capture-receipt reconcile: state read failed (skipped pass)")
         return []
-    buckets = [(None, "session_capture_receipt")] + [
-        (h, f"session_capture_receipt_{h}") for h in sorted(_SESSION_HARNESS_VALUES)
-    ]
+    buckets = _capture_receipt_buckets()
     clear_fields: dict[str, None] = {}
     cleaned: list[str] = []
     for harness, key in buckets:
@@ -30314,11 +30457,19 @@ def _capture_server_owned_keys() -> set[str]:
     (``_ALLOWED_STATE_KEYS`` ← ``_ONBOARDING_DEFAULT_STATE``), so a harness
     that registers an ``install_probe_{h}`` key is server-owned the moment it
     is registered — a literal pair would silently re-open a client-writable
-    evidence key for the next harness (review P2)."""
+    evidence key for the next harness (review P2).
+
+    #5051: the receipt / last-error members are DERIVED from the one key
+    definition (``tortoise/capture_receipts.py``), never re-spelled. They used
+    to be inline f-strings, and the drift is one-sided the wrong way: after a
+    format change the live receipt keys no longer match this set, so a client
+    PATCH could write them — re-opening the exact fabricated-receipt surface
+    #3681 closed (``captureStatus.js`` would read the client's own claim)."""
     return {
-        "session_capture_receipt",
-        *{f"session_capture_receipt_{h}" for h in _SESSION_HARNESS_VALUES},
-        *{f"session_capture_last_error_{h}" for h in _SESSION_HARNESS_VALUES},
+        _capture_receipt_key(None),
+        *{_capture_receipt_key(h) for h in _SESSION_HARNESS_VALUES},
+        *{k for h in _SESSION_HARNESS_VALUES
+          if (k := _capture_last_error_key(h)) is not None},
         *{k for k in _ALLOWED_STATE_KEYS if k.startswith("install_probe_")},
     }
 
