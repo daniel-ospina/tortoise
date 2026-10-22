@@ -1829,21 +1829,33 @@ def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
     # `test_record_schema_placement.py` is `core`), so a lost half cannot be
     # masked by the other one.
     #
-    # Mutation check: removing "tortoise/quadrature.py" from `CORE_ALSO` fails the
-    # `core` and `test_record_schema_placement.py` asserts; removing it from
-    # `SOURCE_PATTERNS["onboarding"]` fails the `onboarding` and
-    # `test_website_docs_consistency.py` asserts.
+    # The descriptive `test_files` assert comes BEFORE the bare `surfaces` assert
+    # in both pairs, and that ordering is load-bearing: a failing assert
+    # short-circuits the rest of the test, so with the surface check first the
+    # only thing a developer saw was a bare `['core']` with no explanation — the
+    # message naming the missing guard was unreachable. Each surface assert also
+    # carries its own message now, so a lost half is named whichever assert fires.
+    #
+    # Mutation check, both measured: removing "tortoise/quadrature.py" from
+    # `CORE_ALSO` fails the `test_record_schema_placement.py` assert (682 files ->
+    # 125, the `onboarding` set alone); removing it from
+    # `SOURCE_PATTERNS["onboarding"]` fails the `test_website_docs_consistency.py`
+    # assert (682 -> 633, the `core` pool alone).
     r = _sel(["tortoise/quadrature.py"])
     assert r["full"] is False, r
-    assert "onboarding" in r["surfaces"], r["surfaces"]
     assert "test_website_docs_consistency.py" in r["test_files"], (
         "the /docs formula guard is not selected by a change to the module it "
-        "derives its expected factors from", r)
+        "derives its expected factors from (SOURCE_PATTERNS entry missing?)", r)
+    assert "onboarding" in r["surfaces"], (
+        "the guard ran from some other surface — a quadrature-only diff must "
+        "select `onboarding`, which is where the guard is registered",
+        r["surfaces"])
+    assert "test_record_schema_placement.py" in r["test_files"], (
+        "the core-registered pool is missing from a quadrature-only selection "
+        "(CORE_ALSO entry removed?)", r)
     assert "core" in r["surfaces"], (
         "a quadrature-only diff dropped the core pool (CORE_ALSO entry removed?)",
         r["surfaces"])
-    assert "test_record_schema_placement.py" in r["test_files"], (
-        "the core-registered pool is missing from a quadrature-only selection", r)
 
 
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
