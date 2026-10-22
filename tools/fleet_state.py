@@ -922,6 +922,101 @@ def load_registry(path: Path = REGISTRY) -> RegistryRows:
     return RegistryRows(rows, measured=True)
 
 
+#: The row format ``lane-registry.tsv`` carries — one row per lane, in the order
+#: ``load_registry`` reads them. Named ONCE so the provisioning advice a refused
+#: reader is given (#9392) is the format the reader will actually be read back
+#: with, and cannot drift from it.
+REGISTRY_ROW_FORMAT = "label<TAB>workspace-uuid<TAB>issue-label"
+
+
+def registry_never_provisioned(error: str) -> bool:
+    """Was the roster read refused because the FILE IS ABSENT (#9392)?
+
+    ⛔ TWO CAUSES WEAR THE SAME ``measured=False`` AND THEY ARE NOT THE SAME
+    PROBLEM. An absent file means the roster was **never provisioned** in this
+    cell — a set-up step nobody performed — while any other ``OSError`` means the
+    file is there and the READ failed (permissions, encoding, a directory where
+    the file should be). Before this predicate the two shared one sentence, so a
+    reader in a fresh cell was told to fix a file it did not have.
+
+    The test is on the CAUSE TEXT the read recorded (``load_registry`` writes
+    ``{type(exc).__name__}: {exc}``), never on the caller's prose, so a caller
+    that embeds the raw error keeps the classification.
+    """
+    lowered = str(error or "").lower()
+    return (
+        "filenotfound" in lowered
+        or "no such file or directory" in lowered
+        # A bare errno 2 with the exception's name stripped (a caller that
+        # rebuilt the message from ``exc.strerror``). ⛔ MATCHED AS A TOKEN, not
+        # as a substring: `"errno 2" in …` is a PREFIX of "errno 20", "errno
+        # 21", "errno 26", "errno 27" and "errno 28" — so a roster that EXISTS
+        # and could not be read (ENOTDIR, EISDIR — the docstring's own example —
+        # ENOSPC, EROFS, EMFILE) was classified as NEVER PROVISIONED, and the
+        # reader was sent to provision a file that is already there.
+        or re.search(r"\berrno 2\b", lowered) is not None
+    )
+
+
+def registry_remedy(error: str, path: Path | str | None = None) -> str:
+    """WHAT A READER CAN DO about an unreadable lane roster (#9392).
+
+    The gate's REFUSAL is right and is not relaxed here: the roster is the only
+    thing that can mechanically attribute a lane to an issue, and a reader that
+    invents one for itself reports every peer as absent — the false-CLEAN class
+    #8175 exists to prevent. What was wrong is the REMEDY it printed. Every
+    INCOMPLETE run used to end with "fix gh auth/network (or rebuild the fleet
+    board) and re-run", and for an absent roster BOTH halves are dead ends: ``gh
+    auth`` is fine (every other surface answered), and ``fleet_state.py build``
+    builds the board FROM this file, so it fails on the SAME read the rebuild was
+    prescribed for. A reader was sent in a loop.
+
+    So the sentence is derived from the CAUSE and states the real owner of it:
+
+      * ABSENT (``registry_never_provisioned``) — the cell was never
+        provisioned. Provisioning is a CELL/human step (one row per live lane),
+        and the message says so, plus why a lane must not provision ITSELF.
+      * unreadable for any other recorded cause — the file is there and the read
+        still failed, so the fix is the file (permissions/encoding), not the
+        cell.
+      * no cause recorded — name the file's shape and send the reader there
+        first rather than guessing between the two.
+
+    Returns prose WITHOUT the raw error: the caller already prints that, and a
+    second copy here is a second thing that can disagree with it.
+    """
+    target = REGISTRY if path is None else path
+    if registry_never_provisioned(error):
+        return (
+            "the roster was NEVER PROVISIONED in this cell — "
+            f"{Path(target).name} is a hand-maintained file of one "
+            f"`{REGISTRY_ROW_FORMAT}` row per lane, and `fleet_state.py build` "
+            "CANNOT create it: the board is built FROM this file, so rebuilding "
+            "fails on the SAME read. The fix is PROVISIONING, and it is a CELL "
+            "step, not a reader step — add one row per live lane, taking each "
+            "lane's workspace uuid from the cell's own "
+            "`cmux list-workspaces --json`. Do NOT write a row for this lane "
+            "alone to get unblocked: a one-row roster reports every peer as "
+            "absent and produces exactly the false CLEAN this gate exists to "
+            "prevent (#8175)"
+        )
+    if str(error or "").strip():
+        return (
+            f"the roster EXISTS but could not be read ({Path(target).name} at "
+            f"{target}) — fix the file itself (a wrong path such as a directory "
+            "where the file belongs, permissions/encoding, a full or read-only "
+            "disk, or too many open files); "
+            "`fleet_state.py build` cannot repair it, because the board is built "
+            "FROM this file and fails on the same read"
+        )
+    return (
+        "the cause of the failed roster read was not recorded, so start from "
+        f"the file itself ({target}): it is a hand-maintained list of one "
+        f"`{REGISTRY_ROW_FORMAT}` row per lane, and `fleet_state.py build` "
+        "cannot create or repair it"
+    )
+
+
 class WorkspaceMap(dict):
     """The live cmux workspace map, carrying the READ'S provenance (#7738).
 
@@ -1961,6 +2056,11 @@ def build_state(
     # truncated (the two are indistinguishable), and the flag travels with the
     # board so a reader can refuse rather than assert a negative.
     issues_truncated = len(issues_read) >= OPEN_ISSUES_LIMIT
+    # ⛔ AND THE ISSUE COUNT IS ITS OWN READ'S, not the AND of both (#9392 review
+    # P2): beside `open_issues_read` the only relevant provenance is this read's,
+    # and `github_measured` also goes false when the PR list alone failed — gating
+    # on it would throw away a count that WAS measured.
+    issues_measured = bool(getattr(issues_read, "measured", False))
     github_measured = bool(getattr(prs_read, "measured", False)) and bool(
         getattr(issues_read, "measured", False)
     )
@@ -2687,12 +2787,58 @@ def build_state(
             # failure a reader can refuse on, never an empty fleet.
             "registry_measured": registry_measured,
             "registry_error": registry_error,
+            # THE ROSTER'S SIZE, published beside its provenance (#9392). A
+            # one-row roster and a full one are indistinguishable to a reader
+            # that is told only `registry_measured: true` + `board source:
+            # rebuilt`, and the measured incident is exactly that: a hand-written
+            # single self-row turned 11 live lanes invisible and flipped an
+            # INCOMPLETE into a CLEAN with no code change. These are COUNTS OF
+            # WHAT WAS READ (never facts when the read failed — `0` beside
+            # `registry_measured: false` is an artefact of the failure, not an
+            # empty fleet), so a reader can say "roster rows: 1" out loud.
+            # `None` — not `0` — is that rule applied to this field: `load_registry`
+            # returns no rows on ANY `OSError`, so `len()` beside a failed read is
+            # the artefact the sentence above forbids, and the workspace count
+            # below already answers the same way (review P2, #9392).
+            "registry_rows": len(registry) if registry_measured else None,
+            # ⛔ AND SO IS THE WORKSPACE COUNT (review P1): EVERY failure path of
+            # `cmux_workspaces` returns an EMPTY map with `measured=False`, so
+            # `len()` there is an artefact of the failed read, never a
+            # measurement. Publishing it published "vs 0 live workspace(s)" for
+            # a fleet nobody asked successfully, which reads as "every roster
+            # row is a ghost lane" — the same absent-is-not-zero rule this block
+            # already obeys for the provenance fields, one field over. `None` is
+            # the board saying "this read did not happen"; a reader that prints
+            # counts must skip it (`collision_preflight._board_count` does).
+            # ⛔ AND IT COUNTS CMUX WORKSPACES, NOT THE SYNTHETIC ONES (#9392
+            # review P2). `register_process_lanes` MUTATES this same map to add a
+            # `PROC:` entry for a lane it found in the process table and not in
+            # cmux (`title: "pi (process N) — no cmux workspace"`, #8999) — so a
+            # bare `len()` published "live cmux workspaces: 2" for a cmux list of
+            # 1. That is worst exactly where this disclosure was added: the
+            # synthetic entry is minted when the process's cwd is claimed by !=1
+            # registry row, i.e. when the roster is missing rows — the cell case
+            # #9392 is about — and the refusal tells the operator to take one
+            # uuid per lane from `cmux list-workspaces --json`, a list a
+            # `PROC:` entry is not in. The roster's row count stays as it is: it
+            # counts file ROWS, and the label says "row(s)".
+            "workspaces_count": (
+                sum(1 for name in workspaces if not is_proc_ws(name))
+                if workspaces_measured else None
+            ),
             # #8175: was the OPEN-ISSUE read WIDE ENOUGH to prove a negative? A
             # truncated read cannot support "no lane is attributed to issue N"
             # for an N it did not see, so the flag travels with the board and the
             # pre-flight refuses for an absent issue rather than answering.
             "open_issues_truncated": issues_truncated,
-            "open_issues_read": len(issues_read),
+            # ⛔ ABSENT IS NOT ZERO, for this read too (review P2). `gh_json`
+            # returns NO rows on failure, so this `len()` beside a failed read is
+            # the artefact the comment above forbids for `registry_rows` — and
+            # `build --json` prints the object before its refusal. `None` is the
+            # board saying "this read did not happen"; every consumer
+            # (`_issue_entry_problem`, via `open_issues_truncated`) already reads
+            # only under a measured-True flag.
+            "open_issues_read": len(issues_read) if issues_measured else None,
             "open_issues_limit": OPEN_ISSUES_LIMIT,
             # #8999: the LIVE-SESSION store's provenance, in the same shape. The
             # reader can now say WHICH store answered (the cmux session store, the
@@ -3121,7 +3267,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         print(
             "⛔ NOT CACHED: the lane registry could not be read "
             f"({rp['error'] or 'cause unknown'}) — a failed read is never written as "
-            f"fact (#7957 H5); {out} is left untouched",
+            f"fact (#7957 H5); {out} is left untouched.\n"
+            f"   AND A REBUILD IS NOT THE REMEDY (#9392): "
+            f"{registry_remedy(rp['error'])}.",
             file=sys.stderr,
         )
         return 2

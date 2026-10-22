@@ -165,13 +165,17 @@ class WhoIsOnTest(unittest.TestCase):
         # "nobody holds it" family of answers would be unreachable. The default
         # board here answers "no lane is attributed to this issue".
         self._write_fleet_board()
+        # Where a REBUILD's shadowed `gh`/`cmux` stubs record that they were
+        # called (see `failing_rebuild_path`).
+        self.rebuild_stub_log = self.tmp / "rebuild-stub-calls.log"
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
-    def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG) -> Path:
+    def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG,
+                           registry_measured=True, registry_error="") -> Path:
         """Write the claim gate's board at `$HOME/.pi/agent/state`.
 
         Only the fields `collision_preflight._read_board` / `_holders_from_board`
@@ -191,7 +195,10 @@ class WhoIsOnTest(unittest.TestCase):
             # always writes it, and an empty list is what a readable live-session
             # store produces.
             "orphans": [],
-            "reconciliation": {"registry_measured": True,
+            "reconciliation": {"registry_measured": bool(registry_measured),
+                               # The cause text `load_registry` records, so a
+                               # test can model an UNPROVISIONED roster (#9392).
+                               "registry_error": str(registry_error),
                                "github_measured": True,
                                # The board must also stamp its OPEN-ISSUE coverage:
                                # `_board_can_answer` refuses an unstamped board
@@ -245,6 +252,35 @@ class WhoIsOnTest(unittest.TestCase):
         path.write_text(body)
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         return path
+
+    def failing_rebuild_path(self) -> str:
+        """A `PATH` on which the claim gate's REBUILD reads fail locally.
+
+        ⛔ A REBUILD RUNS IN THE TOOL SUBPROCESS (`collision_preflight._read_board`
+        → `fleet_state.build_state`), so it cannot be mocked from here, and it
+        uses BARE `gh`/`cmux` from `PATH` — not this harness's `--gh` stub. An
+        unanswerable board therefore reaches the network (two real GraphQL calls
+        against a nonexistent repo) and, on a box where cmux is reachable, reads
+        the OPERATOR's real workspace list.
+
+        Shadowing both with FAILING stubs keeps the cause under test intact —
+        the real `FileNotFoundError` from `load_registry`, which runs first —
+        while making the rest of the rebuild a local no-op (`_run` degrades a
+        non-zero exit to "", the production fail-open shape). The stubs also
+        RECORD their calls (`self.rebuild_stub_log`), so the test can prove the
+        rebuild happened through THIS path.
+        """
+        stub_dir = self.tmp / "rebuild-stubs"
+        stub_dir.mkdir(exist_ok=True)
+        log = self.rebuild_stub_log
+        for name in ("gh", "cmux"):
+            self._write_exec(
+                stub_dir / name,
+                "#!/usr/bin/env bash\n"
+                f'printf \'%s\\n\' "$0 $*" >> {log}\n'
+                f'echo "{name}-stub: rebuilds never leave the test" >&2\n'
+                "exit 127\n")
+        return f"{stub_dir}:{os.environ.get('PATH', '')}"
 
     # ── fixtures ─────────────────────────────────────────────────────────────
 
@@ -845,6 +881,45 @@ exit 0
         self.assertEqual(rc, 0, out)
         self.assertIn("ANSWER: 1 holder(s)", out)
         self.assertIn("lane-live", out)
+
+    def test_an_unprovisioned_roster_names_provisioning_not_a_rebuild(self):
+        """#9392, on THIS verb: the two renders must agree.
+
+        `who-is-on` prints the claim gate's surface note, and the gate's
+        INCOMPLETE verdict line prints the remedy — both now take their sentence
+        from `fleet_state.registry_remedy`, so a lane that asks "who is on #N?"
+        and the lane that runs the pre-flight are told the SAME thing: the roster
+        was never provisioned, and a rebuild cannot help. Before the fix this
+        verb could only report "the lane registry could not be read" while the
+        gate told the reader to rebuild the board.
+
+        ⛔ THE REBUILD IS KEPT LOCAL (review P2): the gate rebuilds inside this
+        tool's own subprocess with bare `gh`/`cmux`, so both are shadowed by
+        failing stubs — the real `FileNotFoundError` under test still happens,
+        but no GraphQL call and no operator cmux read can.
+        """
+        self._write_fleet_board(
+            registry_measured=False,
+            registry_error=(
+                "FileNotFoundError: [Errno 2] No such file or directory: "
+                f"'{self.tmp}/.pi/agent/state/lane-registry.tsv'"),
+        )
+        rc, out = self.run_tool(
+            ISSUE, env_extra={"PATH": self.failing_rebuild_path()})
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertNotIn("ANSWER: nobody", out)
+        self.assertIn("lane-registry.tsv", out)
+        self.assertIn("NEVER PROVISIONED", out)
+        self.assertIn("CANNOT create it", out)
+        self.assertIn("PROVISIONING", out)
+        self.assertNotIn("rebuild the fleet board", out.lower())
+        # ⛔ AND THE REBUILD REALLY RAN — through the LOCAL stubs (review P2), so
+        # this test keeps proving the claim gate meets the REAL roster read and
+        # keeps doing it without a network round-trip.
+        log = self.rebuild_stub_log.read_text()
+        self.assertIn("/gh ", log)
+        self.assertIn("/cmux ", log)
 
     def test_an_unmeasured_holder_makes_the_answer_incomplete(self):
         """A lane the board attributed but could not measure is NOT "nobody": the

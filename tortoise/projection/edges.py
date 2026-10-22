@@ -237,18 +237,43 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
         # extractedFrom keeps its create-if-missing stub (live _link_source
         # parity).
         if rel == "aboutDocument":
-            # D10 B1 live-parity (adversarial): the LIVE auto-detect
-            # (`_resolve_about_edge_target`) resolves an aboutDocument target
-            # only when
-            # `e.documentKind IS NOT NULL`, so a session/connector/provenance
-            # Source can never become an aboutDocument target. This replay
-            # match MUST carry the same guard — without it a producer-created
-            # edge (reachable through the public `sdk.create_edge`) to a
-            # provenance Source is re-attached to that non-document Source on
-            # rebuild, i.e. live and replay disagree (the #2489 "one create
-            # path / byte-identical stubs" invariant). The guard is
-            # DELIBERATE live-parity, not an accident: a wrong target must be
-            # refused here, exactly as live refuses it.
+            # D10 B1: aboutDocument's target is a DOCUMENT — a :Source carrying
+            # `documentKind` and addressable by `url` (ONTOLOGY §4.4). This
+            # replay match carries that target-KIND contract and it is
+            # load-bearing rather than defensive on the DESCRIPTOR route: a
+            # supersede descriptor is keyed on `url` ALONE (`stub_key` cannot
+            # tell a document from a provenance :Source), and supersede 2b
+            # enumerates `(old:Point)-[rel]->` only — so a descriptor written by
+            # a pre-#5206 build (when `create_edge` refused nothing) would be
+            # RE-ATTACHED to a provenance :Source at rebuild unless the kind
+            # test runs in this match. Refusing SKIPS the descriptor (the edge is
+            # absent from the rebuild) instead of minting a mis-pointed one —
+            # the #2489 "one create path / byte-identical stubs" invariant.
+            # ⚠️ The descriptor route is not the only caller: the name-path arm
+            # of `replay_about_links` below calls this same match — with
+            # `rel='aboutDocument'`, `target_label='Source'` and the journaled
+            # `resolve_key` — whenever a pinned endpoint value does not resolve
+            # by id (its `resolve_key` fallback; the key `resolve_about_link`
+            # pins there is a DOCUMENT's `url`, guarded by that arm's own
+            # `documentKind IS NOT NULL`). So the predicate is load-bearing on
+            # the descriptor route only; on that arm the key already came from a
+            # document and the kind test is a defence, not the witness.
+            # Pinned by tests/test_pointsuperseded_rebuild.py::
+            # test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
+            # (delete the predicate below and it reds), and the
+            # `replay_about_links` route below by
+            # tests/test_8398_aboutobject_replay.py::
+            # test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver.
+            # ⚠️ This replay arm is STRICTER than two live writers, which apply
+            # NO kind test at all: `create_about_edge` — the about* name/handle
+            # seam `create_event(aboutDocument=…)` reaches, label filter only —
+            # and `session_link.link_entity`, which validates the ONTOLOGY §3.2
+            # triple only. `about_document_target_reason` is called from
+            # `create_edge` alone. The two live paths that DO carry the
+            # contract are the auto-detect (`_resolve_about_edge_target`:
+            # `e.documentKind IS NOT NULL`) and `create_edge` (#5206). Closing
+            # those two writers is #9679, deliberately not done here — never
+            # loosen this guard on the strength of that gap.
             rows = g.query(
                 "MATCH (s:Source {url:$url}) WHERE s.documentKind IS NOT NULL "
                 "RETURN ID(s), s.id LIMIT 1",
@@ -377,10 +402,11 @@ def about_document_target_reason(label: str | None,
     ``(:Source {url:$url}) WHERE documentKind IS NOT NULL``, and the supersede
     descriptor is keyed by ``stub_key``, which emits nothing for an empty or
     non-string key (the ``isinstance(x, str) and x`` rule ``_writable_id``
-    applies). Live auto-detect refused a non-document Source
+    applies). Before #5206 the live auto-detect refused a non-document Source
     and so did replay, but the live producer (``create_edge``) refused nothing —
     an edge created through it was built, transferred at supersede and then
-    dropped by ``rebuild_all``, ending on NEITHER node (#5206). ``url`` is part
+    dropped by ``rebuild_all``, ending on NEITHER node (#5206; the two writers
+    that still refuse nothing are #9679). ``url`` is part
     of the contract because the supersede descriptor is keyed on it
     (``stub_key``), so a source with no usable ``url`` is lost the same way.
     """
