@@ -764,7 +764,7 @@ def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool,
         risk = "read" if annotations.readOnlyHint is True else "write"
     return ToolDefinition(
         name=name, id=f"surface.probe.{name.removeprefix('tortoise_')}",
-        description="probe", annotations=annotations, risk=risk,
+        description="probe", annotations_override=annotations, risk=risk,
         http_policy=http_policy, sdk_method=sdk_method,
     )
 
@@ -1566,7 +1566,11 @@ class TestToolIdentity:
             _current_legacy_full_access.reset(legacy_tok)
 
     def test_quota_gated_tools_are_declared_writers(self):
-        """Every _quota_gated wrap site's bound tool declares writes=True."""
+        """Every _quota_gated wrap site's bound tool carries the write permission.
+
+        `writes` is DERIVED from `risk` since #4122, so this asserts the derived
+        permission: a quota-gated (data-mutating) tool must be in a writing tier.
+        """
         from tool_surface_capabilities import (  # noqa: I001
             quota_gated_wrap_sites, registry_entries_by_method,
         )
@@ -1577,11 +1581,11 @@ class TestToolIdentity:
             for entry in by_method.get(method, []):
                 assert entry.writes, (
                     f"{entry.name} bound to _quota_gated({method})@{lineno} "
-                    f"but declared writes=False")
+                    f"but its risk tier ({entry.risk!r}) derives writes=False")
 
     def test_gate_reads_the_entry_writes_flag(self):
-        """The gate's decision IS the entry's `writes` flag: a writer needs
-        graphs:write, a read tool is satisfied by graphs:read."""
+        """The gate's decision IS the entry's derived `writes` permission: a writer
+        needs graphs:write, a read tool is satisfied by graphs:read."""
         from fastmcp.exceptions import AuthorizationError
 
         from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
@@ -1591,8 +1595,8 @@ class TestToolIdentity:
         legacy_tok = _current_legacy_full_access.set(False)
         try:
             with pytest.raises(AuthorizationError):
-                _enforce_mcp_tool_scope("tortoise_create_point")  # writes=True
-            _enforce_mcp_tool_scope("tortoise_query")             # writes=False
+                _enforce_mcp_tool_scope("tortoise_create_point")  # risk="write"
+            _enforce_mcp_tool_scope("tortoise_query")             # risk="read"
         finally:
             _current_scopes.reset(scopes_tok)
             _current_legacy_full_access.reset(legacy_tok)

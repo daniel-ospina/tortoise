@@ -51,9 +51,9 @@ class ToolDefinition:
     #    (they were two independent fields, which is the whole defect #4122 named).
     #
     #    OVERRIDES: NIST SP 800-53 AC-6's read-low / write-high default — a tool is
-    #    classified by the caller's PERCEIVED RISK, not by whether its handler
-    #    happens to write, so a confined, idempotent, derived-value refresh is
-    #    permissioned as a read (`maintenance`) instead of as a write.
+    #    classified by USER-PERCEIVED RISK, not by whether its handler writes, so a
+    #    confined, idempotent, derived-value write is permissioned as read
+    #    (`maintenance`).
     risk: str                    # read | maintenance | write | destructive | admin
     http_policy: bool            # True = exposed on HTTP surfaces
     sdk_method: str              # Attribute name on TortoiseSDK, e.g. "create_point"
@@ -64,14 +64,15 @@ class ToolDefinition:
                                  # (deployment-gated — e.g. tortoise_pack_install;
                                  # self-host uses filesystem packs dir + CLI)
     #: Retry safety of the OPERATION — deliberately NOT a risk statement, and so
-    #: deliberately not derivable from `risk`: `tortoise_create_point` is a `write`
-    #: yet idempotent (content-hash dedup), and `maintenance` is ALWAYS idempotent.
-    #: `None` → derived: ``risk == "maintenance"``.
+    #: deliberately not fully derivable from `risk`: `tortoise_create_point` is a
+    #: `write` yet idempotent (content-hash dedup), and `maintenance` is idempotent
+    #: by default but NOT always (`tortoise_compute_confidence` re-derives from the
+    #: value the previous call stored — measured 0.693315 -> 0.693320 on #4122).
+    #: `None` → derived from the tier (`_RISK_HINTS`).
     idempotent: Optional[bool] = None  # noqa: UP045
-    #: `None` → DERIVED from `risk` (the normal case; no entry declares this).
-    #: A non-None value is only for a probe/test that must construct a
-    #: DISAGREEING entry so the drift guards can be proven to fire.
-    annotations: Optional[ToolAnnotations] = None  # noqa: UP045
+    #: ONLY for a probe/test that must construct a DISAGREEING entry so the drift
+    #: guards can be proven to fire. Never set on a registry entry (#4122).
+    annotations_override: Optional[ToolAnnotations] = None  # noqa: UP045
     retired_use_instead: Optional[str] = None  # noqa: UP045  # #3883: non-None ONLY
                                  # on a retired entry — the call that replaces this name.
 
@@ -81,9 +82,19 @@ class ToolDefinition:
             # #4170 failure mode (an under-classified writer served as a read).
             raise ValueError(
                 f"{self.name}: unknown risk {self.risk!r} — must be one of {RISK_TIERS}")
-        if self.annotations is None:
-            object.__setattr__(self, "annotations",
-                               annotations_for_risk(self.risk, self.idempotent))
+
+    @property
+    def annotations(self) -> ToolAnnotations:
+        """DERIVED MCP hints (#4122) — recomputed on every read, never stored.
+
+        A property rather than a field on purpose: the only way to derive a
+        variant of a frozen entry is `dataclasses.replace`, which copies stored
+        fields verbatim — so a stored `annotations` would have stayed stale
+        after `replace(risk=...)`, exactly the drift class this change closes.
+        """
+        if self.annotations_override is not None:
+            return self.annotations_override
+        return annotations_for_risk(self.risk, self.idempotent)
 
     @property
     def writes(self) -> bool:
@@ -117,6 +128,23 @@ class ToolDefinition:
 # `tortoise_compute_confidence`, `tortoise_packs_list`. They keep `graphs:read`
 # and stop claiming `readOnlyHint: true` — the hint is what clients auto-approve
 # on, and it was the only thing actually wrong.
+#
+# THE TIER AXIS, in one sentence each, so the next lane does not re-litigate a
+# row (the split is what `destructiveHint` means to a client):
+#   read        — reads only; no stored state changes.
+#   maintenance — a DERIVED value it owns is refreshed (the trio above). Idempotent
+#                 by default; an entry overrides `idempotent` when measurement says
+#                 otherwise (`tortoise_compute_confidence`).
+#   write       — ADDITIVE only: creates nodes/edges, adds a derived artifact, or
+#                 starts a job. Nothing user-authored is replaced or removed.
+#   destructive — removes, or overwrites in place, stored state that a user
+#                 authored (delete family, in-place update family, terminal status
+#                 writes, whole-graph rewrites) — `destructiveHint: true`.
+#   admin       — changes what the product DOES for the org/graph/install:
+#                 provisioning, pack install, credentials, recording/monitoring and
+#                 source switches. `destructiveHint: true`.
+# Both writing tiers keep `graphs:write`; the split exists only so a client (and
+# the per-tool consent UI the ruling defers) can tell "adds" from "replaces".
 
 #: Every legal tier, least to most risk.
 RISK_TIERS: tuple[str, ...] = ("read", "maintenance", "write", "destructive", "admin")
@@ -147,12 +175,12 @@ def annotations_for_risk(risk: str, idempotent: Optional[bool] = None) -> ToolAn
     """The MCP hints for a tier — the ONLY place they are decided.
 
     Every hint a client sees comes from here, so `risk` cannot disagree with the
-    hints (pinned by `tests/test_tool_risk_tiers.py`)."""
+    hints (pinned by `tests/test_tool_risk_tiers.py`). A tier's row is the single
+    statement: `idempotent` overrides ONLY the retry-safety element, for the tools
+    whose operation is not idempotent despite its tier."""
     read_only, destructive, idem = _RISK_HINTS[risk]
     if idempotent is not None:
         idem = bool(idempotent)
-    elif risk == MAINTENANCE_TIER:
-        idem = True
     return ToolAnnotations(readOnlyHint=read_only, destructiveHint=destructive,
                            idempotentHint=idem)
 
@@ -160,7 +188,8 @@ def annotations_for_risk(risk: str, idempotent: Optional[bool] = None) -> ToolAn
 # ── Shorthand annotations (probe/test only — the registry DERIVES its own) ──
 # Kept because the capability guards construct deliberately-inconsistent probe
 # entries with them (`tests/test_tool_registry.py::_probe`); NO registry entry
-# declares annotations any more (#4122).
+# declares annotations any more (#4122), which is why there is no `_idem()` — an
+# idempotent write is expressed as `idempotent=True` on its entry.
 
 def _ro() -> ToolAnnotations:
     return ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=False)
@@ -168,10 +197,6 @@ def _ro() -> ToolAnnotations:
 
 def _rw() -> ToolAnnotations:
     return ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False)
-
-
-def _idem() -> ToolAnnotations:
-    return ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True)
 
 
 # ── Registry Entries ────────────────────────────────────────────
@@ -487,7 +512,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "draft extraction Point may go live (quarantine lock, "
                     "R16 operator promotion, deferred dedup/temporal wiring). "
                     "WRITES status + wires edges.",
-        risk="write",
+        risk="destructive",
         http_policy=True,
         sdk_method="promote_point",
     ),
@@ -519,6 +544,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "require_calibration=False to run on topology alone "
                     "(explicit opt-out).",
         risk="maintenance",
+        # measured on #4122: call 2 starts from the value call 1 stored
+        # (0.693315 -> 0.693320), so repeated calls DO have an additional effect
+        idempotent=False,
         http_policy=True,
         sdk_method="compute_confidence",
     ),
@@ -557,7 +585,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         # #329: whole-graph EP is CPU-heavy — tenant MCP surface excluded
         # (stdio/operator only). REST /v1/dream remains tenant-reachable but is
         # separately budgeted at MAX_DREAM_FULL_PER_HOUR (hosted_api).
-        risk="write",
+        risk="destructive",
         http_policy=False,
         sdk_method="dream",
         rest_spec=RestSpec(method="POST", path="/v1/dream"),
@@ -601,7 +629,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.annotate_operator",
         description="Annotate an operator Point with structured epistemic dimensions "
                     "(bias, precision, consistency, directness).",
-        risk="write",
+        risk="destructive",
         http_policy=True,
         sdk_method="annotate_operator",
     ),
@@ -661,7 +689,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.invalidate",
         description="Mark a Point outdated with a CORRECTS edge from the correcting Point. "
                     "dry_run=True previews the one-point transition + one edge and changes nothing.",
-        risk="write",
+        risk="destructive",
         http_policy=True,
         sdk_method="invalidate_point",
     ),
@@ -673,7 +701,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "old to new. transfer_edges=False: invalidate behavior — outdated flag "
                     "+ CORRECTS edge only, no edge transfer. "
                     "dry_run=True previews exactly which edges would transfer and changes nothing.",
-        risk="write",
+        risk="destructive",
         http_policy=True,
         sdk_method="supersede",
     ),
@@ -827,7 +855,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "team:manage-scoped key (or legacy full-access) — the capture 409 "
                     "('Session recording is disabled for this graph') routes agents here; "
                     "call this tool to turn recording back on, then retry the capture.",
-        risk="write",
+        risk="admin",
         http_policy=True,
         # Custom handler in mcp_server.py (ContextVar auth gate); the REST twin
         # is the hand-written PATCH /v1/graphs/{graph_id} in hosted_api.py — no
@@ -1186,7 +1214,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "mitigate: reason + strength (0-1) — creates/updates the mitigation "
                     "Point (idempotent). annotate: bias/precision/consistency/directness "
                     "(0-1).",
-        risk="write",
+        risk="destructive",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (dispatches to sdk.mitigate_operator / sdk.annotate_operator; #3904)
     ),
@@ -1238,7 +1266,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.backfill_v25",
         description="Backfill database to ONTOLOGY v2.5 schema. "
                     "EXCLUDED from tenant HTTP — schema-level migration (operator-only).",
-        risk="write",
+        risk="destructive",
         http_policy=False,
         sdk_method="backfill_v25",
     ),
@@ -1297,7 +1325,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
             "disable stops recording; enable there reports already-on rather "
             "than changing a recorded default."
         ),
-        risk="write",
+        risk="admin",
         http_policy=True,
         # Custom handler in mcp_server.py, following `tortoise_overview`'s
         # consolidation precedent (one entry point, dispatching). NO `rest_spec`

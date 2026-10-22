@@ -100,7 +100,8 @@ class TestTheRiskAxis:
 
         A count is the only thing that notices a whole tier silently emptying
         (e.g. every `destructive` tool drifting back to `write` because someone
-        found the hint inconvenient).
+        found the hint inconvenient). `test_the_destructive_set_is_pinned_by_name`
+        pins WHICH rows, so a swap cannot hide behind the count.
         """
         census: dict[str, int] = {tier: 0 for tier in RISK_TIERS}
         for e in served():
@@ -108,11 +109,79 @@ class TestTheRiskAxis:
         assert census == {
             "read": 48,
             "maintenance": 3,
-            "write": 32,
-            "destructive": 12,
-            "admin": 4,
+            "write": 23,
+            "destructive": 19,
+            "admin": 6,
         }, census
         assert sum(census.values()) == len(served())
+
+    def test_the_destructive_set_is_pinned_by_name(self):
+        """`destructive` means "removes or overwrites user-authored state".
+
+        Pinned by name because the count alone let a review finding through: five
+        rows that overwrite (supersede moves every edge off the old point,
+        invalidate/promote_point write a terminal status, dream rewrites stored
+        confidence graph-wide, backfill_v25 rewrites every node's schema) were
+        first tiered `write`, which silently removed the client's
+        `destructiveHint` confirmation for them.
+        """
+        destructive = {e.name for e in served() if e.risk == "destructive"}
+        assert destructive == {
+            # the delete family — their own descriptions say "cannot be undone"
+            "tortoise_delete", "tortoise_delete_point", "tortoise_delete_entity",
+            # removal from default retrieval
+            "tortoise_retract_point",
+            # in-place overwrite of user-authored properties
+            "tortoise_update", "tortoise_update_point", "tortoise_update_entity",
+            "tortoise_annotate_operator", "tortoise_operator_action",
+            "tortoise_set_point_baseline", "tortoise_assess_source",
+            "tortoise_set_source_tier",
+            # terminal status writes / replacement
+            "tortoise_supersede", "tortoise_invalidate", "tortoise_promote_point",
+            # whole-graph rewrites
+            "tortoise_dream", "tortoise_backfill_v25",
+            # bulk re-ingest that rewrites an existing corpus' stored rows
+            "tortoise_index_files", "tortoise_ingest_corpus",
+        }, sorted(destructive)
+
+    def test_the_admin_set_is_pinned_by_name(self):
+        """`admin` = changes what the product DOES for the org/graph/install."""
+        admin = {e.name for e in served() if e.risk == "admin"}
+        assert admin == {
+            "tortoise_org_create",            # org provisioning
+            "tortoise_pack_install",          # installs code
+            "tortoise_onboarding_session_recording",  # org-wide recording
+            "tortoise_onboarding_github_connect",     # credential handshake
+            "tortoise_graph_set_recording",   # per-graph recording override
+            "tortoise_manage_sources",        # enable/disable sources
+        }, sorted(admin)
+
+    def test_the_write_set_is_additive_only(self):
+        """The `write` tier is pinned by name too — it must contain nothing that
+        replaces or removes stored state, because that is the whole distinction
+        from `destructive` and what makes `destructiveHint: false` an honest
+        claim for these rows.
+
+        `tortoise_get_source_reliability` is here deliberately: it ADDS a cache
+        row but is a declared writer on main, so a `graphs:read` key cannot call
+        it today — demoting it to `maintenance` would hand read keys a new tool,
+        which is a surface change, not a classification.
+        """
+        writes = {e.name for e in served() if e.risk == "write"}
+        assert writes == {
+            "tortoise_approve_merge", "tortoise_checkpoint",
+            "tortoise_create_document", "tortoise_create_edge",
+            "tortoise_create_entity", "tortoise_create_event",
+            "tortoise_create_object", "tortoise_create_operator",
+            "tortoise_create_point", "tortoise_create_source",
+            "tortoise_create_subject", "tortoise_diary_write",
+            "tortoise_file_decision", "tortoise_file_human_approval",
+            "tortoise_get_source_reliability", "tortoise_index_sessions",
+            "tortoise_ingest", "tortoise_mine_conversations",
+            "tortoise_mitigate_operator", "tortoise_onboarding_demo_create",
+            "tortoise_onboarding_github_index", "tortoise_onboarding_seed",
+            "tortoise_session_capture",
+        }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
         """Pinned by name: permissioning a tool as read-while-it-writes is a
@@ -135,7 +204,7 @@ class TestHintsCannotDrift:
         # … and the property can still fire: a read-tier entry carrying a writer
         # annotation is the #4474 defect.
         target = next(e for e in served() if e.risk == "read")
-        rogue = dataclasses.replace(target, annotations=_rw())
+        rogue = dataclasses.replace(target, annotations_override=_rw())
         assert read_hint_violations([rogue]), "drift guard is vacuous"
 
     def test_writes_permission_follows_the_tier(self):
@@ -158,6 +227,22 @@ class TestHintsCannotDrift:
                 f"{e.name}: served hints {e.annotations} are not the derivation "
                 f"{derived} for risk={e.risk!r}")
 
+    def test_replace_re_derives_the_hints(self):
+        """`dataclasses.replace(risk=...)` must not keep the OLD tier's hints.
+
+        This is the drift the tier model exists to close and the only path to it
+        left in the dataclass's own API: a stored `annotations` field would be
+        copied verbatim by `replace`, so a hosted/deployment variant built that
+        way would serve `readOnlyHint: true` on a write tool. `annotations` is a
+        property for exactly this reason.
+        """
+        target = next(e for e in served() if e.risk == "read")
+        for tier in RISK_TIERS:
+            moved = dataclasses.replace(target, risk=tier)
+            assert moved.annotations == annotations_for_risk(tier, moved.idempotent), (
+                f"replace(risk={tier!r}) kept stale hints {moved.annotations}")
+            assert moved.writes == (tier in WRITE_RISK_TIERS)
+
     def test_the_three_tier_states_map_to_three_hint_states(self):
         """The table itself, so a change to it is a visible edit here too."""
         read = annotations_for_risk("read")
@@ -169,6 +254,10 @@ class TestHintsCannotDrift:
             == (False, False, True)
         assert (write.readOnlyHint, write.destructiveHint, write.idempotentHint) \
             == (False, False, False)
+        # … and a `maintenance` row may still declare itself non-idempotent, which
+        # is the only way `_RISK_HINTS` can be the single statement: the measured
+        # case is `tortoise_compute_confidence` (call 2 starts from call 1's write).
+        assert annotations_for_risk(MAINTENANCE_TIER, False).idempotentHint is False
         # A genuinely idempotent write keeps the retry-safety hint …
         assert annotations_for_risk("write", True).idempotentHint is True
         # … and the destructive/admin tiers are the ones that may overwrite.
@@ -212,7 +301,10 @@ class TestTheReadThroughToolsRegressionPin:
                 f"and this tool refreshes stored state (#4122)")
             # and it is NOT a write, so it never needs graphs:write
             assert entry.writes is False, name
-            assert entry.annotations.idempotentHint is True, name
+        # idempotent by default — except the one the measurement says is not
+        assert entries["tortoise_compute_confidence"].annotations.idempotentHint is False
+        for name in ("tortoise_get_confidence", "tortoise_packs_list"):
+            assert entries[name].annotations.idempotentHint is True, name
 
     def test_the_hint_the_client_sees_is_the_false_one(self):
         """The regression is about the SERVED hint, not the registry field — read

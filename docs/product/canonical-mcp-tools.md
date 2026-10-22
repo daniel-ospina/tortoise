@@ -123,18 +123,18 @@ read permission can be granted generously with no path to a destructive action.
 
 > **OVERRIDES:** the read-or-write binary stated just above, and NIST SP 800-53 AC-6's
 > read-low / write-high default — the owner ruled (2026-10-21, on #4122) that a tool is
-> classified by the caller's **perceived risk**, not by whether its handler writes, so there is
-> a third tier: `maintenance`. A confined, idempotent refresh of a **derived** value (the
-> PostgreSQL 16 `MAINTAIN` precedent — refresh runs under definer rights, so the caller needs
-> only read) is permissioned as a **read** while declaring `readOnlyHint: false`.
-> `tortoise_get_confidence`, `tortoise_compute_confidence` and `tortoise_packs_list` are
-> `maintenance`: a `graphs:read` key may call them and they never require `graphs:write`.
-> The declaration is `risk` on the registry entry; `writes`, `readOnlyHint` and
-> `idempotentHint` are **derived** from it (`tortoise/tool_registry.py`) and pinned by
-> `tests/test_tool_risk_tiers.py`, so a hint cannot be "fixed" in one place and left wrong in
-> the other. A future lane that wants them to be writes must reopen #4122 — `writes=True`
-> would also stop the expensive recompute being metered as a read, which is the cost lever
-> OWASP API4 asks us to watch.
+> classified by **user-perceived risk**, not by whether its handler writes, so a confined,
+> idempotent, **derived-value write is permissioned as read** (`maintenance`). The precedent
+> is PostgreSQL 16's `MAINTAIN` privilege (refresh runs under definer rights, so the caller
+> needs only read). `tortoise_get_confidence`, `tortoise_compute_confidence` and
+> `tortoise_packs_list` are `maintenance`: a `graphs:read` key may call them, they never
+> require `graphs:write`, and they do NOT declare `readOnlyHint: true` (that literal hint is
+> what clients auto-approve on). The declaration is `risk` on the registry entry; `writes`,
+> `readOnlyHint`, `destructiveHint` and `idempotentHint` are **derived** from it
+> (`tortoise/tool_registry.py`) and pinned by `tests/test_tool_risk_tiers.py`, so a hint
+> cannot be "fixed" in one place and left wrong in the other. A future lane that wants these
+> to be writes must reopen #4122 — `writes=True` would also stop the expensive recompute
+> being metered as a read, which is the cost lever OWASP API4 asks us to watch.
 
 **Operator-only tools are exempt.** They are never handed to a tenant, so they may mix
 reads and writes — `index_files` is the clean example: both of its members (`index_files`,
@@ -153,8 +153,10 @@ move to the SDK/REST pack surface. See **Open items**.
 
 ## READ — 9 tools
 
-Grantable freely **once the one blocking item below is fixed** — `recall_beliefs`
-currently absorbs `get_confidence`, which is read-labelled but writes. See **Open items**.
+Grantable freely. The one item that used to block this — `recall_beliefs` absorbing
+`get_confidence`, which is read-labelled but writes — is **resolved by the #4122 ruling**
+(the trio is `risk="maintenance"`: a `graphs:read` key may call it and it no longer claims
+`readOnlyHint: true`). See **Open items**.
 
 | # | Tool | Absorbs |
 |---|---|---|
@@ -245,12 +247,12 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 
 | Item | Status |
 |---|---|
-| **Confidence reads currently WRITE.** `get_confidence` is annotated `readOnlyHint=True` (the `tortoise_get_confidence` entry in `tortoise/tool_registry.py`, `annotations=_ro()`) but, for a dirty root, calls `self.dream(dirty_only=True, ...)` inside `TortoiseSDK.get_confidence` (`tortoise/sdk.py`), which writes `SET n.confidence = p.c` in `tortoise/dream.py` (`_ep_run_batch`). Until that read path stops writing, `recall_beliefs` cannot honestly be called read-only. *(Cited by symbol, not line: line numbers go stale on every rebase.)* | **BLOCKING for the read/write guarantee** |
+| **Confidence reads currently WRITE.** `get_confidence` refreshes and stores the score (for a dirty root it calls `self.dream(dirty_only=True, ...)` inside `TortoiseSDK.get_confidence`, `tortoise/sdk.py`, which writes `SET n.confidence = p.c` in `tortoise/dream.py`). | **✅ RESOLVED 2026-10-21 (#4122) — the LABEL half.** The entry is `risk="maintenance"`: it keeps `graphs:read` (so `recall_beliefs` may absorb it without breaking the read guarantee for KEY SCOPE) and it declares `readOnlyHint: false`, so no client auto-approves it as a read. The read path still stores a derived score — that is the tier's defining behaviour, recorded in the `OVERRIDES:` note under *reads and writes never share a tool*. *(Cited by symbol, not line: line numbers go stale on every rebase.)* |
 | **`tortoise_get_entity` must NOT be retired** by the #3883 warning shim. The map must retire `tortoise_get` → `tortoise_get_entity(id, type=...)` instead, because `list_tools` strips retired names *by string* — so retiring `get_entity` while re-declaring it would hide it from agents entirely. | **✅ RESOLVED — PR #4031 retires `tortoise_get` into `tortoise_get_entity` and keeps `get_entity` live; the tool gained the `type=` dispatch (`point`\|`entity`\|`operator`\|`events`\|`governance`), so the named replacement call resolves, and `TortoiseSDK.get_entity` is untouched. The earlier inverse (retiring `get_entity` into `tortoise_get`) was the must-fix this row raised.** |
-| **`compute_confidence` is mislabelled in the same way.** Annotated read-only, but it persists: `TortoiseSDK.compute_confidence` (`tortoise/sdk.py`) runs `MATCH (n:Point {id: p.id}) SET n.confidence = p.c`. `stabilize_beliefs` (a write tool) is therefore its correct home — confirmed. | resolved — moves to `stabilize_beliefs` |
-| **`packs_list` is tenant-facing and NOT on the MCP.** The registry has it `_ro()`, `http_policy=True`, described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). **Settled 2026-09-22: it is SDK/REST only and POST-BETA** — the tenant read is preserved there, and no competitor exposes pack installation on its agent API, so the agent-facing MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
+| **`compute_confidence` is mislabelled in the same way.** It persists: `TortoiseSDK.compute_confidence` (`tortoise/sdk.py`) runs `MATCH (n:Point {id: p.id}) SET n.confidence = p.c`. | **✅ RESOLVED 2026-10-21 (#4122) — `risk="maintenance"`** (keeps `graphs:read`, drops `readOnlyHint`; explicitly `idempotent=False` because call 2 starts from call 1's stored value). The earlier plan to move it to `stabilize_beliefs` is superseded by the ruling. |
+| **`packs_list` is tenant-facing and NOT on the MCP.** Described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). Its read classification is `risk="maintenance"` since #4122 (the `get_tenant_packs` self-heal MERGE) — it keeps `graphs:read` and no longer claims `readOnlyHint`. **Settled 2026-09-22: it is SDK/REST only and POST-BETA** — the tenant read is preserved there, and no competitor exposes pack installation on its agent API, so the agent-facing MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
 | **`pack_install` is tenant-facing too — an unflagged write.** It has `http_policy=True` and is described as *"Install a custom expansion pack on the **HOSTED surface** … stores the manifest in the tenant graph and activates it"* (`tortoise/tool_registry.py`); the baseline records it `served: http`. **Settled 2026-09-22: SDK/REST only and POST-BETA**, so the tenant-visible write survives instead of being destroyed by folding it into an operator-only tool. (Its `hosted_only=True` flag is separately dead — see #4114.) Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |
-| **`run_onboarding` absorbs two read-only tenant-served tools** — `onboarding_state` and `onboarding_github_status` are `_ro()` and `http_policy=True`. So it is both read and write on the customer-grantable surface, which the principle above forbids. **Settled 2026-09-22: the container is DROPPED** for `check_connection` (*programmatic, returns a result — not a wizard*), and its two tenant-visible reads are **rehomed to the tenancy block (SDK/REST)**. The MCP surface therefore **loses both reads by design** — the capability is reachable, just not through the agent API. The other five setup members are not on the MCP target. | **✅ RESOLVED 2026-09-22 — dropped for `check_connection`; two reads rehomed to SDK/REST** |
+| **`run_onboarding` absorbs two read-only tenant-served tools** — `onboarding_state` and `onboarding_github_status` are `risk="read"`/`readOnlyHint` and `http_policy=True`. So it is both read and write on the customer-grantable surface, which the principle above forbids. **Settled 2026-09-22: the container is DROPPED** for `check_connection` (*programmatic, returns a result — not a wizard*), and its two tenant-visible reads are **rehomed to the tenancy block (SDK/REST)**. The MCP surface therefore **loses both reads by design** — the capability is reachable, just not through the agent API. The other five setup members are not on the MCP target. | **✅ RESOLVED 2026-09-22 — dropped for `check_connection`; two reads rehomed to SDK/REST** |
 | **`graph_set_recording` — dropping it removes an agent's self-heal path.** The registry says the capture `409` (*"Session recording is disabled for this graph"*) *"routes agents here; call this tool to turn recording back on, then retry the capture"* (the `tortoise_graph_set_recording` entry in `tortoise/tool_registry.py`). REST exposes the same operation at `PATCH /v1/graphs/{graph_id}`, but **an MCP client cannot reach REST** — so dropping it would leave an agent that hits a 409 with no recovery path inside MCP. **Owner ruling 2026-09-21: KEEP IT.** It becomes a **24th approved tool** — this list's own count, not the beta target's, which becomes **26** after its other deltas (a write; needs a `team:manage`-scoped key, so it is not a universal self-heal path). Its SDK method is the builder-only `update_memory_graph`; the SDK's own per-field `graph_set_recording` stays discarded, consistent with the ruling that deleted `set_memory_graph_name`/`set_memory_graph_backend`. | **✅ RESOLVED — kept; the MCP target became 26 at that ruling (27 since #3540, 2026-10-17)** |
 | **SDK method `TortoiseSDK.get_entity`** keeps the narrow meaning while this tool takes the broad one — same name, two meanings, one layer apart. | resolve in the SDK pass |
 | **Bridge table** — every `type=`/`mode=` value in these 23 mapped to the SDK method behind it, before implementation starts. | pre-flight |
