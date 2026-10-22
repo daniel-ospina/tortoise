@@ -1095,10 +1095,19 @@ def test_the_changelog_entry_names_the_section_the_stamp_actually_left():
     `## 1. The problem` — the quota/volume measurement, with no id classification
     in it at all.
 
-    Non-vacuity (measured at `5f136d15b`, the pre-fix head): every assertion below
-    reds there. `§1`'s body carries none of the populations the classification
-    quotes (`8,700` / `1,000` / `~30 EV-*`), and the entry named no document for
-    its other §-reference, so the qualifier assertion reds too.
+    Non-vacuity, measured on BOTH revisions — and the two red differently:
+
+    * At `5f136d15b` (this PR's first commit, where the entry first appeared with
+      `§1` in **both** its heading and its first sentence) the section-content
+      assertion reds — `§1` is `## 1. The problem`, which carries none of the
+      populations the classification quotes (`8,700` / `1,000` / `~30 EV-*`) —
+      and the qualifier assertion reds too, because the entry named no document
+      for its other §-reference. The heading/body **equality passes** there:
+      both pointers were wrong in the same direction, which is exactly why the
+      section-content assertion below is the load-bearing one.
+    * At `origin/main` (the true pre-fix head) the test reds earlier still: no
+      changelog entry is headed *"narration stamp left"* at all, so
+      `_changelog_entry` finds 0.
 
     The convention this leans on is the document's own: a bare `§N` in
     `STORAGE-ARCHITECTURE-CHANGELOG.md` is a STORAGE section, and a section in
