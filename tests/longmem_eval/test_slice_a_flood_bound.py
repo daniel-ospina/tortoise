@@ -25,7 +25,7 @@ Two independent jobs:
      * the assembly bounds the flood to <= 1 + max_verbatim and no
        value-critical claim is lost;
      * a provenance-free pool does NOT get that bound (the measured #8658
-       scope limit);
+       scope limit — still the shape of a DEGRADED fallback read);
      * the duplicate-free control comes back byte-identical (no regression);
      * the receipt names NO reader and NO judge — it can never be quoted as
        the old T's end-to-end measurement.
@@ -243,7 +243,9 @@ def test_provenance_free_pool_does_not_get_the_bound(receipt: dict) -> None:
     """The measured scope limit (#8658): pass 1's content legs still dedup the
     STATEMENT flood, but pass 2 — a point's OWN source chunks/turns — is inert
     without ``quote``/``source_turn_id``, so the same pool costs 12 flood slots
-    instead of 2 on the product ask-lane shape."""
+    instead of 2. That was the product ask-lane shape until #8658 landed (the
+    read path now carries the provenance); the arm stays live because a
+    DEGRADED fallback read still has no provenance."""
     bare = receipt["arms"]["provenance_free_assembly"]
     assert bare["package_stats"]["verbatim_refs_kept"] == 0
     # pass 1 is provenance-independent, so it still collapses the STATEMENT

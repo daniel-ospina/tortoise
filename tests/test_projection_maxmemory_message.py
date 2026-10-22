@@ -101,8 +101,12 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # 1. The one executable lever.
-    assert "raise / relieve the container's --maxmemory" in msg, msg
+    # 1. The one executable lever — named for BOTH instance classes: the
+    #    projection message is emitted on managed instances too, where a
+    #    container flag cannot be set (#9532 cycle 3 P1).
+    assert "raise / relieve the instance's maxmemory ceiling" in msg, msg
+    assert "REDIS_ARGS" in msg, msg
+    assert "managed instance" in msg, msg
     # 2. The residue-pass lever is NOT named: that pass runs only when an
     #    operator invokes it, so naming its env lever would be advice that frees
     #    nothing.
