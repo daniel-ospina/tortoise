@@ -30,6 +30,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
@@ -12320,6 +12321,42 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     return resp
 
 
+def _revealable_plaintext(value) -> bool:
+    """#4356: is this a secret a human — or a Copy button — can actually use?
+
+    The SERVER half of the predicate the dashboard already owns in
+    ``website/apps/dashboard/src/sessionKey.js::revealablePlaintext`` (#4342),
+    same polarity and same reason: a shown-once secret is useless if it is
+    blank or invisible, so "we handed back a string" is not the question — "can
+    it be read/copied" is. ``str.strip()`` alone is NOT a blankness test: it
+    strips whitespace but not zero-width / format characters, so a value of
+    only those would pass and reproduce the exact symptom (a visually empty
+    reveal, or an agent that cannot use the key).
+
+    A value is revealable when it contains at least ONE character a person can
+    see — a letter, number, punctuation or symbol. That single rule is total
+    over the invisible classes (whitespace/separators, ``Cf`` format such as
+    U+200B/U+FEFF, ``Cc`` controls, unassigned, and combining marks such as the
+    variation selectors a ``Default_Ignorable`` list would carry), plus
+    BRAILLE PATTERN BLANK (U+2800), which is in NEITHER ``Cf`` nor
+    ``Default_Ignorable`` and is listed explicitly for that reason. Only the
+    DECISION reads a copy; nothing here rewrites the secret.
+
+    Deliberately fail-CLOSED and deliberately not a format check: refusing a
+    rotation is recoverable (the old key keeps working), destroying one is not.
+    It must never become a validator for the token FORMAT — a legitimate
+    non-ASCII or future-format secret must be waived through, not refused.
+    """
+    if not isinstance(value, str):
+        return False
+    return any(
+        not ch.isspace()
+        and unicodedata.category(ch)[0] in "LNPS"
+        and ch != "\u2800"
+        for ch in value
+    )
+
+
 @app.post("/v1/team/keys/{key_id}/rotate")
 async def rotate_api_key(key_id: str, request: Request, response: Response,
                          org: dict = Depends(get_current_org_session)):  # noqa: B008
@@ -12367,6 +12404,22 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     plaintext is still returned (reveal-once: the only alternative is losing a
     live secret). There is NO cross-lane transaction and none is claimed — see
     the #4355 scoping comment for the declared residuals.
+
+    #4356 — a revealable replacement is a PRECONDITION of the destructive leg.
+    Create-first is not enough on its own: a create that returns a ROW but no
+    usable secret (the silent-falsy shape — no raise, empty/unrevealable
+    plaintext) would otherwise revoke the displaced key and hand back a
+    credential nobody can use, which is strictly worse than refusing. So the
+    mint envelope is tested for a revealable plaintext immediately after the
+    mint and BEFORE `_claim_key_revocation`: falsy ⇒ the destructive leg is not
+    attempted at all, the displaced row is left untouched, and the call refuses
+    with a truthful 500 naming the unusable replacement row. The unusable
+    replacement is NOT auto-revoked — #4356's AC(3) pins that a
+    plaintext-less rotate fires no revoke of its own, so the cleanup stays
+    manual (disclosed in the detail, and named there by its prefix so the user
+    does not revoke the WRONG row: the mint carries the displaced row's label
+    over, so two live rows can share one name). Success-path ordering is
+    unchanged: `mint → revoke`.
     """
     from tortoise.quota import api_key_occupies_slot
 
@@ -12481,9 +12534,50 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
         ) from None
 
     kid = minted["id"]
-    api_key = minted["key_plaintext"]
+    # `.get` on purpose: an ABSENT field is the same failure as a falsy one and
+    # must take the same refusal, not raise a KeyError/500 with no explanation.
+    api_key = minted.get("key_plaintext")
     key_prefix = minted["key_prefix"]
     now = minted["created_at"]
+
+    # ── #4356: is the replacement USABLE? A precondition of the destructive
+    # leg, so it is tested BEFORE it. #4342's client-side guard sat after the
+    # revoke: truthful about the wreckage, but too late — the old key was dead
+    # and the replacement's secret was gone. A failed replacement must never
+    # destroy a working credential.
+    if not _revealable_plaintext(api_key):
+        _logger.error(
+            "rotate: replacement %s for %s (org %s, prefix %r) minted with no "
+            "revealable plaintext — refusing to revoke the displaced key",
+            kid, key_id, org["org_id"], key_prefix)
+        # The row was created, so the trail must say so — otherwise the only
+        # record of the unused replacement is a log line that rotates away.
+        await _async_audit(
+            request, org["org_id"], "api_key_rotate",
+            resource_type="api_key", resource_id=kid,
+            detail={
+                "replaced_key_id": key_id,
+                "replaced_revoked": False,
+                "destructive_leg": "not_attempted",
+                "reason": "replacement_plaintext_not_revealable",
+            },
+        )
+        prefix_note = (
+            f" (its prefix is {key_prefix}; the replacement carries this key's "
+            "name, so use the prefix to tell them apart)"
+            if key_prefix else ""
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "The rotation did not complete: the replacement key was "
+                "created but its value could not be shown, so it would be "
+                "unusable. Nothing was revoked — the key you rotated is "
+                "unchanged and behaves exactly as before. An unusable "
+                f"replacement row now exists{prefix_note}: revoke that row "
+                "from the key table, then retry the rotation."
+            ),
+        )
 
     # ── Destructive leg: a CLAIM, so exactly one concurrent rotate wins ──
     replaced_revoked = True

@@ -669,6 +669,102 @@ def test_double_failure_reveals_the_live_replacement(client, fake, monkeypatch):
     assert len(_live(fake, org["org_id"])) == 2, "both keys are live — say so"
 
 
+def test_silent_falsy_plaintext_never_revokes_the_displaced_key(
+        client, fake, monkeypatch):
+    """#4356: a mint that RETURNS a row but NO usable secret is a FAILED
+    REPLACEMENT, and a failed replacement must never destroy a working
+    credential.
+
+    This is the shape the #4356 reopen named as unguarded: `_mint_key` does not
+    raise, the row IS inserted, and the plaintext is empty. Create-first alone
+    does not save it — the revoke used to fire unconditionally after the mint,
+    so the old key died and the caller was handed an unusable replacement.
+    Pinned here: the destructive leg is never even ATTEMPTED, the displaced row
+    is untouched and still authenticates, and the refusal says so.
+    """
+    org = _signup_org(client, fake)
+    real_mint = ha_mod._mint_key
+
+    def _silent_falsy_mint(*a, **kw):
+        out = real_mint(*a, **kw)    # the replacement row really is created…
+        out["key_plaintext"] = ""   # …and its secret is gone, with NO raise
+        return out
+
+    monkeypatch.setattr(ha_mod, "_mint_key", _silent_falsy_mint)
+    claims: list = []
+    real_claim = sc.claim_api_key_revocation
+
+    def _spy_claim(*a, **kw):
+        claims.append(a)
+        return real_claim(*a, **kw)
+
+    monkeypatch.setattr(sc, "claim_api_key_revocation", _spy_claim)
+    events: list[dict] = []
+
+    async def _fake_audit(request, org_id, operation, **kwargs):
+        events.append({"org_id": org_id, "operation": operation, **kwargs})
+
+    monkeypatch.setattr(ha_mod, "_async_audit", _fake_audit)
+
+    r = _rotate(client, org["key_id"], _auth(org["key"]))
+    assert r.status_code >= 500, r.text
+    detail = r.json()["detail"]
+    assert "Nothing was revoked" in detail, detail
+    assert "already been revoked" not in detail, (
+        "#4342's copy described a world where the guard ran AFTER the revoke — "
+        "it must not survive the reorder (#4356)"
+    )
+    # AC(3): the plaintext-less rotate fires NO destructive leg at all.
+    assert claims == [], (
+        "the revoke must not even be attempted when the replacement's secret "
+        "cannot be shown"
+    )
+    assert _row_by_id(fake, org["key_id"])["revoked_at"] is None, (
+        "the displaced row must be left untouched"
+    )
+    # …and the caller keeps a WORKING credential (the AC's actual subject).
+    assert client.get("/v1/team/keys", headers=_auth(org["key"])).status_code == 200
+    # The unusable replacement exists and is NAMED — by prefix, because the mint
+    # carries the displaced row's label over, so two live rows can share a name.
+    orphan = next(x for x in _live(fake, org["org_id"])
+                  if x["id"] != org["key_id"])
+    assert orphan["key_prefix"] in detail, (
+        "the manual cleanup must name the row to remove, not just 'the unused one'"
+    )
+    assert len(_live(fake, org["org_id"])) == 2, (
+        "the unmintable orphan is NOT auto-revoked — #4356 AC(3) forbids the "
+        "revoke on this path, so the cleanup stays manual and DISCLOSED"
+    )
+    # The row was created, so it must not be invisible to the audit trail.
+    assert [e["operation"] for e in events] == ["api_key_rotate"], events
+    assert events[0]["resource_id"] == orphan["id"]
+    assert events[0]["detail"]["destructive_leg"] == "not_attempted"
+    assert events[0]["detail"]["replaced_revoked"] is False
+
+
+# ── #4356: the revealable-plaintext predicate (the guard's polarity) ────
+
+@pytest.mark.parametrize("value", [
+    "", " ", "\t\n ", "\u200b\u200b", "\ufeff", "\u2800", "\u0301",
+])
+def test_the_plaintext_predicate_refuses_a_blank_or_invisible_secret(value):
+    """A secret nobody can see is not a secret anybody can use. `strip()` alone
+    would pass every one of these but the first three."""
+    assert ha_mod._revealable_plaintext(value) is False
+
+
+@pytest.mark.parametrize("value", ["tt_0123abcd", "tk_ff", " a ", "ключ-01"])
+def test_the_plaintext_predicate_waives_a_visible_secret(value):
+    """Fail-closed on BLANKNESS, never a format check — a legitimate non-ASCII
+    (or future-format) secret must pass through, not be refused."""
+    assert ha_mod._revealable_plaintext(value) is True
+
+
+@pytest.mark.parametrize("value", [None, 0, 12345, {}, ["tt_x"], b"tt_x", True])
+def test_the_plaintext_predicate_is_total_over_non_strings(value):
+    assert ha_mod._revealable_plaintext(value) is False
+
+
 # ── T7: the concurrency claim ───────────────────────────────────────────────
 
 def test_lost_claim_rolls_back_and_409s(client, fake, monkeypatch):
