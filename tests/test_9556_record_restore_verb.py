@@ -18,9 +18,12 @@ What is pinned here, and each one is a way a restore verb is worthless:
    that wiped first and refused after would pass any exit-code-only pin), and
    one asserts the source refusal fires BEFORE the target graph is opened —
    opening a projection creates the graph and MERGEs its ``:Meta`` marker.
-2. **A rebuild that wrote nothing is refused too**, separately from (1) — the
-   record HAD rows and the report says 0 written. A verb that trusted the
-   return code would report that as a restore.
+2. **A rebuild that materialised nothing is reported, not trusted** — the
+   record HAD rows, the wipe ran, and the cache holds none of them. Pinned with
+   a REAL projection whose write half is a no-op: the projection must report
+   ``nodes_written == 0`` (it MEASURES the cache after the rebuild) and the verb
+   must land on exit ``2``/UNKNOWN — pre-fix the same run printed
+   ``✓ restored … 2 node(s) written`` over an EMPTY cache, exit ``0``.
 3. **The cache's L2 guard is reported as a REFUSAL, not a traceback** (#2944).
    It fires on every production graph name (``org_<org_id>``), so an operator
    must read the reason, not a stack trace.
@@ -380,10 +383,17 @@ def test_allow_empty_proceeds(monkeypatch, capsys):
     assert projection.closed and conn.closed, "the verb owns both handles"
 
 
-# ── 2. a rebuild that wrote nothing is not a restore ──────────────────────
+# ── 2. a rebuild that materialised nothing is not a restore ───────────────
 
 
-def test_a_rebuild_that_wrote_nothing_is_REFUSED(monkeypatch, capsys):
+def test_a_rebuild_that_materialised_nothing_is_UNAVAILABLE(monkeypatch,
+                                                           capsys):
+    """Exit 2, NOT the exit-3 class — the wipe already ran.
+
+    Exit ``3`` is documented as "REFUSED, nothing was written", which an
+    operator reads as "my cache is as it was". After a wipe that put nothing
+    back that reading is false, so this case belongs in the UNKNOWN class.
+    """
     projection = _RecordingProjection(result={
         "nodes_written": 0, "relations_written": 0, "statements": 0,
         "record_nodes": 2, "record_relations": 0,
@@ -391,14 +401,15 @@ def test_a_rebuild_that_wrote_nothing_is_REFUSED(monkeypatch, capsys):
     rc, _, _ = _drive(monkeypatch, view=_view(2), projection=projection)
     err = capsys.readouterr().err
 
-    assert rc == rrestore.EXIT_REFUSED, err
-    assert "wrote 0 node(s)" in err, err
-    assert "not a restore" in err, err
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "holds 0 node(s)" in err, err
+    assert "LOST" in err, err
+    assert "REFUSED" not in err, err
 
 
 def test_a_contradictory_report_is_UNAVAILABLE_rather_than_a_silent_pass(
         monkeypatch, capsys):
-    """The report says it wrote more than the record holds — UNKNOWN, not green."""
+    """The MEASURED cache count disagrees with the record — UNKNOWN, not green."""
     projection = _RecordingProjection(result={
         "nodes_written": 7, "relations_written": 0, "statements": 0,
         "record_nodes": 2, "record_relations": 0,
@@ -407,7 +418,32 @@ def test_a_contradictory_report_is_UNAVAILABLE_rather_than_a_silent_pass(
     err = capsys.readouterr().err
 
     assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "the cache holds 7 node(s)" in err, err
     assert "disagree" in err, err
+
+
+def test_a_non_mapping_report_is_UNAVAILABLE_not_a_traceback(monkeypatch,
+                                                             capsys):
+    """A future projection that returns a non-report must not escape as a crash.
+
+    ``result.get(...)`` on, say, a list raises ``AttributeError`` — outside the
+    module's exception boundary, so the operator would get a traceback where the
+    contract promises exit ``2`` and an UNKNOWN statement.
+    """
+    class _ListReportProjection(_RecordingProjection):
+        def rebuild_from_record(self, view, **kwargs):
+            self.calls.append({"view": view, **kwargs})
+            return ["not", "a", "report"]
+
+    rc, conn, projection = _drive(monkeypatch, view=_view(2),
+                                  projection=_ListReportProjection())
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "not a report" in err, err
+    assert "UNKNOWN" in err, err
+    assert "Traceback" not in err, err
+    assert projection.closed and conn.closed
 
 
 # ── 3. the L2 guard is a refusal, not a traceback ─────────────────────────
@@ -732,3 +768,124 @@ def test_a_LIVE_complete_restore_reports_zero_unwritten_keys(
     assert payload["nodes_written"] == 5, payload
     assert payload["unwritten_keys"] == 0, payload
     assert "not-hot" not in printed.out, printed.out
+
+
+# ── the counts are MEASURED, not the plan's length (#9556 review P2) ──────
+
+
+def test_a_LIVE_rebuild_reports_what_the_CACHE_holds_not_the_plans_length(
+        shared_proj, cache_graph, monkeypatch):
+    """RED pre-fix: ``nodes_written`` was ``len(nodes)`` — the plan's size.
+
+    The projection's write half is replaced by a no-op, so nothing is
+    materialised; the wipe is real, so the cache really does end up empty. A
+    count that is read back off the graph reports ``0``; a count that is the
+    input tuple's length reports ``2`` and hands the operator a destroyed cache
+    behind a green exit.
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    monkeypatch.setattr(cp, "project_records", lambda g, plan: 0)
+
+    report = proj.rebuild_from_record(_view(2), confirm_destructive=True)
+
+    assert cache_graph.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0, (
+        "the fixture must really leave the cache empty, or the pin is vacuous")
+    assert report["nodes_written"] == 0, (
+        "nodes_written must be MEASURED from the cache; the pre-fix value is "
+        f"the plan's length ({report.get('nodes_selected')} selected)")
+    assert report["nodes_selected"] == 2, report
+
+
+def test_a_LIVE_wipe_that_materialised_nothing_is_UNAVAILABLE_not_green(
+        monkeypatch, shared_proj, cache_graph, capsys):
+    """The end of the false-PASS: a real wipe, a real empty cache, exit 2.
+
+    Pre-fix this run exited ``0`` and printed ``✓ restored … 2 node(s) …
+    written`` over a cache it had just emptied — the "successful-looking run
+    that destroyed the cache" the verb exists to prevent, arriving through the
+    counts instead of through the source.
+    """
+    from tortoise import __main__ as cli
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    monkeypatch.setattr(cp, "project_records", lambda g, plan: 0)
+    _install_fakes(monkeypatch, view=_view(2), projection=proj)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", cache_graph.name])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, printed.err
+    assert "LOST" in printed.err, printed.err
+    assert "✓" not in printed.out, (
+        f"a wiped cache must never print the restored line: {printed.out}")
+    remaining = cache_graph.query(
+        "MATCH (p:Point) RETURN count(p)").result_set[0][0]
+    assert remaining == 0, (
+        f"the fixture must have wiped the cache for this pin to mean anything "
+        f"(got {remaining} point(s))")
+
+
+def test_the_partial_severity_uses_the_CONSTANT_not_a_literal(monkeypatch,
+                                                             caplog):
+    """``log_result`` compared against the string ``"complete"``.
+
+    ``COVERAGE_COMPLETE`` is ``"complete"`` today, so the literal was correct
+    only by coincidence: a rename would silently log every COMPLETE restore as a
+    WARNING (the partial-restore severity). Measured by moving the constant.
+    """
+    import logging
+
+    monkeypatch.setattr(rrestore, "COVERAGE_COMPLETE", "whole-record")
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="org_o",
+        record_nodes=5, record_relations=0, nodes_written=5,
+        relations_written=0, target_nodes_before=0,
+        coverage="whole-record", declared_keys=0, bounded=False)
+
+    with caplog.at_level(logging.INFO, logger=rrestore.LOG_NAME):
+        rrestore.log_result(outcome)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        f"a complete restore was logged as a warning: {caplog.records}")
+
+
+def test_the_post_rebuild_count_is_BOUNDED_and_never_invents_a_zero():
+    """This read runs AFTER the wipe, so two things must not go wrong.
+
+    An unbounded full-graph count could block forever with the cache already
+    destroyed and nothing printed (the verb's contract is bounded reads), and an
+    UNREADABLE count returned as `0` would be a number the code did not measure —
+    rendered as `the cache now holds 0 node(s)`, i.e. the LOST-wipe message,
+    which is a conclusion rather than the measurement that did not happen.
+    """
+    from tortoise.projection import FalkorProjection
+
+    proj = object.__new__(FalkorProjection)
+    seen: list[dict] = []
+
+    class _Rows(list):
+        @property
+        def result_set(self):
+            return self
+
+    class _Graph:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query(self, cypher, **kw):
+            seen.append(kw)
+            return _Rows(self.rows)
+
+    proj.g = _Graph([[3]])
+    assert proj._count_projected("RETURN count(n)") == 3
+    assert seen[0]["timeout"] == rrestore.CACHE_READ_TIMEOUT_MS, seen
+
+    proj.g = _Graph([])
+    with pytest.raises(RuntimeError, match="no row"):
+        proj._count_projected("RETURN count(n)")

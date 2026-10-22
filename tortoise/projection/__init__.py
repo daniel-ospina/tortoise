@@ -16510,6 +16510,7 @@ class FalkorProjection(
         lane is opened by its only caller.
         """
         from tortoise.cache_projection import (
+            NODE_TABLES,
             declaration_for,
             project_records,
             record_plan,
@@ -16548,6 +16549,31 @@ class FalkorProjection(
         self._ensure_indexes()
         statements = project_records(self.g, plan)
 
+        # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
+        # ``len(nodes)`` is the size of the INPUT, computed above — before the
+        # wipe and before ``project_records`` ran — so returning it as
+        # "written" made EVERY caller's count check a tautology: a rebuild that
+        # wiped and materialised nothing still reported
+        # ``nodes_written == len(nodes)``, i.e. a destroyed cache behind an
+        # exit-0-shaped success. That is the false-PASS class, so the counts are
+        # read back off the graph the same way the sibling replay lane does
+        # (``_rebuild_all_replay`` → ``node_count``/``edge_count`` after the
+        # fold). The wipe is unconditional and whole-graph, so everything the
+        # graph holds now was written by THIS run.
+        #
+        # ⚠️ ``relations_written`` can legitimately be lower than the number of
+        # record relations SELECTED: a relation statement MATCHes its endpoints,
+        # so one whose endpoint the projection does not resolve is a no-op (see
+        # this method's module-facing notes). ``relations_selected`` reports the
+        # plan's own size beside it, so the two are told apart rather than
+        # conflated.
+        nodes_written = self._count_projected(
+            "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
+            "RETURN count(n)",
+            {"labels": sorted(NODE_TABLES)})
+        relations_written = self._count_projected(
+            "MATCH ()-[r]->() RETURN count(r)", None)
+
         declaration = None
         if declare:
             materialized = plan.node_keys()
@@ -16559,8 +16585,12 @@ class FalkorProjection(
             write_declaration(self.g, declaration)
 
         return {
-            "nodes_written": len(nodes),
-            "relations_written": len(relations),
+            "nodes_written": nodes_written,
+            "relations_written": relations_written,
+            # The plan's own size, stated as such: it is what the projection
+            # SELECTED from the record, and it is NOT a write count.
+            "nodes_selected": len(nodes),
+            "relations_selected": len(relations),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),
@@ -16568,6 +16598,37 @@ class FalkorProjection(
             "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
             "source": "record",
         }
+
+    def _count_projected(self, cypher: str,
+                         params: dict | None = None) -> int:
+        """Run one post-rebuild COUNT and return it as an ``int``.
+
+        The measurement half of :meth:`_project_record_view`'s report. A read is
+        permitted on every lane (``_raw_query_lane_permit``/§17.1 gate the
+        MUTATING statements only), so this runs inside the rebuild's declared
+        window unchanged.
+
+        ⚠️ BOUNDED, because this read happens AFTER the wipe: a full-graph count
+        that blocks forever would leave an operator with a destroyed cache and
+        no output at all (the ``record-restore`` verb's contract is bounded
+        reads — ``_target_nodes_before`` bounds the same shape with the same
+        constant, imported from the sibling verb so the two cannot drift).
+
+        A count that cannot be READ (a timeout, a driver error, an empty result
+        set) RAISES rather than returning a plausible number: the caller's whole
+        purpose at this point is to say what the cache now holds, and "unknown"
+        reported as ``0`` would be read as the LOST-wipe finding — a number the
+        code did not measure is exactly the false PASS that made ``len(nodes)``
+        wrong in the first place. The caller classifies this as UNKNOWN.
+        """
+        from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
+
+        rows = self.g.query(cypher, params=params,
+                            timeout=CACHE_READ_TIMEOUT_MS).result_set
+        if not rows or not rows[0]:
+            raise RuntimeError(
+                f"the post-rebuild count returned no row: {cypher[:80]}")
+        return int(rows[0][0])
 
     def query(self, cypher: str, **params):
         # #7951 §17.1 — the public raw-query lane is closed for a

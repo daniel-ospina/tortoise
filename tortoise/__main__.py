@@ -798,18 +798,22 @@ def _cmd_record_restore(args):
     ``docs/infra-runbook.md`` §9.
 
     Exit codes, because an operator's next step keys on them:
-      ``0`` restored · ``3`` REFUSED, nothing written (empty source, the cache's
-      L2 destructive-op guard, a rebuild that wrote nothing) · ``2`` no verdict
-      (no/invalid DSN, ``psycopg2`` absent, an unreadable record or cache, a
-      usage error). ``2``'s caveat is ``record-reconcile``'s, inherited
-      verbatim: argparse's own ``error()`` also exits ``2``, so ``2`` means
-      only *no verdict was produced*.
+      ``0`` restored · ``3`` REFUSED before any write, nothing written (empty
+      source, the cache's L2 destructive-op guard) · ``2`` no verdict — a
+      DSN/usage problem, an unreadable record or cache, **or a failure once the
+      rebuild has started** (a wipe that put nothing back lands here: the cache
+      is LOST, not untouched). ``2``'s caveat is ``record-reconcile``'s,
+      inherited verbatim: argparse's own ``error()`` also exits ``2``, so ``2``
+      means only *no verdict was produced*.
 
     ⛔ ``--cache-graph`` is REQUIRED, with no derived default, for the reason
     ``record-reconcile`` requires it — and the consequence here is worse than a
     wrong verdict: a wrong guess opens an EMPTY graph, so the run would report
     a restore into a graph nobody reads while the operator's real graph stayed
-    destroyed. That is why the pre-wipe node count is reported too.
+    destroyed. That is why the pre-wipe node count is reported too, and why the
+    counts the verb prints are read back off the cache after the rebuild
+    (``record_restore``): a number the code did not measure is a claim, not a
+    restore.
 
     ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
     on the record, ``CACHE_READ_TIMEOUT_MS`` on the pre-wipe count — the same

@@ -2597,16 +2597,16 @@ python -m tortoise record-restore … --json
 ```
 
 `--limit 0` is REFUSED (exit `2`, before any write): it would wipe the cache and
-write nothing — the destructive no-op this verb exists to prevent — while
-reporting a code whose documented meaning is "nothing was written".
+write nothing — the destructive no-op this verb exists to prevent — so it is
+refused before the target graph is even opened.
 
 **Exit codes — the next step keys on the code, not on the log:**
 
 | code | meaning | next step |
 |---|---|---|
-| `0` | restored; the counts printed are what was written | compare `nodes_written`/`relations_written` with the record's own counts |
-| `3` | **REFUSED — the restore did not run** (empty source, the cache's wipe guard, a rebuild that wrote 0): no row of the record's state was written | read the printed reason — each has a different remedy. ⚠️ The source-side refusals fire BEFORE the target graph is opened, but the L2 refusal is asked of a **projection**, and opening one creates the graph and MERGEs its own `:Meta` bookkeeping marker — so a refused run can leave an empty graph behind. That is the projection, not a restore |
-| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, usage error, **a failure during the rebuild itself**) | fix the input; on the last case the wipe may already have run, so treat the cache as **UNKNOWN**, not empty |
+| `0` | restored; `nodes_written`/`relations_written` are **measured off the cache after the rebuild** (not the plan's size) | compare them with the record's own counts — equality, not "close" |
+| `3` | **REFUSED before any write** (empty source, the cache's wipe guard): no row of the record's state was written | read the printed reason — each has a different remedy. ⚠️ The source-side refusals fire BEFORE the target graph is opened, but the L2 refusal is asked of a **projection**, and opening one creates the graph and MERGEs its own `:Meta` bookkeeping marker — so a refused run can leave an empty graph behind. That is the projection, not a restore |
+| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, **a `--limit` below 1**, usage error, **a failure during the rebuild**, **a rebuild that left the cache holding none of the record's rows**) | fix the input; for the two post-wipe cases the cache has been **wiped** — treat it as **LOST** (and in every case as UNKNOWN), never as it was |
 
 `2`'s caveat is `record-reconcile`'s, inherited verbatim: argparse's own
 `error()` also exits `2`, so `2` means only *no verdict was produced* — not "the
@@ -2620,9 +2620,15 @@ record is unreachable".
    exit-0-shaped success that destroyed the cache. The commonest cause is a
    mistyped `--org`/`--graph`: a scope that was never written reads exactly like
    a mistyped one.
-2. **A rebuild that wrote nothing is refused separately** — the record HAD rows
-   and the report says 0. Different failure, different remedy; do not collapse
-   them.
+2. **A rebuild that materialised nothing is reported as UNKNOWN (exit `2`),
+   never as the exit-`3` class** — the record HAD rows, the wipe ran, and the
+   cache holds none of them. Exit `3` says "REFUSED, nothing was written",
+   which reads as "your cache is as it was"; after a wipe that is false, so the
+   wording and the code both say the cache is LOST. ⛔ This only means anything
+   because the counts are **measured**: `rebuild_from_record` reads them back
+   off the graph after the write, so a projection that wiped and materialised
+   nothing reports `0` (and the printed `N node(s)` on a healthy run is the
+   number of nodes actually in the cache, not the size of the record slice).
 3. **`--cache-graph` cannot be guessed.** The cache graph's name is not the
    record's `graph_id` scope column: this tree names it `org_<org_id>` (the org
    SDK's isolated graph) or `org_<org_id>_<graph_id>` (the registry/ACL
@@ -2686,16 +2692,16 @@ part of this section, and its status is stated rather than implied:
 
 | drill step | status |
 |---|---|
-| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (live cache graph included) |
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (29 pins / 30 collected cases, live cache graph included) |
 | a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
 #9567), flush the `test_`-named drill graph, run this verb, then compare
-`nodes_written`/`relations_written` **and** a per-label count against the
-pre-flush baseline captured in the same run — equality, not "close". Record the
-counts in the run's artifact; do not put them in this section, where they would
-rot.
+`nodes_written`/`relations_written` (both **measured off the cache**) **and** a
+per-label count against the pre-flush baseline captured in the same run —
+equality, not "close". Record the counts in the run's artifact; do not put them
+in this section, where they would rot.
 
 ### What this does not do (so it cannot be cited for it later)
 

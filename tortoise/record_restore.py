@@ -23,11 +23,19 @@ WHAT A RESTORE MUST REFUSE — the four ways it could be worthless
    This is the guard the verb exists behind, not a convenience: the destructive
    token (``confirm_destructive``) proves the *operator* authorized a wipe; it
    says nothing about whether there was anything to put back.
-2. **A rebuild that wrote nothing is not a restore either.** Refused
-   separately from (1), because it is a different failure: the record HAD rows
-   and the projection reported ``nodes_written == 0``. A caller that trusts the
-   return code without reading the counts cannot tell the two apart, so this
-   raises rather than printing.
+2. **A rebuild that materialised nothing is not a restore either.** Refused
+   separately from (1), because it is a different failure AND a different
+   state: the record HAD rows, the wipe ran, and the cache holds none of them.
+   ⚠️ That is reported as **UNKNOWN (`restore_unavailable`, exit 2), never as
+   the exit-3 refusal class** — exit `3` means "REFUSED, nothing was written"
+   and reads as "your cache is as it was", while here the cache has already
+   been wiped by this run. ⛔ This guard is only worth having because the
+   numbers it reads are MEASURED: ``rebuild_from_record`` reads its counts back
+   off the graph after the write (``_project_record_view``), so a projection
+   that wiped and materialised nothing really does report ``0``. When they were
+   the plan's length, this refusal (and the report below it) could never fire
+   and the printed ``N node(s) written`` was the plan's size — the #9556
+   review's false-PASS finding.
 3. **A restore that cannot name its target refuses.** ``--cache-graph`` has no
    derived default (the record's ``graph_id`` scope column is NOT the cache
    graph's name): a wrong guess does not fail — FalkorDB opens an EMPTY graph —
@@ -49,6 +57,11 @@ WHAT A RESTORE MUST REFUSE — the four ways it could be worthless
 
 WHAT IS REPORTED, AND WHY THE PRE-WIPE COUNT IS ONE OF THE NUMBERS
 =================================================================
+Every count in the result is a MEASUREMENT, not a plan: ``nodes_written`` /
+``relations_written`` are read back off the target graph AFTER the rebuild
+(``_project_record_view``), so an operator's equality check against the record
+is an assertion the code establishes rather than one it assumes.
+
 The target graph's node count is read **before** the wipe and reported with the
 result. It is informational — it never decides what to project (the record does,
 §2.0's one-way rule) — and it is the number that makes a mistyped target
@@ -90,6 +103,7 @@ WHAT THIS DOES NOT DO (and must not be read as doing)
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -116,23 +130,30 @@ LOG_NAME = "tortoise.record_restore"
 
 #: The restore ran and the cache now holds the record's state.
 EXIT_RESTORED = 0
-#: The cache refused the wipe (L2), or the source/target could not be trusted
-#: to make a restore meaningful. **Nothing was written** — the distinction from
-#: ``EXIT_UNAVAILABLE`` is what an operator's next step keys on.
+#: The restore was refused BEFORE the wipe: an empty source or the cache's L2
+#: guard refused the graph. **Nothing was written** — the distinction from
+#: ``EXIT_UNAVAILABLE`` is what an operator's next step keys on, so ⛔ no
+#: post-wipe outcome may be reported under it (`--limit < 1` is a usage refusal
+#: inside this class' shape but exits ``2``, because it is a bad ARGUMENT rather
+#: than a verdict about the cache).
 EXIT_REFUSED = 3
 #: No verdict was produced: no/invalid DSN, ``psycopg2`` absent, an unreadable
-#: record or cache, a usage error. Mirrors ``record_reconcile.EXIT_UNAVAILABLE``
-#: (and inherits its documented caveat: argparse's own usage ``error()`` exits
-#: ``2`` too, so ``2`` means only *no verdict was produced*).
+#: record or cache, a usage error — **or a failure once the rebuild started**, in
+#: which case the cache may have been wiped and holds nothing (the caller must
+#: treat it as UNKNOWN or LOST, never as untouched). Mirrors
+#: ``record_reconcile.EXIT_UNAVAILABLE`` (and inherits its documented caveat:
+#: argparse's own usage ``error()`` exits ``2`` too, so ``2`` means only *no
+#: verdict was produced*).
 EXIT_UNAVAILABLE = 2
 
 
 class RestoreUnavailable(Exception):
-    """The restore could not be ATTEMPTED — a verdict is not available."""
+    """No verdict — the restore could not be attempted, or it ran and its
+    result cannot be established (the cache's state is UNKNOWN, or LOST)."""
 
 
 class RestoreRefused(Exception):
-    """The restore was attempted and refused — nothing was written."""
+    """The restore was refused BEFORE any write — nothing was written."""
 
 
 def _as_int(value: Any, what: str) -> int:
@@ -144,9 +165,28 @@ def _as_int(value: Any, what: str) -> int:
             f"the cache state is UNKNOWN") from e
 
 
+def _as_optional_int(value: Any) -> int | None:
+    """A count that may legitimately be ABSENT (a projection may not report it).
+
+    Unlike :func:`_as_int`, "not reported" is not a fault here: the selected
+    counts are diagnostics, so ``None`` stays ``None`` (and the outcome says so)
+    rather than turning a landed restore into an UNKNOWN.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class RestoreOutcome:
-    """What one record-sourced restore did, as counts an operator can check."""
+    """What one record-sourced restore did, as counts an operator can check.
+
+    ⛔ ``nodes_written`` / ``relations_written`` are MEASURED off the target
+    graph after the rebuild, never the plan's length: they are the numbers an
+    operator compares with the record to decide whether the restore landed, so
+    a number the code did not read back would be a claim it does not establish.
+    """
 
     org_id: str
     graph_id: str
@@ -157,6 +197,14 @@ class RestoreOutcome:
     relations_written: int
     #: ``None`` when the pre-wipe read could not be made (informational only).
     target_nodes_before: int | None
+    #: What the projection SELECTED from the record (its plan size). Equal to
+    #: :attr:`nodes_written` on a landed restore; kept so a run that selected
+    #: more than it materialised is visible rather than silently reconciled.
+    nodes_selected: int | None = None
+    #: ⚠️ May legitimately exceed :attr:`relations_written`: a relation whose
+    #: endpoint the projection does not resolve is a no-op (its statement
+    #: MATCHes both endpoints), so selected != written is not by itself a fault.
+    relations_selected: int | None = None
     #: ``complete`` / ``partial`` from the projection's own declaration.
     coverage: str | None = None
     #: Keys the declaration enumerated as known-hot. ⚠️ A ``complete``
@@ -192,6 +240,8 @@ class RestoreOutcome:
             "record_relations": self.record_relations,
             "nodes_written": self.nodes_written,
             "relations_written": self.relations_written,
+            "nodes_selected": self.nodes_selected,
+            "relations_selected": self.relations_selected,
             "target_nodes_before": self.target_nodes_before,
             "coverage": self.coverage,
             "declared_keys": self.declared_keys,
@@ -201,16 +251,24 @@ class RestoreOutcome:
         }
 
     def render(self) -> str:
-        """ONE operator line — the counts, the coverage, and the not-hot set."""
+        """ONE operator line — the MEASURED counts, the coverage, the not-hot set."""
         before = ("unknown" if self.target_nodes_before is None
                   else str(self.target_nodes_before))
         line = (
             f"restored {self.org_id}/{self.graph_id} -> cache "
-            f"{self.cache_graph}: {self.nodes_written} node(s), "
-            f"{self.relations_written} relation(s) written from the record "
+            f"{self.cache_graph}: the cache now holds {self.nodes_written} "
+            f"node(s) and {self.relations_written} relation(s) from the record "
             f"({self.record_nodes} record node(s), {self.record_relations} "
             f"record relation(s)); the target held {before} node(s) before the "
             f"wipe; coverage={self.coverage}")
+        if (self.nodes_selected is not None
+                and self.nodes_selected != self.nodes_written):
+            # Should be impossible on a landed restore — say so rather than
+            # letting two counts disagree in silence. `record_restore` refuses
+            # this case outright; the line stays honest if a future caller
+            # builds the outcome by hand.
+            line += (f" — ⚠️ the projection SELECTED {self.nodes_selected} "
+                     f"node(s), more than the cache holds")
         if self.unwritten_keys:
             line += (
                 f" — {self.unwritten_keys} record key(s) were NOT written, so a "
@@ -228,7 +286,7 @@ def log_result(outcome: RestoreOutcome,
     """
     line = outcome.render()
     log = logger or logging.getLogger(LOG_NAME)
-    if outcome.coverage and outcome.coverage != "complete":
+    if outcome.coverage and outcome.coverage != COVERAGE_COMPLETE:
         log.warning(line)
     else:
         log.info(line)
@@ -362,22 +420,27 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
     and a future caller of ``rebuild_from_record`` must not be able to wipe a
     graph by forgetting it.
 
-    Refusals (:class:`RestoreRefused`):
+    Refusals (:class:`RestoreRefused` — all of them PRE-wipe, so "nothing was
+    written" is true of every one):
       * an empty view without ``allow_empty`` (see the module docstring, 1);
       * a wipe the cache's L2 guard refuses (a non-``test_`` server graph,
-        asked BEFORE the rebuild — see :func:`_ask_the_wipe_guard`);
-      * a rebuild that reported writing no nodes while the record held some.
+        asked BEFORE the rebuild — see :func:`_ask_the_wipe_guard`).
     Unavailability (:class:`RestoreUnavailable` — no verdict, the cache's state
-    must be treated as UNKNOWN): ``--limit`` below 1, a rebuild whose reported
-    counts contradict the record, and **any failure raised during the rebuild**
-    — the pre-wipe guard passed, so the wipe may already have run.
+    must be treated as UNKNOWN or as LOST): ``--limit`` below 1, a rebuild that
+    materialised none of the record's rows, a rebuild whose measured counts
+    disagree with the record, a non-mapping report, and **any failure raised
+    during the rebuild** — the pre-wipe guard passed, so the wipe may already
+    have run.
 
-    ⚠️ "Nothing was written" is about the RESTORE'S OWN STATE. The two
-    cache-side refusals happen before the wipe and write none of the record's
-    rows, but opening the projection can create the target graph and MERGE its
-    ``:Meta`` bookkeeping marker — which is why the two source-side refusals are
-    split out above, and why every message names what was and was not written
-    instead of saying "nothing happened".
+    ⚠️ ``--limit < 1`` is a BAD ARGUMENT (``RestoreUnavailable``, exit ``2``),
+    not a verdict about the cache: nothing has been read or written at that
+    point, and the CLI refuses it before the target graph is opened either.
+
+    ⚠️ The two count checks read ``nodes_written``, which the projection now
+    MEASURES off the graph after the write (#9556 review). They are therefore
+    live guards on the shipped path rather than tautologies over the plan's
+    length: a rebuild that wiped and materialised nothing reports ``0`` here and
+    lands in the UNKNOWN class, not on exit ``0``.
     """
     refuse_unrestorable_source(view, org_id=org_id, graph_id=graph_id,
                                cache_graph=cache_graph,
@@ -408,25 +471,44 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
             f"and the cache's state is UNKNOWN. Re-run `record-restore` once "
             f"the cause is fixed; do not read the cache as empty") from e
 
+    if not isinstance(result, Mapping):
+        # A seam that returns something other than a report would otherwise
+        # raise `AttributeError` PAST this module's exception boundary, i.e. a
+        # traceback where the operator needs exit 2 and an UNKNOWN statement —
+        # and the state really is unknown, because the rebuild has already run.
+        raise RestoreUnavailable(
+            f"the rebuild returned {type(result).__name__}, not a report — "
+            f"the wipe may already have run, so the cache's state is UNKNOWN")
+
     nodes_written = _as_int(result.get("nodes_written"), "nodes_written")
     relations_written = _as_int(result.get("relations_written"),
                                 "relations_written")
 
     if record_nodes and nodes_written == 0:
-        raise RestoreRefused(
-            f"the rebuild wrote 0 node(s) while the record holds "
-            f"{record_nodes} for {org_id}/{graph_id} — a rebuild that writes "
-            f"nothing is not a restore, and the cache has already been wiped")
+        # ⚠️ NOT the exit-3 class. Exit 3's documented meaning is "REFUSED,
+        # nothing was written" — an operator reads that as "my cache is as it
+        # was", and here it was WIPED by this run and holds none of the
+        # record's rows. Post-wipe, so the state is reported as UNKNOWN (exit 2)
+        # with the wipe spelled out.
+        raise RestoreUnavailable(
+            f"the rebuild ran, wiped cache {cache_graph!r}, and the cache now "
+            f"holds 0 node(s) while the record holds {record_nodes} for "
+            f"{org_id}/{graph_id} — the wipe happened and nothing was put "
+            f"back. Treat the cache as LOST, not as restored and not as it "
+            f"was; fix the cause and re-run `record-restore`")
 
     expected_nodes = record_nodes if limit is None else min(record_nodes,
                                                             limit)
     if nodes_written != expected_nodes:
+        # The MEASURED cache count is the authority here; `nodes_selected`
+        # (what the projection said it selected) is reported beside it so a
+        # disagreement names which side is wrong.
         raise RestoreUnavailable(
-            f"the rebuild reported {nodes_written} node(s) written but the "
-            f"record holds {record_nodes}"
+            f"the cache holds {nodes_written} node(s) from the record after "
+            f"the rebuild, but the record holds {record_nodes}"
             + (f" (bounded by --limit {limit} to {expected_nodes})"
                if limit is not None else "")
-            + " — the reported restore and the source disagree, so the cache "
+            + " — the restored cache and the source disagree, so the cache "
               "state is UNKNOWN")
 
     return RestoreOutcome(
@@ -441,4 +523,6 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
         coverage=result.get("coverage"),
         declared_keys=_as_int(result.get("declared_keys"), "declared_keys"),
         bounded=limit is not None,
+        nodes_selected=_as_optional_int(result.get("nodes_selected")),
+        relations_selected=_as_optional_int(result.get("relations_selected")),
     )

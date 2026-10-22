@@ -117,9 +117,14 @@ So **this projection does not carry them.** The consequence is named, not
 hidden and not silent: a record-sourced rebuild **drops** them, and the six
 classes are listed here (and in the module docstring). It is deliberately **not
 counted at runtime** — a count would need the same pre-wipe cache read this
-path forbids, and `rebuild_from_record`'s report describes the RECORD's coverage
-(`nodes_written`/`record_nodes`/`coverage`/`declared_keys`), not a census of what
-the wipe destroyed. The classes are the next unit's work (journal/record
+path forbids, and `rebuild_from_record`'s report describes the RECORD's
+coverage (`record_nodes`/`record_relations`/`coverage`/`declared_keys`), not a
+census of what the wipe destroyed. ⚠️ Since #9556 the report ALSO carries
+`nodes_written`/`relations_written`, which are **measured off the cache AFTER the
+write** (so a caller can tell a landed restore from a wipe that put nothing
+back). That is not the read §0.5 forbids and it reverses nothing here: it runs
+after the projection has finished and it decides nothing about what is
+projected — it only refuses to report a plan's length as a result. The classes are the next unit's work (journal/record
 completeness, the `#4240`/`#5089` root). Shipping a `rebuild_all`-shape snapshot
 on this path would import a **cache read** into the one path the ruling requires
 to have none.
