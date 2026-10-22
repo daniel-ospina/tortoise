@@ -346,7 +346,8 @@ def _fake_extract_factory(calls: list):
 
 def _run_one_question(monkeypatch, tmp_path, model: str, qid: str,
                       calls: list, *, cache_ingest: bool, sweep_cache=False,
-                      tag: str = "mock", work_dir=None):
+                      tag: str = "mock", work_dir=None,
+                      activate_beliefs: bool = False):
     """One run_evaluation over the single question on the docker lane with
     the mocked extractor (counts into ``calls``). Returns (outcomes, _)."""
     import tortoise.extractor_v2 as ev2
@@ -358,6 +359,8 @@ def _run_one_question(monkeypatch, tmp_path, model: str, qid: str,
         ingest_mode="v2", db_uri=DB_URI, model=model,
         dataset_fingerprint="icache-test",
         cache_ingest=cache_ingest, sweep_cache=sweep_cache,
+        # #8486: thread the belief-layer arm (the cache reuse gate's subject)
+        activate_beliefs=activate_beliefs,
         extractor_model=_StableModel(tag))
 
 
@@ -578,5 +581,72 @@ def test_marker_peer_guard_never_caches_a_live_peer_graph(
         assert marker.exists()  # our write never clobbered the peer's marker
         data = json.loads(marker.read_text(encoding="utf-8"))
         assert data["pid"] == _os.getpid() + 1
+    finally:
+        _clean_question(ns, qid)
+
+
+def test_an_activated_cache_hit_is_never_served_to_an_arm_off_run(
+        monkeypatch, tmp_path):
+    """#8486 (fresh-context review round 3, P1): the reuse gate keys on the
+    marker's ``belief_activated`` flag, so an arm-ON run that ACTIVATES A
+    CACHED GRAPH IN PLACE must refresh that flag — otherwise a later arm-OFF
+    run hits the stale ``false`` marker, reuses a live/EP-measured graph, and
+    publishes a number whose posture says ``inert`` (an unmeasured 0.50 that
+    is not the truth).
+
+    The three-run sequence: arm-OFF ingest (marker false) → arm-ON cache HIT
+    (extractor skipped, graph activated in place, marker refreshed) → arm-OFF
+    run MUST MISS and re-ingest."""
+    qid = _mini()[2]["question_id"]
+    model = _unique_model("armgate")
+    ns = runner.question_graph_namespace(model, None, qid)
+    try:
+        # run 1 — arm OFF: a normal cached ingest; marker records activated=false
+        calls1: list = []
+        o1, _ = _run_one_question(monkeypatch, tmp_path, model, qid, calls1,
+                                  cache_ingest=True)
+        assert len(calls1) >= 1
+        assert o1[0].get("ingest_cached") is False
+        flags = TortoiseSDK(namespace=ns)
+        try:
+            rows = flags._get_proj().g.query(
+                "MATCH (m:lme_ingest_cache {namespace:$ns}) "
+                "RETURN m.belief_activated", params={"ns": ns}).result_set
+        finally:
+            flags.close()
+        assert rows and not runner._marker_activated(rows[0][0])
+
+        # run 2 — arm ON over the CACHED graph: extraction skipped, the graph
+        # is promoted + EP'd in place, and the marker must flip
+        calls2: list = []
+        o2, r2 = _run_one_question(monkeypatch, tmp_path, model, qid, calls2,
+                                   cache_ingest=True, activate_beliefs=True)
+        assert len(calls2) == 0, "the arm-ON run reused the inert graph"
+        assert o2[0].get("ingest_cached") is True
+        posture = (r2.get("methodology") or {}).get("measurement_posture") or {}
+        # whatever EP did, the arm RAN — the number of measured questions is
+        # recorded and the graph is no longer the inert graph the mark claimed
+        assert posture.get("ingest_mode") == "v2"
+        assert posture.get("beliefs_activated") is not None
+        flags = TortoiseSDK(namespace=ns)
+        try:
+            rows = flags._get_proj().g.query(
+                "MATCH (m:lme_ingest_cache {namespace:$ns}) "
+                "RETURN m.belief_activated", params={"ns": ns}).result_set
+        finally:
+            flags.close()
+        assert rows and runner._marker_activated(rows[0][0]), (
+            "an activated cache HIT must refresh the marker — a stale false "
+            "lets an arm-OFF run reuse a live graph under an `inert` posture")
+
+        # run 3 — arm OFF again: the live graph is NOT the inert graph this
+        # run's posture claims, so it must MISS and re-ingest
+        calls3: list = []
+        o3, _ = _run_one_question(monkeypatch, tmp_path, model, qid, calls3,
+                                  cache_ingest=True)
+        assert len(calls3) >= 1, (
+            "an arm-OFF run reused a belief-activated graph — its posture "
+            "would report `inert` for measured posteriors")
+        assert o3[0].get("ingest_cached") is False
     finally:
         _clean_question(ns, qid)
