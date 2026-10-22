@@ -13653,7 +13653,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     VERIFIED gate order (#2093 S2 amendment — the impl docstring's old gate
     list was stale, pre-#1927):
-      1. boundary 422 — invalid harness / conversation shape (Pydantic
+      1. boundary 422 — invalid harness / conversation shape / BLANK session_id
+         (#9599: `SessionRequest._non_blank_session_id`; a blank id names no
+         session, and writing it minted a duplicate `:Session` whose CONTAINS
+         edge landed nothing) (Pydantic
          SessionRequest validation fires BEFORE the handler on REST; the MCP
          tool's SessionRequest construction maps the same failure to its
          422-equivalent error dict) — recording-off never masks a malformed

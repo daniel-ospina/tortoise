@@ -9709,8 +9709,10 @@ class TortoiseSDK:
         "ok" is the success signal (never "extracted" — extracted > 0 can
         co-occur with ok=False on partial-emission failure), "extraction_mode"
         is truthful ("llm:<route>" / "llm" on success, "empty" when the
-        conversation has no extractable content — always with ok=False and an
-        errors entry — and "error" when extraction failed), errors/warnings
+        conversation has no extractable content OR the request was refused
+        before any extraction could run (a blank `session_id`, #9599: nothing
+        was accepted, so nothing was extractable) — always with ok=False and an
+        errors entry naming the cause — and "error" when extraction failed), errors/warnings
         are additive and never clobbered, and an empty/blank conversation is
         rejected BEFORE any write (no Session stub, turns=0). W5 Phase F
         (#2104): a re-capture of an EXISTING session_id reports
@@ -9737,10 +9739,16 @@ class TortoiseSDK:
         """
         from datetime import datetime, timezone
 
-        # #9599: the same door rule as ``commit_session``'s — see the long note
-        # there. Checked BEFORE the extractor, the projection handle or any
-        # graph write: a refused id writes nothing and journals nothing.
+        # #9599: the same door rule as ``commit_session``'s, in the SAME ORDER —
+        # the mint first (as `commit_session` does), then the refusal — so the
+        # two doors cannot disagree about any input shape (a review finding:
+        # checking before the mint made `capture_session(0)` refuse where
+        # `commit_session(0)` minted). Checked BEFORE the extractor, the
+        # projection handle or any graph write: a refused id writes nothing and
+        # journals nothing.
         from tortoise.ids import mint_session_id, session_id_refusal
+
+        session_id = session_id or mint_session_id()
         _blank_session = session_id_refusal(session_id)
         if _blank_session is not None:
             return {
@@ -9764,7 +9772,6 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        session_id = session_id or mint_session_id()
         # #5632: snapshot the LIFETIME journal-failure counter at the START of
         # THIS capture. The receipt below must disclose only appends that
         # failed DURING it — a failure from an earlier, unrelated write on this

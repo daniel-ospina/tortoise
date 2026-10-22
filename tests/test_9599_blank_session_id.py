@@ -110,6 +110,68 @@ def test_a_padded_but_real_session_id_is_not_refused(padded):
     assert ids_mod.session_id_refusal(padded) is None
 
 
+@pytest.mark.parametrize("value", (0, False, 123, b"  ", ["   "]))
+def test_a_present_non_string_id_is_refused_with_its_own_cause(value):
+    """A wrong SHAPE is not "blank" — naming it blank would be a false cause.
+
+    (The #8018/#8702 rule: a report must name a cause that is true for the
+    record it describes.)
+    """
+    reason = ids_mod.session_id_refusal(value)
+    assert reason, f"{value!r} must be refused"
+    assert "blank" not in reason, reason
+    assert "must be a string" in reason, reason
+
+
+def test_a_falsy_non_string_is_present_not_absent():
+    """PRESENCE, not truthiness (``identity_absent``'s rule).
+
+    ``0``/``False`` are PRESENT values of the wrong shape, so they are refused
+    rather than silently minted over — and both SDK doors agree on that, which
+    is why the mint now runs BEFORE the check on BOTH doors (a review finding:
+    checking first made ``capture_session(0)`` refuse where
+    ``commit_session(0)`` minted).
+    """
+    assert ids_mod.session_id_refusal(0) is not None
+    assert ids_mod.session_id_refusal(False) is not None
+
+
+def test_the_wire_normaliser_agrees_with_the_doors():
+    """The spool must not put a blank id on the wire (#9599 review P2).
+
+    A blank would be a 422, a 422 is PERMANENT, and the drain quarantines the
+    entry — the capture is then never filed. The spool normalises where its own
+    harness/lane/machine_id normalisers already do.
+    """
+    from tortoise.capture_spool import _normalise_session_id
+
+    for blank in BLANK_IDS:
+        assert _normalise_session_id(blank) is None, blank
+    for absent in (None, ""):
+        assert _normalise_session_id(absent) is None
+    for padded in PADDED_REAL:
+        assert _normalise_session_id(padded) == padded
+    assert _normalise_session_id("s1") == "s1"
+
+
+def test_the_skip_report_names_a_blank_identity_as_blank():
+    """The fold's own diagnostic must not call a blank id a `lone surrogate`.
+
+    ``projection._unwritable_shape`` is the ONE home for "why the store refuses
+    this PRESENT value" (#8840); a false cause there is the #8018/#8702 defect,
+    and a legacy journal written before the doors refused is exactly where the
+    blank shape is reachable.
+    """
+    from tortoise.projection.nonfolded import _unwritable_shape
+
+    for blank in BLANK_IDS:
+        assert "blank" in _unwritable_shape(blank), _unwritable_shape(blank)
+    # The pre-existing shapes still read true.
+    assert _unwritable_shape(5) == "it is a int, not a str"
+    assert "NUL" in _unwritable_shape("a\x00b")
+    assert "surrogate" in _unwritable_shape("a\ud800b")
+
+
 # ── enforcement point 1: the SDK capture doors ───────────────────────────
 
 @pytest.mark.parametrize("door", ("capture", "commit"))

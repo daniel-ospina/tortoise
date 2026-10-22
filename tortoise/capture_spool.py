@@ -1097,6 +1097,21 @@ SESSION_HARNESSES = frozenset({
 _HARNESS_ALIASES = {"desktop": "claude-desktop"}
 
 
+#: A blank-but-present session id — the spelling `tortoise.ids.
+#: session_id_refusal` refuses at the doors, and the one the server 422s. The
+#: spool must not put it on the wire (#9599).
+def _normalise_session_id(value: object) -> str | None:
+    """The wire's session id: a non-blank str, or ``None`` (the server mints).
+
+    Mirrors ``tortoise.ids.session_id_refusal``'s ABSENT/BLANK split without
+    importing the doors' refusal TEXT: the spool needs the value, not the
+    message. A padded-but-real id passes through unchanged — #9553 records
+    those as legitimate identities (the engine-hostility is #9599's owner
+    question, not the spool's to decide).
+    """
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _normalise_harness(value: object) -> str:
     """The ONE harness normalisation, used by the writer and the wire.
 
@@ -2010,7 +2025,15 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # an illegal harness on the wire. The server's 422 for a bad harness is
         # now unreachable from this leg, exactly as the lane's is.
         "harness": _normalise_harness(meta.get("harness")),
-        "session_id": sid,
+        # #9599: the SAME rule the server applies, at the wire — the last line
+        # before it. A blank id (`"  "`) is truthy, so the writer's
+        # `args.session_id or _local_session_id(...)` default never replaced it;
+        # the server refuses it with a 422, a 422 is PERMANENT, and the drain
+        # then quarantines the entry, so the capture is never filed. A blank
+        # names no session, so normalising it to None (the server mints one)
+        # makes that refusal unreachable from this leg — exactly what the
+        # harness/lane/machine_id normalisers beside it are here for.
+        "session_id": _normalise_session_id(sid),
         "source": meta.get("source"),
         "conversation": turns,
         # #8531 review: length-capped at the WIRE. `machine_id` ≤256 and

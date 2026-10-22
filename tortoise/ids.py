@@ -71,15 +71,23 @@ def mint_session_id() -> str:
     return f"session_{uuid.uuid4().hex[:12]}"
 
 
-#: The refusal text for a PRESENT-but-blank session id. One string, so the two
-#: enforcement points (the SDK doors and the hosted ``/v1/sessions`` boundary)
-#: cannot drift into two explanations of one rule.
+#: The CLIENT-FACING refusal text for a PRESENT-but-blank session id. One
+#: string, so the two enforcement points (the SDK doors and the hosted
+#: ``/v1/sessions`` boundary) cannot drift into two explanations of one rule.
+#: It is returned verbatim to callers (a 422 detail on the hosted surface), so
+#: it names the rule and the remedy only — the engine mechanics
+#: (`:Session` duplication / dropped CONTAINS edge) stay in the docstrings,
+#: never on a customer's wire (#9599 review P3).
 SESSION_ID_BLANK_REFUSAL = (
     "session_id is blank — a session id must name something (be non-blank); "
-    "pass None to let Tortoise mint one. A blank id is not an identity: the "
-    "graph engine cannot serve it back to an equality seek, so the write "
-    "mints an unfindable duplicate :Session and silently drops its CONTAINS "
-    "edge (#9599)"
+    "pass None to let Tortoise mint one"
+)
+
+#: A PRESENT session id of the wrong SHAPE. Refused with its own message rather
+#: than the blank one: naming "blank" for an int is the #8018 class (a report
+#: naming a cause that is false for the record it describes).
+SESSION_ID_NOT_STR_REFUSAL = (
+    "session_id must be a string — got %s; pass None to let Tortoise mint one"
 )
 
 
@@ -90,23 +98,29 @@ def session_id_refusal(session_id: str | None) -> str | None:
 
     ABSENT (``None`` or ``""``) is not a refusal — the host named no session,
     and every door mints one (``mint_session_id``). That is today's contract
-    and it is preserved exactly.
+    and it is preserved exactly. The test is PRESENCE, not truthiness
+    (``identity_absent``'s rule): ``0``/``False`` are PRESENT values of the
+    wrong shape, so they get the shape message rather than being silently
+    minted over.
 
     PRESENT-but-BLANK (``"   "``, ``"\t"``) IS a refusal. It is truthy, so the
     doors' ``session_id or mint()`` default never fired for it and it went
     straight to the write — where ``MERGE (s:Session {id:$sid})`` could not
-    match it again and the turn container's CONTAINS edge landed nothing
-    (#9599, measured). A blank is not an identity; the recorded rule already
-    says so at Layer-1 (``commit_schema.CommitRecord._non_blank_session_id``,
-    #4005), and this is the same sentence at the doors.
+    match it again (the engine indexes the trimmed term but does not trim the
+    seek) and the turn container's CONTAINS edge landed nothing (#9599,
+    measured). A blank is not an identity; the recorded rule already says so at
+    Layer-1 (``commit_schema.CommitRecord._non_blank_session_id``, #4005), and
+    this is the same sentence at the doors.
 
     PADDED-but-REAL (``"  s1  "``) is NOT a refusal — #9553 records those as
     legitimate identities. The engine still cannot index them; refusing them
     would be a product-surface decision and is deliberately NOT taken here.
     """
-    if session_id is None or session_id == "":
+    if session_id is None or (isinstance(session_id, str) and session_id == ""):
         return None
-    if isinstance(session_id, str) and session_id.strip():
+    if not isinstance(session_id, str):
+        return SESSION_ID_NOT_STR_REFUSAL % type(session_id).__name__
+    if session_id.strip():
         return None
     return SESSION_ID_BLANK_REFUSAL
 
