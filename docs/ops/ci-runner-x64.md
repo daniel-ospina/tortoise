@@ -122,16 +122,16 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:395` (the scale loop) · guards at `:272-317`
-  (forks `:275`, disk `:295`, cpu/memory `:302`) · sha256 pin + registration at `:401-414`
-  (verify `:406`, token `:409`, one argv `:412-413`, `config.sh` `:414`) · systemd
-  install/start at `:423-426` · label resolution at `:169-207` (`fallback_engaged` `:173`,
-  `resolve_labels` `:184`) · label repair at `:226` · `--print-labels` at `:258`.
+- `--count N` → `tools/install-ci-runner-x64.sh:403` (the scale loop) · guards at `:275-325`
+  (forks `:283`, disk `:303`, cpu/memory `:310`) · sha256 pin + registration at `:414-422`
+  (verify `:414`, token `:417`, one argv `:420-421`, `config.sh` `:422`) · systemd
+  install/start at `:432-434` · label resolution at `:169-207` (`fallback_engaged` `:173`,
+  `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:259`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:320-379`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
+  gone** (`:327-392`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
   `bin/Runner.Listener` must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -149,7 +149,13 @@ falls back.
   PATH, or a failed remote read.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL.
+  arch refusal still governs every INSTALL — and only an install (`:275`, inside the `MODE =
+  install` block). `--status`, `--repair-labels`, `--print-labels` and `--uninstall` are **not**
+  gated by the host's architecture: those modes download nothing, register nothing, and need no
+  x64 binary, so a runner can be inspected, relabelled or decommissioned from any host. (The
+  guard used to sit above the uninstall block too, which refused decommissioning on exactly the
+  ARM64 hosts the fallback pool runs on. `CI_RUNNER_ARCH` remains the seam if a host's arch must
+  be asserted by hand.)
 - `--fallback auto|on|off` decides whether `ubuntu-latest` is attached (auto follows the ARM64
   pool). `--print-labels` answers "which labels would a runner get" without touching a guard,
   token or the network — that is the seam the label invariant is tested through. `--repair-labels`

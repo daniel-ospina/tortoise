@@ -51,6 +51,9 @@ WHAT IS BEING PINNED
   8. No job name, no `runs-on:`, and no required check is touched by this change. That is a
      property of the PR diff (tools/, docs/ops/, docs/00_index.md), which no test of this file can
      see — the diff is the artifact.
+  9. The arch refusal is an **INSTALL** guard, in the code and in the runbook: `--uninstall` (like
+     `--status`, `--repair-labels` and `--print-labels`) runs on a host of either architecture, so
+     a runner can be decommissioned from the box it was installed on.
 """
 
 from __future__ import annotations
@@ -255,6 +258,30 @@ def _stub_tool(bin_dir: Path, name: str, body: str) -> None:
     p.chmod(0o755)
 
 
+def _uninstall_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    """An uninstall env with `sudo`/`gh` stubs, a pinned arch, and a hermetic unit directory.
+
+    ⛔ `CI_RUNNER_UNIT_DIR` IS NOT OPTIONAL HERE. Unpinned, the installer stats the REAL
+    `/etc/systemd/system` for `actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service` — the
+    unit this PR's own `svc.sh install` writes — so on the box these runners live on every
+    uninstall arm that expects a removal gets `rc=3` with the directory intact (measured in review:
+    arm A unpinned `rc=3`, dir survives; arm B pinned `rc=0`, dir gone). A test may not depend on
+    whose host it runs on.
+
+    The `sudo` stub logs its argv and then EXECUTES it, so `sudo rm -rf` really removes the
+    directory — a no-op stub would make every removal arm vacuous.
+    """
+    bin_dir = tmp_path / "bin"
+    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\nexec "$@"')
+    _stub_tool(bin_dir, "gh", 'echo "tok"')
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir(exist_ok=True)
+    env = _env(tmp_path / "base", PATH=f"{bin_dir}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
+    env.update({"CI_RUNNER_UNIT_DIR": str(unit_dir)})
+    env.update(extra)
+    return env
+
+
 def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path: Path):
     """`CI_RUNNER_BASE` is operator input; "a directory exists" is not proof of a runner.
 
@@ -266,15 +293,14 @@ def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path:
     The positive arm rides in the same test so the gate cannot pass by refusing everything: an
     install-shaped directory (`.runner`) IS deregistered and removed.
     """
-    bin_dir = tmp_path / "bin"
     calls = tmp_path / "sudo.log"
-    # `sudo` logs and then EXECUTES, so `sudo rm -rf` really removes the directory here — a no-op
-    # stub would make the positive arm vacuous.
-    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {calls}\nexec "$@"')
-    _stub_tool(bin_dir, "gh", 'echo "tok"')
-    # the arch guard governs the destructive modes too, so the seam pins a host ARCH here: the
-    # subject is the delete gate, not this box's architecture.
-    env = _env(tmp_path / "base", PATH=f"{bin_dir}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
+    # ⛔ `CI_RUNNER_UNIT_DIR` IS PINNED, and that pin is the difference between a hermetic test and
+    # a host-dependent one. Unpinned, the installer stats the REAL `/etc/systemd/system` for
+    # `actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service` — the unit this PR's own
+    # `svc.sh install` writes — so on the box these runners live on the positive arm got `rc=3`
+    # with the directory still on disk, i.e. a RED that no assertion here is about. `_uninstall_env`
+    # also supplies the `sudo` stub (logging to `calls`) and the `gh` stub.
+    env = _uninstall_env(tmp_path)
 
     debris = tmp_path / "not-a-runner"
     debris.mkdir()
@@ -298,21 +324,28 @@ def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path:
     assert not runner.exists(), f"a configured runner directory must be removed: {r.stderr}"
     assert "rm -rf" in calls.read_text(), "the sudo stub never saw the delete — the arm is vacuous"
 
+    # ⛔ THE UNIT-DIR PIN IS LOAD-BEARING, so this arm must be able to see it: the SAME runner
+    # directory, with its unit present in the pinned dir and no `svc.sh`, is refused with rc=3 and
+    # survives. That is precisely the state the UNPINNED env reaches on a host with the unit
+    # installed (the review measured `rc=3`, directory survives), so dropping the pin again turns
+    # the assertion above red instead of silently depending on whose box runs it.
+    unit = "actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service"
+    unit_dir = Path(env["CI_RUNNER_UNIT_DIR"])
+    (unit_dir / unit).write_text("[Unit]\n")
+    held = tmp_path / "a-runner-with-its-unit-installed"
+    held.mkdir()
+    (held / ".runner").write_text("{}\n")
+    r = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(held)})
+    assert r.returncode == 3, (
+        "a configured runner whose unit is installed and has no svc.sh must be LEFT intact at "
+        f"exit 3 — this is the state an UNPINNED unit dir produces on the runners' own host, which "
+        f"is why the pin above exists: {r.returncode} {r.stderr}"
+    )
+    assert held.is_dir(), r.stderr
+    (unit_dir / unit).unlink()
+
 
 # ── 5c. a unit that cannot be removed must not be deleted out from under ─────────────────────
-def _uninstall_env(tmp_path: Path, **extra: str) -> dict[str, str]:
-    """An uninstall env with `sudo`/`gh` stubs, a pinned arch, and a hermetic unit directory."""
-    bin_dir = tmp_path / "bin"
-    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\nexec "$@"')
-    _stub_tool(bin_dir, "gh", 'echo "tok"')
-    unit_dir = tmp_path / "systemd"
-    unit_dir.mkdir(exist_ok=True)
-    env = _env(tmp_path / "base", PATH=f"{bin_dir}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
-    env.update({"CI_RUNNER_UNIT_DIR": str(unit_dir)})
-    env.update(extra)
-    return env
-
-
 def test_uninstall_never_deletes_under_an_enabled_unit_it_failed_to_remove(tmp_path: Path):
     """The unit is removed FIRST; if that fails the directory and its registration are LEFT INTACT.
 
@@ -402,6 +435,48 @@ def test_a_token_mint_failure_leaves_every_runner_untouched(tmp_path: Path):
     assert not sudo_log.exists() or "rm -rf" not in sudo_log.read_text(), (
         "a delete ran before every token was minted"
     )
+
+
+# ── 5e. the arch refusal is an INSTALL guard, not a decommissioning gate ─────────────────────
+def test_the_arch_refusal_governs_install_but_not_uninstall(tmp_path: Path):
+    """A non-x86_64 host cannot INSTALL — and can still UNINSTALL. That is the documented contract.
+
+    The guard sat ABOVE the uninstall block, so `--uninstall` on an aarch64 host (this fleet's
+    Apple-Silicon box, and the five ARM64 pool runners) exited 2 and removed nothing: a runner
+    could not be decommissioned from the host it was installed on, while the runbook claimed the
+    refusal "still governs every INSTALL". Only an install registers an arch label and runs the
+    x64 listener binary; removal downloads nothing and registers nothing.
+
+    Non-vacuity, measured on the pre-fix installer: the same `--uninstall --dry-run` exited **2**
+    with "this installer is for x86_64 hosts" and planned nothing; post-fix it plans the removal
+    (exit 0) and the removal itself succeeds.
+    """
+    env = _uninstall_env(tmp_path, CI_RUNNER_ARCH="aarch64")
+    runner = tmp_path / "base"
+    runner.mkdir()
+    (runner / ".runner").write_text("{}\n")
+
+    # INSTALL is still refused on the foreign arch, before any download or registration
+    refused = _run(
+        "--count", "1", "--dry-run",
+        env=_env(tmp_path, CI_RUNNER_ARCH="aarch64", CI_RUNNER_NCPU="16"),
+    )
+    assert refused.returncode == 2, f"a non-x86_64 INSTALL must still be refused: {refused.stderr}"
+    assert "x86_64 hosts" in refused.stderr, refused.stderr
+
+    # the PLAN is produced (and the arch guard is not what stopped anything)
+    plan = _run("--uninstall", "--count", "1", "--dry-run", env={**env, "CI_RUNNER_BASE": str(runner)})
+    assert plan.returncode == 0, (
+        "a non-x86_64 host must still be able to PLAN a removal — the arch refusal is an INSTALL "
+        f"guard: {plan.returncode} {plan.stderr}"
+    )
+    assert "would stop and uninstall" in plan.stderr and "x86_64 hosts" not in plan.stderr, plan.stderr
+    assert runner.is_dir(), "a dry run removed the directory"
+
+    # …and the removal itself completes, so the runner can be decommissioned from this host
+    done = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(runner)})
+    assert done.returncode == 0, f"a non-x86_64 host must be able to decommission a runner: {done.stderr}"
+    assert not runner.exists(), done.stderr
 
 
 # ── 6. bounds: unreadable is refused, infinite is a bound ───────────────────────────────────

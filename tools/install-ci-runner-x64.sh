@@ -254,7 +254,8 @@ fi
 # them) made `--print-labels` exit 2 on any non-x86_64 host — the label invariant hard-FAILED on
 # the Apple-Silicon box this fleet runs on, and on the five ARM64 runners that serve this very
 # pool whenever the fallback is engaged. Asking "which labels would a runner
-# get" depends on no host property: the arch refusal is an INSTALL guard, and it still refuses.
+# get" depends on no host property: the arch refusal is an INSTALL guard, and it still refuses
+# every install.
 if [ "$MODE" = labels ]; then
   DRY=1   # auto resolves to "decide at install" rather than reading the pool
   resolve_labels
@@ -263,13 +264,20 @@ if [ "$MODE" = labels ]; then
 fi
 
 # ── guards: measured headroom, in the harness's own order (forks, disk, load) ──
-# `CI_RUNNER_ARCH` is a seam, so the refusal can be exercised on a host of either arch (the
-# guarded box is not always the box reading this code). Nothing here is made safer by it: anyone
-# who can set the env can edit the script.
-arch="${CI_RUNNER_ARCH:-$(uname -m)}"
-[ "$arch" = "x86_64" ] || die "this installer is for x86_64 hosts; '$arch' would register a DIFFERENT arch label than it claims"
-
+# ⛔ THE ARCH REFUSAL IS AN **INSTALL** GUARD — and it sat ABOVE the uninstall block, so on any
+# non-x86_64 host `--uninstall` was refused (exit 2) and nothing was removed: a runner could not
+# be decommissioned from the box it was installed on, and the runbook said the opposite ("still
+# governs every INSTALL"). Only INSTALLING registers a runner with THIS arch's label
+# (`self-hosted-x64`) and runs the x64 listener binary; removing one downloads nothing, registers
+# nothing, and needs no x64 binary. `--status`, `--repair-labels` and `--print-labels` already run
+# above this line for the same reason. The destructive path is guarded by `is_runner_install`,
+# never by the arch.
 if [ "$MODE" = install ]; then
+  # `CI_RUNNER_ARCH` is a seam, so the refusal can be exercised on a host of either arch (the
+  # guarded box is not always the box reading this code). Nothing here is made safer by it: anyone
+  # who can set the env can edit the script.
+  arch="${CI_RUNNER_ARCH:-$(uname -m)}"
+  [ "$arch" = "x86_64" ] || die "this installer is for x86_64 hosts; '$arch' would register a DIFFERENT arch label than it claims"
   # COUNT is validated once, before the mode dispatch, for every mode — not here (finding 4).
 
   # FORK HEADROOM FIRST — the failure the harness has hit is fork exhaustion, not CPU.
