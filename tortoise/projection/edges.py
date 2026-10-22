@@ -237,18 +237,20 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
         # extractedFrom keeps its create-if-missing stub (live _link_source
         # parity).
         if rel == "aboutDocument":
-            # D10 B1 live-parity (adversarial): the LIVE auto-detect
+            # D10 B1 live-parity: the LIVE auto-detect
             # (`_resolve_about_edge_target`) resolves an aboutDocument target
-            # only when
-            # `e.documentKind IS NOT NULL`, so a session/connector/provenance
-            # Source can never become an aboutDocument target. This replay
-            # match MUST carry the same guard — without it a producer-created
-            # edge (reachable through the public `sdk.create_edge`) to a
-            # provenance Source is re-attached to that non-document Source on
-            # rebuild, i.e. live and replay disagree (the #2489 "one create
-            # path / byte-identical stubs" invariant). The guard is
-            # DELIBERATE live-parity, not an accident: a wrong target must be
-            # refused here, exactly as live refuses it.
+            # only when `e.documentKind IS NOT NULL`, and the live producer
+            # (`create_edge`) refuses a non-document :Source outright (#5206) —
+            # so on either live path a session/connector/provenance Source can
+            # never become an aboutDocument target. This replay match carries the
+            # SAME target-KIND contract, and it is load-bearing rather than
+            # defensive: a supersede descriptor is keyed on `url` ALONE
+            # (`stub_key`), which cannot tell a document from a provenance
+            # Source, so the kind test must live here — otherwise a descriptor
+            # naming a non-document Source is RE-ATTACHED to it, i.e. the rebuilt
+            # edge mis-points (the #2489 "one create path / byte-identical stubs"
+            # invariant). DELIBERATE, not an accident: the wrong target is
+            # refused here as the live paths refuse it.
             rows = g.query(
                 "MATCH (s:Source {url:$url}) WHERE s.documentKind IS NOT NULL "
                 "RETURN ID(s), s.id LIMIT 1",

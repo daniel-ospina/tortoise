@@ -2878,12 +2878,10 @@ def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
 
 
 def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
-    """B1 (#5026): the REPLAY resolver must carry the LIVE path's
-    `documentKind IS NOT NULL` guard. Without it a producer-created
-    aboutDocument edge (reachable through the public `sdk.create_edge`) to a
-    provenance Source is re-attached to that non-document Source on rebuild —
-    live and replay disagree. A genuine document Source at the same shape
-    still resolves."""
+    """B1 (#5026): the REPLAY resolver applies the same `aboutDocument`
+    target contract the live paths do — the target is a `:Source` carrying
+    `documentKind` and addressable by `url` (ONTOLOGY §4.4). A provenance
+    Source at that shape is refused; a genuine document Source resolves."""
     from tortoise.projection.edges import resolve_structural_target
 
     proj = live_proj

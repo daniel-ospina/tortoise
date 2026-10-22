@@ -14335,10 +14335,13 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 # #2489: per-rel key extraction via the SHARED resolver — never
-                # target.id (Subjects MERGE by name, Sources by url, Documents by
-                # name-or-title). SKIP unresolvable keys (name-less Point from an
-                # id-targeted create_about_edge; url-less extractedFrom target): a
-                # null-key descriptor is un-replayable — those edges die at
+                # target.id (Subjects MERGE by name, Sources by url — and D10: a
+                # document IS a :Source, so aboutDocument and extractedFrom both
+                # key by `url`, the SAME key the target label moved with; a
+                # title-keyed aboutDocument descriptor is no longer resolvable and
+                # is never emitted). SKIP unresolvable keys (name-less Point from
+                # an id-targeted create_about_edge; a Source target lacking url):
+                # a null-key descriptor is un-replayable — those edges die at
                 # rebuild today anyway (zero regression).
                 if derivable:
                     keyed = stub_key(rel, target_props)
