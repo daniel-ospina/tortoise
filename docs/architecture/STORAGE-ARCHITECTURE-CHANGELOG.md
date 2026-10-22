@@ -1499,3 +1499,52 @@ What did NOT move with the retirement is the measured property finding (`#9397`/
 (`session_link.link_entity`, `subject_binding.bind_point_subjects`) and `idx` is re-materialized
 in an inline pattern map by `cache_projection.relation_statement`. The wider census changed the
 count, not that measurement, and `tests/test_9397_about_edge_properties.py` still pins it.
+
+## §17.1's replay permit is HANDLE-ONLY, and the raw-query lane sits behind its own answer (`#9391`, 2026-10-22)
+
+`FalkorProjection.query`'s refusal was scope-CONDITIONED on the same
+`_CACHE_WRITE_AUTHORIZED` ContextVar every sanctioned lane sets, and
+`_replay_write_scope()` sets it around a rebuild engine's body — so the public
+raw-query lane, the one door that exists to write the cache WITHOUT the
+projection, was a permitted writer for a whole rebuild. Measured, on a
+journal-armed projection: outside the window `DirectCacheWriteRefused`, inside it
+the same `CREATE` landed. Latent rather than live (no engine called `self.query`),
+and pinned nowhere: the handoff on the closed `#9210` cited
+`tests/test_9079_record_lane_declared.py::test_the_replay_window_also_authorizes_the_raw_query_lane`,
+a file and test that never existed in this tree (the merged `#9213` file is
+`tests/test_9079_record_replay_declared.py`, and `git log --all -S` finds no such
+commit). The closed issue's scoping comment then excluded the leg as "already
+pinned" on that premise; the correction note is on `#9210`, and the shape of the
+defect — a withdrawn claim standing in for a measurement — is the one this
+changelog exists to keep.
+
+The design decision that replaced it, with its measurements. (1) The permit is
+now LANE-DEPENDENT, not scope-dependent: `_raw_query_lane_permit()` answers "did a
+lane deliberately open the raw lane too", and `_HANDLE_ONLY_WRITE_LANES` names the
+lanes that do not. (2) The closure travels with the SCOPE STACK, because the first
+shape of the fix closed only the un-nested window and every real rebuild nests —
+`rebuild_all` opens the restore and synthetic lanes per leg inside its own replay
+window, and `rebuild_from_record` opens the `schema-ddl` lane for its indexes — so
+each nest re-opened the door (measured: the `CREATE` landed under all three).
+`_handle_only_write_scope()` therefore carries `_RAW_QUERY_CLOSED_DEPTH` beside the
+lane reason, inherited by nested lanes and cleared by the same `finally`. (3) The
+match is on the LANE (`_lane_of`), because four of the ledger's seven rows declare
+`f"{PREFIX}: {detail}"` templates — an exact-string set would have made adding one
+a silent no-op — and the `graph-metadata` row is stated as the matcher's limit,
+since its writers share no prefix. (4) Both `replay` declaration sites use the
+helper: `_replay_write_scope()` and `event_store.reestablish_watermark`, which
+declares its own lane because an inner scope shadows any `with` at its call site.
+
+Two residuals are stated rather than closed. Every lane outside the set still opens
+the raw lane when it is NOT nested inside a handle-only window — that width is
+`#9079`'s sanctioning decision, and a wholesale refusal there is a measured P0 (it
+silently degraded a hosted writer family). And `tests/test_9121_onboarding_residual_pins.py`
+derives its opener population from the AST, so routing `_replay_write_scope()`
+through the new helper DROPPED it from the population and would have blinded the
+escape-(3) detector to any `with _replay_write_scope():` — the fix declared the
+delegation hop (`_DELEGATED_OPENERS`) instead of recording only the new name.
+
+Pin: `tests/test_9391_replay_window_raw_query_width.py` (nine legs: the refused raw
+lane inside and outside the window, three real nests, the still-permitted handle at
+an ARMED door, reads unblocked, the lane-name branch with no window, the
+declaration constants, the second declaration site, and no permit past its `with`).
