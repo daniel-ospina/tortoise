@@ -1508,7 +1508,13 @@ def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
     # Actionable, not merely loud: the repair is a graph write because the node
     # has no id to pass to set_point_baseline, and it must mint ONE id per node
     # (a single literal would create the duplicate-id shape #7822).
-    assert "SET n.id" in message
+    # The repair has to be runnable on the shapes the guards actually admit:
+    # every epistemic label (an id-less :Event is a REAL population — see the
+    # label test below) and a direct edge's endpoint, not only a :Point wired as
+    # an operator's claim.
+    assert ":Subject" in message and ":Object" in message and ":Event" in message
+    assert "eventId" in message and "DISTINCT id" in message
+    assert "DIRECT EDGE" in message
     assert "ONE NEW id" in message
     assert "DETACH DELETE" in message
     assert "#9275" in message
@@ -1738,3 +1744,41 @@ def test_an_id_less_operator_is_inert_but_not_fatal(sdk):
     assert stamped[a["id"]] is not None
     assert stamped[b["id"]] is not None
 
+
+
+def test_the_refusal_names_a_non_point_offender_and_its_repair_finds_it(sdk):
+    """#9275 (review round 5): the guard admits all four epistemic labels.
+
+    The affected-set admission is label-agnostic — ``epistemic_disjunction`` is
+    ``:Point|:Subject|:Object|:Event`` — so an id-less ``:Event`` wired as a
+    claim refuses the run. That population is not hypothetical:
+    ``session_indexer`` mints ``(:Event {eventId: …})`` with NO ``id`` (its
+    identity is the second key). A ``:Point``-only diagnosis would hand the
+    caller a probe that returns zero rows for this node — a dead end in the one
+    place the message has to be actionable — and blind-setting an ``id`` equal to
+    the ``eventId`` would mint the #8879 cross-key shape. So the message names
+    the label set, the second-key caveat, and a probe that actually finds it.
+    """
+    proj = sdk._get_proj()
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+    # A real id-less population: an :Event keyed on eventId, with no `id`.
+    proj.g.query("CREATE (e:Event {eventId:'evt-9275'})")
+    proj.g.query("MATCH (o:Point {id:$o}), (e:Event {eventId:'evt-9275'}) "
+                 "CREATE (o)-[:IMPL {idx:2}]->(e)", params={"o": op["id"]})
+
+    with pytest.raises(UnaddressableClaimError) as exc:
+        sdk.compute_confidence()
+    message = str(exc.value)
+    assert ":Event" in message and "eventId" in message
+
+    # The probe the message prescribes finds the offender (its own predicate,
+    # run here): a :Point-only probe would return nothing.
+    found = proj.g.query(
+        "MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event) "
+        "AND n.id IS NULL RETURN labels(n), id(n), n.eventId").result_set
+    assert len(found) == 1
+    assert found[0][2] == "evt-9275"

@@ -24990,10 +24990,12 @@ class TortoiseSDK:
         disagree (measured) — so it can never consume the
         ``limit=1`` probe's budget. It is excluded because no caller can name it
         to ``set_point_baseline`` and the run cannot survive it anyway: EP keys
-        claims on ``id``, so an id-less ``:Point`` wired as an operator claim
-        makes the pass REFUSE with ``UnaddressableClaimError`` before it stamps
+        claims on ``id``, so an id-less claim wired to an operator makes the pass
+        REFUSE with ``UnaddressableClaimError`` before the refusing pass stamps
         anything (#9275 — fixed there; it used to die in the ordering with a bare
-        ``TypeError``) — nothing is ever stamped on such a node. Sorted
+        ``TypeError``; a multi-batch ``dream_window``/``dream_all`` pass may have
+        committed an earlier batch) — nothing is ever stamped on such a node.
+        Sorted
         (``key=str``, so a numeric id cannot raise
         on a mixed list) for a deterministic message.
         """
@@ -25024,12 +25026,16 @@ class TortoiseSDK:
             f"AND {_live_only('n.status')} "
             "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
             "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "
-            # A hand-written / imported graph can hold an id-less :Point (no
-            # repo writer mints one). No caller can name it to
-            # ``set_point_baseline``, and an id-less participating claim crashes
-            # the run DURING ORDERING, after the batches have stamped the other
-            # nodes — so the run is not fail-closed, but nothing is ever stamped
-            # ON IT (no id to key) (#9275) — so it must never be reported — and
+            # A hand-written / imported graph can hold an id-less epistemic
+            # node (a :Point has no writer that mints one; an :Event has a
+            # LEGITIMATE id-less identity — ``session_indexer`` mints
+            # ``(:Event {eventId})``). No caller can name one to
+            # ``set_point_baseline``, and an id-less participating claim makes EP
+            # REFUSE the run before the refusing pass computes or stamps anything
+            # (``UnaddressableClaimError``, #9275 — it used to crash in the
+            # ordering AFTER the batches had stamped the other nodes), so
+            # nothing is ever stamped ON IT (no id to key) — so it must never be
+            # reported — and
             # the filter belongs HERE, in the WHERE clause, not only in the
             # Python post-pass: ``limit=1`` is applied by the engine BEFORE the
             # post-pass, so a single id-less row would consume the existence
