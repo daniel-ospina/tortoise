@@ -893,10 +893,10 @@ class TestDocsPageAndSkillConfig:
             "chatgpt.com/plugins",  # 2 — the Developer-mode app entry point
             "Scan Tools",           # 4 — OAuth enrolment
             "Authorize",            # 4 — consent (key-less connect completes here)
-            "paste it into that chat",  # 5 — the hand-off to the agent
-            "to verify the connection",  # 6 — the row names the verification hand-off
-            "file your first memory",  # 6 — the journey's outcome
-            "plan-dependent",       # 6 — which tools appear is plan-dependent
+            "paste it into that chat",  # 7 — the hand-off to the agent
+            "to verify the connection",  # 8 — the row names the verification hand-off
+            "file your first memory",  # 8 — the journey's outcome
+            "plan-dependent",       # 8 — which tools appear is plan-dependent
         ):
             assert step in steps, (
                 f"the ChatGPT row must keep step {step!r} — a /docs#chatgpt "
@@ -1031,6 +1031,33 @@ class TestDocsPageAndSkillConfig:
             "the row must state that creating a graph cannot set packs (#9667) — "
             "the two acts are separate, and a user who assumes otherwise never "
             "configures")
+        # …and the disable consequence must keep the product's QUALIFIER. The
+        # resolution contract re-admits a namespace WHOLE once the graph holds any
+        # data in it (pack_state.resolved_pack_set = active records ∪ the graph's
+        # namespaces; docs/EXPANSION_PACKS.md), so an unconditional "turning a pack
+        # off stops new classifications" is false for exactly the packs a user is
+        # most likely to have data in — the opposite of what it tells them.
+        # `packs.js::PACK_CONSEQUENCE.disable` is the owner of that sentence and
+        # states the namespace-granular qualifier; the row must not drop it.
+        assert "no memories from yet" in steps, (
+            "the pack-disable clause must keep the namespace qualifier — a pack "
+            "the graph already holds data in stays classifiable "
+            "(packs.js::PACK_CONSEQUENCE.disable, docs/EXPANSION_PACKS.md)")
+        assert "only stops new classifications" not in steps, (
+            "the row must not state the disable consequence unconditionally — "
+            "the resolution contract re-admits a namespace that already has data")
+
+        # ── the journey is ORDERED ─────────────────────────────────────────
+        # The row is a procedure a visitor follows top to bottom (#9660), so the
+        # one instruction that needs a live conversation — ask the agent to call
+        # the graph-discovery tool — must come AFTER the chat is opened and the
+        # instructions document is pasted. Before that there is no agent to ask
+        # (and, on a brand-new organization, no graph to list either, since the
+        # org graph is materialized on the first write).
+        assert steps.index("paste it into that chat") < steps.index('section="graphs"'), (
+            "the discovery call must be asked of the agent AFTER the chat exists "
+            "and the document is pasted — before that the instruction is not "
+            "actionable in place, which defeats the point of an ordered journey")
 
     def test_4836_document_section2_names_the_live_chatgpt_carrier(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note must name the surface
