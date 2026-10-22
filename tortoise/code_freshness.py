@@ -147,6 +147,28 @@ def _digest(path: str) -> str | None:
         return None
 
 
+def _stable_digest(path: str, expected: tuple[int, int]) -> str | None:
+    """Hash ``path`` only if its stat is ``expected`` BOTH before and after.
+
+    A stat check followed by a separate read is a TOCTOU, and here the race is
+    not theoretical: the concurrent writers are ``git checkout``,
+    ``lane_stash.py pop`` and ``git rebase`` — the byte-identical rewrites this
+    digest exists to recognise — and the window is entered exactly at boot and at
+    the first ``check()`` of a lazily imported module. A pair recorded across the
+    race ("stat of A, digest of B") would match on the next ``check()``, take the
+    content-identical branch and publish ``stale: false`` while the process is
+    still executing A — the #9494 failure direction, produced by its own fix.
+    Refusing the sample is the conservative direction: the file simply stays
+    unverified, which reports stale.
+    """
+    if _stat(path) != expected:
+        return None
+    digest = _digest(path)
+    if digest is None or _stat(path) != expected:
+        return None
+    return digest
+
+
 def _package_files() -> list[tuple[str, str]]:
     """``(module name, .py file)`` for every loaded ``tortoise`` module.
 
@@ -194,9 +216,9 @@ def observe(deep: bool = False) -> int:
             pending = [(name, entry[0], entry[1], entry[2])
                        for name, entry in _baseline.items() if entry[3] is None]
         for name, path, mtime_ns, size in pending:
-            if _stat(path) != (mtime_ns, size):
-                continue  # cannot prove it any more — leave it unverified
-            digest = _digest(path)
+            # `None` = the file moved (now, or during the read): cannot prove
+            # which bytes were loaded, so leave the entry unverified (stale).
+            digest = _stable_digest(path, (mtime_ns, size))
             if digest is None:
                 continue
             with _lock:
@@ -211,7 +233,8 @@ def observe(deep: bool = False) -> int:
             st = _stat(path)
             if st is None:
                 continue
-            _baseline[name] = (path, st[0], st[1], _digest(path) if deep else None)
+            _baseline[name] = (path, st[0], st[1],
+                               _stable_digest(path, st) if deep else None)
             added += 1
         if added and _baseline_at is None:
             _baseline_at = time.time()
@@ -288,7 +311,9 @@ def _disk_digest(name: str, path: str, st: tuple[int, int] | None) -> str | None
         cached = _disk.get(name)
     if cached is not None and cached[0] == st[0] and cached[1] == st[1]:
         return cached[2]
-    fresh = _digest(path)
+    fresh = _stable_digest(path, st)
+    if fresh is None:
+        return None  # the file moved during the read — do not cache a lie
     with _lock:
         _disk[name] = (st[0], st[1], fresh)
     return fresh
@@ -311,7 +336,7 @@ def _drifted() -> tuple[list[dict], int]:
             if blake is None:
                 # Deferred: establish the baseline digest now. The stat still
                 # matches, so these bytes ARE the bytes that were loaded.
-                fresh = _digest(path)
+                fresh = _stable_digest(path, (mtime_ns, size))
                 if fresh is not None:
                     with _lock:
                         _baseline[name] = (path, mtime_ns, size, fresh)

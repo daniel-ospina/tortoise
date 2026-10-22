@@ -504,6 +504,43 @@ def test_concurrent_checks_emit_one_warning(tmp_path, monkeypatch, caplog):
     assert len(records) == 1, [r.getMessage() for r in records]
 
 
+def test_a_rewrite_inside_the_hash_window_is_never_reported_clean(tmp_path, monkeypatch):
+    """The boot digest must be sampled only if the stat held ACROSS the read.
+
+    A stat check and a separate read leave a TOCTOU window, and the writers that
+    land in it are the rewrites this digest exists to recognise (``git
+    checkout``, ``lane_stash.py pop``, ``git rebase``). The dangerous pair is
+    "stat of A, digest of B": it *matches* on the next ``check()``, so the file
+    takes the content-identical branch and the health payload answers
+    ``stale: false`` while the process is still running A — the #9494 failure,
+    produced by its own fix.
+    """
+    module, path = _probe_module(tmp_path)          # the process "loaded" A
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    real_digest = code_freshness._digest
+    raced = []
+
+    def racing_digest(target):
+        # A rewrite lands between the caller's stat and this read.
+        if Path(target) == path and not raced:
+            raced.append(True)
+            path.write_text("VALUE = 1\nEXTRA_SYMBOL = 9\n")
+            st = os.stat(path)
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        return real_digest(target)
+
+    monkeypatch.setattr(code_freshness, "_digest", racing_digest)
+    code_freshness.observe(deep=True)               # boot: the raced sample
+    assert raced, "the race window was not entered — the test proves nothing"
+    monkeypatch.undo()
+
+    report = code_freshness.check()
+    assert report["stale"] is True, report           # never a clean answer
+
+    # And it stays stale: a bad sample must not be re-armed into a clean one.
+    assert code_freshness.check()["stale"] is True
+
+
 # ── 2. the health surface ────────────────────────────────────────────
 
 class _FakeSDK:
