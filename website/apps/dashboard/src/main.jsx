@@ -1000,9 +1000,8 @@ function SettingsTab(props) {
       <section className="settings-home" aria-labelledby={PACK_SETTINGS_SECTION_ID}>
         <h3 id={PACK_SETTINGS_SECTION_ID} tabIndex={-1}>Configured packs</h3>
         <p className="dim small">
-          Each graph draws its vocabulary from the packs configured here. A pack you turn off stops
-          minting its kinds on this graph; memories it already produced stay searchable. Changes apply
-          to one graph only.
+          Each graph draws its vocabulary from the packs configured here.{' '}
+          <strong>Turn off</strong> — {PACK_CONSEQUENCE.disable} Changes apply to one graph only.
         </p>
         {selectorGraphs(graphs).length === 0 ? (
           /* #2728 review P2-1: a FAILED graph read is not "still loading".

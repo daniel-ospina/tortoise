@@ -705,6 +705,9 @@ class TestDocsPageAndSkillConfig:
     DOCS = REPO_ROOT / "website" / "docs.html"
     SKILL = REPO_ROOT / "tortoise" / "onboarding" / "SKILL.md"
     QUICKSTART = REPO_ROOT / "docs" / "quickstart-cloud.md"
+    PACKS_JS = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "packs.js"
+    MAIN_JSX = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "main.jsx"
+    MCP_SERVER = REPO_ROOT / "tortoise" / "mcp_server.py"
 
     # Per-harness headings in the docs #mcp section. Rows are pinned by
     # heading (not a bare "Codex"/"Pi" substring) so deleting a row fails.
@@ -782,6 +785,43 @@ class TestDocsPageAndSkillConfig:
         assert end != -1, "docs.html lost its #api section anchor"
         assert end > start, "docs.html #api now precedes #mcp — slice would be empty"
         return text[start:end]
+
+    @staticmethod
+    def _js_object_string(src: str, name: str, key: str) -> str:
+        """The quoted value of `<name>.<key>` inside a JS object literal.
+
+        A narrow, *fail-loud* reader, deliberately: it asserts both the
+        constant and the key exist, so a rename fails here instead of silently
+        degrading the owner cross-check below into a substring match against
+        `""` (a vacuous pass is the failure mode this reader exists to
+        remove).
+        """
+        start = src.find(f"export const {name} = Object.freeze({{")
+        assert start != -1, (
+            f"{name} is no longer an `Object.freeze({{...}})` literal — the copy "
+            "the docs row quotes has lost its owner")
+        body = src[start:]
+        end = body.find("\n})")
+        assert end != -1, f"{name}'s object literal is not terminated as expected"
+        m = re.search(rf"\b{key}:\s*(['\"])(?P<val>.*?)\1", body[:end], re.S)
+        assert m, (
+            f"{name}.{key} is gone — the docs row cites it as the owner of its "
+            "sentence, so the sentence can no longer be derived")
+        return m.group("val")
+
+    @staticmethod
+    def _copy_norm(text: str) -> str:
+        """Dash-folded, quote-folded, whitespace-collapsed, lower-cased copy.
+
+        The docs row is PROSE: it may swap the module's `;` for a dash, add an
+        `only`, or wrap a line. The claim is not byte-identity — it is that the
+        row carries the same QUALIFIER the owning module states, so both sides
+        are normalised and the module's fragments are required to survive.
+        """
+        folded = (text.replace("\u2014", "-").replace("\u2013", "-")
+                      .replace("\u2019", "'").replace("\u201c", '"')
+                      .replace("\u201d", '"'))
+        return re.sub(r"\s+", " ", folded).strip().lower()
 
     def _row(self, section: str, start_heading: str, end_heading: str) -> str:
         assert start_heading in section, f"docs #mcp row missing: {start_heading}"
@@ -958,9 +998,15 @@ class TestDocsPageAndSkillConfig:
 
         Both steps are PRODUCT facts, not UI labels, so they are assertable here
         without the live-browser walk #9660 requires for the Developer-Mode
-        path: `docs.html#chatgpt` is the live carrier (#4836), and the claims
-        below are checked against the code that owns them rather than against
-        themselves.
+        path: `docs.html#chatgpt` is the live carrier (#4836).
+
+        Each claim the row makes is cross-checked against the artifact that OWNS
+        it, so a reworded owner fails THIS test instead of leaving the row
+        asserting a contract that no longer exists: `TOOL_REGISTRY` /
+        `_OVERVIEW_SECTIONS` for the tools, `supabase_control._graph_namespace_for`
+        plus the `#236` HTTP override for the graph, `packs.js::PACK_CONSEQUENCE`
+        and the Settings heading in `main.jsx` for the packs. Every owner is READ
+        here (or called); none is re-typed.
         """
         section = self._mcp_section()
         start = section.find('<h4 id="chatgpt">')
@@ -970,7 +1016,12 @@ class TestDocsPageAndSkillConfig:
             cut = row.find(delim, 1)
             if cut != -1:
                 row = row[:cut]
+        assert "<ol>" in row, (
+            "the ChatGPT row must keep its ordered step list (#4836) — asserted "
+            "here so a shape change names the reason instead of raising "
+            "IndexError out of the slice below")
         steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
+        row_norm = self._copy_norm(steps)
 
         # ── which graph ────────────────────────────────────────────────────
         # The discovery tool named must be a REAL, ACTIVE, read-risk tool: a
@@ -1009,10 +1060,30 @@ class TestDocsPageAndSkillConfig:
         # graph. A card that implied otherwise would send the user looking for a
         # control that does not exist — the same defect as the stale
         # Developer-Mode path this issue exists for.
-        assert "default graph" in steps, (
+        #
+        # Both graph claims are owned by CODE, and both are exercised here:
+        #   * a connector credential carries no graph_id, so an org-wide key
+        #     resolves to the org's default namespace — that is what makes
+        #     "every write lands in the default graph" true of a connector
+        #     (`supabase_control._graph_namespace_for`, called, cp=None because
+        #     the graph_id-less branch returns before any control-plane read);
+        #   * HTTP mode overwrites any caller-supplied `graph_name` with the org
+        #     graph (`#236`), so there is no per-call selection control to pick.
+        from tortoise.supabase_control import _graph_namespace_for
+        assert _graph_namespace_for(None, "org_abc", None, "org_abc") == "org_abc", (
+            "an org-wide (graph_id-less) key must resolve to the default graph "
+            "namespace — the row's 'every write lands in the default graph' is "
+            "only true while that holds (#9340)")
+        mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
+        assert mcp_src.count('graph_name = f"org_{_current_org_id.get()}"') >= 2, (
+            "#236: HTTP mode must keep overwriting a caller-supplied graph_name "
+            "with the org graph — that is WHY per-call graph selection is not "
+            "available to a connector, so the row may only say so while it is "
+            "true")
+        assert "default graph" in row_norm, (
             "the row must state that writes land on the organization's DEFAULT "
             "graph — that is the connector's actual behaviour (#9340)")
-        assert "picking a graph per call is not available" in steps, (
+        assert "picking a graph per call is not available" in row_norm, (
             "the row must not imply a per-call graph control exists (#9340)")
 
         # ── which packs ────────────────────────────────────────────────────
@@ -1021,13 +1092,37 @@ class TestDocsPageAndSkillConfig:
         # So the row must name the default, name the surface that changes it, and
         # say creation cannot set it (#9667) — otherwise a user reads the union
         # as "Tortoise is broken" instead of "this graph was never configured".
-        assert "Configured packs" in steps, (
+        #
+        # The copy exists in `packs.js::PACK_CONSEQUENCE`, so the module is READ
+        # and its sentences are the source the row must carry — a reworded
+        # consequence fails here rather than leaving the page quoting a
+        # superseded sentence (the #4643 drift class, one layer out).
+        packs_src = self.PACKS_JS.read_text(encoding="utf-8")
+        unconfigured = self._copy_norm(
+            self._js_object_string(packs_src, "PACK_CONSEQUENCE", "unconfigured"))
+        disable = self._copy_norm(
+            self._js_object_string(packs_src, "PACK_CONSEQUENCE", "disable"))
+        # The Settings label is a real dashboard heading, not a name invented by
+        # this test — and the row may not send the user to a section that moved.
+        main_src = self.MAIN_JSX.read_text(encoding="utf-8")
+        assert "tabIndex={-1}>Configured packs</h3>" in main_src, (
+            "the row sends the user to Settings → 'Configured packs'; that "
+            "heading must still exist in main.jsx (main.jsx:1001)")
+        assert "configured packs" in row_norm, (
             "the row must name the Settings surface that configures packs")
-        assert "full pack catalog" in steps, (
+        assert "still uses the full pack catalog" in unconfigured, (
+            "packs.js PACK_CONSEQUENCE.unconfigured no longer states the "
+            "catalog-union default the row quotes — re-derive the row from the "
+            "module instead of patching the sentence here")
+        assert "still uses the full pack catalog" in row_norm, (
             "the row must name the unconfigured-graph default (the catalog "
-            "union) — the product's own words for it are 'still uses the full "
-            "pack catalog'")
-        assert "does not set packs" in steps, (
+            "union) — in the product's own words, 'still uses the full pack "
+            "catalog'")
+        # The unconfigured copy is also what makes the #9667 claim true: a graph
+        # nobody has configured — a freshly created one included — is exactly
+        # the graph PACK_CONSEQUENCE.unconfigured describes.
+        assert "never been configured" in unconfigured
+        assert "does not set packs" in row_norm, (
             "the row must state that creating a graph cannot set packs (#9667) — "
             "the two acts are separate, and a user who assumes otherwise never "
             "configures")
@@ -1039,11 +1134,29 @@ class TestDocsPageAndSkillConfig:
         # most likely to have data in — the opposite of what it tells them.
         # `packs.js::PACK_CONSEQUENCE.disable` is the owner of that sentence and
         # states the namespace-granular qualifier; the row must not drop it.
-        assert "no memories from yet" in steps, (
-            "the pack-disable clause must keep the namespace qualifier — a pack "
-            "the graph already holds data in stays classifiable "
-            "(packs.js::PACK_CONSEQUENCE.disable, docs/EXPANSION_PACKS.md)")
-        assert "only stops new classifications" not in steps, (
+        # The two fragments below are read OUT OF the module and then required in
+        # the row — a reword in either place fails, which a plain substring check
+        # over `docs.html` alone could not do.
+        for fragment in ("packs this graph holds no memories from yet",
+                         "kinds already here stay searchable and writable"):
+            assert fragment in disable, (
+                f"packs.js PACK_CONSEQUENCE.disable no longer carries {fragment!r} "
+                "— the namespace-granular qualifier is the contract "
+                "(pack_state.resolved_pack_set ∪ the graph's namespaces,"
+                " docs/EXPANSION_PACKS.md), so the module and the row must move "
+                "together")
+            assert fragment in row_norm, (
+                f"the pack-disable clause must keep the namespace qualifier "
+                f"{fragment!r} — a pack the graph already holds data in stays "
+                "classifiable (packs.js::PACK_CONSEQUENCE.disable)")
+        # The unconditional form must be absent from BOTH sides: it is the shape
+        # the resolution contract falsifies, so the module must not state it and
+        # the page must not quote it.
+        assert "only stops new classifications" not in disable, (
+            "PACK_CONSEQUENCE.disable must not state the consequence "
+            "unconditionally — the resolution contract re-admits a namespace "
+            "that already has data")
+        assert "only stops new classifications" not in row_norm, (
             "the row must not state the disable consequence unconditionally — "
             "the resolution contract re-admits a namespace that already has data")
 
@@ -1051,9 +1164,12 @@ class TestDocsPageAndSkillConfig:
         # The row is a procedure a visitor follows top to bottom (#9660), so the
         # one instruction that needs a live conversation — ask the agent to call
         # the graph-discovery tool — must come AFTER the chat is opened and the
-        # instructions document is pasted. Before that there is no agent to ask
-        # (and, on a brand-new organization, no graph to list either, since the
-        # org graph is materialized on the first write).
+        # instructions document is pasted: before that there is no agent to ask.
+        # The ordering is about the CONVERSATION, not about whether a graph
+        # exists — `hosted_api.agent_signup` creates the `kind='default'` graph
+        # at org creation, so a graph is listable from signup. What the user
+        # cannot know before the write is WHICH graph the write landed in, and
+        # reading the graph back is what answers it.
         assert steps.index("paste it into that chat") < steps.index('section="graphs"'), (
             "the discovery call must be asked of the agent AFTER the chat exists "
             "and the document is pasted — before that the instruction is not "
