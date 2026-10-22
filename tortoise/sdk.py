@@ -35,7 +35,6 @@ import logging
 import os
 import re
 import stat
-import string
 import unicodedata
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -461,55 +460,65 @@ def _strip_whitespace(expr: str) -> str:
 #: #9287: what a ``pointKind`` MAY contain — the WRITE-DOOR half of the
 #: boundary ``_KIND_WHITESPACE_CHARS`` declares above.
 #:
-#: A kind is an IDENTIFIER, not prose, and the rule is stated POSITIVELY (what a
-#: character must be) rather than as a blacklist of bad ones: only letters,
-#: digits, ASCII punctuation, and a plain INTERIOR space are accepted. A negative
-#: rule cannot be complete here — this issue's own fix was opened TWICE on
-#: exactly that mistake: first a category blacklist missed ``U+3164`` HANGUL
-#: FILLER (``Lo``, renders blank), then the enumerated fix for it missed
-#: ``U+E0100``..``U+E01EF`` (variation selectors-17+) and ``U+1D159`` (MUSICAL
-#: SYMBOL NULL NOTEHEAD, ``So``) — each measured accepted-and-gate-escaping on
-#: the head it was found on (#9591 review cycles 2 and 3). Under the positive
-#: rule every one of those is excluded BY CONSTRUCTION: a blank separator, a
-#: control, a format mark, a mark/variation selector, a symbol and a lone
-#: surrogate are all "not alnum and not ASCII punctuation".
+#: A kind is an IDENTIFIER, not prose. The rule is stated POSITIVELY and over
+#: PROPERTIES, not examples: a character is admissible when it is PRINTABLE
+#: (``str.isprintable`` is False across ``Cc``/``Cf``/``Cs``/``Co``/``Cn`` and
+#: the ``Z*`` separators — the whole invisible half of Unicode, where every
+#: escape in this issue lived) and is not one of the measured NON-RENDERING code
+#: points below (Unicode files those under printable categories, so nothing
+#: decidable reaches them). The kind is probed in NFC form, so a decomposed
+#: accent (``'cafe\\u0301'``) is the same identifier as its composed spelling;
+#: the STORED value is never rewritten.
 #:
-#: ⚠️ RESIDUAL, declared rather than implied: Unicode files a handful of
-#: BLANK-RENDERING *letters* under ``Lo`` — the Hangul fillers below — so
-#: "alnum" accepts them and only an enumeration can refuse them. Four code
-#: points, one family, measured; they are listed and a generative test
-#: (``test_the_door_and_the_gate_family_cannot_diverge``) asserts the closure
-#: this module claims: every code point the door ACCEPTS is a code point the
-#: gate's read path strips, so no future gap of this class can be silent.
+#: Why properties and not a blacklist: this fix was opened TWICE on enumerated
+#: rules. A category blacklist missed ``U+3164`` HANGUL FILLER (``Lo``, renders
+#: blank); the enumerated fix for that missed ``U+E0100``..``U+E01EF``
+#: (variation selectors-17+) and ``U+1D159`` (MUSICAL SYMBOL NULL NOTEHEAD,
+#: ``So``) — each measured accepted-and-gate-escaping on the head it was found on
+#: (#9591 review cycles 2 and 3).
 #:
-#: Why the READ path stays a small enumeration and the DOOR carries the full
-#: rule: each code point the read path strips costs one ``replace()`` on every
-#: scanned row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full
-#: Unicode space list timed out the gate on an eight-node fixture), while the
-#: door pays it once per write.
-_KIND_ALLOWED_PUNCTUATION = frozenset(string.punctuation)  # ASCII only
-
-#: Blank-rendering LETTERS (``Lo``) — the one family the positive rule cannot
-#: exclude, because Unicode calls them letters. Measured accepted-and-gate-
-#: escaping before this set existed (#9591 review cycle 2). Every OTHER blank
-#: code point (braille blank, null notehead, variation selectors, combining
-#: grapheme joiner, Mongolian FVS…) is excluded by the positive rule, so it
-#: needs no entry here.
-_KIND_BLANK_RENDERING_CHARS = frozenset({
-    "\u115f",  # HANGUL CHOSEONG FILLER
-    "\u1160",  # HANGUL JUNGSEONG FILLER
-    "\u3164",  # HANGUL FILLER
-    "\uffa0",  # HALFWIDTH HANGUL FILLER
-})
+#: ⚠️ THE RESIDUAL, declared rather than implied: a printable code point whose
+#: glyph renders nothing (or renders a no-op) cannot be recognised by any Unicode
+#: property — "does this draw ink" is not machine-decidable. So that class is an
+#: explicit MEASURED list below, and the tests pin both halves: the generative
+#: `test_the_door_accepts_no_invisible_code_point` walks all 0x110000 code points
+#: (accepted ⇒ printable, at BOTH an edge and an interior position) and asserts
+#: every listed code point is refused, so the next member of the class cannot
+#: slip in silently.
+#:
+#: The other direction is pinned too, and it is the one that matters for the
+#: calibration gate: the read path's normalisation family must be a SUBSET of
+#: what this door refuses — `test_the_door_refuses_every_character_the_gate_strips`.
+#: (The reverse is not true and must not be claimed: the door accepts 'a', '-'
+#: and ':', which the read path does not strip and has no reason to.)
+#:
+#: Why the READ path stays a small enumeration and the DOOR carries the rule:
+#: each code point the read path strips costs one ``replace()`` on every scanned
+#: row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full Unicode
+#: space list timed out the gate on an eight-node fixture), while the door pays
+#: it once per write.
+_KIND_NON_RENDERING_CHARS = frozenset({
+    "\u115f",  # HANGUL CHOSEONG FILLER (Lo) — renders blank
+    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+    "\u3164",  # HANGUL FILLER (Lo)
+    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    "\u2800",  # BRAILLE PATTERN BLANK (So)
+    "\U0001d159",  # MUSICAL SYMBOL NULL NOTEHEAD (So)
+    "\u034f",  # COMBINING GRAPHEME JOINER (Mn) — a visible no-op
+    "\u17b4",  # KHMER VOWEL INHERENT AQ (Mn)
+    "\u17b5",  # KHMER VOWEL INHERENT AA (Mn)
+}) | frozenset(chr(cp) for cp in range(0x180b, 0x1810)) \
+  | frozenset(chr(cp) for cp in range(0xfe00, 0xfe10)) \
+  | frozenset(chr(cp) for cp in range(0xe0100, 0xe01f0))
 
 
 def _kind_non_identifier_char(kind: str, i: int) -> bool:
     """True when ``kind[i]`` cannot be part of an identifier.
 
-    The POSITIVE rule (see ``_KIND_ALLOWED_PUNCTUATION``): a character is part
-    of an identifier when it is alphanumeric, ASCII punctuation, or a plain
-    INTERIOR space. Everything else — separators, controls, format marks,
-    marks/variation selectors, symbols, surrogates — is refused.
+    The POSITIVE rule (see ``_KIND_NON_RENDERING_CHARS``): a character is part
+    of an identifier when it is PRINTABLE and does not render blank, or when it
+    is a plain INTERIOR space. Everything else — separators, controls, format
+    marks, unassigned and non-rendering code points — is refused.
 
     ONE predicate for both halves of this module's kind rule: the refusal
     (``_kind_invisible_char``) and the suggested fix (``_kind_suggestion``) read
@@ -519,14 +528,15 @@ def _kind_non_identifier_char(kind: str, i: int) -> bool:
     escaping hands back a DIFFERENT string).
     """
     ch = kind[i]
-    if ch == " " and 0 < i < len(kind) - 1:
+    if ch == " ":
         # A plain INTERIOR space is a legitimate separator in an
         # open-vocabulary kind ('technical debt') and the gate strips it
-        # wherever it occurs, so it can never be an escape.
-        return False
-    if ch in _KIND_ALLOWED_PUNCTUATION:
-        return False
-    return not ch.isalnum() or ch in _KIND_BLANK_RENDERING_CHARS
+        # wherever it occurs, so it can never be an escape. A LEADING/trailing
+        # one is the padding this door exists to refuse.
+        return not (0 < i < len(kind) - 1)
+    if ch in _KIND_NON_RENDERING_CHARS:
+        return True
+    return not ch.isprintable()
 
 
 def _kind_invisible_char(kind: str) -> str | None:
@@ -537,14 +547,21 @@ def _kind_invisible_char(kind: str) -> str | None:
     and it can never make a node escape the gate's classification — the read
     path strips it wherever it occurs, so ``'state ment'`` is already demanded
     as the ``statement`` it is. Every character the POSITIVE rule above does not
-    admit (see ``_KIND_ALLOWED_PUNCTUATION`` / ``_KIND_BLANK_RENDERING_CHARS``)
+    admit (see ``_KIND_NON_RENDERING_CHARS``)
     is refused in any position, including the interior: ``'state\\u2003ment'`` is
     either a separator or padding, and guessing is how a kind silently becomes
     a different kind.
     """
-    for i in range(len(kind)):
-        if _kind_non_identifier_char(kind, i):
-            return kind[i]
+    # NFC probe: a DECOMPOSED spelling ('cafe' + U+0301) is the same
+    # identifier as its composed form, and refusing it would make the door
+    # depend on which normalisation form the caller happened to produce. The
+    # stored value is untouched — normalising what we WRITE would move the dedup
+    # identity `(pointKind, content_hash)` behind the caller's back, which is why
+    # this refuses rather than rewrites in the first place.
+    probe = unicodedata.normalize("NFC", kind)
+    for i in range(len(probe)):
+        if _kind_non_identifier_char(probe, i):
+            return probe[i]
     return None
 
 
@@ -634,12 +651,25 @@ def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
         if suggestion
         else "The kind is only invisible characters — supply a name."
     )
+    # ⛔ STATE THE REASON THAT IS TRUE FOR THIS CHARACTER (#9591 review cycle 4):
+    # the read path HAPPENS to normalise the ASCII/NBSP family, so claiming "the
+    # gate would not demand a prior" for those is false — measured: an imported
+    # row with `' statement'` IS demanded (pinned by
+    # `test_out_of_contract_kind_shapes_do_not_abort_the_gate`). The door is the
+    # guarantee either way; only the out-of-family half is the measured fail-open.
+    reason = (
+        "the read path's own whitespace normalisation happens to fold this "
+        "spelling today, but the door — not a per-row scan — is the guarantee, "
+        "and a kind is an identifier"
+        if bad in _KIND_WHITESPACE_CHARS
+        else "the calibration gate classifies kinds after its own normalisation, "
+             "so this spelling is a DIFFERENT kind: the gate would not demand a "
+             "prior for it while EP still consumed and stamped the node"
+    )
     raise ValueError(
         f"{door}: {prop} must be an identifier, but {value!r} carries "
         f"{bad!r} (U+{ord(bad):04X}). A kind is matched by exact membership, "
-        "so this spelling is a DIFFERENT kind: the calibration gate would not "
-        f"demand a prior for it while EP still consumed and stamped the node "
-        f"(#9287). {tail}"
+        f"so {reason} (#9287). {tail}"
     )
 
 
@@ -17207,6 +17237,27 @@ class TortoiseSDK:
                 "message": "pointKind 'event' is not a write kind — use an "
                            "entity item with type:'event' and eventKind "
                            "('occurrence'/'turn') for episodic records",
+            })
+        # #9287 (review cycle 4): the same refusal the Point write doors raise,
+        # reported as a PHASE-1 violation. Without it this class was
+        # Phase-2-only in `ingest()` — measured: a bundle whose second point
+        # carried a padded kind PASSED `_validate_bundle` (zero mutations) and
+        # then raised from `create_point` mid-write, with the FIRST item already
+        # committed. Every other kind rule here is collected, zero-mutation and
+        # shared by both phases (`TestPhase1Phase2Parity`); this one now is too.
+        bad = _kind_invisible_char(kind)
+        if bad is not None:
+            fix = _kind_suggestion(kind)
+            violations.append({
+                "section": "points", "index": index,
+                "message": f"pointKind must be an identifier, but {kind!r} "
+                           f"carries {bad!r} (U+{ord(bad):04X}) — a kind is "
+                           "matched by exact membership, so this spelling is a "
+                           "different kind (#9287). "
+                           + (f"Pass the kind without the {bad!r} — e.g. "
+                              f"'{fix}'." if fix else
+                              "The kind is only invisible characters — "
+                              "supply a name."),
             })
 
     def _check_refs(self, bundle: dict, violations: list[dict]) -> None:

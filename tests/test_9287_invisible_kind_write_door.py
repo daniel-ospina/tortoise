@@ -30,9 +30,10 @@ refusal would otherwise abort a whole section's extraction.
 
 ⛔ WHAT THE CLOSURE IS, exactly (do not overstate it — the first cut did): no
 SDK write can mint a kind the gate cannot classify, for the whitespace/format
-categories AND the measured blank-rendering set (``_KIND_BLANK_RENDERING_CHARS``
-— the Hangul fillers, braille blank, variation selectors; Unicode files those
-under ordinary categories, cycle 2 P2). A code point with no such signal at all
+categories AND the measured non-rendering set (``_KIND_NON_RENDERING_CHARS`` —
+the four Hangul fillers, braille blank, musical null notehead, combining grapheme
+joiner, Khmer inherent vowels, Mongolian FVS and both variation-selector ranges;
+Unicode files those under printable categories, cycles 2-3 P2). A code point with no such signal at all
 is still a different kind, and an IMPORTED row with an out-of-family spelling is
 still not demanded by the read path (the declared boundary, pinned below).
 
@@ -347,7 +348,7 @@ class TestTheModelProducerKeepsItsOwnOutputInContract:
         from tortoise.extractor import _DocumentPointStage
 
         class _StubModel:
-            def complete(self, *, system, user):  # noqa: ARG002
+            def complete(self, *, system, user):
                 return json.dumps({"points": [
                     {"content": "padded", "pointKind": "\u2003statement\u2003"},
                     {"content": "zero width", "pointKind": "state\u200bment"},
@@ -466,6 +467,29 @@ class TestTheClassIsClosed:
         from tortoise.sdk import _kind_invisible_char
         assert _kind_invisible_char("\u2003statement\u2003") == "\u2003"
 
+    def test_ingest_reports_the_refusal_as_a_PHASE_1_violation(self, sdk):
+        """#9287 (review cycle 4): ingest must refuse BEFORE it writes anything.
+
+        `_check_kind` is shared by Phase 1 (`_validate_bundle`) and Phase 2 so
+        that no kind rule is Phase-2-only. Without the arm added here, a bundle
+        whose SECOND point carried a padded kind passed Phase 1 (zero mutations)
+        and then raised from `create_point` mid-write with the FIRST item already
+        committed — measured: `landed: [['clean first item', 'statement']]`.
+        """
+        from tortoise.exceptions import BundleValidationError
+        bundle = {"points": [
+            {"kind": "statement", "content": "clean first item"},
+            {"kind": "\u2003statement\u2003", "content": "padded second item"},
+        ]}
+        violations = sdk._validate_bundle(bundle)
+        assert any("pointKind must be an identifier" in v["message"]
+                   for v in violations), violations
+        with pytest.raises(BundleValidationError):
+            sdk.ingest(bundle)
+        landed = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN n.content").result_set
+        assert landed == [], landed  # zero mutations, not a half-written graph
+
     def test_the_door_accepts_no_invisible_code_point(self):
         """GENERATIVE closure over the WHOLE code space (#9591 review cycle 3).
 
@@ -481,23 +505,30 @@ class TestTheClassIsClosed:
         that oracle, which is exactly why they are an explicit measured list —
         and they are asserted here too.
         """
-        from tortoise.sdk import (_KIND_BLANK_RENDERING_CHARS,
-                                  _kind_invisible_char)
+        from tortoise.sdk import _KIND_NON_RENDERING_CHARS, _kind_invisible_char
         accepted_invisible = []
         for cp in range(0x110000):
             ch = chr(cp)
-            if _kind_invisible_char(f"{ch}statement") is not None:
-                continue
-            if not ch.isprintable():
-                accepted_invisible.append(hex(cp))
+            if ch == " ":
+                continue  # the one documented interior exemption
+            # BOTH positions: the rule is position-dependent, so an
+            # interior-only widening — e.g. exempting Cf marks so ZWJ emoji
+            # kinds pass — must red here too (#9591 review cycle 4).
+            for probe in (f"{ch}statement", f"state{ch}ment"):
+                if _kind_invisible_char(probe) is None and not ch.isprintable():
+                    accepted_invisible.append(
+                        (hex(cp), "interior" if probe.startswith("state")
+                         else "edge"))
         assert accepted_invisible == [], (
             "the door accepts non-printable code points — the #9287 escape is "
             f"reachable through those: {accepted_invisible[:20]}")
         # …and the letter-blanks the printable oracle cannot see:
-        for ch in _KIND_BLANK_RENDERING_CHARS:
+        for ch in _KIND_NON_RENDERING_CHARS:
             assert _kind_invisible_char(f"{ch}statement") is not None, (
-                f"the door accepts U+{ord(ch):04X}, which renders blank and "
+                f"the door accepts U+{ord(ch):04X}, which renders nothing and "
                 "escapes the gate's classification")
+            assert _kind_invisible_char(f"state{ch}ment") is not None, (
+                f"the door accepts U+{ord(ch):04X} at an INTERIOR position")
 
     def test_the_door_refuses_every_character_the_gate_strips(self):
         """The demand and the write door cannot drift apart (#9287).
