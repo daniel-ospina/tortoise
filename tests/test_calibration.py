@@ -13,6 +13,7 @@ from tortoise.sdk import BASELINE_SOURCE_INHERITED
 from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
 from tortoise.exceptions import CalibrationError
 from tortoise.exceptions import UnaddressableClaimError
+from tortoise.live import direction_flows
 
 
 @pytest.fixture
@@ -1785,21 +1786,13 @@ def test_the_refusal_names_a_non_point_offender_and_its_repair_finds_it(sdk):
     assert any("Event" in str(cell) for cell in found[0])
 
 
-def test_a_direction_less_edge_to_an_id_less_node_does_not_refuse(sdk):
-    """#9275 (review round 6): a `-` factor transfers NO confidence — not fatal.
+def _dash_edge_fixture(sdk, direction):
+    """Two calibrated claims behind an operator + a direct edge (off the TARGET)
+    to an id-less node, with the given `direction` (#9275 review round 7).
 
-    ``_update_factor`` returns before writing anything when ``direction_flows``
-    is ``(False, False)``, so a NULL input on such a factor cannot move a named
-    claim. Refusing on it would reject a graph ``origin/main`` computes — the
-    same falsifier the id-less-OPERATOR arm is exempted by. Any OTHER direction
-    stays fatal: an IMPL star dilutes its named claims by ``scale = 1/(n-1)``,
-    so even an unreached NULL target changes their messages.
-
-    The fixture needs a NON-EMPTY affected set, or no factor forms at all and
-    the test proves nothing (measured: a lone `-` edge to an id-less node yields
-    ``affected == set()``, ``factors == []``): two calibrated claims behind an
-    operator give the affected set, and the `-` direct edge off the TARGET is the
-    factor that carries the NULL input.
+    The non-empty affected set is load-bearing: a LONE direct edge to an id-less
+    node yields `affected == set()` and `factors == []`, so nothing is refused
+    either way and the test would prove nothing.
     """
     proj = sdk._get_proj()
     a = sdk.create_point("statement", "A", status="live")
@@ -1810,13 +1803,30 @@ def test_a_direction_less_edge_to_an_id_less_node_does_not_refuse(sdk):
     proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
     proj.g.query(
         "MATCH (x:Point {id:$b}), (n:Point) WHERE n.id IS NULL "
-        "CREATE (x)-[:IMPL {direction:'-'}]->(n)", params={"b": b["id"]})
-
-    # The factor carrying the NULL input really is assembled (so the refusal
-    # this test forbids would otherwise fire on it).
+        "CREATE (x)-[:IMPL {direction:$d}]->(n)",
+        params={"b": b["id"], "d": direction})
     ep = sdk._get_ep()
     factors = ep._affected_factors(ep._affected_claims([a["id"]], 2))
-    assert any(f[5] == "-" and None in f[2] for f in factors), factors
+    factor = [f for f in factors if f[5] == direction and None in f[2]]
+    assert factor, f"no {direction!r} factor carrying a NULL input: {factors}"
+    return proj, a, b, ep, factor[0]
+
+
+@pytest.mark.parametrize("direction", ["-", "->"])
+def test_a_receive_only_null_input_does_not_refuse_the_run(sdk, direction):
+    """#9275 (review rounds 6-7): a NULL that can only RECEIVE is not fatal.
+
+    `_update_factor` writes source→target under `fwd` and target→source under
+    `bwd`, and returns before writing anything for a `-` factor. So the NULL here
+    is never a SENDER: `-` has no flow at all, and under `->` the id-less node is
+    the direct edge's TARGET (index 1), which `fwd` writes INTO. Measured: the
+    named claim's posterior is 1.0 for both — identical, i.e. unreached — while
+    `<-` reaches it (1.04407021681169) and must still refuse.
+    """
+    proj, a, _b, ep, factor = _dash_edge_fixture(sdk, direction)
+    fwd, bwd = direction_flows(direction)
+    sending = (fwd and factor[2][0] is None) or (bwd and factor[2][1] is None)
+    assert ep._null_input_sends(factor) is sending is False
 
     out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
     assert out["converged"] is True
@@ -1824,3 +1834,16 @@ def test_a_direction_less_edge_to_an_id_less_node_does_not_refuse(sdk):
         "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha",
         params={"i": a["id"]}).result_set
     assert posterior[0][0] is not None
+
+
+def test_a_null_input_that_sends_still_refuses_the_run(sdk):
+    """#9275 (review round 7): `<-` makes the id-less TARGET a sender — fatal.
+
+    The back-message goes target→source, so the NULL endpoint reaches a named
+    claim (measured posterior 1.04407021681169 vs 1.0 for the receive-only
+    shapes), and the run must refuse rather than compute it.
+    """
+    _proj, a, _b, ep, factor = _dash_edge_fixture(sdk, "<-")
+    assert ep._null_input_sends(factor) is True
+    with pytest.raises(UnaddressableClaimError):
+        sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)

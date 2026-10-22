@@ -1464,14 +1464,14 @@ class TortoiseEP:
         # verbatim from the engine, and a `:Point` written outside the SDK (no
         # writer mints one — every id-binding write path refuses a missing id on
         # its own post-write check) can carry none, so the engine returns a row
-        # whose id is NULL and `None` lands in this set. The reachable shape is
-        # an OPERATOR-SEEDED claim and the operator-bridge hop (`RETURN DISTINCT
-        # c.id` / `m.id`); a direct-edge endpoint cannot be it, because every
-        # direct-edge leg is narrowed by `b.id <> a.id` (and `_live_neighbors_many`
-        # by `m.id <> n.id`) — in Cypher those predicates are NULL, not TRUE, for
-        # an id-less endpoint, so such a row never arrives. Pinned by
-        # `tests/test_6211_ep_anchor.py`, whose fixture keeps an id-less
-        # direct-edge endpoint alive in `_affected_factors`.
+        # whose id is NULL and `None` lands in this set. ONE admission arm is
+        # reachable: the operator-SEED query (`RETURN DISTINCT c.id`, no id
+        # predicate at all). Every other arm compares ids — the operator-bridge
+        # hop `m.id <> n.id`, the direct-edge hop and `_live_neighbors_many`
+        # `b.id <> a.id` / `m.id <> n.id` — and in Cypher those predicates are
+        # NULL, not TRUE, for an id-less endpoint, so the row never arrives.
+        # Pinned by `tests/test_6211_ep_anchor.py`, whose fixture keeps an
+        # id-less direct-edge endpoint alive in `_affected_factors`.
         #
         # THAT SAME ASYMMETRY is why the node must ALSO be refused at factor
         # assembly (`run()`, below): the hops NULL-drop it, so an operator the
@@ -1546,6 +1546,31 @@ class TortoiseEP:
             "left(coalesce(n.content, ''), 80)\n"
             "  -- then give each row its own NEW id, or DETACH DELETE it"
         )
+
+    @staticmethod
+    def _null_input_sends(factor: tuple) -> bool:
+        """#9275: can this factor deliver a message FROM a NULL input?
+
+        Mirrors `_update_factor`'s flow handling: it returns before writing when
+        `direction_flows` is (False, False), and for a TWO-input factor `fwd`
+        writes source→target while `bwd` writes target→source — so only a NULL on
+        an enabled SENDING end can move a named claim. A receive-only NULL is
+        exempt (measured: it leaves every named posterior identical to the `-`
+        case). The n-ary arm is deliberately CONSERVATIVE (any flow ⇒ refuse):
+        `_update_nary_factor` fans a source out over its targets with
+        `scale = 1/(n-1)`, and rather than re-derive its per-endpoint semantics
+        in a guard, an unnameable participant in an n-ary star is refused.
+        """
+        _op_id, _op_type, input_ids, _weight, _label, direction = factor
+        if len(input_ids) < 2:
+            return False          # `_update_factor` no-ops below two inputs
+        fwd, bwd = direction_flows(direction)
+        if not (fwd or bwd):
+            return False          # `-`: no confidence transfers at all
+        if len(input_ids) > 2:
+            return True           # n-ary: conservative, see docstring
+        id_a, id_b = input_ids
+        return (fwd and id_a is None) or (bwd and id_b is None)
 
     def _graph_claim_count(self) -> int:
         """Claim count in the graph (degeneration-guard sizing, #395).
@@ -2404,17 +2429,18 @@ class TortoiseEP:
         # inputs, so such a node cannot change any belief; refusing on it would
         # turn a graph `main` computes (measured: iterations 9, converged, both
         # posteriors stamped) into a refused one.
-        # GATED ON FLOW: a `-` factor transfers NO confidence — `_update_factor`
-        # returns before writing anything when `direction_flows` is
-        # (False, False) — so a NULL input there cannot move a named claim and
-        # refusing on it would reject a graph `origin/main` computes and that
-        # this guard exists to leave alone (measured: both the
-        # legacy-operator and the direct-edge `-` shapes leave `_node_cache` /
-        # `_msg_cache` untouched). Any OTHER direction is refused: an IMPL star
-        # dilutes its named claims by `scale = 1/(n-1)`, so even an unreached
-        # NULL target changes their messages.
-        if any(any(_i is None for _i in f[2]) and any(direction_flows(f[5]))
-               for f in factors):
+        # GATED ON WHETHER THE NULL CAN SEND, not on "any flow". A factor only
+        # moves a NAMED claim when the NULL endpoint is a SENDER on an enabled
+        # direction (`_update_factor`'s `if fwd:` writes source→target, `if
+        # bwd:` target→source; a `-` factor returns before writing anything).
+        # So the receive-only shapes are exempt — `-` in full, and a
+        # one-directional factor whose NULL sits on the RECEIVING end — while a
+        # NULL that sends is refused. MEASURED (2-input direct edge, varying only
+        # the direction, named claim's posterior): bidirectional 1.04407021681169,
+        # `<-` 1.04407021681169 (the NULL target sends a back-message into the
+        # named source), `->` 1.0 and `-` 1.0 (indistinguishable — the named claim
+        # is never reached), yet a flat "any flow" gate refused `->` too.
+        if any(self._null_input_sends(f) for f in factors):
             # No run set is published: `_last_affected` was reset at entry and is
             # assigned only after this guard. (`_last_skipped_factors` keeps what
             # the assembly just collected — those factors WERE dropped, so the
