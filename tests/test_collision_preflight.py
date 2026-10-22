@@ -2079,6 +2079,82 @@ class CollisionPreflightTest(unittest.TestCase):
         # 1 main worktree + 1 hit + 8 fillers = 10, all enumerated.
         self.assertIn("10 worktree(s) enumerated (untruncated)", out)
 
+    # ── #9540: a PATH SUBSTRING is a spelling, not a claim ──────────────────
+
+    def test_worktree_path_substring_with_a_foreign_branch_is_not_a_claim(self):
+        # #9540, measured on the real fleet: `/tmp/wt-3718` held lane work for
+        # #9397 (`fix/9397-about-edge-properties`) and matched #3718 only
+        # because the DIRECTORY NAME contains it. The gate has no dismissal
+        # switch by design (#8175), so a stale directory name froze the highest
+        # value un-gated product defect permanently. The branch is the field a
+        # lane deliberately named; the path is a leftover.
+        self.add_worktree(f"wt-{ISSUE}-stale-name",
+                          branch="fix/9397-about-edge-properties")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # Reported, never silent: the reader must see WHAT was demoted and why.
+        self.assertIn(f"wt-{ISSUE}-stale-name", out)
+        self.assertIn(f"its PATH contains {ISSUE} but its BRANCH claims #9397", out)
+        self.assertIn("[local worktrees]", out)
+
+    def test_worktree_path_substring_still_blocks_when_the_branch_names_this_issue(self):
+        # CONTROL for the test above: the demotion must fire ONLY when the branch
+        # names something else. A branch that names THIS issue is the claim, and
+        # the path merely agrees with it.
+        self.add_worktree(f"wt-{ISSUE}-stale-name", branch=f"fix/{ISSUE}-lane")
+        rc, out = self.run_tool()
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+        self.assertIn(f"[local worktrees]", out)
+        self.assertIn(f"matched issue-number ({ISSUE})", out)
+
+    def test_worktree_path_substring_still_blocks_for_a_non_claim_branch_name(self):
+        # ⛔ THE NARROWNESS IS THE SAFETY PROPERTY. Only the shape a lane uses to
+        # CLAIM an issue (`<type>/<number>-<slug>`) can contradict the path. A
+        # number that is not a claim — a date, a version — must not cancel it,
+        # or a reused worktree whose branch says `chore/bump-2024-10` would read
+        # a live lane as free. This is the fail-closed direction: a false CLEAN
+        # is strictly worse than a false COLLISION.
+        for i, branch in enumerate((f"chore/bump-2024-10", f"release-1.2.3",
+                                    f"fix/{ISSUE}1-lookalike")):
+            with self.subTest(branch=branch):
+                self.add_worktree(f"wt-{ISSUE}-nonclaim-{i}", branch=branch)
+                rc, out = self.run_tool()
+                self.assertNotEqual(rc, 0, f"branch={branch!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+                self.assertIn(f"matched issue-number ({ISSUE})", out)
+
+    def test_branch_names_other_issue_reads_only_the_claim_shape(self):
+        # Unit pin on the helper, so a later refactor of the worktree scan cannot
+        # widen it unnoticed. Each case is a decision, not a spelling test.
+        mod = _tool_module()
+        cases = [
+            ("fix/9397-about-edge-properties", 9397),
+            ("refs/heads/fix/9397-about-edge-properties", 9397),
+            ("feat/9397-x", 9397),
+            ("test/9397-x", 9397),
+            # the branch names THIS issue → no contradiction
+            ("fix/3061-mine", None),
+            # not a claim shape → a version/date is not an issue reference
+            ("chore/bump-2024-10", None),
+            ("release-1.2.3", None),
+            # `3061cafe` is not the claim SHAPE (`<n>-<slug>`), so it cannot
+            # contradict a path — and it names THIS issue anyway, so the path
+            # keeps blocking either way (the fail-closed outcome).
+            ("fix/3061cafe-mine", None),
+            # generated worktree checkout, detached: nothing to contradict
+            ("mergify/merge-queue/6160bad001", None),
+            ("(detached)", None),
+            ("", None),
+        ]
+        for branch, expected in cases:
+            with self.subTest(branch=branch):
+                self.assertEqual(
+                    mod._branch_names_other_issue(branch, ISSUE), expected
+                )
+
     # ── #6622: a RECORD of work is not a WORKER ─────────────────────────────
 
     def test_unconfigured_remote_namespace_is_a_fetch_cache_not_a_holder(self):

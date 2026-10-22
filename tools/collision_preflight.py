@@ -1245,6 +1245,58 @@ def _is_generated_branch(name: str) -> bool:
     return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
 
 
+#: Branch namespaces a LANE chooses, in the shape this repo uses to name a
+#: claim: `<type>/<issue-number>-<slug>`. Narrow ON PURPOSE — see
+#: `_branch_names_other_issue`, which matches ONLY this shape. A name outside it
+#: (`chore/bump-2024-10`, a version, a date) is not read as naming an issue, so
+#: a path substring cannot be cancelled by a number that is not a claim.
+_LANE_BRANCH_CLAIM = re.compile(
+    r"(?:fix|feat|chore|test|tests|docs|refactor|perf|ci|build|wip|spec|spike)"
+    r"/#?(\d{3,7})(?![0-9])(?:-|$)"
+)
+
+
+def _branch_names_other_issue(branch: str, issue: int) -> int | None:
+    """The OTHER issue this branch's own name claims, or None.
+
+    #9540: a worktree was matched to issue 3718 by its PATH alone — `/tmp/wt-3718`
+    — while its branch was `fix/9397-about-edge-properties`. The directory name
+    was a leftover; the lane's claim was #9397. A path is a SPELLING, and a
+    substring of it is not evidence, so the stronger field (the branch a lane
+    deliberately named) must be able to contradict it — otherwise the top of the
+    product queue is frozen by a directory name and the gate has no dismissal
+    switch by design (#8175).
+
+    ⛔ NARROW ON PURPOSE, because this DEMOTES a blocking hit and a false CLEAN
+    is the dangerous direction. It answers only one question — "does this branch
+    claim a DIFFERENT issue, in the claim shape a lane actually writes?" — and
+    returns None for everything else, so the caller keeps blocking:
+
+      * a generated branch (`mergify/merge-queue/…`) claims nothing. It is
+        excluded BEFORE this test by the caller, so the PATH still blocks —
+        `test_worktree_on_a_generated_branch_is_still_found_by_its_path`;
+      * a name with no claim shape (`chore/bump-2024-10`, `release-1.2.3`)
+        returns None: a version or a date is not an issue reference;
+      * a branch that names THIS issue returns None (the branch is the claim);
+      * a detached worktree (`(detached)`) returns None — with no branch name
+        there is no contradiction, so the path keeps blocking.
+
+    The residual risk is stated rather than hidden: a worktree whose PATH was
+    created for issue N and whose branch later claims issue M is attributed to
+    M. That is the attribution the fleet board makes too (a lane is identified
+    by its branch slug), so the two surfaces agree instead of the path silently
+    out-voting the branch.
+    """
+    for match in _LANE_BRANCH_CLAIM.finditer(branch or ""):
+        claimed = int(match.group(1))
+        if claimed == issue:
+            return None
+        if _inside_hex_digest(branch, match.start(1), match.end(1)):
+            continue
+        return claimed
+    return None
+
+
 def _pr_terminal_state(pr: dict) -> str | None:
     """The terminal state of a PR, or None while it can still be in flight.
 
@@ -2611,6 +2663,12 @@ def scan_worktree_surface(
     angle: #3504 class 4's reproduction had the caller's OWN worktree among its
     blocking hits. The path is matched in full — a worktree is named after its
     issue by convention, and the full path is the honest field to read.
+
+    ⛔ THE PATH IS THE WEAKER OF THE TWO FIELDS, AND #9540 IS WHY. A path is also
+    a leftover: `/tmp/wt-3718` held a lane whose branch claimed #9397, and the
+    substring alone was enough to block #3718 permanently. The path still blocks
+    whenever nothing contradicts it (a generated or detached branch included) —
+    see `_branch_names_other_issue` for the one contradiction that demotes it.
     """
     for block in blocks:
         path = block.get("path", "")
@@ -2619,8 +2677,9 @@ def scan_worktree_surface(
         # says nothing about ownership); the PATH is still matched in full, so
         # a real worktree cannot be hidden by this (#3611).
         branch_matchable = not _is_generated_branch(branch)
-        if not (number_present(path, issue)
-                or (branch_matchable and number_present(branch, issue))):
+        path_hit = number_present(path, issue)
+        branch_hit = branch_matchable and number_present(branch, issue)
+        if not (path_hit or branch_hit):
             continue
         label = f"{path} [{branch or 'detached'}]"
         if identity.owns_worktree(path) or identity.owns_branch(branch):
@@ -2631,6 +2690,26 @@ def scan_worktree_surface(
                 "weak",
             )
             continue
+        # #9540: a PATH SUBSTRING IS A SPELLING, NOT A CLAIM. `/tmp/wt-3718`
+        # matched #3718 while its branch (`fix/9397-about-edge-properties`)
+        # claimed #9397 — a leftover directory name froze a product defect that
+        # every other surface reported free. The branch is the field a lane
+        # deliberately named, so when the two disagree the branch wins and the
+        # path hit is reported (never silent) at a strength that cannot block.
+        # Scoped to the case where the branch is the ONLY contradiction: a
+        # branch that names THIS issue blocks, and a detached/generated branch
+        # leaves nothing to contradict the path, so both keep blocking.
+        if path_hit and not branch_hit:
+            other = _branch_names_other_issue(branch, issue)
+            if other is not None:
+                surface.add(
+                    label,
+                    f"its PATH contains {issue} but its BRANCH claims #{other} "
+                    "— a path substring is a spelling, not a claim; the branch "
+                    "is the claim (non-blocking)",
+                    "weak",
+                )
+                continue
         terminal = _branch_terminal_state(
             branch, block.get("head"), merged_head_shas, ancestor_merged,
             main_tip, first_parent,
