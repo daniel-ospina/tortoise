@@ -42,6 +42,11 @@ Consumers (see the #9494 wiring):
 * ``mcp_server._safe`` — an ``ImportError``/``AttributeError`` raised by a
   stale process is answered with the measured drift AND the restart, instead of
   a symbol name that sends the reader into a correct file.
+
+Scope, stated so it is not assumed: the HOSTED app builds its own ``/health``
+dict (``hosted_api``) and does not route through ``monitoring.metrics()``, so
+that endpoint does not carry ``server_code`` — the surfaces this reaches are
+``tortoise_health`` (MCP, stdio and HTTP) and ``monitoring.serve_health``.
 """
 from __future__ import annotations
 
@@ -150,6 +155,18 @@ def tracked() -> list[str]:
         return sorted(_baseline)
 
 
+def _display_path(path: str) -> str:
+    """The repo-relative spelling of a tracked file, never an absolute one.
+
+    ``metrics()`` is served to TENANTS (the ``tortoise_health`` MCP tool over
+    HTTP), so an absolute ``/Users/<operator>/.../.venv/...`` path in the
+    payload leaks the host's layout and user name. Two components is enough to
+    identify a drift (``tortoise/sdk.py``) and carries nothing about the host.
+    """
+    parts = path.replace(os.sep, "/").split("/")
+    return "/".join(parts[-2:]) if len(parts) >= 2 else path
+
+
 def _iso(ts: float | None) -> str | None:
     if ts is None:
         return None
@@ -166,6 +183,7 @@ def check() -> dict:
          "baseline_at": iso,                # first observation of the graph
          "tracked": int,                    # module files compared
          "changed": [{module, file, loaded_mtime, disk_mtime, removed}],
+                                            # `file` is repo-relative, never absolute
          "changed_count": int,              # len(changed) is capped at 20
          "hint": str | None}                # the restart, when stale
     """
@@ -183,7 +201,7 @@ def check() -> dict:
         loaded_iso = _iso(mtime_ns / 1e9)
         changed.append({
             "module": name,
-            "file": path,
+            "file": _display_path(path),
             "loaded_mtime": loaded_iso,
             "disk_mtime": _iso(disk_mtime / 1e9) if disk_mtime is not None else None,
             "removed": st is None,

@@ -146,6 +146,21 @@ def test_mutating_the_real_sdk_mtime_is_observed():
     assert "tortoise.sdk" in [row["module"] for row in report["changed"]]
 
 
+def test_the_report_never_leaks_an_absolute_host_path(tmp_path, monkeypatch):
+    """``metrics()``/``tortoise_health`` is served to TENANTS over HTTP: the
+    drift row must identify the file (``tortoise/sdk.py``) without publishing
+    the host's directory layout or user name."""
+    module, path = _probe_module(tmp_path)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    code_freshness.check()
+    _rewrite(path)
+
+    row = code_freshness.check()["changed"][0]
+
+    assert row["file"] == "probe_9494.py" or not row["file"].startswith("/")
+    assert str(tmp_path) not in row["file"]
+
+
 def test_a_clean_process_reports_clean():
     """No drift, no alarm: the flag must not be a constant."""
     report = code_freshness.check()
