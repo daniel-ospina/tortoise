@@ -380,9 +380,11 @@ Exit codes
                         the board FROM that file, so a rebuild fails on the SAME
                         read), or the roster is PRESENT but unreadable (remedy:
                         FIX THE FILE — a rebuild cannot help, it fails on the
-                        same read), or the board is unreadable / the attribution
-                        is ambiguous (remedy: rebuild the board, `uv run python
-                        tools/fleet_state.py build`). A surface
+                        same read), or its read recorded NO CAUSE (remedy: start
+                        from the FILE itself; `fleet_state.py build` cannot
+                        create or repair it), or the board is unreadable / the
+                        attribution is ambiguous (remedy: rebuild the board,
+                        `uv run python tools/fleet_state.py build`). A surface
                         that can never
                         produce a blocking hit is EXEMPT and its failure is only
                         REPORTED: it has no ability to prevent a duplicate, so its

@@ -6222,22 +6222,32 @@ class CollisionPreflightTest(unittest.TestCase):
             "the header must not call a cause unrebuildable while prescribing a rebuild for it",
         )
         absent = flat.find("LANE ROSTER is ABSENT")
-        # ⛔ ACCEPT EITHER PHRASING FOR ARM 2 (review, cycle 3). The header's
-        # cause clause and the sentence the tool actually PRINTS
-        # (`fleet_state.registry_remedy`) differ in wording — "the roster EXISTS
-        # but could not be read". A future lane aligning the header to the
-        # shipped message is a consistency edit, not a regression, and pinning
-        # on one sentence would redden this pin for it.
+        # ⛔ ACCEPT EITHER PHRASING FOR ARM 2 (review, cycle 3, re-raised as a
+        # P3 at cycle 4). The header's cause clause and the sentence the tool
+        # actually PRINTS (`fleet_state.registry_remedy`) differ in wording —
+        # "the roster EXISTS but could not be read" — and so does the REMEDY
+        # ("fix the file itself"). A future lane aligning the header to the
+        # shipped message is a consistency edit, not a regression, so both
+        # halves accept either spelling.
         present = max(
             flat.find("roster is PRESENT but unreadable"),
             flat.find("roster EXISTS but could not be read"),
         )
+        # ⛔ FOUR ARMS, NOT THREE (review, cycle 4 P2). `registry_remedy` shipped
+        # three roster arms — PROVISION / fix the file / NO CAUSE RECORDED — and
+        # `test_registry_remedy_has_three_arms_and_never_lists_the_rebuild`
+        # pins all three. A header that names only two sends the no-cause reader
+        # to the nearest clause, which is the board rebuild that fails on the
+        # same read: the same dead end #9392 files, one arm narrower.
+        nocause = flat.find("recorded NO CAUSE")
         board = flat.find("the board is unreadable")
         self.assertNotEqual(absent, -1, "the ABSENT-roster arm must stay stated")
         self.assertNotEqual(present, -1, "the unreadable-roster arm needs its own clause")
+        self.assertNotEqual(nocause, -1, "the no-cause-recorded arm needs its own clause")
         self.assertNotEqual(board, -1, "the ambiguous-attribution arm must stay stated")
         self.assertLess(absent, present)
-        self.assertLess(present, board)
+        self.assertLess(present, nocause)
+        self.assertLess(nocause, board)
         # ⛔ EVERY ARM'S OWN REMEDY IS ASSERTED POSITIVELY (review, cycle 3). The
         # slice checks below are satisfied TRIVIALLY when a sentence is deleted
         # altogether, so a partial undo — an arm that names a cause and gives
@@ -6246,19 +6256,35 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertIn(
             "PROVISION", flat[absent:present], "the ABSENT roster's remedy is provisioning it"
         )
-        # The unreadable arm's own remedy is FIX THE FILE, and the rebuild
+        # The unreadable arm's own remedy is fixing the FILE, and the rebuild
         # sentence belongs to the LATER arm only — so the first "rebuild the
         # board" must not appear before the board arm begins.
-        self.assertIn(
-            "FIX THE FILE", flat[present:board], "the unreadable roster's remedy is fixing the file"
+        self.assertTrue(
+            any(k in flat[present:nocause] for k in ("FIX THE FILE", "fix the file itself")),
+            "the unreadable roster's remedy is fixing the file",
         )
         self.assertNotIn(
-            "rebuild the board", flat[present:board], "a rebuild cannot repair an unreadable roster"
+            "rebuild the board",
+            flat[present:nocause],
+            "a rebuild cannot repair an unreadable roster",
         )
+        self.assertIn(
+            "cannot create or repair",
+            flat[nocause:board],
+            "a roster read that recorded no cause sends the reader to the file",
+        )
+        # ⛔ THE COMMAND IS PART OF THE REMEDY (review, cycle 4 P3). Pinning only
+        # "rebuild the board" let the arm lose `… fleet_state.py build` and stay
+        # green — the instruction minus the thing that makes it runnable.
         self.assertIn(
             "rebuild the board",
             flat[board:],
             "the ambiguous-attribution arm's remedy is the board rebuild",
+        )
+        self.assertIn(
+            "tools/fleet_state.py build",
+            flat[board:],
+            "the board arm's remedy must carry the command that runs it",
         )
 
     def test_the_header_contract_matches_the_surface_set(self):
