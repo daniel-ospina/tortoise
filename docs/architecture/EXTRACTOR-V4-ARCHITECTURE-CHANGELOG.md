@@ -860,8 +860,9 @@ vocabulary guard (a closed set would break pack lifecycles — stated in the sub
 and no `OVERRIDES:` marker: this is a proposal awaiting a ruling, not a departure from a recorded one.
 
 **Two record defects fixed in the same pass, neither a design change.** ⚠️ **The subsection now names its revision
-pin (`653980445`).** Its citations are HEAD numbers: read against the document's default pin (`c79ba1cf2`) three of
-the cited files are shorter than the cited line and `tortoise/definite_description_backfill.py` does not exist, so
+pin (`653980445`).** Its citations are HEAD numbers: read against the document's default pin (`c79ba1cf2`) five of
+the cited files are shorter than the cited line (`sdk.py`, `assembly.py`, `projection/entities.py`,
+`projection/__init__.py`, `commit_ops.py`) and `tortoise/definite_description_backfill.py` does not exist, so
 the header's default sent a reader to no citation on every line of the passage — the pin is stated in the passage
 and named in the header's exception list, and a guard reds if the pin is dropped. ⚠️ **The closing sentence
 counted the steps wrong** — it read *"§4.4 declares the policy for the six pipeline steps … not a seventh

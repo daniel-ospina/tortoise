@@ -48,6 +48,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
+#: The changelog that records WHY a pin was added and what its correction was —
+#: the third place this claim is written down (#9654 review round 2).
+CHANGELOG = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE-CHANGELOG.md"
 EXTRACTOR = ROOT / "tortoise" / "extractor_v2.py"
 VET_GATE = ROOT / "tortoise" / "vet_gate.py"
 
@@ -120,6 +123,15 @@ G5_DESTRUCTIVE_END = "### S3 — RESOLVE"
 
 def _document() -> str:
     return DOC.read_text(encoding="utf-8")
+
+
+def _changelog() -> str:
+    """The changelog beside the doc — the record of WHY a pin was added."""
+    assert CHANGELOG.exists(), (
+        f"{CHANGELOG.name} is gone — the pin's stated evidence and its "
+        "correction now have no recorded home (#5333)."
+    )
+    return CHANGELOG.read_text(encoding="utf-8")
 
 
 def _policy_section() -> str:
@@ -325,21 +337,36 @@ def test_the_pin_evidence_counts_exactly_the_files_it_names():
     at both refs when the pin was added) — the count a reader can check against
     the list beside it is the cheapest falsifier, and a new citation has to
     update both together, which is the point.
+
+    The claim is written down in THREE places, and the changelog is the one a
+    lane auditing the pin opens first: round 2 found it still saying "three"
+    after the header, the subsection and this docstring were corrected. It is
+    read here for exactly that reason.
     """
-    text = _document()
-    claims = list(_SHORTER_COUNT_CLAIM.finditer(text))
-    assert len(claims) >= 2, (
-        "the pin's evidence no longer states a count of shorter files in both "
-        "the header AND the subsection — re-point this guard at whichever "
-        f"passage now carries it ({len(claims)} occurrence(s)): #5333"
+    sources = (("the architecture doc", _document()),
+               ("its changelog", _changelog()))
+    claims = []
+    for name, text in sources:
+        found = list(_SHORTER_COUNT_CLAIM.finditer(text))
+        assert found, (
+            f"{name} no longer states how many cited files are shorter at "
+            f"`{BASE_PIN}`, so this guard would pass vacuously over it — "
+            "re-point the guard at whichever passage now carries the count "
+            "(#5333)"
+        )
+        claims.extend((name, text, match) for match in found)
+    assert len(claims) >= 3, (
+        "the pin's evidence is stated in the header, the subsection AND the "
+        f"changelog; found {len(claims)} occurrence(s) — re-point this guard "
+        "(#5333)"
     )
-    for claim in claims:
+    for name, text, claim in claims:
         expected = _COUNT_WORDS[claim.group("count").lower()]
         tail = text[claim.end():claim.end() + 400]
         stop = tail.find(")")
         names = _ENUMERATED_PY.findall(tail if stop == -1 else tail[:stop])
         assert len(names) == expected, (
-            f"this sentence says {expected} cited files are shorter at "
+            f"{name}: this sentence says {expected} cited files are shorter at "
             f"`{BASE_PIN}` but enumerates {len(names)}: {names}. Name every "
             "out-of-range file and update the count — a lane refreshing the pin "
             "re-checks exactly the names given here (#5333)."
