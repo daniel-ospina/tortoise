@@ -231,6 +231,135 @@ def test_faq_cites_the_real_paper_title() -> None:
     )
 
 
+#: The per-turn capture window, derived from the clipper's own constant so the
+#: FAQ cannot outrun what the store keeps (#9517).
+_CAPTURE_TURN_CAP = re.compile(r"^_CAPTURE_TURN_CAP\s*=\s*(\d+)", re.MULTILINE)
+
+
+def _capture_turn_cap() -> int:
+    """How many code points of a captured turn are actually stored (`sdk.py`).
+
+    Derived, not restated: `_clip_capture_turn_content` cuts every over-cap turn
+    to this many code points and appends the truncation marker, so a docs claim
+    about what "the source" retains is bounded by this number, and a change to
+    the constant must red the FAQ rather than silently falsify it.
+    """
+    src = _read(SDK)
+    m = _CAPTURE_TURN_CAP.search(src)
+    assert m, (
+        "_CAPTURE_TURN_CAP not found in tortoise/sdk.py — did the capture "
+        "window move? The FAQ's source-retention answers are bound to it."
+    )
+    return int(m.group(1))
+
+
+def _faq_answer(anchor: str) -> str:
+    """One FAQ answer's HTML: from its heading to the next heading."""
+    html = _read(FAQ)
+    start = html.find(f'id="{anchor}"')
+    assert start != -1, f"website/faq.html lost the #{anchor} heading"
+    after = html[start:]
+    end = after.find("<h3", 1)
+    return after if end == -1 else after[:end]
+
+
+def test_the_faq_source_retention_answers_disclose_the_capture_window() -> None:
+    """#9517 ISSUE 2: a retention promise may not outrun what the store keeps.
+
+    The two answers below promised the whole captured source is kept and
+    "still there to search directly", while the capture path stores at most
+    `_CAPTURE_TURN_CAP` (5,000) code points per turn, appends a truncation marker
+    carrying the original length, and redacts credential-shaped spans before the
+    write (#4911). For a long captured turn the tail is simply not in the store,
+    so an unbounded "the raw material is still there" is false — and no page in
+    `website/` disclosed the window at all.
+
+    The window is read out of `tortoise/sdk.py`, so raising the cap without
+    updating the copy, or wording the promise past the cap, is a red test.
+    """
+    window = f"{_capture_turn_cap():,}"
+    for anchor in ("source-text", "missed"):
+        answer = _faq_answer(anchor)
+        assert window in answer, (
+            f"website/faq.html#{anchor} promises the source is kept without "
+            f"disclosing that a captured turn is stored clipped at {window} "
+            "characters (tortoise/sdk.py::_CAPTURE_TURN_CAP). Scope the "
+            "retention claim to what the store guarantees (#9517)."
+        )
+        assert "marker" in answer.lower(), (
+            f"website/faq.html#{anchor} discloses the {window}-character window "
+            "but not that a clipped turn is marked with its original length — "
+            "the marker is what makes the stored turn honest to a reader."
+        )
+
+
+#: #9510's ruling names each of these FAQ passages by anchor, quotes the
+#: self-undercutting clause it forbids, and states the positive statement that
+#: replaces it. The pair is the ruling's, not a taste judgement — which is why it
+#: is a bounded per-anchor table rather than a phrasing blacklist that would rot.
+_RULING_REWRITES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # A2 — "a different retrieval signal" framed Tortoise as a better index;
+    # the ruling's rewrite is typed, weighted constraints **computed over**,
+    # and the cognitive-layer-for-agents positioning.
+    "not-just-rag": (
+        ("a different retrieval signal",),
+        ("computed over", "reasoning, memory and learning"),
+    ),
+    # A4 — "not as evidence that this graph works" undercuts the very graph the
+    # answer is describing; the rewrite names what the study measured and what
+    # Tortoise computes over.
+    "source-text": (
+        ("not as evidence that this graph works",),
+        ("computes over typed relations",),
+    ),
+    # A10 — "the graph itself is not the differentiator" is correct but empty;
+    # the rewrite is "a graph *stores* relationships; Tortoise *computes* over
+    # them". A11's problem span was three clauses, and the first ("an alpha,
+    # single-maintainer reimplementation that is not a competitor product")
+    # survived three review rounds because nothing bound it: it is the premise
+    # the removed "bolt-on-able rather than out of reach" conclusion was drawn
+    # from, so keeping it keeps the self-undercut (#9517 review 5).
+    "different": (
+        ("not the differentiator", "single-maintainer reimplementation"),
+        ("<em>computes</em> over them",),
+    ),
+}
+
+
+def test_the_rulings_named_faq_rewrites_are_the_ones_that_shipped() -> None:
+    """#9517 review 3: the ruling's A2/A4/A10 passages must not survive verbatim.
+
+    #9510 forbids negative self-review on customer-facing copy, and its
+    "Inventory and disposition" table names each of these three passages by
+    anchor with the clause to remove and the positive statement to put in its
+    place. The PR that implements the ruling rewrote seven of the twelve FAQ
+    items, left these three standing, and its body then asserted the FAQ was
+    the whole exposure — so the surviving passages are what a reader sees while
+    the PR says otherwise.
+
+    A4 is the sharp one: "do not read this study as evidence that this graph
+    works" sits in the same paragraph the PR edits, and it hands the reader the
+    argument against the product on the page that argues for it.
+    """
+    for anchor, (forbidden, required) in _RULING_REWRITES.items():
+        answer = _faq_answer(anchor)
+        for phrase in forbidden:
+            assert phrase not in answer, (
+                f"website/faq.html#{anchor} still carries {phrase!r}. #9510's "
+                "inventory disposes of that clause — a surface that volunteers "
+                "its own weak points hands the reader the argument against us "
+                "— and #9517's own body claimed the FAQ was clean against the "
+                "ruling, so the passage cannot stay here unrewritten."
+            )
+        for phrase in required:
+            assert phrase in answer, (
+                f"website/faq.html#{anchor} does not carry the positive "
+                f"statement {phrase!r} that replaces the ruled-out clause. "
+                "Deleting the self-undercut without stating what Tortoise "
+                "actually does leaves the answer shorter, not stronger."
+            )
+
+
 @PAGES
 def test_no_dead_issue_references_in_public_copy(page: Path) -> None:
     """Public copy must not cite issue numbers, and must never cite nonexistent ones.
