@@ -24,6 +24,8 @@ export interface BlogPost {
   cover_image_url: string | null;
   tags: string[];
   author: string | null;
+  // NULL = no avatar; the byline renders the NAME ALONE (see authorBylineHtml).
+  author_image_url: string | null;
   meta_title: string | null;
   meta_description: string | null;
   published_at: string | null;
@@ -41,6 +43,22 @@ export interface Env {
 }
 
 export const SITE_URL = "https://tortoise.premiselabs.co";
+
+/**
+ * The article author — ONE name, four places that must agree (#1383): this
+ * constant (the SSR renderer's fallback), the `author` column DEFAULT
+ * (migration 20261021000001), the agent API's insert default, and
+ * `DEFAULT_AUTHOR` in website/apps/blog-admin/src/lib/blog-api.ts.
+ *
+ * They must agree because a fallback that differs from the DB default prints two
+ * different names for the same post depending on which path wrote it — which is
+ * how every post shipped as the anonymous 'Tortoise team' with no way to tell.
+ */
+export const DEFAULT_AUTHOR = "Daniel Ospina";
+
+/** The shipped author avatar (website/blog/author-daniel-ospina.jpg, 400×400, 26,742 B). */
+export const DEFAULT_AUTHOR_IMAGE_URL = `${SITE_URL}/blog/author-daniel-ospina.jpg`;
+
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/; // shared with the agent API (#1795)
 export const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
@@ -122,7 +140,7 @@ function rqlHeaders(env: Env): Record<string, string> {
 }
 
 const POST_COLS =
-  "id,slug,title,body,excerpt,cover_image_url,tags,author,meta_title,meta_description,published_at,updated_at";
+  "id,slug,title,body,excerpt,cover_image_url,tags,author,author_image_url,meta_title,meta_description,published_at,updated_at";
 
 export async function fetchPublishedPosts(env: Env): Promise<BlogPost[]> {
   // Index does NOT need body — omit it (no N+1, no 100KB/post over-fetch).
@@ -152,6 +170,10 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
 // CommonMark backslash escapes (#4481) now live in `_shared/md-escape.ts` so the
 // body renderer and the video-marker parser share ONE rule (#8379 finding 1).
 
+// Nesting depth for inline spans (#1385) — bold → link → em with one level of
+// slack. See `inline()` for why this stays linear.
+const MAX_INLINE_DEPTH = 3;
+
 /** True when `text[index]` is preceded by an odd run of backslashes (escaped). */
 function isEscaped(text: string, index: number): boolean {
   let n = 0;
@@ -159,7 +181,7 @@ function isEscaped(text: string, index: number): boolean {
   return n % 2 === 1;
 }
 
-function inline(text: string): string {
+function inline(text: string, depth = 0): string {
   // Bounded quantifiers: catastrophic backtracking on attacker input is a CPU
   // DoS on the edge function (verified: 100K "[" → 16.8s before bounding, 100ms
   // after). Link/image content capped at 200 chars, href/src at 300.
@@ -167,8 +189,22 @@ function inline(text: string): string {
   // OR a char that cannot start one, never both, so each position has exactly
   // one parse and the bounded repetition stays linear (a class that also
   // matched `\` would make the alternation ambiguous and the run exponential).
+  //
+  // #1385 — the alternation is UNCHANGED. Nesting (`[**bold**](url)`, which used
+  // to emit the label's asterisks literally) is handled by re-parsing a span's
+  // CONTENT, not by widening the pattern: a new pattern would have to re-earn
+  // the anti-ReDoS bound above, and re-earning it is how the 16.8s regression
+  // gets reintroduced. Recursion is depth-capped (`MAX_INLINE_DEPTH`) and only
+  // ever runs on content the regex already isolated (≤200 chars), so sibling
+  // spans are disjoint and one nesting level costs O(len): the whole render is
+  // O(MAX_INLINE_DEPTH · len).
   const re =
     /(`[^`]+`)|(\*\*(?:\\.|[^\\*\n]){1,200}\*\*)|(\*(?:\\.|[^\\*\n]){1,200}\*)|(!\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\))|(\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\))/g;
+  // A span's content is inline MARKDOWN, not text — parse it so nested spans
+  // survive. At the depth cap the content degrades to escaped text, never to
+  // a half-open tag.
+  const nested = (raw: string): string =>
+    depth < MAX_INLINE_DEPTH ? inline(raw, depth + 1) : escapeHtml(unescapeMd(raw));
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;
@@ -184,12 +220,14 @@ function inline(text: string): string {
       // Code spans are verbatim in CommonMark — backslash escapes do NOT apply.
       out += `<code>${escapeHtml(m[1].slice(1, -1))}</code>`;
     } else if (m[2] !== undefined) {
-      out += `<strong>${escapeHtml(unescapeMd(m[2].slice(2, -2)))}</strong>`;
+      out += `<strong>${nested(m[2].slice(2, -2))}</strong>`;
     } else if (m[3] !== undefined) {
-      out += `<em>${escapeHtml(unescapeMd(m[3].slice(1, -1)))}</em>`;
+      out += `<em>${nested(m[3].slice(1, -1))}</em>`;
     } else if (m[4] !== undefined) {
       const src = m[6] ?? "";
       const safeSrc = validUrl(src) ? escapeHtml(src) : "";
+      // `alt` lands in an ATTRIBUTE, so it is text and never markup — it must
+      // not go through `nested()`, which would emit tags into the attribute.
       out += `<img src="${safeSrc}" alt="${escapeHtml(unescapeMd(m[5] ?? ""))}">`;
     } else if (m[7] !== undefined) {
       const href = m[9] ?? "";
@@ -203,9 +241,11 @@ function inline(text: string): string {
       // `noopener`; an off-site absolute link keeps the hard-won `_blank` +
       // `noopener`. Previously every link was treated as external (#8313).
       const external = accepted && /^https?:\/\//i.test(href.trim());
+      // The link label is inline markdown (a URL is not): `[**x**](u)` is a
+      // bold link. Labels exclude `]`, so a nested `<a>` cannot be produced.
       out += external
-        ? `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`
-        : `<a href="${safeHref}">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
+        ? `<a href="${safeHref}" target="_blank" rel="noopener">${nested(m[8] ?? "")}</a>`
+        : `<a href="${safeHref}">${nested(m[8] ?? "")}</a>`;
     }
     last = re.lastIndex;
   }
@@ -388,11 +428,17 @@ function isFenceLine(line: string): boolean {
 }
 
 /**
- * Whether the body publishes at least one `##` heading. The generated nav is
- * H2-only, so this decides whether a house-style marker has a replacement at
- * all — without one the marker and its list must stay ordinary content rather
+ * Whether the body publishes at least one LEVEL-2 heading. The generated nav is
+ * level-2-only, so this decides whether a house-style marker has a replacement
+ * at all — without one the marker and its list must stay ordinary content rather
  * than be deleted in exchange for nothing. Fenced code blocks are skipped via
  * the SAME predicate `renderMarkdown` uses, so this cannot disagree with it.
+ *
+ * `#{1,2}` — not `##` — because the renderer DEMOTES a single `#` to `<h2>`
+ * (#1385, the post title owns the page's only <h1>), so a body written with
+ * `#` sections also emits level-2 headings and therefore also gets a nav.
+ * Matching only `##` here would leave such a body's house-style marker
+ * unreplaced while `renderMarkdown` had a TOC to put there.
  */
 function hasPublishedH2(lines: string[]): boolean {
   let inFence = false;
@@ -401,7 +447,7 @@ function hasPublishedH2(lines: string[]): boolean {
       inFence = !inFence;
       continue;
     }
-    if (!inFence && /^##\s/.test(line)) return true;
+    if (!inFence && /^#{1,2}\s/.test(line)) return true;
   }
   return false;
 }
@@ -553,11 +599,17 @@ export function renderMarkdown(markdown: string): string {
       continue;
     }
 
-    // Heading
-    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    // Heading. `#{2,4}` missed a single `#`, which then fell through to the
+    // paragraph path and rendered its marker as literal text (#1385). The post
+    // page already emits the post TITLE as its only <h1>, so a body `#` is
+    // demoted to <h2> (the standard CMS treatment) rather than becoming a
+    // second <h1> — an SEO defect. `#` and `##` therefore share a level;
+    // `###`/`####` keep theirs, so existing posts that use `##` render exactly
+    // as before (and keep their TOC depth).
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
     if (h) {
       flushPara(paragraphBuf);
-      const level = h[1].length;
+      const level = Math.max(h[1].length, 2);
       const text = h[2];
       const id = uniqueSlug(slugifyHeading(text));
       // The TOC label is PLAIN TEXT (markdown stripped), like the slug. Inline
@@ -714,14 +766,19 @@ export interface FaqEntry {
   answer: string;
 }
 
-const FAQ_SECTION_RE = /^##\s+.*(faq|frequently asked)/i;
+// `#{1,2}`: a lone `#` is DEMOTED to a level-2 heading (#1385), so it must open
+// an FAQ section exactly like `##` — otherwise a body whose FAQ heading is `#`
+// renders a visible FAQ section while `extractFaq` returns nothing, and the page
+// ships the section without its FAQPage schema.
+const FAQ_SECTION_RE = /^#{1,2}\s+.*(faq|frequently asked)/i;
 
 /**
  * Pull the question/answer pairs out of an article's FAQ section.
  *
- * The section is the `## … FAQ/frequently asked …` block; each `###` heading in
- * it is a question and the text beneath it is the answer. Returns `[]` when the
- * article has no FAQ section, so the caller can simply skip the schema.
+ * The section is the level-2 heading (`#` or `##`) whose text matches
+ * `FAQ/frequently asked`; each `###` heading in it is a question and the text
+ * beneath it is the answer. Returns `[]` when the article has no FAQ section,
+ * so the caller can simply skip the schema.
  */
 export function extractFaq(markdown: string): FaqEntry[] {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
@@ -767,9 +824,11 @@ export function extractFaq(markdown: string): FaqEntry[] {
       continue;
     }
 
-    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    // Same demotion as the renderer above (#1385): a body `#` is classified
+    // exactly like `##`, so an FAQ answer cannot lose a heading the reader sees.
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
     if (h) {
-      const level = h[1].length;
+      const level = Math.max(h[1].length, 2);
       if (level === 2) {
         flush();
         inFaq = FAQ_SECTION_RE.test(line);
@@ -814,6 +873,55 @@ export function faqPageJsonLd(entries: FaqEntry[]): unknown | null {
   };
 }
 
+// ── Author identity — byline + structured data (#1383) ─────────────────────
+/**
+ * The article byline's author fragment: a small round avatar plus the name.
+ *
+ * ⛔ NULL-SAFE BY CONTRACT. When `author_image_url` is null (or is not an
+ * absolute http(s) URL) the fragment is the name ALONE — no `<img>`, no empty
+ * circle, no leftover wrapper. That is the path that would otherwise ship a
+ * broken image: `<img src="">` renders as a broken-image icon in every browser,
+ * so the absence is decided HERE, once, instead of by CSS or by the template.
+ *
+ * The name and the URL keep the byline's existing escaping discipline, and the
+ * URL is additionally scheme-checked by `validUrl`, so a `javascript:` / `data:`
+ * / relative value in the column is dropped rather than embedded. `alt=""` is
+ * deliberate: the avatar is decorative beside the visible name.
+ */
+export function authorBylineHtml(
+  post: Pick<BlogPost, "author" | "author_image_url"> | null | undefined,
+): string {
+  const name = escapeHtml(post?.author ?? DEFAULT_AUTHOR);
+  const imageUrl = post?.author_image_url ?? null;
+  const avatar = imageUrl && validUrl(imageUrl)
+    ? `<img class="byline-avatar" src="${escapeHtml(imageUrl)}" alt="" width="22" height="22" loading="lazy">`
+    : "";
+  return `<span class="byline">${avatar}<span>By ${name}</span></span>`;
+}
+
+/**
+ * The `author` node for `BlogPosting` — a `Person` with an `image`, not an
+ * `Organization` (#1383): a named byline is a person, and `image` is the field
+ * search engines read for authorship.
+ *
+ * `image` is OMITTED (never `null`, never `""`) when there is no usable avatar —
+ * an absent property says "no image", while `image: null` claims there is one and
+ * it is empty. The name reaches the `<script>` through `jsonLd()`'s JSON
+ * escaping, never HTML escaping: `O&#39;Brien` inside valid JSON is a different
+ * author than `O'Brien`.
+ */
+export function authorJsonLd(
+  post: Pick<BlogPost, "author" | "author_image_url"> | null | undefined,
+): { "@type": "Person"; name: string; image?: string } {
+  const node: { "@type": "Person"; name: string; image?: string } = {
+    "@type": "Person",
+    name: post?.author ?? DEFAULT_AUTHOR,
+  };
+  const imageUrl = post?.author_image_url ?? null;
+  if (imageUrl && validUrl(imageUrl)) node.image = imageUrl;
+  return node;
+}
+
 /** `BlogPosting` for an article. */
 function blogPostingJsonLd(post: BlogPost, url: string): unknown {
   const description = post.meta_description ?? (post.excerpt ?? post.title);
@@ -824,7 +932,7 @@ function blogPostingJsonLd(post: BlogPost, url: string): unknown {
     description,
     url,
     image: post.cover_image_url ?? undefined,
-    author: { "@type": "Organization", name: post.author ?? "Tortoise team" },
+    author: authorJsonLd(post),
     datePublished: post.published_at,
     dateModified: post.updated_at,
   };
@@ -1015,6 +1123,8 @@ nav .links .cta{background:var(--accent);color:#04141a;padding:6px 14px;border-r
 h1.art-title{font-family:var(--serif);font-size:40px;line-height:1.2;color:#fff;font-weight:400;margin-top:16px}
 .art-meta{display:flex;align-items:center;gap:14px;margin-top:14px;color:var(--text-dim);font-size:12px;flex-wrap:wrap}
 .art-meta .dot{opacity:.4}
+.byline{display:inline-flex;align-items:center;gap:8px}
+.byline-avatar{width:22px;height:22px;border-radius:999px;object-fit:cover;border:1px solid var(--border);flex:none}
 .share-bar{display:flex;align-items:center;gap:10px;margin:20px 0;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
 .share-bar .label{color:var(--text-dim);font-size:12px;margin-right:4px}
 .share-bar a,.share-bar button{width:34px;height:34px;border-radius:8px;border:1px solid var(--border);background:var(--bg-soft);color:var(--text-dim);display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer}

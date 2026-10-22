@@ -14,9 +14,9 @@
 // Run (Node >= 22.6):
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref, authorBylineHtml, authorJsonLd, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL } from "../website/functions/blog/_lib.ts";
 import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
 // The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
 // article response, so it is the policy that decides whether the embed displays.
@@ -127,6 +127,14 @@ console.log("bounded span content stays linear on adversarial input");
   const faqMs = Date.now() - t2;
   assert(faqMs < 4000, `a '['-heavy FAQ answer stays linear (${faqMs}ms; pre-fix ≈27s)`);
 
+  // Nesting (#1385) added a recursion surface: every span's content is
+  // re-parsed. Content is capped at 200 chars by the pattern and sibling spans
+  // are disjoint, so a body of nested spans must stay linear.
+  const nestedT0 = Date.now();
+  renderMarkdown("[**a**](https://tortoise.premiselabs.co) ".repeat(2000));
+  const nestedMs = Date.now() - nestedT0;
+  assert(nestedMs < 4000, `a body of nested spans stays linear (${nestedMs}ms)`);
+
   // Duplicate headings must allocate anchors in O(1) amortised per heading.
   // The scanned-from-`-1` form was O(N²): 8000 `## A` (48KB — well under
   // BODY_MAX=100KB) took 23.9s standalone, and 16000 (96KB) 131s. Post-fix on
@@ -203,6 +211,118 @@ console.log("heading anchors (#8291 — a TOC link needs a real target)");
     renderMarkdown("## **Bold** and `code`"),
     '<h2 id="bold-and-code"><strong>Bold</strong> and <code>code</code></h2>',
     "the slug comes from heading TEXT, the heading keeps its markup",
+  );
+}
+
+console.log("a body `#` heading is demoted, never leaked (#1385)");
+{
+  // `#{2,4}` did not match a lone `#`, so the line fell through to the paragraph
+  // path and published as literal `# Title` text. The post page already emits the
+  // TITLE as its only <h1>, so the body heading is demoted (standard CMS
+  // treatment) rather than emitting a second <h1>.
+  assertEq(
+    renderMarkdown("# What is agent memory?"),
+    '<h2 id="what-is-agent-memory">What is agent memory?</h2>',
+    "a single `#` renders as <h2>",
+  );
+  assert(
+    !renderMarkdown("# What is agent memory?").includes("#"),
+    "the `#` marker never leaks into the output",
+  );
+  const levels = renderMarkdown("# one\n\n## two\n\n### three\n\n#### four");
+  assert(!levels.includes("<h1"), "no body heading is ever an <h1>");
+  assert(levels.includes("<h2 id=\"one\">one</h2>") && levels.includes("<h2 id=\"two\">two</h2>"), "`#` and `##` share a level");
+  assert(levels.includes("<h3 id=\"three\">three</h3>") && levels.includes("<h4 id=\"four\">four</h4>"), "`###`/`####` keep their levels (existing posts unchanged)");
+  assertEq(
+    renderMarkdown("\\# not a heading"),
+    "<p># not a heading</p>",
+    "an escaped `\\#` stays literal text",
+  );
+  // The FAQ extractor shares the classifier, so it must demote identically —
+  // otherwise a `#` heading would be swallowed into the previous answer while
+  // the reader sees a heading.
+  const faq = extractFaq("## FAQ\n\n### Q?\n\nAnswer.\n\n# Next section\n\nNot part of the answer.");
+  assertEq(faq.length, 1, "a `#` heading closes the FAQ section, exactly like `##`");
+  // `?.` on BOTH: `faq[0]` is undefined when the extractor finds no section, and a
+  // raw dereference inside an `assertEq` ARGUMENT throws before the failure is
+  // recorded — the module dies there, so every assertion after it (the nesting,
+  // house-TOC and docs-contract blocks) never runs. A clean recorded failure is
+  // the point of the harness.
+  assertEq(faq[0]?.answer, "Answer.", "the `#` heading is not folded into the FAQ answer");
+  // …and it OPENS one: `#` and `##` are the same level now, so a section headed
+  // `# FAQ` must emit the FAQPage schema too, not just render the heading.
+  const hashFaq = extractFaq("# FAQ\n\n### Q?\n\nAnswer.");
+  assertEq(hashFaq.length, 1, "a `# FAQ` heading opens an FAQ section");
+  assertEq(hashFaq[0]?.question, "Q?", "the question under a `# FAQ` heading is extracted");
+}
+
+console.log("inline spans nest (#1385)");
+{
+  assertEq(
+    renderMarkdown("[**Try Tortoise free.**](https://tortoise.premiselabs.co)"),
+    '<p><a href="https://tortoise.premiselabs.co" target="_blank" rel="noopener"><strong>Try Tortoise free.</strong></a></p>',
+    "a bold link label is a bold link, not literal asterisks",
+  );
+  assertEq(
+    renderMarkdown("**[the docs](https://tortoise.premiselabs.co/docs)**"),
+    '<p><strong><a href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noopener">the docs</a></strong></p>',
+    "a link inside bold nests",
+  );
+  assertEq(
+    renderMarkdown("*[docs](/docs)*"),
+    '<p><em><a href="/docs">docs</a></em></p>',
+    "a link inside italics nests, and an internal link keeps its same-tab shape",
+  );
+  assertEq(
+    renderMarkdown("[`a*b`](https://tortoise.premiselabs.co)"),
+    '<p><a href="https://tortoise.premiselabs.co" target="_blank" rel="noopener"><code>a*b</code></a></p>',
+    "a code span inside a link label nests",
+  );
+  assertEq(
+    renderMarkdown("![**a**](https://tortoise.premiselabs.co/x.png)"),
+    '<p><img src="https://tortoise.premiselabs.co/x.png" alt="**a**"></p>',
+    "an image alt is an ATTRIBUTE — never parsed as markup",
+  );
+  const nested = renderMarkdown("[**<img src=x onerror=alert(1)>**](https://tortoise.premiselabs.co)");
+  assert(!nested.includes("<img"), "raw HTML inside a nested span stays escaped");
+  assert(nested.includes("&lt;img src=x onerror=alert(1)&gt;"), "the nested span keeps the escaped text");
+  // A malformed double-nest. This is a REGRESSION GUARD on the literal output,
+  // not a nesting proof: the outer link alternative wins at index 0 and its
+  // label stops at the first `]`, so the label is `***[x` (nothing nestable in
+  // it) and the trailing `*text*](…)` is emitted by the plain-text tail, which
+  // is never re-scanned. Pinning the string is what makes it assert something —
+  // the previous `strong`/`em` "balanced" comparisons here were `0 === 0` on
+  // output that contains neither tag, so they passed on every version of the
+  // renderer.
+  const deep = renderMarkdown("[***[x](https://tortoise.premiselabs.co)*text*](https://tortoise.premiselabs.co/inner)");
+  assertEq(
+    deep,
+    '<p><a href="https://tortoise.premiselabs.co" target="_blank" rel="noopener">***[x</a>' +
+      "<em>text</em>](https://tortoise.premiselabs.co/inner)</p>",
+    "a label that stops at the first `]` leaves the rest as text, with no nesting",
+  );
+  // The DEEPEST chain the unchanged, bounded alternation can construct: a link
+  // label (excludes `]`) → `strong` (excludes `*`) → a code span. Nothing
+  // constructible nests further — a label cannot hold a complete link and a
+  // `strong` body cannot hold another `*` span — so `MAX_INLINE_DEPTH`'s
+  // escape branch is a DEFENSIVE bound that no input reaches, not a tested
+  // state. Asserted with a NON-ZERO tag count: counting tags can only prove
+  // balance where a tag is actually emitted.
+  const deepest = renderMarkdown("[**`a`**](https://x.example)");
+  assertEq(
+    deepest,
+    '<p><a href="https://x.example" target="_blank" rel="noopener"><strong><code>a</code></strong></a></p>',
+    "label → strong → code is the deepest nesting the bounded pattern permits",
+  );
+  assertEq(
+    (deepest.match(/<strong>/g) ?? []).length,
+    1,
+    "the deepest nesting case really emits a nested tag (a 0-tag fixture proves nothing)",
+  );
+  assertEq(
+    (deepest.match(/<strong>/g) ?? []).length,
+    (deepest.match(/<\/strong>/g) ?? []).length,
+    "the deepest nesting case keeps <strong> tags balanced",
   );
 }
 
@@ -597,6 +717,362 @@ console.log("JSON-LD cannot break out of its script element");
   assert(tag.startsWith('<script type="application/ld+json">'), "the tag is a JSON-LD script");
 }
 
+// ── the author byline + Person structured data (#1383) ──────────────────────
+// The bug this change fixes is that every post shipped as the anonymous
+// 'Tortoise team' with no face. The risk IN the fix is the opposite failure: an
+// avatar `<img>` emitted on a post that has no image, which renders as a broken
+// image (src="") or an empty circle. So the null path is asserted as an EXACT
+// string, not as a substring absence.
+console.log("article author identity (#1383 — the byline's null-image path)");
+{
+  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+
+  assertEq(
+    authorBylineHtml({ author: "Daniel Ospina", author_image_url: AVATAR }),
+    `<span class="byline"><img class="byline-avatar" src="${AVATAR}" alt="" width="22" height="22" loading="lazy"><span>By Daniel Ospina</span></span>`,
+    "an author WITH an image renders the avatar and the name",
+  );
+
+  // ⛔ THE NULL PATH — the assertion that would otherwise ship a broken <img>.
+  const noImage = authorBylineHtml({ author: "Daniel Ospina", author_image_url: null });
+  assertEq(
+    noImage,
+    '<span class="byline"><span>By Daniel Ospina</span></span>',
+    "an author with NO image renders the name alone — no <img>, no empty circle, no leftover wrapper",
+  );
+  assert(!noImage.includes("<img"), "...and specifically no <img> element at all");
+  assert(!noImage.includes("src="), "...and no src attribute to resolve into a broken image");
+
+  // An empty string is NOT null: a column defaulted to '' (the shape this change
+  // deliberately refuses) would pass a naive null-check and emit <img src="">.
+  const emptyImage = authorBylineHtml({ author: "Daniel Ospina", author_image_url: "" });
+  assertEq(
+    emptyImage,
+    '<span class="byline"><span>By Daniel Ospina</span></span>',
+    "an EMPTY image URL renders the name alone too ('' is not an image)",
+  );
+
+  // A non-http(s) scheme in the column must never reach the markup.
+  for (const hostile of ["javascript:alert(1)", "data:image/svg+xml,<svg/>", "/relative.jpg"]) {
+    const html = authorBylineHtml({ author: "Daniel Ospina", author_image_url: hostile });
+    assert(!html.includes("<img"), `a non-absolute URL emits no <img>: ${hostile}`);
+    assert(!html.includes("javascript:") && !html.includes("data:"), `...and never embeds it: ${hostile}`);
+  }
+
+  // The name is author-controlled text and stays HTML-escaped in the byline.
+  const hostileName = authorBylineHtml({ author: "Daniel <script>alert(1)</script>", author_image_url: null });
+  assert(!hostileName.includes("<script>"), "a hostile author name cannot open a <script> in the byline");
+  assert(hostileName.includes("&lt;script&gt;"), "...it is escaped, not dropped");
+  // A quote in the name must not survive into the avatar URL's attribute context.
+  const quoted = authorBylineHtml({ author: "Daniel Ospina", author_image_url: `${AVATAR}?"onload="alert(1)` });
+  assert(!quoted.includes('"onload="'), "a quote smuggled through the image URL is escaped");
+
+  // No stored author at all → the real default, never the retired anonymous one.
+  const anon = authorBylineHtml({ author: null, author_image_url: AVATAR });
+  assertEq(DEFAULT_AUTHOR, "Daniel Ospina", "the renderer's default author is a real person");
+  assert(anon.includes("By Daniel Ospina"), "a null author falls back to the real author name");
+  assert(!anon.includes("Tortoise team"), "the anonymous 'Tortoise team' fallback is gone");
+}
+
+console.log("article author structured data (#1383 — Person, image omitted when absent)");
+{
+  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const base = {
+    id: "1",
+    slug: "an-article",
+    title: "An article",
+    body: "## A section\n\nText.",
+    excerpt: "An excerpt",
+    cover_image_url: null,
+    tags: [],
+    author: "Daniel Ospina",
+    author_image_url: AVATAR,
+    meta_title: null,
+    meta_description: null,
+    published_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+  };
+  const url = "https://tortoise.premiselabs.co/blog/an-article";
+
+  const withImage = articleJsonLd(base, url).find((n) => n["@type"] === "BlogPosting");
+  assertEq(withImage.author["@type"], "Person", "BlogPosting.author is a Person, not an Organization");
+  assertEq(withImage.author.name, "Daniel Ospina", "...carrying the byline's name");
+  assertEq(withImage.author.image, AVATAR, "...and the avatar URL");
+  assertEq(
+    articleJsonLd(base, url).some((n) => n["@type"] === "Organization"),
+    false,
+    "no Organization node is emitted for the author any more",
+  );
+
+  // ⛔ `image` must be OMITTED, not nulled: `image: null` claims there is an
+  // image and it is empty, which is the structured-data form of a broken <img>.
+  const noImage = articleJsonLd({ ...base, author_image_url: null }, url).find((n) => n["@type"] === "BlogPosting");
+  assertEq("image" in noImage.author, false, "an absent avatar OMITS the author.image property");
+  assertEq(
+    JSON.stringify(noImage.author).includes('"image":null'),
+    false,
+    "...and never serialises it as image:null",
+  );
+  assertEq(noImage.author.name, "Daniel Ospina", "...while the Person and its name remain");
+  assertEq(
+    articleJsonLd({ ...base, author: null, author_image_url: null }, url).find((n) => n["@type"] === "BlogPosting").author.name,
+    "Daniel Ospina",
+    "a null author falls back to the real author name in structured data too",
+  );
+
+  // JSON escaping, not HTML escaping, inside <script>: `O&#39;Brien` in valid
+  // JSON is a DIFFERENT author than `O'Brien`.
+  const apostrophe = articleJsonLd({ ...base, author: "O'Brien" }, url).find((n) => n["@type"] === "BlogPosting");
+  assertEq(apostrophe.author.name, "O'Brien", "the author name reaches JSON-LD un-HTML-escaped");
+  const rendered = articleJsonLd({ ...base, author: "Bad </script><script>alert(1)</script>" }, url).map(jsonLd).join("");
+  assert(!rendered.includes("</script><script>alert(1)"), "a hostile author name cannot close the JSON-LD script tag");
+}
+
+console.log("the ARTICLE PAGE wires the author byline + Person schema (#1383 — the template, not just the helper)");
+{
+  // The unit assertions above prove the helpers; they say nothing about whether
+  // the page USES them. So drive the real `onRequestGet` with a stubbed
+  // Supabase: a template line reverted to the old `<span>By …</span>` (no
+  // avatar, Organization schema) leaves every helper assertion green.
+  const { onRequestGet } = await import("../website/functions/blog/[[path]].ts");
+  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const realFetch = globalThis.fetch;
+
+  const render = async (overrides) => {
+    const row = {
+      id: "1",
+      slug: "a-post",
+      title: "A post",
+      body: "## A section\n\nProse.",
+      excerpt: "An excerpt",
+      cover_image_url: null,
+      tags: ["memory"],
+      author: "Daniel Ospina",
+      author_image_url: AVATAR,
+      meta_title: null,
+      meta_description: null,
+      published_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-02T00:00:00Z",
+      ...overrides,
+    };
+    const requested = [];
+    globalThis.fetch = async (url) => {
+      requested.push(String(url));
+      return new Response(JSON.stringify([row]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      const res = await onRequestGet({
+        request: new Request("https://tortoise.premiselabs.co/blog/a-post"),
+        env: {
+          SUPABASE_URL: "https://project.supabase.co",
+          SUPABASE_ANON_KEY: "anon-key",
+          ASSETS: { fetch: async () => new Response("", { status: 404 }) },
+        },
+        params: { path: ["a-post"] },
+        waitUntil() {},
+      });
+      return { html: await res.text(), status: res.status, requested };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+
+  const withImage = await render({});
+  assertEq(withImage.status, 200, "the article page renders");
+  assert(
+    withImage.requested[0]?.includes("author_image_url"),
+    "the article query ASKS for author_image_url (without it the page can never show an avatar)",
+  );
+  assert(
+    withImage.html.includes('<img class="byline-avatar" src="' + AVATAR + '"'),
+    "the rendered page carries the round avatar in the byline",
+  );
+  assert(withImage.html.includes("By Daniel Ospina"), "...beside the author's name");
+  assert(
+    withImage.html.includes('"@type":"Person"') && withImage.html.includes('"name":"Daniel Ospina"'),
+    "the JSON-LD author is a Person named in the byline",
+  );
+  assert(withImage.html.includes('"image":"' + AVATAR + '"'), "...with the avatar as its image");
+
+  // ⛔ THE FAILING PATH THIS CHANGE MUST NOT SHIP: a post with no image.
+  const noImage = await render({ author_image_url: null });
+  assert(!noImage.html.includes('<img class="byline-avatar"'), "a null-image post renders NO avatar on the page");
+  assert(!noImage.html.includes('src=""'), "...and no empty src anywhere (a broken image)");
+  assert(noImage.html.includes("By Daniel Ospina"), "...the byline still names the author");
+  assert(
+    noImage.html.includes('"@type":"Person"') && !noImage.html.includes('"image":null'),
+    "...and the Person node omits image rather than nulling it",
+  );
+}
+
+console.log("the AGENT publish API keeps the same author contract (#1383 — the write path, not just the page)");
+{
+  // The admin editor is not the only writer: agents publish through this API.
+  // `""` is the value that would defeat the whole null contract — it is not
+  // nullish, so a NULL-only guard would pass it through and the byline would
+  // emit <img src="">. Drive the real handler and assert on the row it writes.
+  const { onRequestPost } = await import("../website/functions/blog/api/posts/[[path]].ts");
+  const realFetch = globalThis.fetch;
+
+  const publish = async (body) => {
+    const inserted = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = String(init?.method ?? "GET").toUpperCase();
+      if (u.includes("/rest/v1/blog_agent_keys")) {
+        return Response.json([{ agent_name: "agent-under-test", active: true }]);
+      }
+      if (u.includes("/rest/v1/blog_posts") && method === "POST") {
+        const row = JSON.parse(String(init.body));
+        inserted.push(row);
+        return Response.json([{ id: "row-1", slug: row.slug }]);
+      }
+      return Response.json({ success: true });
+    };
+    try {
+      const res = await onRequestPost({
+        request: new Request("https://tortoise.premiselabs.co/blog/api/posts", {
+          method: "POST",
+          headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        env: { SUPABASE_URL: "https://db.test", SUPABASE_SERVICE_ROLE_KEY: "svc" },
+        params: {},
+        waitUntil() {},
+      });
+      return { status: res.status, body: await res.json().catch(() => null), inserted };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+
+  const blank = await publish({ title: "T", slug: "author-blank-image", author_image_url: "" });
+  assertEq(blank.status, 201, "an agent can still publish with a blank image field");
+  assertEq(
+    blank.inserted[0]?.author_image_url,
+    null,
+    "an explicit empty-string image is stored as NULL, not '' ('' is not nullish and would emit <img src=\"\">)",
+  );
+
+  const hostile = await publish({ title: "T", slug: "author-bad-image", author_image_url: "javascript:alert(1)" });
+  assertEq(hostile.status, 400, "a non-absolute image URL is REFUSED by the API");
+  assertEq(hostile.inserted.length, 0, "...and nothing is written");
+  assertEq(
+    typeof hostile.body?.author_image_url,
+    "string",
+    "...with a field-specific error, not a generic failure",
+  );
+
+  const noAuthor = await publish({ title: "T", slug: "author-default" });
+  assertEq(noAuthor.status, 201, "an agent publish without an author still succeeds");
+  assertEq(
+    noAuthor.inserted[0]?.author,
+    DEFAULT_AUTHOR,
+    "...and the row carries the real author, not the retired anonymous default",
+  );
+  // ⛔ The avatar default must follow the NAME default (#1383). The admin editor
+  // prefills DEFAULT_AUTHOR_IMAGE_URL, so a post created here WITHOUT the field
+  // would otherwise render name-only while the same author's editor-written post
+  // renders an avatar — the byline still depending on which path wrote the post,
+  // which is the defect this change removes for the name. The agent is the
+  // primary writer on this surface, so this is the common case, not a corner.
+  assertEq(
+    noAuthor.inserted[0]?.author_image_url,
+    DEFAULT_AUTHOR_IMAGE_URL,
+    "an agent publish that OMITS the avatar gets the shipped one — the same byline the editor prefills",
+  );
+
+  // An explicit `""` is still a clear-to-NULL (see the `blank` case above), and a
+  // post by a DIFFERENT author never inherits the shipped avatar.
+  const otherAuthor = await publish({ title: "T", slug: "author-guest", author: "Someone Else" });
+  assertEq(otherAuthor.status, 201, "a guest author can be published without an image");
+  assertEq(
+    otherAuthor.inserted[0]?.author_image_url,
+    null,
+    "a post NOT by the shipped author gets NO avatar (the shipped avatar is not a global default)",
+  );
+}
+
+console.log("the shipped avatar exists, and is the URL the migration backfills (#1383)");
+{
+  // The failure this prevents is the one that CANNOT be caught by rendering:
+  // a byline whose <img> points at an asset nobody committed (a 404 avatar on
+  // every backfilled post), or a backfill that writes a URL the code no longer
+  // names. The constant, the file and the migration are checked against each
+  // other rather than each against a copy of the string.
+  assertEq(
+    DEFAULT_AUTHOR_IMAGE_URL,
+    "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg",
+    "the shipped avatar URL is the blog's own asset path",
+  );
+  assertEq(
+    new URL(DEFAULT_AUTHOR_IMAGE_URL).pathname,
+    "/blog/author-daniel-ospina.jpg",
+    "...served from the /blog/ path the blog Functions and Assets fallback own",
+  );
+
+  const assetPath = new URL("../website/blog/author-daniel-ospina.jpg", import.meta.url);
+  const asset = statSync(assetPath);
+  assert(asset.isFile() && asset.size > 0, "the avatar file is committed where the URL says it is");
+  assert(
+    asset.size <= 100 * 1024,
+    `the avatar is a web asset, not a camera original (${asset.size} bytes)`,
+  );
+
+  const migration = readFileSync(
+    new URL("../supabase/migrations/20261021000001_blog_author_identity.sql", import.meta.url),
+    "utf8",
+  );
+  assert(
+    migration.includes(DEFAULT_AUTHOR_IMAGE_URL),
+    "the migration's backfill writes the SAME URL the renderer names (backfilled posts get a real avatar)",
+  );
+  assert(
+    migration.includes(`'Daniel Ospina'`),
+    "the migration's author default matches the renderer's DEFAULT_AUTHOR",
+  );
+}
+
+console.log("the apply RECIPE is the atomic one (#1383 — `psql -f` is not one transaction)");
+{
+  // The migration toggles `blog_posts_set_updated_at` OFF around the backfill and
+  // back ON. That pair is only atomic when the file is applied as ONE simple query
+  // (CLI `db push`, Management API, the PGlite harness). `psql -f` autocommits PER
+  // STATEMENT, so an abort halfway commits the DISABLE and never reaches the ENABLE
+  // — updated_at then stops moving for every blog post, silently. The guarantee
+  // therefore lives in the recipe, so the recipe is what gets guarded: a reworded
+  // runbook that drops `--single-transaction` or the ledger step re-opens the hole
+  // with every other test still green.
+  const norm = (s) => s.replace(/\s+/g, " ");
+  const readme = norm(readFileSync(new URL("../supabase/README.md", import.meta.url), "utf8"));
+  const mig = norm(
+    readFileSync(
+      new URL("../supabase/migrations/20261021000001_blog_author_identity.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  assert(
+    mig.includes("psql --single-transaction"),
+    "the migration STATES the apply precondition (without it the DISABLE/ENABLE pair is not atomic)",
+  );
+  assert(
+    readme.includes("psql --single-transaction"),
+    "the runbook's out-of-band apply uses `psql --single-transaction`, never a bare `psql -f`",
+  );
+  assert(
+    readme.includes("ON_ERROR_STOP=1"),
+    "...and stops at the first error instead of pressing on past it",
+  );
+  assert(
+    readme.includes("supabase migration repair --linked --status applied"),
+    "the runbook RECORDS the applied version — psql writes the schema, not the ledger, and `check-migration-drift` is fail-closed",
+  );
+}
+
 // ── House style: the shapes the already-published articles use ────────────
 // Recognised so an existing article gains real links and a styled answer box
 // with NO body edit — the CMS has no revision history and no read path
@@ -626,6 +1102,18 @@ console.log("house-style table of contents");
     !html.includes("<strong>Table of contents</strong>"),
     "the marker paragraph itself is not emitted",
   );
+
+  // #1385: a body `#` is DEMOTED to a level-2 heading, so it is a navigation
+  // target too. If the marker gate kept matching only `##`, a body written with
+  // `#` sections would emit level-2 headings but keep its hand-written list as
+  // ordinary content — the doc's "level-2 headings (`#` and `##`)" claim would
+  // then be false. The gate and the renderer must agree on what level 2 is.
+  const hashToc = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n# Alpha\n\n# Beta",
+  );
+  assert(hashToc.includes('<nav class="toc"'), "a body whose sections are `#` still gets a generated TOC");
+  assert(hashToc.includes('<a href="#alpha">Alpha</a>'), "the generated entry links to the demoted heading's anchor");
+  assert(!hashToc.includes("<h1"), "…and the demotion never emits a body <h1>");
 
   // The guard: a marker with no list under it stays ordinary prose, so a
   // sentence that happens to read "Table of contents" is not eaten.
@@ -1189,14 +1677,43 @@ console.log("docs/blog-authoring.md examples render as the page claims");
     );
   }
 
-  // The Basics table's heading row (`##`–`####` → `<h2>`–`<h4>`; the post title
-  // supplies the page's <h1>). The page previously claimed `#`–`####` →
-  // `<h1>`–`<h4>`, which the renderer falsifies (a lone `#` is not a heading)
-  // and which contradicted the page's own anchors paragraph.
-  assert(/`##`–`####` headings/.test(doc), "the Basics table documents `##`–`####`, not `#`–`####`");
+  // The Basics table's heading row. The page previously claimed `#`–`####` →
+  // `<h1>`–`<h4>`, which the renderer falsified (a lone `#` was not a heading at
+  // all and published as literal text — #1385). The contract now matches the
+  // renderer: `#`–`####` are headings, `#`/`##` are demoted to `<h2>` because the
+  // post title owns the page's only `<h1>`, and `###`/`####` keep their levels.
+  assert(/`#`–`####` headings/.test(doc), "the Basics table documents `#`–`####` headings");
+  assert(
+    /a single `#` is demoted to `<h2>`/.test(doc),
+    "the Basics table states the single-`#` demotion (#1385)",
+  );
+  assert(!/Single-`#` headings/.test(doc), "the page no longer claims a lone `#` publishes as literal text");
   assert(renderMarkdown("## Two").includes('<h2 id="two">Two</h2>'), "`##` renders an <h2>");
   assert(renderMarkdown("#### Four").includes('<h4 id="four">Four</h4>'), "`####` renders an <h4>");
-  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` is not a heading");
+  assert(
+    renderMarkdown("# One").includes('<h2 id="one">One</h2>'),
+    "a lone `#` renders as an <h2> heading (#1385)",
+  );
+  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` never becomes an <h1>");
+
+  // The TOC section's "left alone" promise, pinned to the gate it names. The gate
+  // is level-2 (`#` or `##`), so a hand-written list under a marker survives ONLY
+  // when the body has no level-2 heading at all. This is the sentence #1385 left
+  // stale at `##` while widening `hasPublishedH2` — the doc contradicted both the
+  // renderer and its own paragraph 13 lines above. The BEHAVIOUR that sentence
+  // describes is pinned by the `###`-only body in "house-style table of
+  // contents" ("with no H2 the author's label and list are preserved"); what was
+  // missing, and is asserted here, is that the CONTRACT states the gate.
+  // Prose wraps, so the sentence is matched against the whitespace-flattened doc.
+  const docFlat = doc.replace(/\s+/g, " ");
+  assert(
+    /no level-2 heading \(`#` or `##`\)/.test(docFlat),
+    "the TOC section states the gate as a level-2 heading (`#` or `##`)",
+  );
+  assert(
+    /level-2 heading \(`#` or `##`\) containing/.test(docFlat),
+    "the FAQ section states that `#` opens it too (the same level-2 gate)",
+  );
 }
 
 console.log("");

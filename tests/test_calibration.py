@@ -943,6 +943,83 @@ def test_point_with_absent_point_kind_is_gated(sdk):
     assert kindless["id"] in str(exc.value)
 
 
+def test_empty_point_kind_is_gated_like_an_absent_one(sdk):
+    """#9592: an EMPTY kind is ABSENCE, so the gate must demand a prior for it.
+
+    The kind arm demanded a prior for an ABSENT ``pointKind`` ("absence is
+    evidence") but let an EMPTY-STRING kind fall into the string arm and fail
+    membership — so the two spellings of "no kind at all", which mean the same
+    thing to a consumer that reads no kind (EP), landed on opposite sides of the
+    gate. MEASURED before this clause (embedded engine):
+
+        p = create_point('', 'empty kind', status='live')   # pointKind=''
+        create_operator('IMPL', anchor, [p['id']])
+        _uncalibrated_ep_participants(None)   -> []          # FAIL-OPEN
+        compute_confidence(require_calibration=True)  -> RAN, converged=True
+            node stamped  ep_alpha 1.28700840529772, ep_beta 1.24220750014412
+        REMOVEd the property instead             -> demanded (the asymmetry)
+
+    …and ``calibrate_summary()`` listed the node as uncalibrated at the same
+    time, so the audit and the gate disagreed (#9063's divergence, in a
+    spelling #9063 left open). Reachable: ``create_point('', …)`` is accepted
+    (an empty kind carries no character for #9287's write-door rule to refuse)
+    and the MCP ``tortoise_create_point`` tool forwards a client's ``kind``
+    verbatim.
+
+    Both gate arms are asserted, because they are two queries: the whole-graph
+    form and the scoped (``ids=…``) form #7739 hands ``compute_confidence``.
+    """
+    anchor = sdk.create_point("statement", "Anchor", credibility="gold",
+                              status="live")
+    empty = sdk.create_point("", "Empty kind target", status="live")
+    assert sdk.get_point(empty["id"])["pointKind"] == ""
+    sdk.create_operator("IMPL", anchor["id"], [empty["id"]])
+
+    assert sdk._uncalibrated_ep_participants(None) == [empty["id"]]
+    # the SCOPED arm is a different query and must agree (#7739)
+    assert sdk._uncalibrated_ep_participants({empty["id"]}) == [empty["id"]]
+    # …and so must the AUDIT surface it used to disagree with
+    row = {r["id"]: r for r in sdk.calibrate_summary()}[empty["id"]]
+    assert row["calibrated"] is False
+    assert "set_point_baseline" in row["suggestion"]
+
+    # The consumed node is refused BEFORE the run stamps it — the #7478 class.
+    with pytest.raises(CalibrationError, match="uncalibrated") as exc:
+        sdk.compute_confidence(anchors=[anchor["id"]],
+                               require_calibration=True)
+    assert empty["id"] in str(exc.value)
+    stamped = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta",
+        params={"id": empty["id"]}).result_set
+    assert stamped == [[None, None]]
+
+    # Fail-closed AND satisfiable: the node is a :Point, so the writer closes it.
+    sdk.set_point_baseline(empty["id"], 2.0, 1.0)
+    assert sdk._uncalibrated_ep_participants(None) == []
+    sdk.compute_confidence(anchors=[anchor["id"]], require_calibration=True)
+
+
+def test_whitespace_only_point_kind_is_gated_like_an_absent_one(sdk):
+    """#9592: normalisation makes a WHITESPACE-ONLY kind empty, so it is gated.
+
+    The predicate normalises a kind by REMOVING the whitespace family wherever
+    it occurs (``_strip_whitespace`` — ``trim()`` strips space only on this
+    engine), so ``'   '`` normalises to ``''``. Reading the empty arm off the RAW
+    property would have left that spelling fail-open — the same class of hole,
+    one spelling over, which is exactly what the normalisation exists to close.
+    EP reads no kind at all, so the node is a consumed claim either way.
+    """
+    sdk._get_proj().g.query(
+        "CREATE (n:Point {id:'blank-kind-9592', pointKind:'   ',"
+        " status:'live'})")
+
+    assert sdk._uncalibrated_ep_participants(None) == ["blank-kind-9592"]
+    assert sdk._uncalibrated_ep_participants({"blank-kind-9592"}) == [
+        "blank-kind-9592"]
+    sdk.set_point_baseline("blank-kind-9592", 2.0, 1.0)
+    assert sdk._uncalibrated_ep_participants(None) == []
+
+
 def test_gated_labels_are_point_only():
     """#9063 boundary, pinned: widening the LABEL set is the owner's decision.
 

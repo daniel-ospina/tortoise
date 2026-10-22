@@ -14,12 +14,13 @@ import logging
 from . import record_writer
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
-# #5140: the `documents` METER KEY's defender for THIS producer. `quota` is a
-# leaf module (stdlib-only at import time), so this adds no cycle.
-from .quota import refuse_document_writer_demotion
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
 from .projection import _live_write_scope, fold
+
+# #5140: the `documents` METER KEY's defender for THIS producer. `quota` is a
+# leaf module (stdlib-only at import time), so this adds no cycle.
+from .quota import refuse_document_writer_demotion
 
 logger = logging.getLogger(__name__)
 
