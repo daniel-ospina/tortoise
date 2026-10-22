@@ -202,6 +202,27 @@ class TestTheRiskAxis:
                            description="probe", risk="read-only",
                            http_policy=False, sdk_method="")
 
+    def test_risk_is_required_and_the_removed_fields_are_not_passable(self):
+        """The derivation is STRUCTURAL: `risk` has no default, and
+        `annotations` / `writes` are properties, so neither the drift nor a
+        fail-open omission can come back by edit.
+
+        A default of `read` would fail OPEN — `readOnlyHint: true` (client
+        auto-approve) plus `writes: false` (`graphs:read` reaches it) — so
+        omitting the axis must be as loud as omitting `annotations` was before
+        #4122. Carried over from #9573's cycle-1 P1 pin when the two
+        implementations of the axis were merged (it pinned the same three
+        constructions against its `field(init=False)` shape).
+        """
+        base = dict(name="tortoise_probe_bare", id="surface.probe.bare",
+                    description="probe", http_policy=True, sdk_method="query")
+        with pytest.raises(TypeError):
+            ToolDefinition(**base)  # no `risk` at all — must not default to read
+        with pytest.raises(TypeError):
+            ToolDefinition(**base, risk="read", writes=True)  # removed field
+        with pytest.raises(TypeError):
+            ToolDefinition(**base, risk="read", annotations=_ro())  # removed field
+
 
 class TestHintsCannotDrift:
     def test_read_only_hint_follows_the_tier(self):
