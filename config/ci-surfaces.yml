@@ -1162,6 +1162,18 @@ surfaces:
   # operator topology losing its eventId / dropping back out of the
   # retrievable memory layer) + the cross-session CORRECTS audit leg.
   - eval/write_path/test_write_path_operator_lane.py
+  # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
+  # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
+  # emission it reads. It pins that a receipt names the extractor that RAN (so
+  # the monkeypatched WIRE lane can never publish a product number), that the
+  # denominator is the CURRENT 15-edge gold (never the discarded 4), and that
+  # every planted edge is wired+persisted or carries a named cause with its
+  # pre/post-commit endpoint refs. Dual-registered exactly like the lane above
+  # (api / ep / eval): `tests/eval/write_path/grading.py` + `runner.py` name no
+  # SOURCE_PATTERNS surface, so without these arms the checker's own regression
+  # suite would not run on the change that breaks it. Hermetic — dict fixtures
+  # only, no graph, no LLM, no network.
+  - eval/write_path/test_write_path_operator_receipt.py
   # #2280 (CI drift repair): volunteer §3.2 + W3 reflex surfaces merged in
   # #2283 but never registered — the drift gate failed every PR (incl.
   # #2283's own python-ci-gate). Hosted/selfhost transports mirror
@@ -4497,6 +4509,18 @@ surfaces:
   # once the fix-wave creates headroom.
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
+  # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
+  # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
+  # emission it reads. It pins that a receipt names the extractor that RAN (so
+  # the monkeypatched WIRE lane can never publish a product number), that the
+  # denominator is the CURRENT 15-edge gold (never the discarded 4), and that
+  # every planted edge is wired+persisted or carries a named cause with its
+  # pre/post-commit endpoint refs. Dual-registered exactly like the lane above
+  # (api / ep / eval): `tests/eval/write_path/grading.py` + `runner.py` name no
+  # SOURCE_PATTERNS surface, so without these arms the checker's own regression
+  # suite would not run on the change that breaks it. Hermetic — dict fixtures
+  # only, no graph, no LLM, no network.
+  - eval/write_path/test_write_path_operator_receipt.py
   - test_calibration.py
   - test_calibration_tools.py
   - test_decide.py
@@ -5473,6 +5497,18 @@ surfaces:
   - eval/write_path/test_write_path_prescreen.py
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
+  # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
+  # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
+  # emission it reads. It pins that a receipt names the extractor that RAN (so
+  # the monkeypatched WIRE lane can never publish a product number), that the
+  # denominator is the CURRENT 15-edge gold (never the discarded 4), and that
+  # every planted edge is wired+persisted or carries a named cause with its
+  # pre/post-commit endpoint refs. Dual-registered exactly like the lane above
+  # (api / ep / eval): `tests/eval/write_path/grading.py` + `runner.py` name no
+  # SOURCE_PATTERNS surface, so without these arms the checker's own regression
+  # suite would not run on the change that breaks it. Hermetic — dict fixtures
+  # only, no graph, no LLM, no network.
+  - eval/write_path/test_write_path_operator_receipt.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
   # #4194: the write path now embeds turns via tortoise/embeddings.py's
@@ -7400,6 +7436,7 @@ durations:
   test_session_reinjection_rules.py: 0.9
   test_backups_v1_alias.py: 0.1
   eval/write_path/test_write_path_operator_lane.py: 25.0
+  eval/write_path/test_write_path_operator_receipt.py: 20.0  # #9077: 62 pure-dict tests (13.6 s warm, 19.5 s cold, `-p no:cacheprovider`, carve-out env); errs high deliberately
   longmem_eval/test_temporal_admission_trace.py: 0.1
   test_2884_ep_state_journaled.py: 4.7
   test_3276_has_ep_measured.py: 4.6
