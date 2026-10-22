@@ -226,11 +226,14 @@ the shapes the path produces:
 | `submit failed (status 422)` | a URL does not belong to the host, or the key does not match the protocol's schema | check `host`/`urlList` in the payload |
 | `submit failed (status 400)` | the payload itself was rejected | check `host`/`key`/`keyLocation` in `_shared/indexnow.ts` |
 | `submit failed (status 429)` | **rate-limited** — you are submitting too often | nothing on the publish path (the 24 h window prevents it); if a hand-run backfill triggers this, stop and retry tomorrow |
-| `submit failed (status 5xx)` / `(no status — timeout/network)` | the endpoint or the network | nothing urgent; the next publish of a *different* article is unaffected |
+| `submit failed (status 5xx)` | the endpoint is failing — a vendor-side fault, not ours | nothing urgent; the next publish of a *different* article is unaffected |
+| `submit failed (no status — timeout/network)` | the request did not complete inside the timeout, or the network refused it | same — nothing to do; a submission is best-effort |
 | `submit failed (unusable url)` | `SITE_URL` and the slug did not form a valid URL | a code/config fault, not a vendor one — fix `SITE_URL` |
-| `stamp failed (supabase <n>\|upstream unreachable)` | the submission was attempted but the 24-hour window was **not recorded** | nothing to do, but do **not** treat it as deduped: a re-publish within 24 h will submit again |
+| `stamp failed (supabase <n>)` | the submission was attempted but the 24-hour window was **not recorded** (the control-plane write failed) | nothing to do, but do **not** treat it as deduped: a re-publish within 24 h will submit again |
+| `stamp failed (upstream unreachable)` | same — the window was **not recorded**, because the network failed before the write landed | as above |
 | `skipped (submitted <ts>)` | inside the 24-hour window | nothing |
-| `skipped (state unreadable, supabase <n>)` | the column could not be read, which is what a deploy that ran **ahead of its migration** looks like | apply the migration, then re-publish (or backfill by hand) — until then **nothing is submitted** and the publish still succeeds |
+| `skipped (state unreadable, supabase 400)` | the column is not in the schema — what a deploy that ran **ahead of its migration** looks like | apply the migration, then re-publish (or backfill by hand) — until then **nothing is submitted** and the publish still succeeds |
+| `skipped (state unreadable, supabase 401\|403\|5xx)` | the read failed for another reason: a rotated/wrong service-role key, or a Supabase fault | check the key / the Supabase status — **the migration will not help here**. Nothing was submitted |
 | `skipped (state unreadable, upstream unreachable)` | the state read timed out or the network failed — **not** a migration problem | nothing urgent; the publish is live and the next publish of that article will submit |
 | `skipped (state unreadable, no row)` | the row was gone when the stamp was read (a concurrent delete) | nothing — but note the state was unknown, so nothing was submitted |
 | `unexpected failure` | a bug-shaped error inside the notification | file it; the publish itself already succeeded |

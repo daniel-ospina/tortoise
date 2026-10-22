@@ -145,10 +145,13 @@ export interface SubmitResult {
  * fail the write that triggered it, and there is no retry in this path (a retry
  * loop on a failing vendor is a self-inflicted flood).
  *
- * Every outcome is logged with the URL and, when there is one, the status:
- *   • accepted  → `[indexnow] submitted (status 200|202): <url>`
- *   • rejected  → `[indexnow] submit failed (status <n>): <url>`
- *   • no answer → `[indexnow] submit failed (no status — timeout/network): <url>`
+ * The outcomes it logs, each with the URL:
+ *   • accepted     → `[indexnow] submitted (status 200|202): <url>`
+ *   • rejected     → `[indexnow] submit failed (status <n>): <url>`
+ *   • no answer    → `[indexnow] submit failed (no status — timeout/network): <url>`
+ *   • unusable url → `[indexnow] submit failed (unusable url): <url>` (SITE_URL
+ *                    and the slug did not form a parseable URL — a config fault,
+ *                    not a vendor one)
  * A silent failure is the failure mode that matters — the post is live either
  * way, so the log is the ONLY signal that the notification did not land.
  */

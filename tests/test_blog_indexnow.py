@@ -144,6 +144,7 @@ for (const c of cases) {
         const body = JSON.parse(String(init.body));
         if (Object.prototype.hasOwnProperty.call(body, 'indexnow_submitted_at')) {
           stateCalls.push({ kind: 'stamp', hasSignal: !!(init && init.signal) });
+          if (c.stampFails) return new Response('{"message":"boom"}', { status: 500 });
           row.indexnow_submitted_at = body.indexnow_submitted_at;
           return Response.json([{ ...row }]);
         }
@@ -203,16 +204,18 @@ console.log(JSON.stringify({
 }));
 """
 
-# Stamps for the through-the-handler window cases, built ONCE against the real
-# clock (the handler stamps `Date.now()`), so neither case depends on the fixed
-# probe clock above.
+# Stamps for the through-the-handler window cases are built WHEN THE CASES ARE
+# SERIALISED, not at import (see ``run_driver``): the handler stamps
+# ``Date.now()``, so a 23 h stamp built at collection time would be a fixed
+# 3600 s budget consumed by everything else pytest does before this module's
+# first test. The sentinels below stand in for the real ISO strings.
 def _stamp_hours_ago(hours: float) -> str:
     return (
         datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
     ).isoformat().replace("+00:00", "Z")
 
 
-STATES_AT_IMPORT = {"expired": _stamp_hours_ago(25), "fresh": _stamp_hours_ago(23)}
+STAMP_SENTINEL_HOURS = {"@expired": 25, "@fresh": 23}
 
 
 CASES: dict[str, dict] = {
@@ -252,8 +255,13 @@ CASES: dict[str, dict] = {
     # level up (`if (!shouldSubmit(...) || lastSubmittedAt)`) leaves the pure
     # probes green. The stamp is relative to the REAL clock because the handler
     # stamps `Date.now()`; `STATES["expired"]`/`["fresh"]` are built at import.
-    "expired_stamp_resubmits": {"status": "draft", "lastSubmittedAt": STATES_AT_IMPORT["expired"], "steps": [{"status": "published"}]},
-    "fresh_stamp_does_not_resubmit": {"status": "draft", "lastSubmittedAt": STATES_AT_IMPORT["fresh"], "steps": [{"status": "published"}]},
+    "expired_stamp_resubmits": {"status": "draft", "lastSubmittedAt": "@expired", "steps": [{"status": "published"}]},
+    "fresh_stamp_does_not_resubmit": {"status": "draft", "lastSubmittedAt": "@fresh", "steps": [{"status": "published"}]},
+    # The stamp write fails (our own control plane 5xx). The submission still
+    # happens and the publish still 200s, but the window was NOT recorded — so the
+    # operator must be told, or the next re-publish silently submits again with
+    # nothing saying why.
+    "stamp_fails": {"status": "draft", "stampFails": True, "steps": [{"status": "published"}]},
     # ── V4 ────────────────────────────────────────────────────────────────
     "endpoint_500": {"status": "draft", "indexnowStatus": 500, "steps": [{"status": "published"}]},
     "endpoint_unreachable": {"status": "draft", "indexnowThrows": True, "steps": [{"status": "published"}]},
@@ -331,6 +339,24 @@ def payload() -> dict:
     node = shutil.which("node")
 
     order = list(CASES)
+    # The window stamps are materialised HERE, milliseconds before node runs, not
+    # at import: the handler stamps `Date.now()`, so an import-time 23 h stamp
+    # would give the "still inside the window" case a fixed 3600 s budget spent on
+    # everything else pytest does before this module's first test.
+    stamp_now = {
+        sentinel: _stamp_hours_ago(hours) for sentinel, hours in STAMP_SENTINEL_HOURS.items()
+    }
+    cases = [
+        {
+            **CASES[k],
+            **(
+                {"lastSubmittedAt": stamp_now[CASES[k]["lastSubmittedAt"]]}
+                if CASES[k].get("lastSubmittedAt") in stamp_now
+                else {}
+            ),
+        }
+        for k in order
+    ]
     with tempfile.TemporaryDirectory() as td:
         driver = Path(td) / "driver.mjs"
         driver.write_text(_DRIVER, encoding="utf-8")
@@ -341,7 +367,7 @@ def payload() -> dict:
                 str(driver),
                 str(POSTS_FUNCTION),
                 str(INDEXNOW_MODULE),
-                json.dumps([CASES[k] for k in order]),
+                json.dumps(cases),
                 json.dumps(_probe_payload()),
             ],
             capture_output=True,
@@ -371,6 +397,36 @@ def _submitted_urls(res: dict) -> list[str]:
 
 def _logs_matching(res: dict, needle: str) -> list[str]:
     return [line for line in res["logs"] if needle in line]
+
+
+# ── The operator doc must not advertise a log surface it has lost a row of ──
+def test_every_log_shape_the_module_can_emit_is_in_the_operator_table() -> None:
+    """The doc table is the runbook's only discovery mechanism — keep it complete.
+
+    An operator diagnoses a notification failure by filtering for `[indexnow]` and
+    reading the table. A shape the code emits and the table omits is a failure
+    nobody can interpret, and a table row the code can no longer emit points at an
+    action that no longer exists. Both directions are asserted from the SOURCE, so
+    adding a `console.*` to the module reds here until the operator doc is updated
+    with it — the same shape as the V1 key-file assertion, which reads the
+    committed file rather than a copy of its name.
+
+    """
+    source = INDEXNOW_MODULE.read_text(encoding="utf-8")
+    shapes = set()
+    for match in re.finditer(r"console\.(?:log|warn|error)\(`\[indexnow\] ([^`]+)`", source):
+        # Everything before the first interpolation, minus the trailing separator.
+        head = match.group(1).split("${", 1)[0].rstrip(": ")
+        if head:
+            shapes.add(head)
+    assert len(shapes) >= 10, f"expected the module's log shapes, found {sorted(shapes)}"
+
+    doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8")
+    missing = sorted(s for s in shapes if s not in doc)
+    assert missing == [], (
+        "docs/blog-authoring.md's [indexnow] table omits log shapes the module emits: "
+        f"{missing} — an operator cannot act on a line the runbook does not describe"
+    )
 
 
 # ── V1: the key file is served from the site root ──────────────────────────
@@ -479,6 +535,12 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
         "publish → edit → unpublish → re-publish within one day must submit ONCE — "
         f"got {len(sequence['submissions'])}: {_submitted_urls(sequence)}"
     )
+    # ... and the suppression must be VISIBLE: a re-publish that is silently
+    # skipped is indistinguishable from a notification that never fired, which is
+    # the #7751 shape one layer down.
+    assert _logs_matching(sequence, "skipped (submitted "), (
+        f"a window-suppressed re-publish must log why: {sequence['logs']}"
+    )
 
 
 # ── V3, through the handler: an EXPIRED stamp submits again ───────────────
@@ -520,8 +582,29 @@ def test_an_empty_state_read_skips_and_says_so(results) -> None:
         f"an empty state read must not submit (the state is unknown, not clean) — "
         f"got {_submitted_urls(res)}"
     )
-    assert _logs_matching(res, "state unreadable"), (
-        f"an empty state read must log, or the failure is invisible: {res['logs']}"
+    # The SUFFIX, not just the shared "state unreadable" prefix: the doc gives the
+    # three causes three different remedies, so a branch that logs the wrong one
+    # sends the operator to the wrong action ("the row was gone — nothing to do"
+    # on a deploy that ran ahead of its migration is how the capability stays
+    # silently dead).
+    assert _logs_matching(res, "state unreadable, no row"), (
+        f"an empty state read must log its OWN shape, not another cause's: {res['logs']}"
+    )
+
+
+def test_a_failed_stamp_still_notifies_and_says_the_window_was_lost(results) -> None:
+    """The stamp write failing must not be silent: the window was NOT recorded.
+
+    The publish still succeeds and the submission still happens — but the next
+    re-publish will submit again, which the doc tells the operator to expect. The
+    stub answered every stamp with 200 until round 3, so this shape was reachable
+    in production and unexercised in the suite.
+    """
+    res = results["stamp_fails"]
+    assert res["statuses"] == [200], f"a failed stamp must not fail the publish: {res['statuses']}"
+    assert len(res["submissions"]) == 1, f"the notification itself must still happen: {res}"
+    assert _logs_matching(res, "stamp failed (supabase 500)"), (
+        f"the lost window must be logged, with its status: {res['logs']}"
     )
 
 
@@ -585,8 +668,12 @@ def test_unreadable_dedupe_state_skips_the_submission_and_says_so(results) -> No
     assert res["submissions"] == [], (
         f"an unreadable stamp must not submit — got {_submitted_urls(res)}"
     )
-    assert _logs_matching(res, "state unreadable"), (
-        f"the skip must be logged: {res['logs']}"
+    # The SUFFIX pins WHICH cause was logged — the doc gives `supabase 400`
+    # ("apply the migration") and `upstream unreachable` ("not a migration
+    # problem") different remedies, so logging the wrong one sends the operator to
+    # an action that cannot fix it. The stub answers 400 here.
+    assert _logs_matching(res, "state unreadable, supabase 400"), (
+        f"the skip must log its own shape: {res['logs']}"
     )
 
 
