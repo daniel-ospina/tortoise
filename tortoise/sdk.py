@@ -14487,7 +14487,13 @@ class TortoiseSDK:
                 # Row shape: [internal id, logical id, labels, properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
-                # replay key (name / coalesce(title,name) / url) at emission.
+                # replay key at emission: `name` for aboutSubject/Object/Event/
+                # Point, `url` for aboutDocument and extractedFrom (D10 — a
+                # document IS a :Source). The retired pre-D10 title fallback key
+                # is NOT one: `stub_key` never returns it (a title-only target
+                # yields None), so such a descriptor cannot be emitted at all.
+                # ONE key map in this loop — the emission comment below states
+                # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
                 if target_graph_id in succ_internals:
@@ -14519,10 +14525,13 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 # #2489: per-rel key extraction via the SHARED resolver — never
-                # target.id (Subjects MERGE by name, Sources by url, Documents by
-                # name-or-title). SKIP unresolvable keys (name-less Point from an
-                # id-targeted create_about_edge; url-less extractedFrom target): a
-                # null-key descriptor is un-replayable — those edges die at
+                # target.id (Subjects MERGE by name, Sources by url — and D10: a
+                # document IS a :Source, so aboutDocument and extractedFrom both
+                # key by `url`, the SAME key the target label moved with; a
+                # title-keyed aboutDocument descriptor is no longer resolvable and
+                # is never emitted). SKIP unresolvable keys (name-less Point from
+                # an id-targeted create_about_edge; a Source target lacking url):
+                # a null-key descriptor is un-replayable — those edges die at
                 # rebuild today anyway (zero regression).
                 if derivable:
                     keyed = stub_key(rel, target_props)

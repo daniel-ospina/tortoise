@@ -19,6 +19,20 @@ Design decisions (locked 2026-08-15, issue #318 — decision comment
       tier exists (pricing/GTM decision).
 - D4  Read-only introspection surface (REST ``GET /v1/packs`` + MCP
       ``packs_list``) — this module is the shared ensure-then-read core.
+- D4a (#9583, recorded 2026-10-22) — D4's *"read-only"* is a statement of
+      what the surface is FOR, and it is not a guarantee the mechanism keeps:
+      this module is the shared ensure-then-READ core, so a
+      ``get_tenant_packs`` read can MERGE a missing starter ``:PackInstall``
+      (the #318 self-heal, one per starter namespace, suppressed when the graph
+      carries a ``:PackSelection`` marker — #2728/#8648). Both surfaces
+      advertised D4's word as a guarantee: the MCP ``packs_list`` description
+      was corrected under #9575 and the REST ``GET /v1/packs`` OpenAPI
+      description — served from that route's docstring — under #9583. D4 is
+      kept VERBATIM above rather than reworded: it is a locked decision list,
+      and an unmarked edit would read as history being tidied. D4's intent
+      (these two endpoints exist to EXPOSE state, not to change it at a
+      caller's request) stands; the ensure half is recorded here, where the
+      next reader of D4 will see it.
 - D5  Existing-tenant backfill handles ``org_{name}`` vs ``org_{id}``
       naming via the RECORDED graph_name (graph-scripts/backfill_pack_installs.py).
 - D6  Existence masking — empty result when nothing to see; errors only for

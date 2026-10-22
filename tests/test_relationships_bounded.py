@@ -1365,24 +1365,54 @@ def test_failed_decoration_is_labelled_not_silently_empty():
     )
 
 
-class _PartialFillGraph:
-    """``graph`` stand-in that raises while assembling the SECOND point.
+class _UnhashableStatus:
+    """Truthy and unhashable: survives the fetch, raises INSIDE the assembly.
 
-    The fill loop assigns ``rels[pid] = entries`` point-by-point INSIDE the
-    ``try``, so a raise while assembling the second point leaves the first
-    point already filled. The raise here is the real, unguarded confidence
+    Used to inject a mid-assembly failure without depending on a defect: the
+    fetch keeps it (``row[5] or ""`` calls ``__bool__``), and the per-peer
+    assembly raises ``TypeError`` at ``is_terminal_status``'s set membership —
+    which is after the PREVIOUS point was already filled.
+    """
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __bool__(self):
+        return True
+
+
+class _PartialFillGraph:
+    """``graph`` stand-in with TWO modes over the same two-point shape.
+
+    DEFAULT (``fail_during_assembly=False``) — the #8504 regression fixture:
+    P1's peer is healthy, P2's peer carries the persisted ``(0.0, 0.0)``
+    MEASURED posterior, and the decoration must SUCCEED (no raise, both entries
+    present). #8504's own test uses this mode.
+
+    INJECTION (``fail_during_assembly=True``) — raises while assembling the
+    SECOND point, for the #6971 reset invariant below. The fill loop assigns
+    ``rels[pid] = entries`` point-by-point INSIDE the ``try``, so a raise while
+    assembling the second point leaves the first point already filled.
+
+    #8504 removed that invariant's original trigger — the unguarded confidence
     division (``round(alpha / (alpha + beta), 4)``) for a persisted
-    ``(0.0, 0.0)`` posterior with ``has_ep=True``: ``tortoise/ep.py`` guards
-    that pair twice (#330) and ``_write_node`` persists it, so the input class
-    occurs.
+    ``(0.0, 0.0)`` posterior is now guarded — so the mid-assembly failure is
+    INJECTED here with an unhashable peer status. The invariant #6971 pins
+    (ANY failure during assembly resets the WHOLE decoration) never depended on
+    which defect supplied the failure.
     """
 
     class _Result:
         def __init__(self, rows):
             self.result_set = rows
 
-    def __init__(self):
+    def __init__(self, fail_during_assembly=False, degenerate_pair=(0.0, 0.0)):
         self.support_rows_served = 0
+        self.fail_during_assembly = fail_during_assembly
+        # The pair P2's peer carries. ``(0.0, 0.0)`` is the persisted state
+        # #8504 is about; a subnormal pair like ``(1e-200, 1e-200)`` is the
+        # SAME "unusable persisted pair" class and underflowed the sibling
+        # variance division into the identical batch-wiping raise.
+        self.degenerate_pair = degenerate_pair
 
     def query(self, cypher, **kwargs):
         params = kwargs.get("params") or {}
@@ -1397,15 +1427,126 @@ class _PartialFillGraph:
         if "raw_cap" in params:
             return self._Result([])  # Q2-crit: no critical-class peers
         if "per_op" in params:
-            # Q2-support: P1's peer is healthy, P2's is the degenerate pair.
+            # Q2-support: P1's peer is healthy, P2's is degenerate (#8504) —
+            # or, in injection mode, carries a status the assembly cannot hash.
             self.support_rows_served += 2
+            status_b = _UnhashableStatus() if self.fail_during_assembly else ""
             return self._Result([
-                ("op1", "IMPL", 0, "A", "statement", "", 1.0, 1.0, True, None, False),
-                ("op2", "IMPL", 0, "B", "statement", "", 0.0, 0.0, True, None, False),
+                ("op1", "IMPL", 0, "A", "statement", "",
+                 3.0, 1.0, True, None, False),
+                ("op2", "IMPL", 0, "B", "statement", status_b,
+                 self.degenerate_pair[0], self.degenerate_pair[1], True, None,
+                 False),
             ])
         if "m.id" in cypher:
             return self._Result([])  # Q2b: no mitigations
         return self._Result([])  # Q2f: no family counts
+
+
+def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
+    """#8504: a persisted (0.0, 0.0) MEASURED peer must not abort the batch.
+
+    ``tortoise/ep.py::_write_node`` writes that pair verbatim (its #330 guard
+    fixes only the derived ``confidence``), and ``ep_measured_cypher`` calls it
+    MEASURED (``posterior_alpha IS NOT NULL``). The EP math itself clamps its
+    own posteriors (``_beta_from_natural`` / ``moments_to_beta``), so the pair
+    reaches the graph through a direct property write or a legacy graph — it is
+    a state the SDK can hold and re-flush, not one its arithmetic mints. Either
+    way the peer assembly's raw ``alpha / (alpha + beta)`` raised
+    ``ZeroDivisionError`` for it, and per #6971's handler that discarded EVERY
+    point in the batch, not just the degenerate peer.
+    """
+    out = get_relationships_bounded(_PartialFillGraph(), ["P1", "P2"])
+    assert out.decoration_error == "", (
+        "a degenerate MEASURED peer must decorate, not abort the batch")
+    peers = {e["related_id"]: e["peer"] for e in out["P1"] + out["P2"]}
+    assert set(peers) == {"A", "B"}, (
+        "the healthy peer's entry must survive alongside the degenerate one")
+    assert peers["A"]["confidence"] == 0.75, peers["A"]  # 3/(3+1)
+    assert peers["B"]["confidence"] == 0.5, (
+        "#330's uniform fallback is the house value for a degenerate pair — "
+        "the same 0.5 StateRanker._fetch_point_signals reports for it "
+        "(ranking.py:1046 → NEUTRAL_CONFIDENCE); NOT the GraphRanker sibling, "
+        "which reads the mirrored column and has no such guard. got "
+        f"{peers['B']['confidence']!r}")
+    assert peers["B"]["variance"] == 0.0, (
+        "_beta_variance's s <= 0 guard — which is why the 0.5 mean does not "
+        "read as a fabricated Beta(1,1) posterior")
+    assert peers["B"]["contested"] is False, (
+        "a degenerate posterior is not evidence of contest")
+
+
+def test_subnormal_peer_pair_does_not_underflow_the_variance_division():
+    """#8504 (sibling site): a subnormal persisted pair must not abort the batch.
+
+    ``_beta_variance`` guards ``s <= 0`` but not the denominator it then
+    divides by: for α=β=1e-200 both ``α*β`` and ``s*s`` underflow to ``0.0``,
+    so the division raised ``ZeroDivisionError`` — the same failure shape one
+    line under the site #8504 repairs, discarding every assembled point. A
+    non-finite sum is the same class (α overflowing to ``+inf`` yielded
+    ``α/inf == 0.0``: maximum disbelief rather than the neutral fallback).
+
+    This is a stub-level unit test of the helpers' totality as reached through
+    the batch assembly, not a claim that the SDK's own EP arithmetic mints such
+    a pair (it clamps to >= 0.01) — the reachability is the direct property
+    write ``_write_node``/legacy graphs also give the ``(0.0, 0.0)`` case.
+    """
+    graph = _PartialFillGraph(degenerate_pair=(1e-200, 1e-200))
+    out = get_relationships_bounded(graph, ["P1", "P2"])
+    assert out.decoration_error == "", (
+        "a subnormal peer pair must decorate, not abort the batch: "
+        f"{out.decoration_error}")
+    peers = {e["related_id"]: e["peer"] for e in out["P1"] + out["P2"]}
+    assert set(peers) == {"A", "B"}, (
+        "the healthy peer's entry must survive alongside the subnormal one")
+    assert peers["B"]["variance"] == 0.0, (
+        "an underflowed/overflowed denominator carries no variance to report: "
+        f"{peers['B']['variance']!r}")
+    assert peers["B"]["confidence"] == 0.5, (
+        "α/s is still a usable mean for a subnormal pair (0.5), so the wire "
+        f"value stays the house fallback; got {peers['B']['confidence']!r}")
+
+
+@pytest.mark.parametrize("degenerate_write", [
+    # The pair _write_node persists (posterior arm of ep_measured_cypher).
+    "SET n.posterior_alpha = 0.0, n.posterior_beta = 0.0",
+    # The legacy arm of ep_measured_cypher: `ep_alpha IS NOT NULL AND NOT
+    # baseline_set` — a pre-#2199 graph, which reaches the SAME division.
+    "SET n.ep_alpha = 0.0, n.ep_beta = 0.0",
+], ids=["measured-posterior-arm", "legacy-ep-prior-arm"])
+def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(
+        sdk, degenerate_write):
+    """#8504 end-to-end: the degenerate pair reaches the graph, on a real one.
+
+    Covers BOTH arms of ``ep_measured_cypher`` that can make a ``(0.0, 0.0)``
+    pair read as MEASURED — the persisted posterior ``_write_node`` writes, and
+    a legacy ``ep_alpha``/``ep_beta`` pair on a graph that never got a #2199
+    baseline. They coalesce into the same α/β and reach the same division, so
+    pinning only the posterior arm would let a change to the coalesce or the
+    legacy arm reintroduce a batch-losing raise with every test still green.
+
+    The stub above pins the assembly arithmetic; this pins that the row
+    survives the WHOLE decoration — both the in-Cypher contested projection
+    (``nan`` for 0/0, not an error) and the Python assembly.
+    """
+    a = _point(sdk, content="claim whose only peer is degenerate")
+    b = _point(sdk, content="peer carrying a degenerate (0.0, 0.0) posterior")
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    _graph(sdk).query(
+        "MATCH (n:Point) WHERE n.id = $id " + degenerate_write,
+        params={"id": b["id"]},
+    )
+    out = get_relationships_bounded(_graph(sdk), [a["id"]])
+    assert out.decoration_error == "", (
+        "the degenerate peer aborted the whole decoration: "
+        f"{out.decoration_error}")
+    entries = out[a["id"]]
+    assert [e["related_id"] for e in entries] == [b["id"]], entries
+    # 0.5 (not None) is what makes this an arm that read as MEASURED: an
+    # unmeasured peer carries confidence None and would never reach the divide.
+    assert entries[0]["peer"]["confidence"] == 0.5, entries[0]["peer"]
+    assert entries[0]["peer"]["variance"] == 0.0, entries[0]["peer"]
+    assert entries[0]["peer"]["contested"] is False, entries[0]["peer"]
 
 
 def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
@@ -1417,7 +1558,17 @@ def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
     SDK stamped every hit with that "is empty" message — a self-contradicting
     payload that costs a marker-trusting consumer real edges.
     """
-    graph = _PartialFillGraph()
+    graph = _PartialFillGraph(fail_during_assembly=True)
+    # Pin this test's OWN premise, with no cross-test dependence: the same stub
+    # in default mode must FILL P1. Without this, the (correct) all-empty reset
+    # makes the final assertion pass identically whether or not a partial fill
+    # ever happened, so a fixture edit that moved the injection earlier would
+    # leave this test green while it no longer exercises the invariant it is
+    # named for.
+    pre = get_relationships_bounded(_PartialFillGraph(), ["P1", "P2"])
+    assert pre["P1"], (
+        "the same fixture in default mode must fill P1 — otherwise the reset "
+        "assertion below proves nothing")
     out = get_relationships_bounded(graph, ["P1", "P2"])
     # Non-vacuity: the stub must actually have served P1 a real peer row and
     # reached the except path, or the assertion below proves nothing.
@@ -1426,13 +1577,13 @@ def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
         "path was never exercised"
     )
     assert out.decoration_error != "", (
-        "expected the degenerate-posterior division to reach the except path, "
+        "expected the mid-assembly raise to reach the except path, "
         "got a clean decoration"
     )
-    assert "ZeroDivisionError" in out.decoration_error, out.decoration_error
+    assert "TypeError" in out.decoration_error, out.decoration_error
     assert out == {"P1": [], "P2": []}, (
         "a failed decoration must be all-empty for EVERY requested point — "
-        "the relayed marker asserts exactly that (#6971)"
+        "P1 was already assembled when P2 raised (#6971)"
     )
 
 
