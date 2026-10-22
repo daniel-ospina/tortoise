@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import pytest
 
-from tortoise.projection import FalkorProjection
+from tortoise.projection import FalkorProjection, _fmt_bytes
 
 # The server's own wording when `maxmemory` is reached with `noeviction`.
 _MAXMEMORY_ERROR = (
@@ -410,9 +410,10 @@ def test_a_ratio_far_below_the_ceiling_does_not_claim_the_ceiling_was_reached(mo
     `used_memory 1.0 KiB of maxmemory 512.0 MiB`, and quoting "has reached its
     memory ceiling" there would state a fact the reading contradicts.
 
-    The branch therefore reports the OBSERVATION with the shortfall (so two
-    rounded-equal figures can never be printed as "below"), keeps the cause list
-    modal, and asks for a re-read instead of forbidding the ceiling.
+    The branch therefore reports the OBSERVATION with the shortfall, keeps the
+    cause list modal, and asks for a re-read instead of forbidding the ceiling.
+    (Naming the shortfall alone does NOT stop the two rounded figures from
+    colliding — see `test_the_ceiling_is_printed_in_bytes_...`.)
 
     NON-VACUOUS: on the pre-fix code this message asserts the ceiling AND the
     `--maxmemory` lever for exactly these numbers.
@@ -437,27 +438,41 @@ def test_a_ratio_far_below_the_ceiling_does_not_claim_the_ceiling_was_reached(mo
     assert "may be elsewhere" in lowered, msg
 
 
-def test_the_shortfall_is_named_so_two_rounded_figures_never_read_as_below():
-    """#7392 cycle 5 — `_fmt_bytes` rounds to 0.1 of a unit, and the branch
-    prints BOTH figures: at 16 MiB a sub-52 KiB drift renders both as
-    "16.0 MiB", so a message saying "BELOW the ceiling (16.0 MiB)" beside
-    `used_memory 16.0 MiB` contradicts itself.
+@pytest.mark.parametrize("cap", [
+    16 * 1024 * 1024,            # 16.0 MiB — the measured-drift size
+    1_095_216_660,               # 1.02 GiB: the ROUNDED forms collide (1.0 GiB)
+    2_147_483_648,               # 2.0 GiB: same collision
+])
+def test_the_ceiling_is_printed_in_bytes_so_no_two_figures_read_as_equal(cap):
+    """#7392 cycle 6 — the below-ceiling reading must not print two figures that
+    LOOK the same.
 
-    Naming the SHORTFALL is what makes that impossible: any reading that reaches
-    this branch is more than `max(64 KiB, cap // 100)` under the cap, so the
-    delta always renders as its own non-zero figure.
+    `_fmt_bytes` keeps one decimal of a unit, so at 1-5 GiB (and TiB) caps the
+    usage and the ceiling of a below-branch reading can round to the SAME string
+    — "10.5 MiB below its maxmemory ceiling of 1.0 GiB" printed beside
+    "used_memory 1.0 GiB" reads as a self-contradiction, which is the very
+    failure this branch exists to remove. Naming the shortfall does NOT prevent
+    it (294 of 401 sampled 1-5 GiB caps reproduced the collision). The branch
+    therefore prints the ceiling in EXACT BYTES.
+
+    NON-VACUOUS: this pin fails on the previous commit, whose message put the
+    ceiling through `_fmt_bytes` — the earlier version of this test compared the
+    figure WITH its `used_memory ` prefix, so it passed on every possible value.
     """
-    cap = 16 * 1024 * 1024
+    # One byte past the tolerance, so this is the BELOW branch.
+    used = cap - max(64 << 10, min(cap // 100, 1 << 20)) - 1
     proj = object.__new__(FalkorProjection)
-    proj._memory_pressure = lambda: (cap - (3 * cap // 10), cap)  # type: ignore[method-assign]
+    proj._memory_pressure = lambda: (used, cap)  # type: ignore[method-assign]
 
     msg = proj._write_refusal_message(RuntimeError("Out of memory"))
     assert msg is not None
-    # The rendered usage and ceiling differ — no self-contradiction.
-    rendered = msg.split("NOW reports ", 1)[1]
-    used_text = rendered.split(" — ", 1)[0]
-    assert used_text != "16.0 MiB", msg
-    assert "below its maxmemory ceiling" in msg.lower(), msg
+    lowered = msg.lower()
+    assert "does not show the ceiling being reached" in lowered, msg
+    # The ceiling is exact, so it can never be confused with the rounded usage.
+    assert f"ceiling ({cap} B)" in msg, msg
+    assert f"ceiling ({_fmt_bytes(cap)})" not in msg, msg
+    # The shortfall is named, and is non-zero.
+    assert _fmt_bytes(cap - used) in msg, msg
 
 
 def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():

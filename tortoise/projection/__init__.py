@@ -10575,10 +10575,11 @@ class FalkorProjection(
             cap = int(info["maxmemory"])
         except (TypeError, ValueError):
             return None
-        if cap < 0:
+        if cap < 0 or used < 0:
             # No conformant Redis reports a negative ceiling (`CONFIG SET
-            # maxmemory` refuses one), so this is a broken reading and not an
-            # answer — it must not become a "no ceiling" claim either.
+            # maxmemory` refuses one) nor a negative usage, so either is a
+            # broken reading and not an answer — it must not become a
+            # "no ceiling"/"below the ceiling" claim either.
             return None
         # cap == 0 is the server answering "no limit", not a failed reading.
         return (used, cap)
@@ -10639,8 +10640,8 @@ class FalkorProjection(
                 "container's REDIS_ARGS, or the provider's console on a "
                 "managed instance. If it reports 0, there is no ceiling to "
                 "raise and the pressure is NOT a maxmemory dataset ceiling — "
-                "it may come from host/kernel memory, or from an in-instance "
-                "per-query cap.")
+                "it may come from host/kernel memory, an in-instance "
+                "per-query cap, or elsewhere.")
         elif pressure[1] <= 0:
             # Readable, and it says NO limit. Name the absence, not a ceiling.
             # The value is interpolated rather than spelled "0": the predicate
@@ -10656,11 +10657,11 @@ class FalkorProjection(
             remedy = (
                 "Remedy: this instance has no ceiling to raise — the pressure "
                 "is NOT a maxmemory dataset ceiling, and it may come from "
-                "host/kernel memory or from an in-instance per-query cap. Do "
-                "not go looking for a --maxmemory to tune: none is set (one "
-                "would be added in a container's REDIS_ARGS or in the "
-                "provider's console on a managed instance, and this message "
-                "reports it by name once it exists).")
+                "host/kernel memory, an in-instance per-query cap, or "
+                "elsewhere. Do not go looking for a --maxmemory to tune: none "
+                "is set (one would be added in a container's REDIS_ARGS or in "
+                "the provider's console on a managed instance, and this "
+                "message reports it by name once it exists).")
         else:
             used, cap = pressure
             # #7392 cycle 5 — the reading is taken AFTER the refusal
@@ -10674,7 +10675,15 @@ class FalkorProjection(
             # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
             # different cause — and only a shortfall WIDER than it is treated as
             # evidence that the ceiling is not the explanation.
-            drift = max(64 << 10, cap // 100)
+            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
+            # floor; the 1% arm is a heuristic that must not scale unbounded,
+            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
+            # print the ceiling sentence for a reading that is far from it —
+            # the over-claim direction, which is the unsafe one (its remedy is
+            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
+            # safe, because the below branch withholds nothing and asks for a
+            # re-read.
+            drift = max(64 << 10, min(cap // 100, 1 << 20))
             if used + drift >= cap:
                 lead = ("the server has reached its memory ceiling (used_memory "
                         f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
@@ -10687,15 +10696,22 @@ class FalkorProjection(
                 # issue's proposal kept the ceiling sentence whenever the ratio
                 # was read, which assumed "read" implies "reached"; this branch
                 # is where that assumption fails, so it reports the OBSERVATION
-                # (with the shortfall, so two rounded-equal figures can never be
-                # printed as "BELOW") and asks for a re-read rather than
-                # forbidding the ceiling as the remedy. The cause list keeps the
-                # same modal shape (ii) uses.
+                # and asks for a re-read rather than forbidding the ceiling.
+                #
+                # #7392 cycle 6 — the CEILING is printed in exact bytes here,
+                # not through `_fmt_bytes`: that formatter keeps one decimal of
+                # a unit, so at 1-5 GiB (and TiB) caps the usage and the ceiling
+                # of a below-branch reading can round to the SAME string, and
+                # "10.5 MiB below its maxmemory ceiling of 1.0 GiB" printed
+                # beside "used_memory 1.0 GiB" reads as a contradiction. Naming
+                # the shortfall alone did not prevent that (294 of 401 sampled
+                # 1-5 GiB caps reproduced it).
                 shortfall = cap - used
-                lead = (f"this instance NOW reports used_memory "
-                        f"{_fmt_bytes(used)} — {_fmt_bytes(shortfall)} below its "
-                        f"maxmemory ceiling of {_fmt_bytes(cap)} — so THIS "
-                        "reading does not show the ceiling being reached")
+                lead = ("the server refused a command for MEMORY reasons, and "
+                        f"this instance NOW reports used_memory "
+                        f"{_fmt_bytes(used)} — {_fmt_bytes(shortfall)} below "
+                        f"its maxmemory ceiling ({cap} B) — so THIS reading "
+                        "does not show the ceiling being reached")
                 remedy = ("Remedy: re-read INFO memory while the refusal is "
                           "repeating. If it reports at the ceiling, raise / "
                           "relieve it — the --maxmemory in a container's "
