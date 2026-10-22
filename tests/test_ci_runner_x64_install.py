@@ -604,6 +604,13 @@ def test_the_runbooks_installer_line_map_lands_on_what_it_names():
         "resolve_labels": r"^resolve_labels\(\)",
         "verify": r'\[ "\$got" = "\$SHA256_LINUX_X64" \]',
         "token": r"registration-token",
+        # ⛔ THE TWO MODE BLOCKS THE MAP LINKS TO. Both were cited one whole guard-block away from
+        # where they actually start after a fix commit shifted lines above them — the labelled
+        # anchors below (`forks`, `verify`, …) all still landed, so nothing caught it (review
+        # finding, cycle 2). A ref that points INTO a guard the sentence does not name is worse than
+        # no ref: a fixer sent to `:327` edits the capacity guard on the destructive path.
+        "uninstall": r'^if \[ "\$MODE" = uninstall \]',
+        "install": r'^if \[ "\$MODE" = install \]',
     }
     # ⛔ EVERY anchor must be found by name: a label the map stopped naming is how this pin would
     # silently degrade to checking nothing (the runbook writes some labels bare — `(forks :262` —

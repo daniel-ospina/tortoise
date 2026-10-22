@@ -122,16 +122,17 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:422` (the scale loop) · guards at `:278-327`
-  (forks `:286`, disk `:306`, cpu/memory `:313`) · sha256 pin + registration at `:433-441`
-  (verify `:433`, token `:436`, one argv `:439-440`, `config.sh` `:441`) · systemd
+- `--count N` → `tools/install-ci-runner-x64.sh:422` (the scale loop) · the two mode blocks the
+  paragraphs below cite: `install` `:278` (arch refusal dies at `:283`) and `uninstall` `:331` ·
+  guards at `:278-327` (forks `:286`, disk `:306`, cpu/memory `:313`) · sha256 pin + registration
+  at `:433-441` (verify `:433`, token `:436`, one argv `:439-440`, `config.sh` `:441`) · systemd
   install/start at `:451-453` · label resolution at `:169-207` (`fallback_engaged` `:173`,
   `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:262`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:327-405`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
+  gone** (`:330-405`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
   `bin/Runner.Listener` must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -151,8 +152,8 @@ falls back.
   failed, likewise left intact), a tool missing from PATH, or a failed remote read.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
-  arch refusal still governs every INSTALL — and only an install (`:275`, inside the `MODE =
-  install` block). `--status`, `--repair-labels`, `--print-labels` and `--uninstall` are **not**
+  arch refusal still governs every INSTALL — and only an install (`:278`, the `MODE = install`
+  block; the refusal itself dies at `:283`). `--status`, `--repair-labels`, `--print-labels` and `--uninstall` are **not**
   gated by the host's architecture: those modes download nothing, register nothing, and need no
   x64 binary, so a runner can be inspected, relabelled or decommissioned from any host. (The
   guard used to sit above the uninstall block too, which refused decommissioning on exactly the
@@ -202,22 +203,26 @@ The installer's invariants are pinned by `tests/test_ci_runner_x64_install.py` (
 belongs to). It drives the script as a subprocess in a hermetic env — a temp base dir, a stub
 `gh`, no network — and every case runs on any host and any architecture; there is no skip path.
 
-1. **`ci_runner_gate.sh` relabels every runner in the repo — NOT YET FIXED.** `set_labels`
-   (`scripts/ci_runner_gate.sh:162`) enumerates *all* runner ids (`runner_ids` `:150`, no pool
-   filter) and PUTs the ARM64 pool's label body (`fallback_on` `:184`: `{self-hosted-arm64,
-   ubuntu-latest}`; `fallback_off` `:185`: `{self-hosted-arm64}`). On the pre-fix gate that means an
-   x86 runner gets `self-hosted-arm64` stamped onto it — a false architecture claim a future
-   arch-specific job could be routed into — and loses `self-hosted-x64`, so nothing distinguishes
-   it from an ARM64 box in the API.
+1. **A stamped runner now HEALS on the next gate tick — #2327 is FIXED; what remains is when the
+   gate re-runs, and the manual re-sync.** The pre-#2327 gate rewrote the labels of *every* runner
+   it could enumerate, which is what stamped `self-hosted-arm64` onto an x86 box and dropped
+   `self-hosted-x64` — a false architecture claim a future arch-specific job could be routed into,
+   with nothing in the API distinguishing it from an ARM64 box. `daniel-ospina/agent-infra#2327`
+   landed as PR #2338 (gate commit `63b768f6d`, on `agent-infra` `main`): `managed_ids`
+   (`scripts/ci_runner_gate.sh:187`) selects only runners carrying a pool marker, `labels_for`
+   (`:212`) derives each body from THAT runner's own GitHub host label (`ARM64`/`X64`), and the
+   legacy `self-hosted-arm64` stamp is deliberately NOT consulted — so an already-stamped x86
+   runner is repaired rather than re-stamped. `ubuntu-latest` is the only label the gate owns and
+   the only one it toggles (`fallback_on`/`fallback_off` `:289-290`).
 
-   ⛔ **The trigger is the next gate TICK, not the next transition.** The gate re-applies labels
-   when `mode != want || prev != want` (`:274`), and `current_mode` (`:187`) counts *any* runner
-   carrying `ubuntu-latest` as `local`. While these runners carry that label, the gate cannot read
-   `github` — so on a day GitHub-hosted is healthy it runs `fallback_off`, which is the path that
-   stamps the ARM64 label. Filed as **`daniel-ospina/agent-infra#2327`** (per-runner label sets:
-   preserve each runner's own pool label, toggle only `ubuntu-latest`). Until it lands, repair with
-   `tools/install-ci-runner-x64.sh --repair-labels` (re-applies this arch's marker and syncs the
-   fallback label to the gate's state, no re-registration).
+   ⛔ **The trigger is still the next gate TICK, not the next transition, and that is the part that
+   stays a risk.** The gate re-applies labels when `mode != want || prev != want` (`:379`), and
+   `current_mode` (`:292`) counts *any* runner carrying `ubuntu-latest` as `local` — while these
+   runners carry that label the gate cannot read `github`, so on a day GitHub-hosted is healthy it
+   runs `fallback_off`, which post-#2327 strips `ubuntu-latest` from an x64 runner and emits
+   `{self-hosted-x64}` (plus any custom label that runner already carried, which the gate never
+   removes — `labels_for` `:218-233`). `tools/install-ci-runner-x64.sh --repair-labels` re-applies this arch's
+   marker and syncs the fallback label to the gate's state by hand, with no re-registration.
 2. **The pool is still the slower class for long legs.** These runners are not pinned off the
    fast matrix (`test (a)…(i)`), so a 20m watchdog leg can still be killed here if this box
    turns out slower than hosted under load. That is the #6897 measurement, unchanged; the
