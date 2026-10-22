@@ -2357,6 +2357,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             "non-zero counter has no way to tell the documented baseline from a "
             "real arming failure"
         )
+    # ... and the bar must require PRESENCE, not only a clean reason breakdown.
+    # `write_live_record` returns BEFORE counting anything when unarmed
+    # (`tortoise/record_writer.py`: `if not armed: return None`), so an unarmed
+    # deployment yields `record_write_failures: {}`,
+    # `record_non_journal_skips: {}` and an empty `fly logs` grep — the "no
+    # unexpected failure" half is then VACUOUSLY satisfied. Without this the
+    # recipe greens the exact state the section exists to catch.
+    assert "NOT_ARMED" in section and "FAIL" in section, (
+        "the pass bar does not state that an all-empty reading is `NOT_ARMED` "
+        "and a FAIL — an unarmed deployment counts nothing at all, so a bar "
+        "written only as 'no growth' is vacuously green on the silent-inert "
+        "deployment this section exists to detect"
+    )
+    assert re.search(r"seam was REACHED", section), (
+        "the pass bar has no presence requirement — name the reading that must "
+        "EXIST after a capture before the reason breakdown means anything"
+    )
 
 
 def _guarded_append(name: str) -> str:

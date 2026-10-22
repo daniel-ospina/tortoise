@@ -2600,7 +2600,9 @@ of broken: nothing goes red, the record simply never receives a row
 (`docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` §A8).
 
 **The value.** The project's **pooler** DSN — the same shape `.env.example`
-documents for `TORTOISE_AUDIT_DSN` (and for `TORTOISE_RECORD_DSN` itself):
+documents for `TORTOISE_AUDIT_DSN`. ⚠️ `.env.example`'s own
+`TORTOISE_RECORD_DSN` line is a **commented, non-pooler `localhost` placeholder**:
+copy the *shape* from the `TORTOISE_AUDIT_DSN` block, not that line.
 `postgresql://postgres.<project-ref>:<urlencoded-password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require&connect_timeout=5`.
 ⚠️ **URL-encode the password** (`@`, `:`, `#`, `/` and `?` are DSN delimiters): a
 raw `p@ss:word` does not fail — it parses into a *different* host/user, and
@@ -2651,8 +2653,9 @@ the counter either.
    the rows: the authenticated MCP tool `tortoise_overview(section="health")` on
    the app's `/mcp` mount, which serves `monitoring.metrics()` from the same
    process that writes the rows (the retired name `tortoise_health` still answers
-   as an alias), so `record_write_failures` (a `{reason: count}` dict) and
-   `record_non_journal_skips` are the live shape. ⛔ Do **not** substitute a
+   as an alias), so `record_write_failures` (a `{reason: count}` dict),
+   `record_non_journal_skips` and `record_position_unproven` are the live shape.
+   ⛔ Do **not** substitute a
    `fly ssh console -C "python3 -c 'import tortoise.monitoring; …'"` one-liner:
    the counters are in-process memory, so a fresh interpreter answers **0**
    unconditionally — a worse false pass than the 404 above.
@@ -2687,10 +2690,26 @@ armed deployment:
   documented baseline, not an arming failure — and per that epic's ordering (R1
   arms, R2 lands the schema) a non-zero `write_failed` is even *expected* before R2
   lands.
+- `record_position_unproven` **may be non-zero** — a DURABLE journal whose append
+  could not prove the record's position writes no layer-1 row (a replay heals
+  it). It is the one key that says *"layer 1 is behind the journal by N
+  records"*; it is **not** a write failure and must not be read as one, but it
+  must not be silently ignored either.
 
-So the bar is: **no growth in a reason other than the documented #9264
-`write_failed` refusals, and none at all for `no_tenant` / `malformed_dsn` /
-`circuit_open`.** Those three are always a fail-and-fix:
+So the bar has **two parts, and BOTH are required**:
+
+1. **The seam was REACHED.** After one capture, at least one expected reading
+   must be *present*: `record_non_journal_skips{reason="no_durable_journal"}`
+   ≥ 1, or new `journal_event` / `point` rows on the record project. **Both
+   empty — or all-zero — means the write seam was never entered: the deployment
+   is still `NOT_ARMED`, and that is a FAIL, not a pass.** `write_live_record`
+   returns *before counting anything* when unarmed, so an absent reading and a
+   healthy zero are **byte-identical** on both recipes above — which is why
+   presence, not only the reason breakdown, is part of the bar. The usual causes
+   are a missing/blank GitHub secret, or a Fly value the deploy did not stage.
+2. **No unexpected failure.** *Then*: **no growth in a reason other than the
+   documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
+   `malformed_dsn` / `circuit_open`.** Those three are always a fail-and-fix:
 `no_tenant` = the request carried no tenant (or a set-but-undeclared env pair),
 `malformed_dsn` = the value is not a parseable DSN, `circuit_open` = a recent
 connect FAILED (wrong host/password, project paused, network) — i.e. the
