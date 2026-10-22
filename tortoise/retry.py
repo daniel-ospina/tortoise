@@ -871,8 +871,23 @@ def is_memory_ceiling_refusal(exc: BaseException) -> bool:
     cycle 2): the outage family also owns the ANSWERED ``BusyLoadingError``
     (LOADING). The real discriminator is :func:`_answered_refusal`, which
     excludes every ``ResponseError`` from the outage family: ``OutOfMemoryError``
-    IS a ``ResponseError``, and LOADING is not an ``OutOfMemoryError``. That is
-    why the two predicates cannot both answer True for one exception.
+    IS a ``ResponseError``, and LOADING is not an ``OutOfMemoryError``. So the
+    two predicates cannot both answer True for the SAME exception object on its
+    OWN class/text.
+
+    ⚠️ That is a statement about one link, not a universal property of the pair
+    (#9532 cycle 3 P3). This function WALKS the chain below, so the two
+    predicates CAN both answer True for one exception — a transport failure
+    whose ``__cause__`` is a ceiling refusal is admitted by
+    :func:`is_instance_unavailable` (on the top link's ``TimeoutError``) and by
+    this one (on the cause). What keeps a caller-visible message to ONE suffix
+    is the ORDER in ``cypher_guard._note_instance_outage`` — the outage arm
+    first, the ceiling arm only as its fallback — plus the shared
+    ``_LEGIBLE_OPENER`` idempotency marker. Not the disjointness. Pinned by
+    ``test_the_ordering_not_the_disjointness_keeps_one_suffix`` in
+    ``tests/test_7357_memory_ceiling_legibility.py``, which reddens if the two
+    arms are ever swapped (the ceiling note would then claim "nothing was
+    applied" about a failure whose REPLY was LOST).
 
     Class first, text second: ``OutOfMemoryError`` is the class the vendor
     parser mints for the engine's own ``OOM …`` reply on the pinned redis, and

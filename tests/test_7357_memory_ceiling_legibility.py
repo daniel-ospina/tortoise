@@ -231,6 +231,52 @@ def test_the_note_does_not_invite_a_retry_and_names_the_real_remedy():
     assert "re-issuing this statement is safe" not in text
 
 
+def _provisioner_redis_args(provision_src):
+    """The ``REDIS_ARGS`` strings ``provision.sh`` actually passes to docker.
+
+    P2 (#9532 cycle 3): the first version of this guard sliced the script at the
+    FIRST occurrence of the literal ``REDIS_ARGS`` — which is the last word of a
+    COMMENT (``# ... `--maxmemory` in REDIS_ARGS``) — so the slice was the empty
+    string and ``"--maxmemory" not in ""`` was vacuously true. The fact the
+    note's wording rests on ("the CI provisioner passes none") was therefore
+    unpinned: appending ``--maxmemory 1g`` to the real default left every
+    assertion in that test green.
+
+    So parse the ARGV, not the prose: ``start <name> "<redis_args>" <auth>`` is
+    the one call site shape that reaches ``docker run -e REDIS_ARGS=...``, and a
+    comment can never be mistaken for it. Self-tested by
+    ``test_the_provisioner_argv_scanner_reads_the_argv_not_a_comment`` so a
+    rewrite of this function cannot silently re-vacuum the guard.
+    """
+    import re
+
+    return re.findall(r'^\s*start\s+"[^"]*"\s+"([^"]*)"', provision_src, re.M)
+
+
+def test_the_provisioner_argv_scanner_reads_the_argv_not_a_comment():
+    """The scanner's own self-test (#9532 cycle 3 P2).
+
+    The defect was a guard that read a COMMENT and therefore asserted on the
+    empty string. This plants the two shapes that matter — a decoy comment that
+    says ``REDIS_ARGS`` before any call site, and a real ``start`` invocation
+    that carries a ``--maxmemory`` — and requires the scanner to return the
+    argv and to see the flag. A comment-slicing implementation returns ``""``
+    here and fails the first assertion.
+    """
+    planted = (
+        "# a comment that mentions REDIS_ARGS and `--maxmemory` in prose\n"
+        'start "$NAME" "--requirepass falkordb --save \'\'" "-a falkordb"\n'
+        '  start "$LEGACY" "--save \'\' --maxmemory 1g" ""\n'
+    )
+    argv = _provisioner_redis_args(planted)
+    assert argv == ["--requirepass falkordb --save ''",
+                    "--save '' --maxmemory 1g"], (
+        "the scanner must read the `start` argv, not a comment that names it: "
+        f"{argv!r}")
+    assert any("--maxmemory" in args for args in argv), (
+        "a real argv carrying --maxmemory must be visible to the guard")
+
+
 def test_the_remedy_claims_match_the_files_they_assert_about():
     """P2 (#9532 cycle 2): pin the FACTS, not only the note's own wording.
 
@@ -259,14 +305,16 @@ def test_the_remedy_claims_match_the_files_they_assert_about():
 
     provision_src = (root / ".github" / "actions" / "falkordb-provision"
                      / "provision.sh").read_text(encoding="utf-8")
-    # The provisioner's own REDIS_ARGS default, as the comment block at the
-    # `--maxmemory` discussion records: `--requirepass falkordb --save ''`.
-    assert "--requirepass falkordb --save ''" in provision_src, (
-        "the provisioner's REDIS_ARGS default moved — re-derive the note's "
-        "\"the CI provisioner passes none\" claim")
-    assert "--maxmemory" not in provision_src.split("REDIS_ARGS")[1].split("\n")[0], (
+    argv = _provisioner_redis_args(provision_src)
+    assert argv, (
+        "the provisioner's `start` call sites must still be parseable — the "
+        "guard below is only meaningful if it reads argv")
+    assert [args for args in argv if "--maxmemory" in args] == [], (
         "the provisioner now passes a --maxmemory; the note's claim that it "
-        "passes none is stale")
+        f"passes none is stale: {argv!r}")
+    assert any(args == "--requirepass falkordb --save ''" for args in argv), (
+        "the provisioner's REDIS_ARGS default moved — re-derive the note's "
+        f"\"the CI provisioner passes none\" claim: {argv!r}")
 
 
 def test_the_note_never_names_deleting_graphs_as_the_remedy():
@@ -659,3 +707,47 @@ def test_the_note_is_applied_once_across_two_nested_channels(monkeypatch):
     assert message.startswith(CEILING_SENTENCE)
     assert message.count(_LEGIBLE_OPENER) == 1, message
     assert "memory-ceiling" in message.lower()
+
+
+def test_the_ordering_not_the_disjointness_keeps_one_suffix():
+    """P3 (#9532 cycle 3): the two predicates are NOT universally disjoint.
+
+    The docstrings of :func:`is_memory_ceiling_refusal` and
+    ``cypher_guard._note_instance_outage`` claimed the two families "cannot both
+    answer True for one exception" / "are provably disjoint". The class
+    partition is real, but it is per LINK: both predicates walk the
+    ``__cause__``/``__context__`` chain (this PR added that walk), so a
+    ``TimeoutError`` whose cause is the engine's ceiling refusal is admitted by
+    BOTH. What actually keeps a caller-visible message to ONE suffix is the
+    ORDER in the applier — the outage arm first, the ceiling arm only as its
+    fallback — plus the shared ``_LEGIBLE_OPENER`` marker.
+
+    This pins the mechanism instead of the claim, because with both predicates
+    answering True an arm swap would apply the ceiling note ("Nothing was
+    applied … re-issuing it now will be refused the same way") to a transport
+    failure whose REPLY WAS LOST — the overclaim
+    :func:`explain_instance_unavailable` exists to forbid.
+
+    NON-VACUOUS: swap the two arms in ``_note_instance_outage`` (ceiling first)
+    and the "no ceiling note" assertion below reddens — the ceiling arm returns
+    a note, so the outage fallback never runs.
+    """
+    chained = redis_exc.TimeoutError("Timeout reading from socket")
+    chained.__cause__ = _ceiling_error()
+    # Both predicates admit it: the top link is a transport failure, the cause
+    # is the ceiling family. That is the fact the docstrings now state.
+    assert is_instance_unavailable(chained) is True
+    assert is_memory_ceiling_refusal(chained) is True
+
+    cypher_guard._note_instance_outage(chained, mutating=True)
+    message = str(chained)
+    assert message.startswith("Timeout reading from socket"), (
+        "the driver sentence must stay at position 0")
+    assert message.count(_LEGIBLE_OPENER) == 1, message
+    assert "OUTCOME IS UNKNOWN" in message, (
+        "a lost reply is the outage note's case, not the ceiling's")
+    assert "memory-ceiling" not in message.lower(), (
+        "the ceiling note must never be applied to a transport failure: it "
+        "claims nothing was applied and no retry is needed, but a lost reply "
+        "proves nothing either way — the outage arm running FIRST is what "
+        "guarantees this, not the sets being disjoint")
