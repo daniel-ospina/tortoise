@@ -20,6 +20,7 @@ import {
   HARNESS_FAMILIES, HARNESS_FAMILY_IDS, harnessFamilyOf, preferredSurface,
   harnessDisplayName, knownHarnessName,
   HARNESS_ANALYTICS_ALIASES, analyticsHarnessOf,
+  SERVED_SKILLS_ORIGIN, servedSkillUrl, WORKFLOWS_PROMPT, SKILLS_INSTALL_URL,
 } from './harnesses.js'
 
 const KEY = 'tt_w2_test_key'
@@ -658,4 +659,43 @@ test('#3661: every capture surface names the opt-in, and none claims capture hap
     'the Pi seam has no consent gate — its copy must say installing it IS the opt-in')
   assert.doesNotMatch(HARNESS_CAPTURE_INSTALL.pi, /Filing is OFF until this machine opts in/,
     'the Pi seam must not carry the hook wording: it reads no TORTOISE_CAPTURE')
+})
+
+test('#9660: WORKFLOWS_PROMPT is a pointer to the served skills, never a second rendering', () => {
+  // The defect this pins: the constant used to be a hand-written PROSE SUMMARY
+  // of the three served skills — content whose source of truth is the
+  // sha256-pinned mirror (`config/served-skills-upstream.yml`, #4643), restated
+  // one layer up where nothing could re-derive it, so it could only rot.
+  //
+  // EXACT, DERIVED assertions only — deliberately no prose sweep over rule
+  // words. This file records why (see the #4365 note at the top): a shape net
+  // over agent-facing prose produced ~41 defects IN THE NET and none in the
+  // product across eight reviews. What is demonstrable is the SET and the
+  // ORIGIN, so that is all that is asserted.
+  const served = SKILLS_LIST.split(', ')
+  assert.equal(served.length, 3, 'precondition: the shipped set is three skills')
+  for (const name of served) {
+    assert.ok(WORKFLOWS_PROMPT.includes(servedSkillUrl(name)),
+      `the prompt must point at the served skill '${name}' — the set it names is SKILLS_LIST's`)
+  }
+  // Every URL the prompt carries must be a served skill document on the ONE
+  // origin; a second host (or a docs/raw-github link) would be a second source.
+  const urls = WORKFLOWS_PROMPT.match(/https:\/\/[^\s)]+/g) || []
+  assert.equal(urls.length, served.length,
+    `the prompt must carry exactly one URL per served skill, got ${urls.length}: ${urls}`)
+  for (const url of urls) {
+    assert.ok(url.startsWith(`${SERVED_SKILLS_ORIGIN}/skills/`),
+      `unexpected origin in the workflows prompt: ${url}`)
+  }
+  // The module declares the served origin ONCE. These two literals predate it
+  // (`_dashboard_constant` reads them in single-quoted form), so they are pinned
+  // to it rather than rewritten — one origin, no second host.
+  assert.ok(SKILLS_INSTALL_URL.startsWith(`${SERVED_SKILLS_ORIGIN}/`),
+    'SKILLS_INSTALL_URL must live on SERVED_SKILLS_ORIGIN')
+  assert.equal(ONBOARDING_INSTRUCTIONS_URL, servedSkillUrl('tortoise-onboarding'),
+    'ONBOARDING_INSTRUCTIONS_URL must be the servedSkillUrl form of the same document')
+  // The live connector leaves still receive the pointer (Claude Desktop/Web via
+  // wizardWorkflowsText), so the user-facing prompt cannot lose it silently.
+  assert.ok(wizardWorkflowsText('', 'included').includes(WORKFLOWS_PROMPT),
+    'the live workflows prompt must still start from WORKFLOWS_PROMPT')
 })

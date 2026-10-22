@@ -901,8 +901,8 @@ class TestDocsPageAndSkillConfig:
             assert step in steps, (
                 f"the ChatGPT row must keep step {step!r} — a /docs#chatgpt "
                 "visitor follows this list to a verified connection (#4836)")
-        assert steps.count("<li>") == 6, (
-            "the ChatGPT procedure is 6 steps; if you deliberately changed the "
+        assert steps.count("<li>") == 8, (
+            "the ChatGPT procedure is 8 steps; if you deliberately changed the "
             "journey, update this count and the per-step literals together")
         # The row must NOT name a RETIRED tool: `tortoise_health` is absent from
         # `tools/list` (#3883), so a tool-grant client like ChatGPT cannot call
@@ -947,6 +947,90 @@ class TestDocsPageAndSkillConfig:
         assert "<code>tt_…</code>" in row, (
             "the warning must name the tt_ prefix too — dropping it would leave "
             "legacy-shaped keys looking acceptable to ChatGPT")
+
+    def test_9660_chatgpt_row_names_the_graph_and_the_configured_packs(self):
+        """#9660: the journey's two invisible surfaces.
+
+        A ChatGPT user was told how to authorize and how to paste the
+        instructions document, but nothing said **which graph** the connector
+        writes to or **which packs** that graph recognises — so the two facts a
+        first write depends on had to be discovered from odd extraction results.
+
+        Both steps are PRODUCT facts, not UI labels, so they are assertable here
+        without the live-browser walk #9660 requires for the Developer-Mode
+        path: `docs.html#chatgpt` is the live carrier (#4836), and the claims
+        below are checked against the code that owns them rather than against
+        themselves.
+        """
+        section = self._mcp_section()
+        start = section.find('<h4 id="chatgpt">')
+        assert start != -1, "docs #mcp must carry a ChatGPT carrier row (#4836)"
+        row = section[start:]
+        for delim in ('<p class="callout">', "<h3", "<h4"):
+            cut = row.find(delim, 1)
+            if cut != -1:
+                row = row[:cut]
+        steps = row.split("<ol>", 1)[1].split("</ol>", 1)[0]
+
+        # ── which graph ────────────────────────────────────────────────────
+        # The discovery tool named must be a REAL, ACTIVE, read-risk tool: a
+        # connector holding a read-only grant is exactly the user this step
+        # exists for (#9660's plan-dependent write-tool finding), so naming a
+        # write/admin tool would prescribe a call that cannot be made.
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+        assert "tortoise_list_graphs" in steps, (
+            "the row must name the graph-discovery tool — a connector carries no "
+            "graph of its own, so the user has to see what exists before writing")
+        active = {t.name: t for t in TOOL_REGISTRY}
+        retired = {t.name for t in RETIRED_TOOL_REGISTRY}
+        assert "tortoise_list_graphs" in active, (
+            "the row names tortoise_list_graphs, so it must stay in tools/list")
+        assert "tortoise_list_graphs" not in retired, (
+            "the row must not name a RETIRED tool (#3883 class) — a tool-grant "
+            "client cannot call one")
+        assert active["tortoise_list_graphs"].risk == "read", (
+            "graph discovery must be a read-risk tool — write tools are the ones "
+            "a plan can withhold")
+        # The advertised (consolidated) form is named too, and the section it
+        # teaches must be one the tool really accepts: a card that names an
+        # `overview(section=…)` value the handler rejects sends the agent into a
+        # validation error at the one moment it is trying to orient itself.
+        assert 'section="graphs"' in steps, (
+            "the row must name the advertised overview(section=\"graphs\") form")
+        assert "tortoise_overview" in active, (
+            "the row names the advertised overview tool, so it must stay active")
+        assert active["tortoise_overview"].risk == "read", (
+            "overview must stay read-risk — it is the orientation call")
+        from tortoise.mcp_server import _OVERVIEW_SECTIONS
+        assert "graphs" in _OVERVIEW_SECTIONS, (
+            "the row teaches overview(section='graphs'); the handler must accept it")
+        # …and it must not promise per-call graph selection, which the surface
+        # does not have (#9340 open): every connector write lands on the default
+        # graph. A card that implied otherwise would send the user looking for a
+        # control that does not exist — the same defect as the stale
+        # Developer-Mode path this issue exists for.
+        assert "default graph" in steps, (
+            "the row must state that writes land on the organization's DEFAULT "
+            "graph — that is the connector's actual behaviour (#9340)")
+        assert "picking a graph per call is not available" in steps, (
+            "the row must not imply a per-call graph control exists (#9340)")
+
+        # ── which packs ────────────────────────────────────────────────────
+        # The hazard is INVISIBLE, not absent: an unconfigured graph resolves to
+        # the catalog union (#2714 indicator 3), which is the intended default.
+        # So the row must name the default, name the surface that changes it, and
+        # say creation cannot set it (#9667) — otherwise a user reads the union
+        # as "Tortoise is broken" instead of "this graph was never configured".
+        assert "Configured packs" in steps, (
+            "the row must name the Settings surface that configures packs")
+        assert "full pack catalog" in steps, (
+            "the row must name the unconfigured-graph default (the catalog "
+            "union) — the product's own words for it are 'still uses the full "
+            "pack catalog'")
+        assert "does not set packs" in steps, (
+            "the row must state that creating a graph cannot set packs (#9667) — "
+            "the two acts are separate, and a user who assumes otherwise never "
+            "configures")
 
     def test_4836_document_section2_names_the_live_chatgpt_carrier(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note must name the surface
