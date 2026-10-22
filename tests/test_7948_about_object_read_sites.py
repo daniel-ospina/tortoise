@@ -263,10 +263,15 @@ WHAT THIS PINS
    text the PR exists to replace, names no denial — and would go green again on any
    rewording of the denial, so it retired itself on the next prose edit. The predicate
    now reads the CLAIM, and the only denial it reads is a negation of the framing
-   marker ITSELF: a STRONG denial (`not`, `never`, `without`, `n't`, `skipped`, …) is
-   searched to the end of the sentence on both sides of the marker, a WEAK quantifier
-   (`no`, `none`) only to the next clause break, and a weak quantifier that PREDICATES a
-   measurement noun (`no framing was taken`) counts as strong. ⚠️ That is a copy-level
+   marker ITSELF: a STRONG denial (`not`, `never`, `without`, `n't`, `skipped`, …) AFTER
+   the marker is searched to the end of the sentence (a `,` `;` or `—` does not stop it),
+   while BEFORE the marker it is read only inside the marker's own clause
+   (`_CLAUSE_BREAK` ends its reach and `_DENIAL_WINDOW` caps it) — so
+   `# never taken; 10.36 s with --durations=0` is FRAMED while its mirror reds, and that
+   before-side cut is what keeps `# no gating change: 14.4 s whole arm, --durations=0`
+   framed. A WEAK quantifier (`no`, `none`) is read only to the next clause break, and a
+   weak quantifier that PREDICATES a measurement noun (`no framing was taken`) counts as
+   strong. ⚠️ That is a copy-level
    heuristic, and its boundaries are stated rather than implied: it does not decide WHICH
    marker a denial governs, so `# the control step was 14.4 s, not the whole arm` reds a
    settleable figure, `i.e.`/`e.g.` read as sentence ends, and a denial more than
