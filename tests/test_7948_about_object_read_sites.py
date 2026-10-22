@@ -244,9 +244,13 @@ WHAT THIS PINS
    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
    `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` +
    `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` +
-   `test_the_narrow_gate_walk_rebuild_buys_nothing` — the six
+   `test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name` +
+   `test_the_narrow_gate_walk_rebuild_buys_nothing` — the seven
    `#9506`/`#9522`/`#9501` arms, and the only ones here about this instrument's OWN
-   prose rather than §13's. The third is the `#9522` capture arm: it replays the
+   prose rather than §13's. (An inventory that under-counts the set it inventories is
+   the same defect class the arms police: the SIX this list first named omitted the
+   ratios arm, which is the one holding the magnitude paragraph's percentages to its
+   own rows — `#9528` review round 9, P3.) The third is the `#9522` capture arm: it replays the
    removed figure
    through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
    above the `def`), then holds the LIVE function by containment (its docstring's first
@@ -327,8 +331,10 @@ WHAT THIS PINS
    is the claim that rots"* — which `_unframed_durations` cannot see, because it matches
    a NUMBER and a UNIT and a proportion spelled in words carries neither. So the
    sentence survived the guard written to delete exactly that
-   claim, and it did not reproduce: measured at this PR's base (`81f5594dc`, fresh
-   process, `_literal_files()` warm, two runs) the rebuild is 2.5–3.0 s of
+   claim, and it did not reproduce: measured at `81f5594dc` — the merge base when the
+   measurement was taken, NOT this PR's current base (`main` has advanced past it since,
+   so a `base` label would name a tree this measurement never saw) — fresh process,
+   `_literal_files()` warm, two runs, the rebuild is 2.5–3.0 s of
    `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over half the arm**, not a small
    fraction of it. (The first measurement belongs to a DIFFERENT tree, `69390341f`, and
    reads 1.70 s / 1.81 s of 3.35 s / 3.14 s; `#9549` changed the census universe between
@@ -349,13 +355,13 @@ WHAT THIS PINS
    one line wide and visible).
    `_unframed_durations` is deliberately NOT flattened: its framing window is the
    number's own LINE by design, and the wrap residual there is filed as `#9531`.
-   ⚠️ **The SIXTH arm is the third alphabet, and the one no predicate can see.** The
+   ⚠️ **The SEVENTH arm is the third alphabet, and the one no predicate can see.** The
    comment had also come to pin a bare count two lines below a sentence saying no
    magnitude was pinned ("the same 29 `_File`s" next to "No magnitude is pinned: the
    rebuild is a small fraction of this arm's cost"): true, deterministic, and measured
    by NOTHING, since bare digits carry no UNIT for `_unframed_durations` to match and
    are not words for `_unsettleable_magnitudes`. The count is gone rather than
-   restated, and the claim it stood for is EXECUTED by
+   restated, and the claim it stood for is EXECUTED by the SEVENTH arm,
    `test_the_narrow_gate_walk_rebuild_buys_nothing`: it substitutes a rebuild of the
    same `_File`s for `_literal_files()` and runs the REAL `_narrow_gate_walk_sites`
    body, so "same values, same order, same derivations" is measured through the walk
@@ -3937,9 +3943,34 @@ _MAGNITUDE_SUBJECT = (
     r"|(?:it|its|itself|them|their)\b|this\s+one|that\s+one)"
 )
 
+#: A number written as a WORD, for the percentage slot below. ⚠️ The slot was
+#: DIGIT-ONLY, so `# forty per cent of the arm is the re-parse` was GREEN while its
+#: digit twin REDded — the `#9528` review's round-2 P2, and the same one-word-swap
+#: retirement the whole guard exists to refuse. It is a closed vocabulary (tens,
+#: their hyphenated compounds, teens, units, and the `hundred` forms) rather than
+#: `[a-z]+`, because a generic word slot turns every `<word> per cent` into a hit.
+_WORD_NUMERAL = (
+    r"(?:(?:a\s+|one\s+|two\s+)?hundred"
+    r"|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+    r"(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?"
+    r"|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
+    r"|ten|one|two|three|four|five|six|seven|eight|nine)"
+)
+
 #: A multiplier slot — a DIGIT or a number WORD, so `4 times` cannot be green where
 #: `4x` reds and `three in four` cannot be green where `3 in 4` reds (cycle-3 review).
-_MAGNITUDE_NUMERAL = r"(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|nine|ten)"
+#: ⚠️ The word branch is `_WORD_NUMERAL`, the SAME closed vocabulary the percentage slot
+#: uses, and not a hand-list of one..ten: the first version stopped at `ten`, so
+#: `# forty times the walk`, `# twenty times the walk`, `# one in twenty of the walks`
+#: and `# elevenfold the walk` were all GREEN while their digit twins REDded — a
+#: fail-open cell inside the closure this constant claims (`#9528` review round 11, P2).
+#: One vocabulary, two slots, so a numeral cannot be closed in one alphabet and open in
+#: the other WITHIN it. Outside it both alphabets are open: `_WORD_NUMERAL` carries no
+#: `zero` and no thousand scale, so `a thousand times the walk` and `zero times the walk`
+#: stay GREEN while `1000 times the walk` reds — the same one-keystroke retirement one
+#: scale up, documented rather than chased (`#9528` review round 12, P3-4; the percentage
+#: slot's STATED MISSES carries the same bound).
+_MAGNITUDE_NUMERAL = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})"
 
 #: A magnitude asserted in WORDS — the form `_unframed_durations` cannot see, because
 #: it matches digits. Each alternative names a proportion without naming a number: the
@@ -3961,35 +3992,33 @@ _MAGNITUDE_NUMERAL = r"(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|
 #: the list is closed only where the SPELLING is, which is these shapes.
 #: ⚠️ The MULTIPLICATIVE forms are a separate alternative (cycle-2 review): `twice as long
 #: as the walk`, `doubles this arm's cost`, `2× the walk`, `an order of magnitude`,
-#: `a factor of two`, `three in four of the walks` are each a magnitude bound to a
-#: measured quantity — a one-keystroke rewording of the sentence `#9516` left behind —
-#: and every one of them was GREEN. Each is BOUND (to a subject, to `as … as`, to
+#: `a factor of two`, `three in four of the walks` are each a magnitude CLAIM — a
+#: one-keystroke rewording of the sentence `#9516` left behind — and every one of them
+#: was GREEN. Most bind to a measured quantity; the three named below are the
+#: exceptions. MOST are BOUND (to a subject, to `as … as`, to
 #: `of <subject>`, or to a `than <subject>` comparison) so `# doubles entries in the
 #: list`, `# reads 2x per site`, `# the rebuild is 2x faster` and `# 0x1f` stay GREEN.
-#: ⚠️ …and the NUMERAL is a SHAPE, not a hand-list (cycle-3 review): `4 times`,
-#: `10 times`, `quadruples`, `threefold`, `3 in 4`, `9 out of 10` and `3/4` were all
-#: GREEN while their neighbours red, which is the "closed" claim being false by one
-#: keystroke. `Nx`/`N×` must be TIGHT (`2×`) because `3 x 4` is a grid, and `factor of`
+#: ⚠️ THREE alternatives are deliberately UNBOUND — `an order of magnitude`,
+#: `a factor of <numeral>` and `<numeral>fold` — and the accepted cost is that they red
+#: a sentence carrying no figure (`# the flag has a twofold purpose`, `# the change is
+#: an order of magnitude simpler`). They are kept unbound because the bound spellings
+#: are `threefold the walk` / `2× the walk`, which the bound alternatives already cover,
+#: while `twofold` alone is a magnitude claim in this instrument's prose (the RED cell
+#: at `test_…arm_reds_on_the_text_it_replaced` pins it). Stated, not discovered
+#: (`#9528` review round 11, P3-1).
+#: ⚠️ …and the NUMERAL is a closed VOCABULARY (`_WORD_NUMERAL`), never a one..ten
+#: hand-list (cycle-3 review, then `#9528` round 11 P2): `4 times`, `10 times`,
+#: `quadruples`, `threefold`, `3 in 4`, `9 out of 10` and `3/4` were all GREEN while
+#: their neighbours red, which is the "closed" claim being false by one keystroke —
+#: and the one..ten version reopened it for `forty times`, `one in twenty` and the
+#: `elevenfold` spellings. `Nx`/`N×` must be TIGHT (`2×`) because `3 x 4` is a grid, and `factor of`
 #: takes a NUMERAL because `a factor of safety` is not a magnitude — both measured.
-#: ⚠️ `Nx`/`N×` also BINDS, like every other alternative (`#9501` review measured it
+#: ⚠️ `Nx`/`N×` also BINDS, unlike the three unbound alternatives named above (`#9501`
+#: review measured it
 #: reding `# reads 2x per site` and `# the rebuild is 2x faster` with the remediation
 #: "state the framing that produced it" for a sentence holding no figure): it takes a
 #: subject (`2× the walk`) or a `than <subject>` comparison (`2x faster than the walk`,
 #: `2x longer than the run`) — prose naming neither stays GREEN.
-#: A number written as a WORD, for the percentage slot below. ⚠️ The slot was
-#: DIGIT-ONLY, so `# forty per cent of the arm is the re-parse` was GREEN while its
-#: digit twin REDded — the `#9528` review's round-2 P2, and the same one-word-swap
-#: retirement the whole guard exists to refuse. It is a closed vocabulary (tens,
-#: their hyphenated compounds, teens, units, and the `hundred` forms) rather than
-#: `[a-z]+`, because a generic word slot turns every `<word> per cent` into a hit.
-_WORD_NUMERAL = (
-    r"(?:(?:a\s+|one\s+|two\s+)?hundred"
-    r"|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
-    r"(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?"
-    r"|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
-    r"|ten|one|two|three|four|five|six|seven|eight|nine)"
-)
-
 #: A percentage figure — a DIGIT or a number WORD — in every spelling the file
 #: closes. One constant serves both the word-form guard and the ratio arm's bare
 #: sweep, so a spelling cannot be closed in one and open in the other — including the
@@ -4046,13 +4075,90 @@ _MAGNITUDE_WORDS = re.compile(
     re.IGNORECASE,
 )
 
-#: A POSITIONAL qualifier in front of a share noun (`# the second half of the walk`,
-#: `# the left half of the suite`, `# the second part of the walk`) — which phase of
-#: something runs, not what share of a measured quantity it is. Measured by the
+#: A POSITIONAL qualifier in front of a PARTITION noun (`# the second half of the
+#: walk`, `# the left half of the suite`, `# the second part of the walk`) — which phase
+#: of a named thing runs, not what share of a measured quantity it is. Measured by the
 #: `#9501` review: both red without this, on the walk's own vocabulary (`part` names one
 #: of the three passes).
-_MAGNITUDE_POSITIONAL = re.compile(
-    r"\b(?:first|second|third|left|right|top|bottom|upper|lower|other)\s+$",
+#:
+#: ⚠️ **The exemption is FOUR constraints, and one ordinary word cannot claim it.**
+#: Every one of them is load-bearing (`#9528` review rounds 5-6, P2):
+#:
+#:  * the QUALIFIER set is the closed phase/partition set below. `other`, `upper` and
+#:    `lower` are share adjectives, not phases: with them in the set, one word retired
+#:    the guard — `# the other half of the arm's cost` and `# the upper half of the arm`
+#:    both read GREEN, and the rationale called all three of them "phase" qualifiers,
+#:    which none of them is.
+#:  * the NOUN is a PARTITION noun (`half` / `part`). `most`, `share`, `fraction`,
+#:    `portion` assert a share by construction and are never a phase.
+#:  * the thing divided is NAMED WITHOUT A POSSESSIVE, and it is a thing with an
+#:    interior (a walk, a suite, a run), never a measured quantity (`the arm`, `the
+#:    arm's cost`). `the second half of the walk` is a phase of the walk; `the second
+#:    half of the walk's cost` is a share of a measurement, and the possessive is the
+#:    difference.
+#:  * the TAIL does not continue the phrase as a share (`_MAGNITUDE_PHASE_SHARE_TAIL`),
+#:    because the subject slot above only swallows an ASCII `'s`: a typographic
+#:    apostrophe, a PLURAL possessive, or an apostrophe dropped altogether ends the match
+#:    at the noun, and the possessive is then OUTSIDE the match where a lookahead cannot
+#:    see it.
+#:
+#: Stated price — an OVER-RED, not an open hole: `# the upper half of the walk` is a
+#: phrasing a reader might write, and it now REDs, because the qualifier list cannot
+#: tell it from `# the upper half of the arm's cost`. The remediation is one edit (say
+#: `second`, or state the framing). Chasing that cell with another qualifier list is the
+#: move that has retired this guard three times; the closed set of PHASES is the smaller
+#: surface.
+_MAGNITUDE_PHASE_QUALIFIER = re.compile(
+    r"\b(?:first|second|third|left|right|top|bottom)\s+$",
+    re.IGNORECASE,
+)
+
+#: The apostrophe-LIKE PUNCTUATION a word processor or IME emits for a possessive
+#: (`'`, U+2019, U+2018, U+FF07). One constant, used by both the phrase lookahead and
+#: the tail veto, so the two cannot disagree about what a possessive is — `EVERY other
+#: possessive spelling` was false one codepoint away before it existed (`#9528` round 6,
+#: P3-2).
+#:
+#: ⚠️ U+02BC (MODIFIER LETTER APOSTROPHE) is deliberately NOT here, and the reason is
+#: named rather than chased: it is a LETTER, so `\w` consumes it and `walkʼs` is a
+#: single word that matches NO alternative of `_MAGNITUDE_SUBJECT` — such a sentence is
+#: never read as a magnitude claim at all. That is a limit of the SUBJECT vocabulary,
+#: not of this exemption, and it is pre-existing (`#9528` round 6, P3-2 measured it).
+_MAGNITUDE_APOSTROPHE = "['\u2019\u2018\uff07]"
+
+#: The PHASE phrase itself, matched against the magnitude match (`half of the walk`),
+#: because the thing divided sits INSIDE the match rather than after it.
+_MAGNITUDE_PHASE_PHRASE = re.compile(
+    r"^(?:half|halves|part|parts)\s+(?:of|in)\s+(?:the\s+)?"
+    rf"(?:walk|suite|run|pass|passes|module|file|tree|list|loop|sweep|corpus)s?\b"
+    rf"(?!{_MAGNITUDE_APOSTROPHE}s)",
+    re.IGNORECASE,
+)
+
+#: The TAIL that turns a phase back into a share when `_MAGNITUDE_SUBJECT` could not
+#: swallow it. The subject slot only consumes an ASCII `'s`, so a possessive in any other
+#: spelling ends the match at the noun and — without this rule — took the phase
+#: exemption: a typographic apostrophe (`walk’s cost`, what macOS and Word produce), a
+#: PLURAL possessive (`walks' cost`), or an apostrophe dropped altogether (`walk cost`),
+#: which leaves the measurement noun outside the match entirely. Measured by the fresh
+#: review at `07caee273`: all four read GREEN while the docstring claimed the possessive
+#: was the discriminator (`#9528` round 5, P2).
+#:
+#: ⚠️ The apostrophe class is the apostrophe-LIKE codepoints a word processor or IME
+#: emits (`'`, U+2019, U+2018, U+FF07 — U+02BC is excluded above, with its reason), and the
+#: measurement nouns are SINGULAR ONLY. The ASCII apostrophe is listed because it is the
+#: one a plain keyboard produces, and it is doubly load-bearing: it kills the phrase via
+#: the lookahead for the subject-swallowed form (`walk's cost`) and vetoes the tail for
+#: the plural form (`walks' cost`). Listing the class without it under-reported the set
+#: by its most reachable member (`#9528` review round 8, P3).
+#: Both details are measured rather than assumed (`#9528` round 6, P2-1/P3-2): a
+#: plural-or-verb class (`costs?|works?|times?|totals?`) reds on honest prose —
+#: `# the second half of the suite works on the cached files` carries no figure and must
+#: stay GREEN — and `EVERY other possessive spelling` was false one codepoint away
+#: (U+2018 read GREEN).
+_MAGNITUDE_PHASE_SHARE_TAIL = re.compile(
+    rf"^(?:{_MAGNITUDE_APOSTROPHE}s\b|{_MAGNITUDE_APOSTROPHE}(?:\s|$)|"
+    r"\s+(?:cost|time|runtime|budget|total)\b)",
     re.IGNORECASE,
 )
 
@@ -4074,8 +4180,8 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
 
     - `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, arm 3.35 s / 3.14 s,
       ungated 10.81 s / 9.90 s.
-    - `81f5594dc` (this PR's base, `#9549`): rebuild 2.50 s / 3.00 s, arm 3.90 s /
-      4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
+    - `81f5594dc` (the merge base the measurement was taken at, `#9549`): rebuild 2.50 s /
+      3.00 s, arm 3.90 s / 4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
       ones above; the direction (over half the arm) is the same on both trees.
 
     Read against the ARM the comment sits in, the rebuild is **over half** of it, not a
@@ -4125,9 +4231,11 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       of something that is not a measured quantity ("most of these modules are literal
       carriers", "the bulk of these modules"), a bare `bulk` with no subject, a bare
       `this`/`that` demonstrative (`# most of this file is parsed once` — the shapes the
-      subject binding exists to keep green), a POSITIONAL share ("the second half of
-      the walk", "the left half of the suite", "the second part of the walk" — a phase,
-      not a share), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
+      subject binding exists to keep green), a POSITIONAL reference to a PHASE of a
+      named thing — a qualifier from the closed set, a partition noun, and a thing
+      divided that is NAMED WITHOUT A POSSESSIVE ("the second half of the walk", "the
+      left half of the suite", "the second part of the walk") — or a PERCENTAGE WITH NO
+      SUBJECT AT ALL (a bare figure whose value
       is written and whose object is not — written without a concrete number here, so
       this description is not itself a bare figure).
       That last cell is the stated PRICE OF THE BINDING rather than an oversight: the
@@ -4148,9 +4256,15 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       proportion at all rather than a phrasing a list must chase.
     * RED on a real magnitude REGARDLESS of the adjective in front of it ("a fraction of
       this arm" as much as "a small fraction of this arm"), on a size-qualified subject
-      ("the entire arm's cost") as much as a bare one, and on `half the arm` as
+      ("the entire arm's cost") as much as a bare one, on `half the arm` as
       much as `half of the arm` — the spellings an adjective-gated, `of`-gated list
-      was green on, one of which is the exact sentence this chain produced.
+      was green on, one of which is the exact sentence this chain produced — and on a
+      SHARE DRESSED AS A PHASE: `the second half of the arm's cost`, `the other half of
+      the arm's cost` and `the upper half of the arm` are shares, and each was GREEN
+      while the phase exemption was one word plus any share noun (`#9528` review rounds
+      5-6, P2). The FOUR constraints that close it are stated at
+      `_MAGNITUDE_PHASE_QUALIFIER` and `_MAGNITUDE_PHASE_QUALIFIER`'s tail rule
+      `_MAGNITUDE_PHASE_SHARE_TAIL`.
     """
     lines = comment.splitlines()
     found: list[str] = []
@@ -4164,12 +4278,15 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
         for match in _MAGNITUDE_WORDS.finditer(window):
             # A POSITIONAL `half` is a phase, not a share (`# the second half of the
             # walk re-reads the sources`) — the qualifier sits outside the match, so
-            # this is a post-filter rather than a lookbehind of shifting width.
-            if _MAGNITUDE_POSITIONAL.search(window[: match.start()]) and re.match(
-                r"(?:half|halves|most|part|parts|portion|portions|share|shares|"
-                r"fraction|fractions)\b",
-                match.group(),
-                re.IGNORECASE,
+            # this is a post-filter rather than a lookbehind of shifting width. BOTH
+            # halves are required, the phrase is tested against the match ITSELF
+            # because the thing divided is inside it, and the TAIL veto closes the
+            # possessive spellings the subject slot cannot swallow: see
+            # `_MAGNITUDE_PHASE_QUALIFIER` and `_MAGNITUDE_PHASE_SHARE_TAIL`.
+            if (
+                _MAGNITUDE_PHASE_PHRASE.match(match.group())
+                and _MAGNITUDE_PHASE_QUALIFIER.search(window[: match.start()])
+                and not _MAGNITUDE_PHASE_SHARE_TAIL.match(window[match.end() :])
             ):
                 continue
             found.append(match.group(match.lastgroup))
@@ -4200,10 +4317,15 @@ _MAGNITUDE_CLAIM_ROW = re.compile(
 #: A stated percentage is rounded to a whole point, so recomputation agrees within one.
 _MAGNITUDE_RATIO_TOLERANCE_PP = 1.5
 
-#: The module docstring's base-anchored figures, which must be the SAME set the
+#: The module docstring's commit-anchored figures, which must be the SAME set the
 #: `81f5594dc` measurement row carries — the two prose sites state one measurement.
+#: ⚠️ The label NAMES THE SHA, never "this PR's base" (`#9528` review round 5, P2): a
+#: `base` label rots the moment `main` advances, until the sentence says the measurement
+#: was taken at a tree that is no longer the base — and a guard that cross-checks the
+#: docstring against the row cannot see it, because both sites carry the same stale
+#: label. The row is provenance for a measurement, not a claim about the merges since.
 _BASE_MEASUREMENT_PROSE = re.compile(
-    r"measured at this PR's base \(`(?P<sha>[0-9a-f]{7,40})`.*?the rebuild is "
+    r"measured at `(?P<sha>[0-9a-f]{7,40})`.*?the rebuild is "
     r"(?P<rlo>[0-9.]+)–(?P<rhi>[0-9.]+) s of\s+`_narrow_gate_walk_sites`'s own "
     r"(?P<alo>[0-9.]+)–(?P<ahi>[0-9.]+) s",
     re.DOTALL,
@@ -4441,9 +4563,11 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
     base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
     assert base is not None, (
         "the module docstring no longer states the base measurement in the form "
-        "`measured at this PR's base (`<sha>`, …) the rebuild is A–B s of "
-        "`_narrow_gate_walk_sites`'s own C–D s`, so the two prose sites cannot be held "
-        "to the same rows"
+        "`measured at `<sha>` — the merge base at the time of measurement — … the "
+        "rebuild is A–B s of `_narrow_gate_walk_sites`'s own C–D s`, so the two prose "
+        "sites cannot be held to the same rows. (The form is pinned to the SHA: a "
+        "`this PR's base` label rots the moment `main` advances, and this message used "
+        "to prescribe it — the guard rejected the form its own remediation named.)"
     )
     rows = {row.group("sha"): row for row in _MAGNITUDE_MEASURED_ROW.finditer(prose)}
     assert base.group("sha") in rows, (
@@ -4470,7 +4594,7 @@ def test_the_gate_walk_comment_asserts_no_unmeasured_magnitude():
     ⚠️ **The gap `#9516` left, executed rather than argued.** Its guard holds the
     comment to its DURATIONS; the comment it produced pins a *proportion* in words
     instead — "the rebuild is a small fraction of this arm's cost" — which measured at
-    this head is over half the arm (2.5–3.0 s of the walk's own 3.9–4.4 s; the numbers
+    `81f5594dc` is over half the arm (2.5–3.0 s of the walk's own 3.9–4.4 s; the numbers
     and their framing are in `_unsettleable_magnitudes`' docstring). So the guard moved
     the figure out of the sentence and the sentence kept the claim, which is the defect
     class this issue chain exists to end: a magnitude stated in prose with nothing
@@ -4910,6 +5034,51 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
             "digit is retired by one word"
         )
 
+    # ⚠️ The PHASE exemption is FOUR constraints, and one ordinary word cannot claim
+    # it (`#9528` review rounds 5-6, P2). `other`, `upper` and `lower` are share
+    # adjectives; a POSSESSIVE subject is a share of a measurement, not a phase of the
+    # thing; a thing that is a measured quantity (`the arm`) has no phases; and the TAIL
+    # must not continue the phrase as a share (the possessive spellings the subject slot
+    # cannot swallow). Every cell below read GREEN while the exemption was
+    # `(first|…|other)\s+$` plus any share noun, which is the "one word retires the
+    # guard" shape this change exists to close.
+    for spelling, expected in (
+        ("# the other half of the arm's cost is the re-parse.", "half"),
+        ("# the upper half of the arm is the re-parse.", "half"),
+        ("# the lower half of the arm is the re-parse.", "half"),
+        ("# the second half of the arm's cost is the re-parse.", "half"),
+        ("# the second half of this arm is the re-parse.", "half"),
+        ("# the second half of the walk's cost is the re-parse.", "half"),
+        ("# the second portion of the walk is the re-parse.", "portion"),
+        # The POSSESSIVE spellings `_MAGNITUDE_SUBJECT` cannot swallow, so the match ends
+        # at the noun and only the TAIL veto can see them (fresh review at `07caee273`):
+        # a typographic apostrophe (what macOS/Word produce), a PLURAL possessive, and an
+        # apostrophe dropped altogether.
+        ("# the second half of the walk\u2019s cost is the re-parse.", "half"),
+        ("# the second half of the walks' cost is the re-parse.", "half"),
+        ("# the second half of the walk cost is the re-parse.", "half"),
+        ("# the second half of the run time is the re-parse.", "half"),
+        ("# the second half of the walk\u2018s cost is the re-parse.", "half"),
+        ("# the second half of the walk\uff07s cost is the re-parse.", "half"),
+        # the WORD numerals above ten, which the one..ten hand-list left GREEN while
+        # their digit twins REDded (`#9528` review round 11, P2):
+        ("# the rebuild is forty times the walk", "forty times the walk"),
+        ("# the rebuild is twenty times the walk", "twenty times the walk"),
+        ("# one in twenty of the walks pay the parse", "one in twenty of the walks"),
+        ("# the rebuild is elevenfold the walk", "elevenfold"),
+        # the ACCEPTED OVER-RED of an unbound alternative, pinned rather than asserted
+        # (`#9528` review round 12, P3-2 — the comment cited this cell before it existed):
+        ("# the flag has a twofold purpose: fast path and cache warm", "twofold"),
+    ):
+        assert _unsettleable_magnitudes(spelling) == [expected], (
+            f"the word-form predicate must red on {spelling!r} as {[expected]!r} "
+            f"({_unsettleable_magnitudes(spelling)}) — a share phrased as a phase is "
+            "still a share: the exemption requires a phase qualifier, a partition "
+            "noun, a name with no possessive, AND a tail that does not continue it as a "
+            "share; one of the four missing is the whole guard gone (see "
+            "`_MAGNITUDE_PHASE_QUALIFIER` and `_MAGNITUDE_PHASE_SHARE_TAIL`)"
+        )
+
     # …and the other direction, so this is a rule about CLAIMS rather than about
     # adverbs: prose about WHICH modules are walked asserts no magnitude, and reding on
     # it would fail a merge gate over a sentence holding no figure (with "state the
@@ -4938,6 +5107,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# the second half of the walk re-reads the sources",
         "# the left half of the suite is unused",
         "# the second part of the walk is the ungated pass",
+        # the measurement NOUN read as a VERB: a plural-or-verb tail class red these and
+        # the diagnostic claimed a figure the sentence does not carry (`#9528` round 6,
+        # P2-1), which is the false-positive direction the guard's own docs refuse
+        "# the second half of the suite works on the cached files",
+        "# the second half of the run costs one parse per module",
+        "# the second half of the walk times out on a cold cache",
+        "# the second half of the walk totals the same bytes",
         # a proportion bound to something that is not a measured quantity:
         "# e.g. 3 in 4 cases",
         "# most of these modules are run in the suite",
