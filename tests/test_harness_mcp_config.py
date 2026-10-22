@@ -1003,10 +1003,11 @@ class TestDocsPageAndSkillConfig:
         Each claim the row makes is cross-checked against the artifact that OWNS
         it, so a reworded owner fails THIS test instead of leaving the row
         asserting a contract that no longer exists: `TOOL_REGISTRY` /
-        `_OVERVIEW_SECTIONS` for the tools, `supabase_control._graph_namespace_for`
-        plus the `#236` HTTP override for the graph, `packs.js::PACK_CONSEQUENCE`
-        and the Settings heading in `main.jsx` for the packs. Every owner is READ
-        here (or called); none is re-typed.
+        `_OVERVIEW_SECTIONS` for the tools, `mcp_auth._get_org_sdk` (driven, both
+        shapes) plus the `#236` HTTP override for the graph,
+        `pack_state.DEFAULT_STARTER_PACKS` / its resolution arms, and
+        `packs.js::PACK_CONSEQUENCE` with the Settings section id for the packs.
+        Every owner is READ here (or called); none is re-typed.
         """
         section = self._mcp_section()
         start = section.find('<h4 id="chatgpt">')
@@ -1052,6 +1053,15 @@ class TestDocsPageAndSkillConfig:
             "the row names the advertised overview tool, so it must stay active")
         assert active["tortoise_overview"].risk == "read", (
             "overview must stay read-risk — it is the orientation call")
+        # …and callable by a CONNECTOR at all: the row asks the user to have the
+        # agent call these, so an http-exposure flip (the #3883 class this suite
+        # already guards for other tools) must fail here rather than silently
+        # hiding the tool from a tool-grant client.
+        for name in ("tortoise_list_graphs", "tortoise_overview"):
+            assert active[name].http_policy is True, (
+                f"step 8 asks the agent to call {name}; it must stay "
+                "http-exposed or a ChatGPT connector cannot make the call "
+                "the row prescribes")
         from tortoise.mcp_server import _OVERVIEW_SECTIONS
         assert "graphs" in _OVERVIEW_SECTIONS, (
             "the row teaches overview(section='graphs'); the handler must accept it")
@@ -1073,26 +1083,31 @@ class TestDocsPageAndSkillConfig:
         #     graph-selecting parameter (the three that do are read-only, or the
         #     admin recording flag — named explicitly below, so a new one fails).
         from tortoise import mcp_auth
-        mcp_auth._current_org_id.set("org_9660_probe")
-        mcp_auth._current_graph_id.set(None)
-        mcp_auth._current_graph_namespace.set(None)
-        default_sdk = mcp_auth._get_org_sdk()
-        assert default_sdk._graph_name is None, (
-            "a credential with NO graph scope must open the org's default graph "
-            f"(no explicit graph name), got {default_sdk._graph_name!r} — the "
-            "row's 'every write lands in the default graph' (#9340)")
-        assert default_sdk._namespace, (
-            "the default-graph SDK must still be org-scoped")
-        mcp_auth._current_graph_id.set("g-9660")
-        mcp_auth._current_graph_namespace.set("org_9660_probe__other")
-        assert mcp_auth._get_org_sdk()._graph_name == "org_9660_probe__other", (
-            "a graph-BOUND credential must open ITS graph — that is the only "
-            "way a request leaves the default graph, and a connector has none")
-        # Reset the request ContextVars: they are process-wide on this thread, and
-        # a later test must not inherit this probe's org/graph scope.
-        mcp_auth._current_org_id.set(None)
-        mcp_auth._current_graph_id.set(None)
-        mcp_auth._current_graph_namespace.set(None)
+        # These ContextVars are process-wide on this thread and there is no
+        # autouse fixture clearing them, so the reset is in a `finally`: a failing
+        # assertion here must report ITSELF, not cascade into every later test
+        # that expects the base/stdio SDK.
+        try:
+            mcp_auth._current_org_id.set("org_9660_probe")
+            mcp_auth._current_graph_id.set(None)
+            mcp_auth._current_graph_namespace.set(None)
+            default_sdk = mcp_auth._get_org_sdk()
+            assert default_sdk._graph_name is None, (
+                "a credential with NO graph scope must open the org's default "
+                f"graph (no explicit graph name), got {default_sdk._graph_name!r} "
+                "— the row's 'every write lands in the default graph' (#9340)")
+            assert default_sdk._namespace == "org_9660_probe", (
+                "the default-graph SDK must be scoped to the organization the "
+                f"credential names, got {default_sdk._namespace!r}")
+            mcp_auth._current_graph_id.set("g-9660")
+            mcp_auth._current_graph_namespace.set("org_9660_probe__other")
+            assert mcp_auth._get_org_sdk()._graph_name == "org_9660_probe__other", (
+                "a graph-BOUND credential must open ITS graph — that is the only "
+                "way a request leaves the default graph, and a connector has none")
+        finally:
+            for var in (mcp_auth._current_org_id, mcp_auth._current_graph_id,
+                        mcp_auth._current_graph_namespace):
+                var.set(None)
         # …and the per-call control is absent from the SURFACE. Enumerated from
         # the live registry through BOTH dispatch shapes (an `sdk_method`, or a
         # handler in mcp_server — the shape a new graph-aware tool is most likely
@@ -1148,7 +1163,13 @@ class TestDocsPageAndSkillConfig:
             "writes (#9340), so it must be argued here, not slipped in: "
             f"{ {n: (active[n].risk, sorted(p)) for n, p in graph_aware.items()} }")
         mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
-        assert mcp_src.count('graph_name = f"org_{_current_org_id.get()}"') >= 2, (
+        # Matched as a PATTERN, not a byte string: a re-wrapped or re-quoted line
+        # is a no-op, and a second guard that reds on a no-op teaches the next
+        # lane to delete it (the #4365 shape-net finding this file already
+        # records).
+        org_override = re.compile(
+            r"graph_name\s*=\s*f[\"']org_\{_current_org_id\.get\(\)\}[\"']")
+        assert len(org_override.findall(mcp_src)) >= 2, (
             "#236: HTTP mode must keep overwriting a caller-supplied graph_name "
             "with the org graph — that is WHY per-call graph selection is not "
             "available to a connector, so the row may only say so while it is "
@@ -1188,9 +1209,17 @@ class TestDocsPageAndSkillConfig:
         # The Settings label is a real dashboard heading, not a name invented by
         # this test — and the row may not send the user to a section that moved.
         main_src = self.MAIN_JSX.read_text(encoding="utf-8")
-        assert "tabIndex={-1}>Configured packs</h3>" in main_src, (
+        # The heading is bound to `PACK_SETTINGS_SECTION_ID` (packs.js exports it;
+        # packs.test.js pins its value), so matching the CONSTANT keeps this guard
+        # alive through a JSX prop reorder while still failing if the section is
+        # renamed or removed.
+        assert re.search(r"export const PACK_SETTINGS_SECTION_ID\s*=\s*['\"]",
+                         packs_src), (
+            "packs.js must export PACK_SETTINGS_SECTION_ID — the row's "
+            "'Settings → Configured packs' destination is addressed by it")
+        assert re.search(r"<h3\s+id=\{PACK_SETTINGS_SECTION_ID\}", main_src), (
             "the row sends the user to Settings → 'Configured packs'; that "
-            "heading must still exist in main.jsx (main.jsx:1001)")
+            "heading must stay bound to PACK_SETTINGS_SECTION_ID in main.jsx")
         assert "configured packs" in row_norm, (
             "the row must name the Settings surface that configures packs")
         # The default graph's set is OWNED by `pack_state.DEFAULT_STARTER_PACKS`
@@ -1232,10 +1261,13 @@ class TestDocsPageAndSkillConfig:
         # ends. Both halves are read from `pack_state` so the row cannot outlive
         # them.
         pack_src = (REPO_ROOT / "tortoise" / "pack_state.py").read_text(encoding="utf-8")
-        assert "ensure_tenant_packs(sdk, graph_name=graph_name)" in pack_src, (
-            "the row says opening Configured packs seeds the five starters on a "
+        assert re.search(
+            r"ensure_tenant_packs\(\s*sdk\b[^)]*graph_name\s*=\s*graph_name", pack_src), (
+            "the row says reading the set seeds the five starters on a "
             "record-less graph; that is `get_tenant_packs`'s self-heal")
-        assert "_read_selection(g) is None" in pack_src
+        assert re.search(r"_read_selection\(\s*g\s*\)\s+is\s+None", pack_src), (
+            "the self-heal must stay suppressed for a DELIBERATELY configured "
+            "graph (the `:PackSelection` marker)")
         assert "entire catalog" in row_norm, (
             "the row must keep the catalog-union fallback (#2714 indicator 3), "
             "scoped to its real predicate")
@@ -1252,7 +1284,11 @@ class TestDocsPageAndSkillConfig:
             "configured-EMPTY graph has no records and resolves to nothing "
             "(#9667), so the row may not attribute the union to 'no records' "
             "alone")
-        assert "if not rows and selection is None:" in pack_src, (
+        union_arms = [ln for ln in pack_src.splitlines()
+                      if ln.strip().startswith("if ")
+                      and "not rows" in ln
+                      and re.search(r"selection\s+is\s+None", ln)]
+        assert union_arms, (
             "pack_state's union arm must keep requiring BOTH no records and no "
             "selection marker — that conjunction is the row's predicate")
         assert "seeds the five starters" in row_norm, (
