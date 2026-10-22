@@ -25,18 +25,23 @@ What this module pins is the half that IS ours, with TWO homes at two layers:
 * the DOOR half — a caller-supplied ``session_id`` — is
   ``tortoise.ids.session_id_refusal``, applied at the SDK capture doors and the
   hosted ``/v1/sessions`` boundary (the ``capture_consent`` idiom: one
-  predicate, two gates); and
-* the REPLAY half — a merge key on a journal record — is
-  ``projection._writable_container_id`` (``_writable_id`` PLUS the blank
-  clause), applied at BOTH folds that merge the session key,
-  ``projection.entities._fold_session_recorded`` and
-  ``projection.entities._link_session``. That predicate already existed on main
-  (#9553) for the ``contains_session`` carrier; this lane extends it to
-  ``SessionRecorded``, which used bare ``_writable_id``. It is ONE predicate for
-  both carriers, not a second one stacked in front of the first.
+  predicate, every door); and
+* the REPLAY half — a merge key on a journal record or a sidecar/record restore
+  — is ``projection._writable_container_id`` (``_writable_id`` PLUS the blank
+  clause), applied at FOUR gates: the two journal folds
+  (``projection.entities._fold_session_recorded`` and
+  ``projection.entities._link_session``) and the two rebuild paths
+  (``rebuild_all``'s ``session_snapshot`` restore and ``rebuild_from_record``).
+  That predicate already existed on main (#9553 review P2) for the
+  ``contains_session`` carrier; this lane extends it to ``SessionRecorded``,
+  which used bare ``_writable_id``. It is ONE predicate for every carrier, not a
+  second one stacked in front of the first. ⚠️ Name all four when adding a
+  fifth: a carrier outside this list ships ungated and resurrects exactly the
+  container the rest of the list refuses (the two rebuild paths are pinned
+  below, at ``test_rebuild_all_...`` and ``test_the_record_sourced_rebuild_...``).
 
 So a record that reaches the graph by ANY path — live, or replayed from a
-journal written before the doors existed, on EITHER carrier — cannot create a
+journal written before the doors existed, on ANY carrier — cannot create a
 ``:Session`` whose id names nothing.
 
 ⛔ ``projection._writable_id`` is NOT where this rule lives, deliberately, and
