@@ -344,9 +344,12 @@ response_fields:
     blocks or refuses, and it changes nothing that was stored. Absent when the write carries a materialized extractedFrom
     (a declared or `session_id`-inferred ref — this door creates the :Source and the edge) or an authored word (`credibility=`,
     which #398 rules IS a source); a bare legacy point-level `sourceKind` does not silence it, because it is an
-    annotation with no link behind it (#8171)'
-  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, so that response
-    stays byte-identical
+    annotation with no link behind it (#8171). A second code rides the same key: `temporal_not_applied`, when the
+    write DEDUP-hits a point that is already a terminal claim and the payload carried a temporal prop — the whole
+    fold is dropped (#7819 refuses re-stamping a dead claim''s window), so the response reports the HIT plus this
+    advisory instead of a silent no-op'
+  unchanged_when_off: n/a — not flag-gated; the key is ABSENT on a sourced or word-bearing write, and on every write
+    whose fold actually applied, so that response stays byte-identical
 - response: tortoise_check_structure
   field: _meta.tortoise_error
   emitted_when: 'only for the transport wait-bound refusal — the ONE producer whose failure payload is a `{code,

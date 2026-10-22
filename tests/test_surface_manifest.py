@@ -2071,6 +2071,35 @@ def test_recorded_response_field_is_rendered_in_the_list():
         assert f"`{rf['field']}`" in text
 
 
+def test_every_recorded_response_field_row_is_rendered_verbatim_from_the_manifest():
+    """The response-field table is GENERATED: every cell must come from the manifest.
+
+    `test_recorded_response_field_is_rendered_in_the_list` above only checks that the
+    field NAME appears, which a hand-written row satisfies — so the table could drift
+    from its source and every in-repo test stayed green while the `surface-guard` CI job
+    (render + `git diff --exit-code`) went red. That is what happened on #9658: the
+    `temporal_not_applied` sentence was written into `docs/product/mcp-sdk-surface.md`
+    and never into `config/surface-manifest.yml`, and it took a reviewer rebuilding the
+    rows by hand to notice.
+
+    Fails on that pre-fix head (the committed row is the pre-#7819 manifest's), so it is
+    not vacuous. The rows come from the renderer's own `response_field_rows`, not a
+    copy of its normalisation, so the two cannot disagree.
+    """
+    sys.path.insert(0, str(ROOT / "tools"))
+    import surface_manifest
+
+    text = RENDERED.read_text(encoding="utf-8")
+    rows = surface_manifest.response_field_rows(_manifest())
+    assert rows, "the manifest renders no response-field rows at all"
+    drifted = [r.split("|")[1].strip() + "/" + r.split("|")[2].strip() for r in rows if r not in text]
+    assert not drifted, (
+        f"these recorded response-field rows are not what the manifest renders: {drifted}. "
+        "The table is generated — change `config/surface-manifest.yml` and re-run "
+        "`python tools/surface_manifest.py render`; do not edit the document."
+    )
+
+
 def test_the_8171_advisory_field_is_recorded_on_both_create_doors():
     """#8171's new response key must be RECORDED, not left to the reviewing half.
 

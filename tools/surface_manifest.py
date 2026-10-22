@@ -1583,6 +1583,39 @@ def observed_usage(row: dict) -> str | None:
     return None
 
 
+def response_field_rows(doc: dict) -> list[str]:
+    """The `recorded response fields` table's data rows, rendered from the manifest.
+
+    ONE definition, read by both `cmd_render` and the test that holds the committed
+    document to it. The table had no in-repo comparison — only the `surface-guard` CI
+    job's render+diff noticed a hand-edit — so a sentence written straight into
+    `docs/product/mcp-sdk-surface.md` survived review after review and went red only in
+    CI (#9658). A second copy of this normalisation in the test would drift from this
+    one and clear exactly that hand-edit, so the test imports this function.
+    """
+    rows: list[str] = []
+    block = doc.get("response_fields")
+    for rf in (block if isinstance(block, list) else []):
+        # `check` REPORTS a malformed block or entry; skip it here rather than crashing the
+        # renderer (the two must not disagree about the same input) or emitting a blank
+        # placeholder row for an entry that is missing `response` or `field`.
+        if not isinstance(rf, dict) or not rf.get("response") or not rf.get("field"):
+            continue
+        # Normalise whitespace AND pipes in every cell: an unescaped `|` splits the markdown
+        # row, and an embedded newline (e.g. a YAML literal block) breaks it the same way.
+        cells = [
+            " ".join(str(rf.get(k, d) or d).split()).replace("|", "/")
+            for k, d in (
+                ("response", ""),
+                ("field", ""),
+                ("emitted_when", ""),
+                ("unchanged_when_off", "yes"),
+            )
+        ]
+        rows.append(f"| `{cells[0]}` | `{cells[1]}` | {cells[2]} | {cells[3]} |")
+    return rows
+
+
 def cmd_render(args: argparse.Namespace) -> int:
     """manifest -> the list the owner reviews.
 
@@ -1760,25 +1793,8 @@ def cmd_render(args: argparse.Namespace) -> int:
     add("")
     add("| Response | Field | Emitted when | Unchanged when off |")
     add("|---|---|---|---|")
-    _rf_block = doc.get("response_fields")
-    for _rf in (_rf_block if isinstance(_rf_block, list) else []):
-        # `check` REPORTS a malformed block or entry; skip it here rather than crashing the
-        # renderer (the two must not disagree about the same input) or emitting a blank
-        # placeholder row for an entry that is missing `response` or `field`.
-        if not isinstance(_rf, dict) or not _rf.get("response") or not _rf.get("field"):
-            continue
-        # Normalise whitespace AND pipes in every cell: an unescaped `|` splits the markdown
-        # row, and an embedded newline (e.g. a YAML literal block) breaks it the same way.
-        _cells = [
-            " ".join(str(_rf.get(k, d) or d).split()).replace("|", "/")
-            for k, d in (
-                ("response", ""),
-                ("field", ""),
-                ("emitted_when", ""),
-                ("unchanged_when_off", "yes"),
-            )
-        ]
-        add(f"| `{_cells[0]}` | `{_cells[1]}` | {_cells[2]} | {_cells[3]} |")
+    for _row in response_field_rows(doc):
+        add(_row)
     add("")
     add("A field belongs in that table from the moment it is added — an off-by-default field that is")
     add("not recorded here has no approval behind it, and the carve-out does not cover it.")
