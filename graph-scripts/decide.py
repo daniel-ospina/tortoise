@@ -186,15 +186,32 @@ def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
     existing = _find_operators(proj, op_type, source_id, target_id, label,
                                any_label=any_label)
     if existing:
-        op_id, status = existing[0]
+        # Prefer the copy EP actually reads. On a graph polluted by an earlier
+        # run, the copies are identical bridges and the storage order is
+        # arbitrary; electing a draft while a live copy sits on the same bridge
+        # would make the run say (and, under --context-free, RANK) the wrong
+        # one. Still ONE bridge — no twin is filed, whichever copy is elected.
+        live = [pair for pair in existing if pair[1] == "live"]
+        op_id, status = (live or existing)[0]
         cache[key] = op_id
         note = None
         if status != "live":
-            note = (f"elected operator {op_id}, status={status} — EP excludes "
-                    "non-live operators (#780), so this bridge does not "
-                    "participate in the ranking until it is promoted "
-                    "(update_point(id, status='live')); it is NOT duplicated "
-                    "(#6671)")
+            from tortoise.live import is_draft_status, is_terminal_status
+            if is_draft_status(status):
+                note = (f"elected operator {op_id}, status=draft — EP excludes "
+                        "draft operators (#780), so this bridge does not "
+                        "participate in the ranking until it is promoted "
+                        "(update_point(id, status='live')); it is NOT "
+                        "duplicated (#6671)")
+            elif is_terminal_status(status):
+                note = (f"elected operator {op_id}, status={status} — a "
+                        "TERMINAL status; EP excludes it (#2422) and "
+                        "update_point cannot resurrect it, so this bridge stays "
+                        "out of the ranking; it is NOT duplicated (#6671)")
+            else:
+                note = (f"elected operator {op_id}, status={status} — a status "
+                        "this read surface does not rank (#780/#2422); the "
+                        "bridge is reused, not duplicated (#6671)")
         return op_id, True, note
     op = sdk.create_operator(op_type, source_id, [target_id], label=label)
     cache[key] = op["id"]
@@ -316,10 +333,15 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         # tortoise/weights.py module docstring, #2315).
         strength = max(0.10, min(0.50, strength))
         label = re.get("label")
-        # any_label: a relevance edge damps the bridge the caller names; it is
-        # not a claim of its own, so it never mints a parallel operator just
-        # because the decision did not repeat the Layer-3 label here.
-        op_id, reused, note = _elect(src, op_type, tgt, label, any_label=True)
+        # A relevance edge is a mitigation, not a claim of its own, so it never
+        # mints a parallel operator. When the caller states a label, the label
+        # SCOPES the dampening (two labels over one triple are two claims —
+        # damping a `refutes` bridge on behalf of a `supports` mitigation would
+        # silently weaken a claim the caller did not name). Without a label the
+        # edge damps every bridge on the triple.
+        any_label = label is None
+        op_id, reused, note = _elect(src, op_type, tgt, label,
+                                     any_label=any_label)
         if op_id is None:
             print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {note}")
             continue
@@ -330,7 +352,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # weight — the exact asymmetry #6671 measured.
             targets = [found_id for found_id, _st in _find_operators(
                 proj, op_type, _resolve(src), _resolve(tgt), label,
-                any_label=True)] or [op_id]
+                any_label=any_label)] or [op_id]
             for target_id in targets:
                 sdk.mitigate_operator(target_id, reason, strength)
             extra = "" if len(targets) == 1 else f" on {len(targets)} operators"

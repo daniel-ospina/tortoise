@@ -207,9 +207,9 @@ class TestDecideWiring:
             "WHERE t.id = $tid RETURN count(op)",
             params={"tid": opt["id"]},
         ).result_set
-        # Allow >=1 because the test itself created op1; the point is the
-        # reuse semantics are encoded in decide.py (created_ops tracking).
-        assert rows[0][0] >= 1
+        # Exactly one: the decide layer reuses the operator instead of adding
+        # a second bridge (#6671). A `>= 1` here could never fail.
+        assert rows[0][0] == 1
 
     def test_compute_confidence_with_anchors(self, sdk):
         """EP computes confidence for points via anchors-based selection."""
@@ -798,3 +798,60 @@ class TestIssue6671ReviewGaps:
             "the warning does not name the operator's real status: " + out)
         assert "DRAFT" not in out, (
             "a retracted operator is reported as a draft: " + out)
+        assert "TERMINAL" in out, (
+            "a terminal status is not named as terminal: " + out)
+        assert "update_point(id, status='live')" not in out, (
+            "the warning offers a remedy that fails for a terminal status — "
+            "update_point only promotes draft->live: " + out)
+
+
+    def test_live_copy_is_preferred_over_a_draft_on_the_same_bridge(self, sdk):
+        """On a polluted bridge the copies are identical, so storage order is
+        arbitrary. Electing the draft while a live copy exists would make the
+        run say — and under --context-free, RANK — the copy EP ignores."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        draft = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+                                    promote_source=False)
+        live = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+
+        data = {
+            "context": "issue-6671-gaps",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        result = decide.file_decision(sdk, data)
+
+        elected = [row for row in result["operators"] if row["op_type"] == "IMPL"]
+        assert elected and elected[0]["id"] == live["id"], (
+            f"elected the draft ({draft['id']}) while a live copy exists — "
+            "storage order decided which bridge the ranking used")
+
+    def test_polluted_bridge_is_damped_on_every_copy(self, sdk, capsys):
+        """A relevance edge must damp EVERY copy on its triple. Damping one
+        leaves the other at full weight — the mitigation split #6671 measured,
+        and the reason a polluted graph could still rank by run count."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]])   # pre-fix pollution
+        assert _operator_census(sdk).get("IMPL") == 2
+
+        data = {
+            "context": "issue-6671-gaps",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [],
+            "truth_edges": [],
+            "relevance_edges": [{"source": crit["id"], "op_type": "IMPL",
+                                 "target": opt["id"], "reason": "weak",
+                                 "strength": 0.20}],
+        }
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census.get("_mitigations") == 2, (
+            "a polluted bridge was only partly damped: " + str(census))
+        assert "on 2 operators" in capsys.readouterr().out
