@@ -118,11 +118,20 @@ class TestTheRiskAxis:
         confidence graph-wide, backfill_v25 rewrites every node's schema) were
         first tiered `write`, which silently removed the client's
         `destructiveHint` confirmation for them.
+
+        The identity-upsert family joined them for the same reason one step
+        further out (#9572): `create_subject` / `create_object` always send a
+        `subjectKind` / `objectKind` — `"other"` when the caller named no kind —
+        and `create_entity` supplies none, which the fold reads as `"other"` too,
+        so a bare re-create rewrites a user-authored discriminator. `main` served
+        `destructiveHint: true` on all three, and a `write` tier would have taken
+        that confirmation away on a call that clobbers.
         """
         # A tool belongs here whenever a REPEAT or a WRAPPER call reaches an
         # overwrite: `mitigate_operator` re-runs `update_point` +
-        # `set_point_baseline` on its idempotent path, and `index_sessions` is a
-        # thin wrapper over the corpus re-index.
+        # `set_point_baseline` on its idempotent path, `index_sessions` is a thin
+        # wrapper over the corpus re-index, and `mine_conversations` wraps the
+        # same re-ingest before mining it.
         destructive = {e.name for e in served() if e.risk == "destructive"}
         assert destructive == {
             # the delete family — their own descriptions say "cannot be undone"
@@ -134,13 +143,17 @@ class TestTheRiskAxis:
             "tortoise_annotate_operator", "tortoise_operator_action",
             "tortoise_set_point_baseline", "tortoise_assess_source",
             "tortoise_set_source_tier", "tortoise_mitigate_operator",
+            # identity upsert that re-applies a LIBRARY DEFAULT over a
+            # user-authored discriminator (#9572)
+            "tortoise_create_subject", "tortoise_create_object",
+            "tortoise_create_entity",
             # terminal status writes / replacement
             "tortoise_supersede", "tortoise_invalidate", "tortoise_promote_point",
             # whole-graph rewrites
             "tortoise_dream", "tortoise_backfill_v25",
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
-            "tortoise_index_sessions",
+            "tortoise_index_sessions", "tortoise_mine_conversations",
         }, sorted(destructive)
 
     def test_the_admin_set_is_pinned_by_name(self):
@@ -161,28 +174,32 @@ class TestTheRiskAxis:
         distinction from `destructive` and what makes `destructiveHint: false` an
         honest claim for these rows.
 
-        It may, however, apply the caller's own properties to the row the call
-        identifies (identity upsert: `create_subject`/`create_object`/
-        `create_entity` MERGE on a name-derived id; `create_source` sets
-        `credibilityTier`). "Additive" must not be read as "cannot change
-        anything" — see the tier axis in `tortoise/tool_registry.py`.
+        It may, however, apply the caller's own property to the row the call
+        identifies (`create_source` sets `credibilityTier`). "Additive" must not
+        be read as "cannot change anything" — but a call that stores a value the
+        caller never supplied is NOT this tier, which is why the identity-upsert
+        family (`create_subject` / `create_object` / `create_entity`, #9572) sits
+        in `destructive` — see the tier axis in `tortoise/tool_registry.py`.
 
         `tortoise_get_source_reliability` is here deliberately: it ADDS a cache
         row but is a declared writer on main, so a `graphs:read` key cannot call
         it today — demoting it to `maintenance` would hand read keys a new tool,
         which is a surface change, not a classification.
+
+        `tortoise_onboarding_github_index` is here deliberately too: it starts a
+        background index of external GitHub content (new rows, no user-authored
+        row rewritten), so it is additive rather than a corpus re-ingest.
         """
         writes = {e.name for e in served() if e.risk == "write"}
         assert writes == {
             "tortoise_approve_merge", "tortoise_checkpoint",
             "tortoise_create_document", "tortoise_create_edge",
-            "tortoise_create_entity", "tortoise_create_event",
-            "tortoise_create_object", "tortoise_create_operator",
+            "tortoise_create_event", "tortoise_create_operator",
             "tortoise_create_point", "tortoise_create_source",
-            "tortoise_create_subject", "tortoise_diary_write",
+            "tortoise_diary_write",
             "tortoise_file_decision", "tortoise_file_human_approval",
             "tortoise_get_source_reliability",
-            "tortoise_ingest", "tortoise_mine_conversations",
+            "tortoise_ingest",
             "tortoise_onboarding_demo_create",
             "tortoise_onboarding_github_index", "tortoise_onboarding_seed",
             "tortoise_session_capture",
@@ -416,6 +433,70 @@ class TestTheReadThroughToolsRegressionPin:
                     mismatches.append(
                         f"{name}: served {attr}={served_value!r}, tier says {expected!r}")
         assert mismatches == [], mismatches
+
+
+#: #9572 — the family whose bare repeat call RE-APPLIES a library default over a
+#: user-authored property: `create_subject` / `create_object` always send a
+#: `subjectKind` / `objectKind` (`"other"` when the caller named none),
+#: `create_entity` sends none and the fold's `ev.get(..., "other")` default takes
+#: over, and `mine_conversations` wraps the corpus re-ingest (`ingest_corpus`,
+#: which is `destructive` for exactly that reason).
+#:
+#: All four served `destructiveHint: true` on `main` (`_rw()`), so tiering them
+#: `write` silently removed the client's confirmation at the moment the call got
+#: MORE dangerous (#4122 review, MEDIUM). They keep `graphs:write` either way — the
+#: tier only decides the hint — so this is not a permission change.
+IDENTITY_UPSERT_OVERWRITERS = (
+    "tortoise_create_subject",
+    "tortoise_create_object",
+    "tortoise_create_entity",
+    "tortoise_mine_conversations",
+)
+
+
+class TestTheIdentityUpsertFamilyKeepsItsConfirmation:
+    """A repeat call applies a DEFAULT the caller never supplied, so these may not
+    claim to be additive (#9572 is the write, this is the HINT).
+
+    Both halves fail on the pre-fix code: there the four are `risk="write"`, so
+    `destructiveHint` is `False`.
+    """
+
+    def test_the_tier_is_destructive_and_the_permission_is_untouched(self):
+        entries = {e.name: e for e in served()}
+        for name in IDENTITY_UPSERT_OVERWRITERS:
+            entry = entries[name]
+            assert entry.risk == "destructive", (
+                f"{name}: re-applying a library default over a user-authored "
+                f"property is `destructive`, not additive (#9572)")
+            assert entry.annotations.destructiveHint is True, (
+                f"{name}: destructiveHint must stay true — `main` served it true "
+                f"and a bare re-create can clobber a stored discriminator")
+            assert entry.annotations.readOnlyHint is False, name
+            # write and destructive BOTH derive `writes`, so nothing about key
+            # scope moves: a `graphs:read` key was refused before and is refused now.
+            assert entry.writes is True, name
+
+    def test_the_served_hint_is_the_destructive_one(self):
+        """Read it back off the registered tool, as a client would — the registry
+        value agreeing with itself is not the property that matters."""
+        import asyncio
+
+        from tortoise.mcp_server import mcp
+
+        async def _tools():
+            return {t.name: t for t in await mcp._list_tools()}
+
+        tools = asyncio.run(_tools())
+        assert tools, "served tool list is empty — the check would be vacuous"
+        for name in IDENTITY_UPSERT_OVERWRITERS:
+            ann = tools[name].annotations
+            assert ann is not None, f"{name}: no annotations on the served tool"
+            assert ann.destructiveHint is True, (
+                f"{name}: served destructiveHint is {ann.destructiveHint!r} — a "
+                f"client gates its confirmation on this and a bare re-create "
+                f"overwrites a user-authored discriminator (#9572)")
+            assert ann.readOnlyHint is False, name
 
 
 class TestReadTierCannotHideAnOutOfBoundaryWrite:

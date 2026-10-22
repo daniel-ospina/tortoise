@@ -145,19 +145,29 @@ class ToolDefinition:
 #                 confined housekeeping pass). Idempotent by default; an entry
 #                 overrides `idempotent` where the behaviour differs (both
 #                 confidence tools DO re-store on a repeat call).
-#   write       — ADDITIVE, and it may also apply THE CALLER'S OWN properties to the
-#                 row THIS CALL identified (identity upsert: `create_subject` /
-#                 `create_object` / `create_entity` `MERGE` on a name-derived id;
-#                 `create_source` sets `credibilityTier`). It never removes a row and
-#                 never rewrites a row the caller did not name — but it is a WRITER,
-#                 so "additive" must not be read as "cannot change anything".
+#   write       — ADDITIVE, and it may also apply THE CALLER'S OWN property to the
+#                 row THIS CALL identified (`create_source` sets `credibilityTier`).
+#                 It never removes a row, never rewrites a row the caller did not
+#                 name, and never stores a value the caller did not supply — a call
+#                 that re-applies OUR OWN DEFAULT is `destructive` below. It is a
+#                 WRITER either way, so "additive" must not be read as "changes
+#                 nothing". `tortoise_onboarding_github_index` is here deliberately:
+#                 it starts a background index of the org's GitHub issues/PRs — new
+#                 rows from external content, no user-authored row rewritten.
 #   destructive — removes, or overwrites in place, stored state that a user
 #                 authored (delete family, in-place update family, terminal status
 #                 writes, whole-graph rewrites, re-ingest that rewrites an existing
 #                 corpus) — `destructiveHint: true`. A tool belongs here whenever a
 #                 REPEAT or a WRAPPER call reaches one of these (`mitigate_operator`
-#                 updates its mitigation point; `index_sessions` wraps the corpus
-#                 re-index).
+#                 updates its mitigation point; `index_sessions` and
+#                 `mine_conversations` wrap the corpus re-index), and whenever a bare
+#                 call applies a LIBRARY DEFAULT over a user-authored discriminator:
+#                 `create_subject` / `create_object` send `"other"` even when the
+#                 caller named no kind, `create_entity` supplies none at all, and the
+#                 fold's never-`None` default then rewrites a stored
+#                 `subjectKind="organization"` (`projection/entities.py`,
+#                 `_upsert_subject` / `_upsert_object`: `ON MATCH … =coalesce($sk, …)`)
+#                 — #9572. Until that clobber is fixed these keep `main`'s hint.
 #   admin       — changes what the product DOES for the org/graph/install:
 #                 provisioning, pack install, credentials, recording/monitoring and
 #                 source switches. `destructiveHint: true`.
@@ -499,7 +509,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "per-file failures reported non-fatally in 'errors'. "
                     "WRITES to the graph; corpus mode walks the server "
                     "filesystem — stdio/CLI only (excluded from tenant HTTP).",
-        risk="write",
+        risk="destructive",  # wraps ingest_corpus — the same corpus re-ingest
         http_policy=False,
         sdk_method="mine_corpus",
     ),
@@ -1048,7 +1058,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_subject",
         id="surface.create_subject",
         description="Create a Subject node (team, role, organization, person).",
-        risk="write",
+        risk="destructive",  # #9572: bare re-create re-applies subjectKind="other"
         http_policy=True,
         sdk_method="create_subject",
     ),
@@ -1056,7 +1066,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_object",
         id="surface.create_object",
         description="Create an Object node (product, customer, skill, etc.).",
-        risk="write",
+        risk="destructive",  # #9572: bare re-create re-applies objectKind="other"
         http_policy=True,
         sdk_method="create_object",
     ),
@@ -1210,7 +1220,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "For type='document', declaring extractedFrom materializes "
                     "the :Source (#8171); on subject/object/event it is inert "
                     "and an extracted_from_inert advisory is returned.",
-        risk="write",
+        risk="destructive",  # #9572: type=subject|object re-applies a "other" default
         http_policy=True,
         sdk_method="create_entity",
     ),

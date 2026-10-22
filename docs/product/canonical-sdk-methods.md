@@ -512,7 +512,8 @@ justified as one.
 | `test_guard`, `ulid` | No product justification exists for either. Candidates for removal from the public surface. |
 | `commit_session` | Is it a distinct user action from `capture_session`, or an internal pipeline split? |
 | `invitation_*` (8), `signup_token_*` (3) | 11 public methods for administrative flows no competitor models as product API. Keep as namespaced admin, or reduce. |
-| `get_confidence` / `compute_confidence` / `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — until then the read/write guarantee does not hold |
+| `get_confidence` / `compute_confidence` | **✅ RESOLVED for the MCP surface by #4122** — both are `risk="maintenance"` in `tortoise/tool_registry.py`: `graphs:read` still reaches them (KEY SCOPE unchanged) and the served `readOnlyHint` is now `false`, so no client auto-approves them as a read. What remains is the METHOD-name half (a `get_`/`compute_` name that stores), owned by the rename pass above. |
+| `get_source_reliability` | a decision: fix the declaration, or add a `write_back: bool` parameter — it is `risk="write"` today (a write-through cache refresh), so the read/write guarantee holds for the PERMISSION but a read-named method still writes |
 | The control-plane cold-handle write | approval of a fix, or an explicit exemption for operator-only surfaces |
 | Five phantom `sdk_method` registry values | folded into #4035's class of defect |
 | 26 memory-facing groups vs the approved 23 tools | whether the SDK mirrors the tool list 1:1 or stays a superset |
