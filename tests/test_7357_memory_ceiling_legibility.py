@@ -22,8 +22,9 @@ What these tests pin, in order:
 * the family predicate, and that it is EXCLUSIVE of the instance-outage family
   (an answered refusal is not a dead box, and a dead box is not an answer);
 * the note's content — capacity refusal, nothing applied, data intact, and the
-  two real remedies rather than an invitation to retry (a deterministic refusal
-  is not a transient);
+  the real remedy rather than an invitation to retry (a deterministic refusal
+  is not a transient), and that it conforms to the repo's recorded #2981 ruling
+  for the same refusal instead of advising a destructive one;
 * the contract: driver sentence at position 0, exception TYPE unchanged, one
   suffix at most;
 * the WIRING, driven through a real ``guarded_client`` and through the duck-typed
@@ -140,11 +141,10 @@ def test_the_note_names_the_mechanism_and_refuses_the_data_loss_reading():
     assert "nothing was applied" in lowered
 
 
-def test_the_note_does_not_invite_a_retry_and_names_the_real_remedies():
+def test_the_note_does_not_invite_a_retry_and_names_the_real_remedy():
     """A deterministic refusal is NOT a transient: the next action is memory."""
     text = (explain_memory_ceiling(_ceiling_error()) or "").lower()
     assert "re-issuing it now will be refused the same way" in text
-    assert "free memory" in text
     assert "raise the ceiling" in text
     # The kernel cap is the BACKSTOP; raising it does not move the refusal, so
     # the note must not send the reader to the wrong knob alone.
@@ -153,6 +153,57 @@ def test_the_note_does_not_invite_a_retry_and_names_the_real_remedies():
     # It must never be told "retrying is safe" the way the READ arm of the
     # transport note is (#9352): that arm's licence does not extend here.
     assert "re-issuing this statement is safe" not in text
+
+
+def test_the_note_never_names_deleting_graphs_as_the_remedy():
+    """P2 (#9532 review): the remedy must agree with the repo's #2981 ruling.
+
+    This seam runs on EVERY instance the SDK builds a client for — shared and
+    production included — not just a lane's own container, so "free memory by
+    deleting graphs this instance no longer needs" is advice the caller cannot
+    act on safely: `GRAPH.DELETE` is irreversible and a name you cannot
+    attribute is not yours to delete. `_write_refusal_message` (#2981) already
+    records that ruling for this exact refusal, and two messages for one
+    refusal must not advise opposite actions.
+
+    NON-VACUOUS: the pre-fix note said "free memory (delete graphs this
+    instance no longer needs)", so the first assertion fails on it.
+    """
+    text = (explain_memory_ceiling(_ceiling_error()) or "").lower()
+    assert "delete graphs this instance no longer needs" not in text, (
+        "the note must not offer graph deletion as the remedy: it is emitted "
+        "on shared and production instances too (see #2981)")
+    # Deletion may only appear as a PROHIBITION, and it must carry #2981's
+    # constraint verbatim rather than loosening it into a paraphrase.
+    assert "do not hand-pick names from graph.list to free memory" in text
+    assert "graph.delete cannot be undone" in text
+    assert "not yours to delete" in text
+    assert "never delete the production graph `tortoise`" in text
+    assert "tortoise_restored*" in text
+    assert "do not flushall" in text
+    assert "#2981" in text, (
+        "the note must point at the policy it is conforming to, or the next "
+        "lane re-decides it")
+
+
+def test_the_denyoom_claim_is_scoped_to_the_verb_that_was_measured():
+    """P3 (#9532 review): the note must not out-claim its own measurement.
+
+    The PR measured a refused `GRAPH.QUERY` WRITE (a `CREATE` left the graph at
+    0 nodes). That every `GRAPH.*` verb carries `denyoom` — reads such as
+    `GRAPH.RO_QUERY`/`GRAPH.LIST` included — is NOT established by it, so the
+    note names the measured verb and the load-bearing half ("rejected BEFORE it
+    ran") rather than the absolute.
+
+    NON-VACUOUS: the pre-fix note said "a `denyoom` command (every `GRAPH.*`
+    verb)", so the second assertion fails on it.
+    """
+    text = explain_memory_ceiling(_ceiling_error()) or ""
+    lowered = text.lower()
+    assert "every `graph.*` verb" not in lowered
+    assert "graph.query" in lowered, (
+        "the scoped claim names the verb that was actually measured")
+    assert "rejected before it" in lowered
 
 
 def test_the_note_is_idempotent_and_keeps_the_exception_type():

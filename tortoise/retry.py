@@ -914,13 +914,27 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
     - it is a CAPACITY refusal, answered by a HEALTHY instance — not the
       engine's graph-swap abort, not a dead container, not data loss (the
       ceiling and `noeviction` exist precisely so the dataset survives);
-    - the command was refused BEFORE it ran, so nothing was applied. `GRAPH.*`
-      commands are registered ``denyoom`` (measured: a refused `CREATE` left the
-      graph at 0 nodes), which is why the note does not hand the caller the
-      transport arm's "OUTCOME IS UNKNOWN, read back first";
+    - the command was refused BEFORE it ran, so nothing was applied. The
+      measured command is a ``GRAPH.QUERY`` WRITE, which carries ``denyoom``
+      (measured: a refused `CREATE` left the graph at 0 nodes). That is the
+      claim the note makes — the verbs actually measured — and not the
+      absolute "every ``GRAPH.*`` verb", which no measurement in this change
+      establishes. It is why the note does not hand the caller the transport
+      arm's "OUTCOME IS UNKNOWN, read back first";
     - re-issuing is NOT the next action. The refusal is deterministic while the
-      instance is at its ceiling, so the note names the two real remedies (free
-      graph data, or raise the ceiling) instead of inviting a retry loop.
+      instance is at its ceiling, so the note names the real remedy — RAISE the
+      ceiling — instead of inviting a retry loop. It deliberately does NOT
+      advise freeing memory by deleting graphs: this seam runs on every
+      instance the SDK builds a client for (shared and production included),
+      not just a lane's own container, where "a graph this instance no longer
+      needs" is not something the caller can know. That is the same ruling the
+      repo already recorded for this refusal in
+      ``tortoise/projection/__init__.py::_write_refusal_message`` (#2981), and
+      two messages for one refusal must not advise opposite actions — a name
+      you cannot attribute is not yours to delete, ``GRAPH.DELETE`` cannot be
+      undone, and the production graph and its snapshots are out of scope. The
+      note carries that constraint verbatim rather than paraphrasing it, and
+      names #2981 so the next reader finds the policy instead of re-deciding it.
 
     It deliberately does NOT say "your data is at risk" or "raise `--memory`":
     the kernel cap is the backstop, and moving it does not move the refusal —
@@ -942,12 +956,16 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
         "dead or restarting instance, and not evidence that the graph or its "
         "data was lost — the ceiling with `noeviction` exists so an overshoot "
         "is refused while the instance and its data stay present. Nothing was "
-        "applied: a `denyoom` command (every `GRAPH.*` verb) is rejected BEFORE "
-        "it runs. Re-issuing it now will be refused the same way — the next "
-        "action is to free memory (delete graphs this instance no longer "
-        "needs) or to raise the ceiling (`--maxmemory`; a container this repo "
-        "starts derives it from `FALKORDB_CONTAINER_MEMORY`, whose kernel cap "
-        "is only the backstop), then re-issue."
+        "applied: the refused command was rejected BEFORE it ran (measured on a "
+        "write: a refused GRAPH.QUERY `CREATE` left the graph at 0 nodes). "
+        "Re-issuing it now will be refused the same way — the next action is to "
+        "raise the ceiling (`--maxmemory`; a container this repo starts derives "
+        "it from `FALKORDB_CONTAINER_MEMORY`, whose kernel cap is only the "
+        "backstop), then re-issue. Do NOT hand-pick names from GRAPH.LIST to "
+        "free memory instead: GRAPH.DELETE cannot be undone, and a name you "
+        "cannot attribute is not yours to delete. Never delete the production "
+        "graph `tortoise` or a `tortoise_restored*` snapshot, and do NOT "
+        "FLUSHALL. See #2981."
     )
     return text + _LEGIBLE_OPENER + explains
 
