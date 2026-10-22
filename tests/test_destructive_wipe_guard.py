@@ -937,6 +937,15 @@ def test_a_bare_DELETE_cannot_be_invented_by_a_lookalike(statement):
     reads True. Both are the clause-position convention ``_WRITE_CLAUSE_RE``
     already uses, so a statement that merely CONTAINS the word cannot be
     refused as a destructive write.
+
+    ⚠️ NOT a blanket invariant — one shape is a KNOWN over-classification
+    (#9632 review): an IDENTIFIER named ``delete``, e.g.
+    ``MATCH (delete) RETURN delete`` (a pure read) or
+    ``MATCH (delete:Point {id:$id}) DELETE delete`` (a one-node delete), lands at
+    clause position with a non-scoping tail, so it is REFUSED. No in-tree
+    statement uses such a variable (an AST sweep of every DELETE-bearing literal
+    found 0), so this is a user-written-query boundary; it is recorded here
+    rather than asserted away.
     """
     from tortoise.projection import _is_bulk_wipe
 
@@ -952,6 +961,14 @@ def test_a_bare_DELETE_cannot_be_invented_by_a_lookalike(statement):
     "MATCH (n) DELETE n MATCH (x) WHERE n.id = $id",
     "MATCH (n) DELETE n WITH n WHERE n:Point",
     "MATCH (n) DELETE n MATCH (x:Point) RETURN x",
+    # #9632 review (P1): the ALIAS signal was read over the whole statement, so a
+    # projection placed AFTER the clause lent the deleted variable a scoped source
+    # name — ``RETURN`` is the one position where ``AS`` binds nothing. Measured on
+    # FalkorDB v4.20.6: all 3 nodes deleted while the classifier returned False
+    # (dispatched at both L2 call sites).
+    "MATCH (x:Point), (n) DELETE n RETURN x AS n",
+    "MATCH (x:Point), (n) DETACH DELETE n RETURN x AS n",
+    "MATCH (x:Point {id:$id}), (n) DELETE n RETURN x AS n",
 ])
 def test_a_targeting_construct_AFTER_the_DELETE_cannot_exempt_the_wipe(statement):
     """#8256 round 3: the label/WHERE search is bounded at the clause, like the
@@ -960,6 +977,8 @@ def test_a_targeting_construct_AFTER_the_DELETE_cannot_exempt_the_wipe(statement
     MUTATION: search the label/WHERE signals over the whole statement (drop the
     ``text[:delete_at]`` bound in ``_var_is_scoped``) and all five read False —
     a spoof that appends a label or a WHERE after the wipe dispatches it.
+    MUTATION (alias, #9632 review P1): pass ``text`` instead of ``bounded`` to
+    ``_scope_names`` and the three ``... RETURN x AS n`` cases read False.
     """
     from tortoise.projection import _is_bulk_wipe
 

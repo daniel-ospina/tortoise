@@ -658,7 +658,15 @@ def _reset_vector_gap_warnings() -> None:
 # on the deleted variable.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
 # parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
-# (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
+# (WHERE true, WHERE 1=1) don't count.
+#   ⚠️ KNOWN GAP (#9632 review, pre-existing and unfixed here): that rule is a
+#   PRESENCE test, not a RESTRICTION test. ``MATCH (n) WHERE n.id = n.id DELETE n``
+#   matches the property arm and ``MATCH (n) WHERE n:Point OR true DELETE n``
+#   matches the label-predicate arm; both delete every node on FalkorDB v4.20.6
+#   (measured 3 → 0) while the classifier says targeted. Closing it means
+#   refusing an exemption whose WHERE chunk contains a top-level ``OR`` or a
+#   self-comparison — a behaviour change on the guard itself, tracked separately
+#   rather than smuggled into #8256. ``IN [list]`` was NOT recognized before
 # #3007 (only ``IN (``), so a scoped delete whose only reference was
 # `id(n) IN [..]` / `labels(n)[0] IN [..]` was misclassified as a bulk wipe.
 _WHERE_REAL_RE = re.compile(
@@ -966,7 +974,18 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     # follows it: a pattern bounds rows before they are deleted, so the bound is
     # a narrowing (fail-closed) and cannot refuse a real targeted delete.
     bounded = text[: max(delete_at, 0)]
-    for name in _scope_names(text, var):
+    # #9632 review (P1, demonstrated on FalkorDB v4.20.6): the ALIAS signal is
+    # bounded too. ``_scope_names`` follows a ``WITH <src> AS <var>`` chain, and
+    # it was read over the WHOLE statement — so a projection placed AFTER the
+    # clause lent the deleted variable a scoped source name:
+    # ``MATCH (x:Point), (n) DELETE n RETURN x AS n`` deleted all 3 nodes on the
+    # engine while the classifier returned False (dispatched at both L2 call
+    # sites). ``RETURN`` is the one position where ``AS`` binds nothing, and the
+    # label on the SOURCE (``x:Point``) then satisfied the label arm. Same
+    # rounding as round 3: nothing that can target a DELETE legally follows it,
+    # so the bound is fail-open-closing and cannot refuse a real targeted delete
+    # (``MATCH (n:Point {id:$id}) WITH n AS m DELETE m`` stays ALLOWED).
+    for name in _scope_names(bounded, var):
         if name in maps:
             return True
         escaped = re.escape(name)
