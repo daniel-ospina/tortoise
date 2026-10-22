@@ -919,25 +919,101 @@ def test_every_allowlisted_root_file_actually_exists():
 # module quotes it, and this test file hard-codes the members.
 _SELF_NAMERS = frozenset({"tools/ci_selection.py", "tests/test_ci_selection.py"})
 
+# The five roots the mention census greps. `scripts/` carries a TRAILING SLASH
+# deliberately (see `_readers_of`).
+_CENSUS_ROOTS = ("tests", "tools", "scripts/", ".github", "tortoise")
+
+# The materialiser for the `scripts/` root (#9475) — named in the announcement so
+# the reader gets the REMEDY, not only the fact.
+_SCRIPTS_MATERIALISER = "tools/link_agent_infra_scripts.py"
+
 
 def _readers_of(name: str) -> list[str]:
     """Non-self files under tests/tools/scripts/.github/tortoise naming `name`.
 
-    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a tracked
-    SYMLINK, and BSD grep does not descend a symlinked directory named without
-    one — so `grep -rlF <n> tests tools scripts .github tortoise` silently
-    searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same dir with
-    the slash). The census numbers are only reproducible with the slash.
+    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a SYMLINK
+    (machine-local since #9475 — gitignored and materialised from
+    `$AGENT_INFRA_PATH`), and BSD grep does not descend a symlinked directory
+    named without one — so `grep -rlF <n> tests tools scripts .github tortoise`
+    silently searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same
+    dir with the slash). The census numbers are only reproducible with the slash.
+
+    ⛔ AND THE ROOT CAN BE ABSENT — which is ANNOUNCED, never silent (#9541
+    review ISSUE 1). `scripts` is no longer tracked, so a fresh clone, a CI
+    runner, and a lane before its first materialisation have no such path at
+    all: grep prints `scripts/: No such file or directory` to stderr, exits 2,
+    and uses only `.stdout`. The four present roots are still censused, but the
+    `scripts/` one is MISSING, and both ratchets this feeds can only be as good
+    as what the census saw — so the loss is printed with the command that
+    restores it. Before this, the root vanished from every fresh checkout
+    without a word while the ratchets stayed green.
 
     SCOPE: a LITERAL-NAME grep. It does not see a reader that finds `name` by
     GLOB or directory walk, nor one outside these five roots.
     """
-    out = subprocess.run(
-        ["grep", "-rlF", name, "tests", "tools", "scripts/", ".github",
-         "tortoise"],
-        cwd=REPO, capture_output=True, text=True).stdout.split("\n")
+    result = subprocess.run(
+        ["grep", "-rlF", name, *_CENSUS_ROOTS],
+        cwd=REPO, capture_output=True, text=True)
+    absent = [root for root in _CENSUS_ROOTS if not (REPO / root).is_dir()]
+    # grep exits 1 for "no match" (normal here) and 2 for "a root could not be
+    # read". Any other non-zero, with every root present, is a fault that must
+    # not read as "no readers" — the same silent-narrowing class as an absent root.
+    if absent or result.returncode not in (0, 1):
+        missing = (
+            f"{', '.join(absent)} absent from this checkout — a machine-local pointer that has "
+            f"not been materialised (#9475: `scripts` is gitignored, not tracked; run `uv run "
+            f"python {_SCRIPTS_MATERIALISER}`)"
+            if absent else "every root is present"
+        )
+        print(
+            f"::warning::MENTION CENSUS INCOMPLETE for {name!r}: {missing}; "
+            f"grep exited {result.returncode}."
+            + (f" {result.stderr.strip()}" if result.stderr.strip() else "")
+            + " A reader living under a root that was not searched cannot be seen here.",
+            file=sys.stderr,
+        )
+    out = result.stdout.split("\n")
     return sorted(h for h in (x.strip() for x in out)
                   if h and h not in _SELF_NAMERS and not h.endswith(".pyc"))
+
+
+def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypatch, capsys):
+    """#9541 review ISSUE 1 (P3): the narrowing must be AUDIBLE, not silent.
+
+    `scripts/` is untracked since #9475, so on a fresh clone, a runner, or a lane
+    before its first materialisation the path is ABSENT: grep prints
+    `scripts/: No such file or directory`, exits 2, and `_readers_of` kept only
+    `.stdout` — so the root vanished from the census without a word and both
+    ratchets it feeds stayed green while a reader under `scripts/` was
+    unseeable. RED before the fix: nothing was printed at all, so the assertion
+    below failed on empty stderr.
+
+    The second half is the discriminator: with every root present the same call
+    says nothing, so the message tracks the ABSENCE rather than being emitted
+    unconditionally.
+    """
+    for root in ("tests", "tools", ".github", "tortoise"):
+        (tmp_path / root).mkdir()
+    # `_readers_of` greps at `REPO`, the module global in THIS file — patch that one.
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    assert REPO == tmp_path, "the census must run against the throwaway tree"
+
+    # `scripts/` deliberately ABSENT — the fresh-clone / runner / new-lane state.
+    assert _readers_of("AGENTS.md") == []
+    absent_message = capsys.readouterr().err
+    assert "MENTION CENSUS INCOMPLETE" in absent_message, (
+        "the `scripts/` root is absent and the census said nothing: the two ratchets this "
+        "feeds (test_no_allowlisted_root_file_has_a_reader, test_no_content_reader) then "
+        "report a complete census over four of five roots"
+    )
+    assert "scripts/" in absent_message, absent_message
+    # The reader gets the REMEDY, not just the fact (the materialiser this PR ships).
+    assert "tools/link_agent_infra_scripts.py" in absent_message, absent_message
+
+    # Control: the pointer materialised — nothing to announce.
+    (tmp_path / "scripts").mkdir()
+    _readers_of("AGENTS.md")
+    assert capsys.readouterr().err == ""
 
 
 def test_no_allowlisted_root_file_has_a_reader():
@@ -1082,8 +1158,10 @@ def test_subdirectory_markdown_is_unaffected():
 _READ_CALLS = frozenset({"open", "read_text", "read_bytes", "read",
                          "readlines", "load", "loads", "loadtxt"})
 
-# The CI roots the selector's surface map is built on. `scripts/` is a tracked
-# SYMLINK, so it must be walked on disk, not read from `git ls-files`.
+# The CI roots the selector's surface map is built on. `scripts/` is a SYMLINK to
+# an agent-infra checkout outside this repo — gitignored and materialised per
+# machine since #9475, not tracked — so it must be walked on disk, not read from
+# `git ls-files`.
 _NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
 
 # A shell read operation. `read\b` deliberately does NOT match "reads" (word
@@ -1153,19 +1231,23 @@ def _content_readers_of(path: str) -> list[str]:
     """Files under the five CI roots that READ `path`'s content.
 
     ⛔ The roots are WALKED on disk, not read from `git ls-files`: `scripts/` is
-    a tracked SYMLINK, so the listing returns the link itself and the ~70 files
-    behind it are never scanned — the same gap #6787 cycle 4 P3 found in the
-    sibling mention census. Shell files use a line-level read-op pattern, never
-    `ast.parse` (which returns False on every `.sh`).
+    a SYMLINK to a checkout OUTSIDE this repository, so a listing returns the
+    link itself (before #9475 it returned the tracked 120000 blob; now the path
+    is gitignored and untracked, so a listing returns nothing at all) and the
+    ~70 files behind it are never scanned — the same gap #6787 cycle 4 P3 found
+    in the sibling mention census. Shell files use a line-level read-op pattern,
+    never `ast.parse` (which returns False on every `.sh`).
 
     ⚠️ SCOPE, stated rather than overclaimed (cycle-2 review P2): `scripts/` is
-    a symlink to an ABSOLUTE machine-local path, so it DANGLES on the Ubuntu CI
-    runner (`python-ci.yml` / `ci.yml` say so) and this walk silently skips that
-    root there — the root is reached only where the symlink resolves. That is
-    the SAME CI limitation the sibling `_readers_of` grep has, and it is not
-    closable from inside the repo. A future member whose ONLY reader lives under
-    `scripts/` cannot rely on this ratchet on CI: grep the whole tree before
-    adding one.
+    a symlink to an ABSOLUTE machine-local target materialised from
+    `$AGENT_INFRA_PATH` (#9475), so on a fresh clone — the Ubuntu CI runner, a
+    lane before its first commit — the path is simply ABSENT and this walk
+    skips that root there; the root is reached only where the pointer has been
+    materialised (`uv run python tools/link_agent_infra_scripts.py`). That is
+    the SAME limitation the sibling `_readers_of` grep has (which now ANNOUNCES
+    the absent root), and it is not closable from inside the repo. A future
+    member whose ONLY reader lives under `scripts/` cannot rely on this ratchet
+    on CI: grep the whole tree before adding one.
     """
     name = path.rsplit("/", 1)[-1]
     out: list[str] = []

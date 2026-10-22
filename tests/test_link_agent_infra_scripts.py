@@ -31,6 +31,27 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "link_agent_infra_scripts.py"
 
+# The trees a reader consults to learn what the `scripts` pointer IS. `docs/` is deliberately
+# OUT of scope: it holds dated records (`docs/scoping/2026-09-17-3863-…` says the pointer "is a
+# tracked symlink") that were true when written — history, not guidance.
+_CLAIM_SCAN_ROOTS = ("AGENTS.md", ".husky", ".github", "tests", "tools")
+_CLAIM_SCAN_SUFFIXES = {".py", ".yml", ".yaml", ".sh", ""}
+#: This guard's own message strings quote the claim they forbid, so it skips itself.
+_CLAIM_SELF_NAMERS = frozenset({"tests/test_link_agent_infra_scripts.py"})
+#: `scripts` asserted to BE (or to have been) a tracked symlink — the claim #9475 falsified.
+#: Deliberately anchored on `scripts` first: an aside that only MENTIONS scripts while claiming
+#: something about `skills` (e.g. "`skills/` is a tracked symlink … `scripts/` was the same
+#: until #9475") is correct and must stay allowed.
+_STALE_TRACKED_CLAIM = re.compile(
+    r"\bscripts?/?\b[^.;]{0,60}\b(?:is|are|was|were|stays?|remains?)\b[^.;]{0,30}"
+    r"\btracked\b[^.;]{0,40}\b(?:symlinks?|120000)\b",
+    re.I | re.S,
+)
+#: The CORRECT shape, which stays allowed: "gitignored, not tracked", "untracked".
+_NOT_TRACKED = re.compile(
+    r"\b(?:not|never|no\s+longer)\s+(?:\*\*)?tracked\b|\buntracked\b", re.I
+)
+
 
 def run_tool(
     *args: str,
@@ -119,6 +140,66 @@ class TestScriptsPointerIsNotTracked:
             "AGENTS.md no longer names tools/link_agent_infra_scripts.py. #9475's accepted fix is "
             "'materialise per machine', so the docs must tell an agent how — the pre-fix table "
             "claimed a tracked symlink that resolved on one machine."
+        )
+
+    def test_no_comment_still_claims_the_pointer_is_tracked(self) -> None:
+        """PR #9541 review ISSUE 2 (P3): a claim that outlives its fact gets re-derived as fact.
+
+        This PR swept the stale "re-link `scripts/`" guidance out of `.husky/pre-commit` and the
+        workflow headers, then left the same claim, in the same words, at five sites in three
+        files the next lane actually reads:
+
+        * `tests/test_ci_selection.py` — `_readers_of` ("`scripts` is a tracked SYMLINK"),
+          `_content_readers_of` (same), and the `_NON_CODE_DOC_ROOTS` comment ("`scripts/` is a
+          tracked SYMLINK, so it must be walked on disk").
+        * `tests/test_8066_served_skill_relay_ratchet.py` — "`skills` and `scripts` are tracked
+          symlinks (mode 120000)".
+        * `tests/test_docs_lint_baseline.py` — "`skills/` and `scripts/` are tracked symlinks".
+
+        RED before the fix (measured here: 5 claim matches, in those 3 files). After #9475
+        `git ls-files -- scripts` is EMPTY and `/scripts` is gitignored, so "tracked" sends a
+        reader looking for a blob that does not exist — and it is precisely the premise the
+        tracked blob would need in order to come back. The repo's own standard is that a
+        duplicated claim re-stales; the untracked shape ("gitignored, not tracked; materialised
+        per machine by `tools/link_agent_infra_scripts.py`") is what must be stated instead.
+
+        SCOPE: a claim-shaped scan of `AGENTS.md`, `.husky/`, `.github/`, `tests/` and `tools/`.
+        Prose in `docs/` is dated history and is out of scope; a claim phrased some way this
+        pattern does not recognise is not caught here.
+        """
+        offenders: list[str] = []
+        for scan_root in _CLAIM_SCAN_ROOTS:
+            base = REPO_ROOT / scan_root
+            if base.is_file():
+                paths = [base]
+            else:
+                paths = sorted(
+                    p for p in base.rglob("*")
+                    if p.is_file() and "__pycache__" not in p.parts
+                    and p.suffix in _CLAIM_SCAN_SUFFIXES
+                )
+            for path in paths:
+                rel = path.relative_to(REPO_ROOT).as_posix()
+                if rel in _CLAIM_SELF_NAMERS:
+                    continue
+                try:
+                    text = path.read_text()
+                except (OSError, UnicodeDecodeError):  # binary or unreadable: not a claim
+                    continue
+                for match in _STALE_TRACKED_CLAIM.finditer(text):
+                    if _NOT_TRACKED.search(match.group(0)):
+                        continue
+                    line = text.count("\n", 0, match.start()) + 1
+                    offenders.append(f"{rel}:{line}: {' '.join(match.group(0).split())}")
+
+        assert not offenders, (
+            "these still call the `scripts` pointer a TRACKED symlink, which #9475 made false "
+            "(`git ls-files -- scripts` is empty and `/scripts` is gitignored — the pointer is "
+            "materialised per machine by tools/link_agent_infra_scripts.py):\n  "
+            + "\n  ".join(offenders)
+            + "\nReword to the machine-local shape — \"gitignored, not tracked; materialised "
+            "from $AGENT_INFRA_PATH\" — because a stale claim is how the tracked blob gets "
+            "re-derived and re-added."
         )
 
 
