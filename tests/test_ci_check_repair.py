@@ -396,26 +396,60 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone():
     implement half of #9365 and read green:
 
       * the workflow step must keep propagating the tool's exit code (no
-        `continue-on-error`, no forced `exit 0`);
+        `continue-on-error` at JOB or step level, no forced `rc`/`exit 0`);
       * the coverage read must keep treating a failed window as the handoff
         (`ran-not-succeeded` at exit 1), not as coverage.
 
     If a change deliberately moves the coverage signal off the run conclusion,
     update THIS test in the same commit — that is the point: the two cannot drift
-    apart. The first half is a substring read of YAML prose, so it is blunt on
-    purpose: an explanatory comment inside the step that NAMES `continue-on-error`
-    will trip it, and that is the intended trade (a false red here costs one edit;
-    a silent fallback regression costs every stalled PR).
+    apart.
+
+    The workflow half is read through the PARSED YAML, not a substring window.
+    A substring read that starts at the step's `name:` is satisfiable by a green
+    the test exists to stop — `continue-on-error: true` at the JOB level sits
+    ABOVE that marker (GitHub: "allow a workflow run to pass when this job
+    fails"), and `rc=0` inserted after `rc=${PIPESTATUS[0]}` keeps the literal
+    `exit "$rc"` in the text while forcing exit 0. Both make the run conclude
+    `success` -> `workflow_state()` returns `covered` -> the local fallback goes
+    idle, which IS the #8254 fail-open. So pin all three places the rc can be
+    neutralised: the job, the step, and the script's own `rc=` assignments.
+    Pinning the parsed structure also removes the old false red on an unrelated
+    step that legitimately sets `continue-on-error` further down the job.
     """
+    import yaml
+
     root = Path(__file__).resolve().parents[1]
-    wf = (root / ".github/workflows/ci-check-repair.yml").read_text()
-    step = wf.split("Repair PRs whose required checks never ran", 1)[1]
-    assert 'exit "$rc"' in step, (
-        "the step must exit with the tool's rc — it is the local fallback's "
-        "coverage signal (#9365)")
-    assert "continue-on-error" not in step, (
-        "continue-on-error would make a red window read as `covered`, silently "
-        "disabling the local fallback for every `needs_user_actor` PR (#9365)")
+    wf = yaml.safe_load((root / ".github/workflows/ci-check-repair.yml").read_text())
+    job = wf["jobs"]["repair"]
+
+    assert not job.get("continue-on-error"), (
+        "job-level continue-on-error makes the RUN conclude `success`, so "
+        "`workflow_state()` reads the window as `covered` and the local "
+        "fallback stays idle for every `needs_user_actor` PR (#9365)")
+
+    steps = [s for s in job["steps"]
+             if "Repair PRs whose required checks never ran" in (s.get("name") or "")]
+    assert len(steps) == 1, f"expected exactly one repair step, found {len(steps)}"
+    step = steps[0]
+
+    assert not step.get("continue-on-error"), (
+        "step-level continue-on-error would make a red window read as `covered`, "
+        "silently disabling the local fallback (#9365)")
+
+    script = step["run"]
+    rc_assignments = [m.strip() for m in
+                      re.findall(r"(?m)^\s*(?:export\s+)?rc\s*=(?!=).*$", script)]
+    assert rc_assignments == ["rc=${PIPESTATUS[0]}"], (
+        "`rc` must be the TOOL's exit code and nothing else — a `rc=0` (or any "
+        "second assignment) forces exit 0 while leaving `exit \"$rc\"` in the "
+        "text, which reads as `covered` down in the launcher (#9365)"
+    )
+
+    last = [ln.strip() for ln in script.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")][-1]
+    assert last == 'exit "$rc"', (
+        "the step's last command must be `exit \"$rc\"` — it is the local "
+        f"fallback's coverage signal (#9365); found {last!r}")
 
     # The other half of the coupling: a failed window is the HANDOFF, not coverage.
     assert R.workflow_state([_wf("failure")], 35, 30) == "ran-not-succeeded"

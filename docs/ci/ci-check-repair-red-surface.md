@@ -1,7 +1,7 @@
 ---
 title: "ci-check-repair's red: which surface carries the verdict (#9365)"
 type: engineering
-domain: ci
+domain: capability
 doc_status: live
 created: 2026-10-21
 subjects.team: epistemic-team
@@ -27,10 +27,11 @@ producing run at the head** — the `needs_user_actor` state, whose only remedy 
 automatic `GITHUB_TOKEN` cannot create. A red run is therefore not a failure of the tool: it is the
 tool working, pointing at a queue item.
 
-**How often:** over the 232 scheduled runs of 2026-10-17 → 2026-10-21, **73 were red (31 %)**,
+**How often:** over the 233 scheduled runs of 2026-10-17 → 2026-10-21, **73 were red (31.3 %)**,
 including
 
-- **13 consecutive red windows** on 2026-10-19, 05:23 → 12:34, across thirteen different heads;
+- **13 consecutive red windows** on 2026-10-19, 05:23 → 12:34, across **eleven distinct heads** (two
+  heads repeat: `c495de1ab` at 09:34 and 09:53, `e9808af5f` at 10:23 and 10:45);
 - **four consecutive red windows on one sha** (`d43a3b73a`, 2026-10-21, 06:36 → 07:50).
 
 That is the alarm-fatigue premise of #9365, measured rather than asserted.
@@ -76,11 +77,16 @@ change**. That prerequisite is the real cost of (A) and (B), and the issue does 
 `tests/test_ci_check_repair.py::test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone`
 fails if either half of the coupling is moved alone:
 
-- step-level `continue-on-error: true`, or `exit 0` replacing `exit "$rc"`;
+- `continue-on-error: true` at the **step** level — or at the **job** level, where it makes the whole
+  run conclude `success` just as effectively;
+- `exit 0` replacing `exit "$rc"`, or a forced `rc` (e.g. `rc=0` after `rc=${PIPESTATUS[0]}` — the
+  literal `exit "$rc"` survives that edit, so it has to be pinned on the assignments);
 - the coverage read ceasing to treat a failed window as the handoff.
 
-It was mutation-tested both ways (step level and nested above `run:`): red with the naive change,
-green without it.
+It reads the workflow through parsed YAML (job keys, the step's keys, the step script's `rc=`
+assignments and its last command), because a substring window anchored on the step's `name:` cannot
+see a job-level key or a forced `rc` — the two most plausible ways to green this run. Mutation-tested
+at all three seams: red with the naive change, green without it.
 
 ## What the owner still has to decide
 
