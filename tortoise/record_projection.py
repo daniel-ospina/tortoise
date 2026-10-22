@@ -192,6 +192,14 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # the pre-ALTER schema, so `_split_properties` would leave an amount in the
     # `props` tail and `cache_projection` would not project it.
     "20261018000001_record_point_money_value_2782.sql",
+    # A FORWARD migration NARROWING a column's TYPE (`ALTER TABLE public.session
+    # ALTER COLUMN capture_redactions TYPE integer`, #9264). The readers do not
+    # parse this form, and deliberately: the projection hands a non-`dict`/
+    # `list` value through unchanged, so the column's declared type was the only
+    # thing disagreeing with the producer's integer count. It is registered so
+    # the schema read and the placement pin still see one authoritative file
+    # list — an unregistered migration is invisible to every reader.
+    "20261022000001_record_session_capture_redactions_integer.sql",
     # §9.1's narrative home (#9555, R7): a NEW table, not an ALTER, so the
     # reader must see it or `_split_properties` would refuse every narrative
     # column and the projection would write nothing while reporting success.

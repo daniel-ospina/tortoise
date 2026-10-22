@@ -266,6 +266,22 @@ BEGIN
   END;
 END $$;
 
+-- ── `session.capture_redactions` is an INTEGER (#9264, #9602 review P2-1) ──
+-- The narrowing is an `ALTER COLUMN … TYPE` inside a `DO` guard, and no schema
+-- reader parses that form (`record_projection.table_columns()` and
+-- `tests/test_record_schema_placement.parse_sql_columns()` both read
+-- `CREATE TABLE` / `ADD COLUMN` only), so this assertion is the ONE automated
+-- instrument that can see it: drop the ALTER, typo its guard predicate, or
+-- widen the column back to `jsonb`, and every other pin stays green while every
+-- `SessionRecorded` row is refused with `DatatypeMismatch` — the session row and
+-- its redaction count silently absent, the receipt still reporting `ok: True`.
+-- Precedent for a type pin: `20260906000001_graphs_deleted_at.sql:34-41`.
+SELECT tests.assert(
+  (SELECT data_type FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'session'
+      AND column_name = 'capture_redactions') = 'integer',
+  '9264: session.capture_redactions is integer, not jsonb');
+
 DO $$
 BEGIN
   BEGIN

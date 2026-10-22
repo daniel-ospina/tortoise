@@ -132,7 +132,7 @@ per journal record type, totality as a registry property, idempotence by stateme
 |---|---|
 | the seam | `tortoise/record_writer.py:920` (`write_live_record`), `:654` (`_default_connect`) |
 | arming surface | `tortoise/record_writer.py:232` — `TORTOISE_RECORD_DSN`, **default OFF** |
-| production call sites | `tortoise/api.py:179` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
+| production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
 | tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py:110`; by-value on the hosted REST lane |
 
 **Measured (§G, run 2): the SDK's public capture path wrote layers 1–3 into a real Postgres** — layer 4 is views, and
@@ -156,7 +156,7 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 65
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). **No migration and no module uses `pgvector`** — `grep -riE 'pgvector|vector\('` over all 67
 migrations returns **0**, and `git grep -il pgvector -- 'tortoise/*'` is **0**. The word itself
 appears in prose only — e.g. this document, §12.1c's open question, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which is
@@ -185,8 +185,8 @@ idempotent, total, and stores no EP scalar`.
 |---|---|---|
 | **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → empty |
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
-| **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert`, `record_projection.py:732`), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
-| **the `session` record** | ⚠️ **`capture_redactions` is NULL because the record that would write it is REFUSED** — the column is `jsonb` and the producer emits an integer, so the `SessionRecorded` carrying `capture_redactions` is refused with `DatatypeMismatch` and is counted on `record_write_failures`; the module refuses to coerce (`record_projection.py:1014`). Pinned as a tolerated disagreement, not fixed (**#9264**, OPEN). | `tests/test_9078_record_written_by_production_path.py:139` `_SCHEMA_DISAGREEMENTS = {"search_keys": …, "capture_redactions": …}` |
+| **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
+| **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — `_SCHEMA_DISAGREEMENTS` now carries `search_keys` only, which is the remaining half of R4. | migration `20261022000001`; `tests/test_9078_record_written_by_production_path.py` `_SCHEMA_DISAGREEMENTS = {"search_keys": …}` |
 | **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**. Which role the record connects as is **R6's decision** and cannot be read off this census — it is the DSN's user, and no DSN is set today (`NOT_ARMED`), so no role is in force. §4's bypass rule fires for the table owner and for `service_role` (R1's arming DSN names `postgres`; the record migrations' own comment says the write path connects as `service_role`), while R6's third option — a **non-bypass** app role — would put RLS in force instead. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
 | **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** The modules that archive today copy **the graph** — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` (`tortoise/backup.py`), and the Cloudflare-R2 logical dump (`hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`). `docs/durability-posture.md`, the page that records durability for every deployment, has **no row for the record** (four deployments, none of them Postgres; it never mentions Supabase). Whether the Supabase project backs it up is **unverified** — the tree's statements about that are plan-level and about the **control plane**, not the record (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
@@ -235,23 +235,25 @@ image until its name is added there; and `deploy-hosted.yml` deliberately does *
 extra in the test env.
 **What it blocks:** every item below **regressing silently**. This is not hypothetical — it is the
 mechanism by which a **new** #9264-class schema↔producer disagreement would hide: the leg that would
-catch it **skips**, twice over (§G run 1 vs run 2). ⚠️ #9264 *itself* is a declared, tolerated pin
-(`_SCHEMA_DISAGREEMENTS`, A8), so arming this leg does not turn it red — **R4** deletes the pin.
+catch it **skips**, twice over (§G run 1 vs run 2). ⚠️ What survives there now is *one* tolerated pin, `point.search_keys` (`_SCHEMA_DISAGREEMENTS`, A8) — #9264's own entry is deleted — so arming this leg does not turn that one red; **R4** deletes the remainder.
 **Cheapest item in the list, and it is the one that makes the rest verifiable.** Land it early.
 
-### R4 — Fix the two schema↔producer disagreements (#9264, **OPEN**) · **M** · schema or code + decision · **BLOCKER**
+### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **HALF DONE**
 
-**What:** `session.capture_redactions` is `jsonb`, the producer emits an **integer** — so the `SessionRecorded` carrying
-`capture_redactions` is **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
-row keeps the column **NULL**; `point.search_keys` is `jsonb`, the producer emits a flattened
+> **`session.capture_redactions` is FIXED** (forward migration `20261022000001`, the column narrowed to
+> `integer`, tolerance entry deleted). What remains here is `point.search_keys`.
+
+**What:** `session.capture_redactions` was `jsonb`, the producer emits an **integer** — so the `SessionRecorded` carrying
+`capture_redactions` was **refused** (`DatatypeMismatch`, counted on `record_write_failures`) and the
+row kept the column **NULL**; `point.search_keys` is `jsonb`, the producer emits a flattened
 **string**. #9200's sibling class. Decide per field which side is authoritative and fix it;
-the tolerance entries in `tests/test_9078…:139` are held by a **self-reddening assertion**
-(`:1942-1946`): a **schema-side** fix fails the test until the entry is deleted, while a
+the tolerance entries in `tests/test_9078…` (`_SCHEMA_DISAGREEMENTS`, now `search_keys` only) are
+held by a **self-reddening assertion**: a **schema-side** fix fails the test until the entry is deleted, while a
 **producer-side** fix leaves the entry green-but-dead — so prefer the schema side, or delete the
 entry as part of that fix.
-**What it blocks:** a **complete** session record (the redaction count is lost today) and any Point
-that carries extracted `search_keys` (refused ⇒ lost). Both are silent losses the journal heals, so
-they are invisible without R3.
+**What it blocks:** a **complete** session record (the redaction count was lost until #9264's
+migration) and any Point that carries extracted `search_keys` (still refused ⇒ still lost). Both
+are silent losses the journal heals, so they are invisible without R3.
 
 ### R5 — Materialise the point-property edge family into `relation` · **L** · code · **BLOCKER**
 
@@ -314,7 +316,7 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head the same command matches
+65 migrations returned **0** (at this head, 68 migrations, the same command matches
 `20261023000001_record_session_narrative.sql` on 37 lines — the table this item's DECIDED block adds);
 `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
@@ -324,8 +326,9 @@ text, not the extracted claim"* — measured 15.9 / 22.0 pts).
 graph acceptance itself** — the record had **no narrative-first home**: a captured turn's text
 is carried as data — an episodic `point.content` row (`…03_record_epistemic.sql:56`; the §G run wrote
 4) and the `journal_event.payload` that mirrors the record, plus, since `#3947` (CLOSED), the journal
-entry a `rebuild_all` replays — so what a *record*-sourced rebuild cannot reproduce is the §9.1
-narrative and its redaction count, not "the raw text" in the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
+entry a `rebuild_all` replays — so what a *record*-sourced rebuild could not reproduce was the §9.1
+narrative (its redaction count followed once #9264's `integer` column landed), not "the raw text" in
+the abstract. This item is not in the epic's four scope items; it is a §9.1 requirement, and that gap is
 the finding (see §E).
 **Decision needed:** none — §9.1 and the 2026-09-23 owner quote already place it. Only *which table
 shape* is open, and that is an engineering choice inside the existing schema discipline.
@@ -345,7 +348,7 @@ write order.
 |---|---|
 | `narrative` | the commit's `story_arc` ⚠️ **— no journal carrier exists yet, see below** |
 | `summary` | the same record's `summary`, projected ONLY alongside the narrative (the capture's own session `:Source` sets `summary` to the transcript's first utterance, which is not the narrative) |
-| `capture_redactions` | `SessionRecorded.capture_redactions` (`#4911`) — **integer**, because a count is not an envelope. ⚠️ NULL in practice today: the carrier's own `session.capture_redactions` is jsonb while the producer emits an integer, so that record is REFUSED (#9264/R4) and never reaches this table; a count this column cannot hold is written as NO count, never a 0 or a coerced shape |
+| `capture_redactions` | `SessionRecorded.capture_redactions` (`#4911`) — **integer**, because a count is not an envelope. It lands: the carrier's `session.capture_redactions` was narrowed to `integer` by `20261022000001` (`#9264`, fixed — see the `session` record row in §A2), so the `SessionRecorded` that carries this count reaches the record instead of being refused; a count this column cannot hold is still written as NO count, never a 0 or a coerced shape |
 | `turn_count` | `SessionRecorded.turn_count` |
 
 ⛔ **The transcript is NOT duplicated here.** The raw turns are already first-class record rows
@@ -382,7 +385,8 @@ nothing). Both were shown to redden under a mutation (RLS disabled; the count CH
 1. **The narrative has NO journal carrier in this tree.** `story_arc` is written to the *graph* by the
    layer-1 commit's raw Cypher (`hosted_api.py`'s document/event MERGEs) and raw Cypher is not a
    journal record (§17.1's unjournalled-writer ledger), so a live capture lands
-   `turn_count` (and `capture_redactions` NULL — that record is refused, see the column table above) with a
+   `turn_count` and `capture_redactions` (both carriers are `SessionRecorded`, which reaches the record
+   since #9264 — see the column table above) with a
    **NULL `narrative`**. The projection is correct and total;
    its narrative carrier does not exist yet. The fix is a producer on the layer-1 commit path (journal
    the derived `:Source`/`:Event` write with `summary`/`story_arc`/`sessionId`), which is
@@ -508,7 +512,7 @@ Postgres, and §17.4 already prices both stores.
 2. **R2** land the schema → *R1 without R2 writes nothing, counted on `record_write_failures` and
    never raised*
 3. **R3** CI proof → *so items 4–9 cannot regress silently; measured, this is how a NEW #9264-class disagreement would hide*
-4. **R4** the two schema↔producer disagreements → *so the session/point record is complete*
+4. **R4** the schema↔producer disagreements (*one* left: `point.search_keys`) → *so the session/point record is complete*
 5. **R6** tenancy enforced → *the bypass rule must be answered before the first hosted customer's data
 exists*
 6. **R5** the edge/operator family → *before the "destroy the graph" claim can be made*
@@ -600,9 +604,12 @@ Row counts in the record afterwards (§A3, §A8):
 ```text
 journal_event 36 · source 2 · event 4 · session 2 · object 4 · subject 0 · point 4
 relation 0 · node_identity 17 · points with embedding 4 · points with content 4
-session.capture_redactions → NULL on both rows            ← R4 / #9264
+session.capture_redactions → NULL on both rows            ← R4 / #9264, PRE-FIX measure
 point.embedding type → jsonb                              ← A5 (no pgvector)
 ```
+
+⚠️ The `capture_redactions` row above is what that run **measured**, kept as measured. After
+\#9264's forward migration the column is `integer`, so a re-run writes the count instead of NULL.
 
 **Run 3 — the DB-level proof on real Postgres (PGlite):**
 
