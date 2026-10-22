@@ -114,7 +114,7 @@ is taken to govern what the assistant may DO, not to reverse what the product AL
 
 status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 
-**Amended 2026-10-22** (owner-filed and owner-scoped on **#9575**, **PR #NNNN**): the
+**Amended 2026-10-22** (owner-filed and owner-scoped on **#9575**, **PR #9582**): the
 `tortoise_packs_list` description no longer claims *"Read-only;"*. PR #9573 (#4122) corrected
 that tool's HINT channel because the handler reaches `pack_state.get_tenant_packs`, whose
 `ensure_tenant_packs` MERGEs a missing starter `:PackInstall` activation — so the tool is
@@ -125,7 +125,7 @@ activation, skipped when the graph's pack set was deliberately configured, #8648
 asserting a read-only guarantee. **No tool is added, removed or renamed; the served schema,
 parameters and bindings are unchanged** — only the description text, and hence that row's `job`
 and the baseline's `cut_at_commit`, change. status: approved · principal: daniel-ospina ·
-PR #NNNN · date: 2026-10-22.
+PR #9582 · date: 2026-10-22.
 
 ## Principle: reads and writes never share a tool
 
