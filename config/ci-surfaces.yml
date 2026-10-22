@@ -1550,6 +1550,7 @@ surfaces:
   # with `manifest drift: ['test_9079_record_replay_declared.py']`, and
   # `fast_pool()` is manifest-derived, so the four pins would run in NO leg.
   - test_9079_record_replay_declared.py
+  - test_link_agent_infra_scripts.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything

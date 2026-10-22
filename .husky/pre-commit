@@ -67,12 +67,15 @@ if [ -f "$SIGPIPE_GUARD" ]; then
     bash "$SIGPIPE_GUARD" --dirs "$(cat .sigpipe-grep-dirs)" || exit 1
   else
     echo "⚠️  $SIGPIPE_GUARD is too old to take --dirs (needs agent-infra#1643)." >&2
-    echo "    Your local agent-infra checkout is behind. Update it and re-link scripts/." >&2
+    echo "    Your local agent-infra checkout is behind. Update it, then re-materialise" >&2
+    echo "    scripts/: uv run python tools/link_agent_infra_scripts.py" >&2
     echo "    Commit NOT blocked -- the guard's CI job still runs." >&2
   fi
 else
   echo "[sigpipe-guard] scripts/check-no-sigpipe-grep.sh not found — NOT checked locally." >&2
-  echo "   Fix: set AGENT_INFRA_PATH and re-link scripts/. CI runs this guard regardless" >&2
+  echo "   Fix: set AGENT_INFRA_PATH, then materialise scripts/ (#9475 — it is gitignored," >&2
+  echo "   not tracked): uv run python tools/link_agent_infra_scripts.py" >&2
+  echo "   CI runs this guard regardless" >&2
   echo "   (job: sigpipe-guard), so this warning is not a pass for the committed tree." >&2
 fi
 
