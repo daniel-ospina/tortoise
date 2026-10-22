@@ -98,16 +98,18 @@ handshake, and the ruling's own *"credentials never pass through the model"* con
 what keeps it out of an agent-callable list/enable/disable operation.
 
 Permission is the condition the owner attached to the ruling and is enforced at the tool
-boundary: the entry declares `writes=True`, so `_enforce_mcp_tool_scope` requires
-`graphs:write` and denies an unresolvable name. Agent session recording keeps its recorded
-`#1927` default (ON — the optional off-switch, ToS-covered); the ruling's "deny-by-default"
+boundary: the entry declares `risk="write"` (#4122 — `writes` is derived from it), so
+`_enforce_mcp_tool_scope` requires `graphs:write` and denies an unresolvable name. Agent
+session recording keeps its recorded `#1927` default (ON — the optional off-switch, ToS-covered);
+the ruling's "deny-by-default"
 is taken to govern what the assistant may DO, not to reverse what the product ALREADY does.
 
 > **OVERRIDES:** the "reads and writes never share a tool" principle stated immediately below,
 > and `beta-sdk-surface.md`'s "account tenancy is not on the MCP" — the owner ruled for **one**
 > consolidated operation that both lists and switches sources, over per-source tools
 > (2026-10-12, on #3540). The permission condition is what makes the departure safe rather than
-> the split: `writes=True` means a read-only key is refused even for `action="list"`, so the
+> the split: `risk="write"` (and the `writes` permission derived from it, #4122) means a
+> read-only key is refused even for `action="list"`, so the
 > read inside a write-gated tool can never be reached by a read-scoped caller. A future lane
 > that "fixes" this by splitting `list` into its own read tool would restore the principle and
 > **undo the ruling's single-tool arithmetic** — reopen #3540 instead of editing this tool.
@@ -118,6 +120,21 @@ status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so
 read permission can be granted generously with no path to a destructive action.
+
+> **OVERRIDES:** the read-or-write binary stated just above, and NIST SP 800-53 AC-6's
+> read-low / write-high default — the owner ruled (2026-10-21, on #4122) that a tool is
+> classified by the caller's **perceived risk**, not by whether its handler writes, so there is
+> a third tier: `maintenance`. A confined, idempotent refresh of a **derived** value (the
+> PostgreSQL 16 `MAINTAIN` precedent — refresh runs under definer rights, so the caller needs
+> only read) is permissioned as a **read** while declaring `readOnlyHint: false`.
+> `tortoise_get_confidence`, `tortoise_compute_confidence` and `tortoise_packs_list` are
+> `maintenance`: a `graphs:read` key may call them and they never require `graphs:write`.
+> The declaration is `risk` on the registry entry; `writes`, `readOnlyHint` and
+> `idempotentHint` are **derived** from it (`tortoise/tool_registry.py`) and pinned by
+> `tests/test_tool_risk_tiers.py`, so a hint cannot be "fixed" in one place and left wrong in
+> the other. A future lane that wants them to be writes must reopen #4122 — `writes=True`
+> would also stop the expensive recompute being metered as a read, which is the cost lever
+> OWASP API4 asks us to watch.
 
 **Operator-only tools are exempt.** They are never handed to a tenant, so they may mix
 reads and writes — `index_files` is the clean example: both of its members (`index_files`,
