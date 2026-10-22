@@ -1,10 +1,13 @@
 """#8066: a SERVED skill's test subject is the tracked copy, never the relay.
 
-`skills` and `scripts` are tracked symlinks (mode 120000) whose committed blobs
-are ABSOLUTE paths in one developer's home
-(`/Users/danielospina/Documents/GitHub/agent-infra/{skills,scripts}`). They
-dangle everywhere else, so `read skills/commit-workflow/SKILL.md` is ENOENT
-and `node scripts/check-doc-affiliation.cjs` cannot run.
+`skills` is a tracked symlink (mode 120000) whose committed blob is an
+ABSOLUTE path in one developer's home
+(`/Users/danielospina/Documents/GitHub/agent-infra/skills`), so `read
+skills/commit-workflow/SKILL.md` is ENOENT everywhere else. `scripts` had the
+same shape until #9475 untracked it — it is now gitignored and materialised per
+machine from `$AGENT_INFRA_PATH` by `tools/link_agent_infra_scripts.py`, so on
+a fresh clone it is ABSENT rather than dangling, and
+`node scripts/check-doc-affiliation.cjs` cannot run until that has run.
 
 The generalisable defect the issue's comment thread registers is NOT "a
 symlink is dead" — it is that a gate whose SUBJECT is resolved through that
