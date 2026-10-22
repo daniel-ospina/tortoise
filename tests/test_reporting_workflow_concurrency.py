@@ -89,6 +89,12 @@ What this module pins
   deadlock the job with ZERO steps, and a constant run group lets a starved
   ``push`` run hold the RUN lock a dispatch needs, so its apply cannot start
   (measured 2026-10-20, #9120 x #1095);
+* the MERGED-TREE GUARD (``main-lint.yml``, #2174) triggers on every push to
+  ``main`` **and** keys its concurrency group on the pushed tree, so nothing can
+  cancel it — a cheap guard sharing a constant group with a long job does not run
+  on a busy main (measured: 21 of 25 merged trees skipped, 2026-10-22) — and it
+  may not be re-added to ``post-merge-validation.yml``; a companion assertion
+  keeps its ruff pin equal to ``ci.yml``'s PR-lint pin and pyproject's;
 * the guard is NON-VACUOUS: it asserts it parsed a plausible number of
   workflows and that each workflow it makes a claim about actually exists, so a
   renamed file or a glob typo fails here instead of passing silently.
@@ -100,6 +106,8 @@ and ``test_workflow_secret_interpolation.py``.
 from __future__ import annotations
 
 import re
+import tomllib
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -107,6 +115,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
+PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 
 def _workflow_paths() -> list[Path]:
@@ -153,7 +162,35 @@ def _triggers(doc: dict) -> dict:
 UNFILTERED_PUSH_OK = {
     "python-ci.yml": "the push-to-main leg IS the merged-tree test run the merge rail baselines against",
     "post-merge-validation.yml": "validates every merged tree (warn-only) — the whole point is one run per push",
+    "main-lint.yml": (
+        "ruff reads the WHOLE tree, so any merged tree can redden main — a path "
+        "filter would skip exactly the trees that need it. Cheap enough (~2 min, "
+        "no package install) to run on every push, and its per-SHA group means no "
+        "push is starved (see MERGED_TREE_GUARD)"
+    ),
     "publish-pypi.yml": "the push arm is a TAG (`v*`), and GitHub does not evaluate `paths` for tag pushes",
+}
+
+# The guard that keeps a lint-red MAIN from reddening every PR's merge ref
+# (#2174). It must run on EVERY merged tree, and the artifact that proves it does
+# is the one pinned below.
+#
+# WHY A SEPARATE PIN, when `UNFILTERED_PUSH_OK` above already excuses the file
+# from the path-filter rule: "triggers on every push" is only half of "runs on
+# every merged tree". The other half is that nothing CANCELS the run — and
+# GitHub keeps ONE pending run per `concurrency.group`, so a run whose group is
+# shared with a long job is cancelled when the next push queues one. That is the
+# measured defect this pin exists for: as a job inside post-merge-validation.yml
+# (constant group, 30-60 min `validate` sibling) the ruff gate ran on 4 of the
+# last 25 merged trees and was ABSENT on the other 21 — including `3337ad1f`, the
+# merge that reddened main for 11 hours and left **14 of 27** open PRs red on
+# `agent-infra-ci / lint` for findings that were main's, not theirs.
+MERGED_TREE_GUARD = {
+    "main-lint.yml": (
+        "the ruff gate on main (#2174): a lint-red main reddens the merge ref of "
+        "EVERY open PR, so a run that did not happen here is a gate that did not "
+        "exist — and a narrowed rule surface is the same failure one level down"
+    ),
 }
 
 # Per-event workflows that are on the pull-request path but cost NOTHING on it,
@@ -1267,3 +1304,370 @@ def test_if_condition_pin_ignores_quote_style_but_not_extra_terms() -> None:
         assert _normalise_condition(other) != pinned, (
             f"{other!r} is not the dispatch-only condition; the pin must see it"
         )
+
+
+# ── The merged-tree guard must RUN on every merged tree (#2174) ───────────────
+#
+# "Triggers on every push" and "runs on every merged tree" are different
+# properties, and only the first one is visible in the `on:` block. GitHub keeps
+# ONE pending run per `concurrency.group` (`queue: single` is the default) and
+# CANCELS that pending run when a newer run in the same group is queued — so a
+# cheap guard sharing a group with a long job is skipped, silently, on exactly
+# the busy main it exists to watch.
+#
+# MEASURED (2026-10-22, the incident this pin is written from): the #2174 ruff
+# gate on main lived as a job in `post-merge-validation.yml`, whose group is the
+# constant `postmerge-validation` and whose `validate` sibling runs 30-60 min.
+# Over the 25 pushes before 2026-10-22T13:02Z the `lint` job existed on **4** and
+# was ABSENT on the other **21** (run cancelled before it started) — including
+# `3337ad1f`, the merge that reddened main with 5 ruff findings. Main stayed red
+# for 11 hours and **14 of 27** open PRs carried `agent-infra-ci / lint` =
+# failure on merge refs that were red because of MAIN, not their own diff.
+#
+# ⛔ The pin has TWO jobs, and the second one is the one that actually loses
+# gates: proving the guard RUNS (trigger + concurrency key), and proving it still
+# FAILS on a finding. A step that runs the right command with
+# `continue-on-error: true`, `|| true`, or an `if:` that never fires is a guard
+# that runs and reports green — a false PASS, one level below "the guard did not
+# run at all".
+
+# Context terms that make a `push` concurrency group UNSTARVEABLE: each is
+# unique per pushed tree (or per run, which is even safer). `github.sha` and
+# `github.event.after` are the pushed tip; `github.run_id` is unique per run.
+# ⛔ `github.ref` is NOT one of them — on a `push` to main it is the constant
+# `refs/heads/main`, i.e. the shared group with a keyed-looking name.
+_UNSTARVEABLE_GROUP_TERMS = frozenset(
+    {"github.sha", "github.event.after", "github.run_id"}
+)
+
+# The only step keys the ruff step may carry. An allow-list rather than a
+# deny-list because the ways to defuse a step are open-ended and the ways to run
+# one honestly are not: `if:` (never runs), `continue-on-error:` (never fails
+# the job), `shell:`/`working-directory:`/`env:` (runs something else). Same
+# idiom as `tests/test_mcp_rename_table.py`'s step-key allow-list.
+_RUFF_STEP_KEYS = frozenset({"name", "run", "id", "timeout-minutes"})
+
+
+def _run_commands(doc: dict) -> list[str]:
+    """Every literal `run:` string in the workflow (jobs → steps)."""
+    commands: list[str] = []
+    for job in (doc.get("jobs") or {}).values():
+        for step in (job or {}).get("steps") or []:
+            run = (step or {}).get("run")
+            if isinstance(run, str):
+                commands.append(run)
+    return commands
+
+
+def _dev_ruff_pin() -> str:
+    """The ONE ``ruff==X`` pin declared in ``pyproject.toml``.
+
+    Read rather than duplicated as a literal, so the workflows' install lines
+    cannot drift from what ``uv sync`` installs: #1685/#2150 were the
+    UNPINNED-install class, and a *differently*-pinned install is the same class
+    with a number in it. Exactly one pin must exist — a second, divergent one
+    fails HERE rather than in a red PR hours later.
+    """
+    data = tomllib.loads(PYPROJECT.read_text())
+    specs: list[str] = []
+    for group in (data.get("project", {}).get("optional-dependencies") or {}).values():
+        specs.extend(group)
+    for group in (data.get("dependency-groups") or {}).values():
+        specs.extend(s for s in group if isinstance(s, str))
+    pins = {s.split("==", 1)[1].strip() for s in specs if s.startswith("ruff==")}
+    assert len(pins) == 1, (
+        f"pyproject.toml must declare exactly one `ruff==` pin, found {sorted(pins)} "
+        "— a second, divergent pin lets main lint and PR lint disagree about what "
+        "a finding is (#1685)"
+    )
+    return pins.pop()
+
+
+def _merged_tree_guard_problem(doc: dict) -> str | None:
+    """Why ``doc`` is not a guard that RUNS (and still FAILS) on every merged tree.
+
+    Returns the reason instead of asserting so
+    :func:`test_the_merged_tree_guard_check_rejects_the_starved_shapes` can prove
+    the check still catches each shape on SYNTHETIC mutants of the live artifact:
+    a pin whose only evidence is the one file it happens to pass on cannot show
+    its teeth, and every shape below is a way to lose the guard while leaving its
+    name, trigger and command intact.
+    """
+    triggers = _triggers(doc)
+    if "push" not in triggers:
+        return "it does not trigger on `push`, so merged trees are never linted here"
+    push = triggers["push"] or {}
+    if isinstance(push, dict):
+        if "paths" in push or "paths-ignore" in push:
+            return (
+                "its `push:` trigger is path-filtered — ruff reads the WHOLE tree, "
+                "so a merged tree outside those paths is never linted, and that is "
+                "the tree that reddens every PR"
+            )
+        # The trigger must select the MERGED TREES. `branches: [release/*]` and
+        # `branches-ignore: [main]` both keep a `push` trigger that never fires on
+        # main — the #2174 defect by an edit no other mutant here tests.
+        branches = push.get("branches")
+        if branches is not None and "main" not in branches:
+            return (
+                f"its `push:` trigger is limited to {branches}, so a push to main is "
+                "never linted — the guard's whole subject is the merged tree"
+            )
+        if "main" in (push.get("branches-ignore") or []):
+            return (
+                "its `push:` trigger EXCLUDES `main` (`branches-ignore`), so the "
+                "merged trees it exists to guard are the ones it never sees"
+            )
+    conc = doc.get("concurrency")
+    if not isinstance(conc, dict):
+        return (
+            "it declares no `concurrency:` mapping, so its runs are unbounded and "
+            "one can still supersede another"
+        )
+    group = str(conc.get("group", ""))
+    terms = [t.strip() for expr in _EXPRESSION.findall(group) for t in expr.split("||")]
+    if not (_UNSTARVEABLE_GROUP_TERMS & set(terms)):
+        return (
+            f"its concurrency group {group!r} carries none of "
+            f"{sorted(_UNSTARVEABLE_GROUP_TERMS)}. GitHub keeps ONE pending run per "
+            "group and CANCELS it when a newer run in the same group is queued, so "
+            "on a busy main the guard is skipped silently (measured: 21 of 25 merged "
+            "trees). `github.ref` is NOT a key here — on a `push` to main it is the "
+            "constant `refs/heads/main`, the same shared group under a name that "
+            "looks keyed. Key the group on the pushed sha: one group per tree, "
+            "nothing to cancel."
+        )
+    ruff_steps = [
+        (job_id, job, step)
+        for job_id, job in (doc.get("jobs") or {}).items()
+        if isinstance(job, dict)
+        for step in (job.get("steps") or [])
+        if isinstance(step, dict)
+        and isinstance(step.get("run"), str)
+        and "ruff check" in step["run"]
+    ]
+    if not ruff_steps:
+        return (
+            "no step runs `ruff check .` — the FULL tree is what this guard exists "
+            "for; a narrowed selection (e.g. `--select E9`) or a dropped step leaves "
+            "the rule surface on main unguarded while the check stays green"
+        )
+    for job_id, job, step in ruff_steps:
+        if step["run"].strip() != "ruff check .":
+            return (
+                f"step {step.get('name') or step.get('id') or job_id!r} runs "
+                f"{step['run'].strip()!r}, not exactly `ruff check .`. A shell escape "
+                "(`|| true`, `; true`, a pipe) or a narrowed selection satisfies a "
+                "membership test while making a REAL failure report green (#1503's "
+                "baseline is the whole repo's rule surface)"
+            )
+        extra = sorted(set(step) - _RUFF_STEP_KEYS)
+        if extra:
+            return (
+                f"the ruff step carries {extra}, which can silently defuse it: `if:` "
+                "means it never runs, `continue-on-error:` means a finding never "
+                "fails the job, and `shell:`/`working-directory:`/`env:` run "
+                "something other than the repo's config on the merged tree"
+            )
+        if "if" in job or job.get("continue-on-error"):
+            return (
+                f"the job owning the ruff step ({job_id!r}) carries "
+                f"{sorted(k for k in ('if', 'continue-on-error') if k in job)} — a "
+                "job-level condition or `continue-on-error` skips or silences the "
+                "guard exactly as a step-level one does"
+            )
+    commands = _run_commands(doc)
+    pin = _dev_ruff_pin()
+    if not any(
+        re.search(r"pip install ruff==" + re.escape(pin) + r"(?=\s|$)", c) for c in commands
+    ):
+        return (
+            f"it does not install the pinned ruff (`pip install ruff=={pin}`), so "
+            "main lints with whatever a bare install resolves to — the #1685/#2150 "
+            "drift class, one direction or the other"
+        )
+    return None
+
+
+@pytest.mark.parametrize("name", sorted(MERGED_TREE_GUARD))
+def test_the_merged_tree_guard_runs_on_every_merged_tree(name: str) -> None:
+    """The live artifact satisfies the pin, and the pin is not vacuous."""
+    assert MERGED_TREE_GUARD[name].strip(), "an allow-list entry is a reviewed decision"
+    path = WORKFLOW_DIR / name
+    assert path.exists(), f"MERGED_TREE_GUARD names a missing workflow: {name}"
+    doc = _load(path)
+    assert name in UNFILTERED_PUSH_OK, (
+        f"{name} is the merged-tree guard, so it cannot be path-scoped — declare "
+        "it in UNFILTERED_PUSH_OK with the reason, or it is not a guard on every tree"
+    )
+    problem = _merged_tree_guard_problem(doc)
+    assert problem is None, (
+        f"{name} is the guard that keeps a lint-red main from reddening every PR's "
+        f"merge ref (#2174), and {problem}"
+    )
+    # ONE home. Re-adding the job to the shared-group workflow restores the
+    # starved path *beside* the working one: it looks like redundancy and is a
+    # silent gap (a green counterexample proves nothing when the other one is
+    # cancelled) — and it is the exact regression this file is closing.
+    pmv_jobs = _load(WORKFLOW_DIR / "post-merge-validation.yml").get("jobs") or {}
+    assert "lint" not in pmv_jobs, (
+        "post-merge-validation.yml carries a `lint` job again — its constant "
+        "`concurrency.group` starves it (21 of 25 merged trees never ran it) and "
+        "the merged-tree guard now lives in " + name
+    )
+
+
+def test_the_pr_and_main_lint_pins_agree() -> None:
+    """PR lint and main lint must install the SAME ruff, or they disagree on findings.
+
+    Three installs pin ruff: `agent-infra`'s reusable workflow (external repo, so
+    not readable from here), `ci.yml`'s `lint-command` for the PR job, and
+    `main-lint.yml`. The external one moves by tag bump; the two in this repo are
+    coupled to pyproject here, so a bump cannot land in one leg only — which is
+    the #1685 class (an unpinned/differently-pinned leg reports a different set of
+    findings for the same tree).
+    """
+    pin = _dev_ruff_pin()
+    ci = _load(WORKFLOW_DIR / "ci.yml")
+    job = (ci.get("jobs") or {}).get("agent-infra-ci") or {}
+    command = str((job.get("with") or {}).get("lint-command", ""))
+    assert re.search(r"pip install ruff==" + re.escape(pin) + r"(?=\s|$)", command), (
+        f"ci.yml's `agent-infra-ci.with.lint-command` is {command!r} and does not "
+        f"install the pyproject pin `ruff=={pin}` — PR lint would then run a "
+        "different ruff than main lint and than `uv sync` (#1685)"
+    )
+
+
+def _main_lint_mutant(mutate) -> dict:
+    """The LIVE guard workflow with one property broken, for the mutational proof."""
+    doc = deepcopy(_load(WORKFLOW_DIR / "main-lint.yml"))
+    mutate(doc)
+    return doc
+
+
+def _trigger_block(doc: dict) -> dict:
+    """The `on:` mapping, whichever key PyYAML resolved it to (YAML 1.1 `True`)."""
+    return doc["on"] if "on" in doc else doc[True]
+
+
+def _ruff_step(doc: dict) -> dict:
+    for job in doc["jobs"].values():
+        for step in job.get("steps") or []:
+            if isinstance(step.get("run"), str) and "ruff check" in step["run"]:
+                return step
+    raise AssertionError("the live artifact lost its ruff step — the mutant is unbuildable")
+
+
+def _set_narrowed_ruff(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check --select E9 ."
+
+
+def _set_shell_escaped_ruff(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check . || true"
+
+
+def _set_continue_on_error(doc: dict) -> None:
+    _ruff_step(doc)["continue-on-error"] = True
+
+
+def _set_step_never_runs(doc: dict) -> None:
+    _ruff_step(doc)["if"] = "false"
+
+
+def _set_job_skips(doc: dict) -> None:
+    for job in doc["jobs"].values():
+        job["if"] = "false"
+
+
+def _set_unpinned_ruff(doc: dict) -> None:
+    for job in doc["jobs"].values():
+        for step in job.get("steps") or []:
+            if isinstance(step.get("run"), str) and "pip install ruff==" in step["run"]:
+                step["run"] = "pip install ruff"
+
+
+_STARVED_SHAPES = [
+    # ── does not RUN on every merged tree ──
+    # The measured defect: the guard inside its former host's constant group.
+    (
+        "the former host's shared group",
+        lambda d: d.__setitem__(
+            "concurrency", {"group": "postmerge-validation", "cancel-in-progress": False}
+        ),
+    ),
+    # A constant group that merely LOOKS keyed by name.
+    (
+        "a constant group named after the guard",
+        lambda d: d.__setitem__("concurrency", {"group": "main-lint", "cancel-in-progress": False}),
+    ),
+    # `github.ref` is `refs/heads/main` for every push to main — the same shared
+    # group in disguise, and the most plausible re-introduction of the bug.
+    (
+        "a group keyed on github.ref (constant on main)",
+        lambda d: d["concurrency"].__setitem__("group", "main-lint-${{ github.ref }}"),
+    ),
+    ("no concurrency block at all", lambda d: d.pop("concurrency")),
+    (
+        "a path-filtered push trigger",
+        lambda d: _trigger_block(d)["push"].__setitem__("paths", ["tortoise/**"]),
+    ),
+    (
+        "a push trigger limited to another branch",
+        lambda d: _trigger_block(d)["push"].__setitem__("branches", ["release/*"]),
+    ),
+    (
+        "a push trigger that ignores main",
+        lambda d: _trigger_block(d)["push"].__setitem__("branches-ignore", ["main"]),
+    ),
+    # ── runs, but cannot FAIL ──
+    ("a narrowed rule surface", _set_narrowed_ruff),
+    ("a shell-escaped invocation (`|| true`)", _set_shell_escaped_ruff),
+    ("continue-on-error on the ruff step", _set_continue_on_error),
+    ("a step `if:` that never fires", _set_step_never_runs),
+    ("a job `if:` that never fires", _set_job_skips),
+    ("an unpinned ruff install", _set_unpinned_ruff),
+]
+
+
+@pytest.mark.parametrize(
+    "label,mutate", _STARVED_SHAPES, ids=[label for label, _ in _STARVED_SHAPES]
+)
+def test_the_merged_tree_guard_check_rejects_the_starved_shapes(label: str, mutate) -> None:
+    """Every way to lose the guard while keeping its name must be caught.
+
+    Each entry is a mutation of the LIVE ``main-lint.yml`` — the shapes a future
+    edit or a copied workflow would actually produce — not a hand-built fragment,
+    so the check is proven against the artifact it guards. The list is in two
+    halves on purpose: losing the RUN (trigger, concurrency key) and losing the
+    FAIL (a step or job that cannot fail), because a guard that runs green on
+    findings is a false PASS, not a missing gate.
+    """
+    problem = _merged_tree_guard_problem(_main_lint_mutant(mutate))
+    assert problem is not None, (
+        f"{label!r} loses the merged-tree guard (#2174) and the check accepted it "
+        "— main could go lint-red again with every PR's merge ref red and no gate "
+        "reporting it"
+    )
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        "main-lint-${{ github.sha }}",
+        "main-lint-${{github.sha}}",
+        "main-lint-${{ github.event.after }}",
+        "main-lint-${{ github.run_id }}",
+    ],
+    ids=["sha-spaced", "sha-unspaced", "event-after", "run-id"],
+)
+def test_the_merged_tree_guard_check_accepts_an_unstarveable_group(group: str) -> None:
+    """The other direction: an equally-correct key must stay green.
+
+    `github.sha`, `github.event.after` and `github.run_id` are all unique per
+    pushed tree or per run, so none of them can be superseded. A pin that reds
+    the honest alternatives gets deleted, and then it guards nothing — the
+    spacing case is here so a format pass cannot red it either.
+    """
+    doc = _main_lint_mutant(lambda d: d["concurrency"].__setitem__("group", group))
+    problem = _merged_tree_guard_problem(doc)
+    assert problem is None, f"{group!r} is unstarveable; the check said: {problem}"

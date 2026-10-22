@@ -1,0 +1,104 @@
+name: main-lint
+
+# The ruff gate on MAIN — the guard that keeps a lint-red main from reddening
+# every PR's merge ref (#2174).
+#
+# WHY THIS IS ITS OWN WORKFLOW (#2174 follow-up, measured 2026-10-22). This job
+# used to live inside post-merge-validation.yml, whose `concurrency.group` is
+# CONSTANT (`postmerge-validation`) and whose `validate` sibling runs a 30-60 min
+# suite. GitHub keeps ONE pending run per concurrency group: when a newer push to
+# main is queued while a run is still pending, the pending run is CANCELLED. So
+# the guard that exists for exactly this class did not run on most merged trees —
+# measured over the 25 pushes before 2026-10-22T13:02Z: the `lint` job existed on
+# **4** and was ABSENT (run cancelled before it started) on the other **21**,
+# including `3337ad1f` — the merge that reddened main. Consequence: main stayed
+# lint-red for 11 hours (5 ruff findings, all merged by that one PR), and **14 of
+# 27 open PRs** carried `agent-infra-ci / lint` = failure on merge refs that were
+# red because of MAIN, not their own diff (tortoise#9603 among them).
+#
+# THE PROPERTY THAT MAKES IT UNSTARVEABLE: the group is keyed on `github.sha`, so
+# every pushed tree gets its OWN group and no run can cancel another. `github.ref`
+# would NOT do — on a `push` to main it is the constant `refs/heads/main`, i.e.
+# the same starveable group under a name that looks keyed; the guard in
+# tests/test_reporting_workflow_concurrency.py rejects that mutant.
+# `cancel-in-progress: false` because a half-run guard is not a reading.
+#
+# It must see EVERY merged tree (no `paths:` filter): ruff reads the whole tree,
+# so any pushed tree can redden main. It is the cheapest gate we have (~2 min,
+# one pip install, no package install), which is why it is never deduped — unlike
+# its former host, whose dedup arm only ever applied to the pytest suite.
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: main-lint-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: read # commit → PR lookup for the attribution comment
+  # `issues: write` is required by `issues.createComment` below — a permission not
+  # listed is `none`, and a `push` event's default token is read-only. Dropping it
+  # in the move here would make the notification a 403 (the pre-move job carried it
+  # at workflow level).
+  issues: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }} # deterministic — mid-run main advance must not move the tree
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12' # pyproject requires-python >= 3.12
+      - name: Install ruff (CI-pinned ==0.16.4)
+        # Same pin as the PR lint (`agent-infra-ci`'s reusable workflow, which
+        # installs ruff==0.16.4 itself, #414) and as pyproject's dev group
+        # (#1685) — the three must move together or main and PR lint disagree
+        # about what a finding is.
+        run: pip install ruff==0.16.4
+      - name: Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)
+        id: ruff
+        run: ruff check .
+      - name: Comment on the merged PR (best-effort attribution)
+        # `failure()` must be NAMED: an `if:` with no status function gets an
+        # implicit `success()` prepended, and `success()` is false once the ruff
+        # step has failed — so the bare `steps.ruff.outcome == 'failure'` form was
+        # SKIPPED on exactly the path it exists for (measured on run 39734942845:
+        # job 119740076899 step 6 "Comment on the merged PR (best-effort
+        # attribution)" = skipped, with step 5 ruff = failure). `failure()` also
+        # keeps the distinction the next line claims: it is true for a ruff
+        # finding, and for a checkout/pip flake the step is skipped rather than
+        # commenting nonsense.
+        if: failure() && steps.ruff.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            let pr = null;
+            try {
+              // Attribution moved off `needs.dedup-check.outputs.pr_number` (that
+              // job lives in post-merge-validation.yml, which this workflow left
+              // behind on purpose). Merge, squash and rebase commits all resolve
+              // here; a direct push simply has no PR to name.
+              const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner, repo, commit_sha: context.sha,
+              });
+              pr = data.length ? data[0].number : null;
+            } catch (err) {
+              core.warning(`main-lint PR attribution failed (error: ${err.message})`);
+            }
+            if (!pr) {
+              core.warning('main lint failed but no PR attribution — see the merge commit check');
+              return;
+            }
+            await github.rest.issues.createComment({
+              issue_number: pr,
+              owner,
+              repo,
+              body: `⚠️ This PR **failed post-merge ruff lint on main** (run ${context.runId}, commit ${context.sha}). Main is now lint-red, which reddens the merge ref of **every** open PR until it is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`,
+            });
