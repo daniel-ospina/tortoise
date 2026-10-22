@@ -33,10 +33,12 @@ install step.** Read off `GET /actions/runs/<id>/jobs` for all 73 failures (2026
 runs ran on a **self-hosted** runner — `runner_name: pi-runner-vm-3` / `-vm-4` / `-vm-6`,
 `runner_group_name: Default`, `labels: ["ubuntu-latest"]` — while the 68 exit-1 runs ran on the
 GitHub-hosted image (`runner_name: "GitHub Actions …"`, `runner_group_name: "GitHub Actions"`). That
-image ships `gh` in `/usr/bin` (measured, `config/ci-surfaces.yml`:2253-2254), so installing `gh` in the
-workflow would change nothing; the self-hosted runners advertise the `ubuntu-latest` **label** without
-carrying `gh` on `PATH`, which is the same shortage #9018 (open) records for `unzip` and `gh`. A
-mixed fleet means the exit-2 class recurs intermittently until that is fixed. (The five runs:
+image ships `gh` in `/usr/bin` — measured, and recorded in `config/ci-surfaces.yml` on the
+`tests/test_install_queue_reconcile_schedule.py` entry (its comment: `ships gh in /usr/bin`) — so
+installing `gh` in the workflow would change nothing; the self-hosted runners advertise the
+`ubuntu-latest` **label** without carrying `gh` on `PATH`, which is the same shortage #9018 (open)
+records for `unzip` and `gh`. A mixed fleet means the exit-2 class recurs intermittently until that
+is fixed. (The five runs:
 `39321962358`, `39336862094`, `39364288888`, `39634379170`, `39642835446`.) Both classes are still
 `ran-not-succeeded`, so both are still the coverage signal — which is the point of Fact 2.
 
