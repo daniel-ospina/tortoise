@@ -8,7 +8,12 @@ An expansion pack extends Tortoise's core ontology with a **domain vocabulary** 
 
 The five starter packs shipped by default: `dev`, `marketing`, `product-strategy`, `pm`, and `agent-ops` (rules-with-why). Your custom packs install alongside them.
 
-One further pack ships in the catalog **without** being a starter: `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items). It is deliberately not auto-installed, and `docs/`-visible per-graph pack selection is #2728.
+Two further packs ship in the catalog **without** being starters:
+
+- `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items).
+- `portfolio` (#9663) — an **overlay on `venture`** (`depends_on: [venture]`) for the portfolio manager's own vocabulary: the `mandate` that bounds what may be held, the `allocationTarget` that states the per-class/sector weight the portfolio is steered toward (and the benchmark it is measured against — `values: targetPct (percent)`), and the `valuationMark` event. It renames nothing venture owns: the position stays `venture:investment`, referenced **namespaced**, and the overlay declares no `equivalentTo`. Every admitted kind passes one bullet of the pack value test, and every rejected candidate names the home that absorbs it — see `tests/test_investment_portfolio_manager_pack.py`, which re-derives each passing bullet from the manifest instead of trusting the comment.
+
+Neither is auto-installed, and `docs/`-visible per-graph pack selection is #2728.
 
 > ⚠️ **Interim caveat — the ungated paths are still catalog-wide (#2714/#2728).** Shipping a pack under `packs/` puts its vocabulary into the **catalog union**, and the union is what a graph gets whenever no per-graph gate is resolved: its kinds enter that graph's value brief and kind index, its `memory_granularity` enters the S1 prompt, and its chains are rendered as chain guidance. Per-graph `:PackInstall` records now gate the classifier and the write gate as well as the pack-state introspection surfaces — but only where a gate is actually resolved. Two paths resolve none: a graph that has **no** `:PackInstall` records falls back to the catalog union by contract (#2714 indicator 3), and the `sdk=None` path is the union by contract (#5163). A third does not resolve one for the whole session: the SDK v2 extraction master (`_commit_session_v2` calls `extract_session_v2` with no `master`) falls through to `build_master_list()` for S1/S2/S4 **and the S5 write gate**, while the classify-later index in that same call IS gated (#5202). So "installed" narrows a graph's vocabulary exactly where records exist, and nowhere else — **except chains**, which are never narrowed (see the `CHAINS` note below), and **except the SDK v2 extraction master**, whose index is gated but whose prompt and write gate are not. The two pack-fit layers remain separate — **approval** (which packs a graph allows, per graph) and **classification** (which approved kind an item gets, per item) — and making approval gate classification on **every** path is #2714/#2728. Do not read "not a starter" as "not active".
 
@@ -664,7 +669,7 @@ declaration that would be inert.
 
 ## Reserved namespaces
 
-`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` ships in the catalog but is **not** a starter and is not in the reserved list.
+`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` and `portfolio` ship in the catalog but are **not** starters and are not in the reserved list.
 
 ## Reference
 
@@ -673,3 +678,4 @@ declaration that would be inert.
 - Governance research (enforcement layering): `docs/research/2026-08-05-expansion-pack-governance-surfaces.md`
 - Worked example: `packs/agent-ops/manifest.yaml` (rules-with-why)
 - Domain pack example: `packs/venture/manifest.yaml` (fund/portfolio state model — Objects hold state, Events are dated, claims are Points)
+- Overlay example: `packs/investment-portfolio-manager/manifest.yaml` (declares `depends_on`, references another pack's kind namespaced, and states its value test per kind)

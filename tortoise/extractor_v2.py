@@ -814,6 +814,18 @@ _PACK_TRIGGERS = {
     "venture:": ("venture", "fund", "portfolio", "grant", "tranche",
                   "disbursement", "term of award", "programme", "asset",
                   "patent", "condition"),
+    # #9663: the portfolio overlay (`packs/investment-portfolio-manager`) is
+    # also a shipped pack with a trigger entry — without one it is injected
+    # WHOLE into every compact-mode prompt, which is the fail-open fallback,
+    # not a design.
+    # ⚠ These are matched with `t in story`, i.e. as SUBSTRINGS, so every entry
+    # must be one that cannot ride inside an unrelated word. `valuation` was the
+    # first draft and matched "evaluation" — which made an unrelated story
+    # select `portfolio:*` AND (because one match suppresses the all-packs
+    # fallback) drop every other pack's kinds from the compact prompt. Prefer
+    # compound forms (`valuation mark`) over words with common look-alikes.
+    "portfolio:": ("portfolio", "mandate", "allocation", "target weight",
+                   "benchmark weight", "valuation mark", "impairment"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
@@ -852,7 +864,7 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # A namespace with NO trigger entry cannot be story-selected —
         # always include it (per-tenant custom packs AND, since #5165, any
         # catalog pack shipped without a trigger entry; dropping them would
-        # silently strip their kinds from the compact prompt). All six
+        # silently strip their kinds from the compact prompt). All seven
         # shipped catalog namespaces HAVE entries, so the default
         # render's selection is unchanged for them — but the byte-identity
         # argument is about those entries, not about a starter-set

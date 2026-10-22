@@ -171,25 +171,42 @@ class TestShippedPacksUnchanged:
         registry.load_all()
         assert not registry.errors, registry.errors
         # The starter catalog, not just "some packs": the five original
-        # domains plus venture (#2725) is the shipped set at this HEAD.
+        # domains plus venture (#2725) plus the portfolio overlay (#9663) is
+        # the shipped set at this HEAD.
         assert {"dev", "product-strategy", "marketing", "pm", "agent-ops",
-                "venture"} <= set(registry.packs)
+                "venture", "portfolio"} <= set(registry.packs)
 
-    def test_no_shipped_pack_declares_a_value_field_yet(self):
-        # Which is WHY their brief / master / prompts stay byte-identical.
+    def test_only_the_portfolio_overlay_declares_a_value_field(self):
+        # ⛔ ONE declaration, named. #2818's indicator was "no shipped pack
+        # declares a value field yet"; #9663's `allocationTarget` is the first
+        # that must, so the guard is re-pinned to the exact declaration rather
+        # than dropped — a SECOND one appearing is still a failure here, and
+        # every other shipped pack's brief entry keeps no `values` key.
         brief = compile_value_brief(default_packs_dir())
-        declared = {k for k, entry in brief.items()
+        declared = {k: entry["values"] for k, entry in brief.items()
                     if isinstance(entry, dict) and entry.get("values")}
-        assert declared == set(), declared
+        assert list(declared) == ["portfolio:allocationTarget"], declared
+        assert [(v["name"], v["valueKind"], v["required"])
+                for v in declared["portfolio:allocationTarget"]] == [
+            ("targetPct", "percent", True)]
 
-    def test_the_catalog_master_renders_no_values_segment(self):
+    def test_the_catalog_master_renders_exactly_that_values_segment(self):
         master = v2._build_master_from_brief(
             compile_value_brief(default_packs_dir()))
-        assert master["pack_values"] == {}
+        assert master["pack_values"] == {
+            "portfolio:allocationTarget": [{
+                "name": "targetPct",
+                "valueKind": "percent",
+                "required": True,
+                "cardinality": "one",
+            }],
+        }
         for rendered in (v2._render_master_verbose(master),
                          v2._render_master_compact(master, None)):
-            assert "[values:" not in rendered
-        assert "KIND VALUE FIELDS" not in v2._s2s4_rules(master)
+            assert "[values: targetPct(percent" in rendered
+            # …and exactly ONE kind carries the segment.
+            assert rendered.count("[values:") == 1
+        assert "KIND VALUE FIELDS" in v2._s2s4_rules(master)
 
 
 # ── indicator 4: malformed declarations give PRECISE errors ────────────────

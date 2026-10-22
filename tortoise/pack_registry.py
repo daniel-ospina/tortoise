@@ -2098,13 +2098,30 @@ class PackRegistry:
                 # declared predicate or a semantics value — the same split
                 # kindDefs uses (shape per-manifest, resolution here, because a
                 # bare name is not decidable from one manifest alone).
+                # #9663: resolution goes through the SAME `_report_unresolved`
+                # gate the relation ENDPOINTS above use, not straight to
+                # `self.errors`. A relation may legitimately name another
+                # pack's predicate as its near-miss (`constrainedBy` vs
+                # venture's `gatedBy`), and a pack that DECLARED that
+                # dependency must be reported as having a missing peer (#2781)
+                # — not isolated as if it had a typo, which is what an error
+                # here does. Measured on a catalog with `venture` removed:
+                # `gatedBy` went to `errors` and `unresolved_refs` stayed empty,
+                # so the whole pack was dropped with no diagnostic naming the
+                # pack to install.
                 for target in rel.get("nearMisses", []) or []:
-                    if target not in all_predicates:
-                        self.errors.setdefault(ns, []).append(
-                            f"relation '{pred}': nearMisses target '{target}' does "
-                            f"not resolve to any declared predicate or semantics "
-                            f"value (core or loaded pack)"
-                        )
+                    if target in all_predicates:
+                        continue
+                    site = (f"relation '{pred}': nearMisses target '{target}' "
+                            f"does not resolve to any declared predicate or "
+                            f"semantics value (core or loaded pack)")
+                    explanation = self._missing_pack_explanation(
+                        target, loaded, missing_deps[ns])
+                    if explanation is None:
+                        self.errors.setdefault(ns, []).append(site)
+                    else:
+                        self.unresolved_refs.setdefault(ns, []).append(
+                            f"{site} — {explanation}")
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
