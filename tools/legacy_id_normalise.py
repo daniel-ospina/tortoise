@@ -493,8 +493,13 @@ def main(argv: list[str] | None = None) -> int:
     # The ids are not re-derivable (`entity_name_id` is a sha256), and after
     # `rm snapshot` (the documented workflow) the report is the only way back.
     # So the check runs before EVERY report write and compares FINGERPRINTS: the
-    # same dump's plan may be rewritten (byte-identical — a re-run is harmless),
-    # a different dump's may not.
+    # same dump's plan may be rewritten, a different dump's may not. ⚠️ A same-dump
+    # rewrite is NOT always byte-identical, and the exception is deliberate: a
+    # DRY RUN over the original dump with an existing APPLY plan rewrites the
+    # report as `mode: dry-run`, which keeps `renames` and `dump_sha256` (so
+    # `--revert` still works) but drops the apply-time counts. Refusing it would
+    # block a legitimate re-measurement; the durable fields a revert needs are
+    # the ones that survive.
     # `--report` is exempt in REVERT mode only: there it is the plan being READ.
     # `--out` is checked in BOTH modes — `--revert … --out plan_B.json` used to
     # replace another pass's plan with a snapshot and exit 0, leaving that pass

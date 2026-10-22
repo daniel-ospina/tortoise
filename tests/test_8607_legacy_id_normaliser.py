@@ -1437,3 +1437,17 @@ def test_a_revert_cannot_replace_another_passs_plan_with_its_snapshot(tmp_path):
     b_plan = plan_b.read_text(encoding="utf-8")
     assert main(["--dump", str(na), "--revert", "--report", str(plan_a), "--out", str(plan_b)]) == 2
     assert plan_b.read_text(encoding="utf-8") == b_plan, "B's plan survived the revert"
+
+
+def test_a_closed_stdout_is_a_message_not_a_traceback(tmp_path, monkeypatch):
+    """`--dump x >&-` closes fd 1, so `sys.stdout` is None and `None.write` is an
+    AttributeError. The exit code was already right (1); the module's own
+    standard is a message, and nothing pinned it."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", None)
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path)])
+    assert "standard output is closed" in str(exc.value.code)
