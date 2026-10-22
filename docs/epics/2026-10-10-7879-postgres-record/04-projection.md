@@ -95,7 +95,8 @@ Interface A states four properties, and the failure each one prevents:
 
 ### 0.4 Verification
 
-* `tests/test_record_projection.py` — 66 hermetic tests (no DB): totality against
+* `tests/test_record_projection.py` — 96 hermetic tests (no DB), 68 of them test
+  functions at #9553 (`--collect-only -q` counts the parametrised cases too): totality against
   the graph fold's own dispatch vocabulary, the producers' own emit sites
   (including the `_*_RECORD_TYPE` constants — so a NEW producer reds the suite),
   and `log.py`'s torn-tail-harmless classification; the
