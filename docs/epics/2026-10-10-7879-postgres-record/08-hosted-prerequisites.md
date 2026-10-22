@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands only when a **journaled edge record** carries the edge: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede. Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), `CONTAINS` (its `contains_session` rides the journal envelope and the record projection drops it, `record_projection.py:978`), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's envelope directive**: `CONTAINS` (`record_projection._ENVELOPE_RELATIONS` emits the `relation` row after the Point's `node_identity`). Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -257,10 +257,20 @@ either (`link_source_to_entity`/`create_edge` write it bare) — and the structu
 measured there as `edges: 0` after a rebuild; `aboutSource`/`aboutAction` ARE carried, by `EntityLinked`).
 For those the fix is a **producer** — the record type, the fold and the resolver already exist as
 `DirectEdgeCreated`, and nothing emits them from those doors. That half has **no live home**: `#9079` closed
-on 2026-10-21 with the §17.1 write-door fix, not this one, so it is recorded on the root ([comment 6323627886](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6323627886)). ⚠️ **Two more families are missing for their own reasons.** `CONTAINS`: the capture's `contains_session`
-rides the **journal envelope**, so a *journal* rebuild restores the edge — a *record*-sourced rebuild cannot,
-because the projection drops that key (`record_projection.py:978`) and emits no `relation` row for it. And an
-**operator's** `IMPL`/`NAND`/`INPUT` edges: `OperatorAdded` is a `point`-row upsert whose inputs sit in
+on 2026-10-21 with the §17.1 write-door fix, not this one, so it is recorded on the root ([comment 6323627886](https://github.com/daniel-ospina/tortoise/issues/7879#issuecomment-6323627886)). ⚠️ **One more family is missing for its own reason, and one has been closed.** `CONTAINS` — the capture's
+`contains_session` rides the **journal envelope**, so a *journal* rebuild restored the edge while a
+*record*-sourced rebuild could not, because the projection dropped that key (`record_projection.py`'s
+`_RECORD_ONLY_KEYS`) and emitted no `relation` row for it. ✅ **Closed by #9553 (R5 class 2):** the envelope
+directive now lands a `relation` row (`_ENVELOPE_RELATIONS`, ordered after the Point's `node_identity`
+because both endpoints are composite FKs into it), and `supabase/tests/pglite/validate.mjs` replays a
+live-ordered pair to assert the row. The endpoint gate is SHARED rather than invented at the record
+layer: a blank / NUL / lone-surrogate `contains_session` is dropped by **both** folds
+(`projection._writable_container_id` ← `_link_session`, mirrored by
+`record_projection._writable_endpoint_id`), and the blank case is measured — an indexed graph cannot
+match a whitespace-only key (**#9599**), so the fold would mint a duplicate `:Session` and land no
+edge while Postgres held the row. That harness now runs in CI on a projection-only change too (`ci.yml`'s
+`pglite` gate → `schema-drill`), not only on a migration one. An
+**operator's** `IMPL`/`NAND`/`INPUT` edges are still missing: `OperatorAdded` is a `point`-row upsert whose inputs sit in
 `point.props` and no journaled edge record carries them, so they never reach `relation` at all.
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
