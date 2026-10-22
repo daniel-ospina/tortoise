@@ -1,7 +1,7 @@
 -- ============================================================================
 -- Migration 20261022000001: IndexNow submission stamp on blog_posts — #9680
 --
--- IndexNow (#9680) notifies Bing / Yandex / Seznam / Naver / Amazon when an
+-- IndexNow (#9680) notifies Bing / Yandex / Seznam / Naver / Amazon / Yep when an
 -- article is published. ⛔ It does NOT reach Google — Google does not consume
 -- IndexNow. Nothing in this migration, its comments or its consumers may claim
 -- otherwise; that claim is why #7751 was recorded as shipped while no code
@@ -31,10 +31,11 @@
 -- Grants: nothing to add. This project relies on Supabase's ALTER DEFAULT
 -- PRIVILEGES, which grant table-level privileges on public tables to anon /
 -- authenticated / service_role, and a TABLE-level grant covers columns added
--- later — see 20261001000002_api_key_mint_serialization.sql, which states the same
--- note. (No migration in this directory issues an explicit GRANT ON blog_posts.)
--- A future lane must not read this as "add column-level GRANTs to be safe": that
--- would NARROW what the table grant already covers.
+-- later — the same mechanism stated for a table at
+-- 20261001000003_connectors.sql ("table-level ALL + BYPASSRLS from Supabase's
+-- default privileges"). (No migration in this directory issues an explicit GRANT
+-- ON blog_posts.) A future lane must not read this as "add column-level GRANTs to
+-- be safe": that would NARROW what the table grant already covers.
 --
 -- ⚠️ `updated_at` SIDE EFFECT. `blog_posts_set_updated_at` is an unconditional
 -- BEFORE UPDATE trigger, so writing this column also rewrites the row's

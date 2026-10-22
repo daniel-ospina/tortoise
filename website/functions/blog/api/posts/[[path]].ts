@@ -29,10 +29,11 @@
 //   - Rate limit: 120 req/min + 2,000 req/day per key (in-memory counter —
 //     per-isolate; unit-tested at lowered thresholds).
 //   - IndexNow (#9680): the PATCH that moves a post to published submits its
-//     canonical URL at most once per 24 h, in the background, fail-soft. Nothing
+//     canonical URL at most once per post ROW per 24 h (read-then-write, so not
+//     atomic — see _shared/indexnow.ts), in the background, fail-soft. Nothing
 //     is submitted when the stamp cannot be read, and the POST (create) path
-//     never notifies. It reaches Bing / Yandex / Seznam / Naver / Amazon — NOT
-//     Google, which does not consume IndexNow.
+//     never notifies. It reaches Bing / Yandex / Seznam / Naver / Amazon / Yep —
+//     NOT Google, which does not consume IndexNow.
 //
 // Author identity (#1383 — part of the same v1 contract, additive):
 //   - `author?: string` (≤100 chars) is the byline NAME. Omitted →
@@ -55,7 +56,7 @@ import {
 import { SLUG_MAX, SLUG_RE } from "../../_shared/slug.ts";
 import { purgeUrl } from "../../_shared/cloudflare-purge.ts";
 // IndexNow notification on the publish transition (#9680). ⛔ It reaches Bing /
-// Yandex / Seznam / Naver / Amazon — NOT Google, which does not consume the
+// Yandex / Seznam / Naver / Amazon / Yep — NOT Google, which does not consume the
 // protocol. See _shared/indexnow.ts for the verified vendor contract.
 import { notifyPublished } from "../../_shared/indexnow.ts";
 // Agent-key auth + rate limiting are shared with the AI SEO generator (#8293)

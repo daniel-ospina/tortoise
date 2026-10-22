@@ -104,6 +104,7 @@ for (const c of cases) {
     indexnow_submitted_at: c.lastSubmittedAt === undefined ? null : c.lastSubmittedAt,
   };
   const submissions = [];
+  const stateCalls = [];
   const logs = [];
   const realLog = console.log, realWarn = console.warn;
   console.log = (...a) => logs.push(a.map(String).join(' '));
@@ -126,9 +127,11 @@ for (const c of cases) {
     }
     if (u.includes('/rest/v1/blog_posts')) {
       if (method === 'GET' && u.includes('select=indexnow_submitted_at')) {
+        stateCalls.push({ kind: 'read', hasSignal: !!(init && init.signal) });
         if (c.stateUnreadable) {
           return new Response('{"message":"column does not exist"}', { status: 400 });
         }
+        if (c.stateNoRow) return Response.json([]);
         return Response.json([{ indexnow_submitted_at: row.indexnow_submitted_at }]);
       }
       if (method === 'GET') return Response.json([{ ...row }]);
@@ -140,6 +143,7 @@ for (const c of cases) {
       if (method === 'PATCH') {
         const body = JSON.parse(String(init.body));
         if (Object.prototype.hasOwnProperty.call(body, 'indexnow_submitted_at')) {
+          stateCalls.push({ kind: 'stamp', hasSignal: !!(init && init.signal) });
           row.indexnow_submitted_at = body.indexnow_submitted_at;
           return Response.json([{ ...row }]);
         }
@@ -188,10 +192,28 @@ for (const c of cases) {
   }
   console.log = realLog;
   console.warn = realWarn;
-  out.push({ statuses, atResolve, submissions, logs, key: indexnow.INDEXNOW_KEY, stamp: row.indexnow_submitted_at });
+  out.push({ statuses, atResolve, submissions, stateCalls, logs, key: indexnow.INDEXNOW_KEY, stamp: row.indexnow_submitted_at });
 }
-console.log(JSON.stringify({ cases: out, windowMs: indexnow.INDEXNOW_WINDOW_MS, probeResults }));
+console.log(JSON.stringify({
+  cases: out,
+  windowMs: indexnow.INDEXNOW_WINDOW_MS,
+  submitTimeoutMs: indexnow.INDEXNOW_TIMEOUT_MS,
+  stateTimeoutMs: indexnow.INDEXNOW_STATE_TIMEOUT_MS,
+  probeResults,
+}));
 """
+
+# Stamps for the through-the-handler window cases, built ONCE against the real
+# clock (the handler stamps `Date.now()`), so neither case depends on the fixed
+# probe clock above.
+def _stamp_hours_ago(hours: float) -> str:
+    return (
+        datetime.datetime.now(datetime.UTC) - datetime.timedelta(hours=hours)
+    ).isoformat().replace("+00:00", "Z")
+
+
+STATES_AT_IMPORT = {"expired": _stamp_hours_ago(25), "fresh": _stamp_hours_ago(23)}
+
 
 CASES: dict[str, dict] = {
     # ── V2 ────────────────────────────────────────────────────────────────
@@ -224,6 +246,14 @@ CASES: dict[str, dict] = {
         "indexnowStatus": 500,
         "steps": [{"status": "published"}, {"status": "draft"}, {"status": "published"}],
     },
+    # A stamp OLDER than the window submits again — THROUGH THE HANDLER, not only
+    # through the pure function. The probes below pin `shouldSubmit` itself; this
+    # pins the CALLER, because "never re-submit once stamped" re-implemented one
+    # level up (`if (!shouldSubmit(...) || lastSubmittedAt)`) leaves the pure
+    # probes green. The stamp is relative to the REAL clock because the handler
+    # stamps `Date.now()`; `STATES["expired"]`/`["fresh"]` are built at import.
+    "expired_stamp_resubmits": {"status": "draft", "lastSubmittedAt": STATES_AT_IMPORT["expired"], "steps": [{"status": "published"}]},
+    "fresh_stamp_does_not_resubmit": {"status": "draft", "lastSubmittedAt": STATES_AT_IMPORT["fresh"], "steps": [{"status": "published"}]},
     # ── V4 ────────────────────────────────────────────────────────────────
     "endpoint_500": {"status": "draft", "indexnowStatus": 500, "steps": [{"status": "published"}]},
     "endpoint_unreachable": {"status": "draft", "indexnowThrows": True, "steps": [{"status": "published"}]},
@@ -231,6 +261,10 @@ CASES: dict[str, dict] = {
     "endpoint_202": {"status": "draft", "indexnowStatus": 202, "steps": [{"status": "published"}]},
     # ── dedupe state unreadable (migration not applied) ───────────────────
     "state_unreadable": {"status": "draft", "stateUnreadable": True, "steps": [{"status": "published"}]},
+    # A read that answers with zero rows is ALSO "unreadable", not "never
+    # submitted": it must skip, and it must log (the module's "every read is
+    # logged" contract, and the only way the runbook's grep can see it).
+    "state_no_row": {"status": "draft", "stateNoRow": True, "steps": [{"status": "published"}]},
     # ── the create path (deliberately NOT instrumented) ───────────────────
     # `POST /blog/api/posts` with status=published publishes immediately, and it
     # does NOT notify: #9680 names the PATCH transition as the trigger. Pinned so
@@ -263,6 +297,7 @@ def _hours_before(hours: float) -> str:
 #: `lastSubmittedAt` is one of: None (never), an ISO string, or NOT_SUBMITTED_STATE
 #: — the `undefined` / "could not read the column" state, which JSON cannot carry.
 NOT_SUBMITTED_STATE = object()
+
 
 
 PROBES: list[tuple[str, str | object | None, bool]] = [
@@ -319,7 +354,10 @@ def payload() -> dict:
         f"driver returned {len(out['cases'])} results for {len(order)} cases"
     )
     return {"cases": dict(zip(order, out["cases"], strict=True)),
-            "windowMs": out["windowMs"], "probeResults": out["probeResults"]}
+            "windowMs": out["windowMs"],
+            "submitTimeoutMs": out["submitTimeoutMs"],
+            "stateTimeoutMs": out["stateTimeoutMs"],
+            "probeResults": out["probeResults"]}
 
 
 @pytest.fixture(scope="module")
@@ -440,6 +478,50 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
     assert len(sequence["submissions"]) == 1, (
         "publish → edit → unpublish → re-publish within one day must submit ONCE — "
         f"got {len(sequence['submissions'])}: {_submitted_urls(sequence)}"
+    )
+
+
+# ── V3, through the handler: an EXPIRED stamp submits again ───────────────
+def test_an_expired_stamp_resubmits_through_the_handler(results) -> None:
+    """The 24 h rule must EXPIRE, and it must be the CALLER that honours it.
+
+    The probes above pin the pure function, but re-implementing "never re-submit
+    once stamped" one level up — ``if (!shouldSubmit(...) || lastSubmittedAt)`` —
+    leaves every probe green, because the probes call ``shouldSubmit`` directly.
+    These two cases drive a real age through ``notifyPublished`` instead, so that
+    caller-side mutant reds: 25 h submits, 23 h does not.
+
+    The stamps are built against the real clock at import (the handler stamps
+    ``Date.now()``), so they cannot be vacuously in the future like a fixed
+    probe-time stamp would be.
+    """
+    expired = results["expired_stamp_resubmits"]
+    assert len(expired["submissions"]) == 1, (
+        "a stamp 25 h old must submit again — a post edited and re-published a day "
+        f"later is otherwise never announced, silently; got {len(expired['submissions'])}"
+    )
+    fresh = results["fresh_stamp_does_not_resubmit"]
+    assert fresh["submissions"] == [], (
+        f"a stamp 23 h old must NOT submit — got {_submitted_urls(fresh)}"
+    )
+
+
+# ── A zero-row read is "unreadable", not "never", and it is logged ────────
+def test_an_empty_state_read_skips_and_says_so(results) -> None:
+    """Zero rows from the stamp SELECT must skip the submission AND log a line.
+
+    Treating it as "never submitted" would submit — a guess about a state we could
+    not read. Treating it as unreadable and logging nothing would put this path
+    outside the module's "every read is logged" contract, and the runbook's only
+    discovery mechanism is ``grep [indexnow]``. Both halves are pinned here.
+    """
+    res = results["state_no_row"]
+    assert res["submissions"] == [], (
+        f"an empty state read must not submit (the state is unknown, not clean) — "
+        f"got {_submitted_urls(res)}"
+    )
+    assert _logs_matching(res, "state unreadable"), (
+        f"an empty state read must log, or the failure is invisible: {res['logs']}"
     )
 
 
@@ -571,12 +653,19 @@ def test_the_publish_resolves_before_the_submission_starts(results) -> None:
     )
 
 
-def test_the_vendor_call_is_bounded(results) -> None:
+def test_the_vendor_call_is_bounded(results, payload) -> None:
     """A 5 s bound on the outbound call, so a hung endpoint cannot hold the task.
 
     Falsifiable: delete the ``signal`` from ``submitUrl``'s fetch and this reds.
     The ``indexnowThrows`` case simulates a rejection, not an abort — without this
     assertion nothing in the suite can see the timeout go away.
+
+    The two Supabase round-trips carry the sharper bound, so they are pinned too:
+    a STALLED state read produces no ``[indexnow]`` line at all (the task is
+    abandoned at the runtime's post-response grace boundary rather than
+    rejecting), which is precisely the silent failure the whole module exists to
+    avoid. Deleting either ``signal`` — or raising either constant above the
+    grace boundary — reds here.
     """
     for name in ("publish_transition", "endpoint_unreachable"):
         res = results[name]
@@ -586,6 +675,24 @@ def test_the_vendor_call_is_bounded(results) -> None:
                 f"{name}: the IndexNow fetch carries no AbortSignal — a hung endpoint "
                 "would hold the background task for as long as the runtime allows"
             )
+
+    res = results["publish_transition"]
+    assert {c["kind"] for c in res["stateCalls"]} == {"read", "stamp"}, (
+        f"expected one state read and one stamp on the happy path: {res['stateCalls']}"
+    )
+    for call in res["stateCalls"]:
+        assert call["hasSignal"] is True, (
+            f"the {call['kind']} call to Supabase carries no AbortSignal — a stalled "
+            "state read means nothing is notified AND no [indexnow] line is written"
+        )
+    assert payload["submitTimeoutMs"] <= 10_000, (
+        f"the vendor bound is {payload['submitTimeoutMs']} ms"
+    )
+    assert payload["stateTimeoutMs"] <= 5_000, (
+        f"the state bound is {payload['stateTimeoutMs']} ms — it must stay "
+        "well inside the runtime's post-response grace boundary, or a stalled read "
+        "goes silent again"
+    )
 
 
 # ── The stamp records the ATTEMPT, not the outcome ────────────────────────

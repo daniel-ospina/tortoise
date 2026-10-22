@@ -231,7 +231,17 @@ async function readSubmittedAt(env: Env, id: string, url: string): Promise<strin
     }
     const rows = (await res.json()) as Array<{ indexnow_submitted_at: string | null }>;
     const row = rows[0];
-    if (!row) return undefined;
+    if (!row) {
+      // Zero rows is NOT "never submitted" — it is a state we could not read
+      // (a concurrent delete, an odd PostgREST answer, a permissions fault).
+      // Returning `undefined` there means "skip", and the skip is logged here
+      // because `notifyPublished` deliberately suppresses its own skip line for
+      // this state. Leaving it silent would put this path outside the module's
+      // "every read and write is logged" contract and invisible to the
+      // runbook's `grep [indexnow]`.
+      console.warn(`[indexnow] skipped (state unreadable, no row): ${url}`);
+      return undefined;
+    }
     return row.indexnow_submitted_at ?? null;
   } catch {
     console.warn(`[indexnow] skipped (state unreadable, upstream unreachable): ${url}`);
@@ -268,8 +278,10 @@ async function stampSubmittedAt(env: Env, id: string, nowMs: number, url: string
 
 /**
  * Submit one published article's canonical URL to IndexNow, at most once per
- * `INDEXNOW_WINDOW_MS`. Called from the agent API's publish transition inside
- * `waitUntil`, so the publish response never waits on the vendor.
+ * `INDEXNOW_WINDOW_MS` PER ROW — non-atomically, and not keyed by URL; the
+ * constant documents the two escapes (overlapping transitions of one row, and a
+ * deleted-and-recreated slug). Called from the agent API's publish transition
+ * inside `waitUntil`, so the publish response never waits on the vendor.
  *
  * ⛔ This is the ONLY submission path in the codebase, and it takes ONE url. A
  * bulk/backfill loop does not belong in a publish handler (#9680 item 5): the
