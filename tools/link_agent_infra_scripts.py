@@ -22,7 +22,8 @@ Exit codes
 ----------
     0  the link resolves to ``$AGENT_INFRA_PATH/scripts`` (``--check``: and it already did)
     1  the link is missing, dangling, or points somewhere else (``--check``: a failure)
-    2  config error — no agent-infra checkout with a ``scripts/`` dir could be found
+    2  config error — no agent-infra checkout with a ``scripts/`` dir could be found, or an
+       explicit ``--infra`` was passed and has none (it is AUTHORITATIVE, never a first try)
 
 Exit 2 is deliberately distinct from 1: "the pointer is wrong" and "there is nothing on this
 machine to point AT" are different repairs, and collapsing them is how a stale checkout gets
@@ -53,16 +54,35 @@ class ConfigError(RuntimeError):
 
 
 def resolve_infra(explicit: str | None) -> Path:
-    """The agent-infra checkout to point at, in precedence order.
+    """The agent-infra checkout to point at, ABSOLUTE, in precedence order.
 
-    ``--infra`` beats ``$AGENT_INFRA_PATH`` beats ``~/agent-infra``. The last fallback is not a
-    guess: agent-infra's own ``link-skills.sh`` uses the identical
+    ``--infra`` is AUTHORITATIVE (not "try this one first"): if it is passed and has no
+    ``scripts/`` directory, that is a config error naming the path — silently falling through to
+    ``$AGENT_INFRA_PATH`` would make ``--check --infra <X>`` exit 0 without ever consulting ``X``,
+    a false green in the assertion mode a lane or gate calls (PR #9541 review). Only when nothing
+    was passed explicitly do we fall back to ``$AGENT_INFRA_PATH`` and then ``~/agent-infra``. The
+    last fallback is not a guess: agent-infra's own ``link-skills.sh`` uses the identical
     ``${AGENT_INFRA_PATH:-$HOME/agent-infra}`` default, so a lane that relies on the fallback
     gets the same answer from both tools instead of two different ones.
+
+    The returned path is ``resolve()``d because it is used as a SYMLINK TARGET: ``os.symlink``
+    stores the string verbatim and a link's target is interpreted relative to the LINK's directory,
+    not to the CWD — so a relative ``--infra`` validated here (against the CWD) would be written as
+    a relative target under ``--repo`` and dangle, while ``materialise`` reported success (PR #9541
+    review P1: the #9475 symptom reinstated by its own fix, reported as a healthy link).
     """
-    candidates: list[Path] = []
     if explicit:
-        candidates.append(Path(explicit).expanduser())
+        cand = Path(explicit).expanduser()
+        if not (cand / LINK_NAME).is_dir():
+            raise ConfigError(
+                f"--infra {cand} has no {LINK_NAME}/ directory, so there is nothing to point at. "
+                "--infra is AUTHORITATIVE when passed (it is not a fallback, and this tool will "
+                "NOT silently use another checkout instead): point it at a clone of "
+                "daniel-ospina/agent-infra, or pass nothing and set AGENT_INFRA_PATH."
+            )
+        return cand.resolve()
+
+    candidates: list[Path] = []
     if os.environ.get("AGENT_INFRA_PATH"):
         candidates.append(Path(os.environ["AGENT_INFRA_PATH"]).expanduser())
     candidates.append(Path.home() / "agent-infra")
@@ -72,7 +92,7 @@ def resolve_infra(explicit: str | None) -> Path:
         src = cand / LINK_NAME
         tried.append(str(cand))
         if src.is_dir():
-            return cand
+            return cand.resolve()
     raise ConfigError(
         "no agent-infra checkout with a scripts/ directory. Looked at: "
         + ", ".join(tried)
@@ -150,6 +170,16 @@ def materialise(dest: Path, src: Path, *, dry_run: bool = False) -> str:
         else:
             dest.unlink()
     os.symlink(src, dest)
+    # Belt-and-braces, and NOT redundant: re-classify what was just written. A link that does not
+    # resolve must be exit 2 (config error), never a printed `relinked:` with exit 0 — reporting a
+    # pointer that is not usable is the one contract this tool exists to keep, and a future
+    # symlink surprise (a relative target, a platform quirk) must not be able to read as success.
+    written, detail = link_state(dest, src)
+    if written != "ok":
+        raise ConfigError(
+            f"wrote {dest} -> {src}, but it does not resolve ({written}: {detail}). The pointer is "
+            "NOT usable — refusing to report success."
+        )
     return f"relinked: {dest} -> {src} (was {state})"
 
 
@@ -160,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--check", action="store_true", help="assert, do not change anything")
     parser.add_argument("--dry-run", action="store_true", help="report the action, change nothing")
     parser.add_argument("--repo", default=str(REPO_ROOT), help="repo root (default: this checkout)")
-    parser.add_argument("--infra", default=None, help="agent-infra checkout (default: $AGENT_INFRA_PATH)")
+    parser.add_argument("--infra", default=None, help="agent-infra checkout (default: $AGENT_INFRA_PATH); authoritative when passed")
     parser.add_argument("--quiet", action="store_true", help="only exit status and errors")
     args = parser.parse_args(argv)
 

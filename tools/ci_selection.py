@@ -1584,7 +1584,31 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_the_engine_pin_guards_are_selected_on_the_files_they_pin.
              "apps/graph-viz/docker-compose.yml",
-             "docs/quickstart-selfhosted.md")
+             "docs/quickstart-selfhosted.md",
+             # PR #9541 review P1: tools/link_agent_infra_scripts.py is the ONLY
+             # executor of #9475's fix — it decides whether the repo-root
+             # `scripts` pointer exists at all, and it is the file every
+             # documented `scripts/<tool>.sh` (admin-merge.sh, the merge rail,
+             # included) depends on. Its guard,
+             # tests/test_link_agent_infra_scripts.py, is `core`-registered — but
+             # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
+             # SOURCE_PATTERNS entry matches the tool, so a MATERIALISER-ONLY
+             # change filtered to `changed == []`, took the docs-only early
+             # return and fell back to tier-1 smoke: the cases pinning that the
+             # pointer stays gitignored, that a dangling link is repaired, that a
+             # RELATIVE --infra still writes a resolving target, and that an
+             # explicit --infra is never discarded would never run on the PR that
+             # can break them — while `--integrity` stays green, because the test
+             # file IS classified. Measured before this entry: `--changed-files
+             # tools/link_agent_infra_scripts.py --event pull_request` ->
+             # surfaces=[], full=False, 57 tier-1 files,
+             # test_link_agent_infra_scripts.py ABSENT. Same #1349/#3332/#3616
+             # silent-drop class as tools/test_lane.py above. `CORE_ALSO` (not
+             # `TOOL_CARVEOUTS`) is the documented seam: the suite is hermetic (a
+             # tmp_path repo root plus a fake agent-infra checkout) and `core` is
+             # where it is registered. Pinned by
+             # tests/test_ci_selection.py::test_link_agent_infra_scripts_tool_change_selects_core_not_tier1.
+             "tools/link_agent_infra_scripts.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

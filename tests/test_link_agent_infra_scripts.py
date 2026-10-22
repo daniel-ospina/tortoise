@@ -20,6 +20,8 @@ Two halves are tested, and they fail for different reasons:
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,8 +32,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 TOOL = REPO_ROOT / "tools" / "link_agent_infra_scripts.py"
 
 
-def run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    """Run the tool as the shell would — exit codes are part of its contract."""
+def run_tool(
+    *args: str,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run the tool as the shell would — exit codes are part of its contract.
+
+    ``cwd`` is explicit for the tests that care about the difference between the CWD and
+    ``--repo``: the tool validates the agent-infra candidate against the CWD but writes the
+    symlink target under ``--repo``, so a relative ``--infra`` is only caught by a test that
+    puts those two in different places.
+    """
     # Asserted, not assumed: without this a missing tool makes python exit 2, which every
     # ConfigError assertion below would read as a PASS for the wrong reason (measured on the
     # pre-fix tree, where the tool did not exist yet and one such test passed vacuously).
@@ -41,6 +53,7 @@ def run_tool(*args: str, env: dict[str, str] | None = None) -> subprocess.Comple
         capture_output=True,
         text=True,
         env=env,
+        cwd=None if cwd is None else str(cwd),
     )
 
 
@@ -156,6 +169,74 @@ class TestMaterialise:
         assert run_tool("--repo", str(repo), "--infra", str(fake_infra)).returncode == 0
         assert (repo / "scripts").resolve() == (fake_infra / "scripts").resolve()
 
+    def test_relative_infra_writes_a_pointer_that_RESOLVES(
+        self, repo: Path, fake_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #9541 review P1: a relative target dangles, yet the tool said `relinked`/exit 0.
+
+        `os.symlink` stores its target VERBATIM and a link's target is resolved relative to the
+        LINK's own directory, never to the CWD — but `resolve_infra` validated `--infra` against
+        the CWD. So `--infra agent-infra` run from ``tmp_path`` wrote the relative target
+        ``agent-infra/scripts`` under ``--repo``, where it points at
+        ``<repo>/agent-infra/scripts`` and does not exist: the #9475 symptom, reinstated by its
+        own fix and reported as a healthy link (and unrepairable — a re-run replaced one dangling
+        link with another and still exited 0). RED before the fix at `link.exists()`; the
+        `--check` re-read below keeps it red even if the write path changes shape.
+        """
+        # CWD == tmp_path, --repo == tmp_path/consumer, --infra given RELATIVE to the CWD.
+        result = run_tool(
+            "--repo", str(repo), "--infra", fake_infra.name, cwd=tmp_path
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        link = repo / "scripts"
+        assert link.is_symlink()
+        assert link.exists(), (
+            f"the pointer {link} -> {os.readlink(link)} DANGLES: a relative --infra was written "
+            "as a relative symlink target, which resolves under the repo, not the CWD. The "
+            "tool reported success over a pointer no documented scripts/<tool>.sh can follow."
+        )
+        assert link.resolve() == (fake_infra / "scripts").resolve()
+        # The tool's own assertion mode must agree — this is the half a lane or a gate calls.
+        checked = run_tool(
+            "--check", "--repo", str(repo), "--infra", fake_infra.name, cwd=tmp_path
+        )
+        assert checked.returncode == 0, (checked.stdout, checked.stderr)
+        assert checked.stdout.startswith("ok:"), checked.stdout
+
+    def test_explicit_infra_is_authoritative_never_a_first_try(
+        self, repo: Path, fake_infra: Path, tmp_path: Path
+    ) -> None:
+        """PR #9541 review P2: an explicit `--infra` must not fall through to the environment.
+
+        `--infra <X>` with no `<X>/scripts` used to be silently DISCARDED in favour of
+        `$AGENT_INFRA_PATH`, so `--check --infra <X>` exited 0 having never consulted ``X`` — a
+        false green in the assertion mode. RED before the fix: this run resolved to
+        ``fake_infra`` and exited 0.
+        """
+        typo = tmp_path / "typo-not-here"
+        typo.mkdir()
+        env = {**os.environ, "AGENT_INFRA_PATH": str(fake_infra)}
+
+        checked = run_tool(
+            "--check", "--repo", str(repo), "--infra", str(typo), env=env
+        )
+        assert checked.returncode == 2, (
+            checked.returncode,
+            checked.stdout,
+            checked.stderr,
+            "--infra was passed explicitly and has no scripts/ dir, so the answer is a CONFIG "
+            "error (exit 2). Exit 0 means the named checkout was discarded and some other one "
+            "was used silently.",
+        )
+        assert str(typo) in checked.stderr, checked.stderr
+
+        # The write path must refuse it too, and change nothing.
+        wrote = run_tool("--repo", str(repo), "--infra", str(typo), env=env)
+        assert wrote.returncode == 2, (wrote.returncode, wrote.stdout, wrote.stderr)
+        assert not os.path.lexists(repo / "scripts"), (
+            f"a refused --infra still materialised a pointer: {repo / 'scripts'}"
+        )
+
 
 class TestDiagnostics:
     def test_missing_agent_infra_is_exit_2_not_1(self, repo: Path, tmp_path: Path) -> None:
@@ -221,3 +302,80 @@ class TestDiagnostics:
         assert result.returncode == 0, result.stderr
         assert (repo / "scripts").resolve() == (fake_infra / "scripts").resolve()
         assert fake_infra.name in result.stdout
+
+
+class TestPreCommitWiring:
+    """PR #9541 review (advisory P2): NOTHING invoked the materialiser.
+
+    Merging #9475 deletes a pointer that resolves on an existing developer host, so every
+    existing checkout and lane loses `scripts/` — `scripts/admin-merge.sh`, the documented
+    merge rail, included — until someone runs the tool by hand. `agent-infra init/update`
+    is not installed on every lane, and the hook only PRINTED the command (and only when
+    the SIGPIPE guard was missing or too old). So the hook now materialises the pointer
+    itself when it is absent and there is a checkout to point at.
+
+    Pinned by EXTRACTION from the real hook, the `.github/scripts/sigpipe-hook.test.sh`
+    precedent: a copied block can drift from the one that actually runs. RED on the
+    pre-fix hook, where no such block exists (the extraction below finds nothing).
+    """
+
+    HOOK = REPO_ROOT / ".husky" / "pre-commit"
+
+    def _block(self) -> str:
+        match = re.search(r"^if \[ ! -e scripts \].*?^fi$", self.HOOK.read_text(), re.S | re.M)
+        assert match, (
+            f"{self.HOOK.name} no longer materialises the machine-local `scripts` pointer "
+            "(#9475: it is gitignored and untracked, so a fresh clone or lane has none). "
+            "Nothing else reliably creates it — without this block, merging deletes "
+            "`scripts/` from every existing checkout and `scripts/admin-merge.sh` stays dead "
+            "until someone runs `uv run python tools/link_agent_infra_scripts.py` by hand."
+        )
+        return match.group(0)
+
+    def _workspace(self, tmp_path: Path) -> Path:
+        """A throwaway repo root holding the hook's block, the tool, and a python shim."""
+        root = tmp_path / "hook-workspace"
+        (root / "tools").mkdir(parents=True)
+        shutil.copy(TOOL, root / "tools" / TOOL.name)
+        bindir = root / ".venv" / "bin"
+        bindir.mkdir(parents=True)
+        shim = bindir / "python"
+        shim.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        shim.chmod(0o755)
+        (root / "block.sh").write_text(self._block() + "\n")
+        return root
+
+    def test_an_absent_pointer_is_materialised_by_the_hook(
+        self, tmp_path: Path, fake_infra: Path
+    ) -> None:
+        root = self._workspace(tmp_path)
+        ran = subprocess.run(
+            ["sh", "block.sh"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env={"AGENT_INFRA_PATH": str(fake_infra), "PATH": "/usr/bin:/bin"},
+        )
+        assert ran.returncode == 0, (ran.stdout, ran.stderr)
+        link = root / "scripts"
+        assert link.is_symlink(), (
+            f"the hook left `scripts` unmaterialised (stdout={ran.stdout!r}, "
+            f"stderr={ran.stderr!r}) — a fresh clone would commit without the merge rail"
+        )
+        assert link.exists(), f"{link} -> {os.readlink(link)} dangles after the hook ran"
+        assert link.resolve() == (fake_infra / "scripts").resolve()
+
+    def test_the_hook_never_blocks_when_there_is_nothing_to_point_at(
+        self, tmp_path: Path
+    ) -> None:
+        """No agent-infra checkout on this machine is an ENVIRONMENT fact, not a commit block."""
+        root = self._workspace(tmp_path)
+        ran = subprocess.run(
+            ["sh", "block.sh"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path / "home")},
+        )
+        assert ran.returncode == 0, (ran.stdout, ran.stderr)
+        assert not os.path.lexists(root / "scripts")

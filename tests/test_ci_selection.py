@@ -2445,6 +2445,29 @@ def test_source_currency_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1()
 
 
+def test_link_agent_infra_scripts_tool_change_selects_core_not_tier1():
+    # PR #9541 review P1: tools/link_agent_infra_scripts.py is the only executor
+    # of #9475's fix (it decides whether the repo-root `scripts` pointer exists at
+    # all), and its guard tests/test_link_agent_infra_scripts.py is `core`-
+    # registered. Without the CORE_ALSO entry the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallowed the path, so a MATERIALISER-only change
+    # selected NO surface and took the docs-only early return — the 14 cases
+    # pinning that the pointer stays gitignored, that a dangling link is repaired,
+    # that a RELATIVE --infra still writes a RESOLVING target (the #9475 symptom
+    # reinstated by its own fix) and that an explicit --infra is never silently
+    # discarded would not have run on the one PR that can break them. Measured
+    # before the entry: `--changed-files tools/link_agent_infra_scripts.py
+    # --event pull_request` -> surfaces=[], full=False, guard ABSENT — while
+    # `--integrity` stayed green, because the TEST file is classified. Same
+    # #1349/#3332/#3616 silent-drop class as #5084/#6138/#4174 above.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/link_agent_infra_scripts.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_link_agent_infra_scripts.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
 def test_cost_coverage_audit_tool_change_selects_core_not_tier1():
     # #5045 review P1: tools/cost_coverage_audit.py IS the instrument the
     # cost-dimension registry rests on, and tests/test_cost_dimensions.py is the
@@ -5032,20 +5055,25 @@ def test_slow_leg_bounds_clear_the_committed_work():
 
 
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
-#: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
-#: runner case (no agent-infra checkout), and it is the ONLY case that may skip.
+#: The machine-local `scripts` pointer itself, WITHOUT following it. Since #9475 it is
+#: GITIGNORED and NOT tracked (a git symlink blob cannot hold `$AGENT_INFRA_PATH`), so the
+#: runner case that may skip is "it was never materialised here" — an absent path, not a
+#: dangling committed link.
 SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
 CI_RUNNER_GATE_ABSENT = (
     f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
-    f"reachable at {CI_RUNNER_GATE} (the tracked `scripts` symlink dangles where "
-    f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
+    f"reachable at {CI_RUNNER_GATE} (the machine-local `scripts` pointer is "
+    f"missing or does not resolve — #9475: it is gitignored, not tracked, so a "
+    f"fresh clone or lane has none until `uv run python "
+    f"tools/link_agent_infra_scripts.py` materialises it from $AGENT_INFRA_PATH, "
+    f"as on a runner where that variable is unset). The repo-side half of the "
     f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
     f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
     f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
     f"out, so a green CI run says nothing about it. Run this module on a host "
-    f"with $AGENT_INFRA_PATH set to verify that the gate still attaches only "
-    f"`ubuntu-latest`. Same shape and same limit as RAIL_ABSENT_REASON in "
-    f"tests/test_pytest_attribution.py."
+    f"with $AGENT_INFRA_PATH set (and the pointer materialised) to verify that "
+    f"the gate still attaches only `ubuntu-latest`. Same shape and same limit as "
+    f"RAIL_ABSENT_REASON in tests/test_pytest_attribution.py."
 )
 
 
@@ -5087,12 +5115,14 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         f"pool claims puts this leg back on the class that cannot finish it.")
 
     if not SCRIPTS_LINK.is_dir():
-        # The tracked `scripts` symlink DANGLES (no agent-infra checkout here), which
-        # is every CI runner: the link is a host convenience, not a repo dependency
-        # (`python-ci.yml` is self-contained by decision, fix #555). Announced, never
-        # silent, and the message says out loud that the premise half is untested by
-        # CI — a bare `skipped` would let a green run read as "the pool's labels were
-        # verified", which is the vacuous pass this guard exists to prevent.
+        # The machine-local `scripts` pointer is ABSENT or does not resolve, which is
+        # every CI runner and every fresh clone/lane: since #9475 it is gitignored and
+        # not tracked, so nothing creates it until
+        # `tools/link_agent_infra_scripts.py` runs. It is a host convenience, not a repo
+        # dependency (`python-ci.yml` is self-contained by decision, fix #555).
+        # Announced, never silent, and the message says out loud that the premise half
+        # is untested by CI — a bare `skipped` would let a green run read as "the pool's
+        # labels were verified", which is the vacuous pass this guard exists to prevent.
         print(CI_RUNNER_GATE_ABSENT)
         pytest.skip(CI_RUNNER_GATE_ABSENT)
     # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
@@ -5108,7 +5138,9 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         f"rather than letting this guard drift out of reach")
     gate = CI_RUNNER_GATE.read_text()
     # The premise this pin rests on lives in ANOTHER repo's script, reached here
-    # through the tracked `scripts` symlink. Pinning a literal against an external,
+    # through the machine-local `scripts` pointer (#9475 — gitignored, not tracked;
+    # materialised per machine from $AGENT_INFRA_PATH, absent until then). Pinning a
+    # literal against an external,
     # changeable fact with nothing asserting that fact is the "comment nobody
     # re-reads" failure this test criticises: harden the gate to attach a
     # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
