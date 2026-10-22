@@ -3995,17 +3995,27 @@ def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
     (`documentKind` added to a provenance Source) only over-counts — it fails
     closed — and is deliberately left alone.
 
-    Both spellings are refused: a `document_kind` disagreeing with the stored
-    camelCase genre is the same demotion one document-path write later
-    (`_upsert_document` reads `$dk` from the snake spelling and overwrites the
-    camelCase one), so admitting it would only hide the escape behind a step.
+    Both spellings are refused, for DIFFERENT reasons — stated truthfully
+    because the earlier wording claimed a mechanism that does not exist. The
+    camelCase `documentKind` is the key the meter reads, so refusing it is the
+    demotion guard itself. The snake_case `document_kind` is INERT as a node
+    property (no reader in the tree reads `s.document_kind`; the meter reads
+    `s.documentKind`), so a bare snake write cannot demote — it is refused
+    because it would put the genre on the node in TWO places, one of them the
+    one every reader ignores: the `raw_state`/`rawState` ambiguity class
+    (`_SOURCE_HANDLED`'s "the state in TWO places" note), and because a
+    `DocumentCreated` payload carrying it DOES reach the genre via
+    `_upsert_document`'s `$dk`. One home for the genre, and it is
+    `documentKind`.
 
     Deliberately NOT in `_DOC_RETIRED_KEYS`: `documentKind` is LIVE (D10 §4.4,
-    the genre axis) and a member there is SCRUBBED off every document. It is an
-    identity-class key owned by the document writer (`_upsert_document`'s fixed
-    clause), so the caller surfaces REFUSE the demotion rather than the
-    projection silently dropping it — a no-op would leave the caller believing
-    it wrote.
+    the genre axis) and a member there is SCRUBBED off every document. On the
+    caller surfaces it is refused LOUDLY rather than dropped, because a silent
+    no-op would leave the caller believing it wrote. (The DOCUMENT writer,
+    `_upsert_document`, instead DROPS a demotion inside its own clause: the
+    same statement is the journal replay fold, so it must stay total and must
+    not abort a rebuild over a pre-guard record. `create_source`/
+    `update_entity` are never replay, so they raise.)
     """
     incoming = [(k, props[k]) for k in ("documentKind", "document_kind")
                 if k in props]
@@ -4032,10 +4042,12 @@ def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
             f"`{DOCUMENT_METER_PREDICATE}`). `documentKind` is the "
             f"documenthood key, not metadata: it cannot be demoted to "
             f"`transcript`/empty through `{surface}` (#5140 — metering a node "
-            f"a caller can un-meter is not a cap). Report the document's "
-            f"removal with `create_source(..., raw_state=...)`, or write the "
-            f"genre through the document writer that owns it "
-            f"(`create_document`/`add_document`)."
+            f"a caller can un-meter is not a cap), and `document_kind` is a "
+            f"second spelling of the same key, not a second key — the genre "
+            f"lives in `documentKind` only. Retarget among metered genres is "
+            f"allowed (`report` -> `brief`). To drop a document's metering, "
+            f"delete the document; to record that a source became "
+            f"unavailable, use `create_source(..., raw_state=...)`."
         )
 
 
@@ -32409,11 +32421,13 @@ class TortoiseSDK:
                 # be demoted through the generic entity surface either — it
                 # merges the SAME `:Source` node `create_source` does, so a
                 # guard on one door and not the other is decoration (#5135's
-                # third-door lesson).
-                _refuse_document_kind_demotion(
-                    self._stored_source_document_kind(
-                        self._get_proj().g, id_val),
-                    props, surface="update_entity", none_demotes=True)
+                # third-door lesson). Presence-tested first for the same reason
+                # as the `create_source` call above.
+                if "documentKind" in props or "document_kind" in props:
+                    _refuse_document_kind_demotion(
+                        self._stored_source_document_kind(
+                            self._get_proj().g, id_val),
+                        props, surface="update_entity", none_demotes=True)
                 _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
                 if _managed:
                     # #3998: the STATE and the merge TOKEN are refused through the
@@ -36260,10 +36274,17 @@ class TortoiseSDK:
         # #5140 P1: the documents METER KEY is not caller-writable IN THE
         # DEMOTION DIRECTION. Runs BEFORE the journal append below, so a
         # refused write leaves no record to replay.
-        _refuse_document_kind_demotion(
-            self._stored_source_document_kind(
-                self._get_proj().g, self._resolve_source_url(url)),
-            ev, surface="create_source")
+        # ⛔ The PRESENCE test is hoisted out of the helper on purpose: the
+        # stored-kind read is a graph round trip (plus `_resolve_source_url`'s
+        # own), and `documentKind` is absent on essentially every producer
+        # (`_index_source_merge` calls this per file), so an unconditional
+        # lookup would put 2-3 queries on the hottest `:Source` write path and
+        # a new pre-write failure mode — for a key nobody supplied.
+        if "documentKind" in ev or "document_kind" in ev:
+            _refuse_document_kind_demotion(
+                self._stored_source_document_kind(
+                    self._get_proj().g, self._resolve_source_url(url)),
+                ev, surface="create_source")
         if is_episodic is not None:
             # #1488: server-managed quota discriminator — explicit param only
             # (mirrors create_point). The props passthrough is rejected above.

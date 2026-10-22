@@ -641,6 +641,70 @@ class TestDocumentsQuota:
         finally:
             tenant.close()
 
+    def test_document_writer_cannot_demote_out_of_the_meter(
+            self, reg_sdk, tmp_path):
+        """#5140 P1, review cycle 2 — the THIRD door: the document writer itself.
+
+        The two guarded surfaces above are not the only writers of the genre.
+        `_upsert_document`'s fixed clause used a plain
+        `s.documentKind=coalesce($dk, s.documentKind, '')`, and `$dk` is
+        caller-chosen, so the DEMOTION was still one call away — from two
+        documented routes:
+
+          * ``EventAPI.add_document(<existing doc id>, document_kind=...)`` —
+            the doc id is the caller's `:Source` MERGE key;
+          * ``sdk._doc_write(frontmatter, <derived doc id>, ...)`` — the
+            ``POST /v1/index/docs`` re-index path, whose id is DERIVED from the
+            file path, so re-indexing one file with ``type: transcript`` hits
+            the SAME node, journals the record, and survives ``rebuild_all``.
+
+        MEASURED before the fix (meter 3 -> 2 -> 1, one call each). The clause
+        is the fix rather than a Python guard because that same statement IS
+        the journal replay fold: the drop must be total, so a rebuild over a
+        pre-guard record re-materialises the metered genre instead of aborting.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            for i in range(3):
+                self._seed_doc(tenant, i, kind="report")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3
+            api = EventAPI(EventLog(str(tmp_path / "dw_events.jsonl")),
+                           initiated_by="extractor",
+                           projection=tenant._get_proj())
+
+            # (1) EventAPI.add_document on an EXISTING document's id.
+            api.add_document("doc_1", "doc 1", document_kind="transcript")
+            # (2) the index path's own writer, same file-derived id.
+            tenant._doc_write({"type": "transcript"}, "doc_0", "doc 0",
+                              str(tmp_path / "doc_0.md"), None)
+
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.url IN ['doc_0','doc_1'] "
+                "RETURN s.url, s.documentKind ORDER BY s.url").result_set
+            assert [list(r) for r in kinds] == [
+                ["doc_0", "report"], ["doc_1", "report"]], (
+                f"a metered document was demoted by the document writer: {kinds!r}")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3, \
+                "the document writer demoted a document out of the meter"
+
+            # ⛔ NON-OVER-REACH, on the same writer: a fresh transcript document
+            # is still mintable (nothing metered stored to demote), and a
+            # metered-to-metered retarget still lands.
+            api.add_document("doc_new", "fresh transcript",
+                             document_kind="transcript")
+            api.add_document("doc_2", "doc 2", document_kind="brief")
+            kinds2 = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.url IN ['doc_2','doc_new'] "
+                "RETURN s.url, s.documentKind ORDER BY s.url").result_set
+            assert [list(r) for r in kinds2] == [
+                ["doc_2", "brief"], ["doc_new", "transcript"]], kinds2
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3
+        finally:
+            tenant.close()
+
     def test_meter_predicate_halves_agree(self, reg_sdk, tmp_path):
         """#5140: the `documents` predicate has ONE definition, in two halves.
 
