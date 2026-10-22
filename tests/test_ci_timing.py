@@ -2028,6 +2028,24 @@ def test_a_longrepr_inside_a_parameter_does_not_split_the_id(tmp_path: Path) -> 
     }
 
 
+def test_a_bracket_carrying_message_is_a_declared_residual(tmp_path: Path) -> None:
+    """The one shape the depth-0 rule gives up, pinned as ACCEPTED — not as correct.
+
+    A bracket-unbalanced id whose message opens with a longrepr shape splits at the delta
+    candidate rather than at the in-parameter separator, so the published id carries part of the
+    message. It is indistinguishable by bracket shape from the family the guard protects
+    (`test_p[a - Failed to connect]`, measured over 70 shapes), where the alternative published
+    `test_p[a` — an id pytest never reports. This pins the residual so a future change cannot
+    silently move it, and so the trade is visible rather than discovered (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a[b] - assert ']' == 'a - b'\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[a[b] - assert ']' == 'a"}
+
+
 def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
     """One unreadable log must not become a KeyError for the whole artifact.
 

@@ -534,8 +534,9 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
        progress lines before the summary (bucketed by length so a failure-dense leg is not
        quadratic);
     2. a separator whose remainder OPENS with pytest's longrepr shape (see `_LONGREPR_RE`) — the
-       only signal that is not bracket arithmetic, and the one that survives a message carrying
-       its own brackets;
+       only signal that is not bracket arithmetic, and it survives a message carrying its own
+       brackets PROVIDED the candidate's head is bracket-consistent with the whole tail (`depth
+       == 0` or `head delta == whole delta`) — the guard below names the case that rules out;
     3. a separator whose head has never gone bracket-negative AND whose bracket delta equals the
        whole tail's (sound when the message carries no brackets: then the id's delta IS the tail's);
     4. the same delta test without the non-negative requirement;
@@ -558,15 +559,22 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
                 break
         cands.append((at, depth, clean))
         at = tail.find(" - ", at + 3)
+    whole = tail.count("[") - tail.count("]")
     for at, _depth, clean in cands:
-        # `at` is the separator's leading SPACE; the pattern starts at its dash. DEPTH 0 only:
-        # an id-internal separator whose remainder merely OPENS with a longrepr-shaped word
-        # (`test_p[a - Failed to connect]`) is not the short-summary split point, and taking it
-        # published an id pytest never reports (#9134 review, P2). Bracket-internal separators
-        # belong to the delta ladder below, which is what d6e166e41 established.
+        # `at` is the separator's leading SPACE; the pattern starts at its dash. DEPTH 0 only.
+        # A separator INSIDE a parameter is not the short-summary split, even when the remainder
+        # merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]` -> `test_p[a`,
+        # measured; publishing such an id is the defect this pass must not reintroduce).
+        #
+        # ⚠️ DECLARED TRADE: a bracket-unbalanced id whose MESSAGE opens with a longrepr shape
+        # (`test_p[a[b] - assert ']' == 'a`) is the one case depth-0 gives up — it now splits at
+        # the ladder's delta candidate instead of at the in-parameter separator. The two families
+        # are indistinguishable by bracket shape (measured over both, 70 shapes), and the id it
+        # publishes there is still one pytest could report, unlike the pre-#9134 behaviour, which
+        # dropped the line entirely. Pinned by
+        # `test_a_bracket_carrying_message_is_a_declared_residual`.
         if clean and _depth == 0 and _LONGREPR_RE.match(tail[at + 1:]):
             return tail[:at]
-    whole = tail.count("[") - tail.count("]")
     for at, _depth, clean in cands:
         if clean and tail[:at].count("[") - tail[:at].count("]") == whole:
             return tail[:at]
