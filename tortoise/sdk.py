@@ -19079,12 +19079,44 @@ class TortoiseSDK:
         passes Phase 1 and raises in step 3 after earlier items committed. Those
         are examples, not the closed set: #8755 carries it.
         """
+        from .pack_state import _KIND_PROP_SPELLINGS
+
         violations: list[dict] = []
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
                 self._check_item_shape(section, i, item, violations)
                 if section == "points" and isinstance(item, dict):
-                    self._check_kind(item.get("kind"), i, violations)
+                    kind = item.get("kind")
+                    self._check_kind(kind, i, violations)
+                    # #9287 (review cycle 5): the POSITIONAL `kind` is not the
+                    # only spelling a points item can carry. `create_point`'s
+                    # free-form props passthrough also accepts `pointKind` /
+                    # `point_kind` (mined from `pack_state._KIND_PROP_SPELLINGS`,
+                    # never re-spelled here), and the write door REFUSES a
+                    # padded one. Checking only `kind` here left that refusal
+                    # to Phase 2: measured at this head, a bundle item carrying
+                    # `kind: 'statement'` PLUS `pointKind: '\u2003statement\u2003'`
+                    # passed Phase 1 (zero violations), the FIRST item was
+                    # written, and the second raised a bare `ValueError` from
+                    # `create_point` MID-BATCH — a partial write with a
+                    # non-contract error, the exact class this check exists to
+                    # make zero-mutation. Both spellings are read at the item's
+                    # OWN flatten depth (the reviewer of #9591 measured the
+                    # depth, `_item_prop_at_depth`'s contract).
+                    _depth = _item_flatten_depth(item, section)
+                    for _spelling, _kind_prop in (
+                            _KIND_PROP_SPELLINGS.items()):
+                        if _kind_prop != "pointKind":
+                            continue
+                        _declared, _value = _item_prop_at_depth(
+                            item, _spelling, _depth)
+                        if not _declared:
+                            continue
+                        # The same value already reported as `kind` is ONE
+                        # defect with two spellings, not two violations.
+                        if kind is not None and _value == kind:
+                            continue
+                        self._check_kind(_value, i, violations)
         for i, conn in enumerate(bundle.get("connections") or []):
             self._check_item_shape("connections", i, conn, violations)
             self._check_connection(i, conn, violations)
@@ -32934,9 +32966,16 @@ class TortoiseSDK:
         # ``_update_entity``) and it writes caller props with a live
         # ``SET n += $p`` — measured at #9591's head: ``update_entity(p["id"],
         # pointKind='\u2003statement\u2003')`` stored the padded kind and a
-        # ``require_calibration=True`` run stamped the node. Gated here, before
-        # the write, by the SAME predicate as ``update_point``.
-        self._refuse_invisible_point_kinds(props, door="update_entity")
+        # ``require_calibration=True`` run stamped the node. The refusal runs
+        # in the ``Point`` branch of the per-label loop below (#9591 review
+        # cycle 5), NOT here: this method is the documented tenant route onto
+        # EVERY label, and an unconditional refusal here failed an unrelated
+        # write on a label the calibration gate never reads — measured:
+        # ``update_entity(object_id, point_kind='statement\u200b')`` raised
+        # while ``create_object(..., props={'point_kind': padded})`` is allowed
+        # (`_create_entity` carries the sibling exemption for the same reason).
+        # The branch below is reached exactly when the node IS a ``:Point``, so
+        # the gate stays closed on the door that matters and inert elsewhere.
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in
@@ -33253,6 +33292,16 @@ class TortoiseSDK:
         # return through it (the re-key guard is kept general and defensively
         # covers `eventId` should that ban ever be lifted).
         post_write_id = id_val
+        # #9287 (review cycle 5): a `point_kind` spelling that actually carries
+        # an invisible character, on THIS call's props — computed once so the
+        # cost is paid only by an offending write, never by every
+        # `update_entity` (the gate reads the props, the probe below reads the
+        # node).
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        _padded_point_kind = any(
+            _kind_invisible_char(props.get(_spelling)) is not None
+            for _spelling, _kind_prop in _kind_spellings.items()
+            if _kind_prop == "pointKind" and _spelling in props)
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             # #4649: a canonical label's identity is an OR-SET, not one key.
             # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
@@ -33263,6 +33312,19 @@ class TortoiseSDK:
             # and #327 index plan), the secondary only on a miss.
             id_keys = (prop, *secondary_entity_id_props(label))
             if label == "Point":
+                # #9287: this IS the ``:Point`` update door (``commit_schema``
+                # lists the pair ``update_point`` / ``_update_entity``), and it
+                # writes caller props with a live ``SET n += $p``. The refusal
+                # itself is fired in the match loop below, where a hit proves
+                # the node IS a Point: an unconditional refusal here (or at the
+                # top of this method) failed an unrelated write, because this
+                # surface reaches EVERY label — measured:
+                # ``update_entity(object_id, point_kind='statement\u200b')``
+                # raised while ``create_object(..., props={'point_kind':
+                # padded})`` is allowed by ``_create_entity``'s sibling
+                # exemption, and no calibration gate reads a non-Point label's
+                # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
+                # The door that matters stays closed; the others stay inert.
                 # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
                 # discipline on this generic surface too. `_sanitize_props`
                 # deliberately ACCEPTS a caller `embedding` (the recorded
@@ -33325,6 +33387,19 @@ class TortoiseSDK:
                 else:
                     point_props = props
                 for match_prop in id_keys:
+                    if _padded_point_kind:
+                        # The refusal fires BEFORE the write below, and only on
+                        # a hit — a miss writes nothing, so nothing needs
+                        # refusing. `RETURN count(n)` is the same MATCH the
+                        # write uses (same label, same key), so the gate can
+                        # never clear an id the write would reach.
+                        _hits = proj.g.query(
+                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
+                            "RETURN count(n)",
+                            params={"id": id_val}).result_set
+                        if _hits and _hits[0][0]:
+                            self._refuse_invisible_point_kinds(
+                                props, door="update_entity")
                     res = proj.g.query(
                         f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
                         "RETURN count(n)",

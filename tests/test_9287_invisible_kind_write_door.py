@@ -226,6 +226,23 @@ class TestUpdateEntityRefuses:
             "Thing", props={"point_kind": "statement\u200b"})
         assert obj["id"]
 
+    def test_update_entity_on_a_non_POINT_label_stays_inert_like_create(
+            self, sdk):
+        """#9591 review cycle 5 (P2): the update gate is PER-LABEL, not global.
+
+        ``update_entity`` is the tenant route onto EVERY label, so an
+        unconditional refusal reopened the create-side asymmetry from the other
+        end: ``update_entity(object_id, point_kind=padded)`` raised while
+        ``create_object(..., props={'point_kind': padded})`` is allowed and no
+        calibration gate ever reads a non-Point label's ``pointKind``
+        (``_CALIBRATION_GATED_LABELS == ("Point",)``). The refusal now lives in
+        the ``Point`` branch of the per-label loop, so this must be INERT here
+        and still CLOSED on a real ``:Point`` (the test above).
+        """
+        obj = sdk.create_object("Thing", props={"point_kind": "statement\u200b"})
+        sdk.update_entity(obj["id"], point_kind="statement\u200b")
+        assert obj["id"]
+
 
 class TestTheJournalSeamRefuses:
     """#9591 review P1: ``EventAPI`` persists ``pointKind`` verbatim.
@@ -484,6 +501,35 @@ class TestTheClassIsClosed:
         violations = sdk._validate_bundle(bundle)
         assert any("pointKind must be an identifier" in v["message"]
                    for v in violations), violations
+        with pytest.raises(BundleValidationError):
+            sdk.ingest(bundle)
+        landed = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN n.content").result_set
+        assert landed == [], landed  # zero mutations, not a half-written graph
+
+    @pytest.mark.parametrize("spelling", ["pointKind", "point_kind"])
+    def test_ingest_reports_the_PROPS_spelling_as_a_PHASE_1_violation(
+            self, sdk, spelling):
+        """#9591 review cycle 5 (P1): the PROPS spelling is a Phase-1 class too.
+
+        ``create_point``'s props passthrough accepts ``pointKind``/``point_kind``
+        and refuses a padded one — but Phase 1 checked only the positional
+        ``kind``, so a bundle item carrying a clean ``kind`` plus a padded prop
+        passed validation, wrote the FIRST item, and then raised a bare
+        ``ValueError`` from ``create_point`` mid-batch (measured at this head:
+        item 1 committed, item 2 refused). Phase 1 now reads both spellings at
+        the item's own flatten depth, so the refusal is a collected violation
+        with zero mutations.
+        """
+        from tortoise.exceptions import BundleValidationError
+        bundle = {"points": [
+            {"kind": "statement", "content": "clean first item"},
+            {"kind": "statement", "content": "padded props item",
+             spelling: f"\u2003statement\u2003"},
+        ]}
+        violations = sdk._validate_bundle(bundle)
+        assert any("pointKind must be an identifier" in v["message"]
+                   and v["index"] == 1 for v in violations), violations
         with pytest.raises(BundleValidationError):
             sdk.ingest(bundle)
         landed = sdk._get_proj().g.query(
