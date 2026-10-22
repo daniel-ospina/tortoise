@@ -2878,12 +2878,32 @@ def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
 
 
 def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
-    """B1 (#5026): the REPLAY resolver must carry the LIVE path's
-    `documentKind IS NOT NULL` guard. Without it a producer-created
-    aboutDocument edge (reachable through the public `sdk.create_edge`) to a
-    provenance Source is re-attached to that non-document Source on rebuild —
-    live and replay disagree. A genuine document Source at the same shape
-    still resolves."""
+    """B1 (#5026): the REPLAY resolver applies the `aboutDocument` target
+    contract — the target is a `:Source` carrying `documentKind` and
+    addressable by `url` (ONTOLOGY §4.4). A provenance Source at that shape is
+    refused; a genuine document Source resolves.
+
+    ⚠️ Scoped on purpose. It is the same contract the two live paths that CARRY
+    one apply — the `documentKind IS NOT NULL` auto-detect, and `create_edge`
+    (which raises for a non-document `:Source`, #5206) — and it is STRICTER than
+    the live writers that carry none: `create_about_edge`, reached from
+    `create_event(aboutDocument=…)` via `_wire_about_value`, and
+    `session_link.link_entity`, which validates only the ONTOLOGY §3.2
+    `(edge_type, source_label, target_label)` triple and never inspects the
+    target's kind. "Live and replay apply the SAME contract" is the #5206
+    over-claim: a reader who takes it as parity concluded may relax this
+    replay guard, which is the only replay DESCRIPTOR path that applies the
+    kind test — the auto-detect's own kind test also runs at replay, on the
+    fold paths (`_upsert_document` / `_upsert_point_edges` →
+    `_create_about_edges` → `_resolve_about_edge_target`) for every
+    document/point `about_entities` (pinned by the sibling
+    `test_5026_b1_live_aboutdocument_ignores_non_document_source` above, which
+    drives it through `proj.apply`), `create_edge` is live-only, and a supersede
+    descriptor carries no kind of its own — delete this predicate and
+    `test_pointsuperseded_rebuild.py::
+    test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source`
+    reds. Closing the two unguarded writers is #9679.
+    """
     from tortoise.projection.edges import resolve_structural_target
 
     proj = live_proj
