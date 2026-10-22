@@ -886,6 +886,31 @@ def is_memory_ceiling_refusal(exc: BaseException) -> bool:
     return False
 
 
+#: #2981's ownership constraint for a memory-ceiling refusal, as ONE authority.
+#:
+#: `tortoise/projection/__init__.py::_write_refusal_message` states this policy
+#: for the SAME refusal, and two messages for one refusal must not drift into
+#: opposite advice (#9532 review P2). The sentence therefore lives HERE — a
+#: stdlib-only leaf that the projection already reaches through
+#: `tortoise.cypher_guard` — and the projection composes its operator message
+#: from this constant instead of carrying a second prose copy, so a change is
+#: made once and both readers move together. It is deliberately plain text with
+#: no code-span backticks: the projection's message is plain, and a
+#: byte-identical string is what makes the binding real rather than a
+#: normalisation that silently tolerates a rewrite.
+#:
+#: The constraint is a PROHIBITION, not a remedy: `GRAPH.DELETE` cannot be
+#: undone, a name the caller cannot attribute is not theirs to delete, the
+#: production graph and its snapshots are out of scope, and `FLUSHALL` is never
+#: an option. See #2981.
+MEMORY_CEILING_OWNERSHIP_CONSTRAINT = (
+    "Do NOT hand-pick names from GRAPH.LIST to free memory instead: "
+    "GRAPH.DELETE cannot be undone, and a name you cannot attribute is not "
+    "yours to delete. Never delete the production graph tortoise or a "
+    "tortoise_restored* snapshot, and do NOT FLUSHALL."
+)
+
+
 def explain_memory_ceiling(exc: BaseException) -> str | None:
     """Return *exc*'s message with a memory-ceiling diagnosis appended (#7357).
 
@@ -933,7 +958,10 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
       two messages for one refusal must not advise opposite actions — a name
       you cannot attribute is not yours to delete, ``GRAPH.DELETE`` cannot be
       undone, and the production graph and its snapshots are out of scope. The
-      note carries that constraint verbatim rather than paraphrasing it, and
+      note carries that constraint VERBATIM by composing
+      :data:`MEMORY_CEILING_OWNERSHIP_CONSTRAINT`, the one constant the
+      projection's own message is built from too (#9532 review P2: a second
+      prose copy in a second module is exactly the drift #2981 forbids), and
       names #2981 so the next reader finds the policy instead of re-deciding it.
 
     It deliberately does NOT say "your data is at risk" or "raise `--memory`":
@@ -959,13 +987,15 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
         "applied: the refused command was rejected BEFORE it ran (measured on a "
         "write: a refused GRAPH.QUERY `CREATE` left the graph at 0 nodes). "
         "Re-issuing it now will be refused the same way — the next action is to "
-        "raise the ceiling (`--maxmemory`; a container this repo starts derives "
-        "it from `FALKORDB_CONTAINER_MEMORY`, whose kernel cap is only the "
-        "backstop), then re-issue. Do NOT hand-pick names from GRAPH.LIST to "
-        "free memory instead: GRAPH.DELETE cannot be undone, and a name you "
-        "cannot attribute is not yours to delete. Never delete the production "
-        "graph `tortoise` or a `tortoise_restored*` snapshot, and do NOT "
-        "FLUSHALL. See #2981."
+        "raise the DB's own ceiling, the `--maxmemory` in that instance's "
+        "`REDIS_ARGS` (it bounds the DATASET), then re-issue. ONLY a "
+        "`tools/test_lane.py` container derives that ceiling from "
+        "`FALKORDB_CONTAINER_MEMORY` (3/4 of it); the others set it themselves — "
+        "the dev container pins 512mb and the CI provisioner passes none — so "
+        "raising `FALKORDB_CONTAINER_MEMORY` alone moves the kernel cap and NOT "
+        "this refusal. The kernel cap is the backstop, never the ceiling. "
+        + MEMORY_CEILING_OWNERSHIP_CONSTRAINT
+        + " See #2981."
     )
     return text + _LEGIBLE_OPENER + explains
 

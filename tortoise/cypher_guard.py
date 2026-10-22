@@ -1819,11 +1819,21 @@ def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
     with the applier's — the exact swap this function exists to prevent.
 
     TWO families reach here, and they are mutually exclusive (#7357): the
-    instance going AWAY (:func:`explain_instance_unavailable` — a transport
-    failure, no reply at all) and the instance REFUSING at its dataset ceiling
-    (:func:`explain_memory_ceiling` — an answered ``OutOfMemoryError``). Only
-    the second is an answer, so the second call is a fallback: one message can
-    never carry both suffixes.
+    instance going AWAY (:func:`explain_instance_unavailable`) and the instance
+    REFUSING at its dataset ceiling (:func:`explain_memory_ceiling` — an
+    answered ``OutOfMemoryError``). Only the second is an answer FROM THIS
+    FAMILY, so the second call is a fallback: one message can never carry both
+    suffixes.
+
+    ⚠️ The exclusivity does NOT rest on "the outage arm only explains the
+    absence of a reply" — that would be false: the outage arm also owns the
+    ANSWERED ``BusyLoadingError`` (``LOADING``), which is an answer of a
+    different kind (#9352 review P2). The real discriminator is the CLASS:
+    :func:`_answered_refusal` in ``tortoise/retry.py`` excludes every
+    ``ResponseError`` from the outage family, ``OutOfMemoryError`` IS a
+    ``ResponseError``, and ``LOADING`` is not an ``OutOfMemoryError``. So the
+    two sets are provably disjoint — but read that predicate before adding the
+    next answered arm here, rather than re-deriving it from the sentence above.
     """
     try:
         if len(getattr(exc, "args", ())) != 1 or not isinstance(exc.args[0], str):
@@ -1835,9 +1845,11 @@ def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
             # Redis-side `--maxmemory` BELOW its cgroup cap, so an overshoot is
             # now an ANSWERED `OutOfMemoryError` instead of a SIGKILL — a shape
             # this seam must explain too, or the issue's defect has merely
-            # moved. Fallback, never a second suffix: the families are mutually
-            # exclusive, because the call above only ever explains the ABSENCE
-            # of a reply.
+            # moved. Fallback, never a second suffix: the families are
+            # disjoint by CLASS (`_answered_refusal` rejects every
+            # `ResponseError`, and `OutOfMemoryError` is one), not because the
+            # arm above "only explains the absence of a reply" — it also owns
+            # the ANSWERED `BusyLoadingError`.
             explained = explain_memory_ceiling(exc)
         if explained is not None:
             exc.args = (explained,)

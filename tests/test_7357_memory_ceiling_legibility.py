@@ -41,6 +41,7 @@ from tortoise.retry import (  # noqa: E402
     _LEGIBLE_OPENER,
     explain_instance_unavailable,
     explain_memory_ceiling,
+    graph_abort_family,
     is_instance_unavailable,
     is_memory_ceiling_refusal,
     retryable_aborted_write,
@@ -51,6 +52,9 @@ from tortoise.sdk import _classify_db_failure  # noqa: E402
 #: The engine's own sentence, verbatim, as the vendor parser hands it over.
 CEILING_SENTENCE = "command not allowed when used memory > 'maxmemory'."
 WRITE_STATEMENT = "CREATE (n:Point {id:$id}) RETURN n.id"
+#: A READ statement, still sent on the denyoom ``GRAPH.QUERY`` verb (measured
+#: refused at the ceiling — see ``DENYOOM_VERBS``).
+READ_STATEMENT = "MATCH (n) RETURN count(n)"
 
 
 def _ceiling_error() -> BaseException:
@@ -142,14 +146,33 @@ def test_the_note_names_the_mechanism_and_refuses_the_data_loss_reading():
 
 
 def test_the_note_does_not_invite_a_retry_and_names_the_real_remedy():
-    """A deterministic refusal is NOT a transient: the next action is memory."""
+    """A deterministic refusal is NOT a transient: the next action is memory.
+
+    P1 (#9532 review): the FIRST version of this note named
+    ``FALKORDB_CONTAINER_MEMORY`` as if it were the ceiling's lever on every
+    container this repo starts. It is not — only ``tools/test_lane.py`` derives
+    ``--maxmemory`` from it (3/4 of the cap), while ``graph-scripts/setup.py``
+    pins ``--maxmemory 512mb`` (so raising the env var moves only the kernel
+    cap) and the CI provisioner passes no ``--maxmemory`` at all. A remedy that
+    cannot work is the exact defect class #7357 is about, so this pins the
+    NARROWED wording: the Redis-side knob is the ceiling, the env var is one
+    container's derivation of it, and the kernel cap is only the backstop.
+
+    NON-VACUOUS: the P1 wording said "a container this repo starts derives it
+    from `FALKORDB_CONTAINER_MEMORY`", so the "ONLY a ... container" assertion
+    fails on it.
+    """
     text = (explain_memory_ceiling(_ceiling_error()) or "").lower()
     assert "re-issuing it now will be refused the same way" in text
-    assert "raise the ceiling" in text
+    assert "raise the db's own ceiling" in text
+    # The Redis-side knob is the lever, and it is named as such.
+    assert "`--maxmemory` in that instance's `redis_args`" in text
     # The kernel cap is the BACKSTOP; raising it does not move the refusal, so
     # the note must not send the reader to the wrong knob alone.
+    assert "only a `tools/test_lane.py` container derives that ceiling" in text
     assert "falkordb_container_memory" in text
     assert "backstop" in text
+    assert "never the ceiling" in text
     # It must never be told "retrying is safe" the way the READ arm of the
     # transport note is (#9352): that arm's licence does not extend here.
     assert "re-issuing this statement is safe" not in text
@@ -173,17 +196,59 @@ def test_the_note_never_names_deleting_graphs_as_the_remedy():
     assert "delete graphs this instance no longer needs" not in text, (
         "the note must not offer graph deletion as the remedy: it is emitted "
         "on shared and production instances too (see #2981)")
-    # Deletion may only appear as a PROHIBITION, and it must carry #2981's
-    # constraint verbatim rather than loosening it into a paraphrase.
+    # Deletion may only appear as a PROHIBITION, and it must be composed from
+    # #2981's ONE authority rather than loosened into a paraphrase.
     assert "do not hand-pick names from graph.list to free memory" in text
     assert "graph.delete cannot be undone" in text
     assert "not yours to delete" in text
-    assert "never delete the production graph `tortoise`" in text
+    assert "never delete the production graph tortoise" in text
     assert "tortoise_restored*" in text
     assert "do not flushall" in text
     assert "#2981" in text, (
         "the note must point at the policy it is conforming to, or the next "
         "lane re-decides it")
+
+
+def test_the_ownership_constraint_has_exactly_one_authority():
+    """P2 (#9532 review): the #2981 constraint must not exist as TWO copies.
+
+    The note is emitted on EVERY instance the SDK builds a client for, and
+    ``_write_refusal_message`` emits its operator form for the same refusal, so
+    two independent prose copies are free to drift into opposite advice — the
+    hazard #2981 records. The constraint therefore lives once, in
+    :data:`MEMORY_CEILING_OWNERSHIP_CONSTRAINT`, and BOTH messages compose it.
+
+    This pins the property structurally rather than by agreeing literals:
+    (1) the SDK note contains the constant verbatim; (2) no SECOND Python
+    module in ``tortoise/`` contains the sentence as prose (so a future lane
+    cannot re-introduce a copy); (3) the projection's message composes the
+    constant instead of spelling it out.
+    """
+    from pathlib import Path
+
+    import tortoise
+    from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT
+
+    assert MEMORY_CEILING_OWNERSHIP_CONSTRAINT in (explain_memory_ceiling(_ceiling_error()) or "")
+
+    # The sentence's own opening is unique enough to detect a second copy. The
+    # scan is scoped to the shipped package (``tortoise/``), so this file's own
+    # literal cannot match itself.
+    opening = "Do NOT hand-pick names from GRAPH.LIST to free memory"
+    root = Path(tortoise.__file__).resolve().parent
+    holders = sorted(
+        str(p.relative_to(root)) for p in root.rglob("*.py")
+        if opening in p.read_text(encoding="utf-8")
+    )
+    assert holders == ["retry.py"], (
+        "the #2981 ownership constraint must have ONE authority — retry.py's "
+        f"MEMORY_CEILING_OWNERSHIP_CONSTRAINT — not a second prose copy: {holders}")
+
+    # …and the projection BUILDS its operator message from it.
+    projection_src = (root / "projection" / "__init__.py").read_text(encoding="utf-8")
+    assert "MEMORY_CEILING_OWNERSHIP_CONSTRAINT" in projection_src, (
+        "_write_refusal_message must compose the shared constant, or the two "
+        "messages for one refusal can drift (#2981)")
 
 
 def test_the_denyoom_claim_is_scoped_to_the_verb_that_was_measured():
@@ -225,13 +290,46 @@ def test_a_ceiling_refusal_is_never_a_retryable_write():
     Both the transient predicate and the write-arm classifier are checked,
     because either answering True would re-issue a statement the engine has just
     refused, and the note above would then be contradicting the code.
+
+    P2 (#9532 review): the ANNOTATED exception is what a caller actually holds
+    (the guard appends the note in place), and the note's own text names the
+    graph-abort family's literal — "graph was deleted or replaced" — which is
+    exactly what ``_GRAPH_ABORT_RE`` matches. So the guarantee that a refusal
+    stays non-retryable rests on the ``\\A`` anchor holding against the note we
+    ourselves wrote, not on the raw driver sentence. This pins BOTH: raw and
+    annotated, including ``graph_abort_family``, so a future note rewrite that
+    moves the literal off position 0 reddens here instead of re-arming the
+    write-retry loop on a statement that provably did not run.
     """
     exc = _ceiling_error()
     assert retryable_transient(exc) is False
     assert retryable_aborted_write(exc, graph_exists=lambda: True) is False
 
+    annotated = _ceiling_error()
+    annotated.args = (explain_memory_ceiling(annotated),)
+    assert _LEGIBLE_OPENER in str(annotated), "the fixture must be annotated"
+    assert retryable_transient(annotated) is False, (
+        "the note itself must not talk the refusal into the transient family")
+    assert retryable_aborted_write(annotated, graph_exists=lambda: True) is False, (
+        "the note quotes the graph-abort literal — the anchor must keep it out "
+        "of the aborted-write arm")
+    assert graph_abort_family(annotated) is False
+
 
 # ── the wiring, through a real guarded client ───────────────────────────────
+#: The verbs the pinned engine actually refuses at the ceiling, MEASURED
+#: 2026-10-21 on `falkordb/falkordb-server:v4.20.6` (`maxmemory 5mb` <
+#: `used_memory` 10.9 MB, `noeviction`): `GRAPH.QUERY` (a WRITE **or a READ**
+#: statement), `GRAPH.EXPLAIN` and `SET` answer
+#: `OutOfMemoryError: command not allowed when used memory > 'maxmemory'.`
+#: `GRAPH.RO_QUERY`, `GRAPH.LIST`, `PING` and `DEL` were NOT refused — they are
+#: not `denyoom` verbs, so a read served through them still succeeds at the
+#: ceiling. The fixture refuses exactly the measured set (#9532 review P2: it
+#: used to raise for `GRAPH.RO_QUERY` too, pinning a shape the engine never
+#: produces and hiding the read path that actually matters).
+DENYOOM_VERBS = {"GRAPH.QUERY", "GRAPH.EXPLAIN", "SET"}
+
+
 class _CeilingConnection:
     """Vendor-shaped connection (redis-py): the public verb IS the dispatcher.
 
@@ -248,6 +346,12 @@ class _CeilingConnection:
 
     def _execute_command(self, *args, **kwargs):
         self.commands.append(args)
+        verb = str(args[0]).upper() if args else ""
+        if verb not in DENYOOM_VERBS:
+            # Faithful to the measurement: a non-denyoom verb is SERVED, so the
+            # refusal cannot be raised for it. Silently raising here is what
+            # made the earlier read test vacuous.
+            return [[0]]
         # A FRESH instance per command, as a real driver does: the note mutates
         # the exception in place, so a shared instance would carry it forward.
         raise type(self.error)(*self.error.args)
@@ -320,13 +424,37 @@ def test_a_guarded_read_gets_the_same_note_and_no_write_ambiguity():
     statement because the REPLY was lost. Here the reply arrived, so the outcome
     is known for both shapes — and claiming ambiguity would send the caller to
     read back a statement that provably did not run.
+
+    P2 (#9532 review): this drives a READ STATEMENT through ``graph.query`` —
+    the ``GRAPH.QUERY`` verb, which IS ``denyoom`` and is measured refused — and
+    not ``ro_query``, which the engine serves at the ceiling. The earlier
+    version asserted the note on a shape production never produces.
     """
     _client, graph = _guarded()
     with pytest.raises(redis_exc.OutOfMemoryError) as caught:
-        graph.ro_query("MATCH (n) RETURN count(n)")
+        graph.query(READ_STATEMENT)
     message = str(caught.value)
     assert "memory-ceiling" in message.lower()
     assert "OUTCOME IS UNKNOWN" not in message
+    assert message.startswith(CEILING_SENTENCE), (
+        "a read statement on the denyoom verb is refused the same way, so the "
+        "driver sentence must still be at position 0")
+
+
+def test_a_verb_the_engine_still_serves_is_never_annotated():
+    """The boundary the note must not cross (#9532 review P2).
+
+    ``GRAPH.RO_QUERY`` is not ``denyoom``: the pinned engine serves it at the
+    ceiling. Annotating it would invent a refusal that did not happen — the
+    same defect class as the illegible message this PR fixes, pointing the
+    other way. This pins that the note is the answer to a REAL refusal, and
+    keeps the fixture honest about which verbs produce one.
+    """
+    _client, graph = _guarded()
+    assert graph.ro_query(READ_STATEMENT) == [[0]], (
+        "the fixture must serve a non-denyoom verb, not raise for it")
+    served = graph.client.connection.commands[-1]
+    assert served[0] == "GRAPH.RO_QUERY"
 
 
 def test_the_client_command_channel_carries_the_note_too():

@@ -51,6 +51,7 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
+from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT  # #9532: ONE ownership authority
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
@@ -10447,12 +10448,15 @@ class FalkorProjection(
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
             "corruption — do NOT rebuild. Remedy: raise / relieve the "
-            "container's --maxmemory. Do NOT hand-pick names from "
-            "GRAPH.LIST to free memory instead: GRAPH.DELETE cannot be "
-            "undone, and a name you cannot attribute is not yours to delete. "
-            "Never delete the "
-            "production graph tortoise or a tortoise_restored* snapshot, and "
-            "do NOT FLUSHALL. See #2981 for the shared-lane form of this."
+            "container's --maxmemory. "
+            # #9532 review P2: composed from the ONE authority in
+            # `tortoise/retry.py` rather than restated here. The SDK's
+            # ceiling note (`explain_memory_ceiling`) is emitted for the same
+            # refusal on shared and production instances, so a second prose
+            # copy would let the two messages advise opposite actions — the
+            # drift #2981 rules out. Editing the constant moves both.
+            + MEMORY_CEILING_OWNERSHIP_CONSTRAINT
+            + " See #2981 for the shared-lane form of this."
         )
 
     def _backend_failure_message(
