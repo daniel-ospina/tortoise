@@ -6431,8 +6431,8 @@ durations:
   test_6211_ep_scale.py: 19.0
   # #6211 (hop anchoring): locally measured on this host, whole file, 8 tests /
   # 5.6-9.0 s (6 readings; the spread is fleet load. It builds an 8k-edge
-  # fixture and profiles one hop; the 8th test,
-  # #9304's journal-read plan pin, builds its own 5-node fixture). The count is
+  # fixture and profiles one hop; the test #9304 ADDED — the journal-read plan
+  # pin, 6th in the file — builds its own 7-node fixture). The count is
   # re-derived at every revision, never carried forward — an earlier revision of
   # this row read "5 tests" for a file that already defined six, and
   # `tests/test_6211_ep_anchor.py::test_the_records_that_state_this_files_size_are_true`

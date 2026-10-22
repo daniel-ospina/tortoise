@@ -304,13 +304,15 @@ operand, and the shipped form here was a LABEL-FREE disjunction
 n.id IN $ids`) with no label for any per-`(label, property)` index to anchor on:
 measured `All Node Scan | (n)` on the 23k-node / 160k-edge fixture, i.e. the id
 predicate applied per record over the whole node set, so its cost tracked the
-GRAPH. #9304 replaced it with the same `UNWIND $ids AS cid` + label-and-id
-pattern the pre-write immediately above it uses (measured
-`Node By Index Scan | (n:{label})`) and moved #7853's "a `:Point:Object` node must
-be journaled exactly ONCE" off the label-free form and onto a **node-keyed
-dedupe** of the swept rows, which is what a per-label sweep needs to satisfy it.
-So the census has no carve-out left: **every one of these statements is
-index-anchored.**
+GRAPH. #9304 replaced it with the same `UNWIND` + label-and-id shape the
+pre-write immediately above it uses (that one binds `$params AS p`, this one
+`$ids AS cid`; both are measured `Node By Index Scan | (n:{label})`) and moved
+#7853's "a `:Point:Object` node must be journaled exactly ONCE" off the
+label-free form and onto a **node-keyed dedupe** of the swept rows — keyed on
+`id(n)`, not on the `id` value, per `live.EPISTEMIC_ID_KEYS`' rule that a dedupe
+key is never the coalesced value (#8879) — which is what a per-label sweep needs
+to satisfy it. So the census has no carve-out left: **every one of these
+statements is index-anchored.**
 
 Three of the operator selector's OWN id-set statements in `analyze.py` are NOT
 counted here, because this census is `ep.py`'s: the operator selector's
@@ -332,12 +334,18 @@ Index Scan`, and no `Node By Label Scan`; the selector test additionally rejects
 `All Node Scan`), never their text; each is reached by the fixture
 (`_load_cache`'s sweeps and Batch 2 directly, `seed_operators` through an
 operator seed — the 300 operators hanging off the hub claim). The journal sweep
-is reached by its own `run()` capture on a 5-node fixture (a wired `emit` stub
-plus evidence priors, the baseline'd and double-labelled ids it has to get
-right), because the pass's shared capture never calls `run()`. On this file's own
+is reached by its own `run()` capture on a 7-node fixture (a wired `emit` stub
+plus evidence priors, and the shapes it has to get right: a baseline'd id, a
+`:Point:Object` id, an id under `:Event` alone — which makes a sweep narrowed to
+a single label observable rather than green — and a second `:Event` node
+sharing one of those ids, the #8879 value-collision shape and the only way a
+dedupe keyed on the `id` value can be told from one keyed on `id(n)`), because
+the pass's shared capture never calls `run()`. On this file's own
 fixture (`_build`: ~8.6k nodes, ~8k edges — NOT the 23k/160k PROFILE fixture
-above) that assertion covers the pass's **49 distinct** id-set
-statements (95 emissions) and the operator selector's **12 distinct** (37
+above) that shared capture covers the pass's **49 distinct** id-set
+statements (95 emissions) — the journal sweep's 4 are the separate capture
+just described, so the pass totals 53 / 99 — and the operator selector's
+**12 distinct** (37
 emissions across the two seeds the assertion uses — all seven of the selector's
 id-set legs: four barriered, three not) — zero unanchored in either.
 Against the pre-#9282 tree (`8c3823b92^`) the file's six behavioural tests run `4

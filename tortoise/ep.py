@@ -2355,28 +2355,32 @@ class TortoiseEP:
                 # #7853 is PRESERVED by the dedupe, not by the label-free
                 # form: a multi-labelled node (`:Point:Object`, the shape
                 # `update_point`'s promote arm mints) is matched once per
-                # label, so the emitted ids are node-keyed through `seen` and
-                # it is still journaled exactly ONCE. The sweep is the same
-                # shape as the write above (`UNWIND` + label+id pattern), and
-                # `$ids` is the same binding, so it stays inside
+                # label, so the rows are deduped on `id(n)` — the INTERNAL node
+                # id, per `live.EPISTEMIC_ID_KEYS`' rule that a DEDUPE key is
+                # `id(n)` and never the coalesced `id` value (a value-collision
+                # dedupe already dropped a distinct Event row, #8879) — and it
+                # is still journaled exactly ONCE. The sweep is the same
+                # `UNWIND` + label-and-id shape as the write above (that one
+                # binds `$params AS p`, this one `$ids AS cid`), and `$ids` is
+                # the same binding, so it stays inside
                 # `test_6211_ep_anchor.py`'s capture filter.
-                seen: dict[str, None] = {}
+                seen: dict[object, str] = {}
                 for _q in epistemic_label_queries(
                     "UNWIND $ids AS cid "
                     "MATCH (n:{label} {id: cid}) "
                     "WHERE coalesce(n.baseline_set, false) = false "
-                    "RETURN n.id"
+                    "RETURN id(n), n.id"
                 ):
-                    for row in self._hop_query(
+                    for _node_id, _claim_id in self._hop_query(
                         _q, {"ids": list(run_evidence)}, hop=None,
                         phase="evidence_prewrite",
                         frontier_size=len(run_evidence),
                     ):
-                        seen[row[0]] = None
+                        seen[_node_id] = _claim_id
                 # Sorted, so the journal order is a property of the id set
                 # rather than of the engine's row order (every record here is
                 # the same posterior clear, so only determinism is at stake).
-                for _cid in sorted(seen, key=str):
+                for _cid in sorted(seen.values(), key=str):
                     self._emit("ConfidenceChanged", id=_cid,
                                posterior_alpha=None, posterior_beta=None)
 
