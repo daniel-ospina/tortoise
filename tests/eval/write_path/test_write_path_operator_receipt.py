@@ -901,7 +901,7 @@ def test_checker_names_a_non_string_duplicate_edge_id(bad_id):
     result = _check(receipt)
     assert "E4-NUMERATOR" in _failures(result)
     # …exactly ONCE. This entry also breaks the coverage arm's view of the
-    # duplicate, so without the `:563` suppression site the receipt is told
+    # duplicate, so without the `:570` suppression site the receipt is told
     # both "id 5 is not a string" AND "covers 0 of the 2 graded rows" — the
     # second misdescribing a shape error as an omission (#9674 round 10).
     numerator = [r for r in result["rules"]
@@ -991,9 +991,10 @@ def _malformed(mutate):
      lambda r: r["operator_audit"].__setitem__("results", 5), "E4-SHAPE"),
     # `results` EMPTY, not merely the wrong type: with no graded rows the
     # coverage arms are skipped by their own `and results` gates, so this
-    # refusal is the only one that fires — and the `or not results` half is
-    # what makes it (`{}` is a dict, so the isinstance half alone passes)
-    # (#9618 round 8).
+    # refusal is not joined by a "covers 0 of the N graded rows" coverage
+    # refusal (other rules DO fire on this row — `E4-DENOM` among them) — and
+    # the `or not results` half is what makes the refusal
+    # (`{}` is a dict, so the isinstance half alone passes) (#9618 round 8).
     ("results empty",
      lambda r: (r["operator_audit"].__setitem__("results", {}),
                 r["operator_audit"].__setitem__("edge_correct", 0),
