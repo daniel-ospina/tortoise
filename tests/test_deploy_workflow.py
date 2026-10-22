@@ -2374,14 +2374,14 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "deployment counts nothing at all, so a bar written only as 'no growth' "
         "is vacuously green on the silent-inert deployment this exists to detect"
     )
-    assert re.search(r"So after a capture, require at least one\s+reading \*\*before\*\* you interpret anything:", section), (
+    assert re.search(r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:", section), (
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
-    # The presence LIST must be the four qualifying readings, in one clause — not
+    # The presence LIST must be the five qualifying readings, in one clause — not
     # merely a lead-in that some other, always-true reading could be appended to.
     presence = re.search(
-        r"So after a capture, require at least one\s+reading \*\*before\*\* you interpret anything:(.*?)\.\s",
+        r"After the capture, require\s+at least one reading \*\*before\*\* you interpret anything:(.*?)\.\s",
         section,
         re.S,
     )
@@ -2392,30 +2392,52 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             f"the presence list omits {reading!r} — an armed deployment whose only "
             "signal is that reading is then indistinguishable from an inert one"
         )
-    # ... and it must stay CLOSED. A liveness probe is true on a healthy app in
-    # every state, so admitting one to this list makes presence trivially
-    # satisfiable and re-opens the silent-inert pass the section exists to close.
-    assert "healthz" not in presence.group(1), (
-        "the presence list admits a `/healthz` probe — that answers on an app "
-        "whose record seam is completely inert, so presence becomes trivially "
-        "satisfiable and the bar greens the state it exists to catch"
+    # ... and it must stay CLOSED. A liveness/health probe answers on an app whose
+    # record seam is completely inert (`/health` is the section's own example of a
+    # route that "does not carry the counter"), so admitting ANY route to this list
+    # makes presence trivially satisfiable and re-opens the silent-inert pass the
+    # section exists to close. Pin the PROPERTY (no route/probe reading), not one
+    # example token.
+    assert not re.search(r"/health|GET /|probe", presence.group(1)), (
+        "the presence list admits a health/liveness probe — that answers on an "
+        "app whose record seam is completely inert, so presence becomes "
+        "trivially satisfiable and the bar greens the state it exists to catch"
+    )
+    # The BEFORE-and-after baseline: "growth" has no referent without it.
+    assert re.search(r"read both counters BEFORE the\s+capture and again after", section), (
+        "the bar says 'growth' but never tells the operator to take a reading "
+        "BEFORE the capture — an absolute count left from earlier in the "
+        "process's life then reads as this capture's growth"
     )
     assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", section), (
         "the bar has no arm for an empty reading — an operator landing there is "
         "told nothing, and that state is the whole point of the section"
     )
-    # ... and item 2 must survive too. Item 1's presence is satisfied by GROWTH in
-    # any reason, so with item 2 gone a `circuit_open` / `no_tenant` reading — the
-    # "set but unreachable" state this section exists to catch — would be a PASS.
-    assert re.search(r"no growth in a reason other than", section), (
-        "the bar drops item 2's 'no growth in a reason other than' rule, so a "
-        "`circuit_open` / `no_tenant` reading passes on the @9264 baseline alone"
+    # ... and item 2 must survive, anchored on its imperative the same way the
+    # presence lead-in is. A phrase-only pin accepted "*Then*, if convenient:" and
+    # "*Then*: you need not care about …" (both GREEN), i.e. the half the bar
+    # depends on could be voided without a red.
+    assert re.search(r"\*Then\*:\s*\*\*no growth in a reason other than", section), (
+        "the bar drops or softens item 2 — with it gone, a `circuit_open` / "
+        "`no_tenant` reading passes on the #9264 baseline alone, which is the "
+        "state this section exists to catch"
     )
     assert re.search(
         r"none at all for `no_tenant` /\s+`malformed_dsn` / `circuit_open`", section
     ), (
         "the bar no longer says the three always-fail reasons are a fail-and-fix, "
         "so the state this section exists to catch reads as a pass"
+    )
+    # The #9264 `write_failed` exemption bound: without it the documented
+    # R1-without-R2 state (writes nothing, counts only `write_failed`) satisfies
+    # item 1's *any reason* clause AND the exemption — green with zero rows.
+    assert re.search(r"a\s+deployment that writes no row at all is not passing this bar", section), (
+        "the `write_failed` exemption is unbounded — the R1-without-R2 deployment "
+        "writes no row, grows only `write_failed`, and then passes both halves"
+    )
+    assert re.search(r"a new `journal_event` / `point` row must still appear", section), (
+        "the bar never requires a row to exist, only that no unexpected reason "
+        "grew — a deployment writing nothing satisfies that"
     )
     # The reasons must NOT be given a common basis: a later review found the
     # section asserting "each is counted only after the DSN resolved, so any of

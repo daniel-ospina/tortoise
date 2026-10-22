@@ -2701,8 +2701,11 @@ So the bar has **two parts, and BOTH are required**:
 1. **Something must have APPEARED.** ⛔ **An all-empty reading is NOT a pass.**
    When the seam is unarmed, `write_live_record` returns *before counting
    anything* — nothing on either counter, nothing in the WARN log — which is
-   **byte-identical** to a healthy zero. So after a capture, require at least one
-   reading **before** you interpret anything: any reason on
+   **byte-identical** to a healthy zero. So **read both counters BEFORE the
+   capture and again after**: presence and growth are the *difference* between
+   the two reads, never an absolute count (a `write_failed` left from earlier in
+   the process's life is not this capture's reading). After the capture, require
+   at least one reading **before** you interpret anything: any reason on
    `record_write_failures`, any reason on `record_non_journal_skips`,
    `record_position_unproven` above zero, or a new `journal_event` / `point` row
    on the record project. The bullets above say what the two expected reasons
@@ -2715,7 +2718,13 @@ So the bar has **two parts, and BOTH are required**:
    and read again before drawing a conclusion.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
-   `malformed_dsn` / `circuit_open`.** Those three are always a fail-and-fix:
+   `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
+   BOUNDED**: it covers only the #9264 `DatatypeMismatch` refusals that recipe 1
+   actually shows, and a new `journal_event` / `point` row must still appear.
+   The R1-without-R2 state writes nothing and counts only `write_failed`, so it
+   satisfies item 1's *any reason* clause and the exemption above — **a
+   deployment that writes no row at all is not passing this bar, whatever the
+   reason breakdown says.** Those three are always a fail-and-fix:
 `no_tenant` = the request carried no tenant, **or** a tenant that was not a full
 org/graph pair, `malformed_dsn` = the value does **not start with**
 `postgresql://` / `postgres://` (`record_dsn()` does no parsing beyond that
