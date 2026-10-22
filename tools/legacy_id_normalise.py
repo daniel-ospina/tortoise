@@ -19,6 +19,11 @@ pass is planned against (``legacy``, not the carried ~9,700).
     python tools/legacy_id_normalise.py --dump normalised.json \\
         --revert --report plan.json --out restored.json
 
+⚠️ In ``--revert`` mode ``--report`` is the INPUT (the plan being undone), so it is
+**never rewritten**: the revert's own report goes to stdout, and ``--out`` is the
+artifact. Rewriting it would replace the apply-time record in the very file this
+workspace calls the way back.
+
 Nothing here connects to a graph. The input is a ``tortoise-logical-dump-v1``
 snapshot (``tortoise.hosted_backup.dump_graph``; the encrypted ``tortoise
 export`` artifact wraps the same payload) and the output is a re-runnable
@@ -320,10 +325,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         try:
             keys = _artifact_keys(path)
-        except (OSError, RuntimeError) as exc:
-            # A symlink loop raises RuntimeError out of resolve(); an
-            # unreadable parent raises OSError. Both are the same user error as
-            # a collision and must not traceback.
+        except (OSError, RuntimeError, ValueError) as exc:
+            # `_artifact_keys` stats the path and its parent and resolves the
+            # name: a symlink loop raises RuntimeError, an embedded NUL raises
+            # ValueError, an unreadable parent raises OSError. All three are the
+            # same user error as a collision and must not traceback.
             parser.error(f"{flag} cannot be resolved ({path}): {exc}")
             raise  # unreachable — parser.error exits; keeps type checkers honest
         for key in keys:
@@ -368,9 +374,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if out is not None:
-        # Report FIRST: if the snapshot write fails, the plan that can undo it
-        # must already exist on disk.
-        _dump_json(report, args.report, "report")
+        # ⛔ In APPLY mode the report is an OUTPUT, written FIRST: if the snapshot
+        # write fails, the plan that can undo it must already exist on disk.
+        # ⛔ In REVERT mode `--report` is an INPUT — it is the plan being undone —
+        # so rewriting it would destroy the apply-time record (`mode: apply`, the
+        # before/after counts) in the very file the docstring calls the way back.
+        # The revert's own report therefore goes to stdout; the artifact that
+        # matters (the restored snapshot) is `--out`.
+        _dump_json(report, None if args.revert else args.report, "report")
         _dump_json(out, args.out, "snapshot")
         print(_summary(report), file=sys.stderr)
     else:
