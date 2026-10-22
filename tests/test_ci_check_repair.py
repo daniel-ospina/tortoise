@@ -379,6 +379,331 @@ def test_exit_zero_never_hides_an_unhandled_repair(monkeypatch):
                    for r in clean)
 
 
+# The keys that green a run WITHOUT the step succeeding. `continue-on-error`
+# is the obvious one; `if:` is the same green one line earlier — a SKIPPED job or
+# step concludes `success`, and #8254's whole failure mode is a required check
+# that nobody produced. `needs:` is the third and the least obvious: a job whose
+# dependency was skipped is itself skipped, so `repair: needs: [<a job with
+# `if: false`>]` never runs the tool while the run concludes `success` — the same
+# fail-open, with neither of the first two keys present (#9365 re-review).
+# The repo already bans all three together in
+# `tests/test_ai_review_gate_contract.py` (`for banned in ("if", "needs",
+# "continue-on-error")`, "a {banned!r}-gated job reports Success without
+# evaluating any evidence"), so this is the established shape rather than a new
+# rule.
+_GREENING_KEYS = ("if", "needs", "continue-on-error")
+
+
+def _repair_step(job):
+    """The step that runs `tools/ci_check_repair.py`, found by CONTENT.
+
+    Keyed on the command, not on the display `name:`: renaming a step for clarity
+    is a legitimate edit, and a name-keyed lookup reddens it (#9365 review).
+    """
+    steps = [s for s in (job.get("steps") or [])
+             if "tools/ci_check_repair.py" in (s.get("run") or "")]
+    assert len(steps) == 1, (
+        "expected exactly one step running tools/ci_check_repair.py, found "
+        f"{len(steps)}: {[s.get('name') for s in (job.get('steps') or [])]}")
+    return steps[0]
+
+
+def _effective_shell(job, step, workflow):
+    """The shell Actions will ACTUALLY run this step with (#9365 review).
+
+    GitHub's precedence is step `shell:` > job `defaults.run.shell` > workflow
+    `defaults.run.shell` > the platform default (`bash -e {0}` on Linux; `-e` is
+    implied, which is why the step's own `set +e`/`set -e` matter). The test used
+    to hardcode `bash -c` and never read this at all, so `shell: 'echo {0}'` on
+    the step — which echoes the script path and exits 0 — left BOTH new tests
+    green while the tool never ran: the run concludes `success`,
+    `workflow_state()` reads `covered`, the local fallback idles, and nobody
+    produces the required checks.
+    """
+    return (step.get("shell")
+            or (job.get("defaults") or {}).get("run", {}).get("shell")
+            or (workflow.get("defaults") or {}).get("run", {}).get("shell"))
+
+
+# The runner variables the step is allowed to be influenced by. PINNED, not
+# inherited (#9365 review): the test used to run the step with `**os.environ`, so
+# a branch keyed on a runner-provided variable was invisible — prepending
+# `if [ "$GITHUB_EVENT_NAME" = schedule ]; then exit 0; fi` kept both tests green
+# in a developer shell (where the variable is unset) while the real 30-minute
+# `schedule` run exited 0 and never ran the tool. The values below are the ones
+# this workflow actually gets.
+_RUNNER_ENV = {
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_EVENT_NAME": "schedule",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_REF": "refs/heads/main",
+    "GITHUB_REPOSITORY": "daniel-ospina/tortoise",
+    "CI": "true",
+}
+
+
+def _run_repair_step(script, tmp_path, tool_rc):
+    """Execute the step's OWN shell with a stubbed `python3` that exits `tool_rc`.
+
+    BEHAVIOURAL, not textual (#9365 review). A regex over the script can only
+    enumerate the spellings somebody thought of: `declare -i rc=0`,
+    `[ "$rc" -ne 0 ] && rc=0` and `printf -v rc 0` all force the exit code while
+    leaving `rc=${PIPESTATUS[0]}` AND `exit "$rc"` intact, so a text pin reads
+    green on a real fail-open. Running the script measures the only thing that
+    matters: what exit code the step actually hands GitHub.
+
+    The environment is a PINNED runner env, not the caller's (#9365 review) — see
+    `_RUNNER_ENV`. `PATH` still carries the system path so the script's own
+    `tee`/`cat` resolve; the stub `python3` wins by coming first.
+
+    `tmp_path` must be FRESH per call — the journal below is the run's argv.
+
+    ARGV IS RECORDED, not just the exit code (#9365 review). An exit-code-only
+    stub accepts ANY invocation, so dropping `--apply` from the step read green:
+    without it `report()` stops escalating the `needs_user_actor` case
+    (`tools/ci_check_repair.py`: `if apply: escalations += 1`), the tool exits 0
+    where it exits 1 when armed, and `workflow_state()` therefore reads `covered`
+    — the same fail-open, reached by a deletion rather than by greening.
+    """
+    bindir = tmp_path / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    argv_log = tmp_path / "python3-argv.log"
+    stub = bindir / "python3"
+    # `--workflow-state` is the LAUNCHER's flag and must NOT be answered here:
+    # this stub exists to stand in for the repair tool the step invokes.
+    stub.write_text("#!/usr/bin/env bash\n"
+                    f'printf "%s\\n" "$*" >> {str(argv_log)!r}\n'
+                    f"exit {tool_rc}\n")
+    stub.chmod(0o755)
+    summary = tmp_path / "step-summary.md"
+    summary.write_text("")
+    env = dict(_RUNNER_ENV)
+    env.update({
+        "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "HOME": str(tmp_path),
+        # The step appends to `$GITHUB_STEP_SUMMARY`. Unset, that redirect is
+        # an "ambiguous redirect" and the run fails for the wrong reason.
+        "GITHUB_STEP_SUMMARY": str(summary),
+    })
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       timeout=120, env=env, cwd=tmp_path)
+    argv = argv_log.read_text() if argv_log.exists() else ""
+    return r, argv, summary.read_text()
+
+
+def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
+    """#9365 — greening this run without moving the coverage signal is a fail-open.
+
+    The red is not decoration. `tools/ci-check-repair-local.sh` decides whether the
+    local fallback runs AT ALL from the newest run's CONCLUSION (`--workflow-state`
+    -> `workflow_state()`), and a failed window IS the GitHub->local handoff. So
+    #9365's "stop reddening main" arms (A: informational only, B: split the
+    verdicts) are only safe together with a moved coverage signal — otherwise a
+    `needs_user_actor` PR reads as "the window was discharged" down there and its
+    required checks are never produced by anyone. That is the #8254 fail-open,
+    restored silently, and it is strictly worse than a red somebody learns to
+    ignore.
+
+    This test pins the workflow half in BOTH directions, so a future lane cannot
+    implement half of #9365 and read green:
+
+      * STRUCTURE — no key may green the run without the step succeeding
+        (`if:` at JOB or step level, `continue-on-error` at either), because a
+        skipped or tolerated job/step concludes `success`;
+      * BEHAVIOUR — the step must hand GitHub the TOOL's exit code, for EVERY
+        non-zero class the tool can produce (1 = needs a local fallback, 2 =
+        could not measure) and for an unknown future one. Asserted by RUNNING the
+        step script against a stubbed interpreter, not by matching its text: a
+        text pin cannot see `rc=0`, and a probe of exit 1 alone cannot see
+        `[ "$rc" = 2 ] && rc=0`, which greens the exit-2 class the record counts
+        as 5 of its 73 reds.
+
+    The launcher half is pinned by
+    `test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one`
+    immediately below: `workflow_state`'s polarity alone does not prove the
+    fallback still READS it.
+
+    If a change deliberately moves the coverage signal off the run conclusion,
+    update BOTH tests in the same commit — that is the point: they cannot drift
+    apart.
+
+    Reading the workflow through parsed YAML (rather than a substring window) is
+    what makes the STRUCTURE half possible at all: a window anchored on the step's
+    `name:` cannot see a job-level key, which sits above that marker, and a
+    content-keyed step lookup survives a rename.
+
+    The key ban is applied to the ONE job this workflow has, and the job SET is
+    pinned too (#9365 re-review): banning keys on `repair` alone left
+    `repair: needs: [<a job with `if: false`>]` green — the dependency is skipped,
+    so `repair` is skipped, so the run concludes `success` and the fallback idles
+    while neither banned key appears on `repair` itself.
+    """
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    wf = yaml.safe_load((root / ".github/workflows/ci-check-repair.yml").read_text())
+    assert set(wf["jobs"]) == {"repair"}, (
+        "this workflow must carry exactly one job. A second job is not forbidden "
+        "for its own sake — it is forbidden because `repair: needs: [<it>]` skips "
+        "the repair whenever the other job is skipped, which greens the run "
+        "without the tool running (#9365). If a job genuinely has to be added, "
+        "extend this assertion deliberately and pin that it cannot skip. "
+        f"jobs={sorted(wf['jobs'])}")
+    job = wf["jobs"]["repair"]
+
+    for banned in _GREENING_KEYS:
+        assert banned not in job, (
+            # The hazard is a SKIPPABLE dependency: a job that carries `if:`,
+            # `continue-on-error` or a matrix that can end up empty makes `repair`
+            # inherit the skip. A dependency that can never skip does not green
+            # anything, which is why this is refused only where it can.
+            f"`{banned}` on the repair job can green the RUN without the repair "
+            "succeeding — as a skip key it drops the job (a skipped job is not a "
+            "failure), as a `needs:` target it inherits that job's skip — so "
+            "`workflow_state()` reads the window as `covered` and the local "
+            "fallback stays idle for every `needs_user_actor` PR (#9365)")
+
+    step = _repair_step(job)
+    for banned in _GREENING_KEYS:
+        assert banned not in step, (
+            f"`{banned}` on the repair step greens the run without the repair "
+            f"succeeding — the #8254 fail-open, silently (#9365)")
+
+    # The step must run under the shell the RUNNER will use (#9365 review): with
+    # `shell: 'echo {0}'` on this step — or the same at either `defaults.run`
+    # level — GitHub echoes the script path and exits 0, so the tool never runs
+    # while the run concludes `success`. Nothing else in this file read it.
+    shell = _effective_shell(job, step, wf)
+    assert shell in (None, "bash", "bash {0}"), (
+        "the repair step must run under bash (Actions' Linux default is `bash -e "
+        "{0}`). A custom `shell:` that does not execute the script greys the step "
+        f"without the tool running (#9365); got shell={shell!r}")
+
+    # Behaviour: the exit code the step hands GitHub, under the RUNNER's env.
+    #
+    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` exits 2
+    # from `_could_not_measure` (a failed measurement) AND from the <3.12
+    # interpreter guard at the top of the module, which raises `SystemExit(2)`
+    # before the rest of the tool is imported — so it is not the only exit-2 path,
+    # and `workflow_state()` maps the class to `ran-not-succeeded` just like exit
+    # 1, so it IS the coverage signal; the record measures 5 of its 73 reds as
+    # exit 2.
+    # Probing exit 1 alone let `[ "$rc" = 2 ] && rc=0` green that entire class
+    # while this test stayed green: the window then reads `covered`, the local
+    # fallback goes idle, and nobody produces the required checks (#9365 review).
+    #
+    # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
+    # class must default to propagate, never to green. If a future arm greens one,
+    # the coverage signal has to move in the same commit.
+    #
+    # A FRESH tmp_path per call: the stub journals its argv into it.
+    script = step["run"]
+    for tool_rc in (1, 2, 3):
+        r, argv, summary_body = _run_repair_step(script, tmp_path / f"rc{tool_rc}", tool_rc)
+        assert not r.stderr, (
+            "the step's own shell failed for a reason that is NOT the repair "
+            f"(stderr={r.stderr!r}) — without this, the summary block crashing "
+            "would exit 1 and the `must exit 1` arm below would pass without "
+            "rc ever being propagated (#9365 review)")
+        assert r.returncode == tool_rc, (
+            "the step must hand GitHub the tool's own exit code — every non-zero "
+            f"class is the local fallback's handoff signal (#9365), so {tool_rc} must "
+            f"not be greened; the step exited {r.returncode}. "
+            f"stdout={r.stdout!r} stderr={r.stderr!r}")
+        # ARGV: the step must still invoke the repair ARMED. Dropping `--apply`
+        # makes the tool exit 0 for a `needs_user_actor` PR, i.e. it greens the
+        # run while every exit-code assertion above still holds.
+        assert "tools/ci_check_repair.py" in argv and "--apply" in argv, (
+            "the repair step must invoke `tools/ci_check_repair.py --apply` — "
+            "without `--apply` the tool exits 0 for the very state this run "
+            f"exists to report, i.e. it greens the run (#9365); argv={argv!r}")
+        assert "```json" in summary_body, (
+            "the step summary must be written — its absence means the block "
+            f"crashed rather than the rc being propagated (#9365); summary={summary_body!r}")
+    r, _, _ = _run_repair_step(script, tmp_path / "rc0", tool_rc=0)
+    assert r.returncode == 0, (
+        f"a clean repair must exit 0 (#9365); the step exited {r.returncode}")
+
+    # The classifier's polarity, on the states the launcher keys on.
+    assert R.workflow_state([_wf("failure")], 35, 30) == "ran-not-succeeded"
+    assert R.workflow_state([_wf("success")], 35, 30) == "covered"
+
+
+def test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one(tmp_path):
+    """The OTHER half of the coupling, on the surface that actually decides.
+
+    `workflow_covered()` in `tools/ci-check-repair-local.sh` is
+    `[ "$rc" = 0 ]` over `--workflow-state`'s exit code. Replacing that one line
+    with `return 0` makes the local fallback permanently idle — the TOTAL #8254
+    fail-open — while every assertion on `R.workflow_state` still passes, because
+    the classifier is untouched (#9365 review). So drive the launcher, not the
+    classifier: a `covered` window must not run the tool, and a
+    `ran-not-succeeded` window must.
+
+    Hermetic: `gh`, the interpreter and `cmux` are stubs, and the state dir is a
+    tmpdir. The `cmux` stub matters — `ORCH_WS` defaults to a REAL workspace
+    uuid, and `CI_REPAIR_ORCH_WS=''` does not disable it (`${VAR:-default}`
+    treats empty as unset). Failing `cmux` is the launcher's own best-effort
+    path, which keeps the durable inbox record and sends nothing.
+    """
+    launcher = str(Path(__file__).resolve().parents[1] / "tools/ci-check-repair-local.sh")
+    calls = tmp_path / "tool-calls.log"
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+
+    pystub = bindir / "pystub"
+    pystub.write_text(
+        "#!/usr/bin/env bash\n"
+        'case " $* " in\n'
+        '  *" --workflow-state "*)\n'
+        '    printf "%s\\n" "${STUB_STATE}"; exit "${STUB_RC}" ;;\n'
+        'esac\n'
+        '# the launcher\'s inline interpreter-version guard\n'
+        'if [ "${1:-}" = "-c" ]; then exit 0; fi\n'
+        f'printf "%s\\n" "$*" >> {str(calls)!r}\n'
+        'printf \'{"needing_repair": 0}\\n\'\n'
+        "exit 0\n")
+    pystub.chmod(0o755)
+
+    ghstub = bindir / "ghstub"
+    ghstub.write_text("#!/usr/bin/env bash\nprintf '[]'\nexit 0\n")
+    ghstub.chmod(0o755)
+
+    cmuxstub = bindir / "cmux"
+    cmuxstub.write_text("#!/usr/bin/env bash\nexit 1\n")
+    cmuxstub.chmod(0o755)
+
+    def fire(state, rc):
+        # A FRESH state dir per fire: the launcher APPENDS to its log, so a shared
+        # one would carry the previous fire's "fallback idle" line into this one.
+        fire_dir = tmp_path / f"state-{state}"
+        if calls.exists():
+            calls.unlink()
+        env = {**os.environ, "CI_REPAIR_PYTHON": str(pystub),
+               "CI_REPAIR_GH": str(ghstub),
+               "CI_REPAIR_STATE_DIR": str(fire_dir),
+               "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+               "STUB_STATE": state, "STUB_RC": str(rc)}
+        r = subprocess.run(["bash", launcher, "--apply"], capture_output=True,
+                           text=True, timeout=180, env=env)
+        log_path = fire_dir / "ci-check-repair.log"
+        log = log_path.read_text() if log_path.exists() else ""
+        return r, log, (calls.read_text() if calls.exists() else "")
+
+    # `covered` (exit 0) = the window WAS discharged -> the fallback must not run.
+    r, log, invoked = fire("covered", 0)
+    assert r.returncode == 0, r.stderr
+    assert "local fallback idle" in log, log
+    assert invoked == "", f"the fallback ran on a covered window: {invoked!r}"
+
+    # `ran-not-succeeded` (exit 1) = the HANDOFF -> the fallback must run the tool.
+    r, log, invoked = fire("ran-not-succeeded", 1)
+    assert "local fallback idle" not in log, log
+    assert "--apply" in invoked, (
+        "a failed window IS the handoff — the local fallback must run the tool "
+        f"(#9365); invocations were {invoked!r}, log={log!r}")
+
+
 def test_reopen_is_deferred_while_the_head_still_has_runs_in_flight(monkeypatch):
     """A reopen re-fires every PR-evaluable workflow; doing it mid-run cancels CI."""
     monkeypatch.setattr(R, "_timeline_reopen_state", lambda *a, **k: (False, 0))

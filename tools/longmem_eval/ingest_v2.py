@@ -449,8 +449,13 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     # record is deterministically re-derived + idempotently re-applied
     # (terminal probe + keep-first conflict rules) on any --retry-failed
     # resume, so the stage retry no longer re-burns a whole payload write
-    # for an advisory fold. Never a silent drop either way — every skip is
-    # warned. ──
+    # for an advisory fold. The warn is BOUNDED by the helper (#5654): the
+    # first _MAX_SUPERSESSION_WARNS (20) per-record skips are logged
+    # individually and any beyond that are counted into ONE summary warn
+    # (batch size + true warning total + withheld count), so an over-budget
+    # skip is sized but not individually logged. The budget is PER CALL,
+    # and the loop below makes one call per kind bucket — so a batch that
+    # raises on both lanes gets the budget twice. ──
     ss_records = [sr for sr in (payload.get("supersessions") or [])
                   if isinstance(sr, dict)]
     if ss_records:
