@@ -64,9 +64,11 @@ def sdk():
 
 
 #: The measured spellings from #9287's body, plus the ASCII cases #9261 pinned:
-#: every Unicode space separator, the control whitespace, the zero-width/format
-#: marks, and a lone surrogate. Each one escaped the gate's read-path family,
-#: which is exactly why the door has to be the closure.
+#: every Unicode space separator, the control whitespace, and the zero-width/format
+#: marks. Each one escaped the gate's read-path family, which is exactly why the
+#: door has to be the closure. A lone SURROGATE (`Cs`) is pinned by its own test
+#: rather than a row here — a surrogate in a parametrisation id is a terminal
+#: encoding hazard, and the assertion is the same one.
 INVISIBLE_KINDS = [
     # Unicode space separators (Zs/Zl/Zp) — the issue's measured list
     "\u2003statement\u2003",   # EM SPACE
@@ -161,6 +163,16 @@ class TestCreatePointRefuses:
                              dedup=True)
         assert _point_ids(sdk) == []
 
+    def test_a_lone_surrogate_is_refused(self, sdk):
+        """The `Cs` arm, pinned without a parametrisation id (encoding hazard).
+
+        A lone surrogate is non-printable, so the POSITIVE rule refuses it; the
+        `INVISIBLE_KINDS` preamble used to CLAIM this row without having one.
+        """
+        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+            sdk.create_point("\ud800statement", "x", status="live")
+        assert _point_ids(sdk) == []
+
 
 class TestUpdatePointRefuses:
     """The second door: an UPDATE is a write and stored the same spelling."""
@@ -206,6 +218,42 @@ class TestUpdateEntityRefuses:
         p = sdk.create_point("statement", "Victim", status="live")
         sdk.update_entity(p["id"], pointKind="observation")
         assert _kinds_in_graph(sdk, p["id"]) == ["observation"]
+
+    def test_the_refusal_is_ATOMIC_with_the_status_write_of_the_same_call(
+            self, tmp_path):
+        """#9591 review cycle 7 (P2): the refusal must precede EVERY write.
+
+        The Point `status` arm WRITES `SET n += $s` and journals `restatus`
+        before the per-label loop, so a gate placed after it told the caller the
+        call failed while the status change had already landed AND been
+        recorded — the one non-atomic gate on this door (`update_point`'s twin
+        of the rule raises before its write). Unpinned until now because the
+        sibling test reads only `n.pointKind`.
+
+        Journaled SDK on purpose: a fixture without a journal cannot tell
+        "nothing was recorded" from "nothing can be recorded", and the write
+        half alone would miss a status change whose record was what landed.
+        """
+        sdk = TortoiseSDK(str(tmp_path / "test.db"),
+                          event_log_path=str(tmp_path / "events.jsonl"))
+        try:
+            p = sdk.create_point("statement", "Victim", status="draft")
+            log = sdk._get_event_log()
+            assert log is not None, "the fixture must wire a journal"
+            before = [e for e in log.read_all()
+                      if e.get("type") == "EntityMutated"]
+            with pytest.raises(ValueError,
+                               match="pointKind must be an identifier"):
+                sdk.update_entity(p["id"], status="live",
+                                  point_kind="\u2003statement\u2003")
+            assert sdk.get_point(p["id"])["status"] == "draft", (
+                "the REFUSED call had already committed the status change")
+            after = [e for e in log.read_all()
+                     if e.get("type") == "EntityMutated"]
+            assert after == before, (
+                "a REFUSED update_entity left an EntityMutated record behind")
+        finally:
+            sdk.close()
 
     def test_the_entity_CREATE_funnel_is_not_gated_and_that_is_deliberate(
             self, sdk):
@@ -343,6 +391,37 @@ class TestTheRefusalIsActionable:
     def test_an_all_invisible_kind_says_supply_a_name(self, sdk):
         with pytest.raises(ValueError, match="only invisible characters"):
             sdk.create_point("\u2003\u2003", "x", status="live")
+
+    def test_a_separator_suggestion_does_not_JOIN_words(self, sdk):
+        """#9591 review cycle 7 (P3): deleting an interior separator mints a
+        DIFFERENT identifier than the caller wrote.
+
+        `'technical\u2003debt'` is refused (the door cannot tell an interior
+        separator from padding), so its suggested fix must not silently
+        concatenate the two words into `'technicaldebt'` — the "kind silently
+        becomes a different kind" this door exists to prevent. A separator
+        folds to the ONE separator the door admits (a plain interior space); a
+        `Cf` mark is still DELETED, because it never was a separator.
+        """
+        from tortoise.sdk import (
+            _clean_model_kind,
+            _kind_invisible_char,
+            _kind_suggestion,
+        )
+        suggested = _kind_suggestion("technical\u2003debt")
+        assert suggested == "technical debt", (
+            f"the suggestion joined the words into {suggested!r}")
+        assert _kind_invisible_char(suggested) is None
+        assert sdk.create_point(suggested, "fixed", status="live")["id"]
+        # An EDGE separator is padding, not a word boundary.
+        assert _kind_suggestion("\u2003technical debt\u2003") == "technical debt"
+        # Consecutive separators collapse to one space, never two.
+        assert _kind_suggestion("technical\u2003\u3000debt") == "technical debt"
+        # A Cf JOINER is not a separator: it is deleted, not spaced.
+        assert _kind_suggestion("state\u200bment") == "statement"
+        # The producer half inherits the same fold (`_clean_model_kind` writes
+        # this value, so a spaced-out model kind cannot become a new kind).
+        assert _clean_model_kind("technical\u2003debt") == "technical debt"
 
 
 class TestTheModelProducerKeepsItsOwnOutputInContract:
@@ -548,7 +627,7 @@ class TestTheClassIsClosed:
         bundle = {"points": [
             {"kind": "statement", "content": "clean first item"},
             {"kind": "statement", "content": "padded props item",
-             spelling: f"\u2003statement\u2003"},
+             spelling: "\u2003statement\u2003"},
         ]}
         violations = sdk._validate_bundle(bundle)
         assert any("pointKind must be an identifier" in v["message"]

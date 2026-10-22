@@ -579,10 +579,26 @@ def _kind_suggestion(kind: str) -> str:
     interior-space exemption, so the value a refusal SUGGESTS is a value the
     door accepts — a suggestion the caller cannot use is the loop #9287's
     review found (``strip()`` cannot remove a ``Cf`` mark).
+
+    An interior SPACE SEPARATOR (``Zs``/``Zl``/``Zp`` — em space, ideographic
+    space, NBSP…) is folded to ONE ASCII space instead of being deleted (#9591
+    review cycle 7, P3): deleting it joins the words around it, so
+    ``'technical\\u2003debt'`` was suggested back as ``'technicaldebt'`` — a
+    silently DIFFERENT identifier, which is the hazard the refusal exists to
+    avoid. At an EDGE the separator is padding (the door refuses it there), so
+    it is dropped; ``Cf`` marks (ZWSP, BOM, soft hyphen) are joiners/no-ops and
+    are still deleted — ``'state\\u200bment'`` really is ``'statement'``.
     """
-    out = "".join(ch for i, ch in enumerate(kind)
-                  if not _kind_non_identifier_char(kind, i))
-    return out.strip()
+    out: list[str] = []
+    for i, ch in enumerate(kind):
+        if not _kind_non_identifier_char(kind, i):
+            out.append(ch)
+            continue
+        if (0 < i < len(kind) - 1
+                and unicodedata.category(ch) in ("Zs", "Zl", "Zp")
+                and out and out[-1] != " "):
+            out.append(" ")
+    return "".join(out).strip()
 
 
 def _clean_model_kind(value, *, default: str = "statement",
@@ -33159,6 +33175,51 @@ class TortoiseSDK:
                 raise ValueError(
                     "'eventId' is server-managed (Event identity) and cannot "
                     "be set via props.")
+        # #9287 (#9591 review cycle 7, P2 — ATOMICITY): the refusal must run
+        # BEFORE this method's FIRST write. The Point `status` arm below commits
+        # `SET n += $s` AND journals `restatus`; placed after it, a refused
+        # `update_entity(pid, status='live', point_kind=<padded>)` told the
+        # caller the call failed while the status change had already landed and
+        # been journaled — a partial commit on a refused call, and the only
+        # gate on this door that was not atomic (every other one, and
+        # `update_point`'s twin of this rule, raise before their write).
+        #
+        # #9287 (review cycle 5): a `point_kind` spelling that actually carries
+        # an invisible character, on THIS call's props — computed once so the
+        # cost is paid only by an offending write, never by every
+        # `update_entity` (the gate reads the props, the probe below reads the
+        # node).
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        # `isinstance(str)` FIRST (#9591 review cycle 6, P1): `_kind_invisible_char`
+        # requires a string and `unicodedata.normalize` raises TypeError
+        # otherwise, so an unguarded call made `update_entity(id,
+        # point_kind=None)` — the documented property-REMOVAL write, and an
+        # int/None kind is accepted by the doors themselves (they return early
+        # for non-str, `_refuse_invisible_kind`) — raise a raw TypeError from a
+        # gate that has nothing to say about it, on EVERY label.
+        _padded_point_kind = any(
+            isinstance(props.get(_spelling), str)
+            and _kind_invisible_char(props.get(_spelling)) is not None
+            for _spelling, _kind_prop in _kind_spellings.items()
+            if _kind_prop == "pointKind" and _spelling in props)
+        if _padded_point_kind:
+            # ⛔ LABEL-AGNOSTIC, and before the per-label loop (review cycle 6,
+            # P2). Probing inside the `Point` arm left a hole: a node carrying
+            # BOTH `:Point` and another canonical label, addressed by the OTHER
+            # label's key (e.g. `(:Point:Source {url: …})` with no `id`), missed
+            # the Point arm's `{id: $id}` probe and was written by the Source
+            # arm — with the padded kind, on a node the calibration gate scans
+            # by `:Point`. One probe over every key this surface can address a
+            # Point by covers both arms, and it runs ONLY when the props
+            # actually carry an invisible kind, so no ordinary update pays for
+            # it.
+            _pt_hits = proj.g.query(
+                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
+                "OR n.url = $id RETURN count(n)",
+                params={"id": id_val}).result_set
+            if _pt_hits and _pt_hits[0][0]:
+                self._refuse_invisible_point_kinds(
+                    props, door="update_entity")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
@@ -33301,41 +33362,6 @@ class TortoiseSDK:
         # return through it (the re-key guard is kept general and defensively
         # covers `eventId` should that ban ever be lifted).
         post_write_id = id_val
-        # #9287 (review cycle 5): a `point_kind` spelling that actually carries
-        # an invisible character, on THIS call's props — computed once so the
-        # cost is paid only by an offending write, never by every
-        # `update_entity` (the gate reads the props, the probe below reads the
-        # node).
-        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
-        # `isinstance(str)` FIRST (#9591 review cycle 6, P1): `_kind_invisible_char`
-        # requires a string and `unicodedata.normalize` raises TypeError
-        # otherwise, so an unguarded call made `update_entity(id,
-        # point_kind=None)` — the documented property-REMOVAL write, and an
-        # int/None kind is accepted by the doors themselves (they return early
-        # for non-str, `_refuse_invisible_kind`) — raise a raw TypeError from a
-        # gate that has nothing to say about it, on EVERY label.
-        _padded_point_kind = any(
-            isinstance(props.get(_spelling), str)
-            and _kind_invisible_char(props.get(_spelling)) is not None
-            for _spelling, _kind_prop in _kind_spellings.items()
-            if _kind_prop == "pointKind" and _spelling in props)
-        if _padded_point_kind:
-            # ⛔ LABEL-AGNOSTIC, and BEFORE the loop (review cycle 6, P2). Probing
-            # inside the `Point` arm left a hole: a node carrying BOTH `:Point`
-            # and another canonical label, addressed by the OTHER label's key
-            # (e.g. `(:Point:Source {url: …})` with no `id`), missed the Point
-            # arm's `{id: $id}` probe and was written by the Source arm — with
-            # the padded kind, on a node the calibration gate scans by `:Point`.
-            # One probe over every key this surface can address a Point by
-            # covers both arms, and it runs ONLY when the props actually carry
-            # an invisible kind, so no ordinary update pays for it.
-            _pt_hits = proj.g.query(
-                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
-                "OR n.url = $id RETURN count(n)",
-                params={"id": id_val}).result_set
-            if _pt_hits and _pt_hits[0][0]:
-                self._refuse_invisible_point_kinds(
-                    props, door="update_entity")
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             # #4649: a canonical label's identity is an OR-SET, not one key.
             # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
