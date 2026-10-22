@@ -123,6 +123,13 @@ class FakeCursor:
         if "count(*)" in sql:
             table = sql.split('"')[1]
             self._value = self._conn.counts[table]
+        elif sql.upper().startswith("TRUNCATE"):
+            # The scratch reset: every record table in ONE statement, exactly as
+            # the module emits it — so a reset that silently emptied one table
+            # (or every table) is visible in the assertion, not assumed.
+            for table in self._conn.counts:
+                self._conn.counts[table] = 0
+            self._value = None
         else:  # set_config
             self._value = None
         return None
@@ -140,12 +147,16 @@ class FakeConn:
         self.counts = counts
         self.closed = False
         self.rolled_back = False
+        self.committed = False
 
     def cursor(self):
         return FakeCursor(self)
 
     def rollback(self) -> None:
         self.rolled_back = True
+
+    def commit(self) -> None:
+        self.committed = True
 
     def close(self) -> None:
         self.closed = True
@@ -268,9 +279,34 @@ def test_the_manifest_records_the_table_set_the_ciphertext_hash_and_no_credentia
 )
 def test_a_pooler_dsn_is_refused_before_anything_is_dumped(dsn):
     runner = FakeRunner()
-    with pytest.raises(rb.RecordBackupError, match=r"DIRECT|POOLER|transaction-mode"):
+    with pytest.raises(rb.RecordBackupUnavailable, match=r"DIRECT|POOLER|transaction-mode"):
         rb.dump_record(dsn, "/tmp/should-not-exist.dump", run=runner)
     assert runner.calls == []
+
+
+def test_the_pooler_refusal_is_a_configuration_fault_not_a_retryable_failure():
+    """The headline refusal of this PR must not report itself as "retry".
+
+    `require_direct_dsn`'s message is the fix (a second, direct DSN) — a
+    scheduler that reads the refusal as `1` retries a permanent config fault
+    forever, so the CLASS is the contract here, not just the sentence.
+    """
+    pooler = "postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    with pytest.raises(rb.RecordBackupUnavailable):
+        rb.require_direct_dsn(pooler)
+    # Still a RecordBackupError (a caller that only wants "the backup did not
+    # happen" keeps working), but NOT a refusal — the two are different codes.
+    assert issubclass(rb.RecordBackupUnavailable, rb.RecordBackupError)
+    assert not issubclass(rb.RecordBackupUnavailable, rb.RecordRestoreRefused)
+    # A direct DSN is still accepted unchanged.
+    assert rb.require_direct_dsn(DSN) == DSN
+
+
+def test_a_missing_psycopg2_is_a_configuration_fault(monkeypatch):
+    """`psycopg2` absent is an install fault (exit 2), not a backup failure."""
+    monkeypatch.setitem(sys.modules, "psycopg2", None)
+    with pytest.raises(rb.RecordBackupUnavailable, match="psycopg2 is not installed"):
+        rb._default_connector(DSN)
 
 
 def test_a_failed_dump_raises_and_publishes_nothing():
@@ -295,13 +331,22 @@ def test_an_empty_dump_is_refused_rather_than_published():
 
 
 def test_a_missing_backup_key_is_a_configuration_fault_not_a_crash():
-    """No key must be exit 2 (unconfigured), never a traceback read as "retry"."""
+    """No key must be exit 2 (unconfigured), never a traceback read as "retry".
+
+    Two things are pinned: the exception CLASS the verb maps to `2` (a plain
+    `RecordBackupError` is `1` = "retry", which a keyless box retries forever),
+    and that it fires BEFORE the dump — a key fault discovered after `pg_dump`
+    writes the system of record to a temp file leaks a plaintext dump per attempt.
+    """
     db = FakeDB(SOURCE_COUNTS)
     storage = MemoryStorage()
-    with pytest.raises(rb.RecordBackupError, match="backup key is not configured"):
+    runner = FakeRunner()
+    with pytest.raises(rb.RecordBackupUnavailable, match="backup key is not configured"):
         rb.create_record_backup(
-            DSN, storage, run=FakeRunner(), connect=db.connect, key=None
+            DSN, storage, run=runner, connect=db.connect, key=None
         )
+    assert runner.calls == []  # nothing was dumped
+    assert db.connections == []  # nor counted
     assert storage.list("") == []
 
 
@@ -311,6 +356,37 @@ def test_a_dump_that_writes_no_file_is_refused():
         rb.create_record_backup(
             DSN, MemoryStorage(), run=runner, connect=FakeDB(SOURCE_COUNTS).connect, key=KEY
         )
+
+
+def test_a_failed_cleanup_of_the_plaintext_dump_is_LOGGED_and_does_not_fail_the_backup(
+    monkeypatch, caplog
+):
+    """`ignore_errors=True` made a failed removal silent — in the one path about plaintext.
+
+    The dump in that directory is the system of record in the clear, so a removal
+    that did not happen must leave evidence. It must still not FAIL the run: by
+    then the artifact is uploaded and durable, and exiting 1 would say "the
+    record is NOT backed up" — false.
+    """
+    import shutil as _shutil
+
+    def _boom(path, *args, **kwargs):
+        raise PermissionError(f"cannot remove {path}")
+
+    # `context()` so the patch is gone before this test's tmpdir teardown (which
+    # removes the same tree the backup just failed to clean).
+    storage = MemoryStorage()
+    with monkeypatch.context() as patch:
+        patch.setattr(_shutil, "rmtree", _boom)
+        with caplog.at_level("WARNING", logger=rb.LOG_NAME):
+            manifest = rb.create_record_backup(
+                DSN, storage, run=FakeRunner(), connect=FakeDB(SOURCE_COUNTS).connect, key=KEY
+            )
+    # The backup is published: a cleanup fault is not a backup fault.
+    assert storage.list(rb.RECORD_BACKUP_PREFIX) != []
+    assert manifest["row_total"] == sum(SOURCE_COUNTS.values())
+    # ...and the failure is not silent.
+    assert any("plaintext" in rec.message for rec in caplog.records)
 
 
 # ── restore: verified before a byte lands, refused on a live target ────────
@@ -481,8 +557,8 @@ def test_the_drill_restores_the_artifact_and_reports_a_measured_row_count():
     )
     assert report["verdict"] == "RESTORED"
     assert report["row_total"] == sum(SOURCE_COUNTS.values())
-    assert report["tables"]["point"] == {"source": 24, "restored": 24}
-    assert report["tables"]["relation"] == {"source": 63, "restored": 63}
+    assert report["tables"]["point"] == {"source": 24, "source_after": 24, "restored": 24}
+    assert report["tables"]["relation"] == {"source": 63, "source_after": 63, "restored": 63}
     # The artifact is a persisted object, not an in-memory handoff: the drill
     # reads it back out of storage the way an operator's restore would.
     assert storage.list(f"{rb.RECORD_BACKUP_PREFIX}{report['backup_id']}/") != []
@@ -499,15 +575,162 @@ def test_the_drill_refuses_a_scratch_target_that_is_the_record_itself():
 
 
 def test_the_drill_refuses_an_empty_record_because_the_pass_would_be_vacuous():
+    """An empty record is a REFUSAL (no verdict) — never a data-loss mismatch.
+
+    Exit 3 means "the drill ran and the restored record disagrees with its
+    source", and under `--json` that path prints `{"verdict": "MISMATCH",
+    "mismatches": []}` — a loss verdict naming no loss, on a run that never
+    touched `pg_restore`. Pointing the drill at an empty record (wrong database,
+    a fresh environment) is a misconfiguration, so it must be the refusal class
+    the verb maps to "could not run".
+    """
     empty = dict.fromkeys(THE_RECORD_TABLES, 0)
     db = FakeDB(empty)
     runner = FakeRunner(on_restore=db.populate_scratch_from_source)
-    with pytest.raises(rb.RecordRestoreVerifyError, match="EMPTY"):
+    with pytest.raises(rb.RecordRestoreRefused, match="EMPTY") as excinfo:
         rb.run_restore_drill(
             DSN, MemoryStorage(), SCRATCH_DSN, run=runner, connect=db.connect, key=KEY
         )
+    assert not isinstance(excinfo.value, rb.RecordRestoreVerifyError)
     # and it refused BEFORE taking a backup of nothing
     assert runner.calls == []
+
+
+def test_the_drill_tolerates_rows_written_after_the_dump_and_names_the_window():
+    """The record is LIVE: a row committed after the dump is not a lost row.
+
+    The artifact is cut from a snapshot taken after the manifest's count, so
+    `journal_event` legitimately holds 512 in the artifact while the source had
+    reached 515 by the end of the dump. Comparing the pre-dump count exactly —
+    the pre-fix behaviour — reds this healthy backup, and the documented daily
+    schedule runs exactly this against the live record.
+    """
+    artifact_counts = dict(SOURCE_COUNTS)
+    db = FakeDB(SOURCE_COUNTS)
+    reads = {"source": 0}
+    real_connect = db.connect
+
+    def connect(dsn):
+        if dsn == DSN:
+            reads["source"] += 1
+            # 1 = the vacuity count, 2 = the manifest count (the artifact's own
+            # numbers), 3 = the post-dump probe. Rows land between 2 and 3.
+            if reads["source"] >= 3:
+                db.source = {**db.source, "journal_event": 515}
+        return real_connect(dsn)
+
+    def restore():
+        # The artifact carries the rows that existed AT DUMP TIME, not the three
+        # that landed afterwards.
+        db.scratch.update(artifact_counts)
+
+    report = rb.run_restore_drill(
+        DSN, MemoryStorage(), SCRATCH_DSN,
+        run=FakeRunner(on_restore=restore), connect=connect, key=KEY,
+    )
+    assert report["verdict"] == "RESTORED"
+    assert report["tables"]["journal_event"] == {
+        "source": 512, "source_after": 515, "restored": 512,
+    }
+    # Every other table did not move, and reports so.
+    assert report["tables"]["point"] == {"source": 24, "source_after": 24, "restored": 24}
+
+
+def test_a_lost_table_is_STILL_red_on_a_record_that_moved():
+    """The tolerance is a window, not a licence: loss is still named."""
+    db = FakeDB(SOURCE_COUNTS)
+    reads = {"n": 0}
+    real_connect = db.connect
+
+    def connect(dsn):
+        if dsn == DSN:
+            reads["n"] += 1
+            if reads["n"] >= 3:
+                db.source = {**db.source, "journal_event": 515}
+        return real_connect(dsn)
+
+    def lose_one_table():
+        db.scratch.update(dict.fromkeys(SOURCE_COUNTS, 0))
+
+    with pytest.raises(rb.RecordRestoreVerifyError) as excinfo:
+        rb.run_restore_drill(
+            DSN, MemoryStorage(), SCRATCH_DSN,
+            run=FakeRunner(on_restore=lose_one_table), connect=connect, key=KEY,
+        )
+    assert next(m["table"] for m in excinfo.value.mismatches) == "node_identity"
+    assert "source 41" in str(excinfo.value)
+
+
+def test_a_restore_carrying_rows_the_source_never_had_is_red():
+    """Above the ceiling is a divergence too — duplication is not growth."""
+    with pytest.raises(rb.RecordRestoreVerifyError) as excinfo:
+        rb.verify_restore(
+            SOURCE_COUNTS,
+            {**SOURCE_COUNTS, "point": SOURCE_COUNTS["point"] + 5},
+            source_after={**SOURCE_COUNTS, "point": SOURCE_COUNTS["point"] + 1},
+        )
+    assert [m["table"] for m in excinfo.value.mismatches] == ["point"]
+    assert "source 24..25" in str(excinfo.value)
+
+
+def test_a_scheduled_drill_is_repeatable_only_with_reset_scratch():
+    """A successful drill leaves the scratch target POPULATED — run 2 would refuse.
+
+    The documented cron line reuses one scratch DSN, so without a reset the
+    drill succeeds exactly once and then reports "the target record is NOT
+    empty" forever: a job that can never succeed again bounds no loss window,
+    and at the exit-code level it is indistinguishable from a real refusal.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+
+    def drill(**kwargs):
+        return rb.run_restore_drill(
+            DSN, MemoryStorage(), SCRATCH_DSN,
+            run=FakeRunner(on_restore=db.populate_scratch_from_source),
+            connect=db.connect, key=KEY, **kwargs,
+        )
+
+    assert drill()["verdict"] == "RESTORED"
+    assert any(db.scratch.values())
+
+    with pytest.raises(rb.RecordRestoreRefused, match="NOT empty"):
+        drill()
+
+    report = drill(reset_scratch=True)
+    assert report["verdict"] == "RESTORED"
+    assert report["scratch_reset"] is True
+    assert db.scratch == SOURCE_COUNTS
+
+
+def test_the_scratch_reset_truncates_the_record_tables_and_nothing_else():
+    """The reset is one TRUNCATE of the record's own tables, with no CASCADE."""
+    seen: list[str] = []
+
+    class RecordingCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            if sql.upper().startswith("TRUNCATE"):
+                seen.append(sql)
+            return super().execute(sql, params)
+
+    class RecordingConn(FakeConn):
+        def cursor(self):
+            return RecordingCursor(self)
+
+    scratch = dict.fromkeys(THE_RECORD_TABLES, 0) | {"journal_event": 9}
+
+    def connect(dsn):
+        return RecordingConn(dsn, scratch)
+
+    rb.reset_record_tables(SCRATCH_DSN, connect=connect)
+    assert len(seen) == 1
+    assert "CASCADE" not in seen[0].upper()
+    for table in THE_RECORD_TABLES:
+        assert f'public."{table}"' in seen[0]
+    assert not any(scratch.values())
+    # The tenant rows the record's FKs reference are NOT the record's tables —
+    # the statement never names them, so a reset cannot take the control plane
+    # with it.
+    assert "public.graphs" not in seen[0] and "public.organizations" not in seen[0]
 
 
 def test_the_drill_reds_when_the_restored_record_is_short():
@@ -543,16 +766,28 @@ def test_prune_keeps_the_newest_and_refuses_to_keep_nothing():
 
 
 def test_prune_never_deletes_an_object_whose_manifest_it_cannot_read():
+    """The naive delete-everything mutant must be REFUSED, in a call that deletes.
+
+    Two readable artifacts and ``keep=1`` on purpose: with one artifact the
+    deletion loop never runs at all, so the stray surviving proves nothing about
+    the guard (a prune that deleted every unattributable key would pass it).
+    Here a real deletion happens in the same call, so the stray's survival is the
+    guard's doing.
+    """
     storage = MemoryStorage()
     _dump_manifest(storage=storage)
+    _dump_manifest(storage=storage)
+    readable = [k for k in storage.list(rb.RECORD_BACKUP_PREFIX) if k.endswith(rb.DUMP_OBJECT)]
+    assert len(readable) == 2
     stray = f"{rb.RECORD_BACKUP_PREFIX}20990101T000000000Z_deadbeef/{rb.DUMP_OBJECT}"
     storage.upload(stray, b"not attributable to any readable manifest")
-    assert rb.list_record_backups(storage) == [] or all(
-        row.get("format") == rb.RECORD_DUMP_FORMAT for row in rb.list_record_backups(storage)
-    )
-    rb.prune_record_backups(storage, keep=1)
-    # Unattributable objects survive: a prune that guesses deletes the only copy
-    # of something it did not understand.
+    assert len(rb.list_record_backups(storage)) == 2
+    deleted = rb.prune_record_backups(storage, keep=1)
+    # A real prune happened — the older artifact's two objects went.
+    assert len(deleted) == 2
+    assert len([k for k in storage.list(rb.RECORD_BACKUP_PREFIX) if k.endswith(rb.DUMP_OBJECT)]) == 2
+    # ...and the unattributable object survived it: a prune that guesses deletes
+    # the only copy of something it did not understand.
     assert storage.download(stray).startswith(b"not attributable")
 
 
@@ -568,7 +803,8 @@ def test_list_record_backups_skips_unreadable_manifests():
 # ── the verb: it exists, and it refuses to report a green it did not measure ──
 
 
-def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None):
+def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None, *,
+         patch_connector=True, backup_key=KEY):
     from tortoise import __main__ as cli
 
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
@@ -587,12 +823,16 @@ def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None):
     # lives in an optional extra, and the row counts are the verb's whole point.
     # Substituting the connector is stated here so a green run is not read as
     # "a live database was counted" — the live drill is the runbook step.
-    monkeypatch.setattr(rb, "_default_connector", (db or FakeDB(SOURCE_COUNTS)).connect)
+    if patch_connector:
+        monkeypatch.setattr(rb, "_default_connector", (db or FakeDB(SOURCE_COUNTS)).connect)
     # ...and the pg_dump/pg_restore boundary, because this lane has no
     # PostgreSQL client binaries. Same disclosure as above: this pins the verb's
     # WIRING and its exit-code contract, not a live dump.
     monkeypatch.setattr(rb, "_default_run", FakeRunner())
-    monkeypatch.setenv("TORTOISE_BACKUP_KEY", base64.b64encode(KEY).decode())
+    if backup_key is None:
+        monkeypatch.delenv("TORTOISE_BACKUP_KEY", raising=False)
+    else:
+        monkeypatch.setenv("TORTOISE_BACKUP_KEY", base64.b64encode(backup_key).decode())
     return cli.main(argv)
 
 
@@ -608,6 +848,122 @@ def test_the_verb_exits_2_when_the_bucket_is_unconfigured(monkeypatch):
         ["record-backup", "--record-dsn", DSN],
         fail_storage="R2 not configured",
     ) == 2
+
+
+def test_the_verb_exits_2_on_a_pooler_dsn_and_dumps_nothing(monkeypatch, capsys):
+    """The PR's headline refusal, read the way a scheduler reads it.
+
+    Pre-fix this was `1` ("the backup failed, retry") — a permanent config fault
+    retried forever — while the help text, the verb's docstring and the runbook
+    all promised `2`.
+    """
+    storage = MemoryStorage()
+    pooler = "postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    assert _cli(monkeypatch, ["record-backup", "--record-dsn", pooler], storage=storage) == 2
+    assert storage.list("") == []
+    assert "pooler" in capsys.readouterr().err.lower()
+
+
+def test_the_verb_exits_2_when_the_backup_key_is_unconfigured(monkeypatch, capsys):
+    storage = MemoryStorage()
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", DSN],
+        storage=storage, backup_key=None,
+    ) == 2
+    # Nothing was published, and no plaintext dump was written.
+    assert storage.list("") == []
+    assert "backup key is not configured" in capsys.readouterr().err
+
+
+def test_the_verb_exits_2_when_psycopg2_is_absent(monkeypatch, capsys):
+    """An install fault is `2` (unconfigured), not `1` (retry)."""
+    monkeypatch.setitem(sys.modules, "psycopg2", None)
+    storage = MemoryStorage()
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", DSN],
+        storage=storage, patch_connector=False,
+    ) == 2
+    assert storage.list("") == []
+    assert "psycopg2 is not installed" in capsys.readouterr().err
+
+
+def test_the_verb_refuses_keep_0_as_exit_2_before_backing_anything_up(monkeypatch, capsys):
+    """`--keep 0` is a usage refusal, not a traceback after a published upload."""
+    storage = MemoryStorage()
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", DSN, "--keep", "0"],
+        storage=storage,
+    ) == 2
+    assert storage.list("") == []
+    assert "--keep must be >= 1" in capsys.readouterr().err
+
+
+def test_a_prune_failure_does_not_report_a_published_backup_as_failed(monkeypatch, capsys):
+    """Exit 1 says "the record is NOT backed up" — false once the artifact is durable."""
+
+    class UnlistableStorage(MemoryStorage):
+        def list(self, prefix="", *args, **kwargs):
+            raise RuntimeError("R2 listing timed out")
+
+    storage = UnlistableStorage()
+    assert _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], storage=storage) == 0
+    # Both objects landed: the backup is durable, so the run is not a failure.
+    assert any(k.endswith(rb.MANIFEST_OBJECT) for k in storage._objects)
+    assert any(k.endswith(rb.DUMP_OBJECT) for k in storage._objects)
+    err = capsys.readouterr().err
+    assert "retention prune failed" in err
+    assert "published" in err
+
+
+def test_the_verb_exits_2_on_an_empty_record_and_prints_no_mismatch_verdict(monkeypatch, capsys):
+    """No verdict means no `MISMATCH`: nothing ran, nothing disagrees."""
+    empty = dict.fromkeys(THE_RECORD_TABLES, 0)
+    assert _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN, "--json"],
+        db=FakeDB(empty),
+    ) == 2
+    out = capsys.readouterr().out
+    assert "MISMATCH" not in out
+
+
+def test_the_verb_refuses_reset_scratch_without_a_scratch_dsn(monkeypatch, capsys):
+    """A silent no-op would make an operator believe the scratch was emptied."""
+    storage = MemoryStorage()
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", DSN, "--reset-scratch"],
+        storage=storage,
+    ) == 2
+    assert storage.list("") == []
+    assert "--reset-scratch only applies to drill mode" in capsys.readouterr().err
+
+
+def test_the_verb_drill_is_repeatable_with_reset_scratch(monkeypatch, capsys):
+    """The documented schedule, run twice: refused without the flag, green with it."""
+    db = FakeDB(SOURCE_COUNTS)
+
+    class DrillingRunner(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            if argv[0].endswith("pg_restore"):
+                db.populate_scratch_from_source()
+            return super().__call__(argv, **kwargs)
+
+    from tortoise import __main__ as cli
+
+    def run(argv):
+        from tortoise import hosted_backup as hb
+        store = MemoryStorage()
+        monkeypatch.setattr(hb, "R2Storage", lambda: store)
+        monkeypatch.setattr(rb, "_default_connector", db.connect)
+        monkeypatch.setattr(rb, "_default_run", DrillingRunner())
+        monkeypatch.setenv("TORTOISE_BACKUP_KEY", base64.b64encode(KEY).decode())
+        return cli.main(argv)
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    base = ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN]
+    assert run(base) == 0
+    assert run(base) == 2  # the scratch target is now populated → refused
+    assert run([*base, "--reset-scratch"]) == 0
 
 
 def test_the_verb_backup_mode_does_not_claim_the_artifact_restores(monkeypatch, capsys):

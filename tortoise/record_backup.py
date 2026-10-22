@@ -142,6 +142,7 @@ __all__ = [
     "RECORD_BACKUP_PREFIX",
     "RECORD_DUMP_FORMAT",
     "RecordBackupError",
+    "RecordBackupUnavailable",
     "RecordRestoreRefused",
     "RecordRestoreVerifyError",
     "compare_row_counts",
@@ -153,7 +154,9 @@ __all__ = [
     "record_columns",
     "record_row_counts",
     "record_tables",
+    "require_backup_key",
     "require_direct_dsn",
+    "reset_record_tables",
     "restore_record_backup",
     "run_restore_drill",
 ]
@@ -230,18 +233,39 @@ class RecordBackupError(RuntimeError):
     """
 
 
+class RecordBackupUnavailable(RecordBackupError):
+    """The run could not be performed at all — this box or this invocation is
+    misconfigured. **No verdict was produced, and retrying cannot fix it.**
+
+    Distinct from its parent on purpose: a plain :class:`RecordBackupError` means
+    "the backup was attempted and did not happen — retry", while the faults that
+    raise this one (a pooler DSN, `psycopg2` absent, `TORTOISE_BACKUP_KEY`
+    missing or malformed, a DSN with no host) are PERMANENT until somebody edits
+    a config. A scheduler that reads both as the same code retries a config fault
+    forever, minting a fresh artifact each time — so the verb maps this class to
+    its "could not run" code rather than to "the backup failed".
+    """
+
+
 class RecordRestoreRefused(RecordBackupError):
     """A restore was attempted that this module will not perform.
 
     A populated target, a foreign/unknown artifact format, an artifact whose
-    table set is not the record's, a tampered payload — each is a refusal, not a
-    partial restore. Subclasses :class:`RecordBackupError` so a caller that only
-    wants "the drill did not run" can catch one name.
+    table set is not the record's, a tampered payload, and a **vacuous drill**
+    (an empty record) — each is a refusal, not a partial restore, and none of
+    them produced a verdict. Subclasses :class:`RecordBackupError` so a caller
+    that only wants "the drill did not run" can catch one name.
     """
 
 
 class RecordRestoreVerifyError(RecordBackupError):
-    """The restore ran and the numbers disagree (or the drill would be vacuous).
+    """The restore RAN and the numbers disagree.
+
+    Only a real disagreement belongs here: a caller maps this class to an
+    incident ("the artifact is NOT proven restorable"), so a case where nothing
+    ran — a vacuous drill over an empty record, an artifact that failed its
+    integrity or shape pin — must be a refusal instead, or the operator is paged
+    for a mismatch that names no mismatch.
 
     Carries ``mismatches``: ``[{table, source, restored}]`` for the tables that
     did not match, so the report NAMES what was lost instead of saying "the
@@ -258,10 +282,10 @@ class RecordRestoreVerifyError(RecordBackupError):
 
 def _split_dsn(dsn: str):
     if not isinstance(dsn, str) or not dsn.strip():
-        raise RecordBackupError("no record DSN — an unarmed backup is not a backup")
+        raise RecordBackupUnavailable("no record DSN — an unarmed backup is not a backup")
     parts = urlsplit(dsn.strip())
     if parts.scheme not in ("postgres", "postgresql"):
-        raise RecordBackupError(
+        raise RecordBackupUnavailable(
             "the record DSN must be a postgresql:// (or postgres://) URI — got "
             f"scheme {parts.scheme!r}. A backup of the wrong store is worse than "
             "no backup."
@@ -286,7 +310,7 @@ def require_direct_dsn(dsn: str) -> str:
     host = (parts.hostname or "").lower()
     for marker in _POOLER_HOST_MARKERS:
         if host.endswith(marker) or f".{marker}" in host:
-            raise RecordBackupError(
+            raise RecordBackupUnavailable(
                 f"the record DSN host {host!r} is a POOLER. A dump/restore "
                 "session must use the DIRECT connection string — the pooler "
                 "loses session state between transactions, so an artifact taken "
@@ -296,9 +320,9 @@ def require_direct_dsn(dsn: str) -> str:
     try:
         port = parts.port
     except ValueError as e:  # a malformed port is a malformed DSN
-        raise RecordBackupError(f"the record DSN has an unreadable port: {e}") from e
+        raise RecordBackupUnavailable(f"the record DSN has an unreadable port: {e}") from e
     if port == _TRANSACTION_POOLER_PORT:
-        raise RecordBackupError(
+        raise RecordBackupUnavailable(
             f"the record DSN uses port {_TRANSACTION_POOLER_PORT} (the "
             "transaction-mode pooler). A dump/restore session must use the "
             "DIRECT connection — see require_direct_dsn's docstring."
@@ -324,7 +348,7 @@ def libpq_env(dsn: str) -> dict[str, str]:
     parts = _split_dsn(dsn)
     host = parts.hostname
     if not host:
-        raise RecordBackupError(
+        raise RecordBackupUnavailable(
             "the record DSN names no host — refusing to let libpq fall back to a "
             "local socket, which would back up the wrong database"
         )
@@ -333,7 +357,7 @@ def libpq_env(dsn: str) -> dict[str, str]:
         if parts.port:
             env["PGPORT"] = str(parts.port)
     except ValueError as e:
-        raise RecordBackupError(f"the record DSN has an unreadable port: {e}") from e
+        raise RecordBackupUnavailable(f"the record DSN has an unreadable port: {e}") from e
     if parts.username:
         env["PGUSER"] = unquote(parts.username)
     if parts.password:
@@ -378,14 +402,37 @@ def _require_table(name: str) -> str:
     return name
 
 
+# ── preconditions ──────────────────────────────────────────────────────────
+
+
+def require_backup_key() -> bytes:
+    """Validate ``TORTOISE_BACKUP_KEY`` WITHOUT encrypting anything.
+
+    Called before the dump, not after it: the key is a precondition of the run
+    (the artifact cannot be written without it), and reaching it only after a
+    whole record has been written to disk means a keyless box dumps the system
+    of record to a temp file, fails, and reports a *retryable* failure — every
+    attempt minting another plaintext dump to clean up.
+    """
+    from .hosted_backup import _get_backup_key
+
+    try:
+        return _get_backup_key()
+    except RuntimeError as e:
+        # `TORTOISE_BACKUP_KEY` absent/malformed is a CONFIGURATION fault, not a
+        # backup failure. A scheduler reads the code, so this must not surface as
+        # "the backup failed, retry" — it would retry a permanent fault forever.
+        raise RecordBackupUnavailable(f"the backup key is not configured — {e}") from e
+
+
 # ── row counts (the measurement the drill is decided by) ────────────────────
 
 
 def _default_connector(dsn: str):
     try:
         import psycopg2
-    except ImportError as e:  # pragma: no cover - exercised by the CLI's exit 2
-        raise RecordBackupError(
+    except ImportError as e:
+        raise RecordBackupUnavailable(
             "psycopg2 is not installed — the record cannot be counted, so a "
             "restore cannot be verified. Install the `postgres` extra."
         ) from e
@@ -575,6 +622,10 @@ def create_record_backup(
     `R2Storage` credentials for the graph sweep needs nothing new.
     """
     require_direct_dsn(dsn)
+    # BEFORE the dump: see `require_backup_key`. Only when no key was injected —
+    # a caller that passed `key=` has already satisfied the precondition.
+    if key is None:
+        require_backup_key()
     counts = record_row_counts(dsn, connect=connect)
     backup_id = _backup_id()
     tmp = tempfile.mkdtemp(prefix="record-backup-", dir=str(workdir) if workdir else None)
@@ -585,12 +636,10 @@ def create_record_backup(
         try:
             blob = encrypt_backup(payload, key=key)
         except RuntimeError as e:
-            # `TORTOISE_BACKUP_KEY` absent/malformed is a CONFIGURATION fault, not
-            # a backup failure — the plaintext dump is removed by the `finally`
-            # below and nothing is published. Without this translation the verb
-            # would die on a traceback and a scheduler would read it as 1 ("the
-            # backup failed, retry") instead of 2 ("this box is unconfigured").
-            raise RecordBackupError(f"the backup key is not configured — {e}") from e
+            # Reached only when a `key=` was injected and is unusable, or when
+            # the environment changed under us: the up-front
+            # `require_backup_key()` is the normal path for an unconfigured box.
+            raise RecordBackupUnavailable(f"the backup key is not configured — {e}") from e
         manifest: dict[str, Any] = {
             "backup_id": backup_id,
             "format": RECORD_DUMP_FORMAT,
@@ -621,9 +670,29 @@ def create_record_backup(
 
 
 def _rmtree(path: str | os.PathLike[str]) -> None:
+    """Remove the plaintext dump directory, LOUDLY if it could not be removed.
+
+    `ignore_errors=True` made a failed removal silent: no exception, no log, and
+    a return that reads exactly like "the plaintext is gone". That is the one
+    path this module says must never be silent — the dump in that directory is
+    the system of record in the clear — so a failure is logged as a warning
+    instead. Cleanup must never FAIL the backup (the artifact is already
+    published and durable by then), which is why it is a warning and not a
+    raise.
+    """
     import shutil
 
-    shutil.rmtree(str(path), ignore_errors=True)
+    try:
+        shutil.rmtree(str(path))
+    except FileNotFoundError:
+        return
+    except OSError:
+        log.warning(
+            "could not remove the plaintext record dump directory %s — it may still "
+            "hold the record in the clear; remove it by hand",
+            path,
+            exc_info=True,
+        )
 
 
 def _write_secret_file(path: Path, data: bytes) -> None:
@@ -790,6 +859,14 @@ def restore_record_backup(
         blob = storage.download(backup_key)
     except KeyError as e:
         raise RecordRestoreRefused(f"artifact not found: {backup_key}") from e
+    except Exception as e:
+        # A transport failure is NOT a refusal (nothing was measured, and a retry
+        # may well succeed) — but it must arrive as this module's error, not as a
+        # raw traceback out of `main()`, which reads as "the backup failed".
+        raise RecordBackupError(
+            f"the artifact could not be downloaded ({backup_key}): {e} — nothing "
+            "was restored"
+        ) from e
     manifest = _read_manifest(storage, backup_key)
     _verify_manifest(manifest, blob)
     try:
@@ -822,7 +899,7 @@ def restore_record_backup(
         env = _subprocess_env(target_dsn)
         database = env.get("PGDATABASE", "")
         if not database:
-            raise RecordBackupError(
+            raise RecordBackupUnavailable(
                 "the target DSN names no database — pg_restore would have nothing "
                 "to restore into"
             )
@@ -861,12 +938,28 @@ def compare_row_counts(
     restored: dict[str, int],
     *,
     tables: tuple[str, ...] | None = None,
+    source_after: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Compare two per-table count maps; return a report with named mismatches.
 
     Equality is required per table, never in TOTAL: a restore that lost a whole
     table while duplicating rows elsewhere can reconcile the sum, and the sum is
     the number an operator would quote.
+
+    ``source_after`` turns the exact comparison into a WINDOW, and it exists
+    because the record is a live system: the artifact is cut from a snapshot
+    taken after the count, so rows committed in between are legitimately in the
+    artifact and not in the count. Comparing exactly against a pre-dump count
+    therefore reds a perfectly healthy backup on any record with continuous
+    writes — and a drill that reds every day on a healthy backup trains the
+    operator to ignore the one signal the design exists to produce.
+
+    The window is ``[min(source, source_after), max(source, source_after)]`` per
+    table, and it keeps the falsifier sharp in both directions: below the floor
+    is LOSS (rows that existed before the dump did not come back), and above the
+    ceiling is a restore carrying rows the source never had (duplication or a
+    corrupt artifact). Only the ambiguity in the middle — the count-to-snapshot
+    gap — is tolerated, and the report NAMES the moved table with both bounds.
     """
     names = tuple(tables or record_tables())
     rows: dict[str, dict[str, int]] = {}
@@ -874,9 +967,13 @@ def compare_row_counts(
     for table in names:
         want = int(source.get(table, -1))
         got = int(restored.get(table, -1))
-        rows[table] = {"source": want, "restored": got}
-        if want != got:
-            mismatches.append({"table": table, "source": want, "restored": got})
+        later = int(source_after.get(table, want)) if source_after is not None else want
+        floor, ceiling = min(want, later), max(want, later)
+        rows[table] = {"source": want, "source_after": later, "restored": got}
+        if not (floor <= got <= ceiling):
+            mismatches.append(
+                {"table": table, "source": want, "source_after": later, "restored": got}
+            )
     return {
         "equal": not mismatches,
         "tables": rows,
@@ -888,20 +985,76 @@ def compare_row_counts(
 def verify_restore(
     source: dict[str, int],
     restored: dict[str, int],
+    *,
+    source_after: dict[str, int] | None = None,
 ) -> dict[str, Any]:
-    """`compare_row_counts`, but a mismatch RAISES with the tables named."""
-    report = compare_row_counts(source, restored)
+    """`compare_row_counts`, but a mismatch RAISES with the tables named.
+
+    ``source_after`` is the post-dump re-count: pass it whenever the source can
+    be written to (see :func:`compare_row_counts`), so the drill measures what
+    the artifact could legitimately contain rather than what a count taken
+    before the dump saw.
+    """
+    report = compare_row_counts(source, restored, source_after=source_after)
     if not report["equal"]:
-        named = ", ".join(
-            f"{m['table']} (source {m['source']} → restored {m['restored']})"
-            for m in report["mismatches"]
-        )
+        def _named(m: dict[str, Any]) -> str:
+            if m["source"] == m["source_after"]:
+                return f"{m['table']} (source {m['source']} → restored {m['restored']})"
+            return (
+                f"{m['table']} (source {min(m['source'], m['source_after'])}"
+                f"..{max(m['source'], m['source_after'])} → restored {m['restored']})"
+            )
+
+        named = ", ".join(_named(m) for m in report["mismatches"])
         raise RecordRestoreVerifyError(
             f"the restored record does not match its source: {named}. The "
             "artifact is NOT proven restorable.",
             mismatches=report["mismatches"],
         )
     return report
+
+
+def reset_record_tables(dsn: str, *, connect: Connector | None = None) -> None:
+    """EMPTY the record's tables on ``dsn`` — the scratch reset that makes a drill repeatable.
+
+    A successful drill leaves the scratch target populated, and every restore
+    refuses a populated target — so without a reset the documented schedule
+    succeeds exactly ONCE and then reports "the target record is NOT empty"
+    forever, which at the exit-code level is indistinguishable from a real
+    refusal. That is worse than a red: the drill is the only thing bounding the
+    record's loss window, and a job that can never succeed again bounds nothing.
+
+    This is deliberately NOT called by :func:`restore_record_backup` and is opt-in
+    (`--reset-scratch`) in the verb: a truncate that ran automatically would
+    destroy the evidence of the last RED drill, and the operator would have no
+    reason to suspect it.
+
+    ALL the record tables go in ONE ``TRUNCATE`` statement, which is what makes
+    it legal while their foreign keys reference each other. No ``CASCADE``: a
+    cascade would reach into whatever else references the record, and a reset
+    that empties more than the record is exactly the accident this refuses to
+    have. If anything outside the record references it, the statement fails
+    loudly instead.
+    """
+    require_direct_dsn(dsn)
+    sql = "TRUNCATE " + ", ".join(f'public."{_require_table(t)}"' for t in record_tables())
+    connector = connect or _default_connector
+    conn = connector(dsn)
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+        except Exception as e:
+            raise RecordRestoreRefused(
+                f"could not empty the scratch record ({e}) — refusing to restore "
+                "into a target this run could not reset. --reset-scratch only "
+                "truncates the record's own tables on the SCRATCH DSN."
+            ) from e
+        finally:
+            cur.close()
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def run_restore_drill(
@@ -915,6 +1068,7 @@ def run_restore_drill(
     key: bytes | None = None,
     pg_dump: str = "pg_dump",
     pg_restore: str = "pg_restore",
+    reset_scratch: bool = False,
 ) -> dict[str, Any]:
     """Back up the record, restore the artifact into scratch, and prove it matched.
 
@@ -924,31 +1078,53 @@ def run_restore_drill(
     restore, count. It never trusts the writer's own claim about what it wrote:
     the numbers come from the two databases, not from the manifest.
 
+    The comparison is against the counts the ARTIFACT was cut with (the manifest's
+    `row_counts`, taken immediately before the dump) and is bounded above by a
+    re-count taken after the dump: the record is live, so rows committed in that
+    gap are in the artifact and not in the count, and comparing exactly would red
+    a healthy backup every day (see :func:`compare_row_counts`).
+
     Refusals, in the order they matter:
 
     * an **empty source** — every count would match against an empty scratch
-      database, so the drill would report success while proving nothing;
-    * a scratch DSN **equal to the source** — the restore would overwrite the
-      record it is supposed to protect;
+      database, so the drill would report success while proving nothing. This is
+      a REFUSAL (no verdict), never a mismatch: nothing ran;
+    * a scratch DSN **equal to the source** — the restore (and a
+      ``reset_scratch``) would destroy the record it is supposed to protect;
     * a non-empty scratch target (refused inside
-      :func:`restore_record_backup`).
+      :func:`restore_record_backup`) — unless ``reset_scratch`` emptied it first.
     """
     if dsn == scratch_dsn:
         raise RecordRestoreRefused(
             "the drill's scratch DSN is the source DSN — a drill must not restore "
             "over the record it is protecting"
         )
-    source = record_row_counts(dsn, connect=connect)
-    if not any(source.values()):
-        raise RecordRestoreVerifyError(
+    before = record_row_counts(dsn, connect=connect)
+    if not any(before.values()):
+        # A refusal, NOT `RecordRestoreVerifyError`: exit 3 means "the drill ran
+        # and the record disagrees with its source", and paging an operator for a
+        # data-integrity incident when the truth is "you pointed this at an empty
+        # record" is the false incident this class split exists to prevent.
+        raise RecordRestoreRefused(
             "the record is EMPTY — every count would match an empty scratch "
             "database, so this drill would prove nothing. Measure against a record "
-            "that holds data.",
-            mismatches=[],
+            "that holds data."
         )
+    if reset_scratch:
+        reset_record_tables(scratch_dsn, connect=connect)
     manifest = create_record_backup(
         dsn, storage, run=run, connect=connect, workdir=workdir, key=key, pg_dump=pg_dump
     )
+    # The artifact's own counts, taken immediately before `pg_dump` — a strictly
+    # narrower window than the vacuity count above, and the numbers the artifact
+    # actually claims to contain.
+    source = {t: int(n) for t, n in (manifest.get("row_counts") or {}).items()}
+    if not source:
+        raise RecordBackupError(
+            "the manifest carries no row_counts — a drill with nothing to compare "
+            "against is not a verification"
+        )
+    after = record_row_counts(dsn, connect=connect)
     backup_key = f"{RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{DUMP_OBJECT}"
     restored = restore_record_backup(
         storage,
@@ -960,7 +1136,7 @@ def run_restore_drill(
         key=key,
         pg_restore=pg_restore,
     )
-    report = verify_restore(source, restored["restored"])
+    report = verify_restore(source, restored["restored"], source_after=after)
     return {
         "verdict": "RESTORED",
         "backup_id": manifest["backup_id"],
@@ -971,4 +1147,5 @@ def run_restore_drill(
         "row_total": report["row_total"],
         "source": manifest.get("source"),
         "target": restored.get("target"),
+        "scratch_reset": bool(reset_scratch),
     }

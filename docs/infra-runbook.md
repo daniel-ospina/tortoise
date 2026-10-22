@@ -383,7 +383,7 @@ python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN"
 
 # backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
 python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" \
-    --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN"
+    --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN" --reset-scratch
 ```
 
 Exit codes (a scheduler's only signal):
@@ -391,9 +391,14 @@ Exit codes (a scheduler's only signal):
 | code | meaning |
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
-| `1` | the backup/restore **could not be performed** (pg_dump/pg_restore non-zero, transport). The record is NOT backed up |
-| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a populated scratch target, an **empty** record to drill. No verdict was produced — never read as green |
-| `3` | the drill **ran** and the restored record disagrees with its source (or the artifact failed integrity/shape verification) |
+| `1` | the backup/restore **could not be performed** (pg_dump/pg_restore non-zero, transport). The record is NOT backed up — **retry** |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
+| `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
+
+Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
+`TORTOISE_BACKUP_KEY` are fixed by editing a config, so a scheduler reading them as `1` would retry a
+permanent fault forever — minting a fresh artifact (and, on a keyless box, a fresh plaintext dump)
+on every attempt. `1` is reserved for "it was attempted and did not happen — try again".
 
 ⚠️ **A `0` in backup-only mode is not a durability claim.** The verb prints
 `NOT PROVEN RESTORABLE` in that mode on purpose: the posture asks for *"a backup whose artifact is
@@ -417,14 +422,40 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
    `session_replication_role = replica`.)
 5. **The scratch target's record tables are EMPTY.** A restore into a populated record is refused —
    it is not a drill, and `pg_restore` would either fail halfway on a duplicate key or overwrite
-   live data.
+   live data. A successful drill **leaves them populated**, so a *scheduled* drill needs
+   `--reset-scratch` (below); without it the first run succeeds and every later run is refused as
+   "the target record is NOT empty".
+
+### `--reset-scratch` — what makes a scheduled drill repeatable
+
+With `--reset-scratch`, the verb `TRUNCATE`s the record's **own nine tables** on the scratch DSN
+only, in one statement, before restoring. It is opt-in because an automatic truncate would destroy
+the leftover state of a RED drill — the evidence an operator needs — with nothing to show for it. It
+can never touch the record itself: a scratch DSN equal to the source is refused first, and no
+`CASCADE` is used, so the tenancy rows the FKs need (`organizations`, `graphs`) are left alone.
+
+### What the comparison tolerates, and why
+
+The record is a **live** system of record. The artifact is cut from a snapshot taken after the
+manifest's row counts, so rows committed in that gap are legitimately in the artifact and not in the
+count. The drill therefore compares each table against the window `[min(before, after),
+max(before, after)]`, where `after` is a re-count taken once the dump has finished: below the floor is
+**loss** (rows that existed before the dump did not come back), above the ceiling is a restore
+carrying rows the source never had (duplication or a corrupt artifact). Comparing exactly against a
+pre-dump count — the earlier behaviour — red a perfectly healthy backup on any record with continuous
+writes, and a drill that reds every day on a healthy backup removes the one falsifier this exists
+for. The report names a table that moved with both bounds, e.g.
+`journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
 
 ### Retention
 
 A successful run prunes `record-backups/` to the newest **14** artifacts (`--keep`). The prune only
 removes objects whose manifest it could read and whose `format` it recognises; anything it cannot
 attribute is left alone, because a prune that guesses deletes the only copy of something it did not
-understand.
+understand. The prune runs **after** the artifact is durable and is best-effort: a failed listing or
+delete logs a warning and the run still exits `0` (the backup happened) — a prune failure must never
+be reported as "the record is NOT backed up". It runs on exit `0` only, so a persistently red drill
+also stops retention; `--reset-scratch` is what keeps the scheduled drill on the `0` path.
 
 ### Schedule — NOT YET DEPLOYED, and that is the current loss window
 
@@ -433,7 +464,7 @@ and its loss window is whatever an operator's manual run makes it (i.e. unbounde
 is one job, alongside the graph sweep's `registry-backup-cron.yml`:
 
 ```cron
-17 3 * * *   python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN"
+17 3 * * *   python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN" --reset-scratch
 ```
 
 Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
@@ -458,7 +489,7 @@ Falsifiers observed **red** in the same session (a green drill that cannot red p
 | `journal_event` forced short | `the restored record does not match its source: journal_event (source 40 → restored 0)` |
 | one byte flipped in the stored artifact | `artifact integrity check failed (sha256 mismatch)` — **before** `pg_restore` ran |
 | restore target already populated | `the target record is NOT empty (event=1, journal_event=40, …)` |
-| drill over an EMPTY record | `the record is EMPTY — every count would match an empty scratch database` |
+| drill over an EMPTY record | `the record is EMPTY — every count would match an empty scratch database` (exit `2`, no verdict: nothing ran) |
 | a schema-carrying dump restored into a migrated target | `pg_restore: error: … relation "node_identity" already exists` — the measured reason the artifact is data-only |
 | a target without the tenancy parents | `violates foreign key constraint "node_identity_org_id_fkey"` — the fail-closed direction |
 

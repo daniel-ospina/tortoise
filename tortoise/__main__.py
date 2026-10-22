@@ -810,10 +810,17 @@ def _cmd_record_backup(args):
       ``1`` the backup/restore could not be performed (pg_dump/pg_restore
           non-zero, a transport failure) — the record is NOT backed up
       ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
-          a pooler DSN, a populated scratch target, an empty record to drill, an
-          artifact whose integrity or shape pin does not verify (no verdict
-          was produced — and NOT a green one)
+          a pooler DSN, `TORTOISE_BACKUP_KEY` absent or malformed, a populated
+          scratch target, an empty record to drill, an artifact whose integrity
+          or shape pin does not verify (no verdict was produced — and NOT a
+          green one), or a ``--keep`` that would delete every artifact
       ``3`` the drill RAN and the restored record DISAGREES with its source
+
+    ``2`` is also the code for every PERMANENT configuration fault, deliberately:
+    the record's own preconditions (a direct DSN, `psycopg2`, the backup key) are
+    fixed by editing config, so a scheduler that read them as ``1`` would retry
+    them forever and mint a fresh artifact on each attempt. A transport failure
+    and a broken dump stay ``1`` — the one class where "try again" is the answer.
 
     ``2`` also covers a USAGE error, exactly as ``record-reconcile`` documents:
     argparse's own ``error()`` exits ``2``. The two are not separated on purpose
@@ -824,6 +831,7 @@ def _cmd_record_backup(args):
     from tortoise.record_backup import (
         RECORD_BACKUP_KEEP,
         RecordBackupError,
+        RecordBackupUnavailable,
         RecordRestoreRefused,
         RecordRestoreVerifyError,
         create_record_backup,
@@ -860,10 +868,24 @@ def _cmd_record_backup(args):
         return 2
 
     keep = args.keep if args.keep is not None else RECORD_BACKUP_KEEP
+    if args.reset_scratch and not args.scratch_dsn:
+        # A silent no-op is how an operator believes the scratch target was
+        # emptied and finds out from the next run's refusal instead.
+        print("Error: --reset-scratch only applies to drill mode — it empties "
+              "the --scratch-dsn target. Nothing was backed up.", file=sys.stderr)
+        return 2
+    if keep < 1:
+        # Validated BEFORE the run: the flag's own help says `--keep 0` is
+        # refused, and a refusal that reached the operator as a traceback after a
+        # successful upload would read as "the backup failed".
+        print(f"Error: --keep must be >= 1, got {keep} — a prune that keeps "
+              f"nothing is data loss. Nothing was backed up.", file=sys.stderr)
+        return 2
     try:
         if args.scratch_dsn:
             report = run_restore_drill(dsn, storage, args.scratch_dsn,
-                                       workdir=args.workdir)
+                                       workdir=args.workdir,
+                                       reset_scratch=args.reset_scratch)
         else:
             report = create_record_backup(dsn, storage, workdir=args.workdir)
     except RecordRestoreVerifyError as e:
@@ -877,11 +899,28 @@ def _cmd_record_backup(args):
         # must not read it as "the record is backed up".
         print(f"Error: {e} — no verdict was produced.", file=sys.stderr)
         return 2
+    except RecordBackupUnavailable as e:
+        # A PERMANENT configuration fault (pooler DSN, psycopg2 absent, missing
+        # key): `2` = unconfigured. `1` would tell a scheduler to retry a fault
+        # only a config edit can clear.
+        print(f"Error: {e} — nothing was backed up, and no verdict was produced.",
+              file=sys.stderr)
+        return 2
     except RecordBackupError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    deleted = prune_record_backups(storage, keep=keep)
+    # Retention is BEST-EFFORT and runs AFTER the artifact is durable. A prune
+    # failure (a listing error, a transient delete error) must never turn a
+    # published, verified backup into "the record is NOT backed up" — exit 1 is
+    # that claim, and it is false here.
+    deleted: list[str] = []
+    try:
+        deleted = prune_record_backups(storage, keep=keep)
+    except Exception as e:
+        print(f"Warning: the backup was published, but the retention prune "
+              f"failed ({e}) — nothing was deleted, and `record-backups/` will "
+              f"grow past --keep until the next successful run.", file=sys.stderr)
     if args.json:
         print(_json.dumps({**report, "pruned": deleted}, indent=2, sort_keys=True))
         return 0
@@ -890,7 +929,9 @@ def _cmd_record_backup(args):
               f"scratch and matched its source "
               f"({report['row_total']} rows across {len(report['tables'])} table(s))")
         for table, counts in report["tables"].items():
-            print(f"  {table}: source={counts['source']} restored={counts['restored']}")
+            moved = ("" if counts.get("source_after", counts["source"]) == counts["source"]
+                     else f" (source moved to {counts['source_after']} by the end of the dump)")
+            print(f"  {table}: source={counts['source']} restored={counts['restored']}{moved}")
     else:
         total = sum(report.get("row_counts", {}).values())
         print(f"✓ record backup {report['backup_id']} published "
@@ -11268,14 +11309,25 @@ def main(argv: list[str] | None = None) -> int:
                          "restore into a populated record is refused. Without "
                          "this flag the verb backs up only, and says the "
                          "artifact is NOT proven restorable")
+    rb.add_argument("--reset-scratch", action="store_true",
+                    help="Drill mode: TRUNCATE the record's tables on the "
+                         "--scratch-dsn target before restoring. A successful "
+                         "drill leaves the scratch target populated, and every "
+                         "restore refuses a populated target — so a scheduled "
+                         "drill needs this to be repeatable. It only ever "
+                         "touches the SCRATCH DSN (refused if equal to the "
+                         "record), and only the record's own tables")
     rb.add_argument("--keep", type=int, default=None,
                     help="Artifacts to retain after a successful run "
                          "(default: 14). `--keep 0` is refused: a prune that "
                          "keeps nothing is data loss")
     rb.add_argument("--workdir", default=None,
                     help="Directory for the plaintext dump while it is being "
-                         "encrypted/restored (default: the system temp dir; the "
-                         "file is 0600 and removed on every path)")
+                         "encrypted/restored (default: the system temp dir). "
+                         "Each file is created inside a 0700 mkdtemp directory "
+                         "and removed on every path; the restored payload is "
+                         "written 0600, the backup dump inherits the process "
+                         "umask within that 0700 directory")
     rb.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
