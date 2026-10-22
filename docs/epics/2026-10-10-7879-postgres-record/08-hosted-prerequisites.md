@@ -123,7 +123,7 @@ per journal record type, totality as a registry property, idempotence by stateme
 |---|---|
 | the seam | `tortoise/record_writer.py:920` (`write_live_record`), `:654` (`_default_connect`) |
 | arming surface | `tortoise/record_writer.py:232` — `TORTOISE_RECORD_DSN`, **default OFF** |
-| production call sites | `tortoise/api.py:179` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
+| production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py:939`, `tortoise/sdk.py` (`_emit_event`) |
 | tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py:110`; by-value on the hosted REST lane |
 
 **Measured (§G, run 2): the SDK's public capture path wrote layers 1–3 into a real Postgres** — layer 4 is views, and

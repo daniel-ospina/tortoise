@@ -7,14 +7,16 @@
 --
 --   * `hosted_api._capture_session_impl` — `_capture_redactions =
 --     _capture_write["redacted_total"]`, carried on the capture receipt as
---     `"capture_redactions": <int>`; both sites are inside that one function
---     and are cited by SYMBOL, which `STORAGE-ARCHITECTURE.md` §11.1 makes the
---     authoritative form — a `file.py:NNNN` here drifted by 67 lines in the
---     merge that carried this migration to its landing base;
---   * `session_schema` — an additive INTEGER property on the Session lane
---     (`tortoise/session_schema.py:157,201`);
---   * `security.redact` — the count it reports ("records on the Session
---     (`capture_redactions`)", `tortoise/security.py:1215`).
+--     `"capture_redactions": <int>`; both sites are inside that one function;
+--   * `session_schema.SESSION_WRITERS` — an additive INTEGER property on the
+--     Session lane;
+--   * `security.redact_secrets` — the count it reports ("records on the
+--     Session (`capture_redactions`)").
+--
+-- Every producer above is cited by SYMBOL, never by `file.py:NNNN`: the symbol
+-- is the authoritative form (`STORAGE-ARCHITECTURE.md` §13), and this file is
+-- append-only, so a line number written here would be permanent while the merge
+-- that carried it to its landing base had already moved `hosted_api` by 67 lines.
 --
 -- Measured on a throwaway `postgres:16-alpine` carrying only the record
 -- migrations, through the PRODUCTION path (`record_writer.write_live_record`):
