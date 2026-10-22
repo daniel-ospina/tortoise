@@ -957,6 +957,14 @@ SOURCE_PATTERNS = {
              # (surfaces=[], full=False) and that test never runs on the PR
              # that owns the launch-gate number (the #3616 pattern).
              "tools/capture_cost_report.py",
+             # #9077 (E4): the operator-receipt EVIDENCE checker. `tools/` is in
+             # NON_PYTHON_PREFIXES, so without this entry a change to the
+             # checker itself selects no surface of its own and its regression
+             # suite (`eval/write_path/test_write_path_operator_receipt.py`, 62
+             # dict-fixture tests) never runs on the PR that weakens the gate —
+             # the same #1349/#2938/#3616 silent-drop class as the entries
+             # above. The suite is registered on `eval` below.
+             "tools/operator_receipt_check.py",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
@@ -2003,7 +2011,7 @@ TOOL_CARVEOUTS = (
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
     # #5052/#9487 review P1: the dispatch-time CLAIM on the graph
-    # (tools/work_claim.py) owns tests/test_work_claim.py — the 55 hermetic arms
+    # (tools/work_claim.py) owns tests/test_work_claim.py — the 87 hermetic arms
     # that pin the fail-closed refusal contract (`acquire`/`status`/`release`
     # refuse an unset store, a hosted-only target, an embedded target, a
     # box-local target, an unreadable store and a failed read-back) plus the
@@ -2011,7 +2019,7 @@ TOOL_CARVEOUTS = (
     # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so
     # a tool-only edit came back with `changed=[]`, select() took the docs-only
     # early return — which bypasses the `if not matched: matched.add("core")`
-    # fallback entirely — and NOT ONE of the 55 arms ran on the most likely
+    # fallback entirely — and NOT ONE of the 87 arms ran on the most likely
     # change to weaken the dispatch gate. Registering tests/test_work_claim.py
     # under `core` in ci-surfaces.yml does NOT cover this: it applies to edits of
     # the TEST file, not of the tool (measured before this entry:
@@ -2019,7 +2027,16 @@ TOOL_CARVEOUTS = (
     # guard absent). Fail-closed (FULL matrix) is the safe default for a tool
     # whose answer drives dispatch, exactly like the two entries above.
     # Pinned by test_ci_selection.test_work_claim_tool_change_fails_closed_to_full.
-    "tools/work_claim.py",
+    #
+    # PREFIX, not the exact file (review of #9487 P2): `_keep_changed` matches with
+    # `startswith`, so the exact `tools/work_claim.py` string failed closed for that ONE path
+    # and nothing else — a rename, or the store split out as `tools/work_claim_store.py`,
+    # re-opened the same silent drop with no failing test (measured: `tools/work_claim_extra.py`
+    # → surfaces=[], full=False, tier-1 smoke). The store seam (`SDKClaimStore`,
+    # `_require_store_configured`) is the half whose breakage must never ship unreviewed, so
+    # the carve-out covers the family. Over-matching costs extra CI; under-matching ships a
+    # dispatch gate with no arms.
+    "tools/work_claim",
     # #3554: the `:Session` writer inventory + D9 retrofit instrument
     # (tools/session_retrofit_audit.py) owns
     # tests/test_session_schema_3554.py. Same silent-drop class as the

@@ -61,8 +61,8 @@
 # ⛔ There is deliberately NO `paths:`/`paths-ignore:` filter here. The triggers
 # are `issues`/`issue_comment`, which carry no path, and a path-filtered GATE
 # never runs — a skipped check reads as a pass to the rail. The same reason
-# keeps this workflow's `concurrency:` keyed PER UNIT (below) rather than
-# collapsed globally.
+# keeps this workflow's `concurrency:` keyed PER ISSUE (below) rather than
+# collapsed to one global group.
 #
 # The job runs on a VERSION-PINNED hosted label, not `ubuntu-latest`. The
 # self-hosted runners on this repo also advertise `ubuntu-latest`
@@ -111,31 +111,70 @@ permissions:
   contents: read
   issues: write
 
-# Collapse duplicate runs, keyed PER UNIT OF WORK so one issue can never cancel
-# another issue's gate. `issue_comment` is keyed by COMMENT id DELIBERATELY: the
-# comment gate annotates THAT comment (a reply carrying its `#issuecomment-<id>`
-# link), and a cancelled run posts nothing — so keying that arm by issue would
-# silently drop a verdict it would otherwise have posted (a fail-open).
-# `issues` and `workflow_dispatch` are keyed by ISSUE number, so re-running the
-# documented recovery path for one issue supersedes its own previous attempt.
+# Collapse duplicate runs, keyed PER ISSUE, never per comment (#9577).
 # `github.run_id` is the guaranteed-unique fallback for a dispatch with no
 # issue_number.
 #
-# ⛔ NOT a single global group. It was proposed for #9115 and refused: with one
-# group, a burst of comments cancels every run but the newest, and each of the
-# cancelled ones owed an annotation — the flood would stop being VISIBLE and
-# become a batch of silently ungated findings. Bounding the run COUNT is a
-# different change (batching/coalescing with a catch-up sweep); it is recorded
-# on #9115 and is not smuggled in here.
+# With ONE GLOBAL group (proposed and refused on #9115) a burst of comments
+# cancels every run but the newest. That was the argument the OLD key was
+# defended with, and it was wrong about what the old key did: the old key was
+# `comment.id || issue.number || inputs.issue_number || run_id`, so on the
+# COMMENT arm — the one that flooded — a comment id is unique per comment, every
+# comment landed in its own group, and `cancel-in-progress` cancelled NOTHING.
+# (Its other two arms did coalesce per issue: a dispatch resolved to the issue
+# number, so re-running the recovery path for one issue already superseded
+# itself. The flood was entirely the comment arm.) A key that is unique per
+# event bounds nothing while reading like a bound (#9577: 38 of 133 queued runs,
+# 0 of 28 PRs mergeable). The rejection of a global group still stands — but it
+# is a different design, not a defence of the old key. What `cancel-in-progress`
+# does now is fire, on the issue, which is the bound the `issues` and
+# `workflow_dispatch` arms already had.
+#
+# THE TRADE, STATED — and it is a REAL LOSS (#9577 replaces #9115's opposite
+# reasoning; the cost below is why #9115 reasoned the other way):
+#   * a second comment on the SAME issue cancels the first one's run, and a
+#     cancelled run posts nothing — that comment never gets a verdict. It is NOT
+#     recoverable in place: `workflow_dispatch -f issue_number=<N>` re-gates the
+#     issue BODY, it has no `comment_id` input, and `issue_comment` is
+#     `types: [created]` only, so nothing re-checks that comment. What a lane can
+#     do is post a NEW comment, which gets a verdict of its own — the original
+#     one stays unreviewed. (The comment arm's own annotation is a step ahead of
+#     this: it offers "replace its provenance line" as an option, which the
+#     `created`-only trigger never re-checks — only its "post a corrected
+#     comment" half is actionable.)
+#   * the comment arm and the ISSUE-BODY arm now SHARE a group. Under the old key
+#     `comment.id` was truthy on comment events, so the two arms never collided;
+#     now a comment arriving mid-flight cancels the body gate, which owns the
+#     issue-level `provenance-stale` label — and the documented recovery dispatch
+#     itself shares the group, so chatter can cancel the recovery too.
+# Accepted anyway: that loss is bounded to ONE issue's own comment stream, while
+# per-comment keying was unbounded ACROSS THE FLEET and starved the REQUIRED
+# `python-ci-gate` — 0 of 28 PRs mergeable is the worse failure. Do not read this
+# as "visible": nothing alerts on a cancelled run's owed verdict (the only trace
+# is a `cancelled` conclusion and an unannotated comment), so the loss is silent
+# in exactly the way #9115 feared — it is ACCEPTED, not mitigated. Bounding the
+# run COUNT across issues without dropping verdicts is #9595's separate change
+# (batching/coalescing with a catch-up sweep); it is not smuggled in here. That
+# residue USED to be cited as "#9115's separate change" — but #9115 is CLOSED as
+# COMPLETED (2026-10-19, while its own last comment recorded the flood
+# recurring), and a closed issue is not a tracking home, so the work had none.
+#
+# `comment.id` is still READ by this workflow (`COMMENT_ID` fetches that
+# comment's body by id) — it just must never be part of the concurrency KEY.
+# `tests/test_reporting_workflow_concurrency.py`
+# `test_finding_provenance_concurrency_group_never_keys_on_a_comment` fails if it
+# comes back, at run level or on any job.
+#
+# ⛔ STILL not a single global group: one issue must never cancel another's gate.
 concurrency:
-  group: finding-provenance-${{ github.event.comment.id || github.event.issue.number || github.event.inputs.issue_number || github.run_id }}
+  group: finding-provenance-${{ github.event.issue.number || github.event.inputs.issue_number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   # THE CHEAP HALF. This job only ROUTES — it never annotates, never labels and
   # never posts, so its verdict cannot be lost by a supersede (the workflow's
-  # per-unit `concurrency:` still covers the pair). It needs no history, hence
-  # `fetch-depth: 1`: that is the whole point of the split (#9115).
+  # per-issue `concurrency:` group covers both jobs of one run). It needs no
+  # history, hence `fetch-depth: 1`: that is the whole point of the split (#9115).
   classify:
     # Version-pinned hosted label — see the COST note above. NOT `ubuntu-latest`
     # (the self-hosted pool advertises that too), and never `self-hosted`.
@@ -222,9 +261,29 @@ jobs:
           fi
 
   # THE EXPENSIVE HALF — full history, and it only runs for a body that IS a
-  # finding. Everything that posts (label, annotation, reply) lives here, so a
-  # superseded run can never leave a half-applied verdict: the job is either
-  # skipped (not a finding) or it runs to completion and annotates.
+  # finding. Everything that posts (label, annotation, reply) lives here.
+  #
+  # WHAT A CANCEL LOSES — PER ARM, because the two arms differ (#9577 review).
+  # With `cancel-in-progress` finally FIRING (#9577) a mid-flight cancel lands
+  # in one of two windows, and only ONE of them leaves a visible trace:
+  #   * ISSUE-BODY arm — the recoverable one. Only this arm applies the
+  #     issue-level `provenance-stale` label (further down), so a comment
+  #     arriving mid-flight can cancel the body gate BETWEEN the label edit and
+  #     the reply, leaving the label applied with no annotation explaining it.
+  #     That is a live state, not a scar: it fails CLOSED (a visible label), and
+  #     the documented `workflow_dispatch -f issue_number=` re-run re-gates the
+  #     body and clears it.
+  #   * COMMENT arm — NOT visible and NOT recoverable in place. This arm has no
+  #     label edit at all (#4732 keeps the issue-level label for the body gate),
+  #     so a cancel anywhere before the reply posts nothing and labels nothing:
+  #     that comment's verdict is silently dropped, and no dispatch can re-run
+  #     it (there is no `comment_id` input and `issue_comment` is `created`-only).
+  #     The lane's only recovery is to post a NEW comment — a new group member
+  #     with a verdict of its own; the original stays unreviewed.
+  # A cancel landing BEFORE the label step is therefore silent for BOTH arms.
+  # Do not read the body arm's label as a general fail-closed guarantee for this
+  # workflow: the run-level trade block at the top states the loss plainly, and
+  # it is ACCEPTED, not mitigated.
   provenance:
     needs: classify
     if: needs.classify.outputs.is_finding == 'true'
