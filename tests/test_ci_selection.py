@@ -2078,8 +2078,15 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
     # no SOURCE_PATTERNS row, so before the CORE_ALSO entries a change to either
     # side ALONE selected NO surface: the pin's own claim ("editing either side
     # alone turns the test red") was untestable in CI, and the edit landed with
-    # the pin never running. Mutation check: removing either CORE_ALSO entry
-    # fails the corresponding arm below (surfaces == []).
+    # the pin never running. Mutation check: removing ANY CORE_ALSO entry for a
+    # path in this tuple fails its arm below (surfaces == []).
+    #
+    # #9638 review P1: the doc arm was DELETED in the same PR that inserted the
+    # #9555/R7 migration entry over the doc's `CORE_ALSO` slot — so the comment
+    # above kept asserting a doc arm that no longer existed, and a
+    # placement-doc-only change (the edit that desynchronises the pin from the
+    # table) ran no guard at all. The tuple is a set of INDEPENDENTLY pinned
+    # paths: a new entry is added beside the existing ones, never on top of one.
     for changed in (
         "supabase/migrations/20261012000003_record_epistemic.sql",
         # #8263: the FORWARD record migration sorts outside the `2026101200000`
@@ -2099,6 +2106,11 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # column set, `test_record_schema_placement.py` pins the record schema
         # against the placement table — plus the narrative suite itself.
         "supabase/migrations/20261023000001_record_session_narrative.sql",
+        # The DOC side of the #7968 pair, restated after #9638 review P1 deleted
+        # it: `test_record_schema_placement.py` reads this file's table, so a
+        # docs-only edit must select `core` too. Measured on the pre-fix head:
+        # `_sel([<this path>])` -> surfaces=[], full=False, both readers ABSENT.
+        "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)
