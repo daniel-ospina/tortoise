@@ -153,6 +153,154 @@ class TestUpdatePointRefuses:
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
 
 
+class TestUpdateEntityRefuses:
+    """#9591 review P1: ``update_entity`` is the OTHER update door onto a Point.
+
+    Measured at the first head: ``update_entity(p["id"],
+    pointKind='\u2003statement\u2003')`` stored the padded kind, the gate answered
+    ``[]`` and a gated run stamped the node — the same escape, one verb over. It
+    is tenant-reachable (``tortoise_update_entity`` splats props, and
+    ``pointKind`` is not server-managed) and ``pipeline.py`` calls it as the
+    generic entity write, so it must be gated, not merely documented.
+    """
+
+    @pytest.mark.parametrize("kwargs", [
+        {"pointKind": "\u2003statement\u2003"},
+        {"point_kind": "\u2003statement\u2003"},
+        {"props": {"pointKind": "\u2003statement\u2003"}},
+        {"pointKind": "statement\u200b"},
+    ])
+    def test_update_entity_refuses_and_writes_nothing(self, sdk, kwargs):
+        p = sdk.create_point("statement", "Victim", status="live")
+        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+            sdk.update_entity(p["id"], **kwargs)
+        assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
+        assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
+
+    def test_update_entity_still_writes_a_clean_kind(self, sdk):
+        p = sdk.create_point("statement", "Victim", status="live")
+        sdk.update_entity(p["id"], pointKind="observation")
+        assert _kinds_in_graph(sdk, p["id"]) == ["observation"]
+
+
+class TestTheJournalSeamRefuses:
+    """#9591 review P1: ``EventAPI`` persists ``pointKind`` verbatim.
+
+    ``EventAPI`` is the write seam every pipeline uses (the v1 extractor,
+    ``ingest``, ``docs_miner``, ``mining``, the CLI) and it already hosts the
+    #5475 kind gate for exactly this reason. Measured at the first head:
+    ``api.add_point(..., pointKind='statement\u2003')`` stored the padded kind and
+    a gated run stamped it. The refusal must come BEFORE the ``log.append``
+    commit point, or the record is replayed faithfully.
+    """
+
+    def _api(self, tmp_path):
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        return EventAPI(EventLog(tmp_path / "events.jsonl"),
+                        initiated_by="extractor", agent_id="test")
+
+    def test_add_point_refuses_a_padded_kind_and_writes_nothing(self, tmp_path):
+        api = self._api(tmp_path)
+        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+            api.add_point("claim", {"source": "test"},
+                          pointKind="statement\u2003")
+        assert api.log.read_all() == []
+
+    def test_add_point_still_writes_a_clean_kind(self, tmp_path):
+        api = self._api(tmp_path)
+        api.add_point("claim", {"source": "test"}, pointKind="statement")
+        assert [e["type"] for e in api.log.read_all()] == ["PointAdded"]
+
+    def test_a_projection_less_lane_is_refused_too(self, tmp_path):
+        """The refusal is a pure string predicate — no graph handle needed."""
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+        api = EventAPI(EventLog(tmp_path / "events.jsonl"),
+                       initiated_by="extractor", agent_id="test",
+                       projection=None)
+        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+            api.add_point("claim", {"source": "test"},
+                          pointKind="\ufeffstatement")
+        assert api.log.read_all() == []
+
+
+class TestTheRefusalIsActionable:
+    """#9591 review P2: the message's own suggestion must be a value the door
+    ACCEPTS — ``str.strip()`` cannot remove a ``Cf`` mark, so the first cut told
+    the caller to pass the identical offending value back."""
+
+    @pytest.mark.parametrize("kind", [
+        "\u2003statement\u2003",   # Zs — strip() would have worked
+        "\tstatement\t",           # Cc
+        "\ufeffstatement",         # Cf — strip() does NOT touch it
+        "state\u200bment",          # interior Cf
+        "statement\u200b",
+    ])
+    def test_the_suggested_fix_is_itself_accepted(self, sdk, kind):
+        from tortoise.sdk import _kind_invisible_char
+        with pytest.raises(ValueError) as exc:
+            sdk.create_point(kind, "x", status="live")
+        message = str(exc.value)
+        suggested = message.rsplit("e.g. ", 1)[1].rstrip(".")
+        assert suggested.startswith("'") and suggested.endswith("'")
+        clean = suggested[1:-1]
+        # EXACT, not merely "accepted": the first cut interpolated ``repr()``,
+        # whose escaping turns a ``Cf`` mark into the six-character backslash
+        # form — a DIFFERENT string the door accepts and stores under a name the
+        # caller never had (`'\\ufeffstatement'` measures as accepted).
+        assert clean == "statement", (
+            f"the refusal suggests {clean!r}, not the caller's kind minus the "
+            "offending character")
+        assert _kind_invisible_char(clean) is None
+        # …and the suggestion really writes.
+        assert sdk.create_point(clean, "fixed", status="live")["id"]
+
+    def test_an_all_invisible_kind_says_supply_a_name(self, sdk):
+        with pytest.raises(ValueError, match="only invisible characters"):
+            sdk.create_point("\u2003\u2003", "x", status="live")
+
+
+class TestTheModelProducerKeepsItsOwnOutputInContract:
+    """#9287: the write door refuses, so the LLM producer must clean its kind.
+
+    A refusal at the seam would abort an entire section's extraction because a
+    model emitted a stray em-space; storing it verbatim is the fail-open. The
+    producer therefore canonicalises (with a warning) before the door sees it.
+    """
+
+    def test_a_padded_model_kind_is_cleaned_with_a_warning(self):
+        from tortoise.sdk import _clean_model_kind
+        assert _clean_model_kind("\u2003statement\u2003", door="extractor") \
+            == "statement"
+        assert _clean_model_kind("\ufeffstatement", door="extractor") \
+            == "statement"
+        assert _clean_model_kind("state\u200bment", door="extractor") \
+            == "statement"
+
+    def test_a_clean_model_kind_is_untouched(self):
+        from tortoise.sdk import _clean_model_kind
+        assert _clean_model_kind("statement") == "statement"
+        assert _clean_model_kind("jobToBeDone") == "jobToBeDone"
+        assert _clean_model_kind("technical debt") == "technical debt"
+
+    def test_a_model_kind_with_nothing_left_falls_back(self):
+        from tortoise.sdk import _clean_model_kind
+        assert _clean_model_kind("\u2003", default="statement") == "statement"
+        assert _clean_model_kind("", default="statement") == "statement"
+        assert _clean_model_kind(None, default="statement") == "statement"
+
+    def test_the_v1_extractor_parser_cleans_the_model_kind(self):
+        """The producer half is wired at the parse site, not only available."""
+        import inspect
+        from tortoise import extractor
+        src = inspect.getsource(extractor)
+        assert "_clean_model_kind(" in src, (
+            "the v1 extractor no longer cleans the model's pointKind — a stray "
+            "invisible character would abort the extraction at the write door")
+
+
+
 class TestLegitimateKindsStillWrite:
     """The refusal must not narrow the open vocabulary it guards."""
 

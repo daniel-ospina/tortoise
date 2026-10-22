@@ -494,6 +494,49 @@ def _kind_invisible_char(kind: str) -> str | None:
     return None
 
 
+def _kind_suggestion(kind: str) -> str:
+    """``kind`` with its non-identifier characters removed, for the message.
+
+    One home with ``_kind_invisible_char``: the same categories and the same
+    interior-space exemption, so the value a refusal SUGGESTS is a value the
+    door accepts — a suggestion the caller cannot use is the loop #9287's
+    review found (``strip()`` cannot remove a ``Cf`` mark).
+    """
+    out = "".join(
+        ch for ch in kind
+        if ch == " " or unicodedata.category(ch) not in _KIND_NON_IDENTIFIER_CATEGORIES
+    )
+    return out.strip()
+
+
+def _clean_model_kind(value, *, default: str = "statement",
+                      door: str = "extractor") -> str:
+    """#9287: canonicalise a kind an LLM produced, BEFORE a write door sees it.
+
+    Model output is UNTRUSTED DATA, not an authored spelling, and the two write
+    seams it reaches are opposites: the SDK doors / the journal seam REFUSE an
+    invisible-character kind (the durable guarantee), while a capture must not
+    abort because a model emitted a stray em-space or zero-width mark inside
+    its JSON. So the producer keeps its own output in contract here — cleaned
+    once, with a WARNING naming the value — instead of either storing the
+    padulation (which the calibration gate cannot classify while EP consumes
+    the node) or failing the whole extraction.
+
+    An empty/blank kind falls back to ``default`` for the same reason: nothing
+    a model returns should be able to mint a kind the gate cannot demand
+    (#9592 is the gate-side half of that).
+    """
+    kind = "" if value is None else str(value)
+    if kind and _kind_invisible_char(kind) is None:
+        return kind
+    fixed = _kind_suggestion(kind) or default
+    _logger.warning(
+        "%s: model returned pointKind %r — using %r (#9287)",
+        door, kind, fixed,
+    )
+    return fixed
+
+
 def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
     """#9287: refuse a kind the calibration gate cannot classify.
 
@@ -523,12 +566,28 @@ def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
     bad = _kind_invisible_char(value)
     if bad is None:
         return
+    # The suggestion is derived from the refusal itself, never ``value.strip()``:
+    # ``strip()`` removes WHITESPACE only, so for the ``Cf`` half of the family
+    # (ZWSP, BOM, soft hyphen, ZWNJ/ZWJ) it returns the value UNCHANGED and a
+    # caller who follows the message verbatim loops on the identical error
+    # (measured: ``'\ufeffstatement'.strip() == '\ufeffstatement'``).
+    suggestion = _kind_suggestion(value)
+    # ⛔ NOT ``{suggestion!r}``: ``repr`` ESCAPES a ``Cf`` character into its
+    # six-character backslash form, so the message would hand the caller a
+    # DIFFERENT string (`'\\ufeffstatement'` — literally backslash-u-…) that the
+    # door happily accepts and stores under a name they never had. The suggestion
+    # is interpolated raw, inside quotes, so it is the value itself.
+    tail = (
+        f"Pass the kind without the {bad!r} — e.g. '{suggestion}'."
+        if suggestion
+        else "The kind is only invisible characters — supply a name."
+    )
     raise ValueError(
         f"{door}: {prop} must be an identifier, but {value!r} carries "
         f"{bad!r} (U+{ord(bad):04X}). A kind is matched by exact membership, "
         "so this spelling is a DIFFERENT kind: the calibration gate would not "
-        "demand a prior for it while EP still consumed and stamped the node "
-        f"(#9287). Pass the kind without the {bad!r} — e.g. {value.strip()!r}."
+        f"demand a prior for it while EP still consumed and stamped the node "
+        f"(#9287). {tail}"
     )
 
 
@@ -31943,6 +32002,10 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9287: the SAME funnel is a write onto a ``:Point`` when the label is
+        # one, so the invisible-kind refusal the point doors apply runs here too
+        # — one predicate, every door (#9591 review, P1).
+        self._refuse_invisible_point_kinds(props, door="create_entity")
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -32555,6 +32618,14 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
+        # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
+        # ``_update_entity``) and it writes caller props with a live
+        # ``SET n += $p`` — measured at #9591's head: ``update_entity(p["id"],
+        # pointKind='\u2003statement\u2003')`` stored the padded kind and a
+        # ``require_calibration=True`` run stamped the node. Gated here, before
+        # the write, by the SAME predicate as ``update_point``.
+        self._refuse_invisible_point_kinds(props, door="update_entity")
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in

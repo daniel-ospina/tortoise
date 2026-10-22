@@ -790,11 +790,19 @@ class _DocumentPointStage:
             }),
         )
         raw = _json(out).get("points", [])
+        # #9287: the model's ``pointKind`` is UNTRUSTED DATA. Storing it verbatim
+        # is what let a stray em-space/zero-width mark mint a point the EP
+        # calibration gate cannot classify while EP consumed and stamped it;
+        # refusing it at the write door instead would abort this whole section's
+        # extraction. So the producer keeps its own output in contract — cleaned
+        # once here, with a warning — and the door remains the guarantee.
         if isinstance(raw, list):
+            from .sdk import _clean_model_kind
             return [
                 {
                     "content": str(r.get("content", "")),
-                    "pointKind": str(r.get("pointKind", "statement")),
+                    "pointKind": _clean_model_kind(
+                        r.get("pointKind", "statement"), door="extractor"),
                     "aboutEntities": list(r.get("aboutEntities", [])),
                     "confidence": float(r.get("confidence", 0.5)),
                 }

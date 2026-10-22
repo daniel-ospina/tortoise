@@ -112,7 +112,17 @@ class EventAPI:
         """
         g = getattr(getattr(self, "projection", None), "g", None)
         if g is None:
+            # ⛔ #9287: the INVISIBLE-KIND refusal below is NOT conditional on a
+            # graph handle — it is a pure string predicate, and a
+            # ``projection``-less lane folds the record through the same
+            # ``_upsert_point`` later (or replays it), so it must be refused
+            # here too. Only the APPROVAL-set gate abstains (it needs a read).
+            self._refuse_invisible_point_kinds_in_payload(payload)
             return
+        # #9287: same ordering rule as the approval gate below — BEFORE the
+        # ``log.append`` commit point in ``_emit``, so a refused payload leaves
+        # nothing to replay.
+        self._refuse_invisible_point_kinds_in_payload(payload)
         from .pack_state import (
             graph_approval_namespaces,
             payload_names_pack,
@@ -122,6 +132,39 @@ class EventAPI:
             return
         refuse_unapproved_kinds_in_payload(
             payload, graph_approval_namespaces(g), spells=spells)
+
+    def _refuse_invisible_point_kinds_in_payload(self, payload: dict) -> None:
+        """#9287: this seam persists ``pointKind`` verbatim — refuse padding.
+
+        ``EventAPI`` is the write seam every pipeline uses (the v1 extractor,
+        ``ingest``, ``docs_miner``, ``mining``, the CLI), and ``add_point``
+        splats the caller's ``fields`` into the journal record, which
+        ``projection._upsert_point`` folds with
+        ``n.pointKind = coalesce($pk, n.pointKind)``. It already hosts the
+        #5475 kind gate for exactly this reason, and it had no invisible-kind
+        arm — measured at #9591's head: ``api.add_point(..., pointKind=
+        'statement\\u2003')`` stored the padded kind, the gate answered ``[]``,
+        and a ``require_calibration=True`` run stamped it.
+
+        The input here is not always a human: ``extractor.py`` builds the kind
+        from the model's JSON (``str(r.get("pointKind", "statement"))``) and
+        passes it straight to ``add_point``, so a stray em-space/NBSP in model
+        output mints the fail-open shape with no caller intent — a refusal that
+        names the record is the only thing that can surface it.
+
+        ONE predicate with the SDK doors (``_kind_invisible_char``), never a
+        re-spelling of the categories. The payload walk is ``pack_state``'s
+        (``kind_spellings_in_payload``) — the same miner the approval gate
+        reads — filtered to the canonical ``pointKind``: entity kinds are a
+        different gate with its own blast radius, and this issue is the
+        calibration gate's.
+        """
+        from .pack_state import kind_spellings_in_payload
+        from .sdk import _refuse_invisible_kind
+        for kind_prop, value in kind_spellings_in_payload(payload):
+            if kind_prop == "pointKind":
+                _refuse_invisible_kind("pointKind", value,
+                                       door="EventAPI.add_point")
 
     def _emit(self, type_: str, *, corrects=None, actor: str | None = None,
               **payload) -> dict:
