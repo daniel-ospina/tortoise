@@ -1583,6 +1583,13 @@ def _pinned_install_problem(commands: list[str], pin: str) -> str | None:
     return None
 
 
+# Keys an `actions/checkout` `with:` may carry: `ref` pins the tree, and the rest
+# cannot change WHICH tree lands in the workspace (they change fetch depth, tags,
+# credentials, LFS, cleaning or submodules — all orthogonal to what ruff reads).
+_CHECKOUT_WITH_KEYS = frozenset(
+    {"ref", "fetch-depth", "fetch-tags", "persist-credentials", "lfs", "clean", "submodules", "path"}
+)
+_STATUS_FUNCTIONS = frozenset({"failure()", "always()", "success()", "cancelled()"})
 _INERT_SHELLS = {"bash", "sh"}
 
 
@@ -1621,11 +1628,15 @@ def _condition_terms(condition: str) -> set[str]:
         stripped = whole.group(1)
     # `steps['ruff'].outcome` and `steps.ruff.outcome` are the SAME accessor.
     stripped = re.sub(r"steps\['([^']+)'\]", r"steps.\1", stripped)
-    return {
-        _normalise_condition(part)
-        for part in re.split(r"&&", stripped)
-        if part.strip()
-    }
+    terms = set()
+    for part in re.split(r"&&", stripped):
+        term = part.strip()
+        # `(steps.ruff.outcome == 'failure')` is the same conjunct one layer deeper.
+        while term.startswith("(") and term.endswith(")"):
+            term = term[1:-1].strip()
+        if term:
+            terms.add(_normalise_condition(term))
+    return terms
 
 
 def _defaults_problem(defaults: object) -> str | None:
@@ -1855,12 +1866,29 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     f"{sorted(k for k in ('if', 'continue-on-error') if k in checkout)} — a "
                     "skipped checkout leaves an empty tree that ruff passes"
                 )
-            if str((checkout.get("with") or {}).get("ref", "")).strip() != "${{ github.sha }}":
+            with_block = checkout.get("with") or {}
+            # GitHub ignores the spacing inside `${{ }}`, and this module already
+            # treats `sha-spaced`/`sha-unspaced` as the same group key; the ref must
+            # be compared the same way or a format pass reds a correct artifact.
+            if not re.fullmatch(r"\$\{\{\s*github\.sha\s*\}\}", str(with_block.get("ref", "")).strip()):
                 return (
                     "an `actions/checkout` step before the guard does not pin "
                     "`with.ref: ${{ github.sha }}` — the workflow's own comment claims a "
                     "deterministic tree ('mid-run main advance must not move the tree'), "
                     "and it is unchecked"
+                )
+            # `sparse-checkout` leaves a NARROWED working tree (a finding outside the
+            # cone is invisible, `ruff check .` exits 0) and `repository` checks out a
+            # different repo entirely — both measure a tree main never had. The keys
+            # that can change WHICH tree lands are excluded by allow-list, not by
+            # naming the two that exist today.
+            unexpected_with = sorted(set(with_block) - _CHECKOUT_WITH_KEYS)
+            if unexpected_with:
+                return (
+                    f"the checkout's `with:` carries {unexpected_with}, which can change "
+                    "WHICH tree ruff measures (`sparse-checkout` narrows it, "
+                    "`repository` replaces it) while `ruff check .` still exits 0. "
+                    f"Allowed: {sorted(_CHECKOUT_WITH_KEYS)}"
                 )
     ruff_steps = [
         (idx, step)
@@ -1944,11 +1972,22 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "calls `issues.createComment` — the notification the guard exists "
                     "for is not in it"
                 )
-            expected_terms = {"failure()", f"steps.{step_id}.outcome == 'failure'"}
+            outcome_term = f"steps.{step_id}.outcome == 'failure'"
             actual_terms = _condition_terms(str(other["if"]))
-            if not any(
-                function in str(other["if"]) for function in ("failure(", "always(", "cancelled(")
-            ):
+            status_terms = actual_terms & _STATUS_FUNCTIONS
+            others = sorted(actual_terms - _STATUS_FUNCTIONS - {outcome_term})
+            # `failure()` and `always()` both remove the implicit `success()` — which
+            # is the ONLY thing required of the status slot — and ANDed with the
+            # outcome conjunct they fire on exactly the failing path. `success()` and
+            # `cancelled()` make it never fire on that path.
+            if status_terms & {"success()", "cancelled()"}:
+                return (
+                    f"the step keyed on `steps.{step_id}.outcome` has "
+                    f"`if: {other['if']}` — {sorted(status_terms & {'success()', 'cancelled()'})} "
+                    "makes it never run on a failed ruff step, so the failure is "
+                    "reported into a run nobody is watching"
+                )
+            if not status_terms:
                 return (
                     f"the step keyed on `steps.{step_id}.outcome` has "
                     f"`if: {other['if']}` — with no status function GitHub prepends an "
@@ -1956,9 +1995,9 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "so this step is SKIPPED on exactly the path it exists for "
                     "(measured on run 39734942845: step 6 skipped, step 5 ruff failed)"
                 )
-            if actual_terms != expected_terms:
-                extra = sorted(actual_terms - expected_terms)
-                missing = sorted(expected_terms - actual_terms)
+            if outcome_term not in actual_terms or others:
+                extra = others
+                missing = [] if outcome_term in actual_terms else [outcome_term]
                 return (
                     f"the step keyed on `steps.{step_id}.outcome` has "
                     f"`if: {other['if']}`, which is not the pinned condition: "
@@ -1986,8 +2025,28 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     # PRESENCE, not truthiness: a job-level `permissions: {}` is GitHub's idiom for
     # "grant nothing" and REPLACES the workflow grant — `or` read it as absent.
     perms = job["permissions"] if "permissions" in job else doc.get("permissions", {})
+    if isinstance(perms, str):
+        # GitHub accepts `read-all` / `write-all` at this scope. `write-all` grants
+        # strictly more than the pin needs (so the comment works); `read-all` grants
+        # no `issues: write`, so it 403s on a push event; anything else is invalid
+        # and means no run exists at all — three different facts, three messages.
+        if perms == "write-all":
+            return None
+        if perms == "read-all":
+            return (
+                "its `permissions: read-all` grants no `issues: write`, so "
+                "`issues.createComment` 403s on a push event (the default token is "
+                "read-only) and a lint-red main is reported into a run nobody sees"
+            )
+        return (
+            f"its `permissions: {perms}` is not a form GitHub accepts — the workflow "
+            "is invalid, so no run exists at all and nothing reports red"
+        )
     if not isinstance(perms, dict):
-        return "its `permissions:` block is not a mapping, so it grants nothing"
+        return (
+            f"its `permissions:` block is {perms!r}, which is not a form GitHub accepts "
+            "— the workflow is invalid, so no run exists at all and nothing reports red"
+        )
     missing = [
         f"{scope}: {level}"
         for scope, level in (
@@ -2416,6 +2475,67 @@ def _set_starveable_leading_term(doc: dict) -> None:
     doc["concurrency"]["group"] = "main-lint-${{ github.ref || github.sha }}"
 
 
+def _set_sparse_checkout(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step.setdefault("with", {})["sparse-checkout"] = "tortoise/"
+
+
+def _set_foreign_repository(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step.setdefault("with", {})["repository"] = "someone-else/not-tortoise"
+
+
+def _set_read_all_permissions(doc: dict) -> None:
+    doc["permissions"] = "read-all"
+
+
+def _set_invalid_permissions(doc: dict) -> None:
+    doc["permissions"] = 42
+
+
+def _set_notifier_success_status(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"success() && steps.{step_id}.outcome == 'failure'"
+
+
+def _set_unspaced_checkout_ref(doc: dict) -> None:
+    """Same expression, different spacing — must be ACCEPTED (GitHub ignores it)."""
+    for step in doc["jobs"]["lint"]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step.setdefault("with", {})["ref"] = "${{github.sha}}"
+
+
+def _set_always_status(doc: dict) -> None:
+    """`always()` + the outcome conjunct fires on exactly the pinned path."""
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"always() && steps.{step_id}.outcome == 'failure'"
+
+
+def _set_parenthesised_conjunct(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"failure() && (steps.{step_id}.outcome == 'failure')"
+
+
+def _set_write_all_permissions(doc: dict) -> None:
+    """GitHub accepts `write-all`, and it grants everything — must be ACCEPTED."""
+    doc["permissions"] = "write-all"
+
+
+def _set_checkout_path_subdir(doc: dict) -> None:
+    """`with.path` lands the same tree one directory down; `ruff check .` recurses."""
+    for step in doc["jobs"]["lint"]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step.setdefault("with", {})["path"] = "repo"
+
+
 def _set_second_checkout(doc: dict) -> None:
     steps = doc["jobs"]["lint"]["steps"]
     steps.insert(1, {"uses": "actions/checkout@v4", "with": {"ref": "main"}})
@@ -2449,7 +2569,10 @@ def _set_notifier_extra_conjunct(doc: dict) -> None:
     step_id = _ruff_step(doc)["id"]
     for step in doc["jobs"]["lint"]["steps"]:
         if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
-            step["if"] = f"failure() && always() && steps.{step_id}.outcome == 'failure'"
+            step["if"] = (
+                f"failure() && steps.{step_id}.outcome == 'failure' "
+                "&& github.ref == 'refs/heads/release'"
+            )
 
 
 def _set_cancel_in_progress(doc: dict) -> None:
@@ -2602,6 +2725,14 @@ _STARVED_SHAPES = [
     ("`shell: echo` on the ruff step", _set_echo_shell),
     ("`working-directory: docs` on the ruff step", _set_step_working_directory),
     ("an extra conjunct on the notifier", _set_notifier_extra_conjunct),
+    # ── the checkout can narrow or replace the measured tree ──
+    ("a sparse checkout", _set_sparse_checkout),
+    ("a checkout of another repository", _set_foreign_repository),
+    # ── permissions the workflow cannot post with, or that make it invalid ──
+    ("`permissions: read-all`", _set_read_all_permissions),
+    ("invalid `permissions`", _set_invalid_permissions),
+    # ── a status slot that never fires on the failing path ──
+    ("`success()` in the notifier status slot", _set_notifier_success_status),
 ]
 
 
@@ -2672,6 +2803,11 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
         ("a quoted `'ruff==<pin>'`", _set_quoted_install),
         ("`ruff check ./` (the same tree)", _set_dot_slash),
         ("the bracket notifier accessor", _set_bracket_notifier),
+        ("an unspaced `${{github.sha}}` checkout ref", _set_unspaced_checkout_ref),
+        ("`always()` in the status slot", _set_always_status),
+        ("a parenthesised outcome conjunct", _set_parenthesised_conjunct),
+        ("`permissions: write-all`", _set_write_all_permissions),
+        ("a checkout `with.path` subdirectory", _set_checkout_path_subdir),
         ("`continue-on-error: false` on the ruff step", _set_inert_continue_on_error),
         ("`shell: bash` on the ruff step", _set_inert_shell),
         ("`uv run ruff check .`", _set_uv_run),
