@@ -643,6 +643,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # the fixture-param monkeypatch auto-restores (no lane leak).
     "test_9192_tenant_armed_by_request.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #5052/#7871: the claim pilot's CLI contract test delenvs the store URI (and
+    # the hosted URL) to exercise the UNSET-STORE REFUSAL — `main acquire` must
+    # return rc 2 ("cannot answer") rather than let the SDK fall back to a default
+    # target, where an empty read is indistinguishable from "nobody holds this".
+    # DELIBERATE_EMBEDDED_LANE: no graph is ever reached — the tool refuses BEFORE
+    # any query — so nothing rides the URI and no docker-half coverage is claimed.
+    # The `monkeypatch` arg is function-scoped and auto-restores (no lane leak).
+    "test_work_claim.py": [
+        r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
