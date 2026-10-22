@@ -1217,9 +1217,16 @@ class TestDocsPageAndSkillConfig:
                          packs_src), (
             "packs.js must export PACK_SETTINGS_SECTION_ID — the row's "
             "'Settings → Configured packs' destination is addressed by it")
-        assert re.search(r"<h3\s+id=\{PACK_SETTINGS_SECTION_ID\}", main_src), (
+        # ONE pattern that is both attribute-ORDER tolerant (a JSX prop reorder is
+        # a no-op) and label-pinning: the row tells the user to look for
+        # "Configured packs", so the visible heading text must survive too, not
+        # just its id binding.
+        assert re.search(
+            r"<h3\b[^>]*\bid=\{PACK_SETTINGS_SECTION_ID\}[^>]*>Configured packs</h3>",
+            main_src), (
             "the row sends the user to Settings → 'Configured packs'; that "
-            "heading must stay bound to PACK_SETTINGS_SECTION_ID in main.jsx")
+            "heading must stay bound to PACK_SETTINGS_SECTION_ID and keep its "
+            "label in main.jsx")
         assert "configured packs" in row_norm, (
             "the row must name the Settings surface that configures packs")
         # The default graph's set is OWNED by `pack_state.DEFAULT_STARTER_PACKS`
@@ -1318,6 +1325,23 @@ class TestDocsPageAndSkillConfig:
             "the row must state that creating a graph does not choose its packs "
             "— scoped to the dashboard form, which posts {org_id, name}; the "
             "API can set them at birth (#9667)")
+        # …and the claim's OWNER is the create call, so read it: the dashboard's
+        # POST /v1/graphs body is what makes "does not choose packs" true. A packs
+        # picker added there would make the row false with the suite green, which
+        # is the defect this very commit removes from the docstring one line up.
+        create_body = re.search(
+            r"\$\{API_BASE\}/v1/graphs`,\s*\{.*?body:\s*JSON\.stringify\((\{[^}]*\})\)",
+            main_src, re.S)
+        assert create_body, (
+            "the dashboard's create-graph POST must stay findable — it is the "
+            "owner of the row's 'the create form does not choose packs'")
+        assert "packs" not in create_body.group(1), (
+            "the dashboard create form now sends packs, so the row's "
+            f"'does not choose packs' is false: {create_body.group(1).strip()}")
+        for field in ("org_id", "name"):
+            assert field in create_body.group(1), (
+                f"the create body must still carry {field}: "
+                f"{create_body.group(1).strip()}")
         # …and the disable consequence must keep the product's QUALIFIER. The
         # resolution contract re-admits a namespace WHOLE once the graph holds any
         # data in it (pack_state.resolved_pack_set = active records ∪ the graph's
