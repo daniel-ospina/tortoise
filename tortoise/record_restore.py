@@ -15,15 +15,14 @@ The runbook section that drives it is ``docs/infra-runbook.md`` §9.
 WHAT A RESTORE MUST REFUSE — the four ways it could be worthless
 ================================================================
 1. **An EMPTY source is not a restore.** A view with no rows wipes the cache
-   and writes nothing, and — measured on the shipped path — reports
-   ``nodes_written: 0`` under a ``complete`` coverage declaration, i.e. **a
-   successful-looking run that destroyed the cache**. The commonest cause is a
-   mistyped ``--org``/``--graph`` (a scope with no rows reads exactly like a
-   scope that was never written), so the empty view refuses unless the operator
-   says ``--allow-empty`` in so many words. This is the guard the verb exists
-   behind, not a convenience: the destructive token (``confirm_destructive``)
-   proves the *operator* authorized a wipe; it says nothing about whether there
-   was anything to put back.
+   and writes nothing, and the shipped path returns NORMALLY (`nodes_written:
+   0`, `coverage: partial`) — an exit-code-0-shaped success that destroyed the
+   cache. The commonest cause is a mistyped ``--org``/``--graph`` (a scope with
+   no rows reads exactly like a scope that was never written), so the empty
+   view refuses unless the operator says ``--allow-empty`` in so many words.
+   This is the guard the verb exists behind, not a convenience: the destructive
+   token (``confirm_destructive``) proves the *operator* authorized a wipe; it
+   says nothing about whether there was anything to put back.
 2. **A rebuild that wrote nothing is not a restore either.** Refused
    separately from (1), because it is a different failure: the record HAD rows
    and the projection reported ``nodes_written == 0``. A caller that trusts the
@@ -41,10 +40,12 @@ WHAT A RESTORE MUST REFUSE — the four ways it could be worthless
    ``rebuild_from_record`` runs the projection's destructive-op guard (L2,
    #2944): a server graph whose name does not start with ``test_``/
    ``tortoise_test`` is REFUSED. That guard fires on every production graph name
-   (``org_<org_id>``), so the verb catches it and exits ``EXIT_REFUSED`` **with
-   the reason and the tracking issue** — it never lets a ``RuntimeError``
-   travel as an unhandled traceback, and it never reports a rediscovered
-   absence of rows as success.
+   (``org_<org_id>``), so the composition asks the projection's OWN guard
+   before it builds a plan — the refusal is attributed exactly, with no
+   message matching and no second copy of the name rule — and anything raised
+   after that pre-flight is reported as UNKNOWN (``restore_unavailable``),
+   never as "nothing was written", because by then the wipe may already have
+   run.
 
 WHAT IS REPORTED, AND WHY THE PRE-WIPE COUNT IS ONE OF THE NUMBERS
 =================================================================
@@ -91,6 +92,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+#: The bound on the pre-wipe count read. Imported from the sibling verb that
+#: bounds the SAME full-graph shape, so the two cannot drift apart.
+from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
+from tortoise.residency import COVERAGE_COMPLETE
 
 __all__ = [
     "EXIT_REFUSED",
@@ -151,7 +157,11 @@ class RestoreOutcome:
     target_nodes_before: int | None
     #: ``complete`` / ``partial`` from the projection's own declaration.
     coverage: str | None = None
-    #: keys the declaration wrote as known-hot.
+    #: Keys the declaration enumerated as known-hot. ⚠️ A ``complete``
+    #: declaration enumerates NOTHING (``cache_projection.declaration_for``
+    #: returns ``hot_keys=()`` when it covers the whole record), so this number
+    #: is 0 on a perfectly complete restore — read :attr:`unwritten_keys`, never
+    #: this, to decide whether anything was left out.
     declared_keys: int = 0
     #: ``--limit`` was supplied, so ``coverage`` is ``partial`` by construction.
     bounded: bool = False
@@ -159,7 +169,16 @@ class RestoreOutcome:
 
     @property
     def unwritten_keys(self) -> int:
-        """Record keys NOT written — the ``not-hot`` set of a bounded restore."""
+        """Record keys NOT written — the ``not-hot`` set of a partial restore.
+
+        A ``complete`` declaration covers every record key by definition and
+        enumerates none of them, so the only correct answer there is 0. This
+        used to be ``record_nodes - declared_keys`` unconditionally, which
+        reported EVERY complete restore as fully not-hot (measured: a 5-node
+        full restore printed "5 record key(s) were NOT written").
+        """
+        if self.coverage == COVERAGE_COMPLETE:
+            return 0
         return max(0, self.record_nodes - self.declared_keys)
 
     def as_dict(self) -> dict:
@@ -215,11 +234,14 @@ def log_result(outcome: RestoreOutcome,
 
 
 def _target_nodes_before(project: Any) -> int | None:
-    """The cache's node count BEFORE the wipe — informational, never a input.
+    """The cache's node count BEFORE the wipe — informational, never an input.
 
-    A read (``MATCH (n) RETURN count(n)``) on the projection's own handle: it
-    does not decide what to project (§2.0's one-way rule leaves that to the
-    record), it only makes a mistyped/absent target VISIBLE in the result. An
+    A BOUNDED read (``MATCH (n) RETURN count(n)``) on the projection's own
+    handle: it does not decide what to project (§2.0's one-way rule leaves that
+    to the record), it only makes a mistyped/absent target VISIBLE in the
+    result. The bound is the sibling verb's
+    (``record_reconcile.CACHE_READ_TIMEOUT_MS``): it is a full-graph count, and
+    an operator's restore must not hang before it prints anything. An
     unreadable handle yields ``None`` and the render says ``unknown`` — a
     reporting gap must not be reported as a number.
     """
@@ -227,7 +249,8 @@ def _target_nodes_before(project: Any) -> int | None:
     if g is None:
         return None
     try:
-        rows = g.query("MATCH (n) RETURN count(n)").result_set
+        rows = g.query("MATCH (n) RETURN count(n)",
+                       timeout=CACHE_READ_TIMEOUT_MS).result_set
     except Exception:
         return None
     if not rows or not rows[0]:
@@ -236,6 +259,36 @@ def _target_nodes_before(project: Any) -> int | None:
         return int(rows[0][0])
     except (TypeError, ValueError):
         return None
+
+
+def _ask_the_wipe_guard(project: Any, cache_graph: str) -> None:
+    """Ask the projection's OWN L2 guard whether this target may be wiped.
+
+    ``rebuild_from_record`` runs ``_assert_test_graph`` (#2944) and refuses a
+    server graph whose name is not ``test_``/``tortoise_test``-prefixed — which
+    is EVERY production graph name (``org_<org_id>``). Asking the projection
+    rather than re-implementing the rule keeps ONE name rule in the tree (the
+    reason ``_assert_test_graph`` takes an explicit ``graph_name`` at all), and
+    it gives the refusal a PRE-WIPE attribution: anything raised after this
+    point may have run the wipe, so it is reported as UNKNOWN instead of as
+    "nothing was written".
+
+    A projection that does not expose the guard (a test double) is not asked —
+    the real guard still runs inside the rebuild, and its refusal then lands in
+    the post-preflight UNKNOWN class, which is the honest reading of a refusal
+    this function could not place.
+    """
+    guard = getattr(project, "_assert_test_graph", None)
+    if not callable(guard):
+        return
+    try:
+        guard(f"REFUSING to run bulk DETACH DELETE on non-test graph "
+              f"(record-restore into {cache_graph!r})")
+    except RuntimeError as e:
+        raise RestoreRefused(
+            f"the cache refused the restore: {e} — the operator's next step is "
+            f"a decision about this graph's disposability (#2944's "
+            f"disposable-graph registry), not a retry") from e
 
 
 def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
@@ -254,10 +307,13 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
 
     Refusals (:class:`RestoreRefused` — **nothing was written**):
       * an empty view without ``allow_empty`` (see the module docstring, 1);
-      * a wipe the cache's L2 guard refuses (a non-``test_`` server graph);
+      * a wipe the cache's L2 guard refuses (a non-``test_`` server graph,
+        asked BEFORE the rebuild — see :func:`_ask_the_wipe_guard`);
       * a rebuild that reported writing no nodes while the record held some.
-    Unavailability (:class:`RestoreUnavailable` — no verdict): a rebuild whose
-    reported counts contradict the record, or a report that is not a count.
+    Unavailability (:class:`RestoreUnavailable` — no verdict, the cache's state
+    must be treated as UNKNOWN): ``--limit`` below 1, a rebuild whose reported
+    counts contradict the record, and **any failure raised during the rebuild**
+    — the pre-wipe guard passed, so the wipe may already have run.
     """
     record_nodes = len(getattr(view, "nodes", ()) or ())
     record_relations = len(getattr(view, "relations", ()) or ())
@@ -271,24 +327,40 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
             f"against the record, or pass --allow-empty to state that wiping "
             f"this cache is what you meant")
 
-    if limit is not None and limit < 0:
+    if limit is not None and limit <= 0:
+        # ⚠️ 0 is not a harmless bound. It reaches the projection, which slices
+        # `nodes[:0]` and STILL WIPES (the wipe precedes the projection), so a
+        # scripted `--limit 0` would destroy the cache and — before this guard —
+        # report it under exit 3, whose documented meaning is "nothing was
+        # written". No operator's restore means "wipe and put nothing back";
+        # that intent is `--allow-empty` over an empty record, not this.
         raise RestoreUnavailable(
-            f"--limit must be >= 0, got {limit} — a negative bound is not a "
-            f"bound, so nothing was restored")
+            f"--limit must be >= 1, got {limit} — 0 wipes the cache and writes "
+            f"nothing, so it is refused before any write. Nothing was "
+            f"restored")
 
     target_before = _target_nodes_before(project)
+
+    # Attribute the wipe guard BEFORE building anything: the projection's L2
+    # check (#2944) is the ONE name rule, so it is ASKED rather than
+    # re-implemented, and a refusal it raises is provably pre-wipe. Everything
+    # after this point may have run the wipe, so it is classified as UNKNOWN —
+    # a `RuntimeError` subclass raised post-wipe (e.g. `DirectCacheWriteRefused`
+    # from `project_records`) must never be reported as "REFUSED, nothing was
+    # written".
+    _ask_the_wipe_guard(project, cache_graph)
 
     try:
         result = project.rebuild_from_record(
             view, confirm_destructive=True, scope=scope, limit=limit)
-    except RuntimeError as e:
-        # The projection's destructive-op guard (L2, #2944) refuses a bulk wipe
-        # on a server graph whose name is not test-prefixed — which is EVERY
-        # production graph name (`org_<org_id>`). Report it as the refusal it
-        # is: an operator's next step is a decision (#2944's disposable-graph
-        # registry), not a retry.
-        raise RestoreRefused(
-            f"the cache refused the restore: {e}") from e
+    except (RestoreRefused, RestoreUnavailable):
+        raise
+    except Exception as e:
+        raise RestoreUnavailable(
+            f"the restore failed DURING the rebuild ({type(e).__name__}: {e}) "
+            f"— the pre-wipe guard passed, so the wipe may already have run "
+            f"and the cache's state is UNKNOWN. Re-run `record-restore` once "
+            f"the cause is fixed; do not read the cache as empty") from e
 
     nodes_written = _as_int(result.get("nodes_written"), "nodes_written")
     relations_written = _as_int(result.get("relations_written"),

@@ -812,8 +812,9 @@ def _cmd_record_restore(args):
     destroyed. That is why the pre-wipe node count is reported too.
 
     ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
-    on the record, the same constants ``record-reconcile`` uses): an operator's
-    restore must not hang with no output.
+    on the record, ``CACHE_READ_TIMEOUT_MS`` on the pre-wipe count — the same
+    constant ``record-reconcile`` bounds the same full-graph read with): an
+    operator's restore must not hang with no output.
 
     ⛔ No storage allowance is consulted (G5 on #9556): #9559's byte gate must
     exempt this lane, because the billing path must never be able to defeat the
@@ -868,9 +869,10 @@ def _cmd_record_restore(args):
             "the real graph stayed destroyed. Nothing was restored.",
             file=sys.stderr)
         return EXIT_UNAVAILABLE
-    if args.limit is not None and args.limit < 0:
-        print(f"Error: --limit must be >= 0, got {args.limit} — a negative "
-              f"bound is not a bound, so nothing was restored.",
+    if args.limit is not None and args.limit < 1:
+        print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
+              f"cache and writes nothing, so it is refused before any write. "
+              f"Nothing was restored.",
               file=sys.stderr)
         return EXIT_UNAVAILABLE
 

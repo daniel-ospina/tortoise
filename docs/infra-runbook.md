@@ -2590,11 +2590,15 @@ python -m tortoise record-restore \
     --org <org_id> --graph <graph_id> \
     --cache-graph <the graph to restore>
 
-# Bounded run (writes at most N nodes; declares coverage=partial):
+# Bounded run (writes at most N nodes, N >= 1; declares coverage=partial):
 python -m tortoise record-restore … --limit 500
 # Machine-readable:
 python -m tortoise record-restore … --json
 ```
+
+`--limit 0` is REFUSED (exit `2`, before any write): it would wipe the cache and
+write nothing — the destructive no-op this verb exists to prevent — while
+reporting a code whose documented meaning is "nothing was written".
 
 **Exit codes — the next step keys on the code, not on the log:**
 
@@ -2602,7 +2606,7 @@ python -m tortoise record-restore … --json
 |---|---|---|
 | `0` | restored; the counts printed are what was written | compare `nodes_written`/`relations_written` with the record's own counts |
 | `3` | **REFUSED, nothing was written** (empty source, the cache's wipe guard, a rebuild that wrote 0) | read the printed reason — each has a different remedy |
-| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, usage error) | fix the input; the cache's state is unchanged |
+| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, usage error, **a failure during the rebuild itself**) | fix the input; on the last case the wipe may already have run, so treat the cache as **UNKNOWN**, not empty |
 
 `2`'s caveat is `record-reconcile`'s, inherited verbatim: argparse's own
 `error()` also exits `2`, so `2` means only *no verdict was produced* — not "the
@@ -2611,11 +2615,11 @@ record is unreachable".
 ### The four refusals, and why each exists
 
 1. **An EMPTY record scope is refused** (`--allow-empty` overrides, deliberately
-   verbose). A restore from no rows wipes the cache and writes nothing — the
-   shipped path reports `nodes_written: 0` under a `complete` coverage
-   declaration, i.e. a successful-looking run that destroyed the cache. The
-   commonest cause is a mistyped `--org`/`--graph`: a scope that was never
-   written reads exactly like a mistyped one.
+   verbose). A restore from no rows wipes the cache and writes nothing, and the
+   shipped path RETURNS NORMALLY (`nodes_written: 0`, `coverage: partial`) — an
+   exit-0-shaped success that destroyed the cache. The commonest cause is a
+   mistyped `--org`/`--graph`: a scope that was never written reads exactly like
+   a mistyped one.
 2. **A rebuild that wrote nothing is refused separately** — the record HAD rows
    and the report says 0. Different failure, different remedy; do not collapse
    them.
@@ -2644,10 +2648,14 @@ A restore can be correct and still leave the cache **not fully hot**. Both
 states have their own reason string, and neither is an absence (§17.3):
 
 - **`not-hot`** — a bounded restore (`--limit`) AND any run whose declaration is
-  `coverage=partial` (see `declared_keys` vs `record_nodes` in the output) wrote
-  only part of the record. A read for an unwritten key is a **residency miss**:
-  it `degraded` on read and is served from the record, and it is **never**
-  reported as `empty`. To make the cache fully hot, re-run without `--limit`.
+  `coverage=partial` wrote only part of the record. Read **`unwritten_keys`** to
+  see that count: it is the not-hot set. ⛔ Do NOT read `declared_keys` for this
+  — a `complete` declaration covers the whole record and enumerates NOTHING, so
+  `declared_keys` is `0` on a perfectly complete restore while
+  `unwritten_keys` is `0` too. A read for an unwritten key is a **residency
+  miss**: it `degraded` on read and is served from the record, and it is
+  **never** reported as `empty`. To make the cache fully hot, re-run without
+  `--limit`.
 - **`cache-unreachable`** — the cache did not answer **at all**. This is the
   fourth residency branch: a residency miss with its own reason, never an
   insufficiency and never an absence. While you see this, *no* read of the

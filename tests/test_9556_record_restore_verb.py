@@ -99,12 +99,23 @@ class _RecordingProjection:
     """
 
     def __init__(self, *, result: dict | None = None,
-                 raises: BaseException | None = None) -> None:
+                 raises: BaseException | None = None,
+                 guard_refuses: bool = False) -> None:
         self.g = None
         self.closed = False
         self.calls: list[dict] = []
         self._result = result
         self._raises = raises
+        self._guard_refuses = guard_refuses
+
+    def _assert_test_graph(self, reason: str = "", *, graph_name=None):
+        """The projection's L2 guard, faked so a refusal is observable."""
+        if self._guard_refuses:
+            raise RuntimeError(
+                "Graph guard: operation blocked on non-test graph "
+                "'org_acme'. "
+                f"{reason} — destructive bulk ops require a graph name "
+                "starting with 'test_' or 'tortoise_test'.")
 
     def rebuild_from_record(self, view, **kwargs):
         self.calls.append({"view": view, **kwargs})
@@ -404,12 +415,11 @@ def test_the_cache_guard_refusal_is_reported_as_a_REFUSAL(monkeypatch, capsys):
     """#2944's L2 refuses a bulk wipe on a non-``test_`` server graph.
 
     Every production graph name is ``org_<org_id>``, so this is the shape an
-    operator WILL hit: the reason must be printed and the exit code distinct.
+    operator WILL hit: the reason must be printed, the exit code distinct, and
+    the refusal must be attributed BEFORE the rebuild (the fake's
+    ``rebuild_from_record`` is never reached — asserted).
     """
-    projection = _RecordingProjection(raises=RuntimeError(
-        "Graph guard: operation blocked on non-test graph 'org_acme'. "
-        "REFUSING to run bulk DETACH DELETE on non-test graph — destructive "
-        "bulk ops require a graph name starting with 'test_' or 'tortoise_test'."))
+    projection = _RecordingProjection(guard_refuses=True)
     rc, conn, projection = _drive(monkeypatch, view=_view(2),
                                   projection=projection)
     err = capsys.readouterr().err
@@ -417,7 +427,58 @@ def test_the_cache_guard_refusal_is_reported_as_a_REFUSAL(monkeypatch, capsys):
     assert rc == rrestore.EXIT_REFUSED, err
     assert "Restore REFUSED" in err, err
     assert "non-test graph 'org_acme'" in err, err
+    assert "#2944" in err, err
+    # Pre-wipe attribution: the guard is asked BEFORE any rebuild, so nothing
+    # was written and the "REFUSED" class is honest.
+    assert projection.calls == [], "the wipe must not be attempted past a refusal"
     assert projection.closed and conn.closed, "both handles must close"
+
+
+def test_a_failure_DURING_the_rebuild_is_UNKNOWN_not_a_clean_refusal(
+        monkeypatch, capsys):
+    """A post-preflight failure may have wiped: exit 2, never "nothing written".
+
+    ``DirectCacheWriteRefused`` / ``CacheProjectionError`` are ``RuntimeError``
+    subclasses raised from ``project_records`` — i.e. AFTER the wipe. A verb
+    that mapped every ``RuntimeError`` to the refusal class would tell the
+    operator the cache was untouched while it was destroyed.
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    projection = _RecordingProjection(raises=DirectCacheWriteRefused(
+        "Refusing a mutating statement on the raw-query lane"))
+    rc, conn, projection = _drive(monkeypatch, view=_view(2),
+                                  projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "UNKNOWN" in err, err
+    assert "DURING the rebuild" in err, err
+    assert "REFUSED" not in err, err
+    assert len(projection.calls) == 1
+    assert projection.closed and conn.closed
+
+
+def test_an_unexpected_driver_error_is_UNAVAILABLE_not_a_traceback(
+        monkeypatch, capsys):
+    """A socket error during the wipe is not a ``RuntimeError``.
+
+    ``DirectCacheWriteRefused``/``CacheProjectionError`` are ``RuntimeError``
+    subclasses, so a ``except RuntimeError`` classifier catches them and misses
+    every driver error (a reset socket, a driver's own exception type). The
+    unclassified case must land on exit ``2`` with an UNKNOWN statement from
+    ONE place (the composition) — otherwise it leaves as a traceback, and the
+    one path with no documented code is the one where the cache may have been
+    wiped and not rebuilt.
+    """
+    projection = _RecordingProjection(raises=ConnectionResetError(
+        "connection reset by peer"))
+    rc, _, _ = _drive(monkeypatch, view=_view(2), projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "UNKNOWN" in err, err
+    assert "Traceback" not in err, err
 
 
 # ── 8. a bounded restore is PARTIAL, and its unwritten keys are not-hot ───
@@ -447,7 +508,67 @@ def test_the_human_line_names_the_not_hot_consequence():
     line = outcome.render()
     assert "not-hot" in line, line
     assert "never empty" in line, line
+    assert outcome.unwritten_keys == 3, outcome.as_dict()
 
+
+def test_a_COMPLETE_restore_is_not_reported_as_not_hot():
+    """A ``complete`` declaration enumerates NO keys — and that is not a gap.
+
+    ``declaration_for`` returns ``coverage=complete, hot_keys=()`` when it covers
+    the whole record, so ``record_nodes - declared_keys`` reported EVERY
+    complete restore as fully not-hot (measured: a 5-node full restore printed
+    "5 record key(s) were NOT written").
+    """
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="org_o",
+        record_nodes=5, record_relations=0, nodes_written=5,
+        relations_written=0, target_nodes_before=0,
+        coverage="complete", declared_keys=0, bounded=False)
+    assert outcome.unwritten_keys == 0, outcome.as_dict()
+    assert "not-hot" not in outcome.render(), outcome.render()
+
+
+def test_limit_zero_is_REFUSED_before_any_write(monkeypatch, capsys):
+    """0 is not a harmless bound: it wipes and writes nothing.
+
+    Measured before the guard: the wipe ran, the "wrote 0" refusal fired AFTER
+    it, and the verb exited 3 — whose documented meaning is "nothing was
+    written". A scripted ``--limit $N`` with ``N=0`` would destroy a cache and
+    report the code that means untouched.
+    """
+    projection = _RecordingProjection()
+    rc, _, projection = _drive(monkeypatch, view=_view(2),
+                               projection=projection,
+                               extra_args=("--limit", "0"))
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "--limit must be >= 1" in err, err
+    assert projection.calls == [], "a 0 bound must not reach the wipe"
+
+
+def test_the_pre_wipe_count_is_BOUNDED(monkeypatch):
+    """The count is a full-graph read: unbounded, it can hang before any output."""
+    seen: list[dict] = []
+
+    class _Rows(list):
+        @property
+        def result_set(self):
+            return [[0]]
+
+    class _Graph:
+        def query(self, cypher, **kw):
+            seen.append({"cypher": cypher, **kw})
+            return _Rows()
+
+    projection = _RecordingProjection()
+    projection.g = _Graph()
+    rrestore.restore_from_record_view(
+        _view(2), org_id="o", graph_id="g", cache_graph="test_x",
+        project=projection)
+
+    assert seen and "timeout" in seen[0], seen
+    assert seen[0]["timeout"] == rrestore.CACHE_READ_TIMEOUT_MS, seen
 
 # ── the live drive: a real cache, restored from a real view ───────────────
 
@@ -503,3 +624,29 @@ def test_a_live_restore_puts_the_record_state_into_the_cache(
         "MATCH (p:Point) RETURN p.id").result_set)
     assert ids == ["p-9556-0", "p-9556-1"], (
         f"the cache must hold exactly the record's two points: got {ids}")
+
+
+def test_a_LIVE_complete_restore_reports_zero_unwritten_keys(
+        monkeypatch, shared_proj, cache_graph, capsys):
+    """End-to-end against a REAL projection: 5 in, 5 out, 0 not-hot.
+
+    This is the assertion the review found missing: every fake agreed with the
+    code's arithmetic, so the complete-declaration bug (``declared_keys == 0`` →
+    ``unwritten_keys == record_nodes``) was invisible to the suite.
+    """
+    from tortoise import __main__ as cli
+
+    projection = _projection_bound_to(shared_proj, cache_graph)
+    _install_fakes(monkeypatch, view=_view(5), projection=projection)
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", cache_graph.name, "--json"])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_RESTORED, printed.err
+    payload = json.loads(printed.out)
+    assert payload["coverage"] == "complete", payload
+    assert payload["nodes_written"] == 5, payload
+    assert payload["unwritten_keys"] == 0, payload
+    assert "not-hot" not in printed.out, printed.out
