@@ -10596,15 +10596,18 @@ class FalkorProjection(
         establishes is that the server REFUSED A COMMAND for memory reasons. A
         ceiling is one step further, and it is claimed (with the ceiling-only
         ``--maxmemory`` lever as its remedy) only when ``INFO memory``
-        returned one AND the reading shows it was reached (``used >= cap``).
+        returned one AND the reading shows it was reached (``used + drift >=
+        cap``, where ``drift`` is the MEASURED post-refusal shortfall — the
+        reading is taken after the refusal and includes buffers that the refused
+        reply releases).
         Three shapes must not borrow that
         claim: ``maxmemory == 0``, where the datum says there is NO ceiling and
         the operator has to be pointed at that ABSENCE (the LOCUS of the
         pressure is not asserted — "a per-query cap" is a limit OF the
         instance); an unusable reading, where no ceiling was established at
-        all; and a ratio that was read but sits BELOW the ceiling, where
-        quoting "has reached" would contradict the numbers in the same
-        parenthesis. Sending someone to raise a ceiling
+        all; and a ratio that was read but sits WIDER than that drift below the
+        ceiling, where quoting "has reached" would state a fact the reading
+        contradicts. Sending someone to raise a ceiling
         that does not exist — or was not reached — is the defect this clause
         closes.
         """
@@ -10660,7 +10663,19 @@ class FalkorProjection(
                 "reports it by name once it exists).")
         else:
             used, cap = pressure
-            if used >= cap:
+            # #7392 cycle 5 — the reading is taken AFTER the refusal
+            # (`_auto_health_recover` probes first, then reads `INFO memory`),
+            # and `used_memory` includes transient client buffers that are
+            # released when the refused reply is written. MEASURED on
+            # falkordb 4.20.6 at a 16 MiB `noeviction` ceiling: immediately after
+            # the server's own `used memory > 'maxmemory'` answer the reading
+            # sits 3.5-56 KiB BELOW the cap while the instance is still refusing
+            # at it. So "reached" is decided with that measured drift as a
+            # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
+            # different cause — and only a shortfall WIDER than it is treated as
+            # evidence that the ceiling is not the explanation.
+            drift = max(64 << 10, cap // 100)
+            if used + drift >= cap:
                 lead = ("the server has reached its memory ceiling (used_memory "
                         f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
                 remedy = ("Remedy: raise / relieve the instance's maxmemory "
@@ -10668,23 +10683,27 @@ class FalkorProjection(
                           "REDIS_ARGS, or the provider's console on a managed "
                           "instance.")
             else:
-                # #7392 — a ratio was READ, but the reading does not support
-                # "reached": it shows the refusal happened BELOW the ceiling.
-                # Keeping the ceiling sentence here would print the
-                # contradiction "has reached its ceiling (used_memory 1.0 KiB of
-                # maxmemory 512.0 MiB)", and the ceiling lever would be a
-                # remedy for a limit that was never met. The issue's proposal
-                # assumed "the ratio was read" implies "the ceiling was
-                # reached"; this branch is where that assumption is false, so
-                # the message states the two measured facts instead.
-                lead = (f"the refusal came at used_memory {_fmt_bytes(used)}, "
-                        f"BELOW the maxmemory ceiling "
-                        f"({_fmt_bytes(cap)}), so reaching the ceiling does "
-                        "not explain it")
-                remedy = ("Remedy: do not raise the ceiling — the reading says "
-                          "the refusal came below it. The pressure is "
-                          "elsewhere: host/kernel memory, another client on "
-                          "this instance, or a per-query cap.")
+                # A ratio was READ, and it sits well below the ceiling. The
+                # issue's proposal kept the ceiling sentence whenever the ratio
+                # was read, which assumed "read" implies "reached"; this branch
+                # is where that assumption fails, so it reports the OBSERVATION
+                # (with the shortfall, so two rounded-equal figures can never be
+                # printed as "BELOW") and asks for a re-read rather than
+                # forbidding the ceiling as the remedy. The cause list keeps the
+                # same modal shape (ii) uses.
+                shortfall = cap - used
+                lead = (f"this instance NOW reports used_memory "
+                        f"{_fmt_bytes(used)} — {_fmt_bytes(shortfall)} below its "
+                        f"maxmemory ceiling of {_fmt_bytes(cap)} — so THIS "
+                        "reading does not show the ceiling being reached")
+                remedy = ("Remedy: re-read INFO memory while the refusal is "
+                          "repeating. If it reports at the ceiling, raise / "
+                          "relieve it — the --maxmemory in a container's "
+                          "REDIS_ARGS, or the provider's console on a managed "
+                          "instance. If it stays below, the pressure may be "
+                          "elsewhere — host/kernel memory, a concurrent client "
+                          "on this instance, the refused command's own buffer, "
+                          "or a per-query cap.")
         # The remedy must NOT restate the ownership policy in prose: a name
         # list here is wrong in one direction or the other, and nothing keeps
         # it in sync with the predicate that owns the rule. So the message

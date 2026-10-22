@@ -365,34 +365,99 @@ def test_unset_maxmemory_names_the_absence_without_asserting_a_locus(monkeypatch
     assert "outside the instance" not in lowered, msg
 
 
-def test_a_ratio_below_the_ceiling_does_not_claim_the_ceiling_was_reached(monkeypatch):
-    """#7392 — a ratio that was READ but sits under `maxmemory` is not "reached".
+#: The post-refusal shortfall that must NOT be read as "below the ceiling":
+#: MEASURED on falkordb 4.20.6 at a 16 MiB `noeviction` ceiling, three refused
+#: writes left the reading 3 568 / 56 552 / 16 880 bytes under the cap while the
+#: instance was still refusing at it. The implementation's tolerance is
+#: `max(64 KiB, cap // 100)`; these cases pin both sides of it.
+_CAP = 16 * 1024 * 1024
+
+
+@pytest.mark.parametrize("used", [
+    _CAP,                 # exactly at the ceiling
+    _CAP - 1,             # a byte under: the MEASURED drift, not a cause
+    _CAP - 4096,          # a page under: same
+    _CAP - (_CAP // 100), # sampled drift: same (at the tolerance boundary)
+])
+def test_a_post_refusal_shortfall_is_not_read_as_below_the_ceiling(monkeypatch, used):
+    """#7392 cycle 5 — the reading is taken AFTER the refusal, so a small
+    shortfall is the MEASUREMENT, not a different cause.
+
+    `_auto_health_recover` probes first and reads `INFO memory` afterwards, and
+    `used_memory` includes buffers that are released when the refused reply is
+    written. Measured on a real server: the refusal fires at `used > cap`, and
+    the very next reading is up to ~56 KiB under it. Treating that as "the
+    ceiling was not reached" would tell an operator not to raise a ceiling that
+    is very much being hit.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (used, _CAP)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    assert "has reached its memory ceiling" in msg, msg
+    assert "raise / relieve the instance's maxmemory ceiling" in msg, msg
+    assert "does not show the ceiling being reached" not in msg, msg
+
+
+def test_a_ratio_far_below_the_ceiling_does_not_claim_the_ceiling_was_reached(monkeypatch):
+    """#7392 — a reading well under `maxmemory` is not "reached".
 
     The issue's proposal kept the ceiling sentence whenever the ratio could be
     read, assuming "read" implies "reached". It does not: the generic
     `out of memory` marker reaches this branch with a reading of
     `used_memory 1.0 KiB of maxmemory 512.0 MiB`, and quoting "has reached its
-    memory ceiling" there contradicts the numbers in the same parenthesis —
-    and prescribes raising a ceiling the reading says was never met.
+    memory ceiling" there would state a fact the reading contradicts.
+
+    The branch therefore reports the OBSERVATION with the shortfall (so two
+    rounded-equal figures can never be printed as "below"), keeps the cause list
+    modal, and asks for a re-read instead of forbidding the ceiling.
 
     NON-VACUOUS: on the pre-fix code this message asserts the ceiling AND the
     `--maxmemory` lever for exactly these numbers.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    cap = 512 * 1024 * 1024
     proj = _projection(probe_error=RuntimeError("Out of memory"))
-    proj._memory_pressure = lambda: (1024, 512 * 1024 * 1024)  # type: ignore[method-assign]
+    proj._memory_pressure = lambda: (1024, cap)  # type: ignore[method-assign]
 
     msg = proj._write_refusal_message(RuntimeError("Out of memory"))
     assert msg is not None
     _assert_no_ceiling_claim(msg)
     lowered = msg.lower()
-    # It says WHAT the reading shows: the refusal is below the ceiling.
-    assert "below the maxmemory ceiling" in lowered, msg
-    assert "reaching the ceiling does not explain it" in lowered, msg
-    assert "1.0 kib" in lowered and "512.0 mib" in lowered, msg
-    # …and the ceiling lever is NOT the remedy this branch prescribes.
-    assert "do not raise the ceiling" in lowered, msg
-    assert "--maxmemory" not in msg, msg
+    # It reports the OBSERVATION, with the shortfall named…
+    assert "this instance now reports used_memory" in lowered, msg
+    assert "does not show the ceiling being reached" in lowered, msg
+    assert "512.0 mib" in lowered and "1.0 kib" in lowered, msg
+    # …the remedy is to RE-READ, not a prohibition and not the ceiling lever…
+    assert "re-read info memory" in lowered, msg
+    assert "do not raise the ceiling" not in lowered, msg
+    # …and the cause list stays modal, like the `maxmemory == 0` branch.
+    assert "may be elsewhere" in lowered, msg
+
+
+def test_the_shortfall_is_named_so_two_rounded_figures_never_read_as_below():
+    """#7392 cycle 5 — `_fmt_bytes` rounds to 0.1 of a unit, and the branch
+    prints BOTH figures: at 16 MiB a sub-52 KiB drift renders both as
+    "16.0 MiB", so a message saying "BELOW the ceiling (16.0 MiB)" beside
+    `used_memory 16.0 MiB` contradicts itself.
+
+    Naming the SHORTFALL is what makes that impossible: any reading that reaches
+    this branch is more than `max(64 KiB, cap // 100)` under the cap, so the
+    delta always renders as its own non-zero figure.
+    """
+    cap = 16 * 1024 * 1024
+    proj = object.__new__(FalkorProjection)
+    proj._memory_pressure = lambda: (cap - (3 * cap // 10), cap)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError("Out of memory"))
+    assert msg is not None
+    # The rendered usage and ceiling differ — no self-contradiction.
+    rendered = msg.split("NOW reports ", 1)[1]
+    used_text = rendered.split(" — ", 1)[0]
+    assert used_text != "16.0 MiB", msg
+    assert "below its maxmemory ceiling" in msg.lower(), msg
 
 
 def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
