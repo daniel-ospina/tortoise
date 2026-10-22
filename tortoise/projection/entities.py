@@ -5608,6 +5608,30 @@ class _EntityHandlers:
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                     THEN coalesce($updatedAt, $now) "
             "                     ELSE coalesce(s.updatedAt, $updatedAt) END, "
+            # #9451: the RECORDED ingest instant, applied on the arm that has a
+            # node to land on. `_materialize_session_source` writes the capture's
+            # own instant to `s.ingestedAt` unconditionally now, and its
+            # `SourceCreated` record carries that same instant — but this clause
+            # did not exist, so a node that ALREADY existed when the record
+            # folded kept an instant no record's ON MATCH could correct (ON
+            # CREATE reads the recorded value, #5024; ON MATCH read nothing).
+            # Measured on a stub minted earlier by `create_point(session_id=…)`:
+            # live `...468430` vs rebuilt `...471988` — the recovery path silently
+            # re-ordering session Sources in the recency computation.
+            #
+            # ⛔ GATED ON `$stub_completion`, exactly like `version` above, and for
+            # the same reason in the other direction: this writer's live ON MATCH
+            # never touches `ingestedAt`, so an UNGATED clause would make a
+            # replayed `create_source`/index record (whose live write preserved
+            # the node's first instant) OVERWRITE it, i.e. trade one
+            # live≠replay divergence for another. `coalesce($ingestedAt, …)` keeps
+            # a legacy/foreign capture record without the key a no-op.
+            # `ingestedAt` does not test `s.contentHash`, so its position inside
+            # this clause is free of the #8870/#7362 write-order rule (only items
+            # that READ the hash must precede the guarded write, which stays LAST).
+            "           s.ingestedAt = CASE WHEN $stub_completion "
+            "                             THEN coalesce($ingestedAt, s.ingestedAt) "
+            "                             ELSE s.ingestedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
             # #3644: the window start moves ONLY on the same hash-diff gate as
             # `version`/`updatedAt` — a create/stub-completion (stored hash
