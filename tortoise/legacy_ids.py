@@ -185,7 +185,7 @@ DECLARED_OUT = "declared-out"
 UNDECLARED = "undeclared"
 #: The bucket for a node :func:`_node_label` cannot resolve at all (no key,
 #: ambiguous identity, a structural defect). Its own field, because a node that
-#: is counted in NO bucket breaks the ledger identity :data:`LEDGER` states.
+#: is counted in NO bucket breaks the ledger identity :meth:`Census.ledger` states.
 UNRESOLVED = "<unresolved>"
 
 #: The labels this pass may re-key, each with the reason it is in scope.

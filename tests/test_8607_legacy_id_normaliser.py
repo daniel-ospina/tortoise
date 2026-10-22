@@ -931,3 +931,83 @@ def test_the_apply_headline_shows_what_the_pass_left_behind(tmp_path, capsys):
     assert "legacy 1002 → 0" in err
     assert "outside this pass 34" in err, err
     assert "'Event': 30" in err, err
+
+
+def test_a_revert_never_rewrites_the_plan_it_reads(tmp_path):
+    """`--report` is an INPUT in revert mode — rewriting it would destroy the
+    apply-time record in the file that is the only way back."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    plan_path = tmp_path / "plan.json"
+    assert (
+        main(
+            [
+                "--dump",
+                str(dump_path),
+                "--apply",
+                "--out",
+                str(tmp_path / "n.json"),
+                "--report",
+                str(plan_path),
+            ]
+        )
+        == 0
+    )
+    before = plan_path.read_text(encoding="utf-8")
+    assert json.loads(before)["mode"] == "apply"
+    assert (
+        main(
+            [
+                "--dump",
+                str(tmp_path / "n.json"),
+                "--revert",
+                "--report",
+                str(plan_path),
+                "--out",
+                str(tmp_path / "back.json"),
+            ]
+        )
+        == 0
+    )
+    assert plan_path.read_text(encoding="utf-8") == before, "the plan was rewritten"
+
+
+def test_a_relative_symlink_to_the_dump_is_refused_as_the_report(tmp_path):
+    """The identity key must catch a symlink too, not only a hardlink."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    (tmp_path / "alias.json").symlink_to("dump.json")  # RELATIVE target
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path), "--report", str(tmp_path / "alias.json")])
+    assert "are the same file" in str(exc.value.code)
+
+
+def test_the_report_is_on_disk_before_a_snapshot_write_that_fails(tmp_path):
+    """The documented order, pinned: report first, snapshot second.
+
+    If the snapshot write fails, the plan that can undo the pass must already
+    exist — otherwise the run leaves a plan-less artifact, or none at all.
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    report = tmp_path / "r.json"
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "--dump",
+                str(dump_path),
+                "--apply",
+                "--out",
+                str(tmp_path),  # a DIRECTORY: the snapshot write fails
+                "--report",
+                str(report),
+            ]
+        )
+    assert json.loads(report.read_text(encoding="utf-8"))["renamed"] == _renamed_population()
+    assert json.loads(dump_path.read_text(encoding="utf-8"))["node_count"] == 9_738
