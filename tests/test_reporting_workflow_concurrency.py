@@ -105,6 +105,7 @@ and ``test_workflow_secret_interpolation.py``.
 
 from __future__ import annotations
 
+import fnmatch
 import posixpath
 import re
 import shlex
@@ -1444,6 +1445,13 @@ def _ruff_argv_problem(command: str) -> str | None:
             offset = len(prefix)
             break
     if offset is None:
+        if "ruff" in tokens and "check" in tokens:
+            return (
+                "the step must be a SINGLE `ruff check .` invocation: a `run: |` block "
+                "whose other commands include it is not modelled (an arbitrary prefix "
+                "is how the step stops being the guard), and a shell escape "
+                "(`|| true`, `; true`, a pipe) is not accepted either"
+            )
         return (
             "the invocation does not run ruff — a shell escape (`|| true`, `; true`, "
             "a pipe) or a different command satisfies a substring test while making "
@@ -1590,6 +1598,21 @@ _CHECKOUT_WITH_KEYS = frozenset(
     {"ref", "fetch-depth", "fetch-tags", "persist-credentials", "lfs", "clean", "submodules", "path"}
 )
 _STATUS_FUNCTIONS = frozenset({"failure()", "always()", "success()", "cancelled()"})
+_STATUS_SCAN = re.compile(r"\b(failure|always|success|cancelled)\(\)")
+_JS_COMMENTS = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+
+
+def _balanced(expression: str) -> bool:
+    """True when ``expression`` has no unbalanced parenthesis (quote-naive is fine here)."""
+    depth = 0
+    for char in expression:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 _INERT_SHELLS = {"bash", "sh"}
 
 
@@ -1625,9 +1648,17 @@ def _condition_terms(condition: str) -> set[str]:
     stripped = condition.strip()
     whole = _EXPRESSION.fullmatch(stripped)
     if whole is not None:
-        stripped = whole.group(1)
+        stripped = whole.group(1).strip()
     # `steps['ruff'].outcome` and `steps.ruff.outcome` are the SAME accessor.
     stripped = re.sub(r"steps\['([^']+)'\]", r"steps.\1", stripped)
+    # A condition wrapped as a whole is the same condition: `(failure() && … )` and
+    # `((failure() && … ))` both evaluate identically, and cycle 7 only stripped
+    # parentheses around ONE CONJUNCT.
+    while stripped.startswith("(") and stripped.endswith(")"):
+        inner = stripped[1:-1].strip()
+        if not _balanced(inner):
+            break
+        stripped = inner
     terms = set()
     for part in re.split(r"&&", stripped):
         term = part.strip()
@@ -1692,6 +1723,11 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
         # main — the #2174 defect by an edit no other mutant here tests.
         branches = push.get("branches")
         if branches is not None:
+            # A YAML SCALAR is iterated CHARACTER BY CHARACTER, so `"main" in
+            # branches` becomes a substring test and `branches: main-next` reads as
+            # selecting main. `_triggers` already normalises a scalar `on:` for the
+            # same reason.
+            branches = [branches] if isinstance(branches, str) else list(branches)
             # GitHub reads `!pattern` as NEGATION, so `branches: [main, '!main']`
             # selects nothing — while a membership test sees "main" present.
             negations = [entry for entry in branches if str(entry).startswith("!")]
@@ -1701,13 +1737,16 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "— GitHub reads `!…` as an exclusion, so this can select nothing "
                     "while a membership test still sees `main`"
                 )
-            if "main" not in branches:
+            # Patterns, not literals: `*`, `**` and `main*` all select main, so a
+            # broadening must not be redded as "a push to main is never linted".
+            if not any(fnmatch.fnmatchcase("main", str(entry)) for entry in branches):
                 return (
-                    f"its `push:` trigger is limited to {branches}, so a push to main "
-                    "is never linted — the guard's whole subject is the merged tree"
+                    f"its `push:` trigger is limited to {branches}, which does not "
+                    "match `main` — the guard's whole subject is the merged tree"
                 )
-        ignore = [str(entry) for entry in (push.get("branches-ignore") or [])]
-        if "main" in ignore:
+        ignore_raw = push.get("branches-ignore") or []
+        ignore = [ignore_raw] if isinstance(ignore_raw, str) else [str(entry) for entry in ignore_raw]
+        if any(fnmatch.fnmatchcase("main", pattern) for pattern in ignore):
             return (
                 "its `push:` trigger EXCLUDES `main` (`branches-ignore`), so the "
                 "merged trees it exists to guard are the ones it never sees"
@@ -1966,15 +2005,28 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "github-script step that POSTS the comment; any other step "
                     "satisfies the shape while notifying nobody"
                 )
-            if "issues.createComment" not in str((other.get("with") or {}).get("script", "")):
+            script = _JS_COMMENTS.sub("", str((other.get("with") or {}).get("script", "")))
+            if "issues.createComment" not in script:
                 return (
                     f"the github-script step keyed on `steps.{step_id}.outcome` never "
                     "calls `issues.createComment` — the notification the guard exists "
                     "for is not in it"
                 )
             outcome_term = f"steps.{step_id}.outcome == 'failure'"
-            actual_terms = _condition_terms(str(other["if"]))
-            status_terms = actual_terms & _STATUS_FUNCTIONS
+            condition_text = str(other["if"])
+            actual_terms = _condition_terms(condition_text)
+            # The status function is detected by SCAN, not by standalone-conjunct
+            # equality: `(failure() && …)` and a conjunct written inside a larger
+            # group are the same pin, and the old test redded them as "no status
+            # function", which was false about the artifact.
+            status_terms = {f"{name}()" for name in _STATUS_SCAN.findall(condition_text)}
+            if "||" in condition_text:
+                return (
+                    f"the step keyed on `steps.{step_id}.outcome` has "
+                    f"`if: {condition_text}` — a DISJUNCTION (`||`) fires on paths the "
+                    "pinned conjunction does not (an earlier step's failure, for one), "
+                    "so it is not the notification this pin requires"
+                )
             others = sorted(actual_terms - _STATUS_FUNCTIONS - {outcome_term})
             # `failure()` and `always()` both remove the implicit `success()` — which
             # is the ONLY thing required of the status slot — and ANDed with the
@@ -2475,6 +2527,47 @@ def _set_starveable_leading_term(doc: dict) -> None:
     doc["concurrency"]["group"] = "main-lint-${{ github.ref || github.sha }}"
 
 
+def _set_scalar_branches_ignore(doc: dict) -> None:
+    """A YAML scalar is iterated character by character — main is excluded."""
+    push = _trigger_block(doc)["push"]
+    push.pop("branches", None)
+    push["branches-ignore"] = "main"
+
+
+def _set_scalar_branches_other(doc: dict) -> None:
+    _trigger_block(doc)["push"]["branches"] = "main-next"
+
+
+def _set_commented_create_comment(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            script = step["with"]["script"].replace(
+                "await github.rest.issues.createComment", "// await github.rest.issues.createComment"
+            )
+            step["with"]["script"] = script
+
+
+def _set_notifier_disjunction(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"failure() || steps.{step_id}.outcome == 'failure'"
+
+
+def _set_glob_branches(doc: dict) -> None:
+    """`*` selects main too — must be ACCEPTED."""
+    _trigger_block(doc)["push"]["branches"] = ["*"]
+
+
+def _set_whole_condition_parens(doc: dict) -> None:
+    """The whole condition wrapped is the same condition — must be ACCEPTED."""
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"(failure() && steps.{step_id}.outcome == 'failure')"
+
+
 def _set_sparse_checkout(doc: dict) -> None:
     for step in doc["jobs"]["lint"]["steps"]:
         if str(step.get("uses", "")).startswith("actions/checkout@"):
@@ -2733,6 +2826,12 @@ _STARVED_SHAPES = [
     ("invalid `permissions`", _set_invalid_permissions),
     # ── a status slot that never fires on the failing path ──
     ("`success()` in the notifier status slot", _set_notifier_success_status),
+    # ── a scalar branch filter inverts the membership test ──
+    ("a scalar `branches-ignore: main`", _set_scalar_branches_ignore),
+    ("a scalar `branches: main-next`", _set_scalar_branches_other),
+    # ── the notification is commented out, or made a disjunction ──
+    ("a commented-out `createComment`", _set_commented_create_comment),
+    ("a notifier using `||`", _set_notifier_disjunction),
 ]
 
 
@@ -2808,6 +2907,8 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
         ("a parenthesised outcome conjunct", _set_parenthesised_conjunct),
         ("`permissions: write-all`", _set_write_all_permissions),
         ("a checkout `with.path` subdirectory", _set_checkout_path_subdir),
+        ("`branches: ['*']`", _set_glob_branches),
+        ("the whole notifier condition parenthesised", _set_whole_condition_parens),
         ("`continue-on-error: false` on the ruff step", _set_inert_continue_on_error),
         ("`shell: bash` on the ruff step", _set_inert_shell),
         ("`uv run ruff check .`", _set_uv_run),
