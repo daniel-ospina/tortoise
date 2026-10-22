@@ -257,13 +257,14 @@ WHAT THIS PINS
    as `_unframed_durations()`: a duration is a claim, and it is allowed only when the
    comment also carries the framing that produced it. ⚠️ The first version of the
    guard keyed on the self-denial PHRASE instead (`no (magnitude|wall-clock)` AND a
-   duration), which was **green on the merge base** — the text the PR exists to
-   replace names no denial — and would go green again on any rewording of the denial,
-   so it retired itself on the next prose edit. The predicate now reads the CLAIM, and
-   the only denial it reads is a negation of the framing marker ITSELF, scoped to that
-   marker's own sentence, so the second arm is its non-vacuity: the merge-base string
-   and the intermediate string RED, a duration carrying its framing stays GREEN, and a
-   duration with only "one box" for company (hardware is not framing) REDs.
+   duration), which was **green on the pre-`#9516` main** — `fa84a473d:990-992`, the
+   text the PR exists to replace, names no denial — and would go green again on any
+   rewording of the denial, so it retired itself on the next prose edit. The predicate
+   now reads the CLAIM, and the only denial it reads is a negation of the framing
+   marker ITSELF, scoped to that marker's own CLAUSE (a `,` `;` `:` `—`/`–` or a
+   sentence `.` ends its reach), so the second arm is its non-vacuity: the pre-`#9516`
+   string and the intermediate string RED, a duration carrying its framing stays GREEN,
+   and a duration with only "one box" for company (hardware is not framing) REDs.
    ⚠️ **Three later corrections, each found by putting the removed string somewhere
    else and watching the arm stay green.** (1) The capture kept only `#`-leading
    lines, so the same figure in the function DOCSTRING, in a TRAILING comment, or in
@@ -3787,8 +3788,11 @@ def _prose_of(fn: Callable[..., object]) -> str:
     figure in each position, which is what
     `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` does.
 
-    `inspect.unwrap` is not decoration: four of `_narrow_gate_walk_sites`'s siblings in
-    `_about_call_time_census.py` are `@lru_cache`d. `getsource` and `getsourcelines`
+    `inspect.unwrap` is not decoration: TEN of `_narrow_gate_walk_sites`'s siblings in
+    `_about_call_time_census.py` are `@lru_cache`d (measured: `_universe`, `_sources`,
+    `_literal_files`, `_files`, `_module_consts`, `_attr_consts`,
+    `_rel_constant_names`, `_census`, `_empty_pattern_sites`, `_call_time_sites`).
+    `getsource` and `getsourcelines`
     unwrap for you, but `getsourceFILE` — the call four lines below, which locates the
     `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
     neither the guard nor the comment (found by the `#9522` review; the first version
@@ -3834,16 +3838,17 @@ def _prose_of(fn: Callable[..., object]) -> str:
 #:
 #: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`,
 #: and `x1,000 s` must not report `000 s` — the lookbehind refuses a number that starts
-#: mid-identifier, mid-digit-run or right after a separator. It is `[\w.,]`, not `[\w.]`,
-#: because the GROUP SEPARATOR is itself the character a fragment would restart after
-#: (measured by the `#9522` re-review: `(?<![\w.])` reported `000 s` for `x1,000 s`).
+#: mid-identifier, mid-digit-run or right after a SEPARATOR. The second lookbehind is
+#: `\d,` and nothing broader, because a comma between two figures is a normal way to
+#: write them (`# arms were 10.36s,10.85s` must report BOTH; `(?<![\w.,])` dropped every
+#: figure after such a comma — measured by the cycle-3 review).
 #:
 #: Residual, recorded rather than silently accepted (`#9531`): a compound `min:sec`
 #: figure (`2m36s`) goes SILENT — the `36s` start is preceded by `m`, so the same
 #: lookbehind that refuses `sha256s` refuses it. That is the re-spelling class again,
 #: and the filed home is `#9531` with the line-vs-number coarseness.
 _DURATION = re.compile(
-    r"(?<![\w.,])"
+    r"(?<![\w.])(?<!\d,)"
     r"(?:\d{1,3}(?:,\d{3})+|\d+(?:[.,]\d+)?(?:e[+-]?\d+)?)\s*"
     r"(?:ms|us|µs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?)\b",
     re.IGNORECASE,
@@ -3887,6 +3892,17 @@ _DENIAL_WINDOW = 40
 #: line end follows it.
 _CLAUSE_BREAK = re.compile(r"[,;:—–]|[.;](?=\s|$)")
 
+#: A boundary for a denial that FOLLOWS its marker — a superset of `_CLAUSE_BREAK`.
+#:
+#: ⚠️ **Asymmetric on purpose, and each half is measured.** A parenthesis or a bare
+#: `and` after the marker is a SIDE REMARK, so `# whole arm 14.4 s (no flakes)` and
+#: `# 14.4 s whole arm and no flakes` must stay framed — both were RED with
+#: `_CLAUSE_BREAK` alone (cycle-3 review), i.e. a true comment was being reworded to
+#: pass the guard. In front of the marker the same words are the governing clause, so
+#: `# (no --durations run): 10.36 s` stays RED and is pinned as such: only this
+#: after-side boundary knows about parentheses.
+_CLAUSE_BREAK_AFTER = re.compile(r"[,;:—–()]|\band\b|[.;](?=\s|$)")
+
 
 def _marker_spans(line: str) -> list[tuple[int, int]]:
     """Every framing-marker occurrence on `line`, as `(start, end)` spans."""
@@ -3927,7 +3943,7 @@ def _denied(line: str, start: int, end: int) -> bool:
     if _DENIAL.search(before):
         return True
     after = line[end : end + _DENIAL_WINDOW]
-    stop = _CLAUSE_BREAK.search(after)
+    stop = _CLAUSE_BREAK_AFTER.search(after)
     if stop:
         after = after[: stop.start()]
     return bool(_DENIAL.search(after))
@@ -4103,7 +4119,7 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
     ), (
         "the quoted intermediate must be the blob's SIX lines, de-indented — an abridged "
         "or re-wrapped paraphrase returns the same durations and so cannot be caught by "
-        f"the assertion below (got {len(intermediate.splitlines())} lines)"
+        f"the duration assertion ABOVE (got {len(intermediate.splitlines())} lines)"
     )
     assert _unframed_durations(pre_9516_main) == ["10.36 s", "10.85 s"], (
         "the predicate must red on the PRE-`#9516` main text (`measured 10.36 s of the "
@@ -4148,6 +4164,26 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "a denial in front of an unrelated clause must not veto framing stated after "
         "it on the same line"
     )
+    # ⚠️ A parenthesis or a bare `and` AFTER the marker is a SIDE REMARK, not a denial
+    # of it — both were RED with `_CLAUSE_BREAK` alone (cycle-3 review), i.e. a true
+    # comment would have been reworded to pass the guard. The parenthetical BEFORE the
+    # marker is the opposite case and must stay RED, which is why the after-boundary is
+    # a superset rather than one list.
+    for side_remark in (
+        "# whole arm 14.4 s (no flakes)",
+        "# 14.4 s in-suite (no failures)",
+        "# 14.4 s whole arm --durations=0 (no failures)",
+        "# 14.4 s whole arm and no flakes",
+    ):
+        assert not _unframed_durations(side_remark), (
+            f"{side_remark!r} frames its figure and adds an unrelated parenthetical or "
+            f"coordinated negation ({_unframed_durations(side_remark)}) — a true "
+            "comment reding here is how a guard teaches an editor to reword it"
+        )
+    assert _unframed_durations("# (no --durations run): 10.36 s") == ["10.36 s"], (
+        "a negation in front of the marker governs it even inside a parenthesis — the "
+        "after-side boundary must not shield it"
+    )
     # ── re-spellings of the same figure: every one of these was GREEN when the number
     # had to be a plain decimal or the unit had to be `ms|s`, and a GREEN figure here
     # means the guard is retired by an editor's keyboard, not by a false claim.
@@ -4172,6 +4208,11 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "`x1,000` is not a duration: the number must be refused from its first digit "
         "and never reported from a fragment after the group separator — measured by "
         "the cycle-2 review as `['000 s']`, a span that is not what was written"
+    )
+    assert _unframed_durations("# arms were 10.36s,10.85s") == ["10.36s", "10.85s"], (
+        "a comma BETWEEN two figures is not a reason to refuse the second one "
+        f"({_unframed_durations('# arms were 10.36s,10.85s')}) — measured by the "
+        "cycle-3 review, where the group-separator lookbehind silently dropped it"
     )
     assert not _unframed_durations(
         "# the arm measured 14.4 s whole arm, --durations=0, one box"
