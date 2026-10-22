@@ -820,6 +820,23 @@ def test_checker_rejects_more_forming_operators_than_the_run_committed():
     assert "E4-FORMING" in _failures(_check(receipt))
 
 
+def test_a_non_list_duplicate_is_not_also_blamed_for_uncovered_rows():
+    """A wrongly-TYPED duplicate earns one refusal, not a second about coverage.
+
+    The artifact supplied the cross-check; it supplied it in a shape the checker
+    cannot read. Reporting "covers 0 of the 2 graded rows" as well misdescribes
+    the defect and would make a shape error look like an omission (#9618 r7).
+    """
+    receipt = _receipt()
+    receipt["session_results"] = {"wp01_quarry_debug": []}
+    result = _check(receipt)
+    assert result["ok"] is False
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
+    assert "expected a list" in numerator[0]["detail"]
+
+
 @pytest.mark.parametrize("field,value", [
     ("session_results", 5),
     ("session_results", {"s": 1}),
@@ -939,6 +956,26 @@ def _malformed(mutate):
     ("endpoints.from not a list",
      lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
      ["endpoints"].__setitem__("from", 5), "E4-REFS"),
+    # The E4-FORMING pair: a DICT satisfies "truthy" and "iterable", so a
+    # checker that only asks for a non-empty value certifies it. `forms_found`
+    # as `{"IMPL": 1}` and `edge_op_ids` as `{<valid id>: 1}` (its KEYS pass
+    # `_OP_ID_RE`) both shipped `ok=True` with the list-ness guard neutralised
+    # (#9618 review round 7).
+    ("forms_found not a list",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("forms_found", {"IMPL": 1}), "E4-FORMING"),
+    ("edge_op_ids not a list",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("edge_op_ids", {_op_id("forms"): 1}), "E4-FORMING"),
+    # `operators_total` is the same bool/`int` pair this PR pinned for
+    # `planted`: `True == True` clears E4-PERSIST, and `"7"` reaches the `>`
+    # comparison and raises TypeError with no rule named.
+    ("operators_total is a bool",
+     lambda r: r["operator_audit"].update(
+         {"operators_total": True, "operators_provenanced": True}), "E4-PERSIST"),
+    ("operators_total is a string",
+     lambda r: r["operator_audit"].__setitem__("operators_total", "7"),
+     "E4-PERSIST"),
 ])
 def test_a_malformed_shape_is_named_never_a_traceback(label, mutate, rule):
     """`2` is reserved for an unreadable FILE; `1` must NAME the failing rule.
@@ -993,6 +1030,13 @@ def test_checker_refuses_a_duplicate_entry_that_is_not_an_object():
     assert "E4-NUMERATOR" in _failures(result)
     assert any("entry is not an object" in r["detail"] for r in result["rules"]
                if not r["ok"]), _failures(result)
+    # …exactly ONCE. Without `duplicate_shape_ok` the coverage arm appends a
+    # second, misleading refusal about "covering 0 of the 2 graded rows" to a
+    # receipt whose real defect is a malformed entry — the artifact did supply
+    # the duplicate, it just supplied a broken one (#9618 round 7).
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
 
 
 def test_checker_refuses_a_duplicate_naming_an_edge_the_rows_do_not_carry():
