@@ -1465,6 +1465,7 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_5412_empty_query_vector_leg_trace.py
   # #8093: the `:Graph.namespace` cell of `docs/registry-graph-schema.md` vs the
   # namespace the code derives (`acl_graph_users._graph_namespace`,
   # `sdk._graph_create`, `hosted_api._provision_graph` / `_org_graph_name`).
