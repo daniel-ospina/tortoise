@@ -246,9 +246,11 @@ WHAT THIS PINS
    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` — the three
    `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
    than §13's. The third is the `#9522` capture arm: it replays the removed figure
-   through each of the four POSITIONS a duration can be written in (docstring, trailing
-   comment, `#` block above the `def`, and the live comment) and holds the `#`-line
-   floor that the capture widening would otherwise have retired. The
+   through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
+   above the `def`), then holds the LIVE function by containment (its docstring's first
+   line is in the capture) and by width (strictly more lines than the `#`-line
+   projection), plus the `#`-line floor that the capture widening would otherwise have
+   retired. The
    gate-walk comment in `_about_call_time_census.py` carried a duration a re-verifier
    cannot settle — `measured 10.36 s of the control's 10.85 s` on the merge base, and
    `~2.6 s of ~17 s` on an intermediate head of the branch — neither with the framing
@@ -3797,8 +3799,11 @@ def _prose_of(fn: Callable[..., object]) -> str:
     unwrap, which locates the `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
     neither the guard nor the comment (found by the `#9522` review; the first version
     of this paragraph blamed `getsource`). The assertion below names the contract for
-    anything that is not a function at all, and after the unwrap the `#` block is read
-    from above the INNER `def`, which is the line `getsourcelines` reports.
+    anything that is not a function at all. ⚠️ `getsourcelines` scans BACK OVER
+    DECORATORS, so for the functions this paragraph is about its line number is the
+    first DECORATOR line, not the `def` (measured by the cycle-5 review) — the `#` block
+    is therefore read from above the decorator, which is the right place and not the
+    place the sentence used to claim.
     """
     fn = inspect.unwrap(fn)
     assert inspect.isfunction(fn) or inspect.ismethod(fn), (
@@ -3855,8 +3860,8 @@ _DURATION = re.compile(
     r"(?<![\w.])(?<!\d,)"
     r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d+)?(?:e[+-]?\d+)?\s*"
     r"(?:"
-    r"milliseconds?|msecs?|microseconds?|nanoseconds?|"
-    r"ms|us|µs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?"
+    r"milliseconds?|msecs?|usecs?|microseconds?|µsecs?|μsecs?|nsecs?|nanoseconds?|"
+    r"ms|us|µs|μs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?"
     r")\b",
     re.IGNORECASE,
 )
@@ -3913,7 +3918,13 @@ _DENIAL_WEAK = re.compile(r"\b(?:no|none|nothing|nobody)\b", re.IGNORECASE)
 #: `(no failures)` stay framed — their object is not a measurement.
 _DENIAL_GOVERNING = re.compile(
     r"\b(?:no|none|nothing|nobody)\b[^.;]{0,40}?"
-    r"\b(?:framing|measure\w*|figure|duration|timing|numbers?|wall-clock|magnitude|split)\b",
+    r"\b(?:framing|measure\w*|figure|duration|timing|numbers?|wall-clock|magnitude|split)\b"
+    # ...and it must PREDICATE that noun (`no framing WAS TAKEN`, `no measurement
+    # EXISTS`). Without the lookahead, a parenthetical that denies a DIFFERENT quantity
+    # reds a framed figure — `# 14.4 s whole arm (no spread figure)` and
+    # `(no per-file timing)` were both RED at the previous head (cycle-5 review), which is
+    # the true-comment-gets-reworded failure this file keeps re-learning.
+    r"(?=\s*(?:was|is|were|are|exists?|available|taken|run|measured|pinned|stated|recorded))",
     re.IGNORECASE,
 )
 
@@ -3947,6 +3958,10 @@ _CLAUSE_BREAK = re.compile(r"[,;:—–]|[.;](?=\s|$)")
 #: `--durations=0 (never taken)` and `--durations=0 and never taken` SILENT — a
 #: fail-open with no compensating red. A strong denial is searched across these breaks.
 _CLAUSE_BREAK_AFTER = re.compile(r"[,;:—–()]|\band\b|[.;](?=\s|$)")
+
+#: A real sentence end — where the search for a STRONG denial stops, because a strong
+#: denial after the marker is about the marker however it is punctuated.
+_SENTENCE_END = re.compile(r"[.;](?=\s|$)")
 
 
 def _marker_spans(line: str) -> list[tuple[int, int]]:
@@ -3995,10 +4010,23 @@ def _denied(line: str, start: int, end: int) -> bool:
     if _DENIAL.search(before):
         return True
     after = line[end : end + _DENIAL_WINDOW]
-    # Strong denials reach across `(`/`)`/`and`; weak quantifiers do not.
-    stop = _CLAUSE_BREAK.search(after)
-    strong_window = after[: stop.start()] if stop else after
-    if _DENIAL_STRONG.search(strong_window) or _DENIAL_GOVERNING.search(strong_window):
+    # ⚠️ THREE windows, because the three lists are denied by different shapes:
+    #   * `_DENIAL_STRONG` is searched to the end of the SENTENCE — `--durations=0 — never
+    #     taken` and `--durations=0, never taken` deny the marker as plainly as the
+    #     parenthesised form, and cutting at `,`/`—` made both SILENT (cycle-5 review);
+    #   * `_DENIAL_GOVERNING` and `_DENIAL_WEAK` are searched to the next clause break, so
+    #     `— no other change to the control step` (a weak quantifier over a different noun)
+    #     stays a side remark;
+    #   * `_DENIAL_WEAK` is searched inside the narrower after-side boundary again, so
+    #     `(no flakes)` and `and no failures` stay framed.
+    sentence = _SENTENCE_END.search(after)
+    strong_window = after[: sentence.start()] if sentence else after
+    if _DENIAL_STRONG.search(strong_window):
+        return True
+    # The GOVERNING list also reads the sentence window: its own lookahead is what keeps
+    # `(no spread figure)` green (no predicate follows the noun), so it does not need the
+    # clause cut — and with the cut, `— no measurement was ever taken` went SILENT.
+    if _DENIAL_GOVERNING.search(strong_window):
         return True
     stop_after = _CLAUSE_BREAK_AFTER.search(after)
     weak_window = after[: stop_after.start()] if stop_after else after
@@ -4231,6 +4259,12 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# 14.4 s in-suite (no failures)",
         "# 14.4 s whole arm --durations=0 (no failures)",
         "# 14.4 s whole arm and no flakes",
+        # a parenthetical that denies a DIFFERENT quantity: the measurement noun alone
+        # was enough to red these at the previous head (cycle-5 review), so the governing
+        # list now requires a PREDICATE after the noun
+        "# 14.4 s whole arm (no spread figure)",
+        "# 14.4 s whole arm (no per-file timing)",
+        "# whole arm 14.4 s and no figure for the per-file split",
     ):
         assert not _unframed_durations(side_remark), (
             f"{side_remark!r} frames its figure and adds an unrelated parenthetical or "
@@ -4252,6 +4286,12 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# 10.36 s --durations=0 and never taken",
         "# 10.36 s --durations=0 and wasn't taken",
         "# 10.36 s --durations=0 and no framing was taken",
+        # a strong denial is about the marker however it is punctuated: the sentence-end
+        # window is what makes `, never taken` and `— never taken` red, and cutting at the
+        # separator made both SILENT (cycle-5 review)
+        "# 10.36 s --durations=0 — never taken",
+        "# 10.36 s --durations=0, never taken",
+        "# 10.36 s --durations=0 — no measurement was ever taken",
     ):
         assert _unframed_durations(strong_denial) == ["10.36 s"], (
             f"{strong_denial!r} denies the framing it names, parenthesised or "
@@ -4278,6 +4318,11 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         ("# the arm took 850 microseconds", ["850 microseconds"]),
         ("# the arm took 850 nanoseconds", ["850 nanoseconds"]),
         ("# the arm took 850 msec", ["850 msec"]),
+        ("# the arm took 900 usec", ["900 usec"]),
+        ("# the arm took 900 usecs", ["900 usecs"]),
+        ("# the arm took 900 usecs of the arm", ["900 usecs"]),
+        ("# the arm took 900 µsec", ["900 µsec"]),
+        ("# the arm took 900 nsecs", ["900 nsecs"]),
         ("# cost 1,000.5 s of the arm", ["1,000.5 s"]),
         ("# cost 2,048.25 ms of the arm", ["2,048.25 ms"]),
     ):
@@ -4379,6 +4424,17 @@ def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
         )
 
     census = _call_time_census()
+    # ⚠️ `inspect.unwrap` and the plain-function contract were both UNEXECUTED — the live
+    # function is undecorated, so neither could run (cycle-5 review). A `@lru_cache`d
+    # sibling is the natural probe: without the unwrap, `inspect.getsourcefile` raises
+    # `TypeError … got _lru_cache_wrapper`. Its docstring is the containment this reads.
+    unwrapped = _prose_of(census._census)
+    assert inspect.getdoc(census._census).splitlines()[0].strip() in unwrapped, (
+        "a `@lru_cache`d sibling's capture does not contain its docstring, so the "
+        "`inspect.unwrap` is not doing its job — `getsourcefile` would raise on the wrapper"
+    )
+    with pytest.raises(AssertionError, match="needs a plain function"):
+        _prose_of(len)  # type: ignore[arg-type]
     # ⚠️ The FLOOR that the capture widening retired, executed rather than described:
     # `_gate_walk_comment_lines` is the `#`-only projection the arms used to read, so a
     # function with NO `#` line must come back EMPTY. Without this arm the floor in
