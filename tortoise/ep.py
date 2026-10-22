@@ -2340,19 +2340,44 @@ class TortoiseEP:
             # `set_point_baseline`): journaling it correctly requires the
             # statement's OUTCOME, not its input params.
             if self._emit is not None:
-                # #7853: single disjunction query (not a per-label sweep) so a
-                # multi-labelled node is read — and journaled — exactly once.
-                rows = self._hop_query(
-                    "MATCH (n) "
-                    f"WHERE {epistemic_disjunction('n')} AND n.id IN $ids "
-                    "AND coalesce(n.baseline_set, false) = false "
-                    "RETURN n.id",
-                    {"ids": list(run_evidence)}, hop=None,
-                    phase="evidence_prewrite",
-                    frontier_size=len(run_evidence),
-                )
-                for row in rows:
-                    self._emit("ConfidenceChanged", id=row[0],
+                # #9304: ID-ANCHORED per-label sweep, deduped on the NODE KEY.
+                # The shipped form was a single LABEL-FREE disjunction query
+                # (`MATCH (n) WHERE (n:Point OR ...) AND n.id IN $ids`) — and a
+                # label-free match has no per-`(label, property)` index to
+                # anchor on, so it was planned `All Node Scan | (n)` with the
+                # id predicate applied per record: cost tracked the GRAPH, on
+                # a leg of every confidence pass that carries evidence priors
+                # and a wired journal (#6211's defect class). MEASURED
+                # (GRAPH.EXPLAIN, this file's fixture): shipped
+                # `All Node Scan | (n)`; per-label
+                # `Node By Index Scan | (n:{label})`.
+                #
+                # #7853 is PRESERVED by the dedupe, not by the label-free
+                # form: a multi-labelled node (`:Point:Object`, the shape
+                # `update_point`'s promote arm mints) is matched once per
+                # label, so the emitted ids are node-keyed through `seen` and
+                # it is still journaled exactly ONCE. The sweep is the same
+                # shape as the write above (`UNWIND` + label+id pattern), and
+                # `$ids` is the same binding, so it stays inside
+                # `test_6211_ep_anchor.py`'s capture filter.
+                seen: dict[str, None] = {}
+                for _q in epistemic_label_queries(
+                    "UNWIND $ids AS cid "
+                    "MATCH (n:{label} {id: cid}) "
+                    "WHERE coalesce(n.baseline_set, false) = false "
+                    "RETURN n.id"
+                ):
+                    for row in self._hop_query(
+                        _q, {"ids": list(run_evidence)}, hop=None,
+                        phase="evidence_prewrite",
+                        frontier_size=len(run_evidence),
+                    ):
+                        seen[row[0]] = None
+                # Sorted, so the journal order is a property of the id set
+                # rather than of the engine's row order (every record here is
+                # the same posterior clear, so only determinism is at stake).
+                for _cid in sorted(seen, key=str):
+                    self._emit("ConfidenceChanged", id=_cid,
                                posterior_alpha=None, posterior_beta=None)
 
         affected = self._affected_claims(operator_ids, max_hops,

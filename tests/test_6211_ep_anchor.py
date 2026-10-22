@@ -336,6 +336,14 @@ def test_direct_edge_factors_are_collected_once_per_edge_from_both_ends(graph):
 #: selector's frontier (`$frontier`) and expansion (`$ops`) sets.
 _ID_PARAMS = ("$ids", "$oids", "$frontier", "$ops")
 
+#: The evidence pre-write's journal read is the ONE id-set statement of the
+#: pass whose `$ids` binding is not a frontier: it re-reads the evidence-prior
+#: ids to record the posterior clear. Its distinguishing text is the
+#: `baseline_set ... = false` predicate, which no other statement carries (the
+#: cache's node-params read RETURNS `coalesce(n.baseline_set, false)` without
+#: filtering on it), so this needle identifies the leg precisely (#9304).
+_JOURNAL_NEEDLE = "coalesce(n.baseline_set, false) = false"
+
 
 def test_the_or_split_statement_counts_are_anchors_times_labels(graph):
     """The split emits 2 anchors x 4 epistemic labels at each OR site (8 + 8).
@@ -385,6 +393,138 @@ def test_the_or_split_statement_counts_are_anchors_times_labels(graph):
                     f"{site} emitted no {anchor}-anchored {label} statement — the "
                     f"per-endpoint split lost an anchor/label pair"
                 )
+
+
+#: Evidence-prior ids for the journal-read test below. `J_EV_MULTI` is the
+#: `:Point:Object` shape: it matches the per-label sweep under BOTH labels, so
+#: it is the only id in this fixture that can be journaled twice (#7853).
+J_EV_A = "j-ev-a"
+J_EV_B = "j-ev-b"
+J_EV_MULTI = "j-ev-multi"
+J_EV_BASELINE = "j-ev-baseline"
+J_EV_MISSING = "j-ev-missing"
+
+
+@pytest.fixture(scope="module")
+def journal_graph():
+    """A SMALL graph: `run()` writes, so it must not share the plan fixture.
+
+    The plan assertion does not need the 8k-edge field — an unlabelled
+    `MATCH (n)` is `All Node Scan` at any size (measured at 3 nodes), and a
+    label+id pattern is `Node By Index Scan` at any size. What the fixture DOES
+    have to carry is the shape that makes the dedupe observable: an evidence id
+    under two epistemic labels.
+    """
+    with tempfile.TemporaryDirectory(prefix="tt6211j_") as td:
+        sdk = TortoiseSDK(os.path.join(td, "j.db"))
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "UNWIND $ids AS id CREATE (n:Point) "
+                "SET n.id = id, n.is_operator = false, n.status = 'live', "
+                "    n.ep_alpha = 4.0, n.ep_beta = 1.0",
+                params={"ids": [J_EV_A, J_EV_B, J_EV_MULTI, J_EV_BASELINE]},
+            )
+            g.query("MATCH (n:Point {id: $id}) SET n:Object", params={"id": J_EV_MULTI})
+            # An explicit baseline: the pre-write keeps its posterior, so it
+            # must NOT be journaled as cleared (its CASE arm is a no-op).
+            g.query(
+                "MATCH (n:Point {id: $id}) "
+                "SET n.baseline_set = true, n.ep_alpha = 7.0, n.ep_beta = 2.0",
+                params={"id": J_EV_BASELINE},
+            )
+            g.query(
+                "CREATE (o:Point {id: 'j-op', is_operator: true, op_type: 'IMPL', "
+                "direction: 'bidirectional', status: 'live'})"
+            )
+            g.query(
+                "MATCH (o:Point {id: 'j-op'}), (a:Point {id: $a}), (b:Point {id: $b}) "
+                "CREATE (o)-[:IMPL {idx: 0, direction: 'bidirectional'}]->(a), "
+                "       (o)-[:IMPL {idx: 1, direction: 'bidirectional'}]->(b)",
+                params={"a": J_EV_A, "b": J_EV_B},
+            )
+            yield sdk
+        finally:
+            sdk.close()
+
+
+def test_the_evidence_prewrite_journal_read_is_planned_as_an_index_read(journal_graph):
+    """#9304: the last unanchored id-set leg of the `ep.py` pass.
+
+    The shipped form was a LABEL-FREE disjunction query —
+
+        MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event)
+              AND n.id IN $ids AND coalesce(n.baseline_set, false) = false
+        RETURN n.id
+
+    — so it had no label for a per-`(label, property)` index to anchor on and
+    was planned `All Node Scan | (n)`: cost tracked the GRAPH, on the leg every
+    journal-wired, evidence-carrying `compute_confidence()` call pays for
+    (#6211's defect class; measured on the 23k-node / 160k-edge PROFILE
+    fixture as `Results -> Project -> Filter -> All Node Scan | (n)`). It was
+    outside this file's pinned set because `_statements_under_test` never calls
+    `run()` — nothing reddened if it regressed.
+
+    Both halves are pinned here, and neither is decoration:
+
+    * the PLAN — every journal read the pass emits is `Node By Index Scan` with
+      no `All Node Scan` / `Node By Label Scan`. Reverting the code to the
+      label-free disjunction reddens it (`All Node Scan | (n)`), and so does
+      dropping the label from the pattern while keeping the `UNWIND`.
+    * the ROWS — #7853's "journal exactly once" invariant, which the label-free
+      form used to carry on its own. A per-label sweep matches a
+      `:Point:Object` node under BOTH labels, so without the node-keyed dedupe
+      `J_EV_MULTI` is journaled twice; the baseline'd id must be journaled zero
+      times (its posterior is not cleared) and an evidence id that is not in the
+      graph must not be journaled at all.
+    """
+    emitted: list[dict] = []
+    ep = TortoiseEP(
+        journal_graph._get_proj(),
+        evidence={
+            J_EV_A: (2.0, 3.0),
+            J_EV_B: (1.5, 1.5),
+            J_EV_MULTI: (3.0, 3.0),
+            J_EV_BASELINE: (9.0, 9.0),
+            J_EV_MISSING: (1.0, 1.0),
+        },
+        emit=lambda kind, **kw: emitted.append({"kind": kind, **kw}),
+    )
+    statements = _capture(ep, ep.run, ["j-op"], 2)
+
+    journal = [(q, p) for q, p in statements if _JOURNAL_NEEDLE in q]
+    assert journal, (
+        "the evidence pre-write's journal read was not captured — either the run "
+        "emitted no journal records (a wired `emit` + evidence priors must "
+        "reach it) or the statement no longer carries the baseline predicate, "
+        f"and this test is blind. Captured: {[q[:70] for q, _ in statements]}"
+    )
+    offenders = []
+    for cypher, params in journal:
+        plan = _plan_text(ep.g, cypher, params)
+        if "Node By Index Scan" not in plan or "All Node Scan" in plan or "Node By Label Scan" in plan:
+            offenders.append((cypher, plan))
+    assert not offenders, (
+        "the evidence pre-write's journal read is not index-anchored, so its "
+        "cost tracks the GRAPH rather than the evidence set (#9304):\n"
+        + "\n".join(f"  {q}\n      plan: {plan}" for q, plan in offenders)
+    )
+
+    cleared = [
+        rec["id"] for rec in emitted
+        if rec["kind"] == "ConfidenceChanged"
+        and rec.get("posterior_alpha") is None
+        and rec.get("posterior_beta") is None
+        and "confidence" not in rec
+    ]
+    assert sorted(cleared) == sorted([J_EV_A, J_EV_B, J_EV_MULTI]), (
+        "the pre-write's journal records are wrong: expected the non-baseline "
+        f"evidence ids {sorted([J_EV_A, J_EV_B, J_EV_MULTI])} exactly ONCE each "
+        f"(a `{J_EV_MULTI}` is :Point:Object, so a per-label sweep without a "
+        f"node-keyed dedupe journals it twice — #7853), no baseline'd id "
+        f"(`{J_EV_BASELINE}` keeps its posterior) and no id the graph does not "
+        f"hold (`{J_EV_MISSING}`). Got {cleared}"
+    )
 
 
 def test_the_operator_selection_queries_are_planned_as_index_reads(graph):
