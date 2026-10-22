@@ -11979,17 +11979,24 @@ class TortoiseSDK:
         #     vs after `rebuild_all()` AND after `rebuild()`, mutation-measured red
         #     on the pre-#9451 tree).
         #
-        #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied (#9451
-        #     review round 3): a `SourceCreated` line written BEFORE this change
-        #     states `now`, which the live write never stored on a pre-existing
-        #     stub — and no record can correct that, because the instant the mint
-        #     chose was never journaled. Such a line used to be replayed to the
-        #     replay clock; the ON MATCH clause now applies its RECORDED `now`
-        #     instead, which is still not the live node's value. So `live ==
-        #     rebuilt` for those legacy lines needs a RE-CAPTURE of the session
-        #     (which writes a faithful record) or a migration — not this fix.
-        #     What #9451 closes is the DOOR: every capture from this version
-        #     onward journals the instant it stored, on either arm.
+        #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied and
+        #     engine by engine (#9451 review rounds 3-4): a `SourceCreated` line
+        #     written BEFORE this change states `now`, which the live write never
+        #     stored on a pre-existing stub — and no record can correct that,
+        #     because the instant the mint chose was never journaled. On
+        #     `rebuild_all()` the ON CREATE arm already applied that recorded
+        #     `now` (pass 1b folds the record before the stub mint); on
+        #     `rebuild()` the stub was re-minted at the REPLAY clock and the fold
+        #     left it there, and this change makes the ON MATCH arm apply the
+        #     recorded `now` on that engine too. Either way the rebuilt node is
+        #     still not the LIVE node's value for those legacy lines: convergence
+        #     needs a MIGRATION or a fresh faithful record — NOT a plain
+        #     re-capture, because `capture_session` short-circuits an
+        #     already-captured session ("session already captured (same
+        #     session_id) — no new extraction") and journals no `SourceCreated`
+        #     for it at all. What #9451 closes is the DOOR: every capture that
+        #     REACHES this writer from this version onward journals the instant it
+        #     stored, on either arm.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
