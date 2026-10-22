@@ -2446,6 +2446,54 @@ def test_the_capstone_census_pin_runs_on_a_main_py_change():
     assert r["full"] is False, r
 
 
+def test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_it():
+    # PR #9668 review P1: `tests/test_5051_capture_receipt_key_registry.py` was
+    # registered in `core` ALONE, and `core` is a FALLBACK surface in
+    # `select()` (`if not matched: matched.add("core")`) — a named-surface match
+    # REPLACES it. Every subject the pin guards is a named-surface match:
+    #
+    #   * `tortoise/hosted_api.py` owns BOTH derivations the pin exists to hold
+    #     to the formatter — `_capture_receipt_buckets` (the delete path's orphan
+    #     sweep) and `_capture_server_owned_keys` (the client-write-refusal set
+    #     #3681 closed) — and is an EXACT `api` source pattern AND an EXACT
+    #     `onboarding` one;
+    #   * `website/apps/dashboard/src/captureStatus.js` is the JS reader pin
+    #     and matches `onboarding`;
+    #   * `tortoise/capture_receipts.py` — the ONLY intended change direction (a
+    #     FORMAT change) — falls through to `core`, which is what the original
+    #     row covers.
+    #
+    # So the pin fired only for a change that also moved the formatter: BOTH
+    # mutations #9668 used as its own evidence are `hosted_api.py`-only edits
+    # (a stale reconcile-bucket prefix; `hermes` dropped from the server-owned
+    # derivation), and a hosted_api.py-only diff selected `api`+`onboarding`
+    # with the pin ABSENT — the drift landed green. Same #1349/#2938/#3154
+    # silent-drop class (and same remedy: dual-registration) as
+    # `test_the_capstone_census_pin_runs_on_a_main_py_change` above and the
+    # #7809 / #8693 / #9068 `api` arms.
+    #
+    # Measured before the `api`/`onboarding` arms (2026-10-17, `select()`
+    # in-process): hosted_api.py -> surfaces=['api','onboarding'], pin ABSENT;
+    # captureStatus.js -> surfaces=['onboarding'], pin ABSENT;
+    # capture_receipts.py -> surfaces=['core'], pin PRESENT.
+    # Mutation check: removing either arm fails the assert below.
+    for source, surface in (
+        ("tortoise/hosted_api.py", "api"),
+        ("tortoise/hosted_api.py", "onboarding"),
+        ("website/apps/dashboard/src/captureStatus.js", "onboarding"),
+        ("tortoise/capture_receipts.py", "core"),
+    ):
+        r = _sel([source])
+        assert surface in r["surfaces"], (source, surface, r["surfaces"])
+        assert r["full"] is False, (source, r)
+        assert "test_5051_capture_receipt_key_registry.py" in r["test_files"], (
+            f"{source} selects {r['surfaces']} but does NOT run the #5051 "
+            "receipt-key pin — a re-spelled key at that site (or a moved "
+            "format) would merge green and only surface on the next full "
+            "run (#1349/#2938/#3154 silent-drop class)"
+        )
+
+
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
     # providers by `env(NAME)` substitution, so each of those names is required
