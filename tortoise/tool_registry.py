@@ -238,10 +238,11 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.packs_list",
         description="List this team's active packs (#318): the shared pack catalog "
                     "joined with the tenant graph's PackInstall activation records. "
-                    "NOT a pure read: the handler seeds a missing starter activation "
-                    "before it answers (one MERGE per starter namespace, skipped when "
-                    "the graph's pack set was deliberately configured, #8648), so a "
-                    "graphs:read caller can cause a write. Empty result when nothing "
+                    "NOT a pure read: when the graph carries no PackInstall record "
+                    "at all, the handler re-seeds the starter set before it answers "
+                    "(one MERGE per starter namespace), so a graphs:read caller can "
+                    "cause a write. The re-seed is skipped when the graph's pack set "
+                    "was deliberately configured (#8648). Empty result when nothing "
                     "is installed (existence masking — another tenant's packs are "
                     "never observable).",
         annotations=_ro(),

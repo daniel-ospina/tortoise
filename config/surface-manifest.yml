@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 9a9c95b1b
+cut_at_commit: c5b2b49dc5aac1e8883f19fcda1b8ac5127ced6a
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -2258,10 +2258,10 @@ rows:
   cluster: null
   canonical: null
   job: 'List this team''s active packs (#318): the shared pack catalog joined with the tenant graph''s PackInstall
-    activation records. NOT a pure read: the handler seeds a missing starter activation before it answers (one MERGE
-    per starter namespace, skipped when the graph''s pack set was deliberately configured, #8648), so a graphs:read
-    caller can cause a write. Empty result when nothing is installed (existence masking — another tenant''s packs
-    are never observable).'
+    activation records. NOT a pure read: when the graph carries no PackInstall record at all, the handler re-seeds
+    the starter set before it answers (one MERGE per starter namespace), so a graphs:read caller can cause a write.
+    The re-seed is skipped when the graph''s pack set was deliberately configured (#8648). Empty result when nothing
+    is installed (existence masking — another tenant''s packs are never observable).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: agents, tooling, docs

@@ -1247,16 +1247,20 @@ class TestCapabilityModel:
 
         A tool that writes on a self-heal path may not advertise itself as
         read-only.  `tortoise_packs_list` fronts `get_tenant_packs`, whose
-        `ensure_tenant_packs` MERGEs an inconsistent `:PackInstall` record; #4122
-        corrected the declaration for exactly that reason (it stopped claiming
-        `readOnlyHint: true`) but left the description asserting "Read-only;", four
-        lines above the comment that says the opposite.  The hint a client
+        `ensure_tenant_packs` MERGEs a missing starter `:PackInstall` activation.
+        PR #9573 (#4122) fixes that entry's HINT channel for exactly that reason
+        (it stops declaring `readOnlyHint: true`) and deliberately left the
+        description asserting "Read-only;" (#9575).  A hint a client
         auto-approves on and the prose an agent reads must agree about whether the
-        call can write.
+        call can write — and only the prose is checkable here, because the hint
+        half lives on #9573's branch, not on `main`.
 
-        The tool set is derived (read-through writers + every `writes=True` row),
-        not listed here, so a NEW read-through writer that inherits the same wrong
-        phrasing fails without anyone remembering this test exists.
+        The tool set is derived (read-through writers by declared method, plus the
+        recorded handler-served bindings, plus every `writes=True` row), not
+        listed here — and the derivation's COVERAGE is asserted, so a read-through
+        writer that gains a tool without a derivable binding fails loudly instead
+        of silently dropping out of the check (`declared_set_violations` skips an
+        op whose binding is absent, which is how the #4035 shape disappears).
 
         Mutation: restore "Read-only;" to `tortoise_packs_list` and this goes red.
         """
@@ -1265,17 +1269,31 @@ class TestCapabilityModel:
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import served_registry
 
-        # A read-only CLAIM, negation-aware: `tortoise_get_source_reliability`
-        # legitimately says "so not read-only" and must not be flagged.
-        claim = re.compile(r"(?<!not )(?<!never )read[\s\-]?only", re.IGNORECASE)
+        # A read-only CLAIM.  Negation-aware (`tortoise_get_source_reliability`
+        # says "so not read-only") and attributive-aware (`writes=True` tools do
+        # legitimately talk about "a read-only key", which is a different claim).
+        claim = re.compile(
+            r"(?<!not )(?<!never )read[\s\-]?only"
+            r"(?!\s+(?:key|keys|caller|callers|scope|credential|token|client))",
+            re.IGNORECASE,
+        )
 
         entries = {e.name: e for e in served_registry()}
         by_method = {e.sdk_method: e.name for e in entries.values() if e.sdk_method}
+        unbound = set(tsc.READ_THROUGH_WRITE_METHODS) - set(by_method) - set(
+            tsc.NON_SDK_READ_BINDINGS)
+        assert unbound == set(), (
+            "a read-through writer has NO derivable tool binding, so this check "
+            f"would silently skip it: {sorted(unbound)}")
         self_heal_writers = {
             by_method[method]
             for method in tsc.READ_THROUGH_WRITE_METHODS
             if method in by_method
-        } | set(tsc.NON_SDK_READ_BINDINGS.values())
+        } | {
+            tool
+            for operation, tool in tsc.NON_SDK_READ_BINDINGS.items()
+            if operation in tsc.READ_THROUGH_WRITE_METHODS
+        }
         declared_writers = {name for name, e in entries.items() if e.writes}
 
         # Non-vacuous: the derived set is live and names the #4122/ #9575 row.
@@ -1288,10 +1306,12 @@ class TestCapabilityModel:
         # The predicate itself is falsifiable in both directions.
         assert claim.search("Read-only; empty result when nothing is installed")
         assert not claim.search("a write-through projection, so not read-only")
+        assert not claim.search("a read-only key is refused even for action='list'")
 
         offenders = sorted(
             f"{name}: {claim.search(e.description).group(0)!r} in a "
-            f"{'declared-writer' if e.writes else 'self-heal-writer'} row"
+            f"{'declared-writer' if name in declared_writers else 'self-heal-writer'} "
+            f"row"
             for name, e in entries.items()
             if (e.writes or name in self_heal_writers) and claim.search(e.description)
         )
