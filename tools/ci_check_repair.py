@@ -884,7 +884,12 @@ def workflow_state(rows: list[dict], window_minutes: int, in_flight_grace_minute
 
 
 def _could_not_measure(args: argparse.Namespace, message: str) -> int:
-    """The single exit-2 path — every "could not measure" message comes from here."""
+    """The exit-2 path for a FAILED MEASUREMENT — every "could not measure" message
+
+    comes from here. It is not the only exit-2 source: the <3.12 interpreter guard at
+    the top of this module raises `SystemExit(2)` before this function even exists
+    (#9365).
+    """
     if args.json:
         print(json.dumps({"error": message, "required": [], "prs": []}))
     else:
