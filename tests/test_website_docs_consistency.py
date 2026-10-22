@@ -28,6 +28,7 @@ HTML, matching the harness contract of `tests/test_signup_form_safety.py`.
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from html import unescape as html_unescape
@@ -70,6 +71,7 @@ DOCS = WEBSITE / "docs.html"
 FAQ = WEBSITE / "faq.html"
 REDIRECTS = WEBSITE / "_redirects"
 SDK = REPO_ROOT / "tortoise" / "sdk.py"
+QUADRATURE = REPO_ROOT / "tortoise" / "quadrature.py"
 
 # Both public pages, for the parametrized guards.
 PAGES = pytest.mark.parametrize("page", [DOCS, FAQ], ids=["docs.html", "faq.html"])
@@ -111,6 +113,69 @@ def _canonical_statuses() -> set[str]:
     return set(re.findall(r"'([^']+)'", m.group(1)))
 
 
+def _sdk_constant(name: str) -> int:
+    """A module-level integer constant read from `tortoise/sdk.py`.
+
+    Read, never restated: a pin that hardcodes the number the copy states cannot
+    catch the COPY going false when the code moves. Measured at the #9515 review —
+    `_CAPTURE_TURN_CAP = 5000` → `2000` left the FAQ pin green while the page
+    claimed 5,000 characters.
+    """
+    m = re.search(rf"^{re.escape(name)}\s*=\s*(\d+)", _read(SDK), re.MULTILINE)
+    assert m, f"{name} not found at module level in tortoise/sdk.py — did it move?"
+    return int(m.group(1))
+
+
+def _exp_bodies(text: str) -> set[str]:
+    """Every `exp(...)` argument in `text`, compacted for comparison.
+
+    The paren scan is explicit rather than a regex because the IMPL factor nests
+    one (`exp(-w*(ca-cb)**2)`), and a non-nesting pattern silently returns a
+    TRUNCATED body that compares unequal to an identical formula.
+    """
+    bodies: set[str] = set()
+    start = 0
+    while (open_at := text.find("exp(", start)) != -1:
+        depth, idx = 0, open_at + 4
+        while idx < len(text):
+            if text[idx] == "(":
+                depth += 1
+            elif text[idx] == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            idx += 1
+        bodies.add(text[open_at + 4:idx])
+        start = open_at + 4
+    return bodies
+
+
+def _quadrature_exponent(func: str) -> str:
+    """The exponent `tortoise/quadrature.py::<func>` returns, in `_exp_bodies` form.
+
+    Derived so the FORMULA is pinned, not the prose around it: `/docs` states
+    `exp(-w·c_a·c_b)` for NAND and `exp(-w·(c_a−c_b)²)` for IMPL, and swapping
+    either for the other (or for a renamed symbol) reds here. `.` is normalised to
+    `*` because the source multiplies and the page renders a middot.
+    """
+    src = _read(QUADRATURE)
+    m = re.search(
+        rf"^def {re.escape(func)}\(.*?return np\.exp\((.+?)\)\s*$", src, re.M | re.S)
+    assert m, f"{func} not found in tortoise/quadrature.py — did it move?"
+    return re.sub(r"\s+", "", m.group(1))
+
+
+def _page_formulas(page: Path) -> set[str]:
+    """The formulas a rendered page states, in `_exp_bodies` form.
+
+    `<sup>2</sup>` becomes `**2` BEFORE the tags are stripped: the page writes the
+    IMPL square as an HTML superscript, so a tag-stripping-only pass yields
+    `(ca-cb)2` — a truncated exponent that would read as a mismatch on honest copy.
+    """
+    raw = re.sub(r"<sup>2</sup>", "**2", _read(page))
+    plain = _normalise(raw).replace("·", "*").replace("−", "-")
+    return _exp_bodies(re.sub(r"\s+", "", plain))
+
 # ── Point status vocabulary ──────────────────────────────────────────────────
 
 
@@ -124,6 +189,84 @@ def test_sdk_status_vocabulary_is_what_the_pins_below_assume() -> None:
         "outdated",
         "archived",
     }
+
+
+def test_docs_states_the_formulas_quadrature_actually_computes() -> None:
+    """/docs' mechanism card must state the FACTORS the engine computes.
+
+    The card's prose is pinned above, but prose is rewordable and a formula is
+    not: `tortoise/quadrature.py` returns `np.exp(-w * ca * cb)` for NAND and
+    `np.exp(-w * (ca - cb) ** 2)` for IMPL, and /docs renders both. Comparing the
+    two DERIVED (never restated) makes a swap falsifiable — replacing the NAND
+    factor on the page with IMPL's left the prose pin green (measured at the
+    #9515 review: `joint-truth penalty` survives a wrong formula), and editing
+    `quadrature.py` itself now reds the page that describes it.
+    """
+    nand = _quadrature_exponent("phi_nand")
+    impl = _quadrature_exponent("phi_impl")
+    assert nand != impl, (
+        "phi_nand and phi_impl return the same factor — the two edge types are no "
+        "longer different constraints, and /docs says they are"
+    )
+    formulas = _page_formulas(DOCS)
+    for func, exponent in (("phi_nand", nand), ("phi_impl", impl)):
+        assert exponent in formulas, (
+            f"website/docs.html does not state exp({exponent}), which is what "
+            f"tortoise/quadrature.py::{func} computes. The card's prose alone cannot "
+            f"catch a wrong formula: it is pinned as words, and words survive a swap."
+        )
+
+
+def _extraction_write_calls() -> list[ast.Call]:
+    """Every `create_point(...)` call inside `SDK._extract_session_v2`.
+
+    Parsed rather than grepped: the extraction path's sourcing claim is about the
+    DOOR it writes through, and a regex over the file would also match the
+    advisory `sdk.create_point` mentioned in a neighbouring docstring.
+    """
+    tree = ast.parse(_read(SDK))
+    out: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_extract_session_v2":
+            for sub in ast.walk(node):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "create_point"
+                ):
+                    out.append(sub)
+    return out
+
+
+def test_the_extraction_write_path_sources_every_extracted_point() -> None:
+    """The evidence under the FAQ's "every extracted claim carries the source".
+
+    `Point.source_ref` (`tortoise/commit_schema.py`, pinned below) governs the
+    COMMIT payload. The extraction path does not go through it — it writes with
+    `sdk.create_point`, whose contract is advisory (`no_source`, #8171) — so the
+    commit-schema pin cannot carry the FAQ's sentence on its own. What makes the
+    sentence true is the write itself: `_extract_session_v2` passes
+    `extractedFrom=f"session:{session_id}"`, and `create_point` wires that edge.
+    Dropping the keyword left every website pin green while the published claim
+    went false (measured at the #9515 review).
+    """
+    calls = _extraction_write_calls()
+    assert calls, (
+        "no create_point(...) call found inside tortoise/sdk.py::_extract_session_v2 "
+        "— the extraction write path moved or was renamed; this pin must be "
+        "re-anchored, not deleted"
+    )
+    for call in calls:
+        kw = {k.arg: k.value for k in call.keywords if k.arg}
+        assert "extractedFrom" in kw, (
+            f"the extraction write at tortoise/sdk.py:{call.lineno} does not pass "
+            f"extractedFrom — an extracted point would then carry no link to the "
+            f"session it was drawn from, which is what website/faq.html promises"
+        )
+        assert "session:" in ast.unparse(kw["extractedFrom"]), (
+            f"the extraction write at tortoise/sdk.py:{call.lineno} no longer links "
+            f"the extracted point to a `session:` Source"
+        )
 
 
 def test_docs_lists_every_canonical_point_status() -> None:
@@ -1869,6 +2012,23 @@ def test_privacy_lists_session_recordings_in_the_data_category_section() -> None
     )
 
 
+def _faq_answer(anchor: str) -> str:
+    """The FAQ answer under ``id="<anchor>"``, up to the next question.
+
+    Scoped for the same reason `_privacy_section` is: an unscoped `in text` pin is
+    satisfied by whichever answer happens to carry the phrase. Measured at the
+    #9515 review — the `truncat` stem matched an unrelated sentence about
+    *truncated neighbourhoods* while the source-text answer itself could drop the
+    marker claim entirely and stay green.
+    """
+    html = _read(FAQ)
+    marker = f'id="{anchor}"'
+    start = html.find(marker)
+    assert start != -1, f"faq.html must carry the answer {anchor!r}"
+    nxt = html.find("<h3", start + len(marker))
+    return html[start : nxt if nxt != -1 else len(html)]
+
+
 def test_privacy_establishes_the_basis_that_6_cites() -> None:
     """#2535 review cycle 2: §6 cites §4 for justification, so §4 must establish it.
 
@@ -1884,8 +2044,8 @@ def test_privacy_establishes_the_basis_that_6_cites() -> None:
 def test_faq_source_answer_states_the_capture_shaping() -> None:
     """The FAQ may not call the stored source "verbatim" or "never rewritten".
 
-    The stored turn is shaped once, on the way in: `_CAPTURE_TURN_CAP` (5000,
-    `tortoise/sdk.py:1134`) routes every writer through
+    The stored turn is shaped once, on the way in: `_CAPTURE_TURN_CAP` (read from
+    `tortoise/sdk.py`, not restated here) routes every writer through
     `_clip_capture_turn_content`, which cuts to the cap AND appends a marker
     carrying the true original length ("no cut is silent"), and
     `_redact_turn_contents` replaces credential-shaped spans in place (#4911) —
@@ -1903,6 +2063,7 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
     # test's own cycle removed, so it is pinned against reintroduction, not against
     # history.
     text = _normalise(_read(FAQ))
+    answer = _normalise(_faq_answer("source-text"))
     for refuted in (
         "verbatim and authoritative",
         "the source is never rewritten",
@@ -1914,21 +2075,30 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
             f"capture path (5000-character clip with a truncation marker, plus "
             f"credential redaction, both applied before the write)."
         )
-    # The NUMBER is pinned as a fact (it must follow `_CAPTURE_TURN_CAP` = 5000,
-    # sdk.py:1134); the other two are pinned as STEMS, not sentences — a future
-    # editor rewording "credential-shaped spans are redacted" to "credentials are
-    # redacted" has not broken anything, and a pin that reds true copy gets
-    # deleted by the first person it blocks.
-    assert "5,000 characters" in text, (
-        "website/faq.html no longer states the capture window (_CAPTURE_TURN_CAP)"
+    # The NUMBER is DERIVED from `_CAPTURE_TURN_CAP`, never restated: hardcoding
+    # 5,000 here left this test green when the constant moved to 2,000 and the
+    # page went on claiming 5,000 characters (measured at the #9515 review). The
+    # other two are pinned as STEMS, not sentences — a future editor rewording
+    # "credential-shaped spans are redacted" to "credentials are redacted" has
+    # not broken anything, and a pin that reds true copy gets deleted by the
+    # first person it blocks.
+    cap = _sdk_constant("_CAPTURE_TURN_CAP")
+    assert f"{cap:,} characters" in answer, (
+        f"faq.html's source-text answer no longer states the capture window "
+        f"({cap:,} characters, `_CAPTURE_TURN_CAP` in tortoise/sdk.py)."
     )
-    assert "truncat" in text.lower(), (
-        "website/faq.html no longer says an over-cap turn is marked (_clip_capture_turn_content)"
+    assert "original length" in answer.lower(), (
+        "faq.html's source-text answer no longer says a cut turn is marked with its "
+        "original length — that is what `_capture_truncation_marker` writes, and it is "
+        "what makes the cut non-silent. Scoped to this answer on purpose: the old "
+        "`truncat` stem was satisfied by an unrelated sentence about truncated "
+        "neighbourhoods, so it never pinned this claim at all (measured at the #9515 "
+        "review)."
     )
-    assert "redact" in text.lower(), (
-        "website/faq.html no longer says credential-shaped spans are redacted "
-        "(_redact_turn_contents, #4911)"
+    assert "redact" in answer.lower(), (
+        "faq.html's source-text answer no longer says credential-shaped spans are "
+        "redacted (_redact_turn_contents, #4911)"
     )
-    assert "every extracted claim carries the source it was drawn from" in text, (
+    assert "every extracted claim carries the source it was drawn from" in answer, (
         "the scoped traceability claim was dropped along with the false universal"
     )
