@@ -223,7 +223,7 @@ def _assert_no_ceiling_claim(msg: str) -> None:
 
 
 def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatch):
-    """#7392 — an UNREADABLE ratio is not evidence of a ceiling.
+    """#7392 — an UNREADABLE datum is not evidence of a ceiling.
 
     NON-VACUOUS: pre-fix this branch emitted "the server has reached its
     memory ceiling (server reports a maxmemory write-refusal (used_memory/
@@ -233,6 +233,13 @@ def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatc
     What it must say instead is what was OBSERVED: the server refused a write
     for memory reasons. That keeps the operator away from `rebuild` (the
     #2981 job) without inventing a ceiling to tune.
+
+    The wording must also be TRUE OF EVERY shape that reaches this branch, not
+    just a raised `INFO` call: a reply that answers WITHOUT a `maxmemory` field
+    is not an unreadable INFO. So the message says the datum could not be read,
+    and it does NOT offer the flag as an action — on this branch whether a
+    ceiling exists is exactly what is unknown (both found in review of this
+    change).
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
@@ -243,9 +250,43 @@ def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatc
     _assert_no_ceiling_claim(msg)
     lowered = msg.lower()
     assert "refused a write for memory reasons" in lowered, msg
-    # …and it says WHICH reading failed, so the operator can re-take it.
-    assert "unreadable" in lowered, msg
+    # …it says the DATUM was not available, naming no failed read it cannot know…
+    assert "no maxmemory could be read" in lowered, msg
+    assert "info memory is unreadable" not in lowered, msg
+    # …the next action is to ESTABLISH it, so the flag is not offered as a lever.
     assert "info memory" in lowered, msg
+    assert "--maxmemory" not in msg, msg
+
+
+def test_a_reply_missing_maxmemory_does_not_claim_the_info_read_failed():
+    """#7392 review — `None` has FIVE causes; the message must fit all five.
+
+    `_memory_pressure()` refuses a datum when the reply raised, was not a dict,
+    omitted `maxmemory`, carried unparseable values, or reported a negative
+    ceiling. Asserting "INFO memory is unreadable" is false for a reply that
+    ANSWERED without the field, so this drives the REAL probe (an INFO reply of
+    `{"used_memory": 1024}`) into the message and pins the wording that is true
+    of every cause.
+
+    NON-VACUOUS for this change, not for the pre-existing code: before it, a
+    reply missing the field collapsed into the asserting branch instead (a
+    ceiling claim for a datum nobody read).
+    """
+
+    class _Conn:
+        def info(self, section):
+            return {"used_memory": 1024}  # answers, without `maxmemory`
+
+    proj = object.__new__(FalkorProjection)
+    proj.db = type("DB", (), {"connection": _Conn()})()
+    proj._probe_error = RuntimeError("Out of memory")
+
+    msg = proj._write_refusal_message(RuntimeError("Out of memory"))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    assert "no maxmemory could be read" in lowered, msg
+    assert "info memory is unreadable" not in lowered, msg
 
 
 @pytest.mark.parametrize("refusal", [
@@ -325,6 +366,10 @@ def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
     # An OMITTED maxmemory is an unanswered datum, not "no limit": the
     # `or 0` default must not mint the positive claim the message then makes.
     assert _proj_with({"used_memory": 1024})._memory_pressure() is None
+    # A NEGATIVE ceiling is a broken reading, not an answer (no conformant
+    # Redis reports one — `CONFIG SET maxmemory` refuses it), so it must not
+    # become a "no ceiling" claim either.
+    assert _proj_with({"used_memory": 1024, "maxmemory": -1})._memory_pressure() is None
 
 
 def test_genuine_corruption_still_advises_rebuild(monkeypatch):

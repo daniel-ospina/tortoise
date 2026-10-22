@@ -10569,6 +10569,11 @@ class FalkorProjection(
             cap = int(info.get("maxmemory", 0) or 0)
         except (TypeError, ValueError):
             return None
+        if cap < 0:
+            # No conformant Redis reports a negative ceiling (`CONFIG SET
+            # maxmemory` refuses one), so this is a broken reading and not an
+            # answer — it must not become a "no ceiling" claim either.
+            return None
         # cap == 0 is the server answering "no limit", not a failed reading.
         return (used, cap)
 
@@ -10599,16 +10604,28 @@ class FalkorProjection(
             return None
         pressure = self._memory_pressure()
         if pressure is None:
-            # No ceiling established: the reading failed. Do not assert one.
-            lead = ("the server refused a write for MEMORY reasons (INFO "
-                    "memory is unreadable, so NO ceiling was established)")
+            # No ceiling established: the datum was not available in any of the
+            # ways `_memory_pressure` refuses one (a raised/absent INFO, a
+            # non-dict reply, a reply that OMITS `maxmemory`, unparseable
+            # values, a negative ceiling). The wording must be TRUE OF ALL of
+            # them — asserting "INFO memory is unreadable" would be false for a
+            # reply that answered without that field (reviewed, #7392).
+            lead = ("the server refused a write for MEMORY reasons (no "
+                    "maxmemory could be read from this instance, so NO "
+                    "ceiling was established)")
+            # The lever is named CONDITIONALLY, after the reading, because on
+            # this branch we do not know whether one exists — prescribing it
+            # unread is exactly the defect #7392 closes. The flag itself
+            # (`--maxmemory`) is therefore NOT offered as an action here.
             remedy = (
-                "Remedy: read the instance's INFO memory before relieving "
-                "anything — if maxmemory is 0 there is no ceiling to raise "
-                "and the pressure is outside the instance (such as "
-                "host/kernel memory or a per-query cap); if it is set, raise "
-                "/ relieve it — the --maxmemory in a container's REDIS_ARGS, "
-                "or the provider's console on a managed instance.")
+                "Remedy: establish the ceiling before relieving anything — "
+                "read the instance's INFO memory. If it reports a maxmemory "
+                "limit, the next action is to raise or relieve it: a "
+                "container's REDIS_ARGS, or the provider's console on a "
+                "managed instance. If it reports 0, there is no ceiling to "
+                "raise and the pressure is NOT a maxmemory dataset ceiling — "
+                "it may come from host/kernel memory, or from an in-instance "
+                "per-query cap.")
         elif pressure[1] <= 0:
             # Readable, and it says NO limit. Name the absence, not a ceiling.
             # The value is interpolated rather than spelled "0": the predicate
@@ -10617,13 +10634,18 @@ class FalkorProjection(
             lead = ("the server refused a write for MEMORY reasons "
                     f"(used_memory {_fmt_bytes(pressure[0])}, and maxmemory "
                     f"is {pressure[1]} — NO maxmemory ceiling is set)")
+            # The locus is NOT asserted: the reading establishes only that
+            # `maxmemory` is not the cause, and "a per-query cap" is a limit OF
+            # the instance — so "outside the instance" would contradict its own
+            # example (reviewed, #7392).
             remedy = (
-                "Remedy: this instance has no ceiling to raise, so the "
-                "pressure is OUTSIDE it — such as host/kernel memory or a "
-                "per-query cap. Do not go looking for a --maxmemory to tune: "
-                "none is set (one would be added in a container's REDIS_ARGS "
-                "or in the provider's console on a managed instance, and this "
-                "message reports it by name once it exists).")
+                "Remedy: this instance has no ceiling to raise — the pressure "
+                "is NOT a maxmemory dataset ceiling, and it may come from "
+                "host/kernel memory or from an in-instance per-query cap. Do "
+                "not go looking for a --maxmemory to tune: none is set (one "
+                "would be added in a container's REDIS_ARGS or in the "
+                "provider's console on a managed instance, and this message "
+                "reports it by name once it exists).")
         else:
             used, cap = pressure
             lead = (f"the server has reached its memory ceiling (used_memory "
@@ -10653,6 +10675,18 @@ class FalkorProjection(
         # This operator message names the same two homes the note does, because
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
+        #
+        # #7392 review P1 — what that binding does NOT yet cover: the pair is
+        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
+        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
+        # asserts "it has reached its configured dataset limit (`maxmemory`)"
+        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
+        # CLASS, not just the wording), so on a ceiling-less instance the note
+        # and the `cap <= 0` branch above state opposite facts. Measured and
+        # recorded on #7357 (issuecomment-6341756094) — the note is that
+        # issue's deliverable, so it is fixed there, not here; this comment is
+        # the pointer so the next reader does not read the sentence above as
+        # proof that the two already agree.
         return (
             "DB refused writes on open: the graph is INTACT but "
             f"{lead}. This is NOT "
