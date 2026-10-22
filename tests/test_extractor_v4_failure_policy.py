@@ -92,32 +92,84 @@ _CODE_CITATION = re.compile(r"`?[A-Za-z0-9_./-]+\.py:\d+`?")
 #: `Per-step FAILURE POLICY`), so a pointer to another number sends a reader to a
 #: section that holds an ordering argument and no rule at all. Bounded to one
 #: line and stopped at `)`/`|` so a wrapping paragraph cannot manufacture a hit.
-_POLICY_POINTER = re.compile(r"§\s*(4\.\d+)[^)\n|]{0,80}(fail-open|fail-closed)")
-#: §4.1 declares the canonical top-level count as **EIGHT** and forbids writing
-#: "seven" (§4.0, §4.1 and §4.2 must agree). A passage that names how many
-#: steps an inherited rule covers must therefore use the document's own number:
-#: a second count in the same file is what the drift marker exists to stop, and
-#: an ordinal derived from it ("not a seventh declaration") is wrong in the same
-#: direction. Matched against the passage with markdown emphasis stripped, so
-#: `**eight**` and `eight` are read alike.
-_NON_CANONICAL_STEP_COUNT = re.compile(
-    r"\b(?:one|two|three|four|five|six|seven|nine|ten|eleven)\s+"
-    r"(?:[A-Za-z-]+\s+)?(?:pipeline\s+)?steps?\b",
+#: ⚠️ `re.IGNORECASE`: the document's canonical direction words are UPPERCASE
+#: (`FAIL-OPEN` / `FAIL-CLOSED`, and §4.4's own rows), so a case-sensitive
+#: pattern reds only on the lowercase spelling of the dead pointer it was written
+#: for and reads a pointer written in the document's own vocabulary as clean
+#: (#9654 review). Measured document-wide: exactly one match either way, and it
+#: is the correct `§4.4` one, so the flag introduces no false positive.
+_POLICY_POINTER = re.compile(
+    r"§\s*(4\.\d+)[^)\n|]{0,80}(fail-open|fail-closed)", re.IGNORECASE
+)
+#: §4.0 declares the canonical top-level count (currently **EIGHT**; §4.1 repeats
+#: it and §4.2 must agree, with a drift marker forbidding "seven"). A passage
+#: that names how many steps an inherited rule covers must use the document's OWN
+#: number — a second count in the same file is what the drift marker exists to
+#: stop, and an ordinal derived from it ("not a seventh declaration") is wrong in
+#: the same direction.
+#:
+#: ⚠️ The count is DERIVED from §4.0 (`_canonical_steps()`, the same parser
+#: `test_every_canonical_step_has_a_declared_failure_policy` uses, which is built
+#: to accept a step being ADDED) rather than hardcoded here. A hardcoded list
+#: mis-fires in both directions on the day the document legitimately grows to
+#: nine: it would red a correctly-updated passage with a message insisting on
+#: the now-stale number, while a passage left at the old number stayed green
+#: (#9654 review P2). Matched against the passage with markdown emphasis
+#: stripped, so `**eight**` and `eight` are read alike.
+#:
+#: Spelled numbers, so a count written as a word and one written as a digit are
+#: read alike. Anything outside this table is not a count ("the steps").
+_NUMBER_VALUES = {
+    word: value
+    for value, word in enumerate(
+        [
+            "zero", "one", "two", "three", "four", "five", "six", "seven",
+            "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen",
+            "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+        ]
+    )
+}
+_ORDINAL_VALUES = {
+    word: value
+    for value, word in enumerate(
+        [
+            "zeroth", "first", "second", "third", "fourth", "fifth", "sixth",
+            "seventh", "eighth", "ninth", "tenth", "eleventh", "twelfth",
+            "thirteenth", "fourteenth", "fifteenth", "sixteenth", "seventeenth",
+            "eighteenth", "nineteenth", "twentieth",
+        ]
+    )
+}
+#: The alternations the patterns use, longest-first so `sixteen` cannot be read
+#: as `six`. ⚠️ The token must be a KNOWN number: with a bare `[A-Za-z]+` the
+#: engine consumes the article in *"the eight pipeline steps"* as the count and
+#: then skips past the real number, which read the canonical sentence as carrying
+#: no count at all (measured: `finditer` returned `[]`).
+_NUMBER_TOKEN = "|".join(
+    sorted(_NUMBER_VALUES, key=len, reverse=True)) + r"|\d+"
+_ORDINAL_TOKEN = "|".join(sorted(_ORDINAL_VALUES, key=len, reverse=True))
+_STEP_COUNT_MENTION = re.compile(
+    rf"\b(?P<n>{_NUMBER_TOKEN})\s+(?:[A-Za-z]+\s+)?(?:pipeline\s+)?steps?\b",
     re.IGNORECASE,
 )
-#: An ordinal count of DECLARATIONS: with EIGHT steps in §4.4, one more rule is a
-#: NINTH declaration — not a seventh.
-_NON_CANONICAL_ORDINAL = re.compile(
-    r"\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|tenth|eleventh)"
-    r"\s+declaration\b",
-    re.IGNORECASE,
-)
-#: The canonical count, stated in the passage that cites it.
-_CANONICAL_STEP_COUNT = re.compile(
-    r"eight\s+(?:[A-Za-z-]+\s+)?(?:pipeline\s+)?steps", re.IGNORECASE
+#: The hyphenated form (`nine-step`), which the whitespace pattern above cannot
+#: see. The token is restricted to a NUMBER, so an ordinary compound
+#: (`per-step`) is not read as a count.
+_HYPHEN_STEP_COUNT = re.compile(rf"\b(?P<n>{_NUMBER_TOKEN})-steps?\b", re.IGNORECASE)
+#: An ordinal count of DECLARATIONS: with N steps in §4.4, one more rule is the
+#: (N+1)th declaration.
+_ORDINAL_DECLARATION = re.compile(
+    rf"\b(?P<o>{_ORDINAL_TOKEN})\s+declaration\b", re.IGNORECASE
 )
 #: The section that DECLARES per-step failure policy (the pointer must name it).
 FAILURE_POLICY_SECTION = "4.4"
+#: The revision §4.4's citations are read at — named in the header's exception
+#: list. Bound PER SECTION rather than "any declared pin": the header's rule is
+#: pin IDENTITY ("except where a passage names a later pin"), so a pin that only
+#: resolves §4.3's numbers must not satisfy §4.4 (#9654 review).
+POLICY_SECTION_PIN = "7d348d351"
+#: The revision §4.3's *G5's destructive half* subsection is read at.
+G5_DESTRUCTIVE_PIN = "653980445"
 #: §4.3's relocation subsection (`#5333`), bounded by the next `###` heading.
 G5_DESTRUCTIVE_HEADING = "#### G5's destructive half"
 G5_DESTRUCTIVE_END = "### S3 — RESOLVE"
@@ -289,6 +341,12 @@ def test_the_state_of_code_citation_names_its_revision_pin():
     The pin is resolved against the header's OWN declared pins and bound to the
     LINE carrying the citation, so it cannot be satisfied by a pin mentioned
     elsewhere in the section, and a second unpinned citation in §4.4 also reds.
+
+    ⚠️ **Bound to §4.4's OWN revision, not to "some declared pin"** (#9654
+    review P2): the header's rule is pin IDENTITY, and once a fourth pin joined
+    the list, accepting any member made a §4.4 line pinned at a §4.3 revision
+    read as compliant. `POLICY_SECTION_PIN` is that section's revision and must
+    also still be declared in the header, so the binding cannot drift silently.
     """
     section = _policy_section()
     assert "_render_search_results" in section, (
@@ -301,6 +359,11 @@ def test_the_state_of_code_citation_names_its_revision_pin():
         "the header names no later pin — this guard would pass vacuously; the "
         "header's pin vocabulary changed and needs re-reading (#8600)."
     )
+    assert POLICY_SECTION_PIN in later, (
+        f"§4.4's citations are read at `{POLICY_SECTION_PIN}`, but the header no "
+        "longer declares that pin among its exceptions — the numbers in §4.4 "
+        "now read against the base pin, where they are wrong (#8600)."
+    )
     cited = [line for line in section.splitlines() if _CODE_CITATION.search(line)]
     assert cited, (
         "§4.4 carries no `file.py:NNNN` citation, so this guard is vacuous — "
@@ -309,7 +372,7 @@ def test_the_state_of_code_citation_names_its_revision_pin():
     unpinned = [
         line.strip()[:160]
         for line in cited
-        if not any(f"`{pin}`" in line for pin in later)
+        if f"`{POLICY_SECTION_PIN}`" not in line
     ]
     assert not unpinned, (
         "these §4.4 lines cite a `file.py:NNNN` without naming the revision the "
@@ -418,13 +481,25 @@ def test_a_section_cited_for_failure_policy_is_the_one_that_declares_it():
     follows a `§4.2` pointer lands on the ordering argument and finds no rule; a
     reader who knows the document concludes the passage invented its own home.
     Measured on the pre-fix text, this reds on `(§4.2 fail-open)`.
+
+    ⚠️ **Anchored, not merely exhaustive** (#9654 review P3): the guard rejects
+    offenders, so a pattern that matched NOTHING would report the same clean
+    result as a document with no dead pointer. The canonical form is therefore
+    required to still be found — the document does name §4.4 beside a direction
+    (G3's row), and if the section renumbers or the spellings change, that is a
+    red rather than silence.
     """
     assert _policy_section(), "§4.4 must exist for this guard to mean anything"
-    offenders = [
-        match.group(0)
-        for match in _POLICY_POINTER.finditer(_document())
-        if match.group(1) != FAILURE_POLICY_SECTION
-    ]
+    matches = list(_POLICY_POINTER.finditer(_document()))
+    canonical = [m for m in matches if m.group(1) == FAILURE_POLICY_SECTION]
+    assert canonical, (
+        "no `§" + FAILURE_POLICY_SECTION + " … fail-open/fail-closed` pointer was "
+        f"found anywhere in {DOC.name} ({[m.group(0) for m in matches]}), so "
+        "this guard is passing vacuously — re-point its pattern at the form the "
+        "document actually uses, or restore the pointer to the section that "
+        "declares the policy (#8495)."
+    )
+    offenders = [m.group(0) for m in matches if m.group(1) != FAILURE_POLICY_SECTION]
     assert not offenders, (
         "these passages attribute a fail-open/fail-closed policy to a section "
         f"that declares none — name §{FAILURE_POLICY_SECTION} (the per-step "
@@ -458,34 +533,84 @@ def test_the_relocation_rule_points_at_the_failure_policy_home():
     )
 
 
+def _stated_step_counts(section: str) -> list[tuple[str, int]]:
+    """``(text, value)`` for every step-count mention in ``section``.
+
+    Word and digit forms are read alike, and the hyphenated form is read too, so
+    the guard covers what a reader would recognise as a count rather than one
+    spelling of it.
+    """
+    found: list[tuple[str, int]] = []
+    for pattern in (_STEP_COUNT_MENTION, _HYPHEN_STEP_COUNT):
+        for match in pattern.finditer(section):
+            token = match.group("n").lower()
+            value = int(token) if token.isdigit() else _NUMBER_VALUES.get(token)
+            if value is not None:
+                found.append((match.group(0), value))
+    return found
+
+
+def _stated_ordinals(section: str) -> list[tuple[str, int]]:
+    """``(text, value)`` for every ``… declaration`` ordinal in ``section``."""
+    return [
+        (match.group(0), _ORDINAL_VALUES[match.group("o").lower()])
+        for match in _ORDINAL_DECLARATION.finditer(section)
+        if match.group("o").lower() in _ORDINAL_VALUES
+    ]
+
+
 def test_the_relocation_rule_does_not_invent_a_second_step_count():
     """P2 (review of #9654): §4.3 must not carry a COMPETING step count.
 
-    §4.0 declares *"EIGHT steps"*, §4.1 repeats it (*"The count is EIGHT … do
-    not write `seven`"*) and §4.4 declares policy for every one of the eight.
-    The subsection's closing sentence nonetheless read *"§4.4 declares the
+    §4.0 declares the canonical set, §4.1 repeats the count (*"The count is
+    EIGHT … do not write `seven`"*) and §4.4 declares policy for every one of
+    them. The subsection's closing sentence nonetheless read *"§4.4 declares the
     policy for the six pipeline steps … not a seventh declaration"* — it
     undercounted §4.4's own coverage by two steps and derived its ordinal from
     that undercount. A second count in the same document is exactly what the
     drift marker forbids, so a future edit that reintroduces one reds here.
 
-    Measured on the pre-fix text (the passage read *"six pipeline steps"* and
-    *"not a seventh declaration"*), this fails.
+    ⚠️ **The count is derived, not restated.** `N` comes from §4.0's own
+    declared set (`_canonical_steps()`), so the passage, §4.0/§4.1 and this
+    guard agree by construction: when the document legitimately grows to nine
+    steps, the guard follows it instead of reding a correct passage and instead
+    of accepting the stale number (#9654 review P2). The permitted ordinal is
+    `N + 1` (one more declaration than the canonical steps).
+
+    Non-vacuity: measured on the pre-fix text (the passage read *"six pipeline
+    steps"* and *"not a seventh declaration"*), both arms fail.
     """
+    canonical = _canonical_steps()
+    count = len(canonical)
+    assert count >= 8, f"§4.0's canonical step set parsed as {canonical!r}"
+    word = next(w for w, value in _NUMBER_VALUES.items() if value == count)
     section = _g5_destructive_half().replace("*", "")
-    assert _CANONICAL_STEP_COUNT.search(section), (
+
+    stated = _stated_step_counts(section)
+    assert any(value == count for _, value in stated), (
         "the relocation rule must state the canonical step count it inherits — "
-        "§4.4 declares the policy for the EIGHT steps of §4.1, and without the "
-        "number the 'proposal' claim has nothing to be carried over FROM "
+        f"§4.4 declares the policy for the {word.upper()} steps of §4.1 "
+        f"({', '.join(canonical)}), and without the number the 'proposal' "
+        f"claim has nothing to be carried over FROM. Counts found: {stated} "
         "(#5333)."
     )
-    offenders = [
-        match.group(0) for match in _NON_CANONICAL_STEP_COUNT.finditer(section)
-    ] + [match.group(0) for match in _NON_CANONICAL_ORDINAL.finditer(section)]
+    offenders = [text for text, value in stated if value != count]
     assert not offenders, (
         "this subsection states a step count the document does not declare — "
-        "§4.0/§4.1 say EIGHT (and §4.4 covers all eight), so the carried-over "
-        f"rule is not a NINTH declaration. Offenders: {offenders!r}"
+        f"§4.0/§4.1 say {word.upper()} ({count}), and §4.4 covers all {count}, "
+        f"so the carried-over rule is not a "
+        f"{next(w for w, v in _ORDINAL_VALUES.items() if v == count + 1).upper()} "
+        f"declaration. Offenders: {offenders!r}"
+    )
+    ordinal_offenders = [
+        text for text, value in _stated_ordinals(section) if value != count + 1
+    ]
+    assert not ordinal_offenders, (
+        "this subsection derives its ordinal from something other than the "
+        f"document's step count — with {count} canonical steps, one more rule "
+        "is the "
+        f"{next(w for w, v in _ORDINAL_VALUES.items() if v == count + 1)} "
+        f"declaration. Offenders: {ordinal_offenders!r} (#5333)"
     )
 
 
@@ -521,10 +646,19 @@ def test_the_relocation_subsection_citations_name_their_revision_pin():
         "the header names no later pin — this guard would pass vacuously; the "
         "header's pin vocabulary changed and needs re-reading (#8600)."
     )
-    pinned = [pin for pin in later if f"`{pin}`" in section]
-    assert pinned, (
-        "§4.3's relocation subsection cites a `file.py:NNNN` but names no "
-        f"revision pin. The header reads an unnamed number against `{BASE_PIN}`, "
+    assert G5_DESTRUCTIVE_PIN in later, (
+        f"this subsection's numbers are read at `{G5_DESTRUCTIVE_PIN}`, but the "
+        "header no longer declares that pin among its exceptions — the passage "
+        "now reads against the base pin, where it resolves to nothing (#8600)."
+    )
+    #: Bound to THIS subsection's own revision, not to "any declared pin": with
+    #: four pins in the header, a set-membership test accepted a passage pinned
+    #: at a sibling's revision, i.e. it verified that a pin appears rather than
+    #: that the passage names the revision its numbers hold at (#9654 review).
+    assert f"`{G5_DESTRUCTIVE_PIN}`" in section, (
+        "§4.3's relocation subsection cites a `file.py:NNNN` but does not name "
+        f"`{G5_DESTRUCTIVE_PIN}`, the revision its numbers hold at. The header "
+        f"reads an unnamed (or differently-pinned) number against `{BASE_PIN}`, "
         "where these numbers are wrong or out of range, so the whole passage "
         "resolves to nothing (#8600). Name the measurement revision in the "
         "passage AND in the header's exception list."

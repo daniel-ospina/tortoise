@@ -867,5 +867,5 @@ the header's default sent a reader to no citation on every line of the passage �
 and named in the header's exception list, and a guard reds if the pin is dropped. ⚠️ **The closing sentence
 counted the steps wrong** — it read *"§4.4 declares the policy for the six pipeline steps … not a seventh
 declaration"*, while §4.0/§4.1 declare **EIGHT** (and §4.4 covers all eight), so the carried-over rule is
-*"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states
-any step count other than the canonical one.
+*"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states a
+spelled or numeric step count other than §4.0's canonical one, or a `… declaration` ordinal other than the next one.

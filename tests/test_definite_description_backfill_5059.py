@@ -35,6 +35,7 @@ change's to touch.
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -802,24 +803,113 @@ def test_the_doc_does_not_claim_archived_has_no_writer():
     )
 
 
+#: The map the design document cites as *declaring* the Point lifecycle while
+#: `nothing consults it` (§4.3, `#5333`). The claim is about READS of the name.
+TRANSITION_MAP = "_ALLOWED_TRANSITIONS"
+
+
+def _transition_map_sites(
+    root: Path, symbol: str = TRANSITION_MAP
+) -> tuple[list[str], list[str]]:
+    """``(definitions, reads)`` of ``symbol`` under ``root``, as ``rel:line``.
+
+    ⚠️ **A READ, not a mention.** The claim the design document makes is that no
+    code *consults* the map. A textual search cannot tell that apart from a
+    comment or a docstring that merely names it — and this tree is comment-dense
+    (the map's own block is nine comment lines), so a substring search both
+    reds a guard whose message says "now has a production reader" for prose, and
+    cannot see a reader that lives in the file the definition is in.
+
+    Parsing settles both: a definition binds the name (`ast.Store`), every
+    consultation loads it (`ast.Load`), and comments do not survive the parse at
+    all.
+    """
+    definitions: list[str] = []
+    reads: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        rel = path.relative_to(root).as_posix()
+        text = path.read_text(encoding="utf-8")
+        if symbol not in text:
+            continue  # cheap prefilter: parsing 244 modules for nothing is tier1 cost
+        tree = ast.parse(text, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Name) or node.id != symbol:
+                continue
+            site = f"{rel}:{node.lineno}"
+            (reads if isinstance(node.ctx, ast.Load) else definitions).append(site)
+    return definitions, reads
+
+
 def test_the_transition_map_the_doc_cites_has_no_production_reader() -> None:
     """The doc's own reason for distrusting `_ALLOWED_TRANSITIONS`, executed.
 
     If a consumer is ever wired up, the doc's *"nothing consults that map"*
     becomes false and this reds — the pin is the claim, in both directions.
+
+    The scan covers **`sdk.py` too**, and it counts READS rather than textual
+    mentions. Both halves are load-bearing: the map and every verb that would
+    plausibly consult it (`update_point`, `retract_point`, `supersede_point`)
+    live in the same file, so a guard that skipped the definition's own file
+    could not red on the most likely consumer — the one the map's own comment
+    names — while reding on a comment elsewhere.
     """
-    definition = Path(dd.__file__).resolve().parent / "sdk.py"
-    readers: list[str] = []
-    for path in definition.parent.rglob("*.py"):
-        if path == definition:
-            continue  # the definition site itself
-        if "_ALLOWED_TRANSITIONS" in path.read_text(encoding="utf-8"):
-            readers.append(str(path.relative_to(ROOT)))
-    assert readers == [], (
-        "`_ALLOWED_TRANSITIONS` now has a production reader "
-        f"({readers}), so the design doc's 'nothing consults that map' is "
-        "stale — and so is the claim that it cannot bound a write (#5333)."
+    definitions, reads = _transition_map_sites(ROOT / "tortoise")
+    assert definitions, (
+        f"`{TRANSITION_MAP}` is not defined anywhere under `tortoise/`, so the "
+        "design doc's citation of it is stale — re-point this guard (#5333)."
     )
-    assert "_ALLOWED_TRANSITIONS" in definition.read_text(encoding="utf-8"), (
-        "the map moved out of `sdk.py`; the doc's citation is stale (#5333)."
+    assert reads == [], (
+        f"`{TRANSITION_MAP}` now has a production reader ({reads}), so the "
+        "design doc's 'nothing consults that map' is stale — and so is the "
+        "claim that it cannot bound a write (#5333)."
+    )
+    assert "sdk.py:" in definitions[0], (
+        f"the map moved out of `sdk.py` (defined at {definitions}); the doc's "
+        "`sdk.py:2942` citation is stale (#5333)."
+    )
+
+
+def test_the_reader_scan_sees_a_consumer_in_the_definitions_own_file(tmp_path):
+    """Non-vacuity: a reader beside the definition is a READ, and is seen.
+
+    This is the shape the reviewer named: wiring the map into `update_point` —
+    the verb the map's own comment says it is *"NOT consulted by … per-call"* —
+    inside `tortoise/sdk.py`. The pre-fix guard skipped that whole file
+    (`if path == definition: continue`), so it reported no reader here.
+    """
+    (tmp_path / "sdk.py").write_text(
+        f'{TRANSITION_MAP} = {{"live": frozenset()}}\n'
+        "\n"
+        "def update_point(status, cur):\n"
+        f"    if status not in {TRANSITION_MAP}[cur]:\n"
+        "        raise ValueError(status)\n",
+        encoding="utf-8",
+    )
+    definitions, reads = _transition_map_sites(tmp_path)
+    assert definitions == ["sdk.py:1"], definitions
+    assert reads == ["sdk.py:4"], (
+        "a read of the map in the file that defines it is not reported — the "
+        "guard is blind to the one place a consumer is most likely to be "
+        "wired (#5333)."
+    )
+
+
+def test_the_reader_scan_ignores_a_mention_that_is_not_a_read(tmp_path):
+    """Non-vacuity, other direction: prose is not a reader.
+
+    A comment or a docstring naming the map does not consult it. Counting
+    mentions would red this guard — whose message says *"now has a production
+    reader"* — on a comment.
+    """
+    (tmp_path / "notes.py").write_text(
+        f'# {TRANSITION_MAP} is a Point-lifecycle spec; nothing consults it.\n'
+        "def describe():\n"
+        f'    """`{TRANSITION_MAP}` is declared and reserved."""\n'
+        "    return None\n",
+        encoding="utf-8",
+    )
+    definitions, reads = _transition_map_sites(tmp_path)
+    assert (definitions, reads) == ([], []), (
+        "a comment/docstring naming the map was counted as a definition or a "
+        f"read ({definitions}, {reads}) — prose is not a consultation (#5333)."
     )
