@@ -12,6 +12,9 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.sdk import BASELINE_SOURCE_INHERITED
 from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
 from tortoise.exceptions import CalibrationError
+from tortoise.exceptions import UnaddressableClaimError
+from tortoise.ep import TortoiseEP
+from tortoise.live import direction_flows
 
 
 @pytest.fixture
@@ -1165,8 +1168,9 @@ def test_duplicate_point_ids_count_once(sdk):
 def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     """#9063: an id-less (or numeric-id) Point is not reported, and cannot hide.
 
-    An id-less node is never STAMPED — it is admitted into EP's affected set and
-    then the run DIES in the ordering (``sorted(affected)``, #9275), and no
+    An id-less node is never STAMPED — `_affected_claims` now REFUSES a run that
+    would consume one (`UnaddressableClaimError`, #9275), which is why it can no
+    longer die in the ordering (``sorted(affected)``) — and no
     caller can name it to ``set_point_baseline`` — so it must never make the
     gate raise a TypeError instead of its CalibrationError (the mixed-type
     ``sorted()`` half), and it must not eat the ``limit=1`` existence probe's
@@ -1475,3 +1479,538 @@ def test_out_of_contract_kind_shapes_do_not_abort_the_gate(sdk):
     # And the run itself still works on that graph (the assertion above would
     # pass even if the query raised inside a caller that swallows it).
     sdk.compute_confidence(require_calibration=True)
+
+
+# ── #9275 — an unaddressable claim refuses the RUN, not the ordering ────────
+
+def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
+    """#9275: a claim that names no node refuses the pass, BEFORE it stamps.
+
+    MEASURED on ``origin/main`` at ``02e18e752``: the id-less ``:Point`` rode
+    ``_affected_claims`` into ``dream.py``'s ``sorted(affected)`` and the pass
+    died with ``TypeError: '<' not supported between instances of 'str' and
+    'NoneType'`` — AFTER it had flushed the posteriors of both NAMED claims
+    (``3.24647986469106``/``1.10312233616541`` and ``3.2020772952``/``1.04032``),
+    leaving the run unreturnable and half-written. The same graph now refuses
+    with a diagnosis, and asserts the invariant that made the old behaviour
+    unacceptable: nothing is stamped.
+
+    The traceback used to name a sort, which is why it could not be diagnosed
+    from the SDK surface: an id-less node cannot be named, so it cannot be
+    repaired by ``set_point_baseline`` — the message has to carry the repair
+    query instead of an id.
+    """
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
+                 "content:'no id'})")
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (c:Point) WHERE c.id IS NULL "
+        "CREATE (o)-[:IMPL {id:'e-9275'}]->(c)",
+        params={"o": op["id"]})
+
+    with pytest.raises(UnaddressableClaimError) as exc:
+        sdk.compute_confidence()
+    message = str(exc.value)
+    assert "is NULL" in message
+    # WHICH guard fired matters: this fixture's operator IS seeded, so the
+    # affected set carries the NULL and `_affected_claims` refuses it. Pinning
+    # the message pins that guard — without it the factor-input guard would
+    # raise the same error class with "a factor's inputs" instead (measured: the
+    # two shapes overlap unless the degenerate-operator case is exercised), so a
+    # revert of the affected-set guard would otherwise be masked.
+    assert "its affected set" in message
+    # Actionable, not merely loud: the repair is a graph write because the node
+    # has no id to pass to set_point_baseline, and it must mint ONE id per node
+    # (a single literal would create the duplicate-id shape #7822).
+    # The repair has to be runnable on the shapes the guards actually admit:
+    # every epistemic label (an id-less :Event is a REAL population — see the
+    # label test below) and a direct edge's endpoint, not only a :Point wired as
+    # an operator's claim.
+    assert ":Subject" in message and ":Object" in message and ":Event" in message
+    assert "eventId" in message and "DISTINCT id" in message
+    assert "DIRECT EDGE" in message
+    assert "ONE NEW id" in message
+    assert "DETACH DELETE" in message
+    assert "#9275" in message
+
+    # THE invariant: the refusal comes before any stamp. A partial stamp is what
+    # made the old TypeError unrecoverable (a retry stamps the same claims
+    # twice), so it is asserted on the SAME namable claims the old run stamped.
+    stamped = dict(proj.g.query(
+        "MATCH (n:Point) WHERE n.id IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha").result_set)
+    assert stamped[anchor["id"]] is None
+    assert stamped[claim["id"]] is None
+
+
+def test_an_id_that_is_not_a_string_is_ordered_not_crashed(sdk):
+    """#9275 sibling: a numeric id is ADDRESSABLE — only the ordering choked.
+
+    ``create_point(..., id=X)`` mints string ids, so a numeric one is the same
+    hand-written-graph class as the id-less node (and ``set_point_baseline(42,
+    …)`` — the remedy ``calibrate_summary`` already prints for it — proves it is
+    addressable). MEASURED on ``origin/main`` at ``02e18e752``: the pass ran and
+    then died in ``sorted(affected)`` with ``TypeError: '<' not supported
+    between instances of 'str' and 'int'``, again AFTER stamping. The sort is
+    now total (``key=str``, the same guard the calibration gate's own sorted
+    message uses) and the claim is computed like any other.
+    """
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
+                 params={"id": claim["id"]})
+
+    out = sdk._get_dreamer().dream([anchor["id"], 42], warm_start=False)
+    assert 42 in out["affected_claims"]
+    # …and on the DEFAULT dream path, which is the one that builds the warm-start
+    # snapshot key `tuple(sorted(input_ids))` — the second site this fix makes
+    # total. Pinned with warm_start=True so deleting that edit reds a test
+    # instead of silently re-introducing the crash on the default path.
+    out_warm = sdk._get_dreamer().dream([anchor["id"], 42], warm_start=True)
+    assert 42 in out_warm["affected_claims"]
+    posterior = proj.g.query(
+        "MATCH (n:Point {id:42}) RETURN n.posterior_alpha").result_set
+    assert posterior[0][0] is not None, (
+        "the numeric-id claim was ordered but never computed")
+
+
+def test_id_less_factor_input_refuses_even_when_the_operator_is_not_seeded(sdk):
+    """#9275 (review round 2): the FACTOR-INPUT half the affected guard cannot see.
+
+    The hop admissions NULL-drop an id-less neighbour (``m.id <> n.id`` is NULL
+    under three-valued logic), so the ``affected`` guard fires ONLY when the
+    operator itself is seeded. When the operator is not seeded — a legacy
+    ``op_type``-only operator (the selector matches ``is_operator = true`` only),
+    or one outside the selector's hops — the pass still consumes the node:
+    ``_affected_factors`` Batch 2 collects an operator's inputs verbatim, and
+    ``_update_factor`` received ``[seed, sibling, None]``, with ``_last_affected``
+    holding the two NAMED ids only.
+
+    MEASURED before this guard on the fixture below: ``compute_confidence()``
+    returned ``converged: True`` with the named posteriors pulled off a phantom
+    ``Beta(1, 1)`` input (``3.2090652206748``/``1.10986962042195`` against a
+    ``3.40474195219355``/``1.08063574424178`` control) — the silent mis-key that
+    rejecting the issue's option 3 was meant to prevent.
+    """
+    proj = sdk._get_proj()
+    seed = sdk.create_point("statement", "Seed", status="live")
+    sibling = sdk.create_point("statement", "Sibling", status="live")
+    for p in (seed, sibling):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    # A legacy operator: op_type only, is_operator NOT true — _bfs_select_operators
+    # matches `is_operator = true`, so this operator is never in the seed set.
+    proj.g.query("CREATE (o:Point {id:'op-9275', pointKind:'operator', "
+                 "op_type:'IMPL', status:'live', is_operator:false})")
+    proj.g.query("MATCH (o:Point {id:'op-9275'}), (a:Point {id:$a}) "
+                 "CREATE (o)-[:IMPL {idx:0}]->(a)", params={"a": seed["id"]})
+    proj.g.query("MATCH (o:Point {id:'op-9275'}), (b:Point {id:$b}) "
+                 "CREATE (o)-[:IMPL {idx:1}]->(b)", params={"b": sibling["id"]})
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
+    proj.g.query("MATCH (o:Point {id:'op-9275'}), (n:Point) WHERE n.id IS NULL "
+                 "CREATE (o)-[:IMPL {idx:2}]->(n)")
+
+    # The witness is OUTSIDE the affected set, so ONLY the evidence pre-write can
+    # touch it — which is how the ordering (guard before the first write) is
+    # observable on THIS path too. It is baseline-free, so the pre-write would
+    # overwrite it.
+    witness = sdk.create_point("statement", "Witness", status="live")
+    read = ("MATCH (n:Point {id:$id}) "
+            "RETURN n.ep_alpha, n.ep_beta, n.posterior_alpha, n.posterior_beta")
+    before = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    assert before[0] != 7.0
+
+    with pytest.raises(UnaddressableClaimError) as exc:
+        sdk.compute_confidence(require_calibration=False,
+                               evidence={witness["id"]: (7.0, 2.0)})
+    assert "factor's inputs" in str(exc.value)
+    after = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    assert after == before, (
+        "the factor-input refusal committed the evidence pre-write — "
+        f"(before={before}, after={after})")
+
+    # Nothing was computed: both named posteriors are still null.
+    stamped = dict(proj.g.query(
+        "MATCH (n:Point) WHERE n.id IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha").result_set)
+    assert stamped[seed["id"]] is None
+    assert stamped[sibling["id"]] is None
+
+
+def test_numeric_id_claims_survive_the_trivial_stamp_and_the_window_path(sdk):
+    """#9275: the other two `key=str` sites, each reachable with a mixed-type set.
+
+    ``dream``'s seed-empty branch sorts the trivial-stamp result, and
+    ``dream_window`` sorts the cross-batch affected set. Both are fed engine ids
+    verbatim, so a hand-written numeric id reaches them; without ``key=str`` each
+    raises ``TypeError: '<' not supported between instances of 'str' and 'int'``.
+    Neither was pinned by the numeric-id test above (that one drives ``dream``'s
+    EP branch only), so this test is what keeps the two edits load-bearing.
+    """
+    proj = sdk._get_proj()
+    # Trivial-stamp path: two anchors, NEITHER wired to an operator or a direct
+    # edge, so `seed_ids` is empty and `_trivial_stamp` returns both ids — a
+    # mixed-type set for `sorted(stamped, key=str)`.
+    named = sdk.create_point("statement", "Loose claim", status="live")
+    numeric = sdk.create_point("statement", "Numeric loose claim", status="live")
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 77",
+                 params={"id": numeric["id"]})
+    out = sdk._get_dreamer().dream([named["id"], 77])
+    assert out["iterations"] == 0
+    assert set(out["affected_claims"]) == {77, named["id"]}
+
+    # Window path: both claims reachable through an operator, so the stale-first
+    # pass accumulates a mixed-type affected set across its batches.
+    other = sdk.create_point("statement", "Windowed", status="live")
+    for p in (named, other):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", named["id"], [other["id"]])
+    window = sdk._get_dreamer().dream_window(budget=50)
+    assert window["mode"] == "stale-first"
+    assert 77 in window["affected_claims"]
+
+
+def test_the_id_less_refusal_commits_no_evidence_pre_write(sdk):
+    """#9275 review (P2): the refusal is before the run's FIRST write.
+
+    ``run()``'s evidence pre-write SETs ``ep_alpha``/``ep_beta`` and (for a
+    ``baseline_set``-unset claim) NULLs the posteriors, plus journals the clear.
+    With the affected-claim collection AFTER it, a refusal left those committed —
+    so ``evidence=`` (a public parameter of ``compute_confidence`` and of
+    ``TortoiseEP.run``) turned "refused, nothing written" into a real
+    half-write, and the diagnostic said otherwise. The collection now runs
+    first: the refusal is the run's first event, and the graph is untouched.
+
+    The witness is deliberately OUTSIDE the affected set — the pre-write
+    applies to any id the caller supplies ("direct graph write so evidence is
+    visible even when there are no operators / affected claims"), which is what
+    makes the pre-write's commitment observable at all.
+    """
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    witness = sdk.create_point("statement", "Witness", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
+                 "content:'no id'})")
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (c:Point) WHERE c.id IS NULL "
+        "CREATE (o)-[:IMPL {id:'e-9275-prewrite'}]->(c)",
+        params={"o": op["id"]})
+
+    read = ("MATCH (n:Point {id:$id}) "
+            "RETURN n.ep_alpha, n.ep_beta, n.posterior_alpha, n.posterior_beta")
+    before = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    # The witness is baseline-free, so the pre-write WOULD overwrite it — which
+    # is what makes this assertion test the ordering rather than the CASE.
+    assert before[0] != 7.0
+
+    with pytest.raises(UnaddressableClaimError):
+        sdk.compute_confidence(factors=[op["id"]],
+                               evidence={witness["id"]: (7.0, 2.0)},
+                               require_calibration=False)
+
+    after = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    assert after == before, (
+        "the refusal committed the evidence pre-write — 'nothing is "
+        f"half-written' would be false (before={before}, after={after})")
+
+
+def test_an_id_less_operator_is_inert_but_not_fatal(sdk):
+    """#9275 (review round 3): only a NULL *input* is fatal — an operator no-ops.
+
+    An id-less ``:Point`` carrying ``is_operator`` mints a factor whose
+    ``input_ids`` is EMPTY: Batch 2 collects inputs ``WHERE o.id IN $ids``, and a
+    NULL operator matches nothing. ``_update_factor`` returns immediately below
+    two participating inputs, so such a node cannot move any belief — refusing on
+    it would turn a graph that computes on ``origin/main`` into a refused one
+    (measured there: ``iterations 9``, converged, both posteriors stamped). The
+    refusal is therefore keyed on the INPUT arm only.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "A", status="live")
+    b = sdk.create_point("statement", "B", status="live")
+    for p in (a, b):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    # The id-less OPERATOR shape: is_operator true, no id, wired to both claims.
+    proj.g.query("CREATE (o:Point {pointKind:'operator', is_operator:true, "
+                 "op_type:'IMPL', status:'live'})")
+    proj.g.query("MATCH (o:Point), (a:Point {id:$a}) "
+                 "WHERE o.id IS NULL AND o.is_operator = true "
+                 "CREATE (o)-[:IMPL {idx:0}]->(a)", params={"a": a["id"]})
+    proj.g.query("MATCH (o:Point), (b:Point {id:$b}) "
+                 "WHERE o.id IS NULL AND o.is_operator = true "
+                 "CREATE (o)-[:IMPL {idx:1}]->(b)", params={"b": b["id"]})
+
+    out = sdk.compute_confidence(require_calibration=False)
+    assert out["converged"] is True
+    stamped = dict(proj.g.query(
+        "MATCH (n:Point) WHERE n.id IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha").result_set)
+    assert stamped[a["id"]] is not None
+    assert stamped[b["id"]] is not None
+
+
+
+def test_the_refusal_names_a_non_point_offender_and_its_repair_finds_it(sdk):
+    """#9275 (review round 5): the guard admits all four epistemic labels.
+
+    The affected-set admission is label-agnostic — ``epistemic_disjunction`` is
+    ``:Point|:Subject|:Object|:Event`` — so an id-less ``:Event`` wired as a
+    claim refuses the run. That population is not hypothetical:
+    ``session_indexer`` mints ``(:Event {eventId: …})`` with NO ``id`` (its
+    identity is the second key). A ``:Point``-only diagnosis would hand the
+    caller a probe that returns zero rows for this node — a dead end in the one
+    place the message has to be actionable — and blind-setting an ``id`` equal to
+    the ``eventId`` would mint the #8879 cross-key shape. So the message names
+    the label set, the second-key caveat, and a probe that actually finds it.
+    """
+    proj = sdk._get_proj()
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+    # A real id-less population: an :Event keyed on eventId, with no `id`.
+    proj.g.query("CREATE (e:Event {eventId:'evt-9275'})")
+    proj.g.query("MATCH (o:Point {id:$o}), (e:Event {eventId:'evt-9275'}) "
+                 "CREATE (o)-[:IMPL {idx:2}]->(e)", params={"o": op["id"]})
+
+    with pytest.raises(UnaddressableClaimError) as exc:
+        sdk.compute_confidence()
+    message = str(exc.value)
+    assert ":Event" in message and "eventId" in message
+
+    # The probe the message PRESCRIBES is extracted from the message and run —
+    # a hand-copied equivalent would keep this green if only the message's query
+    # regressed to :Point-only (the prose still names the labels).
+    probe = next(ln.strip() for ln in message.splitlines()
+                 if ln.strip().startswith("MATCH (n) WHERE"))
+    found = proj.g.query(probe).result_set
+    assert len(found) == 1, f"the prescribed probe found {found!r}"
+    assert any("Event" in str(cell) for cell in found[0])
+
+
+def _dash_edge_fixture(sdk, direction):
+    """Two calibrated claims behind an operator + a direct edge (off the TARGET)
+    to an id-less node, with the given `direction` (#9275 review round 7).
+
+    The non-empty affected set is load-bearing: a LONE direct edge to an id-less
+    node yields `affected == set()` and `factors == []`, so nothing is refused
+    either way and the test would prove nothing.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "A", status="live")
+    b = sdk.create_point("statement", "B", status="live")
+    for p in (a, b):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
+    proj.g.query(
+        "MATCH (x:Point {id:$b}), (n:Point) WHERE n.id IS NULL "
+        "CREATE (x)-[:IMPL {direction:$d}]->(n)",
+        params={"b": b["id"], "d": direction})
+    ep = sdk._get_ep()
+    factors = ep._affected_factors(ep._affected_claims([a["id"]], 2))
+    factor = [f for f in factors if f[5] == direction and None in f[2]]
+    assert factor, f"no {direction!r} factor carrying a NULL input: {factors}"
+    return proj, a, b, ep, factor[0]
+
+
+@pytest.mark.parametrize("direction", ["-", "->"])
+def test_a_receive_only_out_of_scope_null_input_does_not_refuse(sdk, direction):
+    """#9275 (rounds 6-7, scoped by round 10): the FACTOR-INPUT arm exempts a
+    NULL that can only RECEIVE — and only when the node is OUT of the run scope.
+
+    `_update_factor` writes source→target under `fwd` and target→source under
+    `bwd`, and returns before writing anything for a `-` factor. So the NULL here
+    is never a SENDER: `-` has no flow at all, and under `->` the id-less node is
+    the direct edge's TARGET (index 1), which `fwd` writes INTO. This fixture
+    hangs the node off a DIRECT edge, whose hop `b.id <> a.id` NULL-drops it, so
+    `None` never enters `affected` — the AFFECTED-SET arm is a different question
+    by design (`ep.py`, `_null_input_sends` docstring) and is pinned separately by
+    `test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives`.
+
+    The CONTROL is what makes this non-vacuous: the id-less node (and with it the
+    receive-only factor) is DELETED, the prior reset and the run repeated, and the
+    named claim's two posteriors must be IDENTICAL — i.e. the exempt NULL behaves
+    like nothing at all, which a "posterior is not None" assertion cannot
+    distinguish (a baseline stamp satisfies that either way). This fixture is
+    2-input, so it measures influence and not the n-ary star's `1/(n-1)` dilution;
+    the dilution case is pinned by `test_nary_null_sends_only_where_the_pairs_send`
+    over the engine's own `_factor_pairs`.
+    """
+    proj, a, _b, ep, factor = _dash_edge_fixture(sdk, direction)
+    fwd, bwd = direction_flows(direction)
+    sending = (fwd and factor[2][0] is None) or (bwd and factor[2][1] is None)
+    assert ep._null_input_sends(factor) is sending is False
+
+    out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    assert out["converged"] is True
+    with_null = proj.g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha, n.posterior_beta",
+        params={"i": a["id"]}).result_set[0]
+
+    # NON-VACUOUS CONTROL: delete the id-less node (and with it the receive-only
+    # factor), reset the prior, run again. The two posteriors must be IDENTICAL —
+    # that is what "the exempt NULL behaves exactly like nothing at all" means; a
+    # "posterior is not None" assertion cannot distinguish it (a baseline stamp
+    # satisfies that either way).
+    proj.g.query("MATCH (n:Point) WHERE n.id IS NULL DETACH DELETE n")
+    sdk.set_point_baseline(a["id"], 3.0, 1.0)
+    out2 = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    assert out2["converged"] is True
+    without_null = proj.g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha, n.posterior_beta",
+        params={"i": a["id"]}).result_set[0]
+    assert with_null == without_null, (direction, with_null, without_null)
+
+
+def test_a_null_input_that_sends_still_refuses_the_run(sdk):
+    """#9275 (review round 7): `<-` makes the id-less TARGET a sender — fatal.
+
+    The back-message goes target→source, so the NULL endpoint reaches a named
+    claim (measured posterior 1.04407021681169 vs 1.0 for the receive-only
+    shapes), and the run must refuse rather than compute it.
+    """
+    _proj, a, _b, ep, factor = _dash_edge_fixture(sdk, "<-")
+    assert ep._null_input_sends(factor) is True
+    with pytest.raises(UnaddressableClaimError):
+        sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+
+
+def test_an_nary_operator_with_every_id_present_does_not_refuse(sdk):
+    """#9275 (review round 7): a 3-input operator is NOT a refusal trigger.
+
+    The n-ary arm of `_null_input_sends` is conservative about WHICH end sends,
+    never about WHETHER a NULL exists: this fixture has three fully addressed,
+    calibrated claims and no id-less node at all, and round 7 briefly shipped an
+    arm that refused it (and, with it, every EP surface for every 3+-input
+    operator). The refusal is conditioned on a NULL, so the NULL must be found
+    first.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "NaryA", status="live")
+    b = sdk.create_point("statement", "NaryB", status="live")
+    c = sdk.create_point("statement", "NaryC", status="live")
+    for p in (a, b, c):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", a["id"], [b["id"], c["id"]])
+
+    ep = sdk._get_ep()
+    factors = ep._affected_factors(ep._affected_claims([a["id"]], 2))
+    nary = [f for f in factors if len(f[2]) > 2]
+    assert nary, f"no n-ary factor assembled: {factors}"
+    assert all(ep._null_input_sends(f) is False for f in nary)
+
+    out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    assert out["converged"] is True
+    stamped = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND n.posterior_alpha IS NOT NULL "
+        "RETURN count(n)", params={"ids": [a["id"], b["id"], c["id"]]}).result_set
+    assert stamped[0][0] == 3
+
+
+@pytest.mark.parametrize("op_type,inputs,direction,sends", [
+    # IMPL star: input_ids[0] sends under `->`, each target under `<-`.
+    ("IMPL", ["a", "b", "c"], "->", False),          # no NULL at all
+    ("IMPL", [None, "b", "c"], "->", True),          # the star's SOURCE sends
+    ("IMPL", ["a", None, "c"], "->", False),         # a star TARGET only receives
+    ("IMPL", ["a", None, "c"], "<-", True),          # ...and sends back under `<-`
+    ("IMPL", [None, "b", "c"], "<-", False),         # the source only receives
+    ("NAND", ["a", None, "c"], "->", False),         # directed NAND is a star too
+    ("NAND", ["a", None, "c"], "<-", True),
+    ("NAND", ["a", None, "c"], "bidirectional", True),   # mutual NAND is a CLIQUE
+    ("NAND", ["a", "b", None], "bidirectional", True),
+    ("IMPL", ["a", "b", None], "-", False),          # `-`: nothing transfers
+])
+def test_nary_null_sends_only_where_the_pairs_send(op_type, inputs, direction, sends):
+    """#9275 (review round 8): an n-ary star's `->` NULL target only RECEIVES.
+
+    `_update_nary_factor` decomposes into pairs from `_factor_pairs` — a STAR for
+    IMPL and directed NAND, a CLIQUE for mutual NAND — and `_update_factor` sends
+    the pair's source under `fwd` and its target under `bwd`. So a star's `->`
+    NULL at idx >= 1 is inert (it is read as Beta(1,1), exactly like an
+    addressable uncalibrated sibling, dilution included), and refusing it would
+    reject a graph `origin/main` converges. Round 8 shipped that false refusal;
+    round 7 shipped the opposite one (refusing every 3+-input operator).
+    """
+    factor = ("op", op_type, inputs, 1.0, None, direction)
+    assert TortoiseEP._null_input_sends(factor) is sends
+    # The pairs this guard reads are the SAME definition the engine computes with.
+    fwd, bwd = direction_flows(direction)
+    if fwd or bwd:
+        assert TortoiseEP._factor_pairs(op_type, inputs, fwd and bwd)
+
+
+def test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives(sdk):
+    """#9275 (round 10): the affected-set arm is a DIFFERENT question, by design.
+
+    The factor arm asks "does this NULL INPUT influence a named claim?" and is
+    sender-gated. The affected arm asks "can the run ANSWER FOR this claim?" — a
+    member of the scope is hydrated, run through its factors and written back by
+    id, so an id-less member cannot be answered for even when it cannot influence
+    anyone. `origin/main` leaves it naively unstamped and RETURNS a run that
+    silently omits a claim it collected (measured: the named claims' posteriors
+    flushed, the id-less node left null); refusing is the fail-closed answer, and
+    the refusal says which arm fired so a caller is not told to repair an
+    influence that does not exist.
+
+    The shape is the issue's own: a SEEDED operator (the one admission arm that
+    can put an id-less claim into the scope) whose id-less input only RECEIVES
+    under `->`.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "InScopeA", status="live")
+    sdk.set_point_baseline(a["id"], 3.0, 1.0)
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
+    proj.g.query(
+        # `direction` is read from the OPERATOR node (`_affected_factors` Batch
+        # 1), NOT from the member edges — a bare edge property leaves the factor
+        # 'bidirectional', which would make the id-less input a SENDER and this
+        # test would then pass via the FACTOR arm instead of the arm it names.
+        "CREATE (op:Point {id:'op-9275-inscope', is_operator:true, "
+        "direction:'->', pointKind:'statement', status:'live'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'op-9275-inscope'}), (a:Point {id:$a}), (n:Point) "
+        "WHERE n.id IS NULL "
+        "CREATE (op)-[:IMPL {direction:'->'}]->(a) "
+        "CREATE (op)-[:IMPL {direction:'->'}]->(n)", params={"a": a["id"]})
+
+    ep = sdk._get_ep()
+    # The arm identity is proven on the FACTOR, not inferred from the message:
+    # the same graph's factor must be one the sender-gated arm EXEMPTS.
+    scope = None
+    with pytest.raises(UnaddressableClaimError) as exc:
+        scope = ep._affected_claims(["op-9275-inscope"], 2)
+    assert scope is None
+    message = str(exc.value)
+    assert "its affected set" in message
+    # The message distinguishes the two arms, so "repair this node" is not read as
+    # "it is influencing someone".
+    assert "AFFECTED SET" in message and "SENDING slot" in message
+    with pytest.raises(UnaddressableClaimError):
+        ep.run(["op-9275-inscope"])
+
+    # The FACTOR arm exempts this shape (the id-less input only receives under the
+    # operator's `->`), so the refusal above can only be the unconditional
+    # affected-set arm — which is exactly the arm this test names.
+    factors = ep._affected_factors({a["id"]})
+    assert factors, "no factor assembled for the in-scope fixture"
+    star = [f for f in factors if None in f[2]]
+    assert star and star[0][5] == "->", star
+    assert ep._null_input_sends(star[0]) is False
