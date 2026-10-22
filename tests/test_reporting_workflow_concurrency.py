@@ -1389,6 +1389,7 @@ def _dev_ruff_pin() -> str:
 # or replace the rule surface, `--exit-zero` makes every run green, and `--fix`
 # would rewrite the tree the guard is measuring.
 _RUFF_PRESENTATION_FLAGS = ("--no-cache", "--no-fix", "--quiet", "-q")
+_REDIRECTION = re.compile(r"^(?:\d?>&\d+|\d?>\s*/dev/null|>\s*/dev/null)$")
 
 # Keys the workflow, and the ONE job, may carry. Allow-lists rather than
 # deny-lists because the ways to lose the gate are open-ended: a second job plus
@@ -1412,14 +1413,37 @@ def _ruff_argv_problem(command: str) -> str | None:
     and a pin that reds it is a pin that gets deleted.
     """
     tokens = shlex.split(command, comments=True)
-    if tokens[:2] != ["ruff", "check"]:
+    # `uv run ruff …` is this repo's documented command form (AGENTS.md → Python)
+    # and `python -m ruff …` is the same binary; neither can narrow the surface,
+    # and the pinned install ahead of the step still constrains the version.
+    prefixes = (
+        ["uv", "run", "ruff"],
+        ["python", "-m", "ruff"],
+        ["python3", "-m", "ruff"],
+        ["ruff"],
+    )
+    offset = None
+    for prefix in prefixes:
+        if tokens[: len(prefix)] == prefix:
+            offset = len(prefix)
+            break
+    if offset is None:
         return (
-            "the invocation does not start `ruff check` — a shell escape "
-            "(`|| true`, `; true`, a pipe) or a different command satisfies a "
-            "substring test while making a real failure report green"
+            "the invocation does not run ruff — a shell escape (`|| true`, `; true`, "
+            "a pipe) or a different command satisfies a substring test while making "
+            "a real failure report green"
         )
+    tokens = tokens[offset:]
+    if tokens[:1] != ["check"]:
+        return f"it runs `ruff {' '.join(tokens[:1]) or '(nothing)'}` rather than `ruff check`"
+    tokens = tokens[1:]
     paths: list[str] = []
-    for token in tokens[2:]:
+    for token in tokens:
+        # Redirection (`2>&1`, `2>/dev/null`) cannot change what is checked or the
+        # exit code, so it is not a narrowing. A pipe/`;`/`&&`/`||` is a shell
+        # escape and stays a non-flag token, which fails the `.`-only comparison.
+        if _REDIRECTION.search(token):
+            continue
         if token.startswith("-"):
             if token in _RUFF_PRESENTATION_FLAGS or token.startswith("--output-format="):
                 continue
@@ -1439,22 +1463,68 @@ def _ruff_argv_problem(command: str) -> str | None:
     return None
 
 
-def _installs_pinned_ruff(command: str, pin: str) -> bool:
-    """True when ``command`` installs exactly ``ruff==<pin>`` with pip/uv.
+def _ruff_install_specs(command: str) -> list[str]:
+    """Every ``ruff`` requirement token installed by ``command`` (all lines/tokens).
 
-    Parsed, not regex-searched over raw text, because a raw search is blind in
-    both directions: a COMMENTED ``# pip install ruff==0.16.4`` satisfied it while
-    the real line was bare ``pip install ruff``, and the equally-pinned spellings
-    `pip install -q ruff==…` / `--upgrade` / a quoted `'ruff==…'` were rejected.
-    A `uv`/`python -m pip` prefix is allowed — it installs the same pin.
+    Parsed rather than regex-searched, because a raw search is blind in both
+    directions: a COMMENTED ``# pip install ruff==0.16.4`` satisfied it while the
+    real line was bare ``pip install ruff``, and the equally-pinned spellings
+    ``-q`` / ``--upgrade`` / a quoted ``'ruff==…'`` were rejected. `uv` and
+    `python -m pip` prefixes install into the same environment.
+
+    ⛔ It returns EVERY spec, not "a match": pip is last-write-wins, so a second,
+    unpinned ``pip install ruff`` after the pinned one silently replaces it.
     """
+    specs: list[str] = []
     for line in command.splitlines():
         tokens = shlex.split(line, comments=True)
-        if not tokens or tokens[0] not in {"pip", "pip3", "uv", "python", "python3"}:
+        # Shell SEGMENTS: `pip install ruff==0.16.4 && pip install -U ruff` is TWO
+        # installs, and only splitting on the control operators finds the second
+        # one (a single forward scan stops at the `&&` and reports the pin alone).
+        segment: list[str] = []
+        for token in [*tokens, ";"]:
+            if token in {"&&", "||", ";", "|", "&"}:
+                specs.extend(_segment_ruff_specs(segment))
+                segment = []
+                continue
+            segment.append(token)
+    return specs
+
+
+def _segment_ruff_specs(segment: list[str]) -> list[str]:
+    """The ``ruff`` requirement tokens in ONE shell segment (empty if not an install)."""
+    if not segment or segment[0] not in {"pip", "pip3", "uv", "python", "python3"}:
+        return []
+    if "install" not in segment:
+        return []
+    specs: list[str] = []
+    for token in segment[segment.index("install") + 1 :]:
+        if token.startswith("-"):
             continue
-        if "install" in tokens and f"ruff=={pin}" in tokens:
-            return True
-    return False
+        name = re.split(r"[\[<>=!~@]", token, maxsplit=1)[0].lower().replace("_", "-")
+        if name == "ruff":
+            specs.append(token)
+    return specs
+
+
+def _pinned_install_problem(commands: list[str], pin: str) -> str | None:
+    """Why the installs before the guard do not leave exactly ``ruff==<pin>``, or None."""
+    specs = [spec for command in commands for spec in _ruff_install_specs(command)]
+    if not specs:
+        return (
+            f"no step BEFORE the ruff step installs the pinned ruff "
+            f"(`pip install ruff=={pin}`; `uv`/`python -m pip`, `-q`, `--upgrade` and a "
+            "quoted spec are all accepted), so main lints with whatever resolution a "
+            "bare install gives — the #1685/#2150 drift class"
+        )
+    unpinned = [spec for spec in specs if spec.strip("'\"") != f"ruff=={pin}"]
+    if unpinned:
+        return (
+            f"the installs ahead of the guard are {specs} — pip is LAST-WRITE-WINS, so "
+            f"{unpinned} replaces `ruff=={pin}` and main lints with a different ruff "
+            "than PR lint and `uv sync` (#1685). Install exactly the pin, once"
+        )
+    return None
 
 
 def _merged_tree_guard_problem(doc: dict) -> str | None:
@@ -1557,6 +1627,25 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "one this pin rejects, while the per-sha workflow group above still looks "
             "correct"
         )
+    # A job GitHub cannot ALLOCATE is the same defect one level down: no run, no
+    # red, no comment. `runs-on` must be present and a GitHub-hosted ubuntu image;
+    # a self-hosted label that does not exist queues forever.
+    runs_on = job.get("runs-on")
+    if runs_on is None:
+        return (
+            f"job {job_id!r} has no `runs-on:` — GitHub rejects the workflow, so no "
+            "run exists at all and nothing reports red"
+        )
+    runs_on_labels = runs_on if isinstance(runs_on, list) else [runs_on]
+    if not runs_on_labels or not all(
+        isinstance(value, str) and value.startswith("ubuntu-") for value in runs_on_labels
+    ):
+        return (
+            f"job {job_id!r} runs on {runs_on!r}; this guard must run on a "
+            "GitHub-hosted `ubuntu-*` image. A missing or self-hosted label queues "
+            "forever, which is the same 'the gate did not run' outcome as the "
+            "cancellation this pin exists for"
+        )
     unexpected_job = sorted(set(job) - _JOB_KEYS)
     if unexpected_job:
         return (
@@ -1612,7 +1701,13 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "reports red into a run nobody is watching"
             )
         for other in notifiers:
-            if "failure()" not in str(other["if"]):
+            if "uses" not in other and "run" not in other:
+                return (
+                    f"the step keyed on `steps.{step_id}.outcome` has neither `uses:` "
+                    "nor `run:` — GitHub rejects the workflow, so the guard never runs"
+                )
+            expected_if = f"failure() && steps.{step_id}.outcome == 'failure'"
+            if _normalise_condition(str(other["if"])) != _normalise_condition(expected_if):
                 return (
                     f"the step keyed on `steps.{step_id}.outcome` has "
                     f"`if: {other['if']}` — with no status function GitHub prepends an "
@@ -1620,21 +1715,42 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "so this step is SKIPPED on exactly the path it exists for "
                     "(measured on run 39734942845: step 6 skipped, step 5 ruff failed)"
                 )
-        # The install must be in THIS job, BEFORE the ruff step: a decoy pinned
-        # install in another job (or in a later step) leaves the real one bare.
+        # The install must be in THIS job, BEFORE the ruff step, and the LAST word:
+        # a decoy pinned install in another job (or after the guard) leaves the real
+        # one bare, and a second unpinned install replaces a pinned one (pip is
+        # last-write-wins). Both are the #1685 drift class.
         earlier = [
             s.get("run")
             for s in (job.get("steps") or [])[:idx]
             if isinstance(s, dict) and isinstance(s.get("run"), str)
         ]
         pin = _dev_ruff_pin()
-        if not any(_installs_pinned_ruff(c, pin) for c in earlier):
-            return (
-                f"no step BEFORE the ruff step in this job installs the pinned ruff "
-                f"(`pip install ruff=={pin}`, `uv`/`python -m pip` and `-q`/`--upgrade` "
-                "spellings allowed), so main lints with whatever a bare install "
-                "resolves to — the #1685/#2150 drift class, one direction or the other"
-            )
+        install_problem = _pinned_install_problem(earlier, pin)
+        if install_problem is not None:
+            return install_problem
+    # The failure notification is the whole point of "main went red": without
+    # `issues: write`, `createComment` 403s on a push event (the default token is
+    # read-only), and `pull-requests: read` is what the attribution lookup needs.
+    # A job-level `permissions:` REPLACES the workflow level wholesale.
+    perms = job.get("permissions") or doc.get("permissions") or {}
+    if not isinstance(perms, dict):
+        return "its `permissions:` block is not a mapping, so it grants nothing"
+    missing = [
+        f"{scope}: {level}"
+        for scope, level in (
+            ("issues", "write"),
+            ("pull-requests", "read"),
+            ("contents", "read"),
+        )
+        if perms.get(scope) != level
+    ]
+    if missing:
+        return (
+            f"its effective permissions are {perms} and omit {missing} — "
+            "`issues.createComment` 403s without `issues: write` on a push event "
+            "(the default token is read-only), so a lint-red main is reported into a "
+            "run nobody sees, and the attribution lookup needs `pull-requests: read`"
+        )
     return None
 
 
@@ -1673,7 +1789,8 @@ def test_the_pr_and_main_lint_pins_agree() -> None:
     ci = _load(WORKFLOW_DIR / "ci.yml")
     job = (ci.get("jobs") or {}).get("agent-infra-ci") or {}
     command = str((job.get("with") or {}).get("lint-command", ""))
-    assert _installs_pinned_ruff(command, pin), (
+    specs = _ruff_install_specs(command)
+    assert specs == [f"ruff=={pin}"], (
         f"ci.yml's `agent-infra-ci.with.lint-command` is {command!r} and does not "
         f"install the pyproject pin `ruff=={pin}` — PR lint would then run a "
         "different ruff than main lint and than `uv sync` (#1685)"
@@ -1726,6 +1843,14 @@ def _set_unpinned_ruff(doc: dict) -> None:
         for step in job.get("steps") or []:
             if isinstance(step.get("run"), str) and "pip install ruff==" in step["run"]:
                 step["run"] = "pip install ruff"
+
+
+def _set_uv_run(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "uv run ruff check ."
+
+
+def _set_redirect_stderr(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check . 2>&1"
 
 
 def _set_output_format_before_path(doc: dict) -> None:
@@ -1841,6 +1966,58 @@ def _set_dot_slash(doc: dict) -> None:
     _ruff_step(doc)["run"] = "ruff check ./"
 
 
+def _set_second_unpinned_install_step(doc: dict) -> None:
+    """pip is last-write-wins: a later bare install replaces the pinned one."""
+    steps = doc["jobs"]["lint"]["steps"]
+    index = next(i for i, s in enumerate(steps) if "pip install ruff==" in str(s.get("run")))
+    steps.insert(index + 1, {"name": "hotfix ruff", "run": "pip install ruff"})
+
+
+def _set_second_unpinned_install_line(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if "pip install ruff==" in str(step.get("run")):
+            step["run"] = step["run"] + "\npip install ruff"
+
+
+def _set_second_pinned_other_version(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if "pip install ruff==" in str(step.get("run")):
+            step["run"] = step["run"] + "\npip install ruff==0.0.1"
+
+
+def _set_install_then_upgrade(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if "pip install ruff==" in str(step.get("run")):
+            step["run"] = step["run"] + " && pip install -U ruff"
+
+
+def _set_no_runs_on(doc: dict) -> None:
+    doc["jobs"]["lint"].pop("runs-on")
+
+
+def _set_self_hosted_runner(doc: dict) -> None:
+    doc["jobs"]["lint"]["runs-on"] = ["self-hosted", "no-such-runner-label"]
+
+
+def _set_notifier_with_false_conjunct(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"failure() && steps.{step_id}.outcome == 'failure' && (1 == 2)"
+
+
+def _set_notifier_without_action(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    steps = doc["jobs"]["lint"]["steps"]
+    for index, step in enumerate(steps):
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            steps[index] = {"name": step["name"], "if": step["if"]}
+
+
+def _set_permissions_without_issues_write(doc: dict) -> None:
+    doc["permissions"] = {"contents": "read", "pull-requests": "read"}
+
+
 _STARVED_SHAPES = [
     # ── does not RUN on every merged tree ──
     # The measured defect: the guard inside its former host's constant group.
@@ -1899,6 +2076,17 @@ _STARVED_SHAPES = [
     # ── the failure never reaches anyone ──
     ("a ruff step with no `id:`", _set_ruff_step_without_id),
     ("a notifier `if:` without `failure()`", _set_notifier_without_failure),
+    ("a notifier `if:` with a false conjunct", _set_notifier_with_false_conjunct),
+    ("a notifier step with no `uses:`/`run:`", _set_notifier_without_action),
+    # ── the install is pinned, then replaced (last-write-wins) ──
+    ("a second bare install step", _set_second_unpinned_install_step),
+    ("a second bare install line", _set_second_unpinned_install_line),
+    ("a second install of another version", _set_second_pinned_other_version),
+    ("the pin followed by `pip install -U ruff`", _set_install_then_upgrade),
+    # ── the job cannot be allocated, or cannot notify ──
+    ("no `runs-on:`", _set_no_runs_on),
+    ("an unresolvable self-hosted label", _set_self_hosted_runner),
+    ("permissions without `issues: write`", _set_permissions_without_issues_write),
 ]
 
 
@@ -1961,10 +2149,11 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
         ("`pip install -q ruff==<pin>`", _set_quiet_install),
         ("`pip install --upgrade ruff==<pin>`", _set_upgrade_install),
         ("a quoted `'ruff==<pin>'`", _set_quoted_install),
+        ("`uv run ruff check .`", _set_uv_run),
+        ("`ruff check . 2>&1`", _set_redirect_stderr),
     ):
         problem = _merged_tree_guard_problem(_main_lint_mutant(mutate))
         assert problem is None, f"{label} changes presentation only; the pin said: {problem}"
-    doc = _main_lint_mutant(_set_output_format)
     pin = _dev_ruff_pin()
     doc = _main_lint_mutant(
         lambda d: d["jobs"]["lint"].__setitem__(
