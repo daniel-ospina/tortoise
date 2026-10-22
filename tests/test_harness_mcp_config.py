@@ -1062,18 +1062,37 @@ class TestDocsPageAndSkillConfig:
         # Developer-Mode path this issue exists for.
         #
         # Both graph claims are owned by CODE, and both are exercised here:
-        #   * a connector credential carries no graph_id, so an org-wide key
-        #     resolves to the org's default namespace — that is what makes
-        #     "every write lands in the default graph" true of a connector
-        #     (`supabase_control._graph_namespace_for`, called, cp=None because
-        #     the graph_id-less branch returns before any control-plane read);
-        #   * HTTP mode overwrites any caller-supplied `graph_name` with the org
-        #     graph (`#236`), so there is no per-call selection control to pick.
+        #   * the DESTINATION: the graph_id-less (org-wide) arm of the resolver
+        #     returns the caller's default namespace — the arm an OAuth /
+        #     connector credential lands on (mcp_auth reads graph scope FROM the
+        #     credential and leaves `_current_graph_id` unset when it has none,
+        #     so `_get_org_sdk` builds `TortoiseSDK(namespace=org_id)`);
+        #     `cp=None` because that branch returns before any control-plane read;
+        #   * the ABSENCE of a control: no active tool takes a graph-selecting
+        #     parameter, so there is no per-call selection for a card to imply.
         from tortoise.supabase_control import _graph_namespace_for
         assert _graph_namespace_for(None, "org_abc", None, "org_abc") == "org_abc", (
-            "an org-wide (graph_id-less) key must resolve to the default graph "
-            "namespace — the row's 'every write lands in the default graph' is "
-            "only true while that holds (#9340)")
+            "an org-wide (graph_id-less) credential must resolve to the default "
+            "graph namespace — the row's 'every write lands in the default "
+            "graph' is only true while that holds (#9340)")
+        # Read from the LIVE registry + the SDK signatures rather than pinning a
+        # line of prose: a tool that grows a graph selector makes the row's
+        # "not available to a connector today" false the day it lands, which is
+        # precisely the change #9340 will make.
+        import inspect
+
+        from tortoise.sdk import TortoiseSDK
+        graph_params = {"graph", "graph_id", "graph_name", "namespace"}
+        selectors = sorted(
+            f"{t.name}->{t.sdk_method}({p})"
+            for t in active.values()
+            if (method := getattr(TortoiseSDK, t.sdk_method, None)) is not None
+            for p in inspect.signature(method).parameters
+            if p in graph_params
+        )
+        assert not selectors, (
+            "no active MCP tool may take a graph-selecting parameter while the "
+            f"row says per-call graph selection is unavailable (#9340): {selectors}")
         mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
         assert mcp_src.count('graph_name = f"org_{_current_org_id.get()}"') >= 2, (
             "#236: HTTP mode must keep overwriting a caller-supplied graph_name "
@@ -1087,19 +1106,25 @@ class TestDocsPageAndSkillConfig:
             "the row must not imply a per-call graph control exists (#9340)")
 
         # ── which packs ────────────────────────────────────────────────────
-        # The hazard is INVISIBLE, not absent: an unconfigured graph resolves to
-        # the catalog union (#2714 indicator 3), which is the intended default.
-        # So the row must name the default, name the surface that changes it, and
-        # say creation cannot set it (#9667) — otherwise a user reads the union
-        # as "Tortoise is broken" instead of "this graph was never configured".
-        #
-        # The copy exists in `packs.js::PACK_CONSEQUENCE`, so the module is READ
-        # and its sentences are the source the row must carry — a reworded
-        # consequence fails here rather than leaving the page quoting a
-        # superseded sentence (the #4643 drift class, one layer out).
+        # The hazard is INVISIBLE, not absent — but WHICH default applies depends
+        # on the graph, and the row must not average the two. Measured on this
+        # tree (embedded graph, `configured: false` throughout):
+        #   * NO pack records at all (a graph created and never configured, an
+        #     imported or self-hosted graph) → the catalog union, namespaces=None
+        #     (#2714 indicator 3 — the owner's decided behaviour, restated in the
+        #     /v1/graphs #9667 docstring);
+        #   * the starter records every hosted organization is seeded with at
+        #     provisioning (`ensure_tenant_packs` → DEFAULT_STARTER_PACKS) → the
+        #     FIVE starters ∪ data, and the catalog's non-starter pack (`venture`)
+        #     is excluded — while `configured` is STILL false.
+        # So "never been configured, therefore the full catalog applies" is false
+        # for the very graph the row's preceding step sends the user's writes to,
+        # and it would have told that user their default graph recognises every
+        # domain — the odd-extraction surprise #9660 exists to remove. The row
+        # must therefore name the starters as the default-graph set, scope the
+        # catalog fallback to "no pack records", and carry its disable clause
+        # from `packs.js::PACK_CONSEQUENCE` (the module that owns that sentence).
         packs_src = self.PACKS_JS.read_text(encoding="utf-8")
-        unconfigured = self._copy_norm(
-            self._js_object_string(packs_src, "PACK_CONSEQUENCE", "unconfigured"))
         disable = self._copy_norm(
             self._js_object_string(packs_src, "PACK_CONSEQUENCE", "disable"))
         # The Settings label is a real dashboard heading, not a name invented by
@@ -1110,22 +1135,46 @@ class TestDocsPageAndSkillConfig:
             "heading must still exist in main.jsx (main.jsx:1001)")
         assert "configured packs" in row_norm, (
             "the row must name the Settings surface that configures packs")
-        assert "still uses the full pack catalog" in unconfigured, (
-            "packs.js PACK_CONSEQUENCE.unconfigured no longer states the "
-            "catalog-union default the row quotes — re-derive the row from the "
-            "module instead of patching the sentence here")
-        assert "still uses the full pack catalog" in row_norm, (
-            "the row must name the unconfigured-graph default (the catalog "
-            "union) — in the product's own words, 'still uses the full pack "
-            "catalog'")
-        # The unconfigured copy is also what makes the #9667 claim true: a graph
-        # nobody has configured — a freshly created one included — is exactly
-        # the graph PACK_CONSEQUENCE.unconfigured describes.
-        assert "never been configured" in unconfigured
-        assert "does not set packs" in row_norm, (
-            "the row must state that creating a graph cannot set packs (#9667) — "
-            "the two acts are separate, and a user who assumes otherwise never "
-            "configures")
+        # The default graph's set is OWNED by `pack_state.DEFAULT_STARTER_PACKS`
+        # plus the provisioning seed: read the constant (never re-type it), and
+        # require each namespace in the row, so renaming or dropping a starter
+        # fails here instead of leaving the card naming a pack that is not
+        # installed.
+        from tortoise.pack_state import DEFAULT_STARTER_PACKS
+        assert len(DEFAULT_STARTER_PACKS) == 5, (
+            "the row names the five starter packs; DEFAULT_STARTER_PACKS is the "
+            f"owner of that set: {DEFAULT_STARTER_PACKS}")
+        for ns in DEFAULT_STARTER_PACKS:
+            assert f"<code>{ns}</code>" in steps, (
+                f"the row must name the starter pack {ns!r}: a new organization's "
+                "default graph holds pack_state.DEFAULT_STARTER_PACKS (#318)")
+        # …and the seeding is what keeps that true. If provisioning stops
+        # activating the starter set, the default graph's vocabulary becomes the
+        # catalog union and THIS SENTENCE (not the test) is wrong.
+        hosted_src = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+        assert hosted_src.count("ensure_tenant_packs(_make_sdk") >= 2, (
+            "the row says a new organization's default graph HOLDS the starter "
+            "packs; both provisioning paths (tenant_provision and register) must "
+            "keep seeding them (#318) or the sentence is false")
+        # The catalog-wide fallback is real — but only for a graph with NO pack
+        # records, so the row must scope it there and must not claim catalog-wide
+        # coverage for an unconfigured graph that holds starter records.
+        assert "falls back to the entire catalog" in row_norm, (
+            "the row must keep the catalog-union fallback, scoped to its real "
+            "predicate (#2714 indicator 3)")
+        assert "no pack records" in row_norm, (
+            "the catalog fallback applies to a graph with NO :PackInstall "
+            "records; the row must state that predicate rather than "
+            "'unconfigured'")
+        assert "full pack catalog" not in row_norm, (
+            "the row must not say an unconfigured graph uses the full pack "
+            "catalog: a hosted default graph is seeded with the five starters, "
+            "so `configured: false` and 'the whole catalog' do not co-occur "
+            "there (measured: catalog − resolved = {'venture'})")
+        assert "does not choose packs" in row_norm, (
+            "the row must state that creating a graph does not choose its packs "
+            "— scoped to the dashboard form, which posts {org_id, name}; the "
+            "API can set them at birth (#9667)")
         # …and the disable consequence must keep the product's QUALIFIER. The
         # resolution contract re-admits a namespace WHOLE once the graph holds any
         # data in it (pack_state.resolved_pack_set = active records ∪ the graph's
@@ -1152,6 +1201,10 @@ class TestDocsPageAndSkillConfig:
         # The unconditional form must be absent from BOTH sides: it is the shape
         # the resolution contract falsifies, so the module must not state it and
         # the page must not quote it.
+        #   (NOTE: `PACK_CONSEQUENCE.unconfigured` / `packCountLine` still render
+        #   "the full catalog applies" for ANY `configured: false` graph, which is
+        #   wrong for a starter-seeded default graph — pre-existing product copy
+        #   on main, out of this change's scope, tracked as its own issue.)
         assert "only stops new classifications" not in disable, (
             "PACK_CONSEQUENCE.disable must not state the consequence "
             "unconditionally — the resolution contract re-admits a namespace "
