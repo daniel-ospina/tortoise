@@ -30,8 +30,8 @@ import pytest
 
 from tortoise.tool_registry import (
     MAINTENANCE_TIER,
-    RISK_TIERS,
     RETIRED_TOOL_REGISTRY,
+    RISK_TIERS,
     TOOL_REGISTRY,
     WRITE_RISK_TIERS,
     ToolDefinition,
@@ -96,19 +96,17 @@ class TestTheRiskAxis:
         assert unknown == {}, f"entries with an unknown risk tier: {unknown}"
 
     def test_every_tier_is_enumerated(self):
-        """The by-name sets must PARTITION the served registry.
+        """Every tier has an enumerated census — no tier can quietly widen.
 
-        No hard-coded total: a count would only train the next lane to bump a
-        number until green, and every individual row is already pinned by name.
-        What this adds is that no tier can exist without an enumerated set — a
-        new row in `write`/`destructive`/`admin` fails its set, and a row added to
-        `read`/`maintenance` fails `maintenance`'s set or joins the 48 reads.
+        `write`, `destructive`, `admin` and `maintenance` are pinned BY NAME (the
+        three tests above/below); the reading tiers are pinned by COUNT here, so a
+        new `read` tool is a deliberate act rather than a line that just appears.
+        Written as explicit numbers, not as a re-derived `len(x) == len(x)`: the
+        only thing this test may assert is a figure no code path can recompute.
         """
-        tiers = ("write", "destructive", "admin")
-        listed = {e.name for e in served() if e.risk in tiers}
-        unenumerated = {e.name for e in served()} - listed
-        assert unenumerated, "sanity: the reading tiers are not the whole registry"
-        assert len(unenumerated) == len({e.name for e in served() if e.risk in ("read", "maintenance")})
+        reading = {e.name for e in served() if e.risk in ("read", MAINTENANCE_TIER)}
+        assert len(reading) == 51, sorted(reading)   # 48 read + 3 maintenance
+        assert len(served()) == 99, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -313,8 +311,13 @@ class TestHintsCannotDrift:
         from tortoise.mcp_server import WRITE_TOOL_NAMES
 
         expected = frozenset(e.name for e in served() if e.risk in WRITE_RISK_TIERS)
-        # Both spellings of the derivation AND the set the scope gate actually
-        # reads must agree — re-deriving alone would be tautological.
+        # NOTE: `WRITE_TOOL_NAMES` IS `get_write_tool_names()` and `expected` is the
+        # same comprehension, so this chain is one assertion said three ways — it
+        # catches a broken derivation, never an independent disagreement. The
+        # INDEPENDENT pins are the literal count below, the gate's own refusals
+        # (`tests/test_tool_registry.py::test_gate_refuses_read_scope_…`, which
+        # calls `_enforce_mcp_tool_scope` per name) and the served-vs-registry
+        # comparison in `TestTheReadThroughToolsRegressionPin`.
         assert get_write_tool_names() == expected == WRITE_TOOL_NAMES
         assert len(expected) == 48, sorted(expected)  # census, hard-coded
 
@@ -391,6 +394,36 @@ class TestTheReadThroughToolsRegressionPin:
                     mismatches.append(
                         f"{name}: served {attr}={served_value!r}, tier says {expected!r}")
         assert mismatches == [], mismatches
+
+
+class TestReadTierCannotHideAnOutOfBoundaryWrite:
+    """`events_poll` purges expired `:GraphEvent` rows from `event_store.py`, i.e.
+    outside `sdk.py`, so `sdk_graph_mutators()` cannot see it. The carve-out is
+    declared (`RETENTION_CARVEOUTS`) and this arm is what makes the declaration
+    load-bearing: an undeclared read/maintenance tool that reaches one of those
+    operations fails."""
+
+    def test_the_declared_carveout_is_the_only_one(self):
+        import tool_surface_capabilities as tsc
+
+        declared = set(tsc.RETENTION_CARVEOUTS)
+        assert declared == {"tortoise_events_poll"}, sorted(declared)
+        assert tsc.write_classification_violations(tsc.served_registry()) == []
+
+    def test_an_undeclared_read_tool_reaching_one_fails(self, monkeypatch):
+        import tool_surface_capabilities as tsc
+
+        # Pretend `query` were an out-of-boundary mutator: the read tools that
+        # reach it are not declared, so the arm must fire for them.
+        monkeypatch.setitem(
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+            "probe: pretend a mutation lives outside sdk.py")
+        violations = tsc.write_classification_violations(tsc.served_registry())
+        assert any("out-of-boundary mutation" in v and "tortoise_query" in v
+                   for v in violations), violations
+        # …and a `maintenance` or writing tool is not what this arm is for.
+        assert not any("out-of-boundary mutation" in v
+                       and "tortoise_create_point" in v for v in violations)
 
 
 class TestPureReadsStillOnlyNeedReadScope:

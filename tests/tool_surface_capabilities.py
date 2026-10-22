@@ -107,6 +107,17 @@ RETENTION_CARVEOUTS: dict[str, str] = {
         "expired :GraphEvent rows (interval-gated, system-owned) — #4122",
 }
 
+# SDK operations that MUTATE storage from a module OUTSIDE the `sdk.py` derivation
+# boundary, so `sdk_graph_mutators()` cannot see them and `reached_writes` is empty
+# for any tool that reaches them. Listed so a `read`/`maintenance` entry touching
+# one must be declared in RETENTION_CARVEOUTS — without this arm the carve-out
+# ledger was liveness-checked only, and a NEW read-tier tool that purged through
+# another module would be caught by nothing (#4122 review).
+OUT_OF_BOUNDARY_MUTATORS: dict[str, str] = {
+    "poll_events": "event_store.purge_expired/purge_overflow (DETACH DELETE of expired "
+                   ":GraphEvent rows) — invisible to sdk_graph_mutators()",
+}
+
 # Registry `sdk_method` labels that do not resolve to a TortoiseSDK attribute.
 # These are the #3994 `fix-declaration` rows (declared-SDK-link drift, not
 # missing features).  Kept exact so a *new* dangling declaration fails.
@@ -929,7 +940,6 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
     carrying tool must be a self-guarding HTTP-excluded tool), and every
     writer-annotated tool must be in WRITE_TOOL_NAMES."""
     import tortoise.mcp_server as _ms
-
     mutators = sdk_graph_mutators()
     by_method: dict[str, list] = {}
     for e in entries:
@@ -953,6 +963,20 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
                 f"{e.name}: risk={e.risk!r} but its handler reaches "
                 f"write(s) {sorted(reached_writes)} (#4122: only `maintenance` may "
                 f"refresh, and only the operations READ_THROUGH_WRITE_METHODS names)")
+        # 2a-double-prime: a mutation that lives OUTSIDE the sdk.py boundary is
+        # invisible to `sdk_graph_mutators()`, so a `read`/`maintenance` entry that
+        # reaches one must be DECLARED. Without this arm RETENTION_CARVEOUTS was
+        # liveness-checked only, and a new read-tier tool purging through another
+        # module would have been caught by nothing (#4122 review).
+        out_of_boundary = (
+            handler_operations(e.name, mcp_src).operations & set(OUT_OF_BOUNDARY_MUTATORS)
+        )
+        if out_of_boundary and e.risk in ("read", MAINTENANCE_TIER) \
+                and e.name not in RETENTION_CARVEOUTS:
+            out.append(
+                f"{e.name}: risk={e.risk!r} but reaches out-of-boundary mutation "
+                f"{sorted(out_of_boundary)} — declare it in RETENTION_CARVEOUTS "
+                f"or move it off the reading tiers (#4122)")
         if reached_writes:
             if e.http_policy:
                 if e.annotations is None or e.annotations.readOnlyHint is not False:
