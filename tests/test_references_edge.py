@@ -414,3 +414,153 @@ def test_link_source_to_entity_source_kind_passthrough():
         assert r2[0][0] is True
     finally:
         sdk.close()
+
+
+# ── #5151: the references self-loop guard, at the choke point ──────────────
+#
+# Before D10 the two sides of a `references` edge were different LABELS
+# (`:Source -[:references]-> :Document`), so equal keys could not degenerate.
+# D10 makes a document a `:Source`, so `link_source_to_entity("X", "X",
+# "Source")` MERGEd `(:Source {url:'X'})-[:references]->(:Source {url:'X'})` —
+# measured on an isolated graph: 1 node, 1 self-loop. The guard now lives in
+# the writer, not in the caller: `_upsert_document`'s `if ref and ref != did`
+# compares RAW spellings, which `resolve_source_key`'s URL canonicalisation
+# defeats (`…/a/?utm_source=x` vs `…/a`), and a caller-side rule cannot bind
+# the next Source→Source writer at all.
+
+def _self_loop_count(proj) -> int:
+    """Count `references` edges whose endpoints are the SAME node."""
+    rows = proj.g.query(
+        "MATCH (s:Source)-[r:references]->(e:Source) WHERE ID(s) = ID(e) "
+        "RETURN count(r)"
+    ).result_set
+    return int(rows[0][0]) if rows and rows[0] else 0
+
+
+def test_link_source_to_entity_writes_no_self_loop_5151():
+    """#5151: equal source/entity keys on a ``Source`` target mint NO edge.
+
+    FAIL-ON: this is the issue's own reproduction. Without the guard the call
+    MERGEs a `(:Source {url:'X'})-[:references]->(:Source {url:'X'})` self-loop,
+    which asserts nothing (ONTOLOGY §3.4's `references` is source→entity
+    containment/derivation) and is exactly the degenerate shape D10's
+    suppression exists to prevent. The NODE is still created — only the EDGE is
+    degenerate, so suppressing the whole write would be the #5140 failure in the
+    other direction (a dropped edge where one was expected is how the legacy
+    no-`source_url` path broke).
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        sdk.link_source_to_entity("X", "X", "Source")
+        proj = sdk._get_proj()
+
+        nodes = proj.g.query(
+            "MATCH (s:Source {url:'X'}) RETURN count(s)"
+        ).result_set[0][0]
+        assert nodes == 1, f"the Source node must still exist, got {nodes}"
+        assert _self_loop_count(proj) == 0, "degenerate self-loop references edge minted"
+
+        # Idempotent: a re-link must not mint it on the second pass either.
+        sdk.link_source_to_entity("X", "X", "Source")
+        assert _self_loop_count(proj) == 0, (
+            "the second call minted the self-loop the first one suppressed"
+        )
+    finally:
+        sdk.close()
+
+
+def test_link_source_to_entity_writes_no_self_loop_through_the_Document_alias_5151():
+    """#5151: the DEPRECATED ``"Document"`` alias is the same degenerate case.
+
+    The alias is remapped to ``Source`` for identity BEFORE the edge is written,
+    so the guard has to sit after that remap: keyed on the caller's spelling it
+    would let the derivation branch (which also stamps the #5199
+    ``sourceVersion`` anchor) mint the self-loop.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        sdk.link_source_to_entity("X", "X", "Document")
+        proj = sdk._get_proj()
+        assert _self_loop_count(proj) == 0, (
+            "the `Document` alias minted a Source→Source self-loop"
+        )
+    finally:
+        sdk.close()
+
+
+def test_the_self_loop_guard_sees_the_RESOLVED_key_not_the_raw_spelling_5151():
+    """#5151: a URL variant defeats a caller-side ``ref != did`` guard.
+
+    This is why the guard is at the choke point. `resolve_source_key`
+    canonicalises (`…/a/?utm_source=x` → `…/a`), so the two spellings DIFFER
+    while the resolved key EQUALS the entity id — `_upsert_document`'s
+    `if ref and ref != did:` passes the call straight through, and the writer
+    then MERGEs a self-loop. Measured pre-fix on this exact shape: 1 node,
+    1 self-loop.
+    """
+    from tortoise.source_identity import resolve_source_key
+
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (s:Source {url:'https://example.test/a', title:'a', "
+            "canonicalUrl:'https://example.test/a', contentHash:'h1', "
+            "sourceKind:'document'})"
+        )
+        variant = "https://example.test/a/?utm_source=x"
+        # NON-VACUITY: the caller-side test really is defeated here — the raw
+        # spellings differ while the resolved key is the entity id.
+        assert variant != "https://example.test/a"
+        assert resolve_source_key(proj.g, variant) == "https://example.test/a", (
+            "the variant no longer resolves onto the entity node, so this test no "
+            "longer reproduces the case the caller-side guard cannot catch"
+        )
+
+        sdk.link_source_to_entity(variant, "https://example.test/a", "Source")
+        assert _self_loop_count(proj) == 0, (
+            "a URL variant collapsed onto the entity node and minted a self-loop"
+        )
+        nodes = proj.g.query("MATCH (s:Source) RETURN count(s)").result_set[0][0]
+        assert nodes == 1, f"the variant minted a duplicate Source, got {nodes}"
+    finally:
+        sdk.close()
+
+
+def test_the_self_loop_guard_does_not_suppress_legitimate_links_5151():
+    """#5151 FAIL-ON for OVER-suppression — the guard's other direction.
+
+    Two distinct Source nodes are the ``references`` containment link (§3.4's
+    referential chain), and an ``Event``/``Object`` target is matched on
+    ``{id}`` under a DIFFERENT label, so an equal id STRING addresses a distinct
+    node. A guard written on "same label" or on the raw string pair instead of
+    node identity would silently drop both — the #5140 failure shape (a guard at
+    the wrong layer losing the edge it was meant to protect).
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("CREATE (a:Source {url:'a'}),(b:Source {url:'b'})")
+        proj.g.query("CREATE (o:Object {id:'X', name:'o'})")
+
+        sdk.link_source_to_entity("a", "b", "Source")   # containment
+        sdk.link_source_to_entity("X", "X", "Object")   # equal string, other label
+
+        containment = proj.g.query(
+            "MATCH (a:Source {url:'a'})-[:references]->(b:Source {url:'b'}) "
+            "RETURN count(*)"
+        ).result_set[0][0]
+        assert containment == 1, (
+            f"the guard suppressed a legitimate Source→Source link ({containment})"
+        )
+        to_object = proj.g.query(
+            "MATCH (:Source {url:'X'})-[:references]->(o:Object {id:'X'}) "
+            "RETURN count(*)"
+        ).result_set[0][0]
+        assert to_object == 1, (
+            "the guard suppressed a legitimate link to an `Object` that merely "
+            f"shares the id string ({to_object})"
+        )
+        assert _self_loop_count(proj) == 0
+    finally:
+        sdk.close()
