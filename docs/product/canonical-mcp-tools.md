@@ -118,12 +118,15 @@ status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 `tortoise_packs_list` description no longer claims *"Read-only;"*. The handler reaches
 `pack_state.get_tenant_packs`, whose `ensure_tenant_packs` MERGEs a missing starter
 `:PackInstall` activation, so a `graphs:read` caller can cause a write — which is why PR #9573
-(#4122) re-tiers that entry to **`maintenance`** and stops it declaring `readOnlyHint: true`
-(that PR is still open; on `main` the hint is unchanged) and why it deliberately left the
-description — the other string an agent reads before deciding to call — asserting the opposite
-(#9575). The new text states what the call does instead of asserting a read-only guarantee: a
+(#4122), now **landed on `main`**, re-tiers that entry to **`maintenance`** and stops it declaring
+`readOnlyHint: true`, and why it deliberately left the description — the other string an agent
+reads before deciding to call — asserting the opposite (#9575). The new text states what the call
+does instead of asserting a read-only guarantee: a
 graph carrying no `PackInstall` record at all gets its starter set re-seeded before the answer,
-skipped when the graph's pack set was deliberately configured (#8648). **No tool is added,
+skipped when the graph's pack set was deliberately configured (#8648). The rule is enforced by a
+test, not by prose: `tests/test_tool_registry.py` holds **every** entry whose `risk` is not `read`
+to the description it publishes, so a future non-read tool cannot claim *"Read-only;"* either.
+**No tool is added,
 removed or renamed; the served schema, parameters and bindings are unchanged** — only the
 description text, and hence that row's `job` and the baseline's `cut_at_commit`, change.
 status: approved · principal: daniel-ospina · PR #9582 · date: 2026-10-22.
@@ -242,7 +245,7 @@ done by `register_source`; the confidence tools are split across `recall_beliefs
 
 | Item | Status |
 |---|---|
-| **Confidence reads currently WRITE.** `get_confidence` is annotated `readOnlyHint=True` (the `tortoise_get_confidence` entry in `tortoise/tool_registry.py`, `annotations=_ro()`) but, for a dirty root, calls `self.dream(dirty_only=True, ...)` inside `TortoiseSDK.get_confidence` (`tortoise/sdk.py`), which writes `SET n.confidence = p.c` in `tortoise/dream.py` (`_ep_run_batch`). Until that read path stops writing, `recall_beliefs` cannot honestly be called read-only. *(Cited by symbol, not line: line numbers go stale on every rebase.)* | **BLOCKING for the read/write guarantee** |
+| **Confidence reads currently WRITE.** `get_confidence` is annotated `readOnlyHint=True` (the `tortoise_get_confidence` entry in `tortoise/tool_registry.py`, `annotations=_ro()`) but, for a dirty root, calls `self.dream(dirty_only=True, ...)` inside `TortoiseSDK.get_confidence` (`tortoise/sdk.py`), which writes `SET n.confidence = p.c` in `tortoise/dream.py` (`_ep_run_batch`). Until that read path stops writing, `recall_beliefs` cannot honestly be called read-only. *(Cited by symbol, not line: line numbers go stale on every rebase.)* | **✅ RESOLVED by #4122** — owner ruling 2026-10-21 reclassified the read-through tools as `risk=maintenance` (a class of its own, per PostgreSQL 16's `MAINTAIN` privilege): `get_confidence`, `compute_confidence` and `packs_list` no longer declare `readOnlyHint`, they keep `graphs:read`, and `ToolDefinition` derives the hint from the risk axis so the two cannot disagree again. The `annotations=_ro()` citation above is historical — the field is now derived and cannot be declared. |
 | **`tortoise_get_entity` must NOT be retired** by the #3883 warning shim. The map must retire `tortoise_get` → `tortoise_get_entity(id, type=...)` instead, because `list_tools` strips retired names *by string* — so retiring `get_entity` while re-declaring it would hide it from agents entirely. | **✅ RESOLVED — PR #4031 retires `tortoise_get` into `tortoise_get_entity` and keeps `get_entity` live; the tool gained the `type=` dispatch (`point`\|`entity`\|`operator`\|`events`\|`governance`), so the named replacement call resolves, and `TortoiseSDK.get_entity` is untouched. The earlier inverse (retiring `get_entity` into `tortoise_get`) was the must-fix this row raised.** |
 | **`compute_confidence` is mislabelled in the same way.** Annotated read-only, but it persists: `TortoiseSDK.compute_confidence` (`tortoise/sdk.py`) runs `MATCH (n:Point {id: p.id}) SET n.confidence = p.c`. `stabilize_beliefs` (a write tool) is therefore its correct home — confirmed. | resolved — moves to `stabilize_beliefs` |
 | **`packs_list` is tenant-facing and NOT on the MCP.** The registry has it `_ro()`, `http_policy=True`, described as *"List this team's active packs … another tenant's packs are never observable"* (`tortoise/tool_registry.py`). **Settled 2026-09-22: it is SDK/REST only and POST-BETA** — the tenant read is preserved there, and no competitor exposes pack installation on its agent API, so the agent-facing MCP does not carry it. Per-graph curation is tracked by **#4663**. | **✅ RESOLVED 2026-09-22 — SDK/REST post-beta (#4663)** |

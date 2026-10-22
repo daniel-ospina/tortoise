@@ -749,12 +749,24 @@ def _ledger_src(reaches: str) -> str:
     )
 
 
-def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool, writes: bool = False):
+def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool):
+    """Build a probe entry. #4122: hints are DERIVED from `risk`, so a probe
+    declares the risk class it is simulating. `annotations=` is kept in the
+    signature (every probe is written as the hint shape it wants to simulate) and
+    translated here, so each probe still reads as the shape it describes."""
     from tortoise.tool_registry import ToolDefinition
+    risk = "read" if annotations.readOnlyHint else "write"
+    # There is deliberately NO `writes=` parameter: the permission is DERIVED from
+    # `risk` (#4122), so a caller-supplied `writes` could only be ignored or
+    # contradicted (cycle-1 review P2). A probe that needs a hint which disagrees
+    # with its permission (the #4474 shape) builds a `SimpleNamespace` instead —
+    # `test_exemption_set_is_exact` pins exactly that shape.
     return ToolDefinition(
         name=name, id=f"surface.probe.{name.removeprefix('tortoise_')}",
-        description="probe", annotations=annotations,
-        http_policy=http_policy, sdk_method=sdk_method, writes=writes,
+        description="probe", risk=risk,
+        destructive_hint=bool(annotations.destructiveHint),
+        idempotent_hint=bool(annotations.idempotentHint),
+        http_policy=http_policy, sdk_method=sdk_method,
     )
 
 
@@ -1089,28 +1101,43 @@ class TestCapabilityModel:
         assert handler_self_guards("tortoise_probe_helper_guard", _PROBE_SRC)
 
     def test_exemption_set_is_exact(self):
-        """2b: an entry's writer ANNOTATION and its declared `writes` flag must be
-        the same statement — measured over the SERVED set, retired names included
+        """2b: an entry's client hints and its declared permission must be the
+        same statement — measured over the SERVED set, retired names included
         (#3883): a retired writer is still callable by name, so it is not exempt
-        from the guard. #4474 removed the last five entries where the two
-        disagreed, so the exemption is empty and the check is restated as the
-        invariant the name list stood for — both directions, any `http_policy`.
-        The rogue probes below prove it can still fire."""
+        from the guard.
+
+        #4122 replaced the 2-state rule (`readOnlyHint is False` ⇔ `writes`) with
+        the RISK axis, because the 2-state rule had no way to say "changes derived
+        state, but is not a user write". Both hints are now DERIVED from `risk`
+        (`init=False`), so the rogue *probes* that used to prove the check can
+        fire are impossible by construction — an entry cannot be built whose hints
+        disagree with its permission. What the guard must still catch is an entry
+        that does not carry the axis at all: dropping `risk` must not be a way to
+        escape the property."""
+        from types import SimpleNamespace
+
         from tool_surface_capabilities import exemption_set_violations, served_registry
 
         from tortoise.tool_registry import _ro, _rw
         served = served_registry()
         assert served, "served registry is empty — the check would be vacuous"
         assert exemption_set_violations(served) == []
-        # `_probe` leaves writes=False, so a writer annotation makes the two
-        # disagree — exactly the #4474 defect — and the check must fire.
-        rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
-                       http_policy=False)
-        assert exemption_set_violations([rogue])
-        # The reverse direction too: a declared writer behind a read annotation.
-        reverse = _probe("tortoise_rogue_reader", "query", annotations=_ro(),
-                         http_policy=False, writes=True)
+
+        # An entry with no `risk` (a probe, a proxy, a stale object) is checked on
+        # the pre-#4122 rule rather than skipped.
+        rogue = SimpleNamespace(name="tortoise_rogue_writer", annotations=_rw(),
+                                writes=False)
+        assert exemption_set_violations([rogue]), (
+            "an entry with no risk axis must not escape the annotation check")
+        reverse = SimpleNamespace(name="tortoise_rogue_reader", annotations=_ro(),
+                                  writes=True)
         assert exemption_set_violations([reverse])
+
+        # And on the axis itself: a writer permission behind a read risk.
+        off_axis = SimpleNamespace(name="tortoise_off_axis_reader",
+                                   annotations=_ro(), writes=True, risk="read")
+        assert any("risk='read'" in v for v in exemption_set_violations([off_axis]))
+
 
     def test_guard4_rename_simulation_fails_loudly(self):
         """A stale write-surface map (renamed/removed tool, or a declared write
@@ -1215,8 +1242,6 @@ class TestCapabilityModel:
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import declared_set_violations, served_registry
 
-        from tortoise.tool_registry import _rw
-
         # The real registry is clean — the violation below is caused by the probe.
         assert declared_set_violations(served_registry()) == []
         # ... and the op is genuinely NOT declared on any entry (the premise of
@@ -1224,10 +1249,10 @@ class TestCapabilityModel:
         assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
         assert tsc.NON_SDK_READ_BINDINGS["get_tenant_packs"] == "tortoise_packs_list"
 
-        flipped = [dataclasses.replace(e, annotations=_rw())
+        flipped = [dataclasses.replace(e, risk="write")
                    if e.name == "tortoise_packs_list" else e
                    for e in served_registry()]
-        assert any("get_tenant_packs" in v and "non-read HTTP tool" in v
+        assert any("get_tenant_packs" in v and "not `risk='maintenance'`" in v
                    for v in declared_set_violations(flipped)), (
             "the read-classification property is unchecked for a handler-served "
             "read-through op")
@@ -1242,32 +1267,46 @@ class TestCapabilityModel:
             "NON_SDK_READ_OPERATIONS entry 'get_tenant_packs' has no tool binding" in v
             for v in declared_set_violations(without))
 
-    def test_a_self_heal_writer_never_claims_read_only_in_its_description(self):
+    def test_a_non_read_row_never_claims_read_only_in_its_description(self):
         """#9575: the description is the OTHER string an agent reads before calling.
 
-        A tool that writes on a self-heal path may not advertise itself as
-        read-only.  `tortoise_packs_list` fronts `get_tenant_packs`, whose
+        A tool that is not a read may not advertise itself as read-only.
+        `tortoise_packs_list` fronts `get_tenant_packs`, whose
         `ensure_tenant_packs` MERGEs a missing starter `:PackInstall` activation.
-        PR #9573 (#4122) fixes that entry's HINT channel for exactly that reason
-        (it stops declaring `readOnlyHint: true`) and deliberately left the
+        PR #9573 (#4122) fixed that entry's HINT channel for exactly that reason
+        (it no longer declares `readOnlyHint: true`) but deliberately left the
         description asserting "Read-only;" (#9575).  A hint a client
         auto-approves on and the prose an agent reads must agree about whether the
-        call can write — and only the prose is checkable here, because the hint
-        half lives on #9573's branch, not on `main`.
+        call can write — and since #9573 landed, BOTH halves are checkable here:
+        the hint is `risk == read`, so the prose is held to the same axis.
 
-        The tool set is derived (read-through writers by declared method, plus the
-        recorded handler-served bindings, plus every `writes=True` row), not
-        listed here — and the derivation's COVERAGE is asserted, so a read-through
+        The offender set is keyed on `risk != RISK_READ` — the axis #9575's
+        acceptance clause names ("no entry whose `risk` is not `read` carries a
+        'Read-only;' claim in its description") — NOT on a derivation
+        (`writes or in READ_THROUGH_WRITE_METHODS`).  A derivation-keyed filter has
+        a real hole: post-#9573 the only class that is `risk != read` AND
+        `writes == False` is `maintenance`, and nothing pins
+        `maintenance ⊆ READ_THROUGH_WRITE_METHODS`, so a NEW `maintenance` row
+        outside both declared dicts would be skipped and could carry
+        "Read-only;" with every gate green (the exact defect #9575 exists to
+        prevent).  A probe row below pins that hole shut.
+
+        The declaration-derived set is still computed and asserted, but as a
+        COVERAGE cross-check rather than as the predicate: every declared
+        read-through writer must still resolve to a live tool (so a read-through
         writer that gains a tool without a derivable binding fails loudly instead
-        of silently dropping out of the check (`declared_set_violations` skips an
-        op whose binding is absent, which is how the #4035 shape disappears).
+        of silently dropping out — `declared_set_violations` skips an op whose
+        binding is absent, which is how the #4035 shape disappears), and it must
+        land in the `risk != read` set.
 
         Mutation: restore "Read-only;" to `tortoise_packs_list` and this goes red.
         """
         import re
+        from types import SimpleNamespace
 
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import served_registry
+        from tortoise.tool_registry import RISK_MAINTENANCE, RISK_READ
 
         # A read-only CLAIM.  Negation-aware: `tortoise_get_source_reliability`
         # says "so not read-only", which is the opposite claim.  There is
@@ -1280,13 +1319,22 @@ class TestCapabilityModel:
         # decisions, rather than widening this pattern.
         claim = re.compile(r"(?<!not )(?<!never )read[\s\-]?only", re.IGNORECASE)
 
+        def offenders_in(rows: dict) -> list[str]:
+            """Every non-read row whose description claims read-only (#9575)."""
+            return sorted(
+                f"{name}: {claim.search(e.description).group(0)!r} in a "
+                f"risk={e.risk!r} row"
+                for name, e in rows.items()
+                if e.risk != RISK_READ and claim.search(e.description)
+            )
+
         entries = {e.name: e for e in served_registry()}
         by_method = {e.sdk_method: e.name for e in entries.values() if e.sdk_method}
         unbound = set(tsc.READ_THROUGH_WRITE_METHODS) - set(by_method) - set(
             tsc.NON_SDK_READ_BINDINGS)
         assert unbound == set(), (
-            "a read-through writer has NO derivable tool binding, so this check "
-            f"would silently skip it: {sorted(unbound)}")
+            "a read-through writer has NO derivable tool binding, so the coverage "
+            f"cross-check below would silently skip it: {sorted(unbound)}")
         self_heal_writers = {
             by_method[method]
             for method in tsc.READ_THROUGH_WRITE_METHODS
@@ -1296,14 +1344,25 @@ class TestCapabilityModel:
             for operation, tool in tsc.NON_SDK_READ_BINDINGS.items()
             if operation in tsc.READ_THROUGH_WRITE_METHODS
         }
-        declared_writers = {name for name, e in entries.items() if e.writes}
 
-        # Non-vacuous: the derived set is live and names the #4122/ #9575 row.
+        # Coverage cross-check: the declaration is live, and every declared
+        # read-through writer is in the risk-keyed set the predicate uses — so the
+        # two derivations cannot drift apart without this failing.
         assert self_heal_writers <= set(entries), (
             f"a declared read-through writer binds no live tool: "
             f"{sorted(self_heal_writers - set(entries))}")
         assert "tortoise_packs_list" in self_heal_writers
         assert "tortoise_compute_confidence" in self_heal_writers
+        assert self_heal_writers <= {
+            name for name, e in entries.items() if e.risk != RISK_READ}, (
+            "a declared read-through writer is classified as a READ, so the prose "
+            "lint would skip it: "
+            + str(sorted(n for n in self_heal_writers
+                         if entries[n].risk == RISK_READ)))
+
+        # Non-vacuous: the risk-keyed set is live and names the #4122/#9575 row.
+        assert "tortoise_packs_list" in {
+            name for name, e in entries.items() if e.risk != RISK_READ}
 
         # The predicate itself is falsifiable in both directions.
         assert claim.search("Read-only; empty result when nothing is installed")
@@ -1311,16 +1370,30 @@ class TestCapabilityModel:
         # ... and a claim about the TOOL is caught even when a client noun follows.
         assert claim.search("safe for a read-only client — it refreshes a cache")
 
-        offenders = sorted(
-            f"{name}: {claim.search(e.description).group(0)!r} in a "
-            f"{'declared-writer' if name in declared_writers else 'self-heal-writer'} "
-            f"row"
-            for name, e in entries.items()
-            if (e.writes or name in self_heal_writers) and claim.search(e.description)
-        )
+        # ... and it is keyed on `risk`, not on a derivable writer set: a
+        # `maintenance` row that is in NEITHER declared dict (`writes=False`, no
+        # derivable binding) is still caught — the hole a derivation-keyed filter
+        # leaves open.
+        probe = dict(entries)
+        probe["tortoise_probe_maintenance"] = SimpleNamespace(
+            name="tortoise_probe_maintenance", risk=RISK_MAINTENANCE, writes=False,
+            description="Read-only; synthetic probe, declared in no ledger.")
+        assert not probe["tortoise_probe_maintenance"].writes
+        assert "tortoise_probe_maintenance" not in self_heal_writers
+        assert offenders_in(probe) == [
+            "tortoise_probe_maintenance: 'Read-only' in a risk='maintenance' row"]
+        # ... while a genuine READ row claiming read-only is not an offender.
+        probe["tortoise_probe_read"] = SimpleNamespace(
+            name="tortoise_probe_read", risk=RISK_READ, writes=False,
+            description="Read-only; a pure read is allowed to say so.")
+        assert offenders_in(probe) == [
+            "tortoise_probe_maintenance: 'Read-only' in a risk='maintenance' row"]
+
+        offenders = offenders_in(entries)
         assert offenders == [], (
-            "an entry that can write advertises itself as read-only — an agent that "
-            "reads the description (not the hint) will call it expecting no writes:\n  "
+            "an entry whose `risk` is not `read` advertises itself as read-only — an "
+            "agent that reads the description (not the hint) will call it expecting "
+            "no writes:\n  "
             + "\n  ".join(offenders))
 
     def test_read_through_non_sdk_op_is_not_a_resolution_exemption(self):
@@ -1564,10 +1637,12 @@ class TestToolIdentity:
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
-        writer_annotated = sorted(
-            e.name for e in served
-            if e.annotations is not None and e.annotations.readOnlyHint is False
-        )
+        # #4122: derived from the PERMISSION (`writes`, itself derived from
+        # `risk`), not from `readOnlyHint`. A `maintenance` entry is annotated
+        # non-read and is still admitted under `graphs:read` — that is the whole
+        # point of the class — so keying this census on the hint would assert the
+        # opposite of the decision.
+        writer_annotated = sorted(e.name for e in served if e.writes)
         # 48 = the served writer census (44 live + 4 retired shims). Pinned
         # here so the derived loop below can never pass by covering nothing.
         assert len(writer_annotated) == 48, writer_annotated
@@ -1588,7 +1663,14 @@ class TestToolIdentity:
 
     def test_gate_admits_read_scope_for_a_genuine_read_tool(self):
         """#4474: the refusal above is not an over-correction — a `graphs:read`
-        key still succeeds for a tool that declares `writes=False`."""
+        key still succeeds for a tool that declares `writes=False`.
+
+        #4122: the `readOnlyHint is True` derivation below now excludes the three
+        `maintenance` tools — they are annotated non-read on purpose. Their
+        admission is the decision's headline promise (*"no integration loses a
+        tool"*), so pin them by name: a future gate change must not quietly take
+        them away from read-only keys.
+        """
         from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
         from tortoise.mcp_server import _enforce_mcp_tool_scope
         from tortoise.tool_registry import TOOL_REGISTRY
@@ -1598,12 +1680,16 @@ class TestToolIdentity:
             if e.annotations is not None and e.annotations.readOnlyHint is True
         )
         assert reads, "no read-annotated tool in the live registry"
+        maintenance = ("tortoise_get_confidence", "tortoise_compute_confidence",
+                       "tortoise_packs_list")
 
         scopes_tok = _current_scopes.set(["graphs:read"])
         legacy_tok = _current_legacy_full_access.set(False)
         try:
             for name in reads:
                 _enforce_mcp_tool_scope(name)  # must NOT raise
+            for name in maintenance:
+                _enforce_mcp_tool_scope(name)  # must NOT raise (#4122)
         finally:
             _current_scopes.reset(scopes_tok)
             _current_legacy_full_access.reset(legacy_tok)
@@ -1655,3 +1741,120 @@ class TestToolIdentity:
         finally:
             _current_scopes.reset(scopes_tok)
             _current_legacy_full_access.reset(legacy_tok)
+
+
+class TestRiskAxis:
+    """#4122 — the risk axis is the single declared statement per tool.
+
+    Owner decision (2026-10-21): the classification axis is USER-PERCEIVED RISK,
+    not "does the handler write". Hints and the permission are derived from
+    `risk`, so a hint, a permission and a scope can never drift apart again.
+    """
+
+    # The three tools the decision named: their handlers reach a write on an
+    # internal self-heal / recompute path, and they used to declare themselves
+    # read-only — which is what made a client auto-approve a call that changed
+    # customer data.
+    READ_THROUGH_TOOLS = (
+        "tortoise_get_confidence",
+        "tortoise_compute_confidence",
+        "tortoise_packs_list",
+    )
+
+    def test_every_entry_declares_a_known_risk(self):
+        from tortoise.tool_registry import (
+            RETIRED_TOOL_REGISTRY,
+            RISK_CLASSES,
+            TOOL_REGISTRY,
+        )
+        entries = (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+        assert entries, "registry is empty — the check would be vacuous"
+        bad = [(e.name, getattr(e, "risk", None)) for e in entries
+               if getattr(e, "risk", None) not in RISK_CLASSES]
+        assert not bad, f"entry with no known risk class: {bad}"
+
+    def test_readonly_hint_agrees_with_risk_read(self):
+        """Completion criterion 3 (a): `readOnlyHint` is `risk == 'read'`.
+
+        This is the load-bearing half: clients auto-approve on this hint, so an
+        entry whose hint says "read" while its risk says otherwise is the #4122
+        security defect. Fails if the two ever disagree, in either direction.
+        """
+        from tortoise.tool_registry import (
+            RETIRED_TOOL_REGISTRY,
+            RISK_READ,
+            TOOL_REGISTRY,
+        )
+        disagree = [
+            f"{e.name}: readOnlyHint={e.annotations.readOnlyHint} risk={e.risk!r}"
+            for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+            if bool(e.annotations.readOnlyHint) != (e.risk == RISK_READ)
+        ]
+        assert not disagree, f"readOnlyHint disagrees with risk (#4122): {disagree}"
+
+    def test_writes_agrees_with_the_write_risk_classes(self):
+        """Completion criterion 3 (b): `writes` is `risk in {write, destructive,
+        admin}` — the permission a caller needs `graphs:write` for."""
+        from tortoise.tool_registry import (
+            RETIRED_TOOL_REGISTRY,
+            TOOL_REGISTRY,
+            risk_writes,
+        )
+        disagree = [
+            f"{e.name}: writes={e.writes} risk={e.risk!r}"
+            for e in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY)
+            if bool(e.writes) != risk_writes(e.risk)
+        ]
+        assert not disagree, f"writes disagrees with risk (#4122): {disagree}"
+
+    def test_hints_and_permission_cannot_be_hand_set(self):
+        """The derivation is structural: `annotations`/`writes` are not fields a
+        caller can pass, and `risk` is REQUIRED, so the drift #4122 removed cannot
+        come back by edit and forgetting the axis cannot fail open.
+
+        The bare-construction assertion is the regression pin for the cycle-1 P1:
+        with `risk` defaulting to "read", an entry that simply omitted the axis
+        would be built as a SILENT READ — `readOnlyHint: true` (client
+        auto-approve) and `writes: false` (`graphs:read` reaches it). Omitting it
+        must be as loud as omitting `annotations` was before #4122.
+        """
+        from tortoise.tool_registry import ToolAnnotations, ToolDefinition
+        base = dict(name="tortoise_probe", id="surface.probe", description="p",
+                    http_policy=True, sdk_method="query")
+        with pytest.raises(TypeError):
+            ToolDefinition(**base)  # no `risk` at all — must not default to read
+        with pytest.raises(TypeError):
+            ToolDefinition(**base, annotations=ToolAnnotations(readOnlyHint=True))
+        with pytest.raises(TypeError):
+            ToolDefinition(**base, writes=True)
+        with pytest.raises(ValueError):
+            ToolDefinition(**base, risk="sometimes-read")
+
+    def test_the_read_through_tools_are_maintenance_not_read_and_not_write(self):
+        """The security fix: they stop declaring `readOnlyHint`, they keep
+        `graphs:read`, and they are still metered as reads.
+
+        Promoting them to `writes` would satisfy the hint rule too, and it is
+        wrong: `maybe_record_mcp_read` returns early for a WRITE_TOOL_NAMES
+        member, so an expensive recompute would stop being counted as a read and
+        drop out of read-velocity alerting — the cost lever the decision names.
+        """
+        from tortoise.tool_registry import (
+            RISK_MAINTENANCE,
+            TOOL_REGISTRY,
+            get_write_tool_names,
+        )
+        writers = get_write_tool_names()
+        by_name = {t.name: t for t in TOOL_REGISTRY}
+        for name in self.READ_THROUGH_TOOLS:
+            entry = by_name.get(name)
+            assert entry is not None, f"{name} is no longer served"
+            assert entry.risk == RISK_MAINTENANCE, (
+                f"{name}: risk={entry.risk!r}; the owner decision (#4122) classifies "
+                f"a recompute/self-heal write as 'maintenance'")
+            assert entry.annotations.readOnlyHint is False, (
+                f"{name} still declares readOnlyHint=true — clients auto-approve on it")
+            assert entry.writes is False and name not in writers, (
+                f"{name} became a write: a `graphs:read` key would lose it")
+            assert entry.annotations.idempotentHint is True, (
+                f"{name}: maintenance implies idempotentHint per the decision's table")
