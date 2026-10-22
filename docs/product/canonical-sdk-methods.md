@@ -344,11 +344,18 @@ is what mirrors the approved 23-tool list.
 
 Found while building this list. None is fixed here — this document changes no code.
 
-1. **Three read-named methods write.** `get_confidence` is annotated read-only but its own
+1. **Three read-named methods write.** `get_confidence` refreshes and stores the score: its own
    docstring says the lazy-dream path "WRITES `n.confidence`", and it calls
    `dream(dirty_only=True, ...)`, which runs `SET n.confidence = p.c`. `compute_confidence`
    writes the same property eagerly. `get_source_reliability` writes a reliability cache.
-   **This is the blocker on the read/write guarantee** — a read-only key can currently write.
+   **Resolved for the MCP surface by #4122 (2026-10-21):** the three `_ro()` read-only
+   declarations are gone — `get_confidence`, `compute_confidence` and `packs_list` are
+   `risk="maintenance"` in `tortoise/tool_registry.py`, which keeps `graphs:read` (KEY SCOPE is
+   unchanged, so `recall_beliefs` may still absorb them) and derives `readOnlyHint: false`, so no
+   client auto-approves them as a read. The store-and-return behaviour is the tier's defining
+   behaviour, recorded in the `OVERRIDES:` note under *reads and writes never share a tool* in
+   `docs/product/canonical-mcp-tools.md`. What remains is the METHOD-name half (a name beginning
+   `get_`/`compute_` that writes), which the rename pass below owns.
 2. **The control plane writes on first use.** Every registry-backed read (`org_list`,
    `graph_list`, `apikey_list`, `membership_list`, `invitation_list`, and others) calls into
    a registry helper that on a cold handle issues `CREATE INDEX` statements. Idempotent, but

@@ -833,11 +833,12 @@ def test_wide_leg_exclusions_are_tracked_too(client, monkeypatch):
 
 def test_retrieval_allowlist_is_pinned_by_name_and_cannot_be_silently_widened():
     """The allowlist must be pinned BY NAME, never derived from
-    ``readOnlyHint``/``_ro()`` — that covers 52 tools including
-    ``tortoise_health``, ``tortoise_status`` and every ``tortoise_list_*``,
-    which agents call automatically at connect time (which would mark an org
-    activated on connection). Also pins that every name still EXISTS, so a
-    tool rename cannot silently change the number."""
+    ``readOnlyHint`` or the read-ish tiers — those cover 51 registry entries
+    since #4122 (48 ``read`` + 3 ``maintenance``, every one of which keeps
+    ``graphs:read``), including ``tortoise_health``, ``tortoise_status`` and
+    every ``tortoise_list_*``, which agents call automatically at connect time
+    (which would mark an org activated on connection). Also pins that every
+    name still EXISTS, so a tool rename cannot silently change the number."""
     from tortoise.activation_scorecard import (
         RETRIEVAL_TOOL_ALLOWLIST,
         RETRIEVAL_TOOL_ALLOWLIST_WIDE,

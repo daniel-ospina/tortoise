@@ -3933,6 +3933,15 @@ surfaces:
   - test_tmpdir_hygiene.py
   - test_tmpdir_sweep.py
   - test_tool_registry.py
+  # #4122: `writes` and the three MCP hints are DERIVED from one `risk` tier, so a
+  # hint and its permission can no longer disagree. DB-free (registry +
+  # `mcp._list_tools()`), and the `core` surface is the one a
+  # `tortoise/tool_registry.py` diff falls through to. This file is also the ONLY
+  # pin on the tier census and on the two exemptions the capability guards carry
+  # (`MAINTENANCE_TIER` in `write_classification_violations`, `RETENTION_CARVEOUTS`),
+  # so leaving it unregistered would leave those bounds unenforced. Registered via
+  # `tools/ci_selection.py --register` (default surface).
+  - test_tool_risk_tiers.py
   # #4282 (Node A scoreboard): every registered tool + SDK binding must RESOLVE to a
   # live callable. The test executes the resolution (getattr / mcp._list_tools), never
   # greps source. The five known-dead entries are carried as xfail(strict=True) bound
@@ -5530,6 +5539,7 @@ tier1:
 - test_supabase_control.py
 - test_taxonomy.py
 - test_tool_registry.py
+- test_tool_risk_tiers.py  # #4122: the tier ⇔ hint ⇔ permission pins, fast and DB-free — a docs-only PR still grades them, which matters because the tier tables are GENERATED into `docs/product/`
 - test_w4_why_enrichment.py
 - test_weights.py
 - test_writer_inventory.py
@@ -7015,6 +7025,7 @@ durations:
   test_search_engine_nameerror.py: 0.7
   test_signup_form_safety.py: 1.6
   test_tool_registry.py: 4.4
+  test_tool_risk_tiers.py: 8.7  # #4122: ADDED BY THIS PR — the #3400 refresher samples push-to-main runs only, so no CI junit sample exists yet; this is a LOCAL reading at the PR head (embedded carve-out lane, 25 tests, `--junitxml`: sum of testcase/@time 8.71s — ~1.6s of it once-per-file setup, ~4.5s the two served-registry builds). Deliberately not the flat 2.0s default, so the fast split does not pack a ~9s file as free. Refresh from the first post-merge run that includes it.
   test_user_identity_authority.py: 2.3
   test_ci_expected_manifests.py: 0.6
   test_ci_guard_invocation.py: 0.6
