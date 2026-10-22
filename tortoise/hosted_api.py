@@ -13387,11 +13387,16 @@ class SessionRequest(BaseModel):
     # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
     # #4005 — the validator lives on ``CommitPayload``; there is no
     # ``CommitRecord`` class, and citing one sent a review to re-derive a third
-    # spelling); this is the same predicate at the boundary — one home
-    # (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and the
-    # hosted door cannot drift apart. ``None``/absent still mints (the caller
-    # named no session), and a PADDED-but-real id stays legitimate (#9599's own
-    # body — NOT #9553, which is R5/edge families and records no such position).
+    # spelling); this is the same sentence at the boundary — ONE predicate for
+    # all three DOORS (the two SDK doors and this one), so they cannot drift
+    # apart. ⛔ The blank rule has a SECOND, deliberate home one layer down: the
+    # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
+    # PLUS this same blank clause), which gates both journal carriers and the
+    # sidecar restores and landed on main with #9594 from the #9553 review P2 —
+    # so #9553 is the correct citation for the BLANK rule, and only the PADDED
+    # position below is not its. ``None``/absent still mints (the caller named
+    # no session), and a PADDED-but-real id stays legitimate (#9599's own body;
+    # #9553 records no position on padded ids at all).
     # Refusing or trimming it is #9599's open owner question (comment
     # 6342343424): this PR lands only the blank half.
     @field_validator("session_id")

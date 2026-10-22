@@ -92,9 +92,29 @@ SESSION_ID_NOT_STR_REFUSAL = (
 
 
 def session_id_refusal(session_id: object) -> str | None:
-    """The ONE home for the capture doors' session-id rule (#9599).
+    """The DOOR half of the session-id rule — one predicate, every door (#9599).
 
     Returns a refusal reason, or ``None`` when the value may be used.
+
+    ⛔ The blank rule has TWO homes at two layers, deliberately, and neither is
+    a duplicate of the other (#9599 review P2):
+
+    * THIS function is the **DOOR half** — a caller-supplied ``session_id`` at
+      ``capture_session``, ``commit_session`` and the hosted
+      ``SessionRequest`` boundary — where the answer has to name a reason.
+      The three doors share it, so they cannot drift apart.
+    * ``projection._writable_container_id`` is the **REPLAY half** —
+      ``_writable_id`` PLUS this same blank clause — and it gates every fold
+      that merges a session key (``_link_session``'s ``contains_session``,
+      ``_fold_session_recorded``'s id) plus the sidecar restore paths, where
+      there is no caller to explain anything to. It landed on main with #9594
+      from the **#9553 review P2**, so ⚠️ **#9553 IS the correct citation for
+      the blank rule** — do not read the padded note below as retracting that.
+      This branch extends that predicate to the ``SessionRecorded`` carrier
+      rather than stacking a second predicate in front of it.
+
+    The two are pinned equal on every non-empty string by
+    ``tests/test_9599_blank_session_id.py::test_the_fold_gate_and_the_door_gate_are_one_rule``.
 
     ABSENT (``None`` or ``""``) is not a refusal — the host named no session,
     and every door mints one (``mint_session_id``). That is today's contract
@@ -128,9 +148,11 @@ def session_id_refusal(session_id: object) -> str | None:
     recorded position, so it is an OPEN OWNER QUESTION on #9599 (comment
     6342343424, with the three candidate answers and their measured
     consequences), not this lane's decision: this PR lands the BLANK half only.
-    ⚠️ Do not cite #9553 for that position — #9553 is R5 (materialising
-    point-property edge families) and states no position on padded ids at all;
-    the position is quoted in #9599's body, and citing the wrong home is how a
+    ⚠️ Do not cite #9553 for THAT position — #9553 is R5 (materialising
+    point-property edge families) and states no position on padded ids at all
+    (it speaks to the BLANK case only, which is why it owns the replay half
+    above); the padded position is quoted in #9599's body, and citing the wrong
+    home is how a
     later lane "tidies" it into a refusal.
     """
     if session_id is None or (isinstance(session_id, str) and session_id == ""):

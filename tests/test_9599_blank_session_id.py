@@ -183,6 +183,51 @@ def test_a_falsy_non_string_is_present_not_absent():
     assert ids_mod.session_id_refusal(False) is not None
 
 
+def test_the_fold_gate_and_the_door_gate_are_one_rule():
+    """The blank rule is CO-OWNED by exactly two predicates — pinned, not narrated.
+
+    The docstrings say so (``tortoise/ids.session_id_refusal``,
+    ``projection._writable_container_id``), and a claim about two homes is worth
+    nothing unless a later lane widening one of them reds here (#9599 review P2:
+    "one home" was true of the doors and false of the tree). The contract, class
+    by class:
+
+      * BLANK is the shared rule — both layers refuse it;
+      * a PADDED-but-real id and an ordinary id are admitted by both;
+      * ABSENT (``None``/``""``) is the ONE intentional asymmetry — a DOOR
+        mints for it, a FOLD has nothing to mint with and refuses it; and
+      * a non-``str`` is refused by both, with the door naming the SHAPE (the
+        fold has no caller and says nothing).
+
+    Red on the pre-fix tree: ``session_id_refusal`` does not exist there.
+    """
+    from tortoise.projection import _writable_container_id
+
+    for blank in BLANK_IDS:
+        assert _writable_container_id(blank) is False, blank
+        assert ids_mod.session_id_refusal(blank) is not None, blank
+
+    for value in (*PADDED_REAL, "s1"):
+        assert _writable_container_id(value) is True, value
+        assert ids_mod.session_id_refusal(value) is None, value
+
+    for absent in (None, ""):
+        assert ids_mod.session_id_refusal(absent) is None, absent
+        assert _writable_container_id(absent) is False, absent
+
+    for value in (0, False, 123, b"  ", ["   "]):
+        assert _writable_container_id(value) is False, value
+        reason = ids_mod.session_id_refusal(value) or ""
+        assert "must be a string" in reason, (value, reason)
+        assert "blank" not in reason, (value, reason)
+
+    # ⚠️ The layer boundary, stated so a later lane does not "unify" the door by
+    # widening it: a value the ENGINE cannot parse (NUL, lone surrogate) is
+    # refused by the fold's `_writable_id` and is NOT the blank rule.
+    assert _writable_container_id("a\x00b") is False
+    assert ids_mod.session_id_refusal("a\x00b") is None
+
+
 @pytest.mark.parametrize("value", (0, False, 123, b"  "))
 @pytest.mark.parametrize("door", ("capture", "commit"))
 def test_both_sdk_doors_refuse_a_present_non_string_id(sdk, door, value):
