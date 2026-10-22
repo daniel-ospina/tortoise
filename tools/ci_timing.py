@@ -560,16 +560,12 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
         at = tail.find(" - ", at + 3)
     whole = tail.count("[") - tail.count("]")
     for at, _depth, clean in cands:
-        # `at` is the separator's leading SPACE; the pattern starts at its dash. DEPTH 0 only.
-        # A separator INSIDE a parameter is not the short-summary split, even when the remainder
+        # `at` is the separator's leading SPACE; the pattern starts at its dash. DEPTH 0 only:
+        # a separator INSIDE a parameter is not the short-summary split, even when the remainder
         # merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]` -> `test_p[a`,
-        # measured; publishing such an id is the defect this pass must not reintroduce).
-        #
-        # Depth-0 only: a separator INSIDE a parameter is not the short-summary split, even when
-        # the remainder merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]`
-        # -> `test_p[a`) — the defect this pass must not reintroduce. The cost of refusing it is
-        # that a bracket-unbalanced id resolves at a later rung and MAY publish part of the
-        # message as part of the id. That cost is accepted and PINNED rather than described:
+        # measured; publishing such an id is the defect this pass must not reintroduce). The cost
+        # of refusing it is that a bracket-unbalanced id resolves at a later rung and MAY publish
+        # part of the message as part of the id; that cost is pinned by
         # `test_a_bracket_carrying_message_is_a_declared_residual`.
         if clean and _depth == 0 and _LONGREPR_RE.match(tail[at + 1:]):
             return tail[:at]
