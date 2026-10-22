@@ -1460,11 +1460,13 @@ class TortoiseEP:
                 if not frontier:
                     break
         # #9275: an id-less claim is UNNAMEABLE, so it is not a claim this run
-        # can compute. Every admission point above collects `c.id`/`b.id`/`m.id`
-        # verbatim from the engine, and a `:Point` written outside the SDK (no
-        # writer mints one — every id-binding write path refuses a missing id on
-        # its own post-write check) can carry none, so the engine returns a row
-        # whose id is NULL and `None` lands in this set.
+        # can compute. The operator-seeded admission above returns `DISTINCT
+        # c.id` verbatim from the engine, so a `:Point` written outside the SDK
+        # (no writer mints one — every id-binding write path refuses a missing id
+        # on its own post-write check) can put a NULL into this set. (The hop
+        # admissions do NOT: their `m.id <> n.id` / `b.id <> a.id` comparisons are
+        # NULL — row dropped — for an id-less neighbour. That asymmetry is why
+        # the same node must ALSO be refused at factor assembly, below.)
         #
         # WHY REFUSE HERE rather than order around it. `affected` is not a
         # report: every member is loaded into the node cache, run through its
@@ -1488,21 +1490,7 @@ class TortoiseEP:
         # message says "no posterior is computed or stamped", which is what this
         # guard actually buys.)
         if None in affected:
-            raise UnaddressableClaimError(
-                "EP cannot run: this run's affected set contains a claim id that "
-                "is NULL — a :Point wired as an operator's claim carries no "
-                "`id`. Such a node cannot be addressed by EP (every claim is "
-                "keyed on `id` for hydration, for message caching and for the "
-                "posterior write-back), so it can be neither computed nor "
-                "stamped, and no SDK caller can repair it. Refused before EP "
-                "runs, so no posterior is computed or stamped (#9275). Find "
-                "and repair the node(s) — ONE NEW id per node, because a single "
-                "literal would mint the duplicate-id shape #7822:\n"
-                "  MATCH (n:Point) WHERE n.id IS NULL "
-                "RETURN id(n), n.pointKind, left(coalesce(n.content, ''), 80)\n"
-                "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<a new uuid>'  "
-                "-- or DETACH DELETE it"
-            )
+            raise self._unaddressable_claim_error("its affected set")
         # Final strip: FAIL-SAFE only — every admission point into `affected`
         # already excludes drafts (seed predicates, _live_neighbors, direct-edge
         # filters); the strip guards the nuclear-risk invariant against future
@@ -1510,6 +1498,30 @@ class TortoiseEP:
         if not include_draft and affected:
             affected -= self._filter_draft_ids(affected)
         return affected
+
+    def _unaddressable_claim_error(self, where: str) -> UnaddressableClaimError:
+        """The ONE #9275 refusal message, shared by both collection points.
+
+        Two places can see an id-less claim before any posterior is computed —
+        the affected set (operator-seeded admission) and the assembled factor
+        inputs (Batch 2/3 collect ids verbatim) — and they must not drift into
+        telling a caller two different things about the same graph.
+        """
+        return UnaddressableClaimError(
+            f"EP cannot run: a claim id in {where} is NULL — a "
+            ":Point wired as an operator's claim carries no `id`. Such a node "
+            "cannot be addressed by EP (every claim is keyed on `id` for "
+            "hydration, for message caching and for the posterior write-back), "
+            "so it can be neither computed nor stamped, and no SDK caller can "
+            "repair it. Refused before EP runs, so no posterior is computed or "
+            "stamped (#9275). Find and repair the node(s) — ONE NEW id per "
+            "node, because a single literal would mint the duplicate-id shape "
+            "#7822:\n"
+            "  MATCH (n:Point) WHERE n.id IS NULL "
+            "RETURN id(n), n.pointKind, left(coalesce(n.content, ''), 80)\n"
+            "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<a new uuid>'  "
+            "-- or DETACH DELETE it"
+        )
 
     def _graph_claim_count(self) -> int:
         """Claim count in the graph (degeneration-guard sizing, #395).
@@ -2452,6 +2464,28 @@ class TortoiseEP:
             skipped=self._last_skipped_factors)
         if not factors:
             return 0, True
+
+        # #9275: an id-less claim can reach EP as a FACTOR INPUT without ever
+        # being admitted into `affected`. `_affected_factors` Batch 2 collects
+        # an operator's inputs VERBATIM (`RETURN o.id, c.id, ...`), and Batch 3
+        # does the same for direct-edge endpoints, while the BFS hops compare
+        # `m.id <> n.id` / `b.id <> a.id` — which is NULL (row dropped) for an
+        # id-less neighbour under three-valued logic. So the id-less node is
+        # invisible to the `affected` guard above in exactly the case where the
+        # operator is NOT seeded: a legacy `op_type`-only operator (the selector
+        # matches `is_operator = true` only) or one outside the selector's hops.
+        #
+        # MEASURED (this shape, before this guard): seeded by two plain claims,
+        # `_update_factor` received `[seed, sibling, None]` and `[seed, None]`,
+        # `_last_affected` held the TWO NAMED ids only, and `compute_confidence()`
+        # returned `converged: True` with posteriors pulled off a phantom
+        # `Beta(1, 1)` input (3.209/1.109 vs the 3.405/1.081 control) — the silent
+        # mis-key that rejecting the issue's option 3 was supposed to prevent.
+        if any(f[0] is None or any(_i is None for _i in f[2]) for f in factors):
+            # A refused pass publishes no run set (the #7739 rule: a pass that
+            # never ran must not leave a selection report behind).
+            self._last_affected = set()
+            raise self._unaddressable_claim_error("a factor's inputs")
 
         # Load once from graph, then run entirely in memory.
         # Only flush final results at the end — eliminates per-iteration I/O.

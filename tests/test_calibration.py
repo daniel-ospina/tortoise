@@ -1550,3 +1550,83 @@ def test_an_id_that_is_not_a_string_is_ordered_not_crashed(sdk):
         "MATCH (n:Point {id:42}) RETURN n.posterior_alpha").result_set
     assert posterior[0][0] is not None, (
         "the numeric-id claim was ordered but never computed")
+
+
+def test_id_less_factor_input_refuses_even_when_the_operator_is_not_seeded(sdk):
+    """#9275 (review round 2): the FACTOR-INPUT half the affected guard cannot see.
+
+    The hop admissions NULL-drop an id-less neighbour (``m.id <> n.id`` is NULL
+    under three-valued logic), so the ``affected`` guard fires ONLY when the
+    operator itself is seeded. When the operator is not seeded — a legacy
+    ``op_type``-only operator (the selector matches ``is_operator = true`` only),
+    or one outside the selector's hops — the pass still consumes the node:
+    ``_affected_factors`` Batch 2 collects an operator's inputs verbatim, and
+    ``_update_factor`` received ``[seed, sibling, None]``, with ``_last_affected``
+    holding the two NAMED ids only.
+
+    MEASURED before this guard on the fixture below: ``compute_confidence()``
+    returned ``converged: True`` with the named posteriors pulled off a phantom
+    ``Beta(1, 1)`` input (``3.2090652206748``/``1.10986962042195`` against a
+    ``3.40474195219355``/``1.08063574424178`` control) — the silent mis-key that
+    rejecting the issue's option 3 was meant to prevent.
+    """
+    proj = sdk._get_proj()
+    seed = sdk.create_point("statement", "Seed", status="live")
+    sibling = sdk.create_point("statement", "Sibling", status="live")
+    for p in (seed, sibling):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    # A legacy operator: op_type only, is_operator NOT true — _bfs_select_operators
+    # matches `is_operator = true`, so this operator is never in the seed set.
+    proj.g.query("CREATE (o:Point {id:'op-9275', pointKind:'operator', "
+                 "op_type:'IMPL', status:'live', is_operator:false})")
+    proj.g.query("MATCH (o:Point {id:'op-9275'}), (a:Point {id:$a}) "
+                 "CREATE (o)-[:IMPL {idx:0}]->(a)", params={"a": seed["id"]})
+    proj.g.query("MATCH (o:Point {id:'op-9275'}), (b:Point {id:$b}) "
+                 "CREATE (o)-[:IMPL {idx:1}]->(b)", params={"b": sibling["id"]})
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
+    proj.g.query("MATCH (o:Point {id:'op-9275'}), (n:Point) WHERE n.id IS NULL "
+                 "CREATE (o)-[:IMPL {idx:2}]->(n)")
+
+    with pytest.raises(UnaddressableClaimError) as exc:
+        sdk.compute_confidence(require_calibration=False)
+    assert "factor's inputs" in str(exc.value)
+
+    # Nothing was computed: both named posteriors are still null.
+    stamped = dict(proj.g.query(
+        "MATCH (n:Point) WHERE n.id IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha").result_set)
+    assert stamped[seed["id"]] is None
+    assert stamped[sibling["id"]] is None
+
+
+def test_numeric_id_claims_survive_the_trivial_stamp_and_the_window_path(sdk):
+    """#9275: the other two `key=str` sites, each reachable with a mixed-type set.
+
+    ``dream``'s seed-empty branch sorts the trivial-stamp result, and
+    ``dream_window`` sorts the cross-batch affected set. Both are fed engine ids
+    verbatim, so a hand-written numeric id reaches them; without ``key=str`` each
+    raises ``TypeError: '<' not supported between instances of 'str' and 'int'``.
+    Neither was pinned by the numeric-id test above (that one drives ``dream``'s
+    EP branch only), so this test is what keeps the two edits load-bearing.
+    """
+    proj = sdk._get_proj()
+    # Trivial-stamp path: two anchors, NEITHER wired to an operator or a direct
+    # edge, so `seed_ids` is empty and `_trivial_stamp` returns both ids — a
+    # mixed-type set for `sorted(stamped, key=str)`.
+    named = sdk.create_point("statement", "Loose claim", status="live")
+    numeric = sdk.create_point("statement", "Numeric loose claim", status="live")
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 77",
+                 params={"id": numeric["id"]})
+    out = sdk._get_dreamer().dream([named["id"], 77])
+    assert out["iterations"] == 0
+    assert set(out["affected_claims"]) == {77, named["id"]}
+
+    # Window path: both claims reachable through an operator, so the stale-first
+    # pass accumulates a mixed-type affected set across its batches.
+    other = sdk.create_point("statement", "Windowed", status="live")
+    for p in (named, other):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", named["id"], [other["id"]])
+    window = sdk._get_dreamer().dream_window(budget=50)
+    assert window["mode"] == "stale-first"
+    assert 77 in window["affected_claims"]
