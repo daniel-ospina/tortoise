@@ -6201,6 +6201,66 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assert_all_surface_rows(out)
         self.assertIn("8/8 surfaces queried", out)
 
+    def test_the_exit_2_header_gives_each_roster_cause_its_own_remedy(self):
+        # #9657, raised by the fresh-context review of PR #9571 @ 5a22ed54e. The
+        # exit-2 contract is the spec a lane reads after `exit 2` (the header's
+        # own test above says so), and it answered the PRESENT-BUT-UNREADABLE
+        # roster with "rebuild the board" — the exact sentence the same PR
+        # removed for the ABSENT roster, because `fleet_state.py build` builds
+        # the board FROM that file and fails on the same read. It also called
+        # the cause "unrebuildable" while prescribing a rebuild in the same
+        # breath. Nothing pinned the block, which is why half of it survived
+        # the fix; this is the pin.
+        cp = _tool_module()
+        doc = cp.__doc__ or ""
+        # Flatten the WRAPPED prose so the assertions bind to sentences, not to
+        # where the 80-column wrap happens to fall.
+        flat = " ".join(doc.split())
+        self.assertNotIn(
+            "unrebuildable",
+            flat,
+            "the header must not call a cause unrebuildable while prescribing a rebuild for it",
+        )
+        absent = flat.find("LANE ROSTER is ABSENT")
+        # ⛔ ACCEPT EITHER PHRASING FOR ARM 2 (review, cycle 3). The header's
+        # cause clause and the sentence the tool actually PRINTS
+        # (`fleet_state.registry_remedy`) differ in wording — "the roster EXISTS
+        # but could not be read". A future lane aligning the header to the
+        # shipped message is a consistency edit, not a regression, and pinning
+        # on one sentence would redden this pin for it.
+        present = max(
+            flat.find("roster is PRESENT but unreadable"),
+            flat.find("roster EXISTS but could not be read"),
+        )
+        board = flat.find("the board is unreadable")
+        self.assertNotEqual(absent, -1, "the ABSENT-roster arm must stay stated")
+        self.assertNotEqual(present, -1, "the unreadable-roster arm needs its own clause")
+        self.assertNotEqual(board, -1, "the ambiguous-attribution arm must stay stated")
+        self.assertLess(absent, present)
+        self.assertLess(present, board)
+        # ⛔ EVERY ARM'S OWN REMEDY IS ASSERTED POSITIVELY (review, cycle 3). The
+        # slice checks below are satisfied TRIVIALLY when a sentence is deleted
+        # altogether, so a partial undo — an arm that names a cause and gives
+        # no remedy, the exact defect class this pin exists for — would have
+        # stayed green. Each arm must carry its own instruction.
+        self.assertIn(
+            "PROVISION", flat[absent:present], "the ABSENT roster's remedy is provisioning it"
+        )
+        # The unreadable arm's own remedy is FIX THE FILE, and the rebuild
+        # sentence belongs to the LATER arm only — so the first "rebuild the
+        # board" must not appear before the board arm begins.
+        self.assertIn(
+            "FIX THE FILE", flat[present:board], "the unreadable roster's remedy is fixing the file"
+        )
+        self.assertNotIn(
+            "rebuild the board", flat[present:board], "a rebuild cannot repair an unreadable roster"
+        )
+        self.assertIn(
+            "rebuild the board",
+            flat[board:],
+            "the ambiguous-attribution arm's remedy is the board rebuild",
+        )
+
     def test_the_header_contract_matches_the_surface_set(self):
         # #8629 review (P2, claim mismatch). This tool states its contract in the
         # module header, and that header is what the next lane reads before

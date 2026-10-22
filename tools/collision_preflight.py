@@ -378,9 +378,10 @@ Exit codes
                         ROSTER is ABSENT (remedy: PROVISION it with one row per
                         live lane, a CELL step; `fleet_state.py build` builds
                         the board FROM that file, so a rebuild fails on the SAME
-                        read), or the board/roster is present but unreadable and
-                        unrebuildable, or the attribution is ambiguous (remedy
-                        for those two: rebuild the board, `uv run python
+                        read), or the roster is PRESENT but unreadable (remedy:
+                        FIX THE FILE — a rebuild cannot help, it fails on the
+                        same read), or the board is unreadable / the attribution
+                        is ambiguous (remedy: rebuild the board, `uv run python
                         tools/fleet_state.py build`). A surface
                         that can never
                         produce a blocking hit is EXEMPT and its failure is only
