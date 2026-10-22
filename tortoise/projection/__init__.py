@@ -68,12 +68,16 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_UNIMPLEMENTED_OP,
     SHAPE_UNKNOWN_EVENT_TYPE,
     SHAPE_UNKNOWN_OP,
+    MALFORMED_MISSING_TYPE,
+    MALFORMED_NON_DICT_POINT,
+    MALFORMED_SHADOWED,
     NonFoldedEventsError as NonFoldedEventsError,
     assert_no_non_folded,
     classify_terminalizer_miss,
     collect_non_folded,
     identity_absent,
     record_identity_skip,
+    record_malformed_envelope,
     record_non_folded,
 )
 
@@ -6995,6 +6999,44 @@ def _writable_id(val) -> bool:
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
+def _writable_container_id(val) -> bool:
+    """`_writable_id` PLUS the blank refusal — the `contains_session` gate.
+
+    The extra clause is MEASURED, not cosmetic, and it belongs here rather
+    than only in the record projection (#9553 review P2), because a rule that
+    lives in one projection makes the same journal rebuild to two different
+    graphs.
+
+    A whitespace-only string is a broken identity on this engine (#9599): with
+    the `:Session(id)` RANGE index `_ensure_indexes` creates, FalkorDB's
+    equality filter does not match it AT ALL — `MATCH (s:Session) RETURN s.id`
+    lists `'   '`, `MATCH (s:Session {id:'   '})` returns 0, and a re-`MERGE`
+    creates a SECOND `:Session` with the same id instead of matching the first.
+    So `_link_session` used to mint a duplicate container and then fail its own
+    `MATCH … (s:Session {id:$sid})`, landing NO `contains_session` edge — while
+    the record projection (Postgres, no such quirk) WOULD have landed the row.
+    The embedded engine is worse still: it duplicates the node with no index at
+    all.
+
+    ⛔ SCOPE, so this is not over-read as a general sanitizer: the refusals are
+    `_writable_id`'s plus BLANK only. A padded-but-real id (`'  s1  '`) is a
+    legitimate identity and is NOT refused here, even though #9599 affects it
+    the same way — that loss is the engine's to fix, and ducking it in one
+    projection would not stop the engine duplicating nodes on the other paths
+    (`sdk.py`'s raw MERGEs, `_link_source`, …).
+
+    No engine in this repo can round-trip a whitespace-only id, so neither
+    projection may claim one: refusing it here is what makes the journal fold
+    and the record fold agree (`record_projection._writable_endpoint_id`
+    mirrors this predicate value-for-value, pinned by
+    `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
+    `_link_session` becomes a plain `_writable_id` caller again once #9599 is
+    fixed — this gate (`_writable_container_id`) is the stopgap, the index
+    defect is the cause.
+    """
+    return _writable_id(val) and bool(val.strip())
+
+
 def _log_identity_skip(what: str, value, label: str = "identity", *,
                        event_id: str | None = None, where: str = "",
                        absent_is_ordinary: bool = True,
@@ -7063,14 +7105,39 @@ def _log_identity_skip(what: str, value, label: str = "identity", *,
                                  where=where, drops_record=drops_record)
     # The cause comes from `IdentitySkip.describe()`, NOT a sentence written
     # here: it names the refused SHAPE (a non-str / a NUL-bearing str / a
-    # lone-surrogate-bearing str), so the "true cause" claim holds for every
-    # value `_writable_id` refuses. Asserting "NUL/lone-surrogate bearing" for
-    # a non-str id was false for a live journal shape (#8840 review P3).
+    # lone-surrogate-bearing str / a BLANK str — the last one refused by
+    # `_writable_container_id`, see `_unwritable_shape`), so the "true cause"
+    # claim holds for every value `_writable_id` refuses. Asserting
+    # "NUL/lone-surrogate bearing" for a non-str id was false for a live journal
+    # shape (#8840 review P3).
+    #
+    # ⛔ THE CONSEQUENCE IS CONDITIONAL TOO (#9553 review). Most of this reporter's
+    # call sites do not drop the record — they refuse ONE derived edge or stub
+    # AFTER the record itself was written (`_link_session` is one: the Point is in
+    # the graph and only the CONTAINS edge is missing). A sentence asserting "the
+    # record is dropped" at those sites is the #8018 class this module cites
+    # throughout, and it contradicted `consistency`'s own `reason` for the same
+    # skip.
+    #
+    # ⚠️ AND THE FLAG ITSELF IS NOT YET TRUE EVERYWHERE. Cycle 3 of the same review
+    # found 8 CREATION-ANCHOR sites that drop the whole record without passing
+    # `drops_record=True` (SubjectAdded/Subject id, ObjectRegistered, DocumentCreated,
+    # EventRecorded, SourceCreated/SourceVersioned in `projection/entities.py`). So
+    # this message states the consequence only where the caller DECLARES it, and
+    # otherwise says only what is certain about a refused identity — it must not
+    # guess "the record still folds" either, because that is false at those 8. The
+    # flag gap is recorded on #8702 (recurrence, with the 8 sites named); fixing it
+    # also repairs
+    # `recover_from_log`'s `applied`/`identity_skipped` split, which reads the same
+    # flag, so it is not this reporter's call to make.
     logger.warning(
-        "%s#7369/#8702: skipping %s — %s; the record is dropped rather "
-        "than reaching FalkorDB and aborting a replay that has already wiped "
-        "the graph%s",
+        "%s#7369/#8702: skipping %s — %s; %s%s",
         f"{where}: " if where else "", what, entry.describe(),
+        "the record is dropped rather than reaching FalkorDB and aborting a "
+        "replay that has already wiped the graph"
+        if drops_record else
+        "nothing is written for it — the caller decides whether the record "
+        "itself survives",
         f" (event_id={event_id})" if event_id else "",
     )
 
@@ -10529,12 +10596,26 @@ class FalkorProjection(
             return False
 
     def _memory_pressure(self) -> tuple[int, int] | None:
-        """``(used_memory, maxmemory)`` in bytes, or ``None`` if unreadable.
+        """``(used_memory, maxmemory)`` in bytes, or ``None`` if UNREADABLE.
 
         Best-effort and fully guarded: the falkordb client exposes ``.info()``
         only on some versions and the raw redis connection only on others, so
         both paths are tried. An unreadable value must never change the error
         CLASS — only how rich its message is.
+
+        #7392 — ``(used, 0)`` is a READING and is returned AS one.
+        ``maxmemory = 0`` means the server has NO ceiling, which is a different fact from
+        "the ratio could not be read" and calls for a different message;
+        collapsing both to ``None`` is how the write-refusal message came to
+        assert a memory ceiling on an instance that reported none (measured on
+        the shared container, 2026-10-04).
+
+        What counts as a reading is BOTH halves present and usable. A reply that
+        OMITS a field, or that reports an unparseable or negative ``maxmemory``,
+        is an unread datum and is reported as ``None``: the ``or 0`` defaults and
+        a bare ``cap > 0`` test would otherwise turn "this server did not
+        answer" into the positive claims "nothing is used" and "this server has
+        no ceiling" — the over-claim #7392 is about, one level down.
         """
         info = None
         try:
@@ -10547,12 +10628,28 @@ class FalkorProjection(
             return None
         if not isinstance(info, dict):
             return None
+        if "maxmemory" not in info or "used_memory" not in info:
+            # An unanswered field is neither "no limit" nor "nothing used":
+            # either default would be minted as a measured fact downstream.
+            return None
         try:
-            used = int(info.get("used_memory", 0) or 0)
-            cap = int(info.get("maxmemory", 0) or 0)
+            # Presence is established above, so read the keys directly: the
+            # `or 0` default would turn a present-but-falsy value (`""`, None)
+            # into the same measured-looking 0 the presence check exists to
+            # refuse (reviewed, #7392). `int()` on those raises into the
+            # `except`, which is the contract the docstring states.
+            used = int(info["used_memory"])
+            cap = int(info["maxmemory"])
         except (TypeError, ValueError):
             return None
-        return (used, cap) if cap > 0 else None
+        if cap < 0 or used < 0:
+            # No conformant Redis reports a negative ceiling (`CONFIG SET
+            # maxmemory` refuses one) nor a negative usage, so either is a
+            # broken reading and not an answer — it must not become a
+            # "no ceiling"/"below the ceiling" claim either.
+            return None
+        # cap == 0 is the server answering "no limit", not a failed reading.
+        return (used, cap)
 
     def _write_refusal_message(self, exc: BaseException | None) -> str | None:
         """The DISTINCT error for a ``maxmemory`` write-refusal, else ``None``.
@@ -10561,6 +10658,26 @@ class FalkorProjection(
         corruption included — so the rebuild advice still applies there. That
         second direction is what keeps this branch honest: it NARROWS the
         remedy, it does not remove it.
+
+        #7392 — the lead sentence's STRENGTH must match what was READ. The
+        branch exists to say "full, not corrupt", and the only fact the probe
+        establishes is that the server REFUSED A COMMAND for memory reasons. A
+        ceiling is one step further, and it is claimed (with the ceiling-only
+        ``--maxmemory`` lever as its remedy) only when ``INFO memory``
+        returned one AND the reading shows it was reached (``used + drift >=
+        cap``, where ``drift`` is the MEASURED post-refusal shortfall — the
+        reading is taken after the refusal and includes buffers that the refused
+        reply releases).
+        Three shapes must not borrow that
+        claim: ``maxmemory == 0``, where the datum says there is NO ceiling and
+        the operator has to be pointed at that ABSENCE (the LOCUS of the
+        pressure is not asserted — "a per-query cap" is a limit OF the
+        instance); an unusable reading, where no ceiling was established at
+        all; and a ratio that was read but sits WIDER than that drift below the
+        ceiling, where quoting "has reached" would state a fact the reading
+        contradicts. Sending someone to raise a ceiling
+        that does not exist — or was not reached — is the defect this clause
+        closes.
         """
         if exc is None:
             return None
@@ -10569,12 +10686,114 @@ class FalkorProjection(
             return None
         pressure = self._memory_pressure()
         if pressure is None:
-            detail = ("server reports a maxmemory write-refusal "
-                      "(used_memory/maxmemory unreadable)")
+            # No ceiling established: no usable datum came back in any of the
+            # ways `_memory_pressure` refuses one (a raised or non-dict reply, a
+            # reply missing `used_memory`/`maxmemory`, unparseable values, a
+            # negative ceiling). The wording must be TRUE OF ALL of them —
+            # "INFO memory is unreadable" is false for a reply that answered
+            # without a field, and "no maxmemory was read" is false for one that
+            # reported an unusable value (both found in review, #7392).
+            lead = ("the server refused a command for MEMORY reasons (no "
+                    "usable used_memory/maxmemory reading could be obtained "
+                    "from this instance, so NO ceiling was established)")
+            # The lever is named CONDITIONALLY, after the reading, because on
+            # this branch we do not know whether one exists — prescribing it
+            # unread is exactly the defect #7392 closes. The flag itself
+            # (`--maxmemory`) is therefore NOT offered as an action here.
+            remedy = (
+                "Remedy: establish the ceiling before relieving anything — "
+                "read the instance's INFO memory. If it reports a maxmemory "
+                "limit, the next action is to raise or relieve it: a "
+                "container's REDIS_ARGS, or the provider's console on a "
+                "managed instance. If it reports 0, there is no ceiling to "
+                "raise and the pressure is NOT a maxmemory dataset ceiling — "
+                "it may come from host/kernel memory, an in-instance "
+                "per-query cap, or elsewhere.")
+        elif pressure[1] <= 0:
+            # Readable, and it says NO limit. Name the absence, not a ceiling.
+            # The value is interpolated rather than spelled "0": the predicate
+            # is `<= 0`, and a message that hardcoded the literal would
+            # misdescribe the reading it is quoting.
+            lead = ("the server refused a command for MEMORY reasons "
+                    f"(used_memory {_fmt_bytes(pressure[0])}, and maxmemory "
+                    f"is {pressure[1]} — NO maxmemory ceiling is set)")
+            # The locus is NOT asserted: the reading establishes only that
+            # `maxmemory` is not the cause, and "a per-query cap" is a limit OF
+            # the instance — so "outside the instance" would contradict its own
+            # example (reviewed, #7392).
+            remedy = (
+                "Remedy: this instance has no ceiling to raise — the pressure "
+                "is NOT a maxmemory dataset ceiling, and it may come from "
+                "host/kernel memory, an in-instance per-query cap, or "
+                "elsewhere. Do not go looking for a --maxmemory to tune: none "
+                "is set (one would be added in a container's REDIS_ARGS or in "
+                "the provider's console on a managed instance, and this "
+                "message reports it by name once it exists).")
         else:
             used, cap = pressure
-            detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
-                      f"{_fmt_bytes(cap)}")
+            # #7392 cycle 5 — the reading is taken AFTER the refusal
+            # (`_auto_health_recover` probes first, then reads `INFO memory`),
+            # and `used_memory` includes transient client buffers that are
+            # released when the refused reply is written. MEASURED on
+            # falkordb 4.20.6 at a 16 MiB `noeviction` ceiling: immediately after
+            # the server's own `used memory > 'maxmemory'` answer the reading
+            # sits 3.5-56 KiB BELOW the cap while the instance is still refusing
+            # at it. So "reached" is decided with that measured drift as a
+            # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
+            # different cause — and only a shortfall WIDER than it is treated as
+            # evidence that the ceiling is not the explanation.
+            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
+            # floor; the 1% arm is a heuristic that must not scale unbounded,
+            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
+            # print the ceiling sentence for a reading that is far from it —
+            # the over-claim direction, which is the unsafe one (its remedy is
+            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
+            # safe, because the below branch withholds nothing and asks for a
+            # re-read.
+            drift = max(64 << 10, min(cap // 100, 1 << 20))
+            if cap <= 2 * drift:
+                # #7392 cycle 7 — a tolerance larger than the ceiling's own
+                # scale makes the below branch UNREACHABLE and prints "has
+                # reached its memory ceiling" for e.g. 0 B of 4 KiB, which is
+                # the over-claim this branch exists to remove. At those sizes
+                # the absolute floor is meaningless, so scale to the cap.
+                drift = max(1, cap // 100)
+            if used + drift >= cap:
+                lead = ("the server has reached its memory ceiling (used_memory "
+                        f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
+                remedy = ("Remedy: raise / relieve the instance's maxmemory "
+                          "ceiling — the --maxmemory in a container's "
+                          "REDIS_ARGS, or the provider's console on a managed "
+                          "instance.")
+            else:
+                # A ratio was READ, and it sits well below the ceiling. The
+                # issue's proposal kept the ceiling sentence whenever the ratio
+                # was read, which assumed "read" implies "reached"; this branch
+                # is where that assumption fails, so it reports the OBSERVATION
+                # and asks for a re-read rather than forbidding the ceiling.
+                #
+                # #7392 cycle 6 — the CEILING is printed in exact bytes here,
+                # not through `_fmt_bytes`: that formatter keeps one decimal of
+                # a unit, so at 1-5 GiB (and TiB) caps the usage and the ceiling
+                # of a below-branch reading can round to the SAME string, and
+                # "10.5 MiB below its maxmemory ceiling of 1.0 GiB" printed
+                # beside "used_memory 1.0 GiB" reads as a contradiction. Naming
+                # the shortfall alone did not prevent that (294 of 401 sampled
+                # 1-5 GiB caps reproduced it).
+                shortfall = cap - used
+                lead = ("the server refused a command for MEMORY reasons, and "
+                        f"this instance NOW reports used_memory "
+                        f"{_fmt_bytes(used)} — {_fmt_bytes(shortfall)} below "
+                        f"its maxmemory ceiling ({cap} B) — so THIS reading "
+                        "does not show the ceiling being reached")
+                remedy = ("Remedy: re-read INFO memory while the refusal is "
+                          "repeating. If it reports at the ceiling, raise / "
+                          "relieve it — the --maxmemory in a container's "
+                          "REDIS_ARGS, or the provider's console on a managed "
+                          "instance. If it stays below, the pressure may be "
+                          "elsewhere — host/kernel memory, a concurrent client "
+                          "on this instance, the refused command's own buffer, "
+                          "or a per-query cap.")
         # The remedy must NOT restate the ownership policy in prose: a name
         # list here is wrong in one direction or the other, and nothing keeps
         # it in sync with the predicate that owns the rule. So the message
@@ -10597,12 +10816,24 @@ class FalkorProjection(
         # This operator message names the same two homes the note does, because
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
+        #
+        # #7392 review P1 — what that binding does NOT yet cover: the pair is
+        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
+        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
+        # asserts "it has reached its configured dataset limit (`maxmemory`)"
+        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
+        # CLASS, not just the wording), so on a ceiling-less instance the note
+        # and the `cap <= 0` branch above state opposite facts. Measured and
+        # recorded on #7357 (issuecomment-6341756094) — the note is that
+        # issue's deliverable, so it is fixed there, not here; this comment is
+        # the pointer so the next reader does not read the sentence above as
+        # proof that the two already agree.
         return (
-            "DB refused writes on open: the graph is INTACT but the server "
-            f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Remedy: raise / relieve the "
-            "instance's maxmemory ceiling — the --maxmemory in a container's "
-            "REDIS_ARGS, or the provider's console on a managed instance. "
+            "DB refused writes on open: the graph is INTACT but "
+            f"{lead}. This is NOT "
+            "corruption — do NOT rebuild. "
+            + remedy
+            + " "
             # #9532 review P2: composed from the ONE authority in
             # `tortoise/retry.py` rather than restated here. The SDK's
             # ceiling note (`explain_memory_ceiling`) is emitted for the same
@@ -11005,15 +11236,57 @@ class FalkorProjection(
         # boundaries reject the key too, as the fail-closed backstop).
         contains_session = (
             event.get("contains_session") if isinstance(event, dict) else None)
+        # #8843 review cycle 4: read the discriminator from the RAW envelope too.
+        # `_norm` is `{**ev, **ev["point"]}`, so a NESTED `point` payload carrying
+        # its own `type`/`point` key SHADOWS a well-formed envelope — and this
+        # guard then fires on a value the envelope never had. Recording that as
+        # "the envelope is malformed" would name a cause that is FALSE for the
+        # record (the #8018 class). Same reason `contains_session` is read above,
+        # one field over.
+        raw = event if isinstance(event, dict) else {}
         ev = self._norm(event)
         t = ev.get("type")
         if not isinstance(t, str):
             # #331: malformed event (no/non-string 'type') — skip, don't crash.
             # Visible at the I/O boundary: silent skips corrupt recovery
             # accounting (recover_from_log counts "did apply raise", code-review r2).
+            # #8843: the log line is NOT the record — the skip is RECORDED into
+            # the run's collector so a replay boundary can COUNT it. Without
+            # this the record was dropped here while `recover_from_log`'s
+            # per-record `else` arm incremented `applied`, so a journal of
+            # `[healthy PointAdded, {"event_id": "ev-x", "type": null}]`
+            # reported a faithful, complete recovery over a record it had
+            # dropped. Recorded HERE, at the guard, so within the replay
+            # accounting path there is one RECORDER, not a re-derived predicate.
+            # ⛔ EVERY field below is read from `raw` (the ENVELOPE), never from
+            # `ev` (the `_norm` splice `{**ev, **ev["point"]}`)
+            # — review cycle 6. The clause's whole purpose is telling an
+            # operator WHICH journal line to repair, and `ev`'s `event_id` can be
+            # a nested payload's: a record with envelope
+            # `event_id="TRUE-ID"` and `point.event_id="FORGED-ID"` reported
+            # `(event_id='FORGED-ID')` with the real id nowhere in the message.
+            # Same reason `type`/`point` above are read from `raw`.
             logger.warning(
                 "FalkorProjection.apply: skipping malformed event with "
-                "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
+                "missing/non-string 'type' (event_id=%s)", raw.get("event_id"))
+            if isinstance(raw.get("type"), str):
+                record_malformed_envelope(
+                    "journal record", MALFORMED_SHADOWED,
+                    field="type", field_present=True, value=t,
+                    envelope_value=raw.get("type"),
+                    event_id=raw.get("event_id"),
+                    where="FalkorProjection.apply")
+            else:
+                record_malformed_envelope(
+                    "journal record", MALFORMED_MISSING_TYPE,
+                    # the ENVELOPE value, not the splice's: both `raw` and a
+                    # nested payload can carry a non-str `type`, and `t` is the
+                    # spliced one (measured `type: 123` reported as `None`;
+                    # cycle 7).
+                    field="type", field_present="type" in raw,
+                    value=raw.get("type"),
+                    event_id=raw.get("event_id"),
+                    where="FalkorProjection.apply")
             return
         if t in ("PointAdded", "OperatorAdded"):
             # #331 (review r3): ev.get — missing 'point' key handled by the
@@ -11024,7 +11297,55 @@ class FalkorProjection(
                 # (issue #325)
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with non-dict point "
-                    "(event_id=%s)", t, ev.get("event_id"))
+                    "(event_id=%s)", t, raw.get("event_id"))
+                # #8843: recorded, not only warned — see the #331 site above.
+                # `field_present` comes from the RAW record, never from the
+                # value AND never from the splice: `ev.get("point")` is `None`
+                # both for an absent key and for an explicit `point: null`, and
+                # `ev` can carry a NESTED payload's key at a site where the
+                # envelope has none (review cycle 6 — `"point" in ev` reported a
+                # present-but-wrong value for a record whose envelope had no
+                # `point` key at all).
+                # A RAW dict `point` whose nested payload shadows it into a
+                # non-dict is its own cause (review cycle 4), not "malformed
+                # point" — the envelope was fine.
+                _raw_t = raw.get("type")
+                if isinstance(raw.get("point"), dict):
+                    record_malformed_envelope(
+                        # ⛔ The ENVELOPE's own discriminator when it carries
+                        # one — never `t`, which on this branch is the `_norm`
+                        # splice and can be the PAYLOAD's `type` (review cycle
+                        # 8). Measured: envelope `type: "PointAdded"` + payload
+                        # `type: "OperatorAdded"` + `point: "collision"`
+                        # rendered "OperatorAdded: … the envelope record is
+                        # well-formed" — naming the payload's family while
+                        # asserting the envelope was fine, in the one sentence
+                        # that exists to prevent exactly that (#8018).
+                        # ⛔ And the `else` arm must NOT fall back to `t`
+                        # either (cycle 9): when the envelope has no usable
+                        # `type` of its own, `t` IS the payload's, so the same
+                        # falsehood returned through the fallback — with the
+                        # "envelope is well-formed" claim now plainly false (its
+                        # `type` is None). An unnamed family is honest; a wrong
+                        # one sends the operator to the wrong record.
+                        (_raw_t if isinstance(_raw_t, str) else "journal record"),
+                        MALFORMED_SHADOWED,
+                        field="point", field_present=True,
+                        envelope_value=_raw_t,
+                        # the COLLIDING value — `raw["point"]["point"]`, the
+                        # nested key `_norm` splices over the payload — not
+                        # `p` (that is the whole payload, embedding and all)
+                        # and not `raw.get("point")` (identical to `p`, so the
+                        # report compared a value against itself; cycle 5).
+                        value=raw["point"].get("point"),
+                        event_id=raw.get("event_id"),
+                        where="FalkorProjection.apply")
+                else:
+                    record_malformed_envelope(
+                        t, MALFORMED_NON_DICT_POINT,
+                        field="point", field_present="point" in raw, value=p,
+                        event_id=raw.get("event_id"),
+                        where="FalkorProjection.apply")
                 return
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
