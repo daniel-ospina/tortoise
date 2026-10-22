@@ -1215,7 +1215,7 @@ def _projection_carries(projection: str, binding: str) -> bool:
     is a fail-open on the class this net exists to refuse.
     """
     return any(
-        item == _PROJECTS_EVERYTHING or item == binding
+        item in (_PROJECTS_EVERYTHING, binding)
         for item in _projection_items(projection)
     )
 
