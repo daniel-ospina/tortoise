@@ -2775,7 +2775,7 @@ def test_session_retrofit_audit_tool_change_fails_closed_to_full():
 
 def test_work_claim_tool_change_fails_closed_to_full():
     # #5052/#9487 review P1: tools/work_claim.py owns tests/test_work_claim.py — the
-    # dispatch-time claim gate, whose 77 hermetic arms pin every fail-closed refusal the
+    # dispatch-time claim gate, whose 87 hermetic arms pin every fail-closed refusal the
     # tool exists for. Same #3261/#4256 silent-drop class as the collision_preflight and
     # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so without
     # this TOOL_CARVEOUTS entry a claim-tool-only change came back as `changed=[]`,

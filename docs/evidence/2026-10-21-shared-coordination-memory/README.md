@@ -123,7 +123,7 @@ Read on `2026-10-21` on cell-3 (`HOME=/tmp/cell-home`); counts are as-of that re
 
 ## 3. The pilot — one slice, the claim, in the graph
 
-`tools/work_claim.py` (this branch), `tests/test_work_claim.py` (77 fake-store tests + 3 live tests, 80
+`tools/work_claim.py` (this branch), `tests/test_work_claim.py` (87 fake-store tests + 3 live tests, 90
 collected — re-derived with `--collect-only`, and pinned against this line by the suite itself), contract
 `rc 0/1/2/3` identical to `claims.sh` for `acquire`/`release` so a caller needs no
 new branch (`rc 3` is a malformed invocation; `status`'s rc reports that it ANSWERED — see §3.1).
@@ -273,15 +273,18 @@ stores all of them.
 
 ```bash
 # 1. The HERMETIC contract — no store at all, so the three live legs skip VISIBLY.
-#    `TORTOISE_TEST_CARVE_OUT=1` is the embedded-only lane; without it a URI-less run of a
-#    Docker-lane test file errors rather than skips (measured on this branch: the 3 live legs
-#    SKIP under the carve-out flag and ERROR without it).
-TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_work_claim.py -q   # 77 passed at this head, 3 skipped
+#    ⛔ The URI is UNSET explicitly (`env -u`), because the three live legs skip on
+#    `TORTOISE_DB_URI` ALONE: `TORTOISE_TEST_CARVE_OUT=1` only relaxes the session's URI GATE
+#    (without it a URI-less run of a Docker-lane test file ERRORS instead of skipping). Run this
+#    in the repo's documented dev shell — which EXPORTS `TORTOISE_DB_URI` (AGENTS.md §Testing) —
+#    and the legs RUN against the shared container and print "90 passed", so the line below
+#    would be false and the residue would land on a peer's target (#5084).
+env -u TORTOISE_DB_URI TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_work_claim.py -q   # 87 passed at this head, 3 skipped
 
 # 2. The FULL file — the per-claim volume probe on a private lane graph (so no peer's target
 #    is touched), which is also what runs the three live legs.
 uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
-uv run pytest tests/test_work_claim.py -q            # 80 passed (all three live legs run)
+uv run pytest tests/test_work_claim.py -q            # 90 passed (all three live legs run)
 
 # `--allow-box-local`: this lane's container is loopback BY DESIGN. EVERY verb that reads or
 # writes the store (`acquire`, `status`, `release`) refuses a loopback target otherwise,

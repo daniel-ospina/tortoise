@@ -1282,11 +1282,11 @@ def test_the_documented_case_counts_match_what_this_file_collects():
     without re-deriving the docs fails this pin instead of shipping another stale count; the
     docstrings deliberately carry no literal case count so they cannot rot.
 
-    The §6 pin also checks the ENV each command needs (review of #9487 P2): the reproduction
-    used to set `TORTOISE_DB_URI` via `test_lane.py uri` and then promise "the live legs
-    skip" — unreachable from that command, since a set URI makes the legs RUN. Both forms are
-    pinned now: the hermetic one must carry `TORTOISE_TEST_CARVE_OUT=1` and no URI, and the
-    full one must state the `total`."""
+    The §6 pin also checks the ENV each command needs (review of #9487 P2, corrected in the
+    review of PR #9537): the reproduction used to set `TORTOISE_DB_URI` via `test_lane.py uri`
+    and then promise "the live legs skip" — unreachable from that command, since a set URI makes
+    the legs RUN. Both forms are pinned now: the hermetic one must UNSET the URI (`env -u`) and
+    carry `TORTOISE_TEST_CARVE_OUT=1`, and the full one must state the `total`."""
     import inspect
 
     module = sys.modules[__name__]
@@ -1318,14 +1318,25 @@ def test_the_documented_case_counts_match_what_this_file_collects():
     row = re.findall(r"(\d+) fake-store tests \+ (\d+) live tests, (\d+)\s+collected", readme)
     assert row == [(str(hermetic), str(live_cases), str(total))], row
     # §6 — the reproduction's EXPECTED output, which a reader compares their own run against.
-    # Two commands, two claims: the hermetic one needs the carve-out env and NO store, the
-    # full one runs every leg. The env prefix is asserted, not just the count — a command
-    # that sets a URI cannot produce the "3 skipped" line (review of #9487 P2).
+    # Two commands, two claims: the hermetic one must UNSET the store and set the carve-out, the
+    # full one runs every leg. The env prefix is asserted, not just the count (review of #9487
+    # P2) — and the NEGATIVE is asserted too (review of PR #9537): the carve-out only relaxes
+    # the session URI GATE, it does not clear `TORTOISE_DB_URI`, and the live legs skip on URI
+    # absence ALONE. So a hermetic command that merely inherits an exported URI reproduces
+    # "90 passed", not "87 passed, 3 skipped" — the pin asserted the flag and stayed green on
+    # exactly the state where the documented output cannot occur.
     expected = [ln for ln in readme.splitlines() if "test_work_claim.py -q" in ln]
     assert expected, "the reproduction command is gone"
     hermetic_lines = [ln for ln in expected if f"# {hermetic} passed at this head" in ln]
     assert hermetic_lines, expected
-    assert any(ln.lstrip().startswith("TORTOISE_TEST_CARVE_OUT=1 ") for ln in hermetic_lines), expected
+    assert any(
+        "env -u TORTOISE_DB_URI" in ln and "TORTOISE_TEST_CARVE_OUT=1" in ln
+        for ln in hermetic_lines
+    ), expected
+    assert not any("TORTOISE_DB_URI=" in ln for ln in expected), (
+        "a §6 command EXPORTS a store URI — no URI may be set on either reproduction line, or "
+        "the '3 skipped' line is unreachable and the live legs run on the SHARED container"
+    )
     assert any(f"# {total} passed" in ln for ln in expected), expected
     # the timings row's own description of this file
     assert f"{total} tests: {hermetic} in-memory double + {live_cases} live-SDK" in surfaces
@@ -1563,14 +1574,96 @@ def test_the_repo_case_variant_is_the_same_claim_through_the_cli(capsys):
 def test_claim_id_is_one_id_per_unit_of_work_whatever_the_spelling():
     """The CAS is only a CAS if every box derives the SAME id. `claim_id` digested the repo as
     typed, so this was a spelling contest, not a fence — pinned here at the pure-function
-    level so the invariant cannot be quietly dropped from the CLI path later."""
+    level so the invariant cannot be quietly dropped from the CLI path later.
+
+    The KEY half gets the identical treatment (review of PR #9537): it was digested as typed
+    too, so a case variant or a trailing space was a second id for the same unit of work."""
     canonical = wc.claim_id("daniel-ospina/tortoise", "issue-5052")
     assert wc.claim_id("Daniel-Ospina/TORTOISE", "issue-5052") == canonical
     assert wc.claim_id("  daniel-ospina/tortoise  ", "issue-5052") == canonical
+    # ...and the key half no longer is either
+    assert wc.claim_id("daniel-ospina/tortoise", "ISSUE-5052") == canonical
+    assert wc.claim_id("daniel-ospina/tortoise", "issue-5052 ") == canonical
+    assert wc.claim_id("daniel-ospina/tortoise", " Issue-5052\t") == canonical
     # the digest is still a real digest: a DIFFERENT unit is a different id
     assert wc.claim_id("daniel-ospina/tortoise", "issue-5053") != canonical
+    assert wc.claim_id("daniel-ospina/tortoise", "pr-5052") != canonical
     assert wc.claim_id("daniel-ospina/agent-infra", "issue-5052") != canonical
     assert re.fullmatch(r"[0-9a-f]{20}-[0-9a-f]{12}", canonical), canonical
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",  # nothing at all
+        "5052",  # no kind prefix
+        "branch-1",  # a kind this tool does not key on
+        "issue-",  # empty body
+        "-5052",  # empty kind
+        "issue-50 52",  # a space INSIDE the key: two spellings of one unit
+        "issue-50/52",  # a slash would make the key a path
+        "issue-" + "9" * wc.MAX_KEY_LEN,  # longer than the stored-key ceiling
+    ],
+)
+def test_a_key_that_is_not_issue_or_pr_shaped_is_a_usage_error_not_a_second_claim(key):
+    """The key is half of the claim identity, so a malformed one must REFUSE rather than mint
+    its own id (review of PR #9537). Before the fix every one of these produced a perfectly
+    valid, perfectly distinct `claim_id` — the same unit of work under an unvalidated spelling,
+    which is the double grant the repo half of this PR removes."""
+    with pytest.raises(ValueError):
+        wc.canonical_key(key)
+    with pytest.raises(ValueError):
+        wc.claim_id("daniel-ospina/tortoise", key)
+
+
+def test_the_key_half_is_the_same_claim_through_the_library_entry_points():
+    """Review of PR #9537. `main()` canonicalised the key (`normalise_key`), but `acquire`,
+    `release` and `status` are PUBLIC entry points — a store split or a peer script calls them
+    directly — and they digested `record.key` / `key` as typed. Measured pre-fix: keys
+    `issue-5052`, `ISSUE-5052`, `issue-5052 ` and `""` produced FOUR ids and FOUR
+    `rc 0 / acquired` outcomes for one unit of work. Every assertion below reds on the pre-fix
+    code, and the first one reds as a SECOND GRANT rather than as an exception."""
+    store = FakeStore()
+    first = wc.acquire(store, _record(owner="cell-1:100", key="ISSUE-5052"), now=NOW)
+    assert first.rc == wc.EXIT_OK == 0, first
+    assert first.status == "acquired", first
+    # a different SPELLING of the same key is the same claim: refused as held, not re-granted
+    second = wc.acquire(store, _record(owner="cell-4:200", key=" issue-5052 "), now=NOW)
+    assert second.rc == wc.EXIT_HELD == 1, second
+    assert second.status == "held", second
+    assert second.owner == "cell-1:100", second
+    # exactly one row exists, addressed by the canonical id
+    assert list(store.points) == [wc.claim_id("daniel-ospina/tortoise", "issue-5052")]
+    # `status` under a variant spelling reads that row (pre-fix: `free` — the answer a
+    # controller dispatches on)
+    seen = wc.status(store, "daniel-ospina/tortoise", "Issue-5052", now=NOW)
+    assert seen.rc == wc.EXIT_OK == 0, seen
+    assert seen.status == "held", seen
+    assert seen.owner == "cell-1:100", seen
+    # ...and `release` under a variant spelling releases IT (pre-fix: "nothing to release"
+    # at rc 0 while the claim lived on)
+    closed = wc.release(
+        store, "daniel-ospina/tortoise", "ISSUE-5052", owner="cell-1:100", now=NOW + 10
+    )
+    assert closed.rc == wc.EXIT_OK == 0, closed
+    assert closed.status == "released", closed
+    after = wc.status(store, "daniel-ospina/tortoise", "issue-5052", now=NOW + 10)
+    assert after.status == "expired", after
+
+
+def test_a_malformed_key_is_refused_before_the_store_is_touched():
+    """A key that is not `<issue|pr>-<body>` is the caller's contract, so it raises from the
+    entry points rather than being written: `acquire` canonicalises before it reads or writes,
+    so the store sees nothing at all."""
+    store = FakeStore()
+    with pytest.raises(ValueError):
+        wc.acquire(store, _record(key=""), now=NOW)
+    with pytest.raises(ValueError):
+        wc.release(store, "daniel-ospina/tortoise", "5052", owner="box-a:111", now=NOW)
+    with pytest.raises(ValueError):
+        wc.status(store, "daniel-ospina/tortoise", "branch-1", now=NOW)
+    assert store.points == {}, store.points
+    assert store.writes == 0, store.writes
 
 
 def test_a_fence_that_matches_nothing_on_an_unreadable_epoch_refuses_rc2():

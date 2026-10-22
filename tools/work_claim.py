@@ -134,10 +134,13 @@ the same form.
                                               # unless --allow-box-local acknowledges a trial)
 
 `--repo` is HALF OF THE CLAIM IDENTITY, so it is validated and canonicalised before any key is
-built: `owner/name`, exactly one `/`, both halves non-empty, matched case-insensitively (GitHub
-repo names are). A bare name or a case variant is `EXIT_USAGE` (3), never a silent empty answer —
-an unvalidated spelling gave the same unit of work two ids (both boxes reported `acquired`) and
-made `status --repo` answer `0 claim record(s)` at rc 0 over a store that held claims.
+built: `owner/name`, exactly one `/`, both halves non-empty, lowercased because GitHub repo names
+are case-insensitive. A bare name (no `/`) is `EXIT_USAGE` (3); a CASE VARIANT of a valid
+`owner/name` is accepted and canonicalised onto the same claim — never a second id, and never a
+silent empty answer. The `--issue`/`--pr` key half is canonicalised the same way (see
+`canonical_key`), because an unvalidated spelling on EITHER half gave the same unit of work two
+ids (both boxes reported `acquired`) and made `status --repo` answer `0 claim record(s)` at rc 0
+over a store that held claims.
 
 STORE
 -----
@@ -422,8 +425,8 @@ def normalise_repo(repo: str) -> str:
 
     GitHub repo names are case-insensitive, so the canonical form is lowercased, and the shape
     is enforced (exactly one `/`, both halves non-empty) rather than assumed: the key half is
-    already validated and refuses to let two different units collide, and this is the same
-    discipline for the repo half. `ValueError` is the caller's to turn into `EXIT_USAGE`.
+    canonicalised at the same boundaries (`canonical_key`), so neither half of the digest can be
+    spelled two ways into two claims. `ValueError` is the caller's to turn into `EXIT_USAGE`.
     """
     text = (repo or "").strip()
     owner, sep, name = text.partition("/")
@@ -436,16 +439,56 @@ def normalise_repo(repo: str) -> str:
     return f"{owner.lower()}/{name.lower()}"
 
 
+def canonical_key(key: str) -> str:
+    """The KEY half of a claim identity: validated, and CANONICALISED to one spelling.
+
+    ⛔ The key is the other half of `claim_id`'s digest and used to be digested AS TYPED, so
+    `issue-5052`, `ISSUE-5052`, `issue-5052 ` (trailing space) and `""` were FOUR ids for ONE
+    unit of work — four `acquired` outcomes, the same double grant the repo half of this PR
+    removes, reachable from a library caller that never passes through `main()` (which is why
+    the CLI alone was not enough: `acquire`, `release` and `status` are the public entry points
+    a store split or a peer script calls, and `tools/ci_selection.py`'s carve-out comment
+    already anticipates that split). So the shape is enforced at every boundary and the
+    spelling is collapsed: lowercased, surrounding whitespace stripped.
+
+    The BODY is opaque, not numeric: the live legs mint a per-run `issue-<12 hex>` key on
+    purpose (a fixed key let concurrent runs fence each other — see `_probe_key` in the test
+    file), so a numeric-only rule would delete that property, and a leading-zero rule would
+    reject a legitimate hex body one run in ~200. The numeric form is produced by
+    `normalise_key` from an int; a caller that invents a body has invented a DIFFERENT key,
+    which is a legitimate thing to do — what may not happen is two spellings of the SAME key
+    becoming two claims. `ValueError` is the caller's to turn into `EXIT_USAGE`.
+    """
+    text = (key or "").strip().lower()
+    kind, sep, body = text.partition("-")
+    if (
+        not sep
+        or kind not in ("issue", "pr")
+        or not body
+        or "/" in body
+        or any(c.isspace() for c in body)
+    ):
+        raise ValueError(
+            f"claim key must be <issue|pr>-<body> (one '-', a non-empty body with no spaces), "
+            f"got {key!r} — the key is half of the claim identity, so a different spelling is "
+            "a different claim"
+        )
+    if len(text) > MAX_KEY_LEN:
+        raise ValueError(f"claim key {text!r} is longer than {MAX_KEY_LEN} characters")
+    return text
+
+
 def claim_id(repo: str, key: str) -> str:
     """The deterministic point id. Canonical `<hex>-<12 hex>` shape so the SDK does not warn
     on a non-ULID id, and derived ONLY from (repo, key) so two boxes compute the same one —
     the property that makes this a CAS instead of a ledger.
 
-    The repo is normalised INSIDE the digest rather than only at the CLI boundary (review of
-    #9487 P2): the identity must be one id per unit of work no matter which entry point
-    (CLI, a library caller, a peer box) asked for it, and a caller that passed it straight
-    through spelled the CAS away."""
-    digest = hashlib.sha256(f"{normalise_repo(repo)}\x00{key}".encode()).hexdigest()
+    BOTH halves are normalised INSIDE the digest rather than only at the CLI boundary (review
+    of #9487 P2): the identity must be one id per unit of work no matter which entry point
+    (CLI, a library caller, a peer box) asked for it, and a caller that passed either half
+    straight through spelled the CAS away. A malformed half raises here (the caller's
+    contract); it never mints a second id."""
+    digest = hashlib.sha256(f"{normalise_repo(repo)}\x00{canonical_key(key)}".encode()).hexdigest()
     return f"{digest[:20]}-{digest[20:32]}"
 
 
@@ -456,10 +499,10 @@ def normalise_key(kind: str, number: int) -> str:
         raise ValueError(f"unknown claim kind {kind!r} (expected 'issue' or 'pr')")
     if number <= 0:
         raise ValueError(f"claim number must be positive, got {number!r}")
-    key = f"{kind}-{number}"
-    if len(key) > MAX_KEY_LEN:
-        raise ValueError(f"claim key {key!r} is longer than {MAX_KEY_LEN} characters")
-    return key
+    # One definition of the key contract: the builder canonicalises through the same validator
+    # every entry point uses, so a key `main()` mints and a key `acquire()` accepts cannot
+    # disagree about what is canonical (review of PR #9537).
+    return canonical_key(f"{kind}-{number}")
 
 
 def _require_store_configured(environ: dict[str, str] | None = None) -> str:
@@ -855,7 +898,12 @@ def acquire(
     # the stored `repo` property and the id digest are the two halves of the identity, and a
     # library caller that spelled the repo differently would write a row its peers' `status
     # --repo` cannot match. A bad shape raises here (the caller's contract), it never writes.
+    # The KEY half is canonicalised at this boundary too (review of PR #9537): it was digested
+    # as typed, so `issue-5052`, `ISSUE-5052`, `issue-5052 ` and `""` were four ids — and four
+    # `acquired` outcomes — for one unit of work, reachable from any caller that bypasses
+    # `main()`. Only the CLI was canonicalised, and the CLI is not the only door.
     record.repo = normalise_repo(record.repo)
+    record.key = canonical_key(record.key)
     cid = claim_id(record.repo, record.key)
     record.claimed_at = record.claimed_at or now
     record.lease_until = record.lease_until or (now + DEFAULT_TTL)
@@ -1103,6 +1151,10 @@ def release(
     """
     now = _now() if now is None else now
     repo = normalise_repo(repo)
+    # Canonicalised here, not only in `main()` (review of PR #9537): `release` is a public
+    # entry point, and a differently-spelled key addressed a DIFFERENT claim — the release
+    # then answered "was not claimed — nothing to release" at rc 0 while the claim lived on.
+    key = canonical_key(key)
     cid = claim_id(repo, key)
     shared = getattr(store, "require_shared", None)
     if shared is not None:
@@ -1199,6 +1251,9 @@ def status(store: ClaimStore, repo: str, key: str | None, *, now: int | None = N
         if refusal:
             return Outcome(rc=EXIT_UNANSWERABLE, status="REFUSED", reason=f"refused: {refusal}")
     if key:
+        # Canonicalised here too (review of PR #9537): a spelling variant named a different id
+        # and this verb answered `free` — the answer a controller dispatches on.
+        key = canonical_key(key)
         cid = claim_id(repo, key)
         try:
             existing = store.read(cid) or ""
@@ -1462,7 +1517,10 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
                 return _refuse(refusal)
             # A definite read, not a write: `check` must be safe to run on any box at any
             # time, and an empty answer still proves the store answered.
-            store.read(claim_id("probe/probe", "probe"))
+            # A CANONICAL key, because `claim_id` now validates its shape (`probe` is not
+            # `<issue|pr>-<body>`). This is a READ under a repo no box claims, so it mints
+            # nothing; a hit still proves the store answered.
+            store.read(claim_id("probe/probe", "issue-1"))
         except StoreUnanswerable as exc:
             return _refuse(str(exc))
         except Exception as exc:
