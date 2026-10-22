@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import stat
+import string
 import unicodedata
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -457,46 +458,58 @@ def _strip_whitespace(expr: str) -> str:
     return out
 
 
-#: #9287: the character CATEGORIES a ``pointKind`` may not carry — the
-#: WRITE-DOOR half of the boundary ``_KIND_WHITESPACE_CHARS`` declares above.
+#: #9287: what a ``pointKind`` MAY contain — the WRITE-DOOR half of the
+#: boundary ``_KIND_WHITESPACE_CHARS`` declares above.
 #:
-#: A kind is an IDENTIFIER, not prose: surrounding whitespace and invisible
-#: formatting marks are never part of the name, and they are unrepresentable in
-#: the gate's read-path family (each code point would cost a ``replace()`` on
-#: every scanned row — see the cost measurements above). ``Zs``/``Zl``/``Zp`` are
-#: the space separators (the Unicode-space family, NBSP and ideographic space
-#: included), ``Cc`` the controls (tab, newline, NEL, NUL), ``Cf`` the invisible
-#: format marks (ZWSP, ZWNJ, ZWJ, word joiner, BOM, soft hyphen), ``Cs`` the
-#: lone surrogates.
+#: A kind is an IDENTIFIER, not prose, and the rule is stated POSITIVELY (what a
+#: character must be) rather than as a blacklist of bad ones: only letters,
+#: digits, ASCII punctuation, and a plain INTERIOR space are accepted. A negative
+#: rule cannot be complete here — this issue's own fix was opened TWICE on
+#: exactly that mistake: first a category blacklist missed ``U+3164`` HANGUL
+#: FILLER (``Lo``, renders blank), then the enumerated fix for it missed
+#: ``U+E0100``..``U+E01EF`` (variation selectors-17+) and ``U+1D159`` (MUSICAL
+#: SYMBOL NULL NOTEHEAD, ``So``) — each measured accepted-and-gate-escaping on
+#: the head it was found on (#9591 review cycles 2 and 3). Under the positive
+#: rule every one of those is excluded BY CONSTRUCTION: a blank separator, a
+#: control, a format mark, a mark/variation selector, a symbol and a lone
+#: surrogate are all "not alnum and not ASCII punctuation".
 #:
-#: ⚠️ CATEGORIES ALONE ARE NOT COMPLETE, and the first cut of this fix claimed
-#: they were (#9591 review cycle 2, P2 — measured). Unicode gives several
-#: BLANK-RENDERING characters ordinary categories, so no category rule reaches
-#: them: the Hangul fillers ``U+115F``/``U+1160``/``U+3164``/``U+FFA0`` are
-#: ``Lo`` (letters), ``U+2800`` BRAILLE PATTERN BLANK is ``So``, and the
-#: variation selectors ``U+FE00``–``U+FE0F`` are ``Mn`` (marks). Measured on the
-#: first head: ``create_point('\\u3164statement', …)`` was ACCEPTED, the gate
-#: answered ``[]`` and a gated run stamped the node with the same
-#: ``ep_alpha 1.287``/``ep_beta 1.242`` as the issue's body — i.e. the closure
-#: claim was false, not merely imprecise. They are therefore listed explicitly
-#: below, and the honest statement of the rule is: the categories PLUS a small
-#: measured blank-rendering set (an enumeration, with the test that keeps it).
-_KIND_NON_IDENTIFIER_CATEGORIES = ("Zs", "Zl", "Zp", "Cc", "Cf", "Cs")
+#: ⚠️ RESIDUAL, declared rather than implied: Unicode files a handful of
+#: BLANK-RENDERING *letters* under ``Lo`` — the Hangul fillers below — so
+#: "alnum" accepts them and only an enumeration can refuse them. Four code
+#: points, one family, measured; they are listed and a generative test
+#: (``test_the_door_and_the_gate_family_cannot_diverge``) asserts the closure
+#: this module claims: every code point the door ACCEPTS is a code point the
+#: gate's read path strips, so no future gap of this class can be silent.
+#:
+#: Why the READ path stays a small enumeration and the DOOR carries the full
+#: rule: each code point the read path strips costs one ``replace()`` on every
+#: scanned row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full
+#: Unicode space list timed out the gate on an eight-node fixture), while the
+#: door pays it once per write.
+_KIND_ALLOWED_PUNCTUATION = frozenset(string.punctuation)  # ASCII only
 
-#: Blank-rendering code points Unicode files under ordinary categories (see the
-#: caveat above) — measured accepted-and-gate-escaping before this set existed.
+#: Blank-rendering LETTERS (``Lo``) — the one family the positive rule cannot
+#: exclude, because Unicode calls them letters. Measured accepted-and-gate-
+#: escaping before this set existed (#9591 review cycle 2). Every OTHER blank
+#: code point (braille blank, null notehead, variation selectors, combining
+#: grapheme joiner, Mongolian FVS…) is excluded by the positive rule, so it
+#: needs no entry here.
 _KIND_BLANK_RENDERING_CHARS = frozenset({
-    "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
-    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
-    "\u3164",  # HANGUL FILLER (Lo)
-    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
-    "\u2800",  # BRAILLE PATTERN BLANK (So)
-    *(chr(cp) for cp in range(0xfe00, 0xfe10)),  # VARIATION SELECTOR-1..16 (Mn)
+    "\u115f",  # HANGUL CHOSEONG FILLER
+    "\u1160",  # HANGUL JUNGSEONG FILLER
+    "\u3164",  # HANGUL FILLER
+    "\uffa0",  # HALFWIDTH HANGUL FILLER
 })
 
 
 def _kind_non_identifier_char(kind: str, i: int) -> bool:
     """True when ``kind[i]`` cannot be part of an identifier.
+
+    The POSITIVE rule (see ``_KIND_ALLOWED_PUNCTUATION``): a character is part
+    of an identifier when it is alphanumeric, ASCII punctuation, or a plain
+    INTERIOR space. Everything else — separators, controls, format marks,
+    marks/variation selectors, symbols, surrogates — is refused.
 
     ONE predicate for both halves of this module's kind rule: the refusal
     (``_kind_invisible_char``) and the suggested fix (``_kind_suggestion``) read
@@ -511,8 +524,9 @@ def _kind_non_identifier_char(kind: str, i: int) -> bool:
         # open-vocabulary kind ('technical debt') and the gate strips it
         # wherever it occurs, so it can never be an escape.
         return False
-    return (unicodedata.category(ch) in _KIND_NON_IDENTIFIER_CATEGORIES
-            or ch in _KIND_BLANK_RENDERING_CHARS)
+    if ch in _KIND_ALLOWED_PUNCTUATION:
+        return False
+    return not ch.isalnum() or ch in _KIND_BLANK_RENDERING_CHARS
 
 
 def _kind_invisible_char(kind: str) -> str | None:
@@ -522,11 +536,11 @@ def _kind_invisible_char(kind: str) -> str | None:
     a legitimate separator in an open-vocabulary kind (``'technical debt'``),
     and it can never make a node escape the gate's classification — the read
     path strips it wherever it occurs, so ``'state ment'`` is already demanded
-    as the ``statement`` it is. Every OTHER code point of the categories above,
-    and every blank-rendering code point (see the caveat on
-    ``_KIND_NON_IDENTIFIER_CATEGORIES``), is refused in any position, including
-    the interior: ``'state\\u2003ment'`` is either a separator or padding, and
-    guessing is how a kind silently becomes a different kind.
+    as the ``statement`` it is. Every character the POSITIVE rule above does not
+    admit (see ``_KIND_ALLOWED_PUNCTUATION`` / ``_KIND_BLANK_RENDERING_CHARS``)
+    is refused in any position, including the interior: ``'state\\u2003ment'`` is
+    either a separator or padding, and guessing is how a kind silently becomes
+    a different kind.
     """
     for i in range(len(kind)):
         if _kind_non_identifier_char(kind, i):
@@ -32040,10 +32054,15 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
-        # #9287: the SAME funnel is a write onto a ``:Point`` when the label is
-        # one, so the invisible-kind refusal the point doors apply runs here too
-        # — one predicate, every door (#9591 review, P1).
-        self._refuse_invisible_point_kinds(props, door="create_entity")
+        # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
+        # funnel only ever creates Subject/Object/Event/Document/Source —
+        # ``create_entity("Point", …)`` raises `unknown type`
+        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
+        # property on a label the calibration gate never reads
+        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
+        # unrelated write (measured: ``create_object(..., props={'point_kind':
+        # padded})``) over a name this gate has no business with. The Point doors
+        # are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the

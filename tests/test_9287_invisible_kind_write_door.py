@@ -19,9 +19,10 @@ caller asked for (a silent canonical form would also move the dedup identity
 
 Every door that can carry a caller- or model-supplied ``pointKind`` is gated:
 ``create_point`` (positional kind AND the props passthrough, which WINS over the
-positional), ``update_point``, the two entity funnels ``_create_entity`` /
-``_update_entity`` (``update_entity`` is the OTHER documented update door onto a
-``:Point`` — it stored a padded value at the first head, #9591 review cycle 1),
+positional), ``update_point``, and ``_update_entity`` (the OTHER documented
+update door onto a ``:Point`` — it stored a padded value at the first head,
+#9591 review cycle 1; its CREATE sibling cannot reach a ``:Point`` at all, so it
+is deliberately not gated — cycle 3),
 and the journal-first seam ``EventAPI.add_point`` → ``_emit`` (cycle 1, P1:
 ``extractor.py`` feeds it UNTRUSTED model output). The v1 extractor's parser
 canonicalises a model-produced kind before the seam sees it, because the door's
@@ -204,6 +205,25 @@ class TestUpdateEntityRefuses:
         p = sdk.create_point("statement", "Victim", status="live")
         sdk.update_entity(p["id"], pointKind="observation")
         assert _kinds_in_graph(sdk, p["id"]) == ["observation"]
+
+    def test_the_entity_CREATE_funnel_is_not_gated_and_that_is_deliberate(
+            self, sdk):
+        """#9591 review cycle 3: `_create_entity` cannot create a `:Point`.
+
+        ``create_entity("Point", …)`` raises `unknown type` — the funnel only
+        makes Subject/Object/Event/Document/Source — so a ``pointKind`` riding
+        it is a stray property on a label the calibration gate never reads
+        (``_CALIBRATION_GATED_LABELS == ("Point",)``). Gating it there refused an
+        unrelated write (measured: ``create_object(..., props={'point_kind':
+        padded})``), so the arm was dropped and this test pins that decision —
+        if a Point label ever becomes reachable through that funnel, this reds
+        and the gate must come back.
+        """
+        with pytest.raises(ValueError, match="unknown type"):
+            sdk.create_entity("Point", "Not a Point door")
+        obj = sdk.create_object(
+            "Thing", props={"point_kind": "statement\u200b"})
+        assert obj["id"]
 
 
 class TestTheJournalSeamRefuses:
@@ -445,6 +465,39 @@ class TestTheClassIsClosed:
         # "nobody guards this spelling" without this test moving.
         from tortoise.sdk import _kind_invisible_char
         assert _kind_invisible_char("\u2003statement\u2003") == "\u2003"
+
+    def test_the_door_accepts_no_invisible_code_point(self):
+        """GENERATIVE closure over the WHOLE code space (#9591 review cycle 3).
+
+        The first two cuts of this fix were enumerations and each missed its own
+        class — a category blacklist missed ``U+3164`` (``Lo``, renders blank);
+        the enumerated fix for that missed ``U+E0100``–``U+E01EF`` (variation
+        selectors-17+) and ``U+1D159`` (``So``). So the property is asserted
+        generatively, against an oracle that is INDEPENDENT of the door's own
+        rule: a character the door accepts must be PRINTABLE (``str.isprintable``
+        is False for the whole ``Cc``/``Cf``/``Cs``/``Co``/``Cn``/``Z*`` set, i.e.
+        the invisible half of Unicode, which is where every escape in this issue
+        lived). The blank-rendering LETTERS Unicode files under ``Lo`` are outside
+        that oracle, which is exactly why they are an explicit measured list —
+        and they are asserted here too.
+        """
+        from tortoise.sdk import (_KIND_BLANK_RENDERING_CHARS,
+                                  _kind_invisible_char)
+        accepted_invisible = []
+        for cp in range(0x110000):
+            ch = chr(cp)
+            if _kind_invisible_char(f"{ch}statement") is not None:
+                continue
+            if not ch.isprintable():
+                accepted_invisible.append(hex(cp))
+        assert accepted_invisible == [], (
+            "the door accepts non-printable code points — the #9287 escape is "
+            f"reachable through those: {accepted_invisible[:20]}")
+        # …and the letter-blanks the printable oracle cannot see:
+        for ch in _KIND_BLANK_RENDERING_CHARS:
+            assert _kind_invisible_char(f"{ch}statement") is not None, (
+                f"the door accepts U+{ord(ch):04X}, which renders blank and "
+                "escapes the gate's classification")
 
     def test_the_door_refuses_every_character_the_gate_strips(self):
         """The demand and the write door cannot drift apart (#9287).
