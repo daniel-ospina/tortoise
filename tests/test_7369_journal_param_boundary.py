@@ -920,15 +920,20 @@ def test_a_BLANK_container_identity_states_the_TRUE_cause(caplog):
         f"cause steers the operator at a corruption that is not there: {caplog.text!r}"
     )
     # ⛔ AND THE CONSEQUENCE IS NOT OVERSTATED (#9553 review). `_link_session`
-    # refuses ONE derived edge after the Point is already in the graph; the
-    # record is not dropped there, and `consistency`'s `reason` says so. A
-    # message claiming a dropped record at a nested site is the same "false for
-    # the record it describes" class as a false cause.
+    # refuses ONE derived edge after the Point is already in the graph, so a
+    # message claiming a dropped record is false there — the same "false for the
+    # record it describes" class as a false cause. It must not claim the OPPOSITE
+    # either: 8 creation-anchor sites drop the whole record without declaring it
+    # (#8702 recurrence), so the undeclared branch says only what is true everywhere.
     assert "the record is dropped" not in caplog.text, (
         "a nested skip claimed the whole record was dropped — only the "
         f"CONTAINS edge is missing here: {caplog.text!r}"
     )
-    assert "only this derived edge/stub is missing" in caplog.text, caplog.text
+    assert "the record still folds" not in caplog.text, (
+        "an undeclared skip claimed the record survives — the flag is not yet "
+        f"set at every creation anchor (#8702 recurrence): {caplog.text!r}"
+    )
+    assert "nothing is written for it" in caplog.text, caplog.text
 
     # The DECLARED-dropped site keeps the stronger sentence.
     caplog.clear()

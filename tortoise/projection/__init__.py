@@ -7107,20 +7107,33 @@ def _log_identity_skip(what: str, value, label: str = "identity", *,
     # "NUL/lone-surrogate bearing" for a non-str id was false for a live journal
     # shape (#8840 review P3).
     #
-    # ⛔ THE CONSEQUENCE IS CONDITIONAL TOO (#9553 review). 21 of this reporter's
-    # 26 call sites do not drop the record — they refuse ONE derived edge or stub
+    # ⛔ THE CONSEQUENCE IS CONDITIONAL TOO (#9553 review). Most of this reporter's
+    # call sites do not drop the record — they refuse ONE derived edge or stub
     # AFTER the record itself was written (`_link_session` is one: the Point is in
     # the graph and only the CONTAINS edge is missing). A sentence asserting "the
     # record is dropped" at those sites is the #8018 class this module cites
     # throughout, and it contradicted `consistency`'s own `reason` for the same
-    # skip. `drops_record` is the caller's declaration; the message now reads it.
+    # skip.
+    #
+    # ⚠️ AND THE FLAG ITSELF IS NOT YET TRUE EVERYWHERE. Cycle 3 of the same review
+    # found 8 CREATION-ANCHOR sites that drop the whole record without passing
+    # `drops_record=True` (SubjectAdded/Subject id, ObjectRegistered, DocumentCreated,
+    # EventRecorded, SourceCreated/SourceVersioned in `projection/entities.py`). So
+    # this message states the consequence only where the caller DECLARES it, and
+    # otherwise says only what is certain about a refused identity — it must not
+    # guess "the record still folds" either, because that is false at those 8. The
+    # flag gap is recorded on #8702 (recurrence, with the 8 sites named); fixing it
+    # also repairs
+    # `recover_from_log`'s `applied`/`identity_skipped` split, which reads the same
+    # flag, so it is not this reporter's call to make.
     logger.warning(
         "%s#7369/#8702: skipping %s — %s; %s%s",
         f"{where}: " if where else "", what, entry.describe(),
         "the record is dropped rather than reaching FalkorDB and aborting a "
         "replay that has already wiped the graph"
         if drops_record else
-        "the record still folds — only this derived edge/stub is missing",
+        "nothing is written for it — the caller decides whether the record "
+        "itself survives",
         f" (event_id={event_id})" if event_id else "",
     )
 
