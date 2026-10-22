@@ -4,10 +4,10 @@ type: plan
 domain: engineering
 doc_status: draft
 created: 2026-10-12
-updated: 2026-10-12
+updated: 2026-10-22
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "issue #7969, epic #7879, interface A, record projection, Postgres record, idempotent replay"
+aboutObjects: "issue #7969, issue #9553, epic #7879, interface A, record projection, Postgres record, idempotent replay"
 ---
 
 # The record projection — journal → Postgres, total and idempotent
@@ -95,7 +95,8 @@ Interface A states four properties, and the failure each one prevents:
 
 ### 0.4 Verification
 
-* `tests/test_record_projection.py` — 66 hermetic tests (no DB): totality against
+* `tests/test_record_projection.py` — 96 hermetic tests (no DB), 68 of them test
+  functions at #9553 (`--collect-only -q` counts the parametrised cases too): totality against
   the graph fold's own dispatch vocabulary, the producers' own emit sites
   (including the `_*_RECORD_TYPE` constants — so a NEW producer reds the suite),
   and `log.py`'s torn-tail-harmless classification; the
@@ -184,6 +185,22 @@ closed at both layers:
   point row today, and the `relation` table's structural family is a follow-up
   inside `#7969`/`#7951`. Every one of those is a **loud failure or a written
   declaration**, never a silent skip.
+  **Updated by #9553 (R5 class 2):** the ONE edge family that rode the record's
+  own envelope — the capture's `(:Session)-[:CONTAINS]->(:Point)` link, carried
+  as `contains_session` on `PointAdded`/`OperatorAdded` — now lands a `relation`
+  row (`record_projection._ENVELOPE_RELATIONS`), ordered after the Point's
+  `node_identity` because both endpoints are composite FKs into it. The endpoint
+  gate is `projection._writable_container_id` (the fold's own), mirrored
+  value-for-value by `record_projection._writable_endpoint_id`: a blank / NUL /
+  lone-surrogate id drops the row on BOTH routes, so the two rebuilds cannot
+  disagree about it. The blank case is measured, not stylistic — an indexed
+  graph cannot match a whitespace-only key (FalkorDB equality filter, **#9599**),
+  so the fold would mint a duplicate `:Session` and land no edge while Postgres
+  would have held the row.
+  The three remaining R5 classes are still **not** materialized and are named
+  where the producer lives: point-property edges (`extractedFrom`, `about*`,
+  `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural
+  predicates whose `DirectEdgeCreated` fold works but has **no producer**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,

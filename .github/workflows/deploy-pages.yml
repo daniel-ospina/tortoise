@@ -1149,7 +1149,15 @@ jobs:
           # Accept trailing dot (standard dig output).
           if [ "$CNAME" = "premise-labs.pages.dev." ] || [ "$CNAME" = "premise-labs.pages.dev" ]; then
             ROOT_MARKER=$(curl -s https://tortoise.premiselabs.co/ 2>/dev/null || true)
-            if echo "$ROOT_MARKER" | grep -qF "Agent memory that"; then
+            # STRUCTURAL marker, not copy: `data-page="product"` on product.html's
+            # <html> element. The hero <h1> used to be the marker, so every hero
+            # rewrite (PR #8597, PR #9652) silently disarmed this preflight — its
+            # miss branch is a ::warning::, so the tortoise.* tests SKIP (green)
+            # instead of failing. Keep this string identical to PRODUCT_ROOT_MARKER
+            # in tests/e2e/test_legal_pages.py; it is pinned against that file and
+            # against website/product.html by
+            # tests/test_website_static.py::TestProductRootMarkerContract.
+            if echo "$ROOT_MARKER" | grep -qF 'data-page="product"'; then
               echo "TORTISE_HOST_CHECK=1" >> "$GITHUB_ENV"
               echo "DNS preflight green — tortoise.* tests enabled"
             else
