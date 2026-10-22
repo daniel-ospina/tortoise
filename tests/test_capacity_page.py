@@ -40,11 +40,19 @@ CAPACITY = ROOT / "docs" / "capacity.md"
 README = ROOT / "README.md"
 QUICKSTART = ROOT / "docs" / "quickstart-selfhosted.md"
 SELF_HOSTED_HTML = ROOT / "website" / "self-hosted.html"
+FAQ_HTML = ROOT / "website" / "faq.html"
 ENV_EXAMPLE = ROOT / ".env.example"
 CONCURRENCY_TEST = ROOT / "tests" / "test_embedded_concurrency.py"
 
 #: The one integration test that measures concurrent writers on a live graph.
 LIVE_WRITER_TEST = "test_concurrent_writers_live_falkor_no_lost_writes"
+
+#: Every surface that publishes the verified write-concurrency figure. One
+#: tuple, shared by BOTH writer scans below: the figure was published from a
+#: surface this list had never heard of (`website/faq.html`), so the binding was
+#: asleep for it — adding a surface to one list and forgetting the other is the
+#: same defect again (#9517 review 5).
+_WRITER_SURFACES = (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML, FAQ_HTML)
 
 #: The page's GitHub-rendered URL, which is what the website links to.
 CAPACITY_URL = (
@@ -63,7 +71,7 @@ _UNMEASURED_CELL = re.compile(r"unmeasured", re.IGNORECASE)
 #: not know ("concurrent writers verified at 2 processes"), so this is the union
 #: of the wordings in the tree rather than one literal:
 #:   "integration-tested to 5 concurrent writers"  (docs)
-#:   "integration-tested to 5 writers"             (`.env.example`)
+#:   "integration-tested to 5 writers"             (`.env.example`, FAQ)
 #:   "concurrent writers verified at 5 processes"  (quickstart env table)
 #:   "verified to 5 concurrent writer processes"   (website)
 #:   "5 writer processes on one graph"             (capacity §2)
@@ -86,7 +94,7 @@ _SECTION_MIN_ROWS = {
     "## 2. Write concurrency": 3,
     "## 3. Request rate limits": 5,
     "## 4. Graph size (hosted node cap)": 5,
-    "## 5. Retrieval latency": 6,  # §5.1 targets (5) + §5.2 measured path (1)
+    "## 5. Retrieval latency": 7,  # §5.1 targets (5) + §5.2 measured paths (2)
     "## 6. Storage footprint per element": 5,
     "## 7. Belief propagation and dreaming": 6,
 }
@@ -319,6 +327,51 @@ def test_the_vector_cost_row_cites_an_artifact_that_owns_the_figure():
     )
 
 
+def test_the_e2e8_latency_figure_is_a_sourced_row_not_a_prose_escape():
+    """#9517 ISSUE 1: the 345–460 ms p95 HAS an artifact — ADR-009 — so it is a row.
+
+    The figure entered §5.2 as a prose bullet announcing that it had "no lineage"
+    and was staying out of the measured table. Both halves were wrong, and the
+    placement is why nothing caught it: `test_every_measured_row_names_a_source_that_exists`
+    walks `_source_tables`, so a bullet carrying a number publishes it *past* the
+    one check that binds a number to a committed artifact rather than through it.
+    `docs/adr/ADR-009-embedder-selection.md` names the run (E2E-8 post-swap re-run,
+    2026-08-21), its environment (the contended benchmark laptop, under full-suite
+    contention) and its paired MiniLM control (418–464 ms under identical
+    conditions), so the row's entry condition is satisfiable and the caveats that
+    decide applicability travel with the number.
+    """
+    text = _read(CAPACITY)
+    rows = [row for table in _source_tables(text) for row in table]
+    row = next(
+        (r for r in rows if "345" in " ".join(r) and "460" in " ".join(r)), None
+    )
+    assert row is not None, (
+        "docs/capacity.md no longer publishes the 345–460 ms E2E-8 p95 as a "
+        "Source-headed row. Prose is not a citation: `_source_tables` walks "
+        "tables only, so a prose bullet publishes a number past the source- "
+        "binding check instead of satisfying it (#9517)."
+    )
+    joined = " ".join(row)
+    assert "ADR-009" in row[-1], (
+        "the 345–460 ms row must name the artifact that owns the figure — "
+        "docs/adr/ADR-009-embedder-selection.md; the Source cell reads: "
+        f"{row[-1]!r}"
+    )
+    assert "418" in joined and "464" in joined, (
+        "the 345–460 ms row drops the paired MiniLM control (418–464 ms under "
+        "identical conditions). Without it the figure reads as a bare over-band "
+        "result instead of a comparison against the status quo, which is what "
+        f"decides whether it applies: {joined!r}"
+    )
+    assert "no lineage" not in text, (
+        "docs/capacity.md claims the 345–460 ms figure has 'no lineage'. ADR-009 "
+        "carries the run, its date, its environment and its control arm, so the "
+        "claim is false as published — and it contradicts the page's own rule "
+        "that a published number names the artifact it came from (#9517)."
+    )
+
+
 def test_the_ep_frontier_guard_row_names_claims_not_operators():
     """#8492 (third review): `_EP_GUARD_FRONTIER_CAP` bounds new **claims** per hop.
 
@@ -410,7 +463,7 @@ def test_published_write_concurrency_matches_the_integration_test():
     this replaces could not see it (#8492 ISSUE 1).
     """
     n = _integration_writer_coverage()
-    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
+    for path in _WRITER_SURFACES:
         found = _published_writer_counts(_strip_markdown(_read(path)))
         assert found, (
             f"{path.relative_to(ROOT)} no longer publishes a verified "
@@ -453,7 +506,7 @@ def test_no_writer_number_escapes_the_binding_on_a_public_surface():
     be the derived coverage.
     """
     n = _integration_writer_coverage()
-    for path in (CAPACITY, QUICKSTART, ENV_EXAMPLE, SELF_HOSTED_HTML):
+    for path in _WRITER_SURFACES:
         text = _writer_scan_text(path, _read(path))
         for line in text.splitlines():
             embedded_line = bool(re.search(r"\bembedded\b", line, re.IGNORECASE))
