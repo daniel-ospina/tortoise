@@ -6996,17 +6996,21 @@ def _writable_id(val) -> bool:
     ⛔ A WHITESPACE-ONLY value is deliberately STILL writable here (#9599).
     Widening this predicate to ``bool(val.strip())`` looks like the same rule,
     but this function is shared with the fold's LIVE path
-    (``_upsert_subject``/``_upsert_object``): it silently drops a blank-named
-    entity at ``create_subject``/``create_object`` — a ``200 {}`` for a write
-    that never happened, with a metered write op billed for it — and it turns a
-    client-supplied blank entity name in ``/v1/sessions/commit`` into a
-    deterministic 500 that advises an impossible retry. Both were MEASURED when
-    this PR first tried it. The blank SESSION key is therefore refused at every
-    place that writes it: the two capture doors, the two journal folds
-    (``entities._fold_session_recorded``, ``entities._link_session``) and the
-    ``rebuild_all`` snapshot restore (``rebuild_all``'s ``session_snapshot``
-    loop) — all via ``tortoise.ids.session_id_refusal``; the blank-NAME class
-    needs the Layer-1 / ingest shape gates, not this predicate.
+    (``_upsert_subject``/``_upsert_object``). MEASURED with the widening in
+    place: ``create_subject("   ")``/``create_object("   ")`` returned ``{}`` —
+    success, no node written, with a metered write op billed — and
+    ``POST /v1/sessions/commit`` with ``entities:[{"name":"   "}]`` returned
+    **200** with ``nodes_created`` counting a node that never landed and the
+    entity silently dropped. (An earlier draft of this note said "a
+    deterministic 500"; a fresh verifier re-measured it and it is the 200 +
+    silent drop above. The conclusion is unchanged: a 200 that drops the write
+    and reports success is worse than an audible refusal.) The blank SESSION key
+    is therefore refused at every place that writes it: the two capture doors,
+    the two journal folds (``entities._fold_session_recorded``,
+    ``entities._link_session``) and the ``rebuild_all`` snapshot restore
+    (``rebuild_all``'s ``session_snapshot`` loop) — all via
+    ``tortoise.ids.session_id_refusal``; the blank-NAME class needs the Layer-1 /
+    ingest shape gates, not this predicate.
     """
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
@@ -16547,6 +16551,23 @@ class FalkorProjection(
         )
 
         nodes = tuple(view.nodes)
+        # #9599: `rebuild_from_record` is a GRAPH write, so it obeys the GRAPH's
+        # rule even though the RECORD layer deliberately keeps the row (see
+        # `record_projection`'s `SessionRecorded` note — the record is the
+        # faithful carrier, a Postgres key is addressable, the engine's key is
+        # not). MEASURED before this gate: the blank `:Session` landed, its
+        # CONTAINS edge silently did not (the engine cannot serve a blank
+        # indexed key back to an equality seek), and the receipt still said
+        # `coverage: complete` with `relations_written: 1` — a false PASS on
+        # the one path a lost cache depends on.
+        refused = {(n.label, n.key) for n in nodes
+                   if n.label == "Session"
+                   and _session_id_refusal(n.key) is not None}
+        if refused:
+            for _label, _key in sorted(refused):
+                _log_identity_skip("Session", _key, "id (MERGE key)")
+            nodes = tuple(
+                n for n in nodes if (n.label, n.key) not in refused)
         if limit is not None:
             if limit < 0:
                 raise ValueError(f"limit must be >= 0, got {limit}")
@@ -16558,6 +16579,14 @@ class FalkorProjection(
                 and (r.tgt_label, r.tgt_key) in kept)
         else:
             relations = tuple(view.relations)
+        if refused:
+            # An edge whose endpoint was excluded has nothing to bind — dropping
+            # it here (rather than writing a statement that matches no row) is
+            # what makes `relations_written` mean what it says.
+            relations = tuple(
+                r for r in relations
+                if (r.src_label, r.src_key) not in refused
+                and (r.tgt_label, r.tgt_key) not in refused)
 
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
 

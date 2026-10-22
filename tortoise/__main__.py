@@ -5031,6 +5031,7 @@ def _spool_transcript(args) -> dict:
     from pathlib import Path
     from tortoise.capture_spool import (
         Snapshot,
+        _normalise_session_id,
         spool_dir,
         write_spool_entry,
     )
@@ -5117,7 +5118,14 @@ def _spool_transcript(args) -> dict:
     # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
     # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
     # discard of the whole capture.
-    session_id = getattr(args, "session_id", None) or _local_session_id(transcript_path)
+    # #9599: a blank `--session-id` is NOT an identity here either. The WIRE is
+    # already safe (the spool normalises a blank to None and the server mints),
+    # but the LOCAL entry would be keyed on nothing — so two blank-id captures
+    # collide on one spool key while the server files them as separate sessions.
+    # A blank therefore falls through to the path-anchored id, exactly as an
+    # absent one does.
+    session_id = (_normalise_session_id(getattr(args, "session_id", None))
+                  or _local_session_id(transcript_path))
 
     # #2681: derive machine_id + forward model when provided. Derive-only
     # sha256 of hostname\0username — never-throw, memoized per process.
@@ -6941,7 +6949,16 @@ def _cmd_sessions_import(args) -> int:
                                       sort_keys=True)).encode("utf-8")
     else:
         key_material = read_path.read_bytes()
-    session_id = args.session_id or (
+    # #9599: a PRESENT-but-BLANK `--session-id` is not an identity, and this leg
+    # must agree with its three siblings (the SDK doors, the spool's wire
+    # normaliser, the TS hook): those all treat a blank as "named no session"
+    # and let one be minted. Here `args.session_id or …` kept a blank (it is
+    # truthy), which the server now answers with 422 — and this leg classifies a
+    # 422 as PERMANENT, so the import was neither spooled nor filed: a capture
+    # silently lost, plus a raw FastAPI body shown instead of the refusal text.
+    from tortoise.capture_spool import _normalise_session_id
+
+    session_id = _normalise_session_id(args.session_id) or (
         "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 
     # Local receipt — 2xx-only (a failed POST must never look imported).

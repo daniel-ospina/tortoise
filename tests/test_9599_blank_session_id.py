@@ -29,12 +29,15 @@ journal written before the doors existed, on EITHER carrier — cannot create a
 
 ⛔ ``projection._writable_id`` is NOT where this rule lives, deliberately. It is
 the fold's shared identity predicate, and widening it to ``val.strip()`` looks
-like the same rule but reaches the entity NAMES folded through it: measured,
+like the same rule but reaches the entity NAMES folded through it: MEASURED,
 that silently dropped a blank-named entity at ``create_subject``/``create_object``
-(a ``200 {}`` for a write that happened nowhere) and turned a client-supplied
-blank entity name in ``/v1/sessions/commit`` into a deterministic 500 advising an
-impossible retry. The blank-NAME class needs the Layer-1 / ingest shape gates
-(#9647's sibling), not this predicate.
+(a ``200 {}`` for a write that happened nowhere) and dropped the entity on the
+``/v1/sessions/commit`` lane while the response counted a node that never landed.
+(An earlier note here claimed a deterministic 500 on that lane; a fresh verifier
+could not reproduce it, so only the drop is claimed. The conclusion is unchanged —
+a 200 that drops the write and reports success is worse than an audible refusal.)
+The blank-NAME class needs the Layer-1 / ingest shape gates (#9647's sibling),
+not this predicate.
 
 Every graph assertion here reads a LABEL SCAN, never an equality match — an
 equality match on a blank/padded key returns zero rows even when the node
@@ -88,8 +91,11 @@ def _session_ids(sdk) -> list[str]:
     ⛔ Not ``MATCH (s:Session {id:$sid})``: the equality seek returns 0 for a
     blank/padded key even when the node is present (#9599), so a match-based
     assertion would pass vacuously on the bug it is meant to catch.
+
+    Accepts an SDK OR a projection (the record-rebuild tests hold the latter).
     """
-    rows = sdk._get_proj().g.query(
+    proj = sdk._get_proj() if hasattr(sdk, "_get_proj") else sdk
+    rows = proj.g.query(
         "MATCH (s:Session) RETURN s.id").result_set
     return [r[0] for r in rows]
 
@@ -475,3 +481,209 @@ def test_the_record_projection_keeps_the_blank_session_row_on_purpose():
     keys = [s.params[3] for s in stmts if "node_identity" in s.sql]
     assert keys == ["   "], keys
     assert any("INSERT INTO public.session" in s.sql for s in stmts)
+
+
+# ── the THIRD restore path: record → graph (`rebuild_from_record`) ──────
+
+@pytest.mark.parametrize("blank", BLANK_IDS)
+def test_the_record_sourced_rebuild_does_not_materialise_a_blank_session(
+        tmp_path, blank):
+    """The record keeps the row; the GRAPH never holds the key (#9599).
+
+    `rebuild_from_record` is a graph WRITE fed by the record, so it obeys the
+    graph's rule. Measured before this gate: the blank `:Session` landed, its
+    CONTAINS edge silently did not, and the receipt still reported
+    `coverage: complete` with `relations_written: 1` — a false PASS on the one
+    path a lost cache depends on. The exclusion must therefore also be REPORTED
+    (coverage `partial`), not just applied.
+    """
+    from tortoise import cache_projection as cp
+    from tortoise.cache_projection import COVERAGE_PARTIAL
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(str(tmp_path / "g.db"),
+                            graph_name="test_9599_record_rebuild")
+    try:
+        point = cp.node_from_row(
+            "Point", {"id": "p-1", "content": "c", "point_kind": "claim",
+                      "status": "live", "props": {}})
+        session = cp.node_from_row(
+            "Session", {"id": blank, "turn_count": 1, "props": {}})
+        rel = cp.RecordRelation(
+            rel_type="CONTAINS", src_label="Session", src_key=blank,
+            tgt_label="Point", tgt_key="p-1", idx=0, props={})
+        view = cp.RecordView(nodes=(point, session), relations=(rel,))
+
+        report = proj.rebuild_from_record(view, confirm_destructive=True)
+
+        assert _session_ids(proj) == [], _session_ids(proj)
+        assert report["relations_written"] == 0, report
+        assert report["coverage"] == COVERAGE_PARTIAL, report
+        # The Point is untouched — this is a key rule, not a wipe.
+        assert proj.g.query(
+            "MATCH (p:Point {id:'p-1'}) RETURN p.id").result_set
+    finally:
+        proj.close()
+
+
+def test_the_record_sourced_rebuild_still_materialises_a_padded_session(
+        tmp_path):
+    """The narrow rule must not eat a legitimate id (#9599's position)."""
+    from tortoise import cache_projection as cp
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(str(tmp_path / "g.db"),
+                            graph_name="test_9599_record_rebuild_padded")
+    try:
+        session = cp.node_from_row(
+            "Session", {"id": "  s1  ", "turn_count": 1, "props": {}})
+        view = cp.RecordView(nodes=(session,), relations=())
+        report = proj.rebuild_from_record(view, confirm_destructive=True)
+        assert _session_ids(proj) == ["  s1  "], _session_ids(proj)
+        assert report["nodes_written"] == 1, report
+    finally:
+        proj.close()
+
+
+# ── the CLI legs: `sessions import` and the per-turn spool writer ────────
+
+def _import_args(tmp_path, session_id):
+    from types import SimpleNamespace
+
+    transcript = tmp_path / "t.jsonl"
+    # The Pi transcript shape the importer's parser reads: `type: message` with
+    # the role/content under `message` (a top-level `role` yields zero turns and
+    # the leg exits 1 before it ever reaches the wire).
+    transcript.write_text(
+        '{"type":"message",'
+        '"message":{"role":"user","content":"hello"}}\n',
+        encoding="utf-8")
+    return SimpleNamespace(file=str(transcript), harness="pi",
+                           session_id=session_id)
+
+
+@pytest.mark.parametrize("blank", BLANK_IDS)
+def test_sessions_import_never_puts_a_blank_id_on_the_wire(tmp_path, monkeypatch,
+                                                          blank):
+    """`tortoise sessions import` is the third wire client (#9599 review).
+
+    The Codex and Cursor session-end hooks call this leg with
+    ``--session-id "$SESSION_ID"``. ``args.session_id or …`` KEPT a blank (it is
+    truthy), the server now answers 422, and this leg classifies a 422 as
+    PERMANENT — so the import was neither spooled nor filed: a capture silently
+    lost. A blank must fall through to the content-hash ``imp_`` id, exactly as
+    an absent one does.
+    """
+    import json as _json
+    import urllib.request
+    from unittest import mock
+
+    from tortoise.__main__ import _cmd_sessions_import
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    sent: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"session_id": "s-1"}'
+
+    def _fake_urlopen(req, timeout=None):
+        sent["body"] = _json.loads(req.data.decode())
+        return _Resp()
+
+    args = _import_args(tmp_path, blank)
+    with mock.patch.object(urllib.request, "urlopen", _fake_urlopen):
+        rc = _cmd_sessions_import(args)
+
+    assert rc == 0, rc
+    wire_id = sent["body"]["session_id"]
+    assert wire_id.startswith("imp_"), wire_id
+    assert wire_id.strip() == wire_id, "a padded id was minted instead of a path id"
+
+
+def test_sessions_import_keeps_an_explicit_real_id(tmp_path, monkeypatch):
+    """The narrow rule must not eat a caller-named session (#9599)."""
+    import json as _json
+    import urllib.request
+    from unittest import mock
+
+    from tortoise.__main__ import _cmd_sessions_import
+
+    monkeypatch.setenv("TORTOISE_API_KEY", "tt_test")
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    monkeypatch.setenv("TORTOISE_IMPORT_RECEIPT_DIR", str(tmp_path / "receipts"))
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    sent: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return b'{"session_id": "s-1"}'
+
+    def _fake_urlopen(req, timeout=None):
+        sent["body"] = _json.loads(req.data.decode())
+        return _Resp()
+
+    with mock.patch.object(urllib.request, "urlopen", _fake_urlopen):
+        assert _cmd_sessions_import(_import_args(tmp_path, "  s1  ")) == 0
+    assert sent["body"]["session_id"] == "  s1  ", sent["body"]["session_id"]
+
+
+@pytest.mark.parametrize("blank", BLANK_IDS)
+def test_the_per_turn_spool_writer_never_keys_an_entry_on_a_blank(tmp_path,
+                                                                 monkeypatch,
+                                                                 blank):
+    """The LOCAL spool key, not just the wire (#9599 review, observed residual).
+
+    `session capture` (the per-turn writer) derived its id with
+    ``getattr(args, "session_id", None) or _local_session_id(...)`` — a blank is
+    truthy, so two blank-id captures collided on ONE spool key while the server
+    filed them as separate sessions (the wire normalises to null, so it mints a
+    fresh id per filing). The entry key must be path-anchored instead.
+    """
+    from tortoise.__main__ import _cmd_session_capture
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TORTOISE_CAPTURE", "1")
+    monkeypatch.setenv("TORTOISE_SPOOL_DIR", str(tmp_path / "spool"))
+    # ⛔ THIS leg reads a PLAIN-TEXT transcript with speaker prefixes
+    # (`_parse_transcript`), not the Pi JSONL the importer parses — a JSONL
+    # fixture yields zero turns and the leg exits 1 before it spools anything.
+    transcript = tmp_path / "s.txt"
+    transcript.write_text("User: hello\nAssistant: hi\n", encoding="utf-8")
+    args = _import_args(tmp_path, blank)
+    args.file = str(transcript)
+    args.turn = 1
+
+    from tortoise.capture_spool import _entries_dir, spool_dir
+    # An unreachable URL: the SPOOL write happens before the network call, so
+    # the entry's META is what this test reads (the filing failure is recorded,
+    # not raised).
+    _cmd_session_capture(args, "tt_test", "http://127.0.0.1:9")
+    entries = list(_entries_dir(spool_dir()).glob("*.meta.json"))
+    assert entries, "the capture wrote NO spool entry"
+    # ⛔ Read the meta's OWN `session_id`: the file is NAMED by
+    # `entry_key()` (a sha256 digest), so asserting on file names would pass
+    # whatever the key was — a vacuous assertion (a previous cut of this test
+    # did exactly that, and stayed green with the fix reverted).
+    stored = [json.loads(p.read_text(encoding="utf-8")).get("session_id")
+              for p in entries]
+    assert all(isinstance(v, str) and v.strip() for v in stored), stored

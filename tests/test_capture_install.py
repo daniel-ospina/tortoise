@@ -3532,7 +3532,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    6, "db6c933e6558f427c34b72587b46ca2185ebbf170569dde870df71026b0a63f3")
+    6, "0ea7fd5b4192b38d0ee0a13bc71650503cad4834bfb4fe311ab02fd48c24a67a")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3551,7 +3551,7 @@ _GENERATION_DIGESTS = {
     # has NOT shipped (it is introduced by the same unmerged PR), which is the
     # one case where rewriting its entry is legitimate: the never-rewrite rule
     # protects a SHIPPED digest, not an unshipped one.
-    6: "db6c933e6558f427c34b72587b46ca2185ebbf170569dde870df71026b0a63f3",
+    6: "0ea7fd5b4192b38d0ee0a13bc71650503cad4834bfb4fe311ab02fd48c24a67a",
 }
 
 
