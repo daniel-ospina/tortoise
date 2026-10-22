@@ -133,6 +133,12 @@ the same form.
                                               # target; rc 2 = no (a box-local target is rc 2
                                               # unless --allow-box-local acknowledges a trial)
 
+`--repo` is HALF OF THE CLAIM IDENTITY, so it is validated and canonicalised before any key is
+built: `owner/name`, exactly one `/`, both halves non-empty, matched case-insensitively (GitHub
+repo names are). A bare name or a case variant is `EXIT_USAGE` (3), never a silent empty answer —
+an unvalidated spelling gave the same unit of work two ids (both boxes reported `acquired`) and
+made `status --repo` answer `0 claim record(s)` at rc 0 over a store that held claims.
+
 STORE
 -----
 `TORTOISE_DB_URI` — the shared graph (docker://… or bolt://…) — and NOTHING ELSE. The SDK
@@ -248,7 +254,20 @@ def _audit_text(value: str) -> str:
 
 
 class StoreUnanswerable(RuntimeError):
-    """The store could not answer. Always a REFUSAL (rc 2), never a default answer."""
+    """The store could not answer. Always a REFUSAL (rc 2), never a default answer.
+
+    The message is REDACTED at construction (review of #9487 P2). A refusal embeds the text
+    of the driver exception that produced it (`_rows`, and the store-open path in `main`),
+    and a connection error from a `docker://`/`bolt://` DSN routinely quotes the DSN —
+    password included — at whichever layer failed. `store.target()` was the only site that
+    called `_redact_uri`, so the one path a reviewer looks at was safe while the ERROR path
+    printed the credential into `--json` on stdout, exactly where a controller captures it.
+    Redacting here covers every site that interpolates `str(exc)` without each having to
+    remember, and `_redact_uri` is a pure string operation with no userinfo-free rewrite.
+    """
+
+    def __init__(self, message: str = "") -> None:
+        super().__init__(_redact_uri(str(message)))
 
 
 @dataclass
@@ -389,11 +408,44 @@ def _uri_host(uri: str) -> str:
         return ""
 
 
+def normalise_repo(repo: str) -> str:
+    """The repo half of a claim identity: validated, and CANONICALISED to one spelling.
+
+    ⛔ `--repo` used to be used verbatim, and it is half of `claim_id`'s digest — so two boxes
+    that spelled the same repo differently (`daniel-ospina/tortoise` vs `TORTOISE`, or a bare
+    name) computed DIFFERENT ids for the same unit of work: both won their `MERGE`, both were
+    told `acquired`, and the duplicate dispatch this tool exists to prevent happened anyway.
+    The same variance made `query_repo`'s exact `n.repo = $repo` match return nothing, so
+    `status --repo` answered `0 claim record(s)` at rc 0 over a store that held claims —
+    precisely the "an empty answer from an unread store looks exactly like 'nobody holds
+    anything'" defect the refusal branch exists to remove (review of #9487 P2).
+
+    GitHub repo names are case-insensitive, so the canonical form is lowercased, and the shape
+    is enforced (exactly one `/`, both halves non-empty) rather than assumed: the key half is
+    already validated and refuses to let two different units collide, and this is the same
+    discipline for the repo half. `ValueError` is the caller's to turn into `EXIT_USAGE`.
+    """
+    text = (repo or "").strip()
+    owner, sep, name = text.partition("/")
+    if not sep or not owner or not name or "/" in name:
+        raise ValueError(
+            f"--repo must be owner/name (exactly one '/', both halves non-empty), got {repo!r} "
+            "— the repo is half of the claim identity, so a different spelling is a different "
+            "claim"
+        )
+    return f"{owner.lower()}/{name.lower()}"
+
+
 def claim_id(repo: str, key: str) -> str:
     """The deterministic point id. Canonical `<hex>-<12 hex>` shape so the SDK does not warn
     on a non-ULID id, and derived ONLY from (repo, key) so two boxes compute the same one —
-    the property that makes this a CAS instead of a ledger."""
-    digest = hashlib.sha256(f"{repo}\x00{key}".encode()).hexdigest()
+    the property that makes this a CAS instead of a ledger.
+
+    The repo is normalised INSIDE the digest rather than only at the CLI boundary (review of
+    #9487 P2): the identity must be one id per unit of work no matter which entry point
+    (CLI, a library caller, a peer box) asked for it, and a caller that passed it straight
+    through spelled the CAS away."""
+    digest = hashlib.sha256(f"{normalise_repo(repo)}\x00{key}".encode()).hexdigest()
     return f"{digest[:20]}-{digest[20:32]}"
 
 
@@ -500,8 +552,13 @@ class SDKClaimStore:
         try:
             return self._sdk._get_proj().g.query(cypher, params=params).result_set or []
         except Exception as exc:
+            # REDACT BEFORE TRUNCATING (review of #9487 P2): `_redact_uri` needs the `@` that
+            # ends the userinfo, so a driver message longer than the cut whose DSN ends past it
+            # was truncated into `docker://:<partial-password>` — no `@`, nothing to redact, and
+            # the credential tail printed into `--json`. Redaction first, then the cut.
             raise StoreUnanswerable(
-                f"the claim store could not answer ({type(exc).__name__}: {str(exc)[:200]})"
+                f"the claim store could not answer "
+                f"({type(exc).__name__}: {_redact_uri(str(exc))[:200]})"
             ) from exc
 
     def read(self, cid: str) -> str | None:
@@ -515,7 +572,16 @@ class SDKClaimStore:
         )
         if not rows:
             return None
-        return rows[0][0] or ""
+        content = rows[0][0]
+        # A property the store hands back with a non-string type is not content this parser can
+        # read: `_parse`/`_tokens` iterate it character by character, so an int/list raised
+        # outside every handler and left the process on exit 1 = EXIT_HELD (review of #9487 P2).
+        if content is not None and not isinstance(content, str):
+            raise StoreUnanswerable(
+                f"the claim store returned {type(content).__name__} content for id {cid} — "
+                "refusing to parse it as a claim record"
+            )
+        return content or ""
 
     def _transition(
         self, cid: str, record: ClaimRecord, *, expected_epoch: int | None
@@ -530,8 +596,21 @@ class SDKClaimStore:
         match = "MATCH (n:Point {id:$id})"
         if expected_epoch is not None:
             match += " WHERE n.claim_epoch = $expected"
+        # A capacity field that was NOT supplied is REMOVED, never left standing (review of
+        # #9487 P1). `props()` omits an absent field on purpose — a fabricated `0` reads as a
+        # measured idle box — but `SET n += $props` can only ADD keys: a reclaim or a release
+        # over a node a PREVIOUS holder wrote kept that holder's `ncpu`/`lpc`/`lanes` while
+        # the content line this same statement writes says `ncpu=absent`. The two halves of
+        # the record then disagree, and the prop half asserts a peer's measurement as this
+        # claim's capacity — the fabricated-capacity defect the `CAP_ABSENT` design exists to
+        # prevent, with a stale number instead of a zero. `REMOVE` before the `SET` makes the
+        # abstention hold for BOTH readers (`query_repo` parses content, the docstring tells
+        # others to query props). Verified on a live graph: `MATCH … REMOVE … SET n += $props`
+        # is accepted by FalkorDB and the props are gone afterwards.
+        absent = [f"n.{name}" for name in ("ncpu", "lpc", "lanes") if getattr(record, name) is None]
+        remove = (" REMOVE " + ", ".join(absent)) if absent else ""
         rows = self._rows(
-            match + " SET n += $props, n.content = $content RETURN count(n) AS c",
+            match + remove + " SET n += $props, n.content = $content RETURN count(n) AS c",
             id=cid,
             expected=expected_epoch,
             props=props,
@@ -539,6 +618,37 @@ class SDKClaimStore:
         )
         moved = rows[0][0] if rows else 0
         if moved == 0:
+            # 0 rows is the fence doing its job — UNLESS the store does not hold the epoch we
+            # fenced on, in which case the caller would be told "a peer moved it" (rc 1,
+            # retryable) about a record that never moved, on a retry that can never succeed
+            # (review of #9487 P2). Ask what the epoch ACTUALLY is now: a node whose epoch
+            # equals the one we expected should have matched our `WHERE`, so it is a store we
+            # refuse to interpret rather than a race we lost. An absent node is a real move.
+            if expected_epoch is not None:
+                for row in self._rows(
+                    "MATCH (n:Point {id:$id}) RETURN n.claim_epoch AS epoch", id=cid
+                ):
+                    # The epoch is read straight off the node, so its TYPE is the store's to
+                    # decide: a list-valued or textual `claim_epoch` from a foreign writer
+                    # made `int(seen)` raise, which escaped `main()` as exit 1 — the rc this
+                    # contract defines as EXIT_HELD ("held by a live claim"), the same
+                    # recurring defect class the `query_repo` guard closes (review of #9487
+                    # P2). An unreadable epoch on the fence path is a refusal, not a race.
+                    try:
+                        seen = row[0]
+                        seen_epoch = None if seen is None else int(seen)
+                    except (IndexError, TypeError, ValueError) as exc:
+                        raise StoreUnanswerable(
+                            f"the claim store returned an unreadable claim_epoch for id {cid} "
+                            f"({type(exc).__name__}) — refusing to guess which claim moved"
+                        ) from exc
+                    if seen_epoch is None or seen_epoch == int(expected_epoch):
+                        raise StoreUnanswerable(
+                            f"the claim store holds id {cid} at an epoch this fence cannot "
+                            f"match (expected {int(expected_epoch)}, found "
+                            f"{'absent' if seen_epoch is None else seen_epoch}) — refusing to "
+                            "report a moved claim that did not move"
+                        )
             return None
         if moved != 1:
             raise StoreUnanswerable(
@@ -630,23 +740,46 @@ class SDKClaimStore:
         Grouping by id is not cosmetic: a graph written by the pre-MERGE version holds
         duplicate nodes for one id, so a raw property query reports the same unit twice with
         two owners — the ledger would contradict itself about who holds it.
+
+        The match is on the CANONICAL spelling, in the statement and in the re-filter below
+        (review of #9487 P2): an exact `n.repo = $repo` comparison turned a differently-spelled
+        `--repo` into `0 claim record(s)` at rc 0 — an empty answer indistinguishable from
+        "nobody holds anything". `toLower` also reads rows written before the spelling was
+        canonicalised, and the Python-side re-filter uses the same form so the two agree.
         """
+        repo = normalise_repo(repo)
         rows = self._rows(
-            "MATCH (n:Point) WHERE n.pointKind = $kind AND n.repo = $repo "
+            "MATCH (n:Point) WHERE n.pointKind = $kind AND toLower(n.repo) = $repo "
             "RETURN n.id AS id, n.content AS content, n.claim_epoch AS epoch",
             kind=CLAIM_KIND,
             repo=repo,
         )
         best: dict[str, tuple[str, int]] = {}
-        for cid, content, epoch in rows:
-            epoch_i = int(epoch or 0)
+        for row in rows:
+            # A row of unexpected arity, or a `claim_epoch` that is not a number, is a store
+            # we refuse to interpret — NOT an empty listing and NOT a crash (review of #9487
+            # P2). This walk used to sit outside every handler, so a ValueError escaped
+            # `main()` as an uncaught traceback, which exits 1: the rc this contract defines
+            # as EXIT_HELD. A `status --repo` crash then read as "busy" and an `acquire`
+            # crash as "held by a live claim" — an undocumented rc no caller can tell from a
+            # real answer.
+            try:
+                cid, content, epoch = row
+                if content is not None and not isinstance(content, str):
+                    raise ValueError(f"content is {type(content).__name__}, not a string")
+                epoch_i = int(epoch or 0)
+            except (TypeError, ValueError) as exc:
+                raise StoreUnanswerable(
+                    f"the claim store returned a listing row this tool cannot read "
+                    f"({type(exc).__name__}: {_redact_uri(str(exc))[:200]})"
+                ) from exc
             current = best.get(str(cid))
             if current is None or epoch_i > current[1]:
                 best[str(cid)] = (content or "", epoch_i)
         out: list[dict] = []
         for content, _epoch in best.values():
             rec = _parse(content)
-            if rec.repo != repo:
+            if (rec.repo or "").strip().lower() != repo:
                 continue
             out.append(
                 {
@@ -718,6 +851,11 @@ def acquire(
     vocabulary instead of on rc must accept BOTH, or it refuses its own retry (review of #9487).
     """
     now = _now() if now is None else now
+    # Canonicalise the repo at THIS boundary too, not only at the CLI's (review of #9487 P2):
+    # the stored `repo` property and the id digest are the two halves of the identity, and a
+    # library caller that spelled the repo differently would write a row its peers' `status
+    # --repo` cannot match. A bad shape raises here (the caller's contract), it never writes.
+    record.repo = normalise_repo(record.repo)
     cid = claim_id(record.repo, record.key)
     record.claimed_at = record.claimed_at or now
     record.lease_until = record.lease_until or (now + DEFAULT_TTL)
@@ -964,6 +1102,7 @@ def release(
     identity, and the refusal message (absent force) names the real holder.
     """
     now = _now() if now is None else now
+    repo = normalise_repo(repo)
     cid = claim_id(repo, key)
     shared = getattr(store, "require_shared", None)
     if shared is not None:
@@ -1053,6 +1192,7 @@ def status(store: ClaimStore, repo: str, key: str | None, *, now: int | None = N
     defect as an empty read from the wrong graph, and `status` is what a controller dispatches
     on (review of #9487 P3)."""
     now = _now() if now is None else now
+    repo = normalise_repo(repo)
     shared = getattr(store, "require_shared", None)
     if shared is not None:
         refusal = shared()
@@ -1297,6 +1437,7 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
 
     if args.cmd == "check":
         def _refuse(reason: str) -> int:
+            reason = _redact_uri(reason)
             if args.json:
                 print(json.dumps({"status": "REFUSED", "reachable": False, "reason": reason}, sort_keys=True))
             print(f"REFUSED: {reason}", file=sys.stderr)
@@ -1321,7 +1462,7 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
                 return _refuse(refusal)
             # A definite read, not a write: `check` must be safe to run on any box at any
             # time, and an empty answer still proves the store answered.
-            store.read(claim_id("probe", "probe"))
+            store.read(claim_id("probe/probe", "probe"))
         except StoreUnanswerable as exc:
             return _refuse(str(exc))
         except Exception as exc:
@@ -1358,6 +1499,14 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
         number = int(getattr(args, "pr", None) or 0) or int(getattr(args, "issue", None) or 0)
         kind = "pr" if int(getattr(args, "pr", None) or 0) else args.kind
         key = None if args.cmd == "status" and number == 0 else normalise_key(kind, number)
+        # The repo is the OTHER half of the claim identity (review of #9487 P2): validated and
+        # canonicalised once, here, BEFORE any key or ClaimRecord is built, so everything
+        # downstream (the id digest, the written `repo` property, the listing match) sees one
+        # spelling. A bare name or a case variant used to be accepted verbatim, which gave the
+        # same unit two ids (both boxes "acquired") and made `status --repo` answer
+        # `0 claim record(s)` at rc 0 over a store full of claims — a silent empty answer.
+        # A bad spelling is EXIT_USAGE, never a refusal a controller would retry.
+        args.repo = normalise_repo(args.repo)
     except (ValueError, TypeError) as exc:
         print(f"usage: {exc}", file=sys.stderr)
         return EXIT_USAGE
@@ -1373,15 +1522,28 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
         )
         return EXIT_USAGE
 
+    # EVERY invocation-shape check runs BEFORE any store work (review of #9487 P2). `release
+    # --force` with no `--reason` was validated after the store was opened, so with an
+    # unset/unreachable/box-local store it returned rc 2 ("the store could not answer",
+    # retryable) instead of rc 3 (malformed invocation, never retry) — a controller would
+    # retry a command that can never succeed.
+    if args.cmd == "release" and getattr(args, "force", False) and not args.reason.strip():
+        print("usage: --force requires --reason (an audited override, not a quiet one)", file=sys.stderr)
+        return EXIT_USAGE
+
     if store is None:
         try:
             _require_store_configured()
             store = SDKClaimStore(allow_box_local=getattr(args, "allow_box_local", False))
         except StoreUnanswerable as exc:
-            print(f"REFUSED: {exc}", file=sys.stderr)
+            print(f"REFUSED: {_redact_uri(str(exc))}", file=sys.stderr)
             return EXIT_UNANSWERABLE
         except Exception as exc:
-            print(f"REFUSED: claim store could not be opened ({type(exc).__name__}: {exc})", file=sys.stderr)
+            print(
+                f"REFUSED: claim store could not be opened "
+                f"({type(exc).__name__}: {_redact_uri(str(exc))})",
+                file=sys.stderr,
+            )
             return EXIT_UNANSWERABLE
 
     if args.cmd == "acquire":
@@ -1404,10 +1566,8 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
     elif args.cmd == "release":
         # Identity must be reproducible across processes (review of #9487 P1): `release` runs
         # in a DIFFERENT process from `acquire`, so a pid-derived default made every claim
-        # unreleasable. `--session` names the same lane the acquire named.
-        if getattr(args, "force", False) and not args.reason.strip():
-            print("usage: --force requires --reason (an audited override, not a quiet one)", file=sys.stderr)
-            return EXIT_USAGE
+        # unreleasable. `--session` names the same lane the acquire named. The `--force` /
+        # `--reason` shape is validated above, before the store is opened.
         owner = args.owner or _owner_token(args.session)
         outcome = release(
             store,
@@ -1422,9 +1582,13 @@ def main(argv: list[str] | None = None, store: ClaimStore | None = None) -> int:
         outcome = status(store, args.repo, key) if key is not None else status(store, args.repo, None)
 
     if args.json:
-        print(json.dumps(outcome.as_dict(), sort_keys=True))
+        # Redaction at the OUTPUT boundary as well as in `StoreUnanswerable` (review of #9487
+        # P2): `reason` can carry a driver message that quotes the DSN, and this is the stream
+        # a controller captures. A future exception path cannot reintroduce the leak without
+        # passing through here.
+        print(_redact_uri(json.dumps(outcome.as_dict(), sort_keys=True)))
     else:
-        print(f"{outcome.status}: {outcome.reason}")
+        print(_redact_uri(f"{outcome.status}: {outcome.reason}"))
     if outcome.rc == EXIT_UNANSWERABLE:
         # The reason is already on stdout/stderr; rc is the contract the caller branches on.
         print(

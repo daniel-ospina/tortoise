@@ -1920,7 +1920,7 @@ TOOL_CARVEOUTS = (
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
     # #5052/#9487 review P1: the dispatch-time CLAIM on the graph
-    # (tools/work_claim.py) owns tests/test_work_claim.py — the 55 hermetic arms
+    # (tools/work_claim.py) owns tests/test_work_claim.py — the 77 hermetic arms
     # that pin the fail-closed refusal contract (`acquire`/`status`/`release`
     # refuse an unset store, a hosted-only target, an embedded target, a
     # box-local target, an unreadable store and a failed read-back) plus the
@@ -1928,7 +1928,7 @@ TOOL_CARVEOUTS = (
     # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so
     # a tool-only edit came back with `changed=[]`, select() took the docs-only
     # early return — which bypasses the `if not matched: matched.add("core")`
-    # fallback entirely — and NOT ONE of the 55 arms ran on the most likely
+    # fallback entirely — and NOT ONE of the 77 arms ran on the most likely
     # change to weaken the dispatch gate. Registering tests/test_work_claim.py
     # under `core` in ci-surfaces.yml does NOT cover this: it applies to edits of
     # the TEST file, not of the tool (measured before this entry:
@@ -1936,7 +1936,16 @@ TOOL_CARVEOUTS = (
     # guard absent). Fail-closed (FULL matrix) is the safe default for a tool
     # whose answer drives dispatch, exactly like the two entries above.
     # Pinned by test_ci_selection.test_work_claim_tool_change_fails_closed_to_full.
-    "tools/work_claim.py",
+    #
+    # PREFIX, not the exact file (review of #9487 P2): `_keep_changed` matches with
+    # `startswith`, so the exact `tools/work_claim.py` string failed closed for that ONE path
+    # and nothing else — a rename, or the store split out as `tools/work_claim_store.py`,
+    # re-opened the same silent drop with no failing test (measured: `tools/work_claim_extra.py`
+    # → surfaces=[], full=False, tier-1 smoke). The store seam (`SDKClaimStore`,
+    # `_require_store_configured`) is the half whose breakage must never ship unreviewed, so
+    # the carve-out covers the family. Over-matching costs extra CI; under-matching ships a
+    # dispatch gate with no arms.
+    "tools/work_claim",
     # #3554: the `:Session` writer inventory + D9 retrofit instrument
     # (tools/session_retrofit_audit.py) owns
     # tests/test_session_schema_3554.py. Same silent-drop class as the

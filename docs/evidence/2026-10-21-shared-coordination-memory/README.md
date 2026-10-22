@@ -123,7 +123,7 @@ Read on `2026-10-21` on cell-3 (`HOME=/tmp/cell-home`); counts are as-of that re
 
 ## 3. The pilot — one slice, the claim, in the graph
 
-`tools/work_claim.py` (this branch), `tests/test_work_claim.py` (55 fake-store tests + 3 live tests, 58
+`tools/work_claim.py` (this branch), `tests/test_work_claim.py` (77 fake-store tests + 3 live tests, 80
 collected — re-derived with `--collect-only`, and pinned against this line by the suite itself), contract
 `rc 0/1/2/3` identical to `claims.sh` for `acquire`/`release` so a caller needs no
 new branch (`rc 3` is a malformed invocation; `status`'s rc reports that it ANSWERED — see §3.1).
@@ -272,9 +272,16 @@ stores all of them.
 ## 6. Reproducing
 
 ```bash
-# the per-claim volume probe (private lane graph, so no peer's target is touched)
+# 1. The HERMETIC contract — no store at all, so the three live legs skip VISIBLY.
+#    `TORTOISE_TEST_CARVE_OUT=1` is the embedded-only lane; without it a URI-less run of a
+#    Docker-lane test file errors rather than skips (measured on this branch: the 3 live legs
+#    SKIP under the carve-out flag and ERROR without it).
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_work_claim.py -q   # 77 passed at this head, 3 skipped
+
+# 2. The FULL file — the per-claim volume probe on a private lane graph (so no peer's target
+#    is touched), which is also what runs the three live legs.
 uri="$(uv run python tools/test_lane.py uri)" && eval "$uri"
-uv run pytest tests/test_work_claim.py -q            # 55 passed at this head (3 live legs skip without a URI)
+uv run pytest tests/test_work_claim.py -q            # 80 passed (all three live legs run)
 
 # `--allow-box-local`: this lane's container is loopback BY DESIGN. EVERY verb that reads or
 # writes the store (`acquire`, `status`, `release`) refuses a loopback target otherwise,

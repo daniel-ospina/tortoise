@@ -2775,7 +2775,7 @@ def test_session_retrofit_audit_tool_change_fails_closed_to_full():
 
 def test_work_claim_tool_change_fails_closed_to_full():
     # #5052/#9487 review P1: tools/work_claim.py owns tests/test_work_claim.py — the
-    # dispatch-time claim gate, whose 55 hermetic arms pin every fail-closed refusal the
+    # dispatch-time claim gate, whose 77 hermetic arms pin every fail-closed refusal the
     # tool exists for. Same #3261/#4256 silent-drop class as the collision_preflight and
     # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so without
     # this TOOL_CARVEOUTS entry a claim-tool-only change came back as `changed=[]`,
@@ -2791,6 +2791,16 @@ def test_work_claim_tool_change_fails_closed_to_full():
     assert r["full"] is True, r
     assert r["test_files"] == "ALL", r
     assert "core" in r["surfaces"], r
+    # ... and the carve-out is a PREFIX, not one exact filename (review of #9487 P2). The
+    # exact-path entry failed closed for `tools/work_claim.py` alone: a rename, or the store
+    # split into `tools/work_claim_store.py`, re-opened the same silent drop with nothing
+    # failing (measured: `tools/work_claim_extra.py` → surfaces=[], full=False, tier-1).
+    # The store seam is the half whose breakage must never ship unreviewed.
+    for sibling in ("tools/work_claim_store.py", "tools/work_claim_extra.py"):
+        r = _sel([sibling])
+        assert r["full"] is True, (sibling, r)
+        assert r["test_files"] == "ALL", (sibling, r)
+        assert "core" in r["surfaces"], (sibling, r)
 
 
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
