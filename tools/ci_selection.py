@@ -456,6 +456,22 @@ SOURCE_PATTERNS = {
                    "website/functions/blog/_shared/agent-auth.ts",
                    "website/functions/blog/_shared/keywords.ts",
                    "website/functions/blog/_shared/slug.ts",
+                   # #9680: the IndexNow submitter and the key file it points at.
+                   # The RULE under test (`shouldSubmit`'s 24h window, the
+                   # fail-soft call, the state read/write) lives ONLY in
+                   # `indexnow.ts`, and a lone edit to it — a window tweak, a
+                   # retry, a rotation of the key — selects NO surface
+                   # (surfaces=[], full=False) without this entry, so
+                   # `test_blog_indexnow.py` would never run on the change it
+                   # exists to catch: the #1349/#3332/#3616 silent-drop class the
+                   # entries above close. The key file is its own entry because
+                   # the endpoint verifies ownership by FETCHING it: an edit to
+                   # its body is exactly what V1 tests. ROTATION NOTE: rotating
+                   # the key renames this file, so the new name must be added
+                   # here (and in config/pages-upload-classification.txt) in the
+                   # same commit, or the guard goes quiet on the new name.
+                   "website/functions/blog/_shared/indexnow.ts",
+                   "website/a7c41f0e9b2d63584e1c0af7d3b925e6.txt",
                    "website/functions/contact/submit.ts",
                    "website/website_architecture.md",
                    "docs/auth-architecture.md",
