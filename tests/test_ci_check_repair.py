@@ -506,32 +506,20 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
 
     # Behaviour: the exit code the step hands GitHub, whatever the shell spelling.
     #
-    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` has two —
-    # 1 (a PR needs a user credential) and 2 (`_could_not_measure`, the single
-    # exit-2 path) — and `workflow_state()` maps both to `ran-not-succeeded`, so
-    # both ARE the coverage signal; the record measures 5 of its 73 reds as exit 2.
-    # Probing exit 1 alone let `[ "$rc" = 2 ] && rc=0` green that entire class
-    # while this test stayed green: the window then reads `covered`, the local
-    # fallback goes idle, and nobody produces the required checks (#9365 review).
-    #
-    # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
-    # class must default to propagate, never to green. If a future arm greens one,
-    # the coverage signal has to move in the same commit — that is what this
-    # assertion says, and it is why it is not a plain (1, 2) enumeration.
-    script = step["run"]
     # EVERY non-zero class, not the two spellings a reviewer would probe by hand.
     # `tools/ci_check_repair.py` has two — 1 (a PR needs a user credential) and 2
     # (`_could_not_measure`, the single exit-2 path) — and `workflow_state()` maps
     # both to `ran-not-succeeded`, so both ARE the coverage signal; the record
     # measures 5 of its 73 reds as exit 2. Probing exit 1 alone let
     # `[ "$rc" = 2 ] && rc=0` green that entire class while this test stayed
-    # green (#9365 re-review).
+    # green (#9365 review).
     #
     # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
     # class must default to propagate, never to green. If a future arm greens one,
     # the coverage signal has to move in the same commit.
     #
     # A FRESH tmp_path per call: the stub journals its argv into it.
+    script = step["run"]
     for tool_rc in (1, 2, 3):
         r, argv, summary_body = _run_repair_step(script, tmp_path / f"rc{tool_rc}", tool_rc)
         assert not r.stderr, (
