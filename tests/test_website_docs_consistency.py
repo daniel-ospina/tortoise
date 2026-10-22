@@ -1376,10 +1376,15 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     57 tier-1 files and NOT this file — but they are deliberately NOT pinworthy by
     the naive route. The discriminator is not cost: the three tier-1 files that
     route would drop (`test_config.py`, `test_guard.py`, `test_reaper_orphan.py`)
-    are a cost two of the pinned inputs above already pay. It is that a draft-only
-    edit is CONTENT DRIFT, so the intended fix is the per-path extra-tests map
-    (#9650, #3435 §2), not a surface pattern; pinning them also flips `slow_run` to
-    True on top of that. Tracked, not silently accepted.
+    are a cost two of the pinned inputs above already pay — and neither slow-leg
+    gate would fire either, since `onboarding` owns none of the slow files
+    (`slow_leg_by_surface()` has no `onboarding` key, measured), so an
+    `onboarding`-pinned draft would select with `slow_run=False` and
+    `carve_out_run=False`, exactly as
+    `test_public_site_surface_change_selects_onboarding_and_skips_slow` pins for
+    every onboarding-only selection. It is that a draft-only edit is CONTENT
+    DRIFT, so the intended fix is the per-path extra-tests map (#9650, #3435 §2),
+    not a surface pattern. Tracked, not silently accepted.
     """
     unselectable = [
         path

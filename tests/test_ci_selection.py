@@ -31,7 +31,7 @@ from tools.ci_selection import (  # noqa: I001
     surface_audit, render_surface_audit, duplicate_entries,
     on_demand_files, leg_coverage_issues, push_legs, fast_pool,
     duration_issues, TESTS_DIR, WATCHDOG_HEADROOM, WATCHDOG_CEILING_MIN,
-    uri_requiring_files,
+    uri_requiring_files, slow_leg_by_surface,
     carve_matrix_include, carve_shard_issues, carve_shard_count,
     MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
     slow_matrix_include, slow_shard_issues, slow_shard_count,
@@ -294,8 +294,21 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     they guard.
 
     The #2147/#2148 cost gates are unchanged — only the fast surface tests are
-    added; no slow leg, no carve-out leg.
+    added; no slow leg, no carve-out leg. That is a property of the SURFACE, not
+    of these nine paths: `onboarding` owns none of the slow-leg files
+    (`slow_leg_by_surface()` returns no `onboarding` key), which is why the
+    docs/drafts deferral in `test_every_guard_input_is_selectable_by_ci` cannot
+    cite the slow leg as the cost of pinning them (PR #9623 review P3). The
+    assertion below keeps that docstring claim honest: if a slow file ever lands
+    in `onboarding`, this REDS and the paragraph must be re-measured.
     """
+    assert not slow_leg_by_surface(load_manifest()).get("onboarding"), (
+        "`onboarding` now owns slow-leg files, so an onboarding-pinned docs/drafts "
+        "path DOES flip slow_run. Re-measure and update the 'Known remaining "
+        "hole' paragraph in test_website_docs_consistency.py's "
+        "test_every_guard_input_is_selectable_by_ci, which currently records the "
+        "opposite."
+    )
     for changed in (["website/docs.html"], ["website/faq.html"],
                     ["website/apps/dashboard/public/welcome.html"],
                     ["website/self-hosted.html"],
