@@ -314,6 +314,9 @@ jobs:
 
   script-validate:
     runs-on: ubuntu-latest
+    # #2055 — bound from measured green p90: 44-63 min across 25 green runs (max 68) -> 120 is 1.76x p90.
+    # Same shard list as ci.yml's bash-suites (scripts/run-bash-shards.sh), so the same bound.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       # Node is pinned because the shards below include `tests/search-cost/run.sh` (Node >= 22.13 —
@@ -351,6 +354,8 @@ jobs:
 
   skill-lint:
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 9s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Skill lint (hard gate — issue #237)
@@ -365,6 +370,8 @@ jobs:
     # DETECTED (warn) not blocked — the 4h pi.dev refresh may legitimately
     # revert the store, and the weekly report + tripwire are the alert path.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 24s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Cost-config guard (shipped, --shipped-only)
@@ -380,6 +387,8 @@ jobs:
     # red signal: a merge that reintroduces the idiom, or that leaves a stale
     # exception, fails here even if its PR check was bypassed.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 34s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: SIGPIPE false-negative guard (the scan set must be clean)
@@ -396,6 +405,8 @@ jobs:
     # Catches the "PR merged without wiring" drift class that per-PR CI cannot
     # see when the farm edit and the extension land on different branches.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 7s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Extension-farm parity gate (symlink farm + manifest.json into extensions/)
@@ -438,6 +449,8 @@ jobs:
     # change's own rule is "a duplicate beats silence" — so the race is left as a bounded
     # residual rather than traded for a new fail-open. It is strictly rarer than the pre-fix
     # behaviour, which created a duplicate on every failure.
+    # #2055 — measured green p90 4s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/github-script@v7
         env:

@@ -61,6 +61,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [enforce-skills]
     if: failure() && !cancelled()
+    # #2055 — measured green p90 4s -> 10 min (matches this workflow's existing bound).
+    timeout-minutes: 10
     steps:
       - uses: actions/github-script@v7
         with:
@@ -110,6 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [enforce-skills]
     if: success()
+    # #2055 — measured green p90 8s -> 10 min (matches this workflow's existing bound).
+    timeout-minutes: 10
     steps:
       - uses: actions/github-script@v7
         with:

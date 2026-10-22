@@ -1,0 +1,8 @@
+name: over-ceiling
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - run: echo ok

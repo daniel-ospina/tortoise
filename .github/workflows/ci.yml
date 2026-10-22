@@ -58,6 +58,8 @@ jobs:
     # (structural fail / content warn / clean), stale-pin regression, and the
     # drift-check.yml YAML validity.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 9s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Drift-check tests (tiered exits, fixtures, workflow YAML)
@@ -78,6 +80,8 @@ jobs:
     # the fixture suite (backdoor drift blocks/warns, clean 300K passes,
     # override honored). Shipped-only — CI has no live ~/.pi/agent.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 26s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Cost-config guard (shipped, --shipped-only)
@@ -95,6 +99,8 @@ jobs:
     # while no independent model was funded (#860), which is exactly the "guard
     # nobody runs" failure the guard exists to prevent.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 36s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: SIGPIPE false-negative guard (the scan set must be clean)
@@ -111,6 +117,8 @@ jobs:
     # setup-node is explicit: the harness type-strips index.ts and needs Node >= 22.13
     # (sigpipe-grep inherits the runner's Node instead, which is not a contract).
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 11s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -132,6 +140,8 @@ jobs:
     # without evidence) is pinned by extensions/review-enforcer/index.test.ts.
     # Hermetic: a fake `gh` serves every call — no network, no provider keys.
     runs-on: ubuntu-latest
+    # #2055 — bound from measured green p90: 36 min across 25 green runs (max 37) -> 75 is 2.0x p90.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - name: Safe admin-merge rail suite (parser, #3469 trap, flake, parity)
@@ -183,6 +193,8 @@ jobs:
     # an explicit ⏭️ skip and the CI verdict stays repo-tree-only; its
     # fail/pass behaviour is pinned here by the fixture suite's cases 10–12.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 8s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Extension-farm parity gate (symlink farm + manifest.json into extensions/)
@@ -200,6 +212,8 @@ jobs:
     # (-shellcheck=: pre-existing style-level shellcheck findings on clean
     # main must not trip the gate).
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 16s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Actionlint gate (workflows + templates)
@@ -230,6 +244,8 @@ jobs:
     # lane's python-ci call and this job — a 3.11/3.12 divergence would pass PR CI
     # and only break post-merge.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 69s -> 10 min (the sub-minute floor).
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -267,6 +283,8 @@ jobs:
     # Task 1 local env, the `test` job, and ci-main's python-ci caller — a
     # 3.11/3.12 divergence would pass PR CI and only break post-merge.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 87s (max 88s) -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -665,6 +683,8 @@ jobs:
     # undici a FAILURE instead of a green skip. Test-only: no repo manifest is
     # touched and nothing is written under the checkout.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 21s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -689,6 +709,8 @@ jobs:
     # extensions/ content parity (single source of truth #95), launchd
     # isolation (#446).
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 21s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: pi-bootstrap setup regression suite
@@ -722,6 +744,10 @@ jobs:
     # cannot move the rail's lane-coverage comparison (#1349 — a separate remedy; nothing
     # here helps or hinders it).
     runs-on: ubuntu-latest
+    # #2055 — bound from measured green p90: 44-63 min across 25 green runs (max 68) -> 120 is 1.76x p90.
+    # This is the shard list both lanes run; it is the heaviest legitimate job in the repo,
+    # and it is the one #2055 watched sit in_progress after every peer had finished.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       # The runner below includes `tests/search-cost/run.sh`, whose harness type-strips index.ts and
@@ -748,6 +774,8 @@ jobs:
     # the base anchor. Requires AGENT_INFRA_READ_TOKEN (read access to
     # daniel-ospina/swarm) — the same cross-repo pattern as drift-check.yml.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 26s (max 38s) -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4

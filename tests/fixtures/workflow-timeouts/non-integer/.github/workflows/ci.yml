@@ -1,0 +1,8 @@
+name: non-integer
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15m
+    steps:
+      - run: echo ok

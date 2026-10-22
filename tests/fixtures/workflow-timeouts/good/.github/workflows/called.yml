@@ -1,0 +1,9 @@
+name: called
+on:
+  workflow_call:
+jobs:
+  inner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: echo inner

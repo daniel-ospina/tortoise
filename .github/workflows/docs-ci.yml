@@ -35,6 +35,9 @@ jobs:
   markdownlint:
     runs-on: ubuntu-latest
     if: inputs.markdownlint-command != ''
+    # #2055 — no green sample (this workflow's last runs predate the window) -> 15, the floor with
+    # network-free slack; revisit when a green sample exists.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -45,6 +48,9 @@ jobs:
   link-check:
     runs-on: ubuntu-latest
     if: inputs.link-check-args != ''
+    # #2055 — no green sample (this workflow's last runs predate the window) -> 20, allowing for
+    # the third-party URLs it fetches; revisit when a green sample exists.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: lycheeverse/lychee-action@v2
@@ -56,6 +62,8 @@ jobs:
   frontmatter:
     runs-on: ubuntu-latest
     if: inputs.frontmatter-command != ''
+    # #2055 — no green sample (this workflow's last runs predate the window) -> 10, the sub-minute floor.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Validate doc frontmatter

@@ -1,0 +1,15 @@
+name: good
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: echo ok
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: echo lint
+  reusable:
+    uses: ./.github/workflows/called.yml

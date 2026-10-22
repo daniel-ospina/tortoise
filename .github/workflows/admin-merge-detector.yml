@@ -70,6 +70,8 @@ permissions:
 jobs:
   detect:
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 48s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

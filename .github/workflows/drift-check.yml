@@ -66,6 +66,9 @@ jobs:
   drift-check:
     name: agent-infra drift
     runs-on: ubuntu-latest
+    # #2055 — no green sample (this workflow has never completed a run in the window) -> 15; revisit
+    # when a green sample exists.
+    timeout-minutes: 15
     steps:
       - name: Checkout consumer repo
         uses: actions/checkout@v4

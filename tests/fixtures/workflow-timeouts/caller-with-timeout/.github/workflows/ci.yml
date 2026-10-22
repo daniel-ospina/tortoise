@@ -1,0 +1,6 @@
+name: caller-with-timeout
+on: pull_request
+jobs:
+  reusable:
+    uses: ./.github/workflows/called.yml
+    timeout-minutes: 30

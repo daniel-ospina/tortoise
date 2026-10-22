@@ -39,6 +39,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     if: inputs.test-command != ''
+    # #2055 — measured green p90 66s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,6 +56,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     if: inputs.lint-command != ''
+    # #2055 — measured green p90 8s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -72,6 +76,8 @@ jobs:
   typecheck:
     runs-on: ubuntu-latest
     if: inputs.typecheck-command != ''
+    # #2055 — measured green p90 8s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

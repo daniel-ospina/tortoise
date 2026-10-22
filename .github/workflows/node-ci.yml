@@ -93,6 +93,8 @@ jobs:
   script-validate:
     if: inputs.script-validate
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 8s -> 15 min.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Validate Node.js scripts
@@ -112,6 +114,8 @@ jobs:
   skill-lint:
     if: inputs.skill-lint
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 9s -> 15 min.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Validate skill YAML frontmatter
@@ -129,6 +133,8 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 8s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -156,6 +162,8 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 8s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -195,6 +203,8 @@ jobs:
     # command containing quotes — the failure-accumulator case).
     runs-on: ubuntu-latest
     if: inputs.test-command != '' || inputs.test-glob != ''
+    # #2055 — bound from measured green p90: 12.5 min across 25 green runs -> 30 is 2.4x p90.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

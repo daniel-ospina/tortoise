@@ -1,0 +1,5 @@
+name: foreign-caller
+on: pull_request
+jobs:
+  elsewhere:
+    uses: some-other-org/some-other-repo/.github/workflows/ci.yml@main

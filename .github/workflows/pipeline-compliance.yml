@@ -60,6 +60,8 @@ jobs:
   pipeline-compliance:
     name: pipeline-compliance
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 20s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Run pipeline compliance gate
@@ -193,6 +195,8 @@ jobs:
     # filesystem. This job fails on (a) a template edit without
     # materialization, or (b) any symlink under .github/workflows/.
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 7s -> 10 min.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Reusable workflows match templates

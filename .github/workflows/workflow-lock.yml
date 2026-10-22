@@ -149,6 +149,8 @@ permissions:
 jobs:
   workflow-lock:
     runs-on: ubuntu-latest
+    # #2055 — measured green p90 10s -> 10 min.
+    timeout-minutes: 10
     steps:
       # No `ref:` on purpose: pull_request_target checks out the BASE branch
       # (main), so this step runs main's copy of the workflow + script. Do NOT

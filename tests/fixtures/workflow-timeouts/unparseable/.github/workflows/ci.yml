@@ -1,0 +1,8 @@
+name: unparseable
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+      timeout-minutes: 10
+    steps:
+      - run: echo ok
