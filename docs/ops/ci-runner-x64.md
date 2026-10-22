@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: ci-runner-pool, ci-headroom-guards
 aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
 created: 2026-10-22
-updated: 2026-10-22
+updated: 2026-10-23
 ---
 
 # x86_64 CI runners — the fallback pool's second architecture
@@ -184,7 +184,8 @@ Recorded on 2026-10-22 (queue: 75 tortoise + 48 agent-infra runs waiting, 5/5 AR
 | 39787188701 | `test-isolation` | 119853473239 | success | `pi-runner-x64-1` |
 | 39787188701 | `license-surface` | 119853473352 | success | `pi-runner-x64-1` |
 | 39787791937 | `sigpipe-guard` | 119855408820 | success | `pi-runner-x64-1` |
-| 39786848662 | `legal-e2e` | 119852676052 | (in progress at record time) | `pi-runner-x64-1` |
+| 39786848662 | `legal-e2e` | 119852676052 | success | `pi-runner-x64-1` |
+| 39786088684 | `test (c)` | 119851988988 | success | `pi-runner-x64-2` |
 
 ## Known residuals
 
