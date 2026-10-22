@@ -24991,8 +24991,10 @@ class TortoiseSDK:
         ``limit=1`` probe's budget. It is excluded because no caller can name it
         to ``set_point_baseline`` and the run cannot survive it anyway: EP keys
         claims on ``id``, so an id-less ``:Point`` wired as an operator claim
-        DIES the run with a ``TypeError`` during ordering — nothing is ever
-        stamped on it (#9275). Sorted (``key=str``, so a numeric id cannot raise
+        makes the pass REFUSE with ``UnaddressableClaimError`` before it stamps
+        anything (#9275 — fixed there; it used to die in the ordering with a bare
+        ``TypeError``) — nothing is ever stamped on such a node. Sorted
+        (``key=str``, so a numeric id cannot raise
         on a mixed list) for a deterministic message.
         """
         if ids is not None and not ids:

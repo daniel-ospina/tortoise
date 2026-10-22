@@ -1488,23 +1488,28 @@ class TortoiseEP:
         # already written half a pass is not fail-closed, and the caller could
         # not diagnose it — the traceback names a sort, not the graph. So the one
         # place every affected claim is collected refuses, before `_load_cache`
-        # and before the run's first write (its caller in `run()` collects this
-        # set ahead of the evidence pre-write), and names the repair.
+        # and before the run's FIRST write: its caller in `run()` collects this
+        # set ahead of the #2884 evidence pre-write — which persists a
+        # caller-supplied prior and clears a non-baseline claim's posterior — so
+        # that pre-write cannot commit ahead of the refusal (measured before
+        # that ordering: a baseline-free claim went `[None, None, None, None]`
+        # → `[7.0, 2.0, None, None]` across the raise).
         if None in affected:
-            _idless = sum(1 for _c in affected if _c is None)
             raise UnaddressableClaimError(
-                f"EP cannot run: {_idless} node(s) in this run's affected set "
-                "carry no `id`. An id-less :Point wired as an operator's claim "
-                "cannot be addressed by EP — "
-                "every claim is keyed on `id` for hydration, for message "
-                "caching and for the posterior write-back — so it can be "
-                "neither computed nor stamped, and no SDK caller can repair it. "
-                "Refused before the run's FIRST write — `run()` collects this "
-                "set ahead of the evidence pre-write — so nothing is "
-                "half-written (#9275). Find and repair the node(s):\n"
+                "EP cannot run: this run's affected set contains a claim id that "
+                "is NULL — a :Point wired as an operator's claim carries no "
+                "`id`. Such a node cannot be addressed by EP (every claim is "
+                "keyed on `id` for hydration, for message caching and for the "
+                "posterior write-back), so it can be neither computed nor "
+                "stamped, and no SDK caller can repair it. Refused before the "
+                "run's first write — `run()` collects this set ahead of the "
+                "evidence pre-write — so no posterior is computed or stamped "
+                "and nothing is half-written (#9275). Find "
+                "and repair the node(s) — ONE NEW id per node, because a single "
+                "literal would mint the duplicate-id shape #7822:\n"
                 "  MATCH (n:Point) WHERE n.id IS NULL "
-                "RETURN n.pointKind, left(coalesce(n.content, ''), 80)\n"
-                "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<uuid>'  "
+                "RETURN id(n), n.pointKind, left(coalesce(n.content, ''), 80)\n"
+                "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<a new uuid>'  "
                 "-- or DETACH DELETE it"
             )
         # Final strip: FAIL-SAFE only — every admission point into `affected`

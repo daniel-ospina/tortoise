@@ -1155,8 +1155,9 @@ def test_duplicate_point_ids_count_once(sdk):
 def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     """#9063: an id-less (or numeric-id) Point is not reported, and cannot hide.
 
-    An id-less node is never STAMPED — it is admitted into EP's affected set and
-    then the run DIES in the ordering (``sorted(affected)``, #9275), and no
+    An id-less node is never STAMPED — `_affected_claims` now REFUSES a run that
+    would consume one (`UnaddressableClaimError`, #9275), which is why it can no
+    longer die in the ordering (``sorted(affected)``) — and no
     caller can name it to ``set_point_baseline`` — so it must never make the
     gate raise a TypeError instead of its CalibrationError (the mixed-type
     ``sorted()`` half), and it must not eat the ``limit=1`` existence probe's
@@ -1496,10 +1497,12 @@ def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
     with pytest.raises(UnaddressableClaimError) as exc:
         sdk.compute_confidence()
     message = str(exc.value)
-    assert "carry no `id`" in message
+    assert "is NULL" in message
     # Actionable, not merely loud: the repair is a graph write because the node
-    # has no id to pass to set_point_baseline.
+    # has no id to pass to set_point_baseline, and it must mint ONE id per node
+    # (a single literal would create the duplicate-id shape #7822).
     assert "SET n.id" in message
+    assert "ONE NEW id" in message
     assert "DETACH DELETE" in message
     assert "#9275" in message
 
@@ -1537,6 +1540,12 @@ def test_an_id_that_is_not_a_string_is_ordered_not_crashed(sdk):
 
     out = sdk._get_dreamer().dream([anchor["id"], 42], warm_start=False)
     assert 42 in out["affected_claims"]
+    # …and on the DEFAULT dream path, which is the one that builds the warm-start
+    # snapshot key `tuple(sorted(input_ids))` — the second site this fix makes
+    # total. Pinned with warm_start=True so deleting that edit reds a test
+    # instead of silently re-introducing the crash on the default path.
+    out_warm = sdk._get_dreamer().dream([anchor["id"], 42], warm_start=True)
+    assert 42 in out_warm["affected_claims"]
     posterior = proj.g.query(
         "MATCH (n:Point {id:42}) RETURN n.posterior_alpha").result_set
     assert posterior[0][0] is not None, (
