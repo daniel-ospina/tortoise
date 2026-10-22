@@ -875,6 +875,19 @@ def test_checker_names_a_non_list_planted_operators(value):
     assert "E4-NUMERATOR" in _failures(_check(receipt))
 
 
+def test_a_duplicate_entry_that_is_not_an_object_is_refused_once():
+    """The `:543` suppression site: an entry that is not an object is refused by
+    its own rule and must NOT also be blamed for covering no rows — the receipt
+    did supply the duplicate, just in an unreadable shape (#9674 round 10)."""
+    receipt = _receipt()
+    receipt["session_results"] = [5]
+    result = _check(receipt)
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
+    assert "not an object" in numerator[0]["detail"]
+
+
 @pytest.mark.parametrize("bad_id", [5, None, ["a"], {"a": 1}])
 def test_checker_names_a_non_string_duplicate_edge_id(bad_id):
     """`results.get(<unhashable>)` raises `TypeError: unhashable type` — the
@@ -885,7 +898,15 @@ def test_checker_names_a_non_string_duplicate_edge_id(bad_id):
         "planted_operators": [{"id": bad_id, "verdict": "edge_correct",
                                "edge_correct": True, "expected_kind": "SUPPORTS"}],
     }]
-    assert "E4-NUMERATOR" in _failures(_check(receipt))
+    result = _check(receipt)
+    assert "E4-NUMERATOR" in _failures(result)
+    # …exactly ONCE. This entry also breaks the coverage arm's view of the
+    # duplicate, so without the `:563` suppression site the receipt is told
+    # both "id 5 is not a string" AND "covers 0 of the 2 graded rows" — the
+    # second misdescribing a shape error as an omission (#9674 round 10).
+    numerator = [r for r in result["rules"]
+                 if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
+    assert len(numerator) == 1, [r["detail"] for r in numerator]
 
 
 def test_checker_names_a_non_string_operator_id_without_crashing():
@@ -955,6 +976,10 @@ def _malformed(mutate):
     ("endpoint ref not a dict",
      lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
      ["endpoints"]["from"].__setitem__(0, 5), "E4-REFS"),
+    # `[5]` is the `:543` suppression site: a non-object ENTRY must be refused
+    # once, not also as "covers 0 of the graded rows" (#9674 round 10). The
+    # exactly-once half is asserted in
+    # `test_a_duplicate_entry_that_is_not_an_object_is_refused_once`.
     ("session_results entry not a dict",
      lambda r: r.__setitem__("session_results", [5]), "E4-NUMERATOR"),
     # `results` itself, and a non-LIST `endpoints.from` — the parametrisation
