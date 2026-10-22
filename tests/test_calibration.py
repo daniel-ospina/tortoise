@@ -1827,11 +1827,14 @@ def test_a_receive_only_out_of_scope_null_input_does_not_refuse(sdk, direction):
     by design (`ep.py`, `_null_input_sends` docstring) and is pinned separately by
     `test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives`.
 
-    The CONTROL is what makes this non-vacuous: the named claim's posterior must
-    be IDENTICAL to the same graph whose third participant is addressable and
-    uncalibrated — "the exempt NULL behaves exactly like a Beta(1,1) sibling",
-    which a "posterior is not None" assertion cannot distinguish (a baseline
-    stamp satisfies it either way).
+    The CONTROL is what makes this non-vacuous: the id-less node (and with it the
+    receive-only factor) is DELETED, the prior reset and the run repeated, and the
+    named claim's two posteriors must be IDENTICAL — i.e. the exempt NULL behaves
+    like nothing at all, which a "posterior is not None" assertion cannot
+    distinguish (a baseline stamp satisfies that either way). This fixture is
+    2-input, so it measures influence and not the n-ary star's `1/(n-1)` dilution;
+    the dilution case is pinned by `test_nary_null_sends_only_where_the_pairs_send`
+    over the engine's own `_factor_pairs`.
     """
     proj, a, _b, ep, factor = _dash_edge_fixture(sdk, direction)
     fwd, bwd = direction_flows(direction)
@@ -1958,8 +1961,12 @@ def test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives(sdk):
     sdk.set_point_baseline(a["id"], 3.0, 1.0)
     proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
     proj.g.query(
+        # `direction` is read from the OPERATOR node (`_affected_factors` Batch
+        # 1), NOT from the member edges — a bare edge property leaves the factor
+        # 'bidirectional', which would make the id-less input a SENDER and this
+        # test would then pass via the FACTOR arm instead of the arm it names.
         "CREATE (op:Point {id:'op-9275-inscope', is_operator:true, "
-        "pointKind:'statement', status:'live'})")
+        "direction:'->', pointKind:'statement', status:'live'})")
     proj.g.query(
         "MATCH (op:Point {id:'op-9275-inscope'}), (a:Point {id:$a}), (n:Point) "
         "WHERE n.id IS NULL "
@@ -1967,6 +1974,8 @@ def test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives(sdk):
         "CREATE (op)-[:IMPL {direction:'->'}]->(n)", params={"a": a["id"]})
 
     ep = sdk._get_ep()
+    # The arm identity is proven on the FACTOR, not inferred from the message:
+    # the same graph's factor must be one the sender-gated arm EXEMPTS.
     scope = None
     with pytest.raises(UnaddressableClaimError) as exc:
         scope = ep._affected_claims(["op-9275-inscope"], 2)
@@ -1978,3 +1987,12 @@ def test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives(sdk):
     assert "AFFECTED SET" in message and "SENDING slot" in message
     with pytest.raises(UnaddressableClaimError):
         ep.run(["op-9275-inscope"])
+
+    # The FACTOR arm exempts this shape (the id-less input only receives under the
+    # operator's `->`), so the refusal above can only be the unconditional
+    # affected-set arm — which is exactly the arm this test names.
+    factors = ep._affected_factors({a["id"]})
+    assert factors, "no factor assembled for the in-scope fixture"
+    star = [f for f in factors if None in f[2]]
+    assert star and star[0][5] == "->", star
+    assert ep._null_input_sends(star[0]) is False
