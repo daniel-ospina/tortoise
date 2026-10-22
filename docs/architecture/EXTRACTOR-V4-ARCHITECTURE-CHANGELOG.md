@@ -827,3 +827,34 @@ from the reach cells by the guard, never hand-counted. §13.8's enumeration name
 `test_the_extractor_document_agrees_on_the_count` holds it there in both directions. The ruling is unchanged:
 **KEEP the stored edges, deferred to post-launch** — the corrected count moves in the direction the ruling
 already bet on, since more read sites make keeping the edge more strongly indicated.
+
+---
+
+## G5's destructive half — the mechanism was re-measured and §4.3 now states it (2026-10-22, `#5333`)
+
+**What changed in the design document.** §4.3 gained a subsection, *G5's destructive half — the target and the
+journaling arm EXIST; the bar, the arbiter and the RULING do not*, and the G5 row plus the *"Two need an owner
+ruling"* sentence now point at it. **The ruling itself is unchanged and still the owner's**: `#5333`'s task 1 is
+open, `DESTRUCTIVE_DISPOSITIONS` stays empty, and the subsection states a proposal rather than a decision.
+
+**Why it was written: a premise in the decision record was false.** `#5059`'s record told the ruling that *"the
+`(Object)` layer has no writer that folds an archive-style relocation — every existing `status` write is a Point
+supersession (`ObjectSuperseded`, `#1350`)"*, and made the missing mechanism the reason the destructive half
+needed its own issue. Measured against the tree, that is not the state:
+
+| the claim | measured 2026-10-22 |
+|---|---|
+| no fold carries an Object relocation | `update_entity(<object>, status=…)` journals `EntityMutated`, the classifier labels it `restatus`, and replay runs the **same** `SET n += $s` on the canonical label (`sdk.py:33016`; `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS`, `:7383`) |
+| every `Object.status` write is a Point supersession | `ObjectSuperseded` folds Objects (`projection/entities.py:4059`, rebuild sweep `projection/__init__.py:14280`) — but it requires a **visible distinct successor** (`commit_ops.py:1408`), so it is the one arm that cannot express relocation-without-successor |
+| the target needs new vocabulary | `archived` is already in `commit_ops.OBJECT_TERMINAL_STATUSES` (`:51`) and the read-exclusion alias (`:59`), routed by `search_engine._status_vocab_for`; nothing writes it (`sdk.py:2955`, *reserved*) |
+| `#3304`'s raw-`SET` tombstone gap is adjacent and open | `#3304` closed 2026-10-06; the remaining gap is narrower and is stated in the subsection — **no Object-status vocabulary guard on the write side**, and it cannot be a closed set because pack-declared lifecycles own their words |
+
+**The correction moves the cost of the authorisation, so it belongs in front of the ruling.** What the ruling
+would buy is now: an applier plus the **Jev arbitration seam that does not exist** (§4.2 — an adapter, a prompt
+and a parser), not a new event type and not a new fold. #5059's *"one thing B needs that does not exist today"*
+is therefore replaced by an accurate list, and nothing in the ledger's invariants (I1/I2, the empty
+`DESTRUCTIVE_DISPOSITIONS`) changed.
+
+**Not changed, deliberately.** No producer for `archived`, no applier, no disposition rung, no Object-status
+vocabulary guard (a closed set would break pack lifecycles — stated in the subsection rather than implemented),
+and no `OVERRIDES:` marker: this is a proposal awaiting a ruling, not a departure from a recorded one.
