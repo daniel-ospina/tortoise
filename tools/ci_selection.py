@@ -1059,10 +1059,7 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # REPLACES the `core` fallback (#2938) — so without this entry the
              # very PR that edits a formula would STOP running the 632-file core
              # pool it selects today, i.e. the fix for one silent drop would create
-             # another. `core` still owns the engine-wide tests that exercise the
-             # EP factors (`test_gmm_proofs.py` and the calibration/projection
-             # suites import `tortoise.quadrature` directly), so the previous
-             # coverage is kept and the docs guard is added on top.
+             # another.
              #   ⚠️ Deliberately NOT the whole fix: `tests/test_ep_quadrature.py`
              # is registered under `ep`, so a quadrature-only diff still drops it —
              # and so do the three other `ep`-registered suites that import the

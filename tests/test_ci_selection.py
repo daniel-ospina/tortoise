@@ -1813,6 +1813,39 @@ def test_e1_e2_evidence_bundle_change_selects_core_not_the_docs_only_return():
         assert "test_e1_e2_measurement.py" in r["test_files"], (path, r)
 
 
+def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
+    # #9607 review P2: the quadrature fix has TWO halves and only ONE of them was
+    # pinned. `SOURCE_PATTERNS["onboarding"]` admits `tortoise/quadrature.py`, so
+    # the /docs formula guard (`test_website_docs_consistency.py`) runs; the
+    # `CORE_ALSO` entry keeps the `core` pool that a named-surface match REPLACES
+    # (#2938). Dropping the `CORE_ALSO` half is SILENT: the guard still runs, so a
+    # reachability assert alone stays green while the core pool disappears
+    # (measured `_sel(["tortoise/quadrature.py"])` -> 681 files with the entry,
+    # 628 without). No generic ratchet covers it — nothing else iterates
+    # `CORE_ALSO`, and every other entry carries its own explicit arm like this.
+    #
+    # Each assert names a file registered ONLY in the surface its half adds
+    # (`load_manifest()`: `test_website_docs_consistency.py` is `onboarding`,
+    # `test_record_schema_placement.py` is `core`), so a lost half cannot be
+    # masked by the other one.
+    #
+    # Mutation check: removing "tortoise/quadrature.py" from `CORE_ALSO` fails the
+    # `core` and `test_record_schema_placement.py` asserts; removing it from
+    # `SOURCE_PATTERNS["onboarding"]` fails the `onboarding` and
+    # `test_website_docs_consistency.py` asserts.
+    r = _sel(["tortoise/quadrature.py"])
+    assert r["full"] is False, r
+    assert "onboarding" in r["surfaces"], r["surfaces"]
+    assert "test_website_docs_consistency.py" in r["test_files"], (
+        "the /docs formula guard is not selected by a change to the module it "
+        "derives its expected factors from", r)
+    assert "core" in r["surfaces"], (
+        "a quadrature-only diff dropped the core pool (CORE_ALSO entry removed?)",
+        r["surfaces"])
+    assert "test_record_schema_placement.py" in r["test_files"], (
+        "the core-registered pool is missing from a quadrature-only selection", r)
+
+
 def test_supabase_control_change_selects_the_org_purge_rpc_guard():
     # #7968 / PR #8179 review P1: `purge_org_control_plane` lives in
     # `tortoise/supabase_control.py`, which IS a SOURCE_PATTERNS["api"] entry —
