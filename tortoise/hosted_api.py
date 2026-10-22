@@ -10321,7 +10321,15 @@ async def _session_login_exchange(
 
 @app.get("/v1/packs")
 async def list_packs(org: dict = Depends(get_current_org_gated)):  # noqa: B008
-    """#318: read-only pack introspection — the tenant's ACTIVE packs.
+    """#318: pack introspection — the tenant's ACTIVE packs.
+
+    NOT a pure read (#9583): this GET can cause a WRITE. The route fronts
+    ``pack_state.get_tenant_packs``, whose self-heal ``ensure_tenant_packs``
+    MERGEs a missing starter ``:PackInstall`` activation (one MERGE per starter
+    namespace, skipped when the graph's pack set was deliberately configured —
+    #2728/#8648). Mirrors the MCP ``packs_list`` correction (#4122/#9575) — and
+    it matters twice on this route, because FastAPI serves this docstring as the
+    OpenAPI operation ``description``, i.e. the string a generated client reads.
 
     Shared pack catalog + per-tenant ``PackInstall`` activation records
     (graph-native install-state in the tenant graph ``org_{org_id}``).
