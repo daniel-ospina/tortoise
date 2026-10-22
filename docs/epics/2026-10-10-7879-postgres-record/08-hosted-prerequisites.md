@@ -192,11 +192,17 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 ### R1 — Arm the record in the hosted deployment · **S** · ops + decision · **BLOCKER**
 
 **What:** set `TORTOISE_RECORD_DSN` on `tortoise-y4mjjq` to the project's **pooler** DSN
-(`postgresql://postgres.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres`, `?sslmode=require`
+(`postgresql://tortoise_record_app.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres`, `?sslmode=require`
 — the shape `.env.example:305` already documents for `TORTOISE_AUDIT_DSN`), add it to the runbook
 Secrets Matrix and to the deploy workflow's secret-provisioning step, and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
 what makes the env tenant pair be refused rather than silently used
 (`tortoise/record_writer.py:577`; setting `=0` only restates the default).
+> ⚠️ **The user is `tortoise_record_app`, NOT `postgres`** — corrected by R6's decision
+> ([`09-record-tenancy-decision.md`](09-record-tenancy-decision.md), #9554). `postgres` is the
+> **table owner** and bypasses RLS, which would make §4's tenancy decision unimplemented for the one
+> path that writes customer data. The role exists after the migration applies (`NOLOGIN`, no
+> password); granting it `LOGIN` + a password is the operator step in
+> `docs/infra-runbook.md` → "The record's connecting role".
 **What it blocks:** **everything that needs a written record.** Until this is set the record receives
 nothing, so no item in this list that depends on reading one is observable in production — R2 is the
 exception, because the schema lands on a dispatch whether or not R1 has happened.
@@ -286,8 +292,25 @@ i.e. exactly the bypass this item exists to ask about. The mechanism is document
 is not taken.
 **What it blocks:** §4's tenancy decision being **provable** for hosted. §4's bypass rule asks
 exactly this question and the tree cannot answer it today.
-**Decision needed:** the role the record connects as, and whether RLS is defence-in-depth or the
-boundary. This is the one item whose *answer* is a policy call rather than an implementation detail.
+
+> **✅ DECIDED (2026-10-22, #9554) — this item's answer is recorded, and the code now implements
+> it.** The record's application path connects as **`tortoise_record_app`** (`NOBYPASSRLS`, not the
+> table owner, not `service_role`), and **RLS is the boundary** — not defence-in-depth. The tenant
+> GUC is `set_config('app.current_org_id', $1, true)`, issued **transaction-locally** by
+> `record_projection.replay()` from the same `org_id` it projects, so the writer cannot disagree
+> with its own connection and the posture is pooler-mode independent. `postgres`/table owner and
+> `service_role` remain bypassing **on purpose** for schema, backup/restore (R8/R9) and the erasure
+> RPC. Full record, with the rejected candidates and the vendor evidence:
+> [`09-record-tenancy-decision.md`](09-record-tenancy-decision.md). Proven by
+> `supabase/tests/20261022000001_record_tenancy_posture.sql` (PGlite) and
+> `tests/test_record_tenancy_guc.py`.
+> ⚠️ **This corrects R1's DSN above**: its `postgres.<ref>` user is the table owner and would
+> bypass RLS. R1 must arm
+> `postgresql://tortoise_record_app.<ref>:…@…pooler.supabase.com:5432/postgres?sslmode=require`
+> (the role's `LOGIN` credential is provisioned per `docs/infra-runbook.md`). R1 is unarmed at the
+> time of writing, so this is a correction to a plan, not a migration.
+
+**Decision needed:** none — decided (above). The remaining work is R1's DSN, which is R1's.
 
 ### R7 — Raw text and the S1 narrative in Postgres (§9.1) · **L** · schema + code · **BLOCKER**
 

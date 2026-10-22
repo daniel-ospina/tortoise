@@ -5,10 +5,14 @@ journal and the Postgres record, and each one is a test here rather than a
 sentence in a design doc:
 
 1. **The seam emits the record's plan — and nothing of its own.** For a fixed
-   record set the executed statement set equals
+   record set the executed statement set equals the tenant prologue
+   (``record_projection.TENANT_GUC_SQL``, one statement, R6) followed by
    ``record_projection.replay_plan(records, …)``. That equality is also the
    duplication pin: a second, hand-written Postgres writer would drift from the
-   fold, and it would show up here as an extra or missing statement.
+   fold, and it would show up here as an extra or missing statement. The
+   prologue is the ONE statement outside the plan, it is named rather than
+   tolerated, and it is the reason RLS can be the record's tenancy boundary at
+   all (see ``test_record_tenancy_guc.py`` for its own pins).
 2. **Idempotent.** Replaying the same records twice emits the same statement
    set, and the second run adds no ``journal_event`` row for an already-applied
    position (``#5285``'s rule, moved to the record).
@@ -142,6 +146,22 @@ def _plan(records: list[dict[str, Any]] | None = None, *,
     )]
 
 
+def _tenant_statement(org: str = ORG) -> tuple[str, list[Any]]:
+    """The seam's ONE statement outside the plan: the transaction-local GUC.
+
+    Named rather than filtered out of the log, so "the seam adds exactly one
+    statement of its own, and it is the tenant" is the assertion instead of
+    "the seam's statements minus whatever it happens to add".
+    """
+    return (rp.TENANT_GUC_SQL, [org])
+
+
+def _executed(records: list[dict[str, Any]] | None = None, *,
+              first_seq: int = 1, org: str = ORG) -> list[tuple[str, list[Any]]]:
+    """What a write must execute, in order: the tenant, then the plan."""
+    return [*[_tenant_statement(org)], *_plan(records, first_seq=first_seq)]
+
+
 def _armed(conn: FakeConnection | None = None, **kwargs: Any) -> rw.RecordWriter:
     """A writer armed with a fixed DSN whose driver hook yields `conn`."""
     target = conn if conn is not None else FakeConnection()
@@ -164,29 +184,35 @@ def test_the_seam_emits_exactly_the_record_plan() -> None:
     """`replay_plan` is the ONE declaration of journal→record; the seam adds none.
 
     An extra statement here is a second fold; a missing one is a record the
-    boundary silently drops. The assertion is equality over the WHOLE set.
+    boundary silently drops. The assertion is equality over the WHOLE set — the
+    tenant prologue first (R6), then the plan, nothing else.
     """
     conn = FakeConnection()
     result = _armed(conn).write(RECORDS, org_id=ORG, graph_id=GRAPH)
 
-    assert conn.statements() == _plan()
+    assert conn.statements() == _executed()
     assert result.events == len(RECORDS)
     # `statements` counts RECORD mutations (the projection's own definition:
     # every executed statement that is not a journal-position write). Derived
     # from the connection's log, not from the plan, so the count is pinned
-    # independently of the number it is compared against.
-    assert result.statements == (len(conn.executed) - len(conn.journal_positions))
+    # independently of the number it is compared against. The tenant prologue
+    # is not a record mutation, so it is subtracted — exactly one of it.
+    assert conn.statements().count(_tenant_statement()) == 1
+    assert result.statements == (
+        len(conn.executed) - len(conn.journal_positions) - 1)
     assert result.statements > 0
     # The plan is one journal position per record, always.
     assert len(conn.journal_positions) == len(RECORDS)
 
 
-def test_every_executed_statement_comes_from_the_plan_in_order() -> None:
-    """No statement the seam invented, none reordered out of the plan."""
+def test_every_executed_statement_is_the_tenant_or_the_plan_in_order() -> None:
+    """No statement the seam invented beyond the prologue, none reordered."""
     conn = FakeConnection()
     _armed(conn).write(RECORDS, org_id=ORG, graph_id=GRAPH)
-    planned = [sql for sql, _ in _plan()]
-    assert [sql for sql, _ in conn.statements()] == planned
+    expected = [sql for sql, _ in _executed()]
+    assert [sql for sql, _ in conn.statements()] == expected
+    # …and the prologue is FIRST, before anything the plan would scope.
+    assert conn.statements()[0][0] == rp.TENANT_GUC_SQL
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -402,7 +428,7 @@ def test_an_injected_connection_is_the_callers_to_close() -> None:
     result = _armed().write(RECORDS, org_id=ORG, graph_id=GRAPH, conn=injected)
     assert result.connection is None
     assert injected.closed == 0
-    assert injected.statements() == _plan()
+    assert injected.statements() == _executed()
 
 
 def test_a_seam_opened_connection_is_handed_back_for_the_caller_to_commit() -> None:
@@ -526,7 +552,7 @@ def test_the_watermark_is_the_callers_journal_offset() -> None:
     conn = FakeConnection()
     result = _armed(conn).write(RECORDS, org_id=ORG, graph_id=GRAPH, first_seq=41)
 
-    assert conn.statements() == _plan(first_seq=41)
+    assert conn.statements() == _executed(first_seq=41)
     assert sorted(p[2] for p in conn.journal_positions) == [41, 42, 43]
     assert result.first_seq == 41
     assert result.last_seq == 43
@@ -626,7 +652,7 @@ def test_the_one_call_form_is_the_same_contract() -> None:
     writer = rw.RecordWriter(dsn="postgresql://record/db", connect=lambda _d: conn)
     result = rw.write_records(RECORDS, org_id=ORG, graph_id=GRAPH, writer=writer)
     assert result.applied is True
-    assert conn.statements() == _plan()
+    assert conn.statements() == _executed()
     assert (conn.commits, conn.rollbacks) == (0, 0)
 
 
@@ -686,10 +712,25 @@ def _assert_binds_tenant(statements: list[tuple[str, list[Any] | None]],
     accused of escaping it. `_assert_binds` maps each column to its own site,
     so PREDICATE order is not part of the rule (a layer INSERT's column-list
     order is pinned separately, positionally).
+
+    The tenant prologue (R6) is excluded from that fold rule and pinned on its
+    OWN terms instead: it is not a layer statement and names no column, because
+    the tenant IS the value it binds — `set_config('app.current_org_id', <org>)`.
+    So the rule it must satisfy is different and stricter: present exactly once,
+    first, carrying THIS call's org id and no other. Filtering it out silently
+    would be the hole; asserting it explicitly is why the seam cannot set a GUC
+    that disagrees with the rows it is about to write.
     """
     _assert_binds(
-        [rp.Statement(sql, tuple(params or ())) for sql, params in statements],
+        [rp.Statement(sql, tuple(params or ()))
+         for sql, params in statements if sql != rp.TENANT_GUC_SQL],
         tenant,
+    )
+    prologue = [list(params or ()) for sql, params in statements
+                if sql == rp.TENANT_GUC_SQL]
+    assert prologue == [[tenant[0]]], (
+        "the tenant prologue must appear exactly once and bind THIS call's org "
+        f"id — got {prologue!r} for tenant {tenant[0]!r}"
     )
 
 

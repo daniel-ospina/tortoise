@@ -2106,6 +2106,20 @@ surfaces:
   # graph, no URI and no carve-out registration. Its live-engine half is #9188,
   # not here.
   - test_record_writer_seam.py
+  # #9554 (R6) — the record's TENANCY POSTURE on the CODE side: the GUC the
+  # production path sets IS the one the record policies read (compared against
+  # the SQL, not restated), it is transaction-local (`is_local=true`), it
+  # carries the same `org_id` the plan writes (S2), and the tenancy migration
+  # covers every table in `THE_RECORD_TABLES` — so the next record table cannot
+  # arrive with an RLS state the recorded decision does not explain. Registered
+  # against `core` for the same reason as the two entries above: BOTH its inputs
+  # are `core`-selected (`tortoise/record_projection.py` matches no named
+  # SOURCE_PATTERN, and the record migrations under `supabase/migrations/` carry
+  # their own `CORE_ALSO` rows in `tools/ci_selection.py`). DB-free by
+  # construction; its DATABASE half is the PGlite suite
+  # `supabase/tests/20261022000001_record_tenancy_posture.sql`, registered in
+  # `supabase/tests/pglite/validate.mjs`.
+  - test_record_tenancy_guc.py
   # #7968 / PR #8179 review P1: guards the org-erasure wiring — `purge_org_control_plane`
   # must route the organizations delete through the `purge_org_record` RPC
   # (migration 20261012000005), which sets app.record_journal_purge so the

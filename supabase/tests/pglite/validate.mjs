@@ -380,6 +380,16 @@ const suites = [
   // is not named here never runs, and "the suite exists" is then mistaken for
   // "the suite passes". Add the entry in the same commit as the file.
   '20261012000001_record_schema.sql',  // #7968
+  // #9554 (R6) — the record's TENANCY POSTURE: the application role's attributes
+  // and grants, the `*_app_tenant` policies (USING **and** WITH CHECK), a
+  // cross-tenant read returning 0 rows as that role, and the two documented
+  // failure directions of a missing `app.current_org_id` (silent on read, loud
+  // on write). Runs after the schema suite because it re-seeds its own tenants
+  // and purges them through `purge_org_record` at the end. NOTE: this list is
+  // EXPLICIT, not a glob — a suite file that is not named here never runs, and
+  // "the suite exists" is then mistaken for "the suite passes". Add the entry in
+  // the same commit as the file.
+  '20261022000001_record_tenancy_posture.sql',  // #9554
   // #4550 — `recover_team_key`'s cap count AND revoke-target scan exclude
   // EXPIRED-but-unrevoked rows, driven against the REAL function. NOTE: this
   // list is EXPLICIT, not a glob — a suite file that is not named here never

@@ -145,6 +145,8 @@ __all__ = [
     "JOURNAL_EVENT_TYPES",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
+    "TENANT_GUC",
+    "TENANT_GUC_SQL",
     "THE_RECORD_TABLES",
     "RecordProjectionError",
     "RefusedJournalOperation",
@@ -178,6 +180,25 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # `props` tail and `cache_projection` would not project it.
     "20261018000001_record_point_money_value_2782.sql",
 )
+
+#: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
+#: One name, one definition: the record migrations read it and
+#: :data:`TENANT_GUC_SQL` is the only place production code sets it. The two
+#: halves are compared in `tests/test_record_tenancy_guc.py`, because a renamed
+#: GUC makes every policy read NULL — which is zero rows and no error.
+TENANT_GUC = "app.current_org_id"
+
+#: The ONE statement that establishes the record's tenant on a connection.
+#: `is_local` is the third argument and is deliberately `true` — transaction
+#: scoped, never session scoped (R6). A session `SET` is the failure mode, not
+#: the mechanism: on the shared pooler's transaction mode (:6543) session state
+#: does not survive between transactions, so the same code would silently read
+#: zero rows; on session mode (:5432, R1's DSN today) it would survive onto a
+#: pooled connection reused by the NEXT tenant, which returns another tenant's
+#: rows instead. Transaction-local is correct under both, so the DSN can move
+#: without a code change. Bound as a parameter: an org id is never interpolated
+#: into SQL.
+TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 
 #: Where the schema lives when this module is INSTALLED rather than checked out.
 #: `supabase/migrations` is mapped into the wheel as the `tortoise.
@@ -1737,10 +1758,39 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     ``position=seq is not None`` and layer 1 is populated by production traffic,
     not only by a replay. ``True`` (the default) keeps every caller that
     predates the parameter byte-identical.
+
+    THE TENANT GUC (R6). The FIRST statement executed is
+    :data:`TENANT_GUC_SQL` — ``set_config('app.current_org_id', $1, true)`` —
+    carrying the SAME ``org_id`` the plan is about to project. That is the whole
+    mechanism by which RLS can be the record's tenancy boundary rather than a
+    decoration, and it is placed HERE rather than in a caller for one reason:
+    the org id the policies compare against and the org id written into the rows
+    are then one value, so they cannot disagree in silence (test-design surface
+    S2). Two properties follow, and both are pinned in
+    ``tests/test_record_tenancy_guc.py``:
+
+    - it is TRANSACTION-LOCAL (``is_local=true``), so it neither survives the
+      transaction nor depends on a session surviving a pooler — a session ``SET``
+      under transaction pooling reads as NULL, which the ``USING`` predicates
+      turn into zero rows rather than an error;
+    - it runs AFTER the plan is materialized, so the totality guarantee is
+      untouched: an undeclared record type still raises having executed no
+      statement at all.
+
+    ⚠️ WRITE ON ``true``. A caller-supplied ``conn`` in autocommit mode makes
+    ``set_config(..., true)`` warn and set nothing, and the projection's writes
+    then fail the ``WITH CHECK`` predicate instead of landing unscoped — loud,
+    which is the intended direction. The seam's own connections are not in
+    autocommit (``_default_connect`` never turns it on), so the live path is
+    unaffected.
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position)
     cursor = conn.cursor()
+    # The tenant, before anything it scopes. NOT part of `plan`: the plan stays
+    # the pure journal→record declaration, and this statement is the session
+    # context the plan is applied in.
+    cursor.execute(TENANT_GUC_SQL, (org_id,))
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
     report = ReplayReport(events=len(records), statements=0)

@@ -382,8 +382,8 @@ SELECT tests.assert(
   (SELECT count(*) FROM pg_policies
    WHERE schemaname='public'
      AND tablename IN ('node_identity','journal_event','source','event','session',
-                       'object','subject','point','relation')) = 18,
-  '7968: every new table carries the org-read policy and the service_role policy');
+                       'object','subject','point','relation')) = 27,
+  '7968: every new table carries the org-read policy, the service_role policy and (R6) the app role''s tenant policy');
 
 -- auth.rsuperuser-only: SET ROLE then read with a DIFFERENT org GUC -> nothing.
 SET ROLE service_role;

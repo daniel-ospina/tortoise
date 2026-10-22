@@ -2587,6 +2587,55 @@ run (#2706).
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
+| TORTOISE_RECORD_DSN | ✅ **when the record is armed** (R1) — the Postgres record's DSN. ⚠️ Its **user must be `tortoise_record_app`**, never `postgres`/`service_role` (see below) | — | — |
+
+### The record's connecting role (R6 decision, 2026-10-22, #9554)
+
+The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
+application path connects as a role that does not bypass it. The role, the policies and the reason
+are decided in
+[`docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`](epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md);
+this section is the **operator procedure** that goes with it.
+
+**The split.** Migration `20261022000001_record_tenancy_role_and_guc.sql` creates the role
+(`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it exactly the record tables'
+`SELECT/INSERT/UPDATE/DELETE` plus a `*_app_tenant` policy on each. It ships **no password** — a
+credential in a migration is a secret in git, re-minted on every deploy.
+
+**1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
+keeps the plaintext out of the statement and off the logs):
+
+```sql
+ALTER ROLE tortoise_record_app LOGIN;
+\password tortoise_record_app      -- psql; or set it from the dashboard/your password manager
+```
+
+**2. Arm the DSN** (R1) with that role — for the shared pooler this is
+`<role>.<project-ref>` as the user:
+
+```
+TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+**Why not `postgres`.** The `postgres` user is the **table owner**: owners bypass RLS (unless
+`FORCE ROW LEVEL SECURITY` is set) and a superuser bypasses it regardless, so that DSN would make
+§4's *"rows scoped by tenant via row-level security"* false for the only path that writes customer
+data — while every RLS artifact stayed in place looking true. `service_role` is `BYPASSRLS` for the
+same reason. Both remain correct for what needs them: schema, **backup and restore** (R8/R9 — and
+`pg_dump`/restore must use the **direct** connection, never the pooler), and the org-erasure RPC.
+
+**3. Pooler mode does not change the answer.** Port `5432` is the shared pooler in **session** mode,
+`6543` is **transaction** mode. `record_projection.replay()` sets the tenant GUC
+**transaction-locally** (`set_config('app.current_org_id', $1, true)`) as the first statement of the
+write, so it never depends on a session surviving a pooler: moving the DSN between modes needs no
+code change. ⚠️ A **session** `SET` would be wrong in both directions — dropped between transactions
+on `6543` (a silent zero-row read) and carried onto a pooled connection reused by the next tenant on
+`5432` (another tenant's rows).
+
+**If a record read ever returns nothing**, check `current_setting('app.current_org_id')` first: a
+missing GUC reads as **zero rows and no error**, while an unscoped **write** raises `42501`. The
+asymmetry is deliberate and pinned in
+`supabase/tests/20261022000001_record_tenancy_posture.sql`.
 
 ### Runtime Config (non-secret)
 
