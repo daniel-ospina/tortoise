@@ -388,7 +388,18 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
     run_dir = Path(state.data.get("run_dir", DEFAULT_RUN_DIR))
     cp = _default_checkpoint(step.runner)
     out = _default_report(step.runner)
-    common = [*extra, "--checkpoint", str(cp), "--output", str(out)]
+    # #8486: EVERY v2 run step arms the BELIEF LAYER (post-ingest promotion of
+    # the draft extraction points/operators + a real EP pass). Without it the
+    # v2 graph is EP-INERT — ``tortoise/ep.py``'s ``_live_only`` filter skips
+    # every draft point, so each claim's confidence reads the neutral 0.50 of a
+    # Beta(1,1) prior that was never measured (#2598) — and the run would
+    # publish a number in which Tortoise's epistemic layer contributes
+    # nothing. Every runner below builds a ``--ingest-mode v2`` command, so the
+    # arm is valid on all five; the runner records the resulting posture in the
+    # report methodology and the sealed receipt refuses a completed run
+    # without it.
+    common = [*extra, "--activate-beliefs",
+              "--checkpoint", str(cp), "--output", str(out)]
 
     if step.runner == "pilot":          # step 3: type-stratified pilot
         # #2516 (C1): the pilot is a TYPE-STRATIFIED slice, NOT the split's
