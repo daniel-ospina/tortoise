@@ -321,6 +321,46 @@ _CAPSTONE_TOTAL_RE = re.compile(
     re.S,
 )
 
+#: The routing index's row for this epic (#7879) — the file a lane reads to find
+#: out what EXISTS without re-deriving it, so its census is a claim like any
+#: other and is pinned against the migrations on disk (#9638 review P3: the PR
+#: that created the tenth record table left this row saying "9 record tables"
+#: and "no narrative/raw-text table (0)").
+_INDEX_DOC = REPO_ROOT / "docs" / "00_index.md"
+_INDEX_RECORD_ROW_MARKER = "**Hosted prerequisites for the Postgres record (epic #7879)**"
+#: `**10 record tables + 3 procedural views**`
+_INDEX_CENSUS_RE = re.compile(
+    r"\*\*(?P<tables>\d+) record tables \+ (?P<views>\d+) procedural views\*\*"
+)
+#: The record's own migrations: a 14-digit stamp and the `record_` noun. This
+#: deliberately does NOT use a bare `*record*` glob — `0014_metering_records.sql`
+#: is metering, not the record, and counting it would make the census wrong in
+#: the other direction.
+_RECORD_MIGRATION_RE = re.compile(r"^\d{14}_record_.*\.sql$")
+_CREATE_TABLE_RE = re.compile(r"CREATE TABLE IF NOT EXISTS public\.([a-z_]+)")
+_CREATE_VIEW_RE = re.compile(r"CREATE (?:OR REPLACE )?VIEW public\.([a-z_]+)")
+
+
+def record_tables_and_views() -> tuple[dict[str, str], dict[str, str]]:
+    """`({table: migration}, {view: migration})` read off the migrations on disk.
+
+    DERIVED, not restated: a hand-copied list is a second declaration of the
+    schema, and the second declaration is the one that goes stale — which is
+    exactly how `docs/00_index.md` came to say "9 record tables" while ten
+    existed.
+    """
+    tables: dict[str, str] = {}
+    views: dict[str, str] = {}
+    for path in sorted((REPO_ROOT / "supabase" / "migrations").glob("*.sql")):
+        if not _RECORD_MIGRATION_RE.match(path.name):
+            continue
+        text = path.read_text(encoding="utf-8")
+        for match in _CREATE_TABLE_RE.finditer(text):
+            tables.setdefault(match.group(1), path.name)
+        for match in _CREATE_VIEW_RE.finditer(text):
+            views.setdefault(match.group(1), path.name)
+    return tables, views
+
 
 def test_no_stated_total_disagrees_with_the_pin():
     """Every prose restatement of the totals moves WITH the table (#8976 P2).
@@ -447,6 +487,76 @@ def test_the_four_layers_have_tables():
     assert "CREATE TABLE IF NOT EXISTS public.procedural" not in (procedural), (
         "the procedural layer must not become a table"
     )
+
+
+def test_the_routing_index_census_matches_the_record_migrations():
+    """`docs/00_index.md`'s table census must be what the migrations HAVE (#9638 P3).
+
+    The index's #7879 row is the routing surface a lane reads to learn what
+    exists in the record *without re-deriving it*; it states a census ("N record
+    tables + M procedural views") and, until this pin, a NEGATIVE ("no
+    narrative/raw-text table (0)"). Both went false in the one direction the
+    index exists to prevent: `20261023000001_record_session_narrative.sql`
+    created the tenth table and exactly the narrative home the row said did not
+    exist, so the file that indexes `08-hosted-prerequisites.md` contradicted the
+    doc it indexes.
+
+    RED on the pre-fix text — measured: 9 stated vs 10 derived (`{event,
+    journal_event, node_identity, object, point, relation, session,
+    session_narrative, source, subject}`), and the negative sentence still
+    present. The fix is the row's own one-liner, not a change here.
+
+    Non-vacuity of the derivation: the counterfactual is not a re-typed number.
+    `record_tables_and_views()` reads the `CREATE TABLE`/`CREATE VIEW` statements
+    off the record migrations on disk, so deleting the narrative migration would
+    drop the derivation to 9 — and the row would then be WRONG in the other
+    direction, which is why the assertion is equality and not `>=`.
+    """
+    tables, views = record_tables_and_views()
+    rows = [
+        line
+        for line in _INDEX_DOC.read_text(encoding="utf-8").splitlines()
+        if _INDEX_RECORD_ROW_MARKER in line
+    ]
+    assert len(rows) == 1, (
+        f"docs/00_index.md has {len(rows)} rows for the record's hosted "
+        "prerequisites; the census pin needs exactly one to read "
+        f"(marker {_INDEX_RECORD_ROW_MARKER!r})"
+    )
+    row = rows[0]
+
+    stated = _INDEX_CENSUS_RE.search(row)
+    assert stated, (
+        "docs/00_index.md's #7879 row no longer states its census in the pinned "
+        "dialect (`**N record tables + M procedural views**`) — restate it rather "
+        "than deleting the phrase: this pin reads it, and without it the row's "
+        "claims about what exists become uncheckable"
+    )
+    assert int(stated.group("tables")) == len(tables), (
+        f"docs/00_index.md says {stated.group('tables')} record tables, the "
+        f"migrations define {len(tables)}: {sorted(tables)}. Update the row's "
+        "count (and name a NEW table's migration beside it if it falls outside "
+        "the `20261012*_record_*.sql` glob it cites)"
+    )
+    assert int(stated.group("views")) == len(views), (
+        f"docs/00_index.md says {stated.group('views')} procedural views, the "
+        f"migrations define {len(views)}: {sorted(views)}"
+    )
+
+    # The NEGATIVE, which is the half that actually misleads: a reader asking
+    # "is there a home for raw text / the narrative?" was told no.
+    negatives = [
+        phrase
+        for phrase in ("no narrative/raw-text table", "no narrative table")
+        if phrase in row
+    ]
+    if "session_narrative" in tables:
+        assert not negatives, (
+            f"docs/00_index.md still says {negatives} while "
+            f"{tables['session_narrative']} defines public.session_narrative — "
+            "the index tells a lane the home does not exist, in the file that "
+            "exists to stop it re-deriving what the map already holds"
+        )
 
 
 def test_primary_properties_have_a_column():
