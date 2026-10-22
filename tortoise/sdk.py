@@ -11078,10 +11078,17 @@ class TortoiseSDK:
         entities/points it references exist (ordering contract) — ``pt_`` refs
         → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
         entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
-        full provenance) + the ``_fold_object_superseded`` status fold. Every
-        fold miss/skip/failure is surfaced through the shared meta
-        ``warnings`` channel — supersession application is best-effort and
-        never a silent drop (and never fails capture).
+        full provenance) + the ``_fold_object_superseded`` status fold. Fold
+        misses/skips/failures are surfaced through the shared meta
+        ``warnings`` channel under the BOUNDED contract of #5654: the first
+        ``commit_ops._MAX_SUPERSESSION_WARNS`` (20) per-record warnings are
+        appended verbatim; any beyond that budget are counted but NOT
+        appended individually — the call then closes with ONE summary entry
+        carrying the batch size, the true warning total and the withheld
+        count. An over-budget batch therefore stays SIZED, but a past-budget
+        skip is not individually identified (and the write is unaffected:
+        every record is still attempted). Supersession application is
+        best-effort and never fails capture.
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract
@@ -11711,8 +11718,14 @@ class TortoiseSDK:
         # #2164: supersessions — client-derived records (the deterministic
         # channel for the Object status fold; §6b parity). pt_ → supersede()
         # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
-        # entities exist (ordering contract). Warnings ride meta — never a
-        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        # entities exist (ordering contract). Warnings ride meta under the
+        # helper's BOUNDED #5654 contract: the first
+        # ``_MAX_SUPERSESSION_WARNS`` (20) per-record warns land in
+        # meta["warnings"] individually, the remainder are counted and
+        # reported in ONE summary entry (batch size + true warning total +
+        # withheld count) — so nothing is dropped from the WRITE, but past
+        # the budget a skip is not named individually. Best-effort — never
+        # fail capture (hosted §6b rule).
         try:
             from tortoise.commit_ops import (
                 apply_supersessions,
@@ -37624,6 +37637,12 @@ class TortoiseSDK:
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
+
+        A ``Source`` target that resolves to the SAME node as ``source_url``
+        writes NO ``references`` self-loop (#5151): since D10 a document is a
+        ``:Source``, so equal keys collapse source and entity onto one node, and
+        the guard lives in the projection writer where the edge is written — the
+        ``:Source`` itself is still merged, unchanged.
         """
         proj = self._get_proj()
         # ── #5475 (residual): the SECOND writer of ``sourceKind`` ──

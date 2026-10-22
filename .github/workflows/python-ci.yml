@@ -3315,10 +3315,12 @@ jobs:
     # YAML-level parsers, which never evaluate expressions at all.
     #
     # The pinned actionlint image is invoked directly and deliberately NOT via
-    # scripts/check-workflow-actionlint.sh: `scripts` is a tracked symlink
-    # (git mode 120000) pointing outside this repository, so that file does not
-    # exist in a CI checkout, and its default scope also names a templates/
-    # tree this repository does not have (it exits 3 at the glob).
+    # scripts/check-workflow-actionlint.sh: `scripts` is a MACHINE-LOCAL pointer,
+    # gitignored and NOT tracked since #9475 (it is materialised per machine from
+    # $AGENT_INFRA_PATH by tools/link_agent_infra_scripts.py — a git symlink blob
+    # cannot hold a variable), so that file does not exist in a CI checkout, and its
+    # default scope also names a templates/ tree this repository does not have (it
+    # exits 3 at the glob).
     #
     # Both extensions are linted: GitHub loads either `.yml` or `.yaml`, so a
     # `*.yml`-only glob would silently skip a `.yaml` workflow.
