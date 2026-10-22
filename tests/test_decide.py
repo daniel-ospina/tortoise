@@ -855,3 +855,112 @@ class TestIssue6671ReviewGaps:
         assert census.get("_mitigations") == 2, (
             "a polluted bridge was only partly damped: " + str(census))
         assert "on 2 operators" in capsys.readouterr().out
+
+
+    def test_rerun_without_a_mitigation_still_prints_a_ranking(self, sdk):
+        """#6671's fix made the writes idempotent, so a re-run dirties nothing —
+        and the no-arg EP pass then returns a 0-iteration "success" with NO
+        posteriors. Before the explicit-factors fallback the second run printed
+        no table at all while still reporting `converged=True`."""
+        decide = _load_decide_script()
+        data = {
+            "context": "issue-6671-rerun",
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [["crit:1", "IMPL", "opt:a"], ["crit:1", "NAND", "opt:b"]],
+            "truth_edges": [{"source": "crit:1", "op_type": "NAND",
+                             "target": "opt:b"}],
+            "relevance_edges": [],
+        }
+
+        run1 = decide.file_decision(sdk, data)
+        run2 = decide.file_decision(sdk, data)
+
+        assert run1["confidences"], "no ranking on the first run"
+        assert run2["confidences"] == pytest.approx(
+            run1["confidences"], abs=1e-6), (
+            f"the re-run lost or moved the ranking: {run1['confidences']} -> "
+            f"{run2['confidences']}")
+
+    def test_labelled_relevance_edge_scopes_the_dampening(self, sdk):
+        """Two labels over one triple are two claims; a mitigation that names
+        `supports` must not weaken the `refutes` bridge, and must not mint a
+        claim the input never declared."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        supports = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+                                       label="supports")
+        refutes = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+                                      label="refutes")
+
+        data = {
+            "context": "issue-6671-label",
+            "options": {}, "criteria": {}, "findings": {}, "edges": [],
+            "truth_edges": [],
+            "relevance_edges": [{"source": crit["id"], "op_type": "IMPL",
+                                 "target": opt["id"], "reason": "weak",
+                                 "strength": 0.20, "label": "supports"}],
+        }
+        decide.file_decision(sdk, data)
+
+        mitigated = {row[0] for row in sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m) "
+            "RETURN op.id").result_set}
+        assert supports["id"] in mitigated, "the named bridge was not damped"
+        assert refutes["id"] not in mitigated, (
+            "a mitigation scoped to 'supports' damped the 'refutes' claim")
+        census = _operator_census(sdk)
+        assert census.get("IMPL") == 2, (
+            f"the relevance edge minted a claim the input never declared: {census}")
+
+    def test_unknown_status_is_ranked_and_not_misreported(self, sdk, capsys):
+        """EP's rule is not draft AND not terminal — any OTHER status is ranked
+        at full weight, so a "this surface does not rank it" note would be
+        false."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) SET p.status = 'pending'",
+            params={"i": op["id"]})
+
+        data = {
+            "context": "issue-6671-status",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        result = decide.file_decision(sdk, data)
+
+        elected = [row for row in result["operators"] if row["op_type"] == "IMPL"]
+        assert elected and elected[0]["id"] == op["id"], elected
+        out = capsys.readouterr().out
+        assert "does not rank" not in out and "NON-LIVE" not in out, (
+            "a ranked operator was reported as unrankable: " + out)
+
+    def test_outdated_flag_is_reported_not_silently_ranked(self, sdk, capsys):
+        """`outdated=true` is the legacy dead marker: EP excludes it even with
+        status=live (`tortoise.live.is_terminal_status(status, outdated)`), so
+        the run must say so rather than silently electing a dead bridge."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) SET p.outdated = true",
+            params={"i": op["id"]})
+
+        data = {
+            "context": "issue-6671-status",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        decide.file_decision(sdk, data)
+
+        out = capsys.readouterr().out
+        assert "outdated=true" in out, (
+            "an EP-excluded (outdated) bridge was elected silently: " + out)

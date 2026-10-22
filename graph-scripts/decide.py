@@ -128,16 +128,18 @@ def _find_operators(proj, op_type: str, source_id: str, target_id: str,
     at full weight, which is the asymmetry #6671 measured.
 
     ``any_label=True`` drops the label arm of the identity. That is the
-    RELEVANCE-edge posture: a mitigation says "this criterion matters less for
-    that option", so it damps every bridge the caller names by
-    (source, op_type, target) — including a labeled one the same decision filed
-    without repeating the label — instead of minting a parallel unlabeled
-    operator to damp.
+    UNLABELLED-relevance posture: a mitigation that does not name a Layer-3
+    predicate says "this criterion matters less for that option", so it damps
+    every bridge the caller names by (source, op_type, target) — including a
+    labeled one the same decision filed without repeating the label — instead of
+    minting a parallel unlabeled operator to damp.
 
-    The status is returned because a reused operator may be `draft`, and EP
-    excludes draft operators (#780) — reusing one silently would drop the
-    decision's own edge from the ranking (see `_resolve_or_create_operator`).
-    A status-less operator reads as `live`, the graph's own default.
+    The status AND the legacy ``outdated`` flag are returned because EP drops
+    both: `tortoise.live._live_only` is "not draft AND not terminal(status,
+    outdated)". Electing a copy EP ignores silently would drop the decision's
+    own edge from the ranking, so the caller needs both to classify the bridge
+    (`is_draft_status` / `is_terminal_status`). A status-less operator reads as
+    `live`, the graph's own default.
     """
     label_arm = "" if any_label else \
         "AND coalesce(op.label, '') = coalesce($label, '') "
@@ -150,11 +152,11 @@ def _find_operators(proj, op_type: str, source_id: str, target_id: str,
         "-[ro]->(t {id:$tid}) "
         "WHERE op.op_type = $op AND ri.idx = 0 AND ro.idx > 0 "
         + label_arm +
-        "RETURN op.id, op.status",
+        "RETURN op.id, op.status, coalesce(op.outdated, false)",
         params={"sid": source_id, "tid": target_id, "op": op_type,
                 "label": label},
     ).result_set
-    return [(row[0], row[1] or "live") for row in rows]
+    return [(row[0], row[1] or "live", bool(row[2])) for row in rows]
 
 
 def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
@@ -165,6 +167,9 @@ def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
     """Write the edge idempotently — ONE operator per bridge, always.
 
     Returns ``(operator_id, reused, note)``; ``note`` is a warning to print.
+    The elected bridge is the one EP actually reads whenever one exists — EP's
+    rule is `tortoise.live._live_only`: not draft, not terminal (the status
+    deny-list OR the legacy ``outdated=true`` flag).
 
     The existing operator is elected WHATEVER its status, and the status is
     reported. That is the decision recorded on #6671's scoping: filing a live
@@ -186,32 +191,37 @@ def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
     existing = _find_operators(proj, op_type, source_id, target_id, label,
                                any_label=any_label)
     if existing:
+        from tortoise.live import is_draft_status, is_terminal_status
+
+        def _ranked(candidate: tuple[str, str, bool]) -> bool:
+            """EP's own rule (`tortoise.live._live_only`)."""
+            _oid, _status, _outdated = candidate
+            return (not is_draft_status(_status)
+                    and not is_terminal_status(_status, _outdated))
+
         # Prefer the copy EP actually reads. On a graph polluted by an earlier
-        # run, the copies are identical bridges and the storage order is
-        # arbitrary; electing a draft while a live copy sits on the same bridge
-        # would make the run say (and, under --context-free, RANK) the wrong
-        # one. Still ONE bridge — no twin is filed, whichever copy is elected.
-        live = [pair for pair in existing if pair[1] == "live"]
-        op_id, status = (live or existing)[0]
+        # run the copies are identical bridges and storage order is arbitrary;
+        # electing one EP ignores (draft / terminal / outdated) while a ranked
+        # copy sits on the same bridge would make the run report — and under
+        # --context-free RANK — the wrong one. Still ONE bridge: no twin.
+        op_id, status, outdated = ([pair for pair in existing if _ranked(pair)]
+                                   or existing)[0]
         cache[key] = op_id
         note = None
-        if status != "live":
-            from tortoise.live import is_draft_status, is_terminal_status
-            if is_draft_status(status):
-                note = (f"elected operator {op_id}, status=draft — EP excludes "
-                        "draft operators (#780), so this bridge does not "
-                        "participate in the ranking until it is promoted "
-                        "(update_point(id, status='live')); it is NOT "
-                        "duplicated (#6671)")
-            elif is_terminal_status(status):
-                note = (f"elected operator {op_id}, status={status} — a "
-                        "TERMINAL status; EP excludes it (#2422) and "
-                        "update_point cannot resurrect it, so this bridge stays "
-                        "out of the ranking; it is NOT duplicated (#6671)")
-            else:
-                note = (f"elected operator {op_id}, status={status} — a status "
-                        "this read surface does not rank (#780/#2422); the "
-                        "bridge is reused, not duplicated (#6671)")
+        if is_draft_status(status):
+            note = (f"elected operator {op_id}, status=draft — EP excludes "
+                    "draft operators (#780), so this bridge does not "
+                    "participate in the ranking until it is promoted "
+                    "(update_point(id, status='live')); it is NOT duplicated "
+                    "(#6671)")
+        elif is_terminal_status(status, outdated):
+            why = (f"status={status}" if status != "live" else "")
+            if outdated:
+                why = (why + " and " if why else "") + "outdated=true"
+            note = (f"elected operator {op_id}, {why} — a TERMINAL/excluded "
+                    "bridge; EP does not rank it (#2422) and update_point "
+                    "cannot resurrect it, so it stays out of the ranking; it is "
+                    "NOT duplicated (#6671)")
         return op_id, True, note
     op = sdk.create_operator(op_type, source_id, [target_id], label=label)
     cache[key] = op["id"]
@@ -340,6 +350,15 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         # silently weaken a claim the caller did not name). Without a label the
         # edge damps every bridge on the triple.
         any_label = label is None
+        if not any_label and not _find_operators(
+                proj, op_type, _resolve(src), _resolve(tgt), label):
+            # A relevance edge is a mitigation, never a claim: if the labelled
+            # bridge it names does not exist, minting one would file a second
+            # operator on the triple (the #6671 shape) and damp a claim the
+            # input never declared, while the declared bridge keeps full weight.
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: no "
+                  f"{label!r} bridge on this triple — nothing damped")
+            continue
         op_id, reused, note = _elect(src, op_type, tgt, label,
                                      any_label=any_label)
         if op_id is None:
@@ -350,7 +369,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # polluted by an earlier non-idempotent run carries duplicate
             # copies; mitigating only the first would leave the others at full
             # weight — the exact asymmetry #6671 measured.
-            targets = [found_id for found_id, _st in _find_operators(
+            targets = [found_id for found_id, _st, _od in _find_operators(
                 proj, op_type, _resolve(src), _resolve(tgt), label,
                 any_label=any_label)] or [op_id]
             for target_id in targets:
@@ -380,9 +399,24 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             ep = sdk.compute_confidence(factors=all_operator_ids)
         else:
             ep = sdk.compute_confidence()
-        print(f"\n✓ EP computed: {ep['iterations']} iterations, "
-              f"converged={ep['converged']}")
+            if not ep.get("confidences") and all_operator_ids:
+                # #6671: the writes are idempotent now, so a RE-RUN dirties
+                # nothing and the incremental no-arg pass returns a
+                # 0-iteration "success" with no posteriors — the ranking would
+                # silently vanish on the second run while still printing
+                # `converged=True` (the `[ep-ran]` fail-open shape). Rank the
+                # operator factors this decision owns instead.
+                print("  (no dirty roots — ranking this decision's operator "
+                      "factors)")
+                ep = sdk.compute_confidence(factors=all_operator_ids)
         confs = ep.get("confidences", {})
+        if confs:
+            print(f"\n✓ EP computed: {ep['iterations']} iterations, "
+                  f"converged={ep['converged']}")
+        else:
+            # A "successful" pass over zero posteriors is not a ranking.
+            print(f"\n⚠ EP produced NO posteriors ({ep['iterations']} "
+                  "iterations) — the ranking is EMPTY, not converged")
 
         opt_conf: dict[str, float] = {}
         for pid, cid in all_points.items():
