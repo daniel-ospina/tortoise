@@ -6309,9 +6309,22 @@ class CollisionPreflightTest(unittest.TestCase):
         # negation must GOVERN the occurrence, i.e. sit immediately before it.
         # `instead` is deliberately NOT a negation token — it marks an ALTERNATIVE
         # offer ("rebuild the board instead"), which is the prescription itself.
-        governs = re.compile(
-            r"(?:\b(?:not|never|cannot|can't)\s+[^,.;]{0,30}|\binstead of\s+[^,.;]{0,20})$"
-        )
+        # The NEGATION TOKENS cover the contractions a lane actually writes, and
+        # the filler class excludes the punctuation that starts a NEW object
+        # (`:`, `;`, `.`, `,` and the em/en dash this header uses), so "the fix is
+        # not gh auth — rebuild the board" cannot borrow its negation. A negation
+        # may also FOLLOW the dead end (`tools/fleet_state.py build cannot help`),
+        # which is the construction `registry_remedy` itself ships.
+        neg = r"(?:not|never|cannot|can'?t|do(?:es)?n'?t|won'?t)"
+        governs = re.compile(rf"(?:\b{neg}\s+[^,.;:—–]{{0,30}}|\binstead of\s+[^,.;:—–]{{0,20}})$")
+        # The POST-position window is deliberately looser: it allows a dash,
+        # because "rebuild the board — it is not the answer" is a natural
+        # negation, and the narrow escape it leaves ("rebuild the board — gh auth
+        # is not the fix") still names the phrase inside an arm whose whole job is
+        # to say what to do. A pin that reddens the natural phrasing is the
+        # over-pin this file's own siblings avoid; the PRESCRIPTIVE forms it
+        # exists to catch are all covered below.
+        follows = re.compile(rf"^\s*[^,.;:]{{0,30}}\b{neg}\b")
         for arm, (region, requirements) in arms.items():
             low = region.lower()
             for accepted in requirements:
@@ -6324,12 +6337,12 @@ class CollisionPreflightTest(unittest.TestCase):
             for dead_end in dead_ends:
                 for hit in re.finditer(re.escape(dead_end), low):
                     window = low[max(0, hit.start() - 45) : hit.start()]
-                    self.assertRegex(
-                        window,
-                        governs,
+                    after = low[hit.end() : hit.end() + 34]
+                    self.assertTrue(
+                        governs.search(window) or follows.search(after),
                         f"the {arm} arm offers {dead_end!r} un-negated "
-                        f"({low[max(0, hit.start() - 45) : hit.end()]!r}): that rebuild "
-                        "fails on the same read it is prescribed for",
+                        f"({low[max(0, hit.start() - 45) : hit.end() + 34]!r}): that "
+                        "rebuild fails on the same read it is prescribed for",
                     )
 
     def test_the_header_contract_matches_the_surface_set(self):
