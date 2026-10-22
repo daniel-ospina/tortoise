@@ -593,17 +593,20 @@ def _render_matrix(template: str, matrix: dict[str, Any]) -> set[str]:
 CI_SURFACES_REL = "config/ci-surfaces.yml"
 
 # `key -> (default, min, max)`, mirrored from `ci_selection.fast_shard_count` /
-# `carve_shard_count`. The DEFAULTS match the selector; the MALFORMED-VALUE
-# polarity deliberately does NOT. `ci_selection` collapses an unusable value to
-# the default (a producer path must not crash) and names it for `--integrity` to
-# fail on; a guard has no such second reader, so it refuses to measure instead.
-# That difference is the point — see `_declared_shard_count`.
+# `carve_shard_count` / `slow_shard_count`. The DEFAULTS match the selector; the
+# MALFORMED-VALUE polarity deliberately does NOT. `ci_selection` collapses an
+# unusable value to the default (a producer path must not crash) and names it for
+# `--integrity` to fail on; a guard has no such second reader, so it refuses to
+# measure instead. That difference is the point — see `_declared_shard_count`.
 _DECLARED_SHARDS = {
     # `fast_shards >= 2` because a shard pool of one is not a pool.
     "fast_shards": (2, 2, 26),
     # `carve_shards >= 1` because 1 is MEANINGFUL: it is the unsharded job this
     # repo ran until W37, and what removing the key must give back.
     "carve_shards": (1, 1, 26),
+    # `slow_shards >= 2` because this lane has always had two legs and a drop to
+    # one carries the whole ~37.9m pool in a single job (#9539).
+    "slow_shards": (2, 2, 26),
 }
 
 # A `${{ fromJSON(…) }}` matrix is the SELECTOR's output, so the guard must
@@ -614,18 +617,28 @@ _DECLARED_SHARDS = {
 # a FABRICATED name satisfies that subtraction and hides the exact deadlock this
 # guard exists to catch.
 #
-#   * `half` — the fast pool's positional letters: `test (a)`, `test (b)`, …,
-#     `fast_shards` of them.
-#   * `suffix` — the carve-out pool's name TAIL, and it is NOT the positional
-#     shape. The job name is `test-carve-out${{ matrix.suffix }}`, so shard 0
-#     contributes `""` (the UNSHARDED name `test-carve-out` must survive) and
-#     later shards contribute `" (b)"`, `" (c)"` — `ci_selection`'s
+#   * `("test", "half")` — the fast pool's positional letters: `test (a)`,
+#     `test (b)`, …, `fast_shards` of them.
+#   * `("test-slow", "half")` — the slow pool's positional letters, the SAME
+#     `matrix.half` KEY but a DIFFERENT declaration: `slow_shards` of them
+#     (5 today, 2 historically). The key is not the source — the (job, key)
+#     PAIR is. Keying on `half` alone resolved `test-slow (a)`…`(i)` off
+#     `fast_shards` (9) while only 5 legs exist, which is fail-OPEN in exactly
+#     the direction described above: a required check named `test-slow (f)` —
+#     or any slow leg a later `slow_shards` cut drops — was reported producible,
+#     so the deadlock this guard exists to catch stayed undetected.
+#   * `("test-carve-out", "suffix")` — the carve-out pool's name TAIL, and it is
+#     NOT the positional shape. The job name is
+#     `test-carve-out${{ matrix.suffix }}`, so shard 0 contributes `""` (the
+#     UNSHARDED name `test-carve-out` must survive) and later shards contribute
+#     `" (b)"`, `" (c)"` — `ci_selection`'s
 #     `e["suffix"] = "" if i == 0 else f" ({labels[i]})"`. Rendering this key
 #     positionally invents `test-carve-outa`… and drops the three real legs,
 #     which is precisely the fail-open described above.
 _EXPRESSION_MATRIX_SHAPES = {
-    "half": ("fast_shards", "positional"),
-    "suffix": ("carve_shards", "suffix"),
+    ("test", "half"): ("fast_shards", "positional"),
+    ("test-slow", "half"): ("slow_shards", "positional"),
+    ("test-carve-out", "suffix"): ("carve_shards", "suffix"),
 }
 
 
@@ -666,7 +679,7 @@ def _shard_labels(shape: str, count: int) -> list[str]:
     raise CannotMeasure(f"unknown shard label shape {shape!r} — cannot measure")
 
 
-def _render_expression_matrix(template: str, root: Path) -> set[str]:
+def _render_expression_matrix(template: str, root: Path, job_id: str) -> set[str]:
     """Render a `${{ fromJSON(…) }}` matrix from the source that DECLARES it.
 
     #6135: the fast pool's matrix is the selector's OUTPUT. The count is
@@ -674,6 +687,11 @@ def _render_expression_matrix(template: str, root: Path) -> set[str]:
     (`test (a)`, `test (b)`, …) — deliberately not written in the workflow, because
     the labels are a contract the merge rail's lane-parity subtracts by NAME, so an
     S-adding diff must stay a SUPERSET of main's `test (a)`, `test (b)`.
+
+    The source is resolved from the JOB as well as the key (#9539): `test` and
+    `test-slow` both interpolate `matrix.half`, and they are two different
+    pools (`fast_shards` / `slow_shards`). Resolving on the key alone read the
+    slow lane's leg count off the fast band's declaration.
 
     A guard that insists on a literal mapping therefore cannot measure this tree at
     all. Refusing to measure a shape the repo uses BY DESIGN reds every run, and a
@@ -685,13 +703,13 @@ def _render_expression_matrix(template: str, root: Path) -> set[str]:
         raise CannotMeasure(
             f"job strategy.matrix is a `${{{{ … }}}}` expression and the job name "
             f"{template!r} references no `matrix.<key>` — cannot derive the legs")
-    if len(keys) != 1 or keys[0] not in _EXPRESSION_MATRIX_SHAPES:
+    if len(keys) != 1 or (job_id, keys[0]) not in _EXPRESSION_MATRIX_SHAPES:
         raise CannotMeasure(
-            f"job strategy.matrix is a `${{{{ … }}}}` expression and the job name "
-            f"{template!r} references {keys!r}, for which no shard source is "
-            f"declared — cannot derive its legs without guessing")
+            f"job strategy.matrix is a `${{{{ … }}}}` expression and job "
+            f"{job_id!r} named {template!r} references {keys!r}, for which no "
+            f"shard source is declared — cannot derive its legs without guessing")
     key = keys[0]
-    manifest_key, shape = _EXPRESSION_MATRIX_SHAPES[key]
+    manifest_key, shape = _EXPRESSION_MATRIX_SHAPES[(job_id, key)]
     count = _declared_shard_count(root, manifest_key)
     return _render_matrix(template, {key: _shard_labels(shape, count)})
 
@@ -778,7 +796,8 @@ def producible_on_pull_request(workflows_dir: Path | None = None) -> set[str]:
                     # tree — a guard that can never be green is a guard that gets
                     # deleted, and the drift it exists to catch (required-set vs
                     # `.mergify.yml` vs protection) goes unwatched.
-                    names |= _render_expression_matrix(template.strip(), REPO_ROOT)
+                    names |= _render_expression_matrix(template.strip(), REPO_ROOT,
+                                                       str(job_id))
                 else:
                     require_mapping(matrix, f"{path}: jobs.{job_id}.strategy.matrix")
                     names |= _render_matrix(template.strip(), matrix)

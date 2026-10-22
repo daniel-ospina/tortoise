@@ -5136,6 +5136,52 @@ def test_slow_shards_declaration_is_fail_closed():
         set(slow_leg_files(m))
 
 
+def test_removing_slow_shards_reverts_the_leg_count_but_is_not_a_complete_rollback():
+    """#9539: absence gives back 2 legs — and the wall guard then REDS.
+
+    `config/ci-surfaces.yml` and `ci_selection` used to say deleting the key
+    'is a complete rollback', which is the wording `carve_shards` can use (that
+    lane has no wall guard). It is false here: the wall-target guard recomputes
+    from the `durations` map, and two legs project ~20.9m against the 10m
+    guideline — so an operator taking the documented rollback lands on a FAILING
+    suite, not on main's shape. The comments say so now; this pins the FACT they
+    describe, so neither comment can drift back to claiming otherwise.
+    """
+    m = {k: v for k, v in load_manifest().items() if k != "slow_shards"}
+    assert len(slow_shard_entries(m)) == 2, (
+        "absence must revert the leg count to the historical 2")
+    proj = slow_wall_projection(m)
+    assert proj["projected_wall_min"] > SLOW_LEG_WALL_TARGET_MIN, (
+        f"deleting `slow_shards` is documented as NOT a complete rollback because "
+        f"the wall guard reds on 2 legs; it no longer does "
+        f"({proj['projected_wall_min']}m <= {SLOW_LEG_WALL_TARGET_MIN}m) — update "
+        f"that comment in config/ci-surfaces.yml and tools/ci_selection.py")
+
+
+def test_the_selector_offers_no_unwired_slow_matrix_flag():
+    """#9539 review: `--emit-slow-matrix` was dead surface with a false rationale.
+
+    Its comment claimed the run-time drift guard would call it 'so the guard
+    compares the EXPANDED matrix against the config pool without a second
+    implementation'. The drift guard imports `ci_selection` and calls
+    `slow_leg_files()` itself, and nothing anywhere called the flag — a second,
+    unexercised derivation plus a comment asserting it is load-bearing. It was
+    removed rather than wired: `--emit-push-matrix` already publishes
+    `slow_matrix` for the `changes` job, which is what CI actually consumes.
+    """
+    selector = Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"
+    proc = subprocess.run([sys.executable, str(selector), "--emit-slow-matrix"],
+                          capture_output=True, text=True, cwd=str(selector.parent))
+    assert proc.returncode == 2, (
+        f"`--emit-slow-matrix` must be gone (argparse rejects unknown flags with "
+        f"exit 2), got rc={proc.returncode}: {proc.stdout}{proc.stderr}")
+    emit = subprocess.run([sys.executable, str(selector), "--emit-push-matrix"],
+                          capture_output=True, text=True, cwd=str(selector.parent),
+                          check=True).stdout
+    assert json.loads(emit)["slow_matrix"]["include"], (
+        "the surviving entry point must still publish the slow matrix")
+
+
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
 #: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
 #: runner case (no agent-infra checkout), and it is the ONLY case that may skip.
@@ -5529,10 +5575,12 @@ def test_diff_gated_jobs_consume_changes_outputs():
     test-slow + test-carve-out gate their runs on the changes job's
     slow_run / carve_out_run outputs (docs/config-only PRs skip both legs);
     the changes job emits + echoes the diff-gate outputs; test-slow's
-    manifest + run steps intersect the committed leg rows with
+    manifest + run steps intersect the DERIVED leg rows with
     slow_selected on the tier-2 shape (full == false) so only the matched
-    surfaces' slow files run. The committed matrix rows stay literal (the
-    in-workflow drift-guard step pins their union to slow_files - carve_out)."""
+    surfaces' slow files run. test-slow's matrix is the selector's
+    `${{ fromJSON(needs.changes.outputs.slow_matrix) }}` — there are NO
+    literal rows to keep in sync; the in-workflow drift-guard step pins the
+    union of the EXPANDED legs to slow_files - carve_out (#9539)."""
     wf = _load_python_ci()
     # job-level gates
     assert wf["jobs"]["test-slow"]["if"] == \

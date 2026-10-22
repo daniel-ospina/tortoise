@@ -159,7 +159,11 @@ MAX_CARVE_SHARDS = 26
 # move it — only the LEG COUNT can, which is why this key exists.
 #
 # ABSENCE KEEPS THE HISTORICAL SHAPE (2 legs), exactly like `fast_shards`:
-# deleting the key must be a complete rollback to the shape main ran before it.
+# deleting the key gives the leg count back, but it is NOT by itself a complete
+# rollback — the wall guard recomputes from the map (2 legs project ~20.9m
+# against `SLOW_LEG_WALL_TARGET_MIN`), so removing the key reds
+# `test_slow_shards_are_duration_packed_and_meet_the_wall_target` as well. A real
+# rollback moves the target with it.
 # 1 is NOT legal here: an unsharded slow lane is 37.9m + setup, and a silent
 # drop to 1 would be a ceiling regression nothing else here would name.
 DEFAULT_SLOW_SHARDS = 2
@@ -2806,7 +2810,10 @@ def slow_shard_entries(manifest: dict) -> list[dict]:
     Routes through `build_shard_entries` — the SAME pack the tier-2 fast lane
     and the carve-out lane use — so the slow lane gets the established
     mechanism and its per-leg `watchdog_minutes`/`watchdog_headroom` rather
-    than a second implementation. Labels are positional (`a`, `b`, …), which
+    than a second implementation. Those two fields stay on the ENTRY:
+    `slow_matrix_include()` publishes only `half`/`files`, so the job's 40m/60m
+    budgets are still literals (deliberate, #9539) and a reader should not
+    expect them in the matrix. Labels are positional (`a`, `b`, …), which
     keeps the job-name set a SUPERSET of main's two legs: the merge rail's
     lane-parity subtracts names, so an added `test-slow (c)` is fine while a
     rename would refuse every merge.
@@ -4754,9 +4761,8 @@ def main() -> int:
                     help="surface for --register (default: core — the selection fallback)")
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
-                    help="#1472/#6135: print the derived push fast_matrix + shards")
-    ap.add_argument("--emit-slow-matrix", action="store_true",
-                    help="#9539: print the derived test-slow legs + projection")
+                    help="#1472/#6135: print the derived push fast_matrix + shards "
+                         "(and the derived slow_matrix, #9539)")
     ap.add_argument("--split", action="store_true",
                     help="#1473/#6135: LPT-pack the stdin JSON test-file list "
                          "into the configured number of shards")
@@ -4855,19 +4861,6 @@ def main() -> int:
             # `changes` job publishes it and `test-slow` expands it.
             "slow_matrix": slow_matrix_include(legs["slow_shards"]),
         }))
-        return 0
-
-    if args.emit_slow_matrix:
-        # #9539: a standalone read of the slow derivation, so the run-time
-        # drift guard compares the EXPANDED matrix against the config pool
-        # without a second implementation (and without a gh/API dependency).
-        entries = slow_shard_entries(manifest)
-        print(json.dumps({"include": [
-            {"half": e["name"], "files": " ".join(e["files"]),
-             "est_seconds": e["est_seconds"]}
-            for e in entries],
-            "pool": slow_leg_files(manifest),
-            "projection": slow_wall_projection(manifest, entries)}))
         return 0
 
     if args.split:

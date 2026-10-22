@@ -1524,9 +1524,11 @@ jobs:
     # 1 failure. The pin removes THIS leg's kill and the critical-path inflation it
     # caused; it does not turn that run green.
     #
-    # Why ROUTING and not a raised timeout: the 40m budget is 2.11x the leg's
-    # committed weight, i.e. already at the `WATCHDOG_HEADROOM` policy floor (2.0x).
-    # Sizing it for the pool instead would need >=79m (2 x 39.6m), past
+    # Why ROUTING and not a raised timeout: the 40m budget clears the heavier
+    # DERIVED leg (7.58m, #9539 — see the job header below) by 5.3x, i.e. 2.6x the
+    # `WATCHDOG_HEADROOM` policy floor (2.0x, a 15.2m minimum). The literal is not
+    # the constraint here; the RUNNER CLASS is. Sizing the budget for the pool
+    # instead would need >=79m (2 x 39.6m), past
     # `WATCHDOG_CEILING_MIN` (55m) and past this job's own 60m outer cap — and a
     # budget built for the slowest class would also let a genuinely hung HOSTED leg
     # hold the REQUIRED aggregate red for 55m, the regression #6135/#6145 exists to
@@ -1601,7 +1603,8 @@ jobs:
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
     # that fires first cancels the step and loses them. The LITERALS here and
     # below are deliberately unchanged by #9539: the leg count moved from 2 to
-    # 5, so the heavier committed leg fell from 18.95m to 7.58m, and 40m/60m
+    # 5, so the heavier leg fell from 18.95m to 7.58m (DERIVED — the figures on
+    # this header are the derivation, nothing below restates them), and 40m/60m
     # still clear it (5.3x / 7.9x — the `WATCHDOG_HEADROOM` floor is 2.0x).
     # Tightening them to the derived per-leg budget is a failure-path change,
     # not the wall change this PR makes; it stays with the same follow-up that
@@ -1895,15 +1898,16 @@ jobs:
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
-          # shards derive their budget from. The heavier leg carries 18.95m
-          # (#9017 re-cut both rows from the CI junit — see
-          # config/ci-surfaces.yml's #9017 block; the rows before it carried
-          # 14.808m / 14.443m off a stale map, and the legs that map produced
-          # measure 17.98m / 19.90m against CI's own per-test junit) and this
-          # literal is 40m, i.e. 2.11x the 2.0x minimum
-          # the headroom floor requires (37.89m); it was 10m
-          # when the legs' committed weight was 2.84m (the measured pytest step
-          # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
+          # shards derive their budget from. Since #9539 the legs are DERIVED
+          # (`slow_files - carve_out` LPT-packed into `slow_shards` = 5), so the
+          # heavier leg carries 7.58m — the DERIVED weight, not a committed row;
+          # the header on this job carries the derivation and the per-leg numbers.
+          # This literal 40m is 5.3x that weight, i.e. 2.6x the 2.0x minimum the
+          # headroom floor requires (15.2m); it was 10m
+          # when the committed weight was 2.84m (the measured pytest step
+          # was 4.70m, which does not enter the headroom arithmetic). The 40m/60m
+          # pair is deliberately NOT derived from the leg weight — tightening it
+          # belongs with the per-leg `matrix.watchdog_minutes` follow-up. Re-deriving
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.

@@ -74,11 +74,14 @@ carve_shards: 3
 # scale with the leg count (~41 → ~48 for the setup term), the same trade
 # `fast_shards`/`carve_shards` make; wall clock is the objective (#9539).
 #
-# Absence means 2 — the shape this repo ran until now — so deleting this key is
-# a complete rollback. The balance and wall-target guards recompute from the map
+# Absence means 2 — the shape this repo ran until now — so deleting this key
+# gives the leg count back. It is NOT, on its own, a complete rollback: the
+# wall-target guard recomputes from the map, and 2 legs project ~20.9m against
+# the 10m target, so removing the key reds it
 # (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
-# the_wall_target`), so a growing slow file reds here rather than silently
-# restoring the ceiling.
+# the_wall_target`). A real rollback therefore moves the target/guard too — which
+# is what makes a growing slow file red HERE rather than silently restoring the
+# ceiling.
 slow_shards: 5
 
 surfaces:
@@ -5771,11 +5774,14 @@ slow_files:
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
-# The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
-# LPT legs of `slow_files - carve_out` on this same `durations` map, and that
-# job's own drift-guard step fails closed if the union stops matching this list.
-# Both legs are budgeted from that weight (a 40m watchdog under a 60m cap for
-# 14.192m / 14.188m legs), pinned by
+# There are NO committed file lists left to describe: `test-slow` carries a
+# `${{ fromJSON(...slow_matrix) }}` matrix, and that job's own drift-guard step
+# fails closed if the union of the EXPANDED legs stops matching
+# `slow_files - carve_out` on this same `durations` map. The 40m in-step
+# watchdog under the 60m outer cap are LITERALS #9539 deliberately left alone
+# (5.3x / 7.9x the 7.58m heavier derived leg); deriving them from the leg
+# weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
+# keeps the literals honest is
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
