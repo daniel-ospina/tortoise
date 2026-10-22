@@ -2985,3 +2985,186 @@ def test_cli_returns_2_when_a_manifest_leg_list_is_not_a_list(tmp_path, key: str
     assert proc.returncode == 2, f"{key}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
     assert "Traceback" not in proc.stderr
     assert f"`{key}:`" in proc.stderr, "the refusal must name the offending key"
+
+
+# ── the map's measurement source: the JUnit CENSUS, not the log WINDOW ──────
+#
+# WHY THESE EXIST. `config/ci-surfaces.yml:durations` is the sole input the LPT
+# packer balances by, and the collector fed it from pytest's `--durations=15`
+# block — a WINDOW naming the 15 slowest rows of a whole leg. MEASURED on run
+# 39782493641 (2026-10-22, full matrix): `test (h)` executed 2,594 tests over 198
+# files and its durations block named 8 of them; across all 18 legs the window
+# named 119 files while the junit census named 713. The pack was therefore
+# balancing ~96 % stale weights, and the run's real per-pool spread was
+# 1.99x/2.54x/1.70x against the map's claimed 1.00x. These tests pin the census
+# path so the window can never silently become the source again.
+
+_JUNIT_CENSUS = """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="4">
+  <testcase classname="tests.test_heavy" name="test_a" file="tests/test_heavy.py" line="1" time="40.0"/>
+  <testcase classname="tests.test_heavy" name="test_b" file="tests/test_heavy.py" line="2" time="20.0"/>
+  <testcase classname="tests.test_light" name="test_c" file="tests/test_light.py" line="1" time="0.5"/>
+  <testcase classname="tests.test_light" name="test_d" file="tests/test_light.py" line="2" time="0.5"/>
+</testsuite></testsuites>
+"""
+
+
+def write_junit(tmp_path: Path, name: str, content: str) -> Path:
+    logs = tmp_path / "logs"
+    p = logs / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(content)
+    return p
+
+
+def test_junit_census_measures_a_file_the_durations_window_never_names(
+    tmp_path: Path,
+) -> None:
+    """The defect this reader fixes: a fast file is invisible to the window."""
+    write_log(tmp_path, "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "60.00s call     tests/test_heavy.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    # The window named test_heavy only; the census measures BOTH files in full.
+    assert weights["test_heavy.py"] == pytest.approx(60.0)
+    assert weights["test_light.py"] == pytest.approx(1.0)
+
+
+def test_the_census_supersedes_the_window_partial_sum_for_the_same_file(
+    tmp_path: Path,
+) -> None:
+    """A file's window total is a PARTIAL sum (its top-15 tests), so it is smaller."""
+    write_log(tmp_path, "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "40.00s call     tests/test_heavy.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights["test_heavy.py"] == pytest.approx(60.0), (
+        "the window's 40s is test_a alone; the census's 60s is the whole file")
+
+
+def test_an_all_skipped_file_contributes_no_weight(tmp_path: Path) -> None:
+    """A leg where every testcase skipped did not CARRY the file.
+
+    Recording it would write DURATIONS_VALUE_FLOOR_S (0.1s) and so DOWNGRADE a
+    real weight — an embedded-only file on a docker leg is exactly that shape.
+    """
+    write_junit(tmp_path, "junit.xml", """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="2">
+  <testcase classname="tests.test_embedded_only" name="test_a" file="tests/test_embedded_only.py" time="0.0">
+    <skipped type="pytest.skip" message="no embedded engine"/>
+  </testcase>
+  <testcase classname="tests.test_embedded_only" name="test_b" file="tests/test_embedded_only.py" time="0.0">
+    <skipped type="pytest.skip" message="no embedded engine"/>
+  </testcase>
+</testsuite></testsuites>
+""")
+    assert ci_timing.collector_file_weights(tmp_path / "logs") == {}
+
+
+def test_the_d14_uploads_junit_report_is_read_too(tmp_path: Path) -> None:
+    """The D14 lane uploads `junit-d14.xml`, not `junit.xml` — same census."""
+    write_junit(tmp_path, "junit-d14.xml", _JUNIT_CENSUS)
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights == {"test_heavy.py": pytest.approx(60.0),
+                       "test_light.py": pytest.approx(1.0)}
+
+
+def test_a_testcase_without_a_file_attribute_is_dropped_not_guessed(
+    tmp_path: Path,
+) -> None:
+    """No `file` means no path, and a basename never SELECTS a manifest key."""
+    write_junit(tmp_path, "junit.xml", """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="1">
+  <testcase classname="test_orphan" name="test_a" time="9.0"/>
+</testsuite></testsuites>
+""")
+    assert ci_timing.collector_file_weights(tmp_path / "logs") == {}
+
+
+def test_a_malformed_junit_report_is_an_error_not_a_traceback(tmp_path: Path) -> None:
+    """One truncated artifact must not abort a sweep (parse_log's contract)."""
+    write_junit(tmp_path, "junit.xml", "<testsuites><testsuite")
+    parsed = ci_timing.parse_junit(tmp_path / "logs" / "junit.xml")
+    assert parsed["file_paths"] == {}
+    assert parsed["error"] and "unreadable" in parsed["error"]
+    assert ci_timing.collector_file_weights(tmp_path / "logs") == {}
+
+
+def test_an_xfail_is_measured_because_the_test_ran(tmp_path: Path) -> None:
+    """P1 (PR #9651 review): pytest writes XFAIL as `<skipped type="pytest.xfail">`
+    on a testcase that DID execute, with a real `time`.
+
+    Reading the child's mere presence would drop an xfail's cost from its file and
+    floor an all-xfail file at 0.1 s — the same defect `tools/skip-guard.py` names
+    (and `tests/test_ci_expected_manifests.py::test_an_xfail_is_not_an_outcome_violation`
+    pins) in the outcome reader.
+    """
+    write_junit(tmp_path, "junit.xml", """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" tests="3">
+  <testcase classname="tests.test_xf" name="test_ok" file="tests/test_xf.py" time="1.0"/>
+  <testcase classname="tests.test_xf" name="test_xfail_slow" file="tests/test_xf.py" time="2.0">
+    <skipped type="pytest.xfail" message="the shipped behaviour is the defect"/>
+  </testcase>
+  <testcase classname="tests.test_only_xfail" name="test_xfail" file="tests/test_only_xfail.py" time="30.0">
+    <skipped type="pytest.xfail" message="owner ruling pending"/>
+  </testcase>
+  <testcase classname="tests.test_only_xfail" name="test_skipped" file="tests/test_only_xfail.py" time="0.0">
+    <skipped type="pytest.skip" message="no embedded engine"/>
+  </testcase>
+</testsuite></testsuites>
+""")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights["test_xf.py"] == pytest.approx(3.0), "the xfail's 2s belongs to its file"
+    assert weights["test_only_xfail.py"] == pytest.approx(30.0), (
+        "an all-xfail file is MEASURED, never floored at 0.1s")
+
+
+def test_a_sweep_with_no_junit_says_so_instead_of_silently_using_the_window(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 (PR #9651 review): a broken junit upload must not look like a census sweep."""
+    write_log(tmp_path, "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "5.00s call     tests/test_heavy.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights == {"test_heavy.py": 5.0}, "the window is still a usable fallback"
+    err = capsys.readouterr().err
+    assert "::warning::no junit artifact" in err
+
+
+def test_a_broken_junit_artifact_is_named_and_the_leg_still_measured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One truncated report must warn, not abort, and must not hide the census."""
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
+    write_junit(tmp_path / "logs" / "broken", "junit.xml", "<testsuites><testsuite")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert weights["test_light.py"] == pytest.approx(1.0)
+    assert "::warning::junit census skipped" in capsys.readouterr().err
+
+
+def test_the_census_coverage_notice_counts_DISTINCT_files_not_leg_pairs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2 (PR #9651 review cycle 2): the notice must not fall silent on a partial sweep.
+
+    The denominator is distinct files, so the numerator has to be a set: counting
+    (file, leg) pairs lets two legs that both carry the same file report `2 of 2`
+    while a third of the map was never sampled at all.
+    """
+    for leg in ("leg-a", "leg-b"):
+        write_junit(tmp_path / "logs" / leg, "junit.xml", _JUNIT_CENSUS)
+    write_log(tmp_path / "logs" / "leg-c", "pytest.log",
+               "============================= slowest 1 durations =============================\n"
+               "7.00s call     tests/test_window_only.py::test_a\n"
+               "============================= short test summary info =========================\n")
+    weights = ci_timing.collector_file_weights(tmp_path / "logs")
+    assert set(weights) == {"test_heavy.py", "test_light.py", "test_window_only.py"}
+    notice = capsys.readouterr().err
+    assert "junit census supplied 2 of 3 measured files" in notice, notice
+    assert "carried forward" in notice, "the remainder is not all window-derived"

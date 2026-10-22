@@ -50,6 +50,7 @@ import math
 import os
 import re
 import subprocess
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -570,10 +571,103 @@ class DurationsBridgeError(Exception):
     """The bridge refused to render the map (fail-closed)."""
 
 
+def parse_junit(path: Path) -> dict:
+    """Per-file durations from a JUnit XML report — EVERY executed testcase.
+
+    WHY THIS EXISTS, and it is the whole reason the map could not balance.
+    `parse_log` reads pytest's `--durations=15` block, which is a WINDOW, not a
+    census: it lists the 15 slowest (setup+call+teardown) rows of a whole leg.
+    MEASURED on run 39782493641 (2026-10-22, full matrix): `test (h)` executed
+    2,594 tests across 198 files in 575 s of test time, and its durations block
+    named 15 rows spanning **8 files**; `test (g)` named 9 of its 157. So the
+    weekly refresh re-measured ~4 % of the files it packs by, while the map it
+    writes claimed 1.00x shard balance (624 s per fast shard). The observed
+    spread on that run was 1.99x (fast), 2.54x (carve-out) and 1.70x (slow) —
+    the LPT pack was balancing a set of weights that were, for ~96 % of files,
+    whatever the last full sweep said. A stale weight is not a wrong pack: it is
+    a pack of the wrong problem, and the pole leg it produces is the merge
+    ceiling (docs/ci/merge-throughput-measurements.md M2 named this defect and
+    its lever, but the lever's INPUT was still truncated).
+
+    THE SAME STEP ALREADY UPLOADS THE CENSUS. Every `pytest-log-*` artifact
+    carries `/tmp/junit.xml` beside `pytest.log`, and each testcase row carries
+    `file=` and `time=` — so no workflow change is needed to get a complete
+    measurement, only a reader that uses it.
+
+    Shape: `file_paths` matches :func:`parse_log`'s key and totals (`{tests, total_ms,
+    max_ms}`; this reader ADDS a `ran` count, which the log reader has no way to
+    compute) so :func:`_resolve_to_manifest_keys` and
+    :func:`collector_file_weights` treat both sources identically. `ran` counts
+    the testcases that actually EXECUTED. An XFAIL EXECUTED — pytest writes it as
+    `<skipped type="pytest.xfail">` on a testcase that ran and failed as expected
+    — so it is counted, the same predicate `tools/skip-guard.py` already uses
+    (`(skipped.get('type') or '') != "pytest.xfail"`) and pins in
+    `tests/test_ci_expected_manifests.py`. Counting it as a skip under-measures a
+    file by exactly its xfail cost and, when every test in a file xfails, drops a
+    real weight to `DURATIONS_VALUE_FLOOR_S` — the harm this reader exists to
+    prevent. Only a genuinely skipped testcase contributes no time, and a file
+    with no executed testcase is reported with `total_ms == 0.0` and skipped by
+    the caller.
+
+    Never raises: like :func:`parse_log`, a malformed report is an `error`
+    string on the returned dict, so one truncated artifact cannot abort a
+    sweep.
+    """
+    files: dict[str, dict] = {}
+    error: str | None = None
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError) as exc:
+        return {"file_paths": {}, "error": f"unreadable: {exc}"}
+    for case in root.iter("testcase"):
+        raw = (case.get("file") or "").replace("\\", "/")
+        if not raw:
+            # xunit1 omits `file` when pytest could not attribute the case; a
+            # basename is the only remaining key and basenames never SELECT a
+            # manifest key downstream (#6092 F3), so it is dropped here rather
+            # than resolved by guess.
+            continue
+        entry = files.setdefault(
+            _tests_relative_path(raw),
+            {"tests": 0, "ran": 0, "total_ms": 0.0, "max_ms": 0.0})
+        entry["tests"] += 1
+        skipped = case.find("skipped")
+        # ⛔ AN XFAIL RAN. pytest writes it as `<skipped type="pytest.xfail">` on a
+        # testcase that executed and failed as expected, WITH a real `time`. The
+        # correct predicate is already codified in this repo (`tools/skip-guard.py`,
+        # cycle-9 finding, pinned by
+        # `tests/test_ci_expected_manifests.py::test_an_xfail_is_not_an_outcome_violation`);
+        # reading only the child's presence here would drop an xfail's cost from its
+        # file and floor an all-xfail file at 0.1 s (PR #9651 review P1).
+        if skipped is not None and (skipped.get("type") or "") != "pytest.xfail":
+            continue
+        try:
+            seconds = float(case.get("time") or 0.0)
+        except ValueError:
+            seconds = 0.0
+        entry["ran"] += 1
+        entry["total_ms"] += seconds * 1000.0
+        entry["max_ms"] = max(entry["max_ms"], seconds * 1000.0)
+    return {"file_paths": files, "error": error}
+
+
 def collector_file_weights(logs_dir: Path) -> dict[str, float]:
-    """Per-file seconds from the collector's OWN parser, taking the LARGER
+    """Per-file seconds from the collector's OWN parsers, taking the LARGER
     value across the sampled jobs (the leg that CARRIES the file spends that
     time).
+
+    Two sources, and the JUnit census WINS on every file it covers: a leg's
+    `junit.xml` reports every executed testcase's time, while its `pytest.log`
+    `--durations=15` block reports only that leg's 15 slowest rows — the same
+    file's log-derived total is a PARTIAL sum of the junit-derived one (see
+    :func:`parse_junit`). The log stays as the source for the one lane that
+    uploads `pytest.log` alone (`test-concurrency-falkor`), and a larger log
+    value still wins, so no measurement can shrink by adding a source.
+
+    A sweep with NO junit at all is the 4 %-coverage path this function exists to
+    end, so it says so out loud instead of silently re-writing the map from the
+    window (a silent fallback would re-stamp `durations_captured_at` and look
+    exactly like a census sweep — PR #9651 review P2).
 
     Keyed by the tests/-relative PATH (`sub/test_x.py`), not the basename: two
     files that share a basename in different directories are distinct
@@ -589,6 +683,43 @@ def collector_file_weights(logs_dir: Path) -> dict[str, float]:
             seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
             if seconds > weights.get(path, 0.0):
                 weights[path] = seconds
+    # The census pass (see parse_junit): `junit*.xml` covers the D14 upload too,
+    # whose report is `junit-d14.xml`.
+    junit_sources = sorted(Path(logs_dir).rglob("junit*.xml"))
+    # A SET, not a counter: this figure is compared against `len(weights)` (distinct
+    # files), and counting (file, leg) pairs inflated the numerator with every
+    # extra leg until the notice fell silent on a genuinely partial sweep
+    # (PR #9651 review cycle 2, P2).
+    junit_covered: set[str] = set()
+    for junit_path in junit_sources:
+        parsed = parse_junit(junit_path)
+        if parsed["error"]:
+            print(f"::warning::junit census skipped ({junit_path}: "
+                  f"{parsed['error']}) — that leg's files fall back to the "
+                  "--durations window", file=sys.stderr)
+        for path, entry in parsed["file_paths"].items():
+            if not entry["ran"]:
+                # Every testcase skipped on this leg: the leg did not carry the
+                # file, so it has nothing to say about its cost.
+                continue
+            junit_covered.add(path)
+            seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
+            if seconds > weights.get(path, 0.0):
+                weights[path] = seconds
+    if not junit_sources:
+        # The silent-fallback guard: without this, a broken junit upload re-writes
+        # the whole map from the 15-row window and re-stamps `durations_captured_at`
+        # exactly as a census sweep would — the #9651 defect with no signal.
+        print("::warning::no junit artifact in the logs dir — the durations map "
+              "is being refreshed from the --durations WINDOW only, which names "
+              "the slowest rows of each leg and not its files", file=sys.stderr)
+    elif weights and len(junit_covered) < len(weights):
+        # The remainder is NOT all window-derived: a key the sweep never sampled is
+        # CARRIED FORWARD by the bridge, so name the three sources, not two.
+        print(f"::notice::junit census supplied {len(junit_covered)} of "
+              f"{len(weights)} measured files; the rest came from the "
+              "--durations window or were carried forward from the committed map",
+              file=sys.stderr)
     return weights
 
 
