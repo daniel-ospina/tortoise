@@ -4017,7 +4017,21 @@ def get_relationships_bounded(
                             # never a fabricated Beta(1,1) posterior (0.5/0.0833
                             # would be internally contradictory: variance above
                             # the contested threshold but contested=false).
-                            "confidence": round(alpha / (alpha + beta), 4) if has_ep else None,
+                            #
+                            # #8504: a MEASURED peer whose persisted pair is
+                            # (0.0, 0.0) has no posterior mean either, and the
+                            # raw division here raised ZeroDivisionError
+                            # mid-assembly — discarding every point assembled
+                            # before it (#330's guard, missed at this site).
+                            # `_beta_mean` carries that guard, and its uniform
+                            # fallback (0.5) is the SAME value the sibling
+                            # signal surface reports for the pair
+                            # (ranking._fetch_point_signals → NEUTRAL_CONFIDENCE).
+                            # It is not the fabricated posterior above: for this
+                            # pair `_beta_variance`'s own s <= 0 guard yields
+                            # variance 0.0, so contested stays False and nothing
+                            # above the threshold is claimed.
+                            "confidence": round(_beta_mean(alpha, beta), 4) if has_ep else None,
                             "variance": round(variance, 6) if has_ep else None,
                             "contested": contested,
                             "created_at": created,

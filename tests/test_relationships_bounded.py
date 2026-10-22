@@ -1365,24 +1365,47 @@ def test_failed_decoration_is_labelled_not_silently_empty():
     )
 
 
+class _UnhashableStatus:
+    """Truthy and unhashable: survives the fetch, raises INSIDE the assembly.
+
+    Used to inject a mid-assembly failure without depending on a defect: the
+    fetch keeps it (``row[5] or ""`` calls ``__bool__``), and the per-peer
+    assembly raises ``TypeError`` at ``is_terminal_status``'s set membership —
+    which is after the PREVIOUS point was already filled.
+    """
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __bool__(self):
+        return True
+
+
 class _PartialFillGraph:
     """``graph`` stand-in that raises while assembling the SECOND point.
 
     The fill loop assigns ``rels[pid] = entries`` point-by-point INSIDE the
     ``try``, so a raise while assembling the second point leaves the first
-    point already filled. The raise here is the real, unguarded confidence
-    division (``round(alpha / (alpha + beta), 4)``) for a persisted
-    ``(0.0, 0.0)`` posterior with ``has_ep=True``: ``tortoise/ep.py`` guards
-    that pair twice (#330) and ``_write_node`` persists it, so the input class
-    occurs.
+    point already filled.
+
+    #8504 removed the original trigger — the unguarded confidence division
+    (``round(alpha / (alpha + beta), 4)``) for a persisted ``(0.0, 0.0)``
+    posterior is now guarded — so the mid-assembly failure is INJECTED
+    (``fail_during_assembly=True``) with an unhashable peer status. The
+    invariant #6971 pins (ANY failure during assembly resets the WHOLE
+    decoration) never depended on which defect supplied the failure.
+
+    The default mode keeps the ``(0.0, 0.0)`` MEASURED peer that #8504 is
+    about; that fix's own test uses it to prove the batch now decorates
+    instead of raising.
     """
 
     class _Result:
         def __init__(self, rows):
             self.result_set = rows
 
-    def __init__(self):
+    def __init__(self, fail_during_assembly=False):
         self.support_rows_served = 0
+        self.fail_during_assembly = fail_during_assembly
 
     def query(self, cypher, **kwargs):
         params = kwargs.get("params") or {}
@@ -1397,15 +1420,74 @@ class _PartialFillGraph:
         if "raw_cap" in params:
             return self._Result([])  # Q2-crit: no critical-class peers
         if "per_op" in params:
-            # Q2-support: P1's peer is healthy, P2's is the degenerate pair.
+            # Q2-support: P1's peer is healthy, P2's is degenerate (#8504) —
+            # or, in injection mode, carries a status the assembly cannot hash.
             self.support_rows_served += 2
+            status_b = _UnhashableStatus() if self.fail_during_assembly else ""
             return self._Result([
-                ("op1", "IMPL", 0, "A", "statement", "", 1.0, 1.0, True, None, False),
-                ("op2", "IMPL", 0, "B", "statement", "", 0.0, 0.0, True, None, False),
+                ("op1", "IMPL", 0, "A", "statement", "",
+                 3.0, 1.0, True, None, False),
+                ("op2", "IMPL", 0, "B", "statement", status_b,
+                 0.0, 0.0, True, None, False),
             ])
         if "m.id" in cypher:
             return self._Result([])  # Q2b: no mitigations
         return self._Result([])  # Q2f: no family counts
+
+
+def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
+    """#8504: a persisted (0.0, 0.0) MEASURED peer must not abort the batch.
+
+    ``tortoise/ep.py::_write_node`` persists exactly that pair (its #330 guard
+    fixes only the derived ``confidence``), and ``ep_measured_cypher`` calls it
+    MEASURED (``posterior_alpha IS NOT NULL``) — so the peer assembly's raw
+    ``alpha / (alpha + beta)`` raised ``ZeroDivisionError`` for a reachable
+    input class. Per #6971's handler that discarded EVERY point in the batch,
+    not just the degenerate peer.
+    """
+    out = get_relationships_bounded(_PartialFillGraph(), ["P1", "P2"])
+    assert out.decoration_error == "", (
+        "a degenerate MEASURED peer must decorate, not abort the batch")
+    peers = {e["related_id"]: e["peer"] for e in out["P1"] + out["P2"]}
+    assert set(peers) == {"A", "B"}, (
+        "the healthy peer's entry must survive alongside the degenerate one")
+    assert peers["A"]["confidence"] == 0.75, peers["A"]  # 3/(3+1)
+    assert peers["B"]["confidence"] == 0.5, (
+        "#330's uniform fallback is the house value for a degenerate pair — "
+        "the same 0.5 the sibling signal surface reports for it "
+        "(ranking._fetch_point_signals → NEUTRAL_CONFIDENCE); got "
+        f"{peers['B']['confidence']!r}")
+    assert peers["B"]["variance"] == 0.0, (
+        "_beta_variance's s <= 0 guard — which is why the 0.5 mean does not "
+        "read as a fabricated Beta(1,1) posterior")
+    assert peers["B"]["contested"] is False, (
+        "a degenerate posterior is not evidence of contest")
+
+
+def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(sdk):
+    """#8504 end-to-end: the pair ``_write_node`` persists, on a real graph.
+
+    The stub above pins the assembly arithmetic; this pins that the (0.0, 0.0)
+    row survives the whole decoration — both the in-Cypher contested projection
+    (which yields ``nan`` for 0/0, not an error) and the Python assembly.
+    """
+    a = _point(sdk, content="claim whose only peer is degenerate")
+    b = _point(sdk, content="peer carrying a persisted (0.0, 0.0) posterior")
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    _graph(sdk).query(
+        "MATCH (n:Point) WHERE n.id = $id "
+        "SET n.posterior_alpha = 0.0, n.posterior_beta = 0.0",
+        params={"id": b["id"]},
+    )
+    out = get_relationships_bounded(_graph(sdk), [a["id"]])
+    assert out.decoration_error == "", (
+        "the degenerate peer aborted the whole decoration: "
+        f"{out.decoration_error}")
+    entries = out[a["id"]]
+    assert [e["related_id"] for e in entries] == [b["id"]], entries
+    assert entries[0]["peer"]["confidence"] == 0.5, entries[0]["peer"]
+    assert entries[0]["peer"]["variance"] == 0.0, entries[0]["peer"]
+    assert entries[0]["peer"]["contested"] is False, entries[0]["peer"]
 
 
 def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
@@ -1417,7 +1499,7 @@ def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
     SDK stamped every hit with that "is empty" message — a self-contradicting
     payload that costs a marker-trusting consumer real edges.
     """
-    graph = _PartialFillGraph()
+    graph = _PartialFillGraph(fail_during_assembly=True)
     out = get_relationships_bounded(graph, ["P1", "P2"])
     # Non-vacuity: the stub must actually have served P1 a real peer row and
     # reached the except path, or the assertion below proves nothing.
@@ -1426,13 +1508,13 @@ def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
         "path was never exercised"
     )
     assert out.decoration_error != "", (
-        "expected the degenerate-posterior division to reach the except path, "
+        "expected the mid-assembly raise to reach the except path, "
         "got a clean decoration"
     )
-    assert "ZeroDivisionError" in out.decoration_error, out.decoration_error
+    assert "TypeError" in out.decoration_error, out.decoration_error
     assert out == {"P1": [], "P2": []}, (
         "a failed decoration must be all-empty for EVERY requested point — "
-        "the relayed marker asserts exactly that (#6971)"
+        "P1 was already assembled when P2 raised (#6971)"
     )
 
 
