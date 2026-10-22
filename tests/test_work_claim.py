@@ -1087,8 +1087,15 @@ def test_json_outcome_carries_the_decision_a_controller_logs():
 # #9487). Each leg deletes its own node in `finally`, so the per-run key leaves no residue.
 
 
-def _probe_key() -> str:
-    return f"issue-{uuid.uuid4().hex[:12]}"
+def _probe_key(body: str | None = None) -> str:
+    # CANONICAL at the MINT (review round 4). `acquire` canonicalises `record.key` IN PLACE
+    # (`record.key = canonical_key(record.key)`), and `canonical_key` collapses an all-digit
+    # body (`issue-012345678901` → `issue-12345678901`) — which a 12-hex body hits in ~1 run in
+    # 2.8k. Returning the minted spelling left the legs below comparing it against the
+    # CANONICAL spelling the store holds, so `[…].count(key) == 1` redded for a reason that had
+    # nothing to do with the code under test: the exact class this file's comment above already
+    # records. The `body` seam makes that deterministic to pin without drawing a UUID.
+    return wc.canonical_key(f"issue-{body if body is not None else uuid.uuid4().hex[:12]}")
 
 
 
@@ -1600,6 +1607,9 @@ def test_claim_id_is_one_id_per_unit_of_work_whatever_the_spelling():
     # ...while a NON-decimal body stays opaque: the live legs mint `issue-<12 hex>` per run and
     # that uniqueness is what stops two concurrent runs fencing each other (#5084).
     assert wc.canonical_key("issue-0a3f5c9d1b2e") == "issue-0a3f5c9d1b2e"
+    # ...and the live legs' per-run key is CANONICAL AT THE MINT, so the all-digit-body collapse
+    # cannot make the stored spelling differ from the one a leg compares against (round 4).
+    assert _probe_key("012345678901") == "issue-12345678901"
     # the digest is still a real digest: a DIFFERENT unit is a different id
     assert wc.claim_id("daniel-ospina/tortoise", "issue-5053") != canonical
     assert wc.claim_id("daniel-ospina/tortoise", "pr-5052") != canonical
