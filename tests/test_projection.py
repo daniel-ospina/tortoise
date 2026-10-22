@@ -2878,10 +2878,23 @@ def test_5026_b1_live_aboutdocument_ignores_non_document_source(live_proj):
 
 
 def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
-    """B1 (#5026): the REPLAY resolver applies the same `aboutDocument`
-    target contract the live paths do — the target is a `:Source` carrying
-    `documentKind` and addressable by `url` (ONTOLOGY §4.4). A provenance
-    Source at that shape is refused; a genuine document Source resolves."""
+    """B1 (#5026): the REPLAY resolver applies the `aboutDocument` target
+    contract — the target is a `:Source` carrying `documentKind` and
+    addressable by `url` (ONTOLOGY §4.4). A provenance Source at that shape is
+    refused; a genuine document Source resolves.
+
+    ⚠️ Scoped on purpose, and it is the reason this docstring no longer says
+    "the live paths do". It is the same contract the two live paths that CARRY
+    one apply — the `documentKind IS NOT NULL` auto-detect, and `create_edge`
+    (which raises for a non-document `:Source`, #5206) — and it is STRICTER than
+    the live writers that carry none: `create_about_edge`, reached from
+    `create_event(aboutDocument=…)` via `_wire_about_value`, and
+    `session_link.link_entity`, which validates only the ONTOLOGY §3.2
+    `(edge_type, source_label, target_label)` triple and never inspects the
+    target's kind. "Live and replay apply the SAME contract" is the #5206
+    over-claim: a reader who takes it as parity concluded may relax this
+    replay guard, which is the one place the kind test actually runs.
+    """
     from tortoise.projection.edges import resolve_structural_target
 
     proj = live_proj
