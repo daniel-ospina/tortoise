@@ -263,8 +263,15 @@ WHAT THIS PINS
    text the PR exists to replace, names no denial — and would go green again on any
    rewording of the denial, so it retired itself on the next prose edit. The predicate
    now reads the CLAIM, and the only denial it reads is a negation of the framing
-   marker ITSELF, scoped to that marker's own CLAUSE (a `,` `;` `:` `—`/`–` or a
-   sentence `.` ends its reach), so the second arm is its non-vacuity: the pre-`#9516`
+   marker ITSELF: a STRONG denial (`not`, `never`, `without`, `n't`, `skipped`, …) is
+   searched to the end of the sentence on both sides of the marker, a WEAK quantifier
+   (`no`, `none`) only to the next clause break, and a weak quantifier that PREDICATES a
+   measurement noun (`no framing was taken`) counts as strong. ⚠️ That is a copy-level
+   heuristic, and its boundaries are stated rather than implied: it does not decide WHICH
+   marker a denial governs, so `# the control step was 14.4 s, not the whole arm` reds a
+   settleable figure, `i.e.`/`e.g.` read as sentence ends, and a denial more than
+   `_DENIAL_WINDOW` characters after its marker is framed — all filed as `#9531` with the
+   measurements. The second arm is the non-vacuity: the pre-`#9516`
    string and the intermediate string RED, a duration carrying its framing stays GREEN,
    and a duration with only "one box" for company (hardware is not framing) REDs.
    ⚠️ **Three later corrections, each found by putting the removed string somewhere
@@ -3960,8 +3967,15 @@ _CLAUSE_BREAK = re.compile(r"[,;:—–]|[.;](?=\s|$)")
 _CLAUSE_BREAK_AFTER = re.compile(r"[,;:—–()]|\band\b|[.;](?=\s|$)")
 
 #: A real sentence end — where the search for a STRONG denial stops, because a strong
-#: denial after the marker is about the marker however it is punctuated.
-_SENTENCE_END = re.compile(r"[.;](?=\s|$)")
+#: denial after the marker is about the marker however it is CLAUSE-punctuated.
+#:
+#: ⚠️ `;` is NOT here (cycle-6 review): it is a clause separator, and including it made
+#: `--durations=0; never taken` SILENT — a one-character substitution for the hole the
+#: veto exists to close, with no arm able to tell the two behaviours apart. `.` keeps its
+#: `(?=\s|$)` guard so a decimal (`10.36 s`) is not a sentence end. Residual, stated:
+#: an ABBREVIATION dot (`i.e. never taken`, `e.g.`) still reads as a sentence end, so a
+#: strong denial after one is framed — it is in `#9531` with the other residuals.
+_SENTENCE_END = re.compile(r"[.](?=\s|$)")
 
 
 def _marker_spans(line: str) -> list[tuple[int, int]]:
@@ -4014,9 +4028,10 @@ def _denied(line: str, start: int, end: int) -> bool:
     #   * `_DENIAL_STRONG` is searched to the end of the SENTENCE — `--durations=0 — never
     #     taken` and `--durations=0, never taken` deny the marker as plainly as the
     #     parenthesised form, and cutting at `,`/`—` made both SILENT (cycle-5 review);
-    #   * `_DENIAL_GOVERNING` and `_DENIAL_WEAK` are searched to the next clause break, so
-    #     `— no other change to the control step` (a weak quantifier over a different noun)
-    #     stays a side remark;
+    #   * `_DENIAL_GOVERNING` reads the SAME sentence window (its own predicate lookahead
+    #     is what keeps `(no spread figure)` green), and `_DENIAL_WEAK` is searched only to
+    #     the next clause break, so `— no other change to the control step` (a weak
+    #     quantifier over a different noun) stays a side remark;
     #   * `_DENIAL_WEAK` is searched inside the narrower after-side boundary again, so
     #     `(no flakes)` and `and no failures` stay framed.
     sentence = _SENTENCE_END.search(after)
@@ -4292,6 +4307,10 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "# 10.36 s --durations=0 — never taken",
         "# 10.36 s --durations=0, never taken",
         "# 10.36 s --durations=0 — no measurement was ever taken",
+        # `;` is a CLAUSE separator: including it in the sentence-end window made this
+        # silent, a one-character substitution for the hole the veto exists to close
+        "# 10.36 s --durations=0; never taken",
+        "# measured 10.36 s with --durations=0; the run was never taken",
     ):
         assert _unframed_durations(strong_denial) == ["10.36 s"], (
             f"{strong_denial!r} denies the framing it names, parenthesised or "
@@ -4426,8 +4445,10 @@ def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
     census = _call_time_census()
     # ⚠️ `inspect.unwrap` and the plain-function contract were both UNEXECUTED — the live
     # function is undecorated, so neither could run (cycle-5 review). A `@lru_cache`d
-    # sibling is the natural probe: without the unwrap, `inspect.getsourcefile` raises
-    # `TypeError … got _lru_cache_wrapper`. Its docstring is the containment this reads.
+    # sibling is the natural probe, and it fails on the ASSERT first (`got
+    # _lru_cache_wrapper` is not a function); only if that assert is weakened too does
+    # `inspect.getsourcefile` raise its own `TypeError` (cycle-6 review corrected this
+    # comment, which named the TypeError for a mutation that actually trips the assert).
     unwrapped = _prose_of(census._census)
     assert inspect.getdoc(census._census).splitlines()[0].strip() in unwrapped, (
         "a `@lru_cache`d sibling's capture does not contain its docstring, so the "
