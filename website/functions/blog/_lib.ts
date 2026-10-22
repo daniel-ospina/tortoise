@@ -757,9 +757,10 @@ const FAQ_SECTION_RE = /^#{1,2}\s+.*(faq|frequently asked)/i;
 /**
  * Pull the question/answer pairs out of an article's FAQ section.
  *
- * The section is the `## … FAQ/frequently asked …` block; each `###` heading in
- * it is a question and the text beneath it is the answer. Returns `[]` when the
- * article has no FAQ section, so the caller can simply skip the schema.
+ * The section is the level-2 heading (`#` or `##`) whose text matches
+ * `FAQ/frequently asked`; each `###` heading in it is a question and the text
+ * beneath it is the answer. Returns `[]` when the article has no FAQ section,
+ * so the caller can simply skip the schema.
  */
 export function extractFaq(markdown: string): FaqEntry[] {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");

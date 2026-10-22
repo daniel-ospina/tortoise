@@ -53,8 +53,9 @@ no need to convert it:
 2. Second section
 ```
 
-The generated version replaces the paragraph *and* the list. If there is no `##` heading to link to,
-your hand-written list is left alone (content is never deleted to make room for an empty replacement).
+The generated version replaces the paragraph *and* the list. If there is no level-2 heading (`#`
+or `##`) to link to, your hand-written list is left alone (content is never deleted to make room for
+an empty replacement).
 
 ---
 
@@ -103,8 +104,8 @@ colon. `> Quick answers are short.` is an ordinary blockquote — only `Quick an
 
 ## FAQ section
 
-Give the section an `##` heading containing **"FAQ"** or **"Frequently asked"**, then make **each
-question an `###` heading** and the answer the prose beneath it:
+Give the section a level-2 heading (`#` or `##`) containing **"FAQ"** or **"Frequently asked"**, then
+make **each question an `###` heading** and the answer the prose beneath it:
 
 ```text
 ## FAQ

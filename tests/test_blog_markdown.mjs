@@ -243,12 +243,17 @@ console.log("a body `#` heading is demoted, never leaked (#1385)");
   // the reader sees a heading.
   const faq = extractFaq("## FAQ\n\n### Q?\n\nAnswer.\n\n# Next section\n\nNot part of the answer.");
   assertEq(faq.length, 1, "a `#` heading closes the FAQ section, exactly like `##`");
-  assertEq(faq[0].answer, "Answer.", "the `#` heading is not folded into the FAQ answer");
+  // `?.` on BOTH: `faq[0]` is undefined when the extractor finds no section, and a
+  // raw dereference inside an `assertEq` ARGUMENT throws before the failure is
+  // recorded — the module dies there, so every assertion after it (the nesting,
+  // house-TOC and docs-contract blocks) never runs. A clean recorded failure is
+  // the point of the harness.
+  assertEq(faq[0]?.answer, "Answer.", "the `#` heading is not folded into the FAQ answer");
   // …and it OPENS one: `#` and `##` are the same level now, so a section headed
   // `# FAQ` must emit the FAQPage schema too, not just render the heading.
   const hashFaq = extractFaq("# FAQ\n\n### Q?\n\nAnswer.");
   assertEq(hashFaq.length, 1, "a `# FAQ` heading opens an FAQ section");
-  assertEq(hashFaq[0].question, "Q?", "the question under a `# FAQ` heading is extracted");
+  assertEq(hashFaq[0]?.question, "Q?", "the question under a `# FAQ` heading is extracted");
 }
 
 console.log("inline spans nest (#1385)");
@@ -281,18 +286,43 @@ console.log("inline spans nest (#1385)");
   const nested = renderMarkdown("[**<img src=x onerror=alert(1)>**](https://tortoise.premiselabs.co)");
   assert(!nested.includes("<img"), "raw HTML inside a nested span stays escaped");
   assert(nested.includes("&lt;img src=x onerror=alert(1)&gt;"), "the nested span keeps the escaped text");
-  // Depth-capped: past the cap the content degrades to escaped TEXT, so the
-  // output never carries an unbalanced tag.
+  // A malformed double-nest. This is a REGRESSION GUARD on the literal output,
+  // not a nesting proof: the outer link alternative wins at index 0 and its
+  // label stops at the first `]`, so the label is `***[x` (nothing nestable in
+  // it) and the trailing `*text*](…)` is emitted by the plain-text tail, which
+  // is never re-scanned. Pinning the string is what makes it assert something —
+  // the previous `strong`/`em` "balanced" comparisons here were `0 === 0` on
+  // output that contains neither tag, so they passed on every version of the
+  // renderer.
   const deep = renderMarkdown("[***[x](https://tortoise.premiselabs.co)*text*](https://tortoise.premiselabs.co/inner)");
   assertEq(
-    (deep.match(/<strong>/g) ?? []).length,
-    (deep.match(/<\/strong>/g) ?? []).length,
-    "past the nesting cap <strong> tags stay balanced",
+    deep,
+    '<p><a href="https://tortoise.premiselabs.co" target="_blank" rel="noopener">***[x</a>' +
+      "<em>text</em>](https://tortoise.premiselabs.co/inner)</p>",
+    "a label that stops at the first `]` leaves the rest as text, with no nesting",
+  );
+  // The DEEPEST chain the unchanged, bounded alternation can construct: a link
+  // label (excludes `]`) → `strong` (excludes `*`) → a code span. Nothing
+  // constructible nests further — a label cannot hold a complete link and a
+  // `strong` body cannot hold another `*` span — so `MAX_INLINE_DEPTH`'s
+  // escape branch is a DEFENSIVE bound that no input reaches, not a tested
+  // state. Asserted with a NON-ZERO tag count: counting tags can only prove
+  // balance where a tag is actually emitted.
+  const deepest = renderMarkdown("[**`a`**](https://x.example)");
+  assertEq(
+    deepest,
+    '<p><a href="https://x.example" target="_blank" rel="noopener"><strong><code>a</code></strong></a></p>',
+    "label → strong → code is the deepest nesting the bounded pattern permits",
   );
   assertEq(
-    (deep.match(/<em>/g) ?? []).length,
-    (deep.match(/<\/em>/g) ?? []).length,
-    "past the nesting cap <em> tags stay balanced",
+    (deepest.match(/<strong>/g) ?? []).length,
+    1,
+    "the deepest nesting case really emits a nested tag (a 0-tag fixture proves nothing)",
+  );
+  assertEq(
+    (deepest.match(/<strong>/g) ?? []).length,
+    (deepest.match(/<\/strong>/g) ?? []).length,
+    "the deepest nesting case keeps <strong> tags balanced",
   );
 }
 
@@ -1309,6 +1339,25 @@ console.log("docs/blog-authoring.md examples render as the page claims");
     "a lone `#` renders as an <h2> heading (#1385)",
   );
   assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` never becomes an <h1>");
+
+  // The TOC section's "left alone" promise, pinned to the gate it names. The gate
+  // is level-2 (`#` or `##`), so a hand-written list under a marker survives ONLY
+  // when the body has no level-2 heading at all. This is the sentence #1385 left
+  // stale at `##` while widening `hasPublishedH2` — the doc contradicted both the
+  // renderer and its own paragraph 13 lines above. The BEHAVIOUR that sentence
+  // describes is pinned by the `###`-only body in "house-style table of
+  // contents" ("with no H2 the author's label and list are preserved"); what was
+  // missing, and is asserted here, is that the CONTRACT states the gate.
+  // Prose wraps, so the sentence is matched against the whitespace-flattened doc.
+  const docFlat = doc.replace(/\s+/g, " ");
+  assert(
+    /no level-2 heading \(`#` or `##`\)/.test(docFlat),
+    "the TOC section states the gate as a level-2 heading (`#` or `##`)",
+  );
+  assert(
+    /level-2 heading \(`#` or `##`\) containing/.test(docFlat),
+    "the FAQ section states that `#` opens it too (the same level-2 gate)",
+  );
 }
 
 console.log("");
