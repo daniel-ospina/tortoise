@@ -1835,9 +1835,9 @@ def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
             # Redis-side `--maxmemory` BELOW its cgroup cap, so an overshoot is
             # now an ANSWERED `OutOfMemoryError` instead of a SIGKILL — a shape
             # this seam must explain too, or the issue's defect has merely
-            # moved. The two families are mutually exclusive (that one is an
-            # answered refusal, this one is not), so the second call is a
-            # fallback, never a second suffix.
+            # moved. Fallback, never a second suffix: the families are mutually
+            # exclusive, because the call above only ever explains the ABSENCE
+            # of a reply.
             explained = explain_memory_ceiling(exc)
         if explained is not None:
             exc.args = (explained,)
