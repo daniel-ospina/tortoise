@@ -749,12 +749,23 @@ def _ledger_src(reaches: str) -> str:
     )
 
 
-def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool, writes: bool = False):
+def _probe(name: str, sdk_method: str, *, annotations, http_policy: bool,
+           risk: str | None = None):
+    """A synthetic registry entry for the capability guards.
+
+    `risk` defaults to the tier the annotations describe, so a probe is
+    COHERENT unless a test deliberately passes a disagreeing tier — that is how
+    `test_exemption_set_is_exact` proves the drift guard can still fire. The
+    tier also drives the synthetic `writes` permission (#4122: `writes` is
+    derived from `risk`, never declared).
+    """
     from tortoise.tool_registry import ToolDefinition
+    if risk is None:
+        risk = "read" if annotations.readOnlyHint is True else "write"
     return ToolDefinition(
         name=name, id=f"surface.probe.{name.removeprefix('tortoise_')}",
-        description="probe", annotations=annotations,
-        http_policy=http_policy, sdk_method=sdk_method, writes=writes,
+        description="probe", annotations_override=annotations, risk=risk,
+        http_policy=http_policy, sdk_method=sdk_method,
     )
 
 
@@ -923,6 +934,46 @@ class TestCapabilityModel:
         assert write_classification_violations([unguarded], _PROBE_SRC)
         assert not write_classification_violations([guarded], _PROBE_SRC)
 
+    def test_T1_self_guarding_writer_on_a_reading_tier_fails(self):
+        """T1 (2a-prime, #4122 review): the SELF-GUARD must not excuse the TIER.
+
+        The `http_policy is False` exemption is about the SURFACE (the tool is not
+        reachable over HTTP), and the arm below it accepts a self-guarding
+        HTTP-excluded writer.  Neither says anything about the `risk` RUNG, so a
+        later lane could demote `dream` / `backfill_v25` / `index_files` /
+        `ingest_corpus` to `read` (or `maintenance`) and every other arm would stay
+        green: the handler self-guards, so 2a passes; the annotation is `read`, so
+        2b passes.  The tier therefore needs its OWN arm, and this is the
+        falsifiability test for it — a DELETED arm leaves every other test green.
+
+        `tortoise_probe_guarded_excluded` is exactly that shape: it self-guards
+        (the T1 test above asserts the entry is otherwise clean) AND its handler
+        reaches `create_point`, a `sdk_graph_mutators()` member.
+        """
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import MAINTENANCE_TIER, _ro, _rw
+        # Same handler as the clean entry above — the self-guard is real.
+        for tier, ann in (("read", _ro()), (MAINTENANCE_TIER, _rw())):
+            demoted = _probe("tortoise_probe_guarded_excluded", "create_point",
+                             annotations=ann, http_policy=False, risk=tier)
+            violations = write_classification_violations([demoted], _PROBE_SRC)
+            assert any("but its handler reaches write(s)" in v for v in violations), (
+                f"a self-guarding HTTP-excluded entry demoted to risk={tier!r} whose "
+                f"handler reaches a graph mutation was NOT reported — the 2a-prime "
+                f"arm is gone or unreachable: {violations}")
+            # …and nothing ELSE is wrong with it (this pins the arm, not a pile-up).
+            assert violations == [v for v in violations
+                                  if "but its handler reaches write(s)" in v]
+        # The writing tiers are what the same handler is SUPPOSED to carry.
+        for tier in ("destructive", "write"):
+            kept = _probe("tortoise_probe_guarded_excluded", "create_point",
+                          annotations=_rw(), http_policy=False, risk=tier)
+            assert not [v for v in write_classification_violations([kept], _PROBE_SRC)
+                        if "but its handler reaches write(s)" in v], (
+                f"risk={tier!r} is a writing tier — the reading-tier arm must not "
+                f"fire on it")
+
     def test_T2_http_tool_reaching_privileged_capability_fails(self):
         """T2: filesystem and control-plane legs."""
         from tool_surface_capabilities import privileged_exposure_violations
@@ -1089,28 +1140,47 @@ class TestCapabilityModel:
         assert handler_self_guards("tortoise_probe_helper_guard", _PROBE_SRC)
 
     def test_exemption_set_is_exact(self):
-        """2b: an entry's writer ANNOTATION and its declared `writes` flag must be
-        the same statement — measured over the SERVED set, retired names included
-        (#3883): a retired writer is still callable by name, so it is not exempt
-        from the guard. #4474 removed the last five entries where the two
-        disagreed, so the exemption is empty and the check is restated as the
-        invariant the name list stood for — both directions, any `http_policy`.
-        The rogue probes below prove it can still fire."""
+        """2b: an entry's MCP hints and its declared `risk` tier must be the same
+        statement — measured over the SERVED set, retired names included (#3883):
+        a retired writer is still callable by name, so it is not exempt from the
+        guard. Two directions are checked (#4122): `readOnlyHint` must be True
+        exactly for `risk == "read"` (a hint set that disagrees changes client
+        auto-approval behaviour), and `writes` must be True exactly for the
+        writing tiers. The rogue probes below prove both can still fire."""
         from tool_surface_capabilities import exemption_set_violations, served_registry
 
         from tortoise.tool_registry import _ro, _rw
         served = served_registry()
         assert served, "served registry is empty — the check would be vacuous"
         assert exemption_set_violations(served) == []
-        # `_probe` leaves writes=False, so a writer annotation makes the two
-        # disagree — exactly the #4474 defect — and the check must fire.
+        # A read tier carrying a writer annotation — exactly the #4474 defect —
+        # is caught on the readOnlyHint half.
         rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
-                       http_policy=False)
+                       http_policy=False, risk="read")
         assert exemption_set_violations([rogue])
-        # The reverse direction too: a declared writer behind a read annotation.
+        # The reverse direction: a declared writer behind a read annotation.
         reverse = _probe("tortoise_rogue_reader", "query", annotations=_ro(),
-                         http_policy=False, writes=True)
+                         http_policy=False, risk="write")
         assert exemption_set_violations([reverse])
+        # `maintenance` is the third state and must NOT be read as either: the
+        # writer annotation is correct there (it does refresh stored state), so
+        # a maintenance probe with the derived hints is clean …
+        maint_ok = _probe("tortoise_probe_maint", "query", annotations=_rw(),
+                          http_policy=True, risk="maintenance")
+        assert exemption_set_violations([maint_ok]) == []
+        # … while a `writes` permission that disagrees with the tier is caught on
+        # its own half. `writes` is a DERIVED property on the real dataclass, so
+        # the arm is proven against a duck-typed entry — if `writes` ever goes
+        # back to being a declared field, this is the check that keeps it honest.
+        import types
+        forged = types.SimpleNamespace(
+            name="tortoise_probe_forged",
+            risk="maintenance",
+            writes=True,          # needs graphs:write — but maintenance must not
+            annotations=_rw(),
+        )
+        assert any("`writes` disagrees with the risk tier" in v
+                   for v in exemption_set_violations([forged]))
 
     def test_guard4_rename_simulation_fails_loudly(self):
         """A stale write-surface map (renamed/removed tool, or a declared write
@@ -1207,15 +1277,15 @@ class TestCapabilityModel:
         survive the blanked declaration.  `tortoise_packs_list` no longer declares
         `sdk_method="get_tenant_packs"`, so the `by_method` loop in
         declared_set_violations can never key on it; the property is asserted per
-        TOOL NAME via NON_SDK_READ_BINDINGS.  Mutation: flip the tool to a writer
-        annotation and the guard must go red.
+        TOOL NAME via NON_SDK_READ_BINDINGS.  Mutation: re-classify the tool as a
+        pure `read` and the guard must go red — #4122 moved the required posture
+        from "readOnlyHint is True" to `risk == "maintenance"`, so the mutation
+        that must be caught is a return to the tier the ruling retired.
         """
         import dataclasses
 
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import declared_set_violations, served_registry
-
-        from tortoise.tool_registry import _rw
 
         # The real registry is clean — the violation below is caused by the probe.
         assert declared_set_violations(served_registry()) == []
@@ -1224,10 +1294,10 @@ class TestCapabilityModel:
         assert not any(e.sdk_method == "get_tenant_packs" for e in served_registry())
         assert tsc.NON_SDK_READ_BINDINGS["get_tenant_packs"] == "tortoise_packs_list"
 
-        flipped = [dataclasses.replace(e, annotations=_rw())
+        flipped = [dataclasses.replace(e, risk="read")
                    if e.name == "tortoise_packs_list" else e
                    for e in served_registry()]
-        assert any("get_tenant_packs" in v and "non-read HTTP tool" in v
+        assert any("get_tenant_packs" in v and "non-maintenance HTTP tool" in v
                    for v in declared_set_violations(flipped)), (
             "the read-classification property is unchecked for a handler-served "
             "read-through op")
@@ -1465,16 +1535,22 @@ class TestToolIdentity:
         assert len(live) == 44, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
-        """#4474: a `graphs:read`-only key is REFUSED for EVERY entry whose
-        annotation declares a write.
+        """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
 
-        The CASE LIST is DERIVED from the registry's own writer annotation, not
-        hand-typed: a future writer added as `_rw()`/`_idem()` without
-        `writes=True` is covered the moment it lands. A test over a hand-typed
-        list of five names would re-create the very defect it exists to catch.
-        The five #4474 flipped are pinned by name so the derivation cannot
+        The CASE LIST is DERIVED from the entry's permission (`writes`), not
+        hand-typed: a future writer is covered the moment it lands. A test over a
+        hand-typed list of names would re-create the very defect it exists to
+        catch. The five #4474 flipped are pinned by name so the derivation cannot
         silently stop covering them, and the derived count is pinned so the loop
         cannot become vacuous.
+
+        #4122: this used to derive the list from the writer ANNOTATION
+        (`readOnlyHint is False`), which conflated two different facts. The
+        annotation now has a third state — `risk="maintenance"` tools refresh
+        stored state (so no read hint) while remaining callable by a `graphs:read`
+        key (so no write permission) — and they must NOT be in this list. Keying
+        on `writes` is the stricter statement anyway: it is the value the gate
+        actually reads.
         """
         from fastmcp.exceptions import AuthorizationError
 
@@ -1483,22 +1559,24 @@ class TestToolIdentity:
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
-        writer_annotated = sorted(
-            e.name for e in served
-            if e.annotations is not None and e.annotations.readOnlyHint is False
-        )
+        writers = sorted(e.name for e in served if e.writes)
         # 48 = the served writer census (44 live + 4 retired shims). Pinned
         # here so the derived loop below can never pass by covering nothing.
-        assert len(writer_annotated) == 48, writer_annotated
+        assert len(writers) == 48, writers
         for name in ("tortoise_backfill_v25", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):
-            assert name in writer_annotated, f"#4474 case dropped: {name}"
+            assert name in writers, f"#4474 case dropped: {name}"
+        # #4122: the read-through trio is NOT write-permissioned — the drift the
+        # ruling retires would show up here as an availability loss.
+        for name in ("tortoise_get_confidence", "tortoise_compute_confidence",
+                     "tortoise_packs_list"):
+            assert name not in writers, f"#4122: {name} must keep graphs:read"
 
         scopes_tok = _current_scopes.set(["graphs:read"])
         legacy_tok = _current_legacy_full_access.set(False)
         try:
-            for name in writer_annotated:
+            for name in writers:
                 with pytest.raises(AuthorizationError):
                     _enforce_mcp_tool_scope(name)
         finally:
@@ -1528,7 +1606,11 @@ class TestToolIdentity:
             _current_legacy_full_access.reset(legacy_tok)
 
     def test_quota_gated_tools_are_declared_writers(self):
-        """Every _quota_gated wrap site's bound tool declares writes=True."""
+        """Every _quota_gated wrap site's bound tool carries the write permission.
+
+        `writes` is DERIVED from `risk` since #4122, so this asserts the derived
+        permission: a quota-gated (data-mutating) tool must be in a writing tier.
+        """
         from tool_surface_capabilities import (  # noqa: I001
             quota_gated_wrap_sites, registry_entries_by_method,
         )
@@ -1539,11 +1621,11 @@ class TestToolIdentity:
             for entry in by_method.get(method, []):
                 assert entry.writes, (
                     f"{entry.name} bound to _quota_gated({method})@{lineno} "
-                    f"but declared writes=False")
+                    f"but its risk tier ({entry.risk!r}) derives writes=False")
 
     def test_gate_reads_the_entry_writes_flag(self):
-        """The gate's decision IS the entry's `writes` flag: a writer needs
-        graphs:write, a read tool is satisfied by graphs:read."""
+        """The gate's decision IS the entry's derived `writes` permission: a writer
+        needs graphs:write, a read tool is satisfied by graphs:read."""
         from fastmcp.exceptions import AuthorizationError
 
         from tortoise.mcp_auth import _current_legacy_full_access, _current_scopes
@@ -1553,8 +1635,8 @@ class TestToolIdentity:
         legacy_tok = _current_legacy_full_access.set(False)
         try:
             with pytest.raises(AuthorizationError):
-                _enforce_mcp_tool_scope("tortoise_create_point")  # writes=True
-            _enforce_mcp_tool_scope("tortoise_query")             # writes=False
+                _enforce_mcp_tool_scope("tortoise_create_point")  # risk="write"
+            _enforce_mcp_tool_scope("tortoise_query")             # risk="read"
         finally:
             _current_scopes.reset(scopes_tok)
             _current_legacy_full_access.reset(legacy_tok)
