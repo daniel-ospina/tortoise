@@ -121,7 +121,7 @@
     style.textContent =
       "#consent-banner{position:fixed;left:0;right:0;bottom:0;z-index:9999;" +
       "background:#0d1a2d;border-top:1px solid #1e293b;padding:0.9rem 1.25rem;" +
-      "font-family:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace;" +
+      "font-family:ui-monospace,SFMono-Regular,'SF Mono',Menlo,'Cascadia Code','Fira Code','JetBrains Mono',monospace;" +
       "font-size:0.8rem;color:#cbd5e1;box-shadow:0 -4px 24px rgba(0,0,0,0.45)}" +
       "#consent-banner .consent-banner-inner{display:flex;flex-wrap:wrap;align-items:center;" +
       "justify-content:space-between;gap:0.75rem 1.25rem;width:100%;margin:0 auto;max-width:72rem}" +

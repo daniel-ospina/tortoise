@@ -1221,3 +1221,117 @@ class TestInvestorsProgressCopy:
             "(PR #9283)")
 
 
+
+
+class TestMonospaceStackRendersAsAMonoFace:
+    """Every mono font declaration must resolve to a real mono face on macOS Chrome (#6870).
+
+    The stack this repo used everywhere was
+    `'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace`. None of
+    those named faces is installed on a stock macOS Chrome, so the declaration fell
+    through to the bare `monospace` keyword — and Chrome's macOS default for that
+    keyword is **Courier**.
+
+    ⚠️ **`ui-monospace` does NOT fix this on Chrome.** It is a Safari 13.1+ generic;
+    Chrome never shipped it (crbug.com/40194142) and, measured with CDP
+    `CSS.getPlatformFontsForNode` on this repo's Chromium: `ui-monospace` alone →
+    Times (the declaration is dropped), `ui-monospace, Arial` → Arial, `'SF Mono'` →
+    Times, `SFMono-Regular` → Times, `Menlo` → **Menlo**, old stack → **Courier**.
+    So the thing that makes Chrome render a mono face is **`Menlo`**; `ui-monospace`
+    is carried first only so Safari resolves the platform UI mono. Both are required
+    below, and `Menlo` is required *because* it is the one face Chrome resolves —
+    "tidy up the redundant fallbacks" would resurrect the bug, which is why the
+    guard asks for it by name instead of trusting the generic.
+
+    ⚠️ **Scope:** it checks DECLARATIONS, not usage. A page that replaces
+    `font-family: var(--mono)` with a serif renders a serif and this stays green —
+    that is a layout decision, not the Courier defect, and it stays out of scope.
+
+    Pinned rather than remembered because the stack is hand-copied into ~28 places
+    across the marketing pages, the dashboard, the blog renderer, the blog-admin app,
+    the cookie-consent banner and the served MCP consent page (`tortoise/oauth.py`):
+    re-copying the old one from a neighbouring file is a one-keystroke regression and
+    it is SILENT — the page still renders, just in the wrong face. Six such copies
+    were missed on the first pass, and a 28th (the consent page every MCP client
+    approves a grant on) was found by review.
+
+    The scan keys on **the declaration value**, not on the `SF Mono` name: a stack
+    listing none of the old names (`'Cascadia Code', monospace`) renders in Courier
+    too, and an earlier version that keyed on the name PASSED exactly that mutation.
+    It strips CSS/JS comments (so prose saying "not monospace" is not a stack) and
+    blanks `@font-face` blocks, whose `font-family` is the name being *defined* rather
+    than a fallback list — without that, `font-family:'monospace'` in an inline style
+    was skipped as if it were a webfont name, and two real regressions (a JSX
+    `fontFamily:'monospace'` and a canvas `ctx.font='… monospace'`) went green.
+    """
+
+    SUFFIXES = (".html", ".css", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".py")
+    # `--mono:`, `font-family:`, camelCase `fontFamily:` and JS `ctx.font=` (both
+    # appear in the React surfaces), the `font:` shorthand (which smuggles a mono
+    # family past a font-family-only scan), and tailwind's `mono: [...]`.
+    DECL = re.compile(
+        r"(?:--mono|font-family|fontFamily|font|mono)\s*[:=]\s*"
+        # a JS template literal puts `${…}` in the middle of the value, so allow it
+        r"((?:\$\{[^}]*\}|[^;{}\n]|\n[ \t])*)",
+        re.IGNORECASE)
+    #: `/* */`, `<!-- -->` and `//`-to-end-of-line (but not the `//` in a URL)
+    COMMENT = re.compile(r"/\*.*?\*/|<!--.*?-->|(?<!:)//[^\n]*", re.DOTALL)
+    #: `@font-face { font-family: <name> }` declares a NAME, not a fallback stack.
+    FONT_FACE = re.compile(r"@font-face\s*\{[^}]*\}", re.IGNORECASE)
+
+    #: directories and served python modules that emit CSS for a browser
+    ROOTS = ("website", "apps")
+    MODULES = ("tortoise/oauth.py", "tortoise/render.py")
+
+    def _sources(self):
+        repo = Path(__file__).resolve().parent.parent
+        for root_name in self.ROOTS:
+            root = repo / root_name
+            if not root.is_dir():
+                continue
+            for path in sorted(root.rglob("*")):
+                if path.suffix not in self.SUFFIXES or not path.is_file():
+                    continue
+                if "node_modules" in path.parts or "/dist/" in str(path):
+                    continue
+                yield path
+        for mod in self.MODULES:
+            path = repo / mod
+            if path.is_file():
+                yield path
+
+    def _mono_declarations(self):
+        repo = Path(__file__).resolve().parent.parent
+        offenders, checked = [], 0
+        for path in self._sources():
+            text = self.FONT_FACE.sub(" ", self.COMMENT.sub(" ", path.read_text(errors="replace")))
+            for m in self.DECL.finditer(text):
+                value = m.group(1)
+                if "monospace" not in value.lower() or "var(--mono" in value:
+                    continue
+                checked += 1
+                line = text.count("\n", 0, m.start()) + 1
+                low = value.lower()
+                why = []
+                if "menlo" not in low:
+                    why.append("no `Menlo` (the only face macOS Chromium resolves)")
+                if "ui-monospace" not in low:
+                    why.append("no `ui-monospace` (Safari)")
+                elif "menlo" in low and low.index("ui-monospace") > low.index("menlo"):
+                    why.append("`ui-monospace` must come before the named faces")
+                if why:
+                    offenders.append(f"{path.relative_to(repo)}:{line}: {value.strip()[:100]} -> {'; '.join(why)}")
+        return checked, offenders
+
+    def test_no_mono_declaration_omits_a_face_chrome_actually_resolves(self):
+        checked, offenders = self._mono_declarations()
+        assert checked >= 20, (
+            f"only {checked} mono font declaration(s) found under {'/'.join(self.ROOTS)} "
+            f"and {', '.join(self.MODULES)}. If the stack was consolidated into one "
+            "place, delete this test rather than letting it pass on nothing — a scan "
+            "that finds nothing proves nothing.")
+        assert not offenders, (
+            "these mono declarations cannot render as a mono face on macOS Chromium "
+            "(issue #6870), so they fall back to Courier:\n  " + "\n  ".join(offenders) +
+            "\nUse: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', "
+            "'Fira Code', 'JetBrains Mono', monospace")

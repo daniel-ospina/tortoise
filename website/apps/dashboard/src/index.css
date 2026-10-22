@@ -23,7 +23,7 @@
   /* #4331: usage-warning amber — the same #fbbf24 the keys Expires cell
      uses; a named token so the node usage bar (>=80%) has one source. */
   --amber: #fbbf24;
-  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
 }
 
 body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-height: 100vh; }
