@@ -34,6 +34,10 @@ from tools.ci_selection import (  # noqa: I001
     uri_requiring_files,
     carve_matrix_include, carve_shard_issues, carve_shard_count,
     MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
+    slow_matrix_include, slow_shard_issues, slow_shard_count,
+    slow_shard_entries, slow_leg_files, slow_wall_projection,
+    MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
+    SLOW_LEG_WALL_TARGET_MIN, SLOW_LEG_SETUP_ALLOWANCE_MIN,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -65,12 +69,14 @@ def _expand(legs: dict) -> dict:
     """
     out = {}
     for k, v in legs.items():
-        if k in ("shards", "carve_shards"):
+        if k in ("shards", "carve_shards", "slow_shards"):
             # W37: `carve_shards` is the same shape as `shards` (a list of
             # {name, files, …} dicts), so it must be flattened the same way —
             # `set(v)` over dicts raises `unhashable type: 'dict'`, which is
             # how this surface announced itself rather than silently passing.
-            prefix = "" if k == "shards" else "carve_"
+            # #9539: `slow_shards` is the third member of that family.
+            prefix = {"shards": "", "carve_shards": "carve_",
+                      "slow_shards": "slow_"}[k]
             for shard in v:
                 out[prefix + shard["name"]] = set(shard["files"])
         else:
@@ -4671,12 +4677,12 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
     assert "--manifest /tmp/expected-nodeids.txt" in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
-    leg_files = " ".join(i.get("files", "") for i in
-                         wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"])
+    # #9539: read the DERIVED legs — the workflow holds no literal rows.
+    leg_files = slow_leg_files(load_manifest())
     for carved in ("test_reaper", "test_flip_gate", "test_migrate_db",
                    "test_projection_lifecycle", "test_embedded_concurrency",
                    "test_hosted_backup"):
-        assert carved not in leg_files.split(), \
+        assert carved not in leg_files, \
             f"slow carve-out file {carved} must not ride the docker slow legs"
 
 
@@ -5003,9 +5009,12 @@ def test_slow_leg_bounds_clear_the_committed_work():
     assert watchdog < cap, (
         f"the in-step watchdog ({watchdog}m) must stay BELOW the outer cap "
         f"({cap}m) so a killed leg still prints its counts (#798)")
-    for row in job["strategy"]["matrix"]["include"]:
-        files = row["files"].split()
-        assert files, f"test-slow leg {row['half']!r} is empty"
+    # #9539: the legs are DERIVED (slow_shard_entries) — there are no committed
+    # rows left to iterate. This keeps the same floor assertion, applied to each
+    # leg the selector actually emits at the committed leg count.
+    for row in slow_shard_entries(load_manifest()):
+        files = row["files"]
+        assert files, f"test-slow leg {row['name']!r} is empty"
         # FAIL CLOSED on an unmeasured leg file. `durations.get(f, 0.0)` would
         # weigh it ZERO, so the estimate this guard asserts against could sit
         # arbitrarily below the leg's real work and the budget could rot past
@@ -5016,19 +5025,115 @@ def test_slow_leg_bounds_clear_the_committed_work():
         # reading the map at all.
         unmeasured = [f for f in files if f + ".py" not in durations]
         assert not unmeasured, (
-            f"test-slow leg {row['half']!r} has {len(unmeasured)} file(s) with "
+            f"test-slow leg {row['name']!r} has {len(unmeasured)} file(s) with "
             f"no `durations` row: {unmeasured[:5]} — an unmeasured file weighs "
             f"0.0 here, so the leg's estimate is not a lower bound on its work "
             f"and this guard cannot see the budget rot it exists to catch. "
             f"Register it in config/ci-surfaces.yml `durations`.")
         committed = sum(_duration_weight(durations[f + ".py"]) for f in files) / 60.0
         assert watchdog >= WATCHDOG_HEADROOM * committed, (
-            f"test-slow leg {row['half']!r}: the in-step watchdog "
+            f"test-slow leg {row['name']!r}: the in-step watchdog "
             f"({watchdog}m) no longer clears its committed estimate "
             f"({committed:.2f}m) by WATCHDOG_HEADROOM ({WATCHDOG_HEADROOM}x) — "
             f"the leg is killed mid-suite and the gate reds before pytest can "
             f"report. Re-derive the budget (and the outer cap above it) from "
             f"the committed `durations` map.")
+
+
+def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
+    """#9539: the slow legs must be a complete, duration-balanced partition AND
+    the wall their pack projects must stay inside the CI guideline.
+
+    This is the guard the lane did not have. The old committed rows could rot
+    without ANY test noticing: #9017 found the halves at 6.4:1 because the eval
+    file had grown from its declared 855 s to a measured 24.4 min and nothing
+    re-derived the split. Here the properties are recomputed from the committed
+    `durations` map on every run, so a slow file that grows reds THIS instead of
+    silently restoring the merge ceiling:
+
+      * coverage — the legs partition `slow_files - carve_out` exactly, once
+        each (no gap, no duplicate);
+      * balance — no leg exceeds its fair share by more than the house
+        `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
+        within 0.1%, so 1.25 is deliberately loose enough for a coarse map);
+      * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
+        guideline. A new slow file big enough to break it reds here, and the
+        remedy is a reviewed `slow_shards` bump, not a quieter number.
+
+    The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
+    over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
+    would claim a wall the job cannot hit.
+    """
+    m = load_manifest()
+    count = slow_shard_count(m)
+    entries = slow_shard_entries(m)
+    assert len(entries) == count, (
+        f"slow_shards declares {count} legs but the pack emitted {len(entries)} "
+        f"— a short pack means the pool cannot be sharded that widely")
+    assert count >= 2
+    # coverage: exactly once each
+    flat = [f for e in entries for f in e["files"]]
+    assert len(flat) == len(set(flat)), (
+        f"a slow file rides more than one leg: "
+        f"{sorted({f for f in flat if flat.count(f) > 1})}")
+    assert set(flat) == set(slow_leg_files(m)), (
+        "the slow legs must cover slow_files - carve_out exactly: "
+        f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
+        f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
+    # balance: no leg above its fair share by more than the house band
+    proj = slow_wall_projection(m, entries)
+    pool = proj["pool_min"]
+    fair = pool / count
+    assert proj["max_leg_min"] <= fair * cs.HALF_DURATION_IMBALANCE_RATIO, (
+        f"slow legs are duration-imbalanced: {proj['legs_min']} min against a "
+        f"{fair:.2f}m fair share (band {cs.HALF_DURATION_IMBALANCE_RATIO}x) — "
+        f"the LPT pack regressed; re-cut from the `durations` map")
+    # the bound itself
+    assert proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN, (
+        f"the slow lane no longer meets its wall target: {proj['legs_min']} min "
+        f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
+        f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
+        f"{proj['projected_wall_min']:.2f}m — over the "
+        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. Raise "
+        f"`config/ci-surfaces.yml::slow_shards` (reviewed) instead of letting "
+        f"this lane become the merge ceiling again")
+    # the emitted matrix is what the job expands, and every leg is non-empty
+    inc = slow_matrix_include(entries)["include"]
+    assert [r["half"] for r in inc] == [e["name"] for e in entries]
+    assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
+
+
+def test_slow_shards_declaration_is_fail_closed():
+    """#9539: a malformed `slow_shards` is an ERROR, never a silent default.
+
+    Same polarity as `fast_shard_issues`/`carve_shard_issues`: absence is 'not
+    adopted' (the historical 2 legs) and is fine; an explicit null, a string, a
+    bool, a float or a count that deletes or over-extends the lane is a typo
+    that `--integrity` must NAME — otherwise the workflow runs a leg count
+    nobody chose and the merge rail's lane-parity (a job-NAME subtraction) sees
+    a set that was never reviewed."""
+    ok = load_manifest()
+    assert slow_shard_issues(ok) == [], slow_shard_issues(ok)
+    assert slow_shard_count(ok) >= 2, (
+        "this repo exists to shard the slow lane; a count of 1 means the key "
+        "was removed and the wall guard below is what will red")
+    for bad, why in ((None, "explicit null"), ("5", "a string"),
+                     (True, "a bool"), (5.5, "a float"), (1, "one leg"),
+                     (0, "zero"), (-1, "negative"),
+                     (MAX_SLOW_SHARDS + 1, "above the a..z ceiling")):
+        m = dict(ok, slow_shards=bad)
+        assert slow_shard_issues(m), f"{why} ({bad!r}) must be an error"
+        assert slow_shard_count(m) == DEFAULT_SLOW_SHARDS == 2, (
+            f"{why} must fail SAFE to the historical two legs, not to a number "
+            f"nobody chose")
+    # Absence is NOT an error — it is 'not adopted', and it must give back the
+    # historical two-leg shape.
+    m = {k: v for k, v in ok.items() if k != "slow_shards"}
+    assert slow_shard_issues(m) == []
+    assert slow_shard_count(m) == 2
+    assert len(slow_shard_entries(m)) == 2
+    assert set(f for e in slow_shard_entries(m) for f in e["files"]) == \
+        set(slow_leg_files(m))
 
 
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
@@ -5453,35 +5558,54 @@ def test_diff_gated_jobs_consume_changes_outputs():
             f"test-slow '{want}' must consume slow_selected (tier-2 scoping)"
         assert 'case " $SLOW_SEL " in' in run, \
             f"test-slow '{want}' must intersect with slow_selected"
-    # committed matrix rows remain literal file lists (drift-guard pinned)
-    rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
-    assert len(rows) == 2
+    # #9539: the slow legs are the DERIVED matrix (`fromJSON(...slow_matrix)`),
+    # not committed rows — the same shape `test`/`test-carve-out` use. What the
+    # pin still checks is what mattered about the old rows: every leg entry
+    # exists and is declared in `slow_files` (a dead or unclassified entry is
+    # the #1260/#1270 drift class), the union is the whole pool minus the
+    # carve-out set, and no file rides two legs.
+    matrix = wf["jobs"]["test-slow"]["strategy"]["matrix"]
+    assert matrix == "${{ fromJSON(needs.changes.outputs.slow_matrix) }}", (
+        "test-slow's matrix must be the selector's slow_matrix (no literal rows, "
+        f"#9539), got {matrix!r}")
+    assert "slow_matrix" in outs, "changes job must publish slow_matrix (#9539)"
+    push_step = next(s for s in wf["jobs"]["changes"]["steps"]
+                     if s.get("id") == "push-matrix")
+    assert "slow_matrix=" in push_step["run"], (
+        "the push-matrix step must echo slow_matrix (#9539)")
+    inc = slow_matrix_include(slow_shard_entries(load_manifest()))["include"]
+    assert len(inc) == slow_shard_count(load_manifest()) >= 2
     from tools.ci_selection import TESTS_DIR
     _slow = set(load_manifest()["slow_files"])
-    for row in rows:
+    seen: set[str] = set()
+    for row in inc:
         tokens = row["files"].split()
-        assert tokens, "test-slow leg row must be a literal file list (#1471)"
+        assert tokens, "a derived slow leg must never be empty"
         for token in tokens:
             rel = f"{token}.py"
             assert (TESTS_DIR / rel).exists(), \
-                f"test-slow leg entry {rel} does not exist under tests/"
+                f"slow leg entry {rel} does not exist under tests/"
             assert rel in _slow, \
-                f"test-slow leg entry {rel} is not declared in slow_files"
+                f"slow leg entry {rel} is not declared in slow_files"
+            assert rel not in seen, f"slow leg entry {rel} rides two legs"
+            seen.add(rel)
+    assert seen == {f + ".py" for f in slow_leg_files(load_manifest())}, (
+        "the legs must cover slow_files - carve_out exactly (no gap, no dup)")
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
     """#2159 review P2-1: the changes job's slow_selected echo strips the
     .py suffix and space-joins BARE names; test-slow's tier-2 shape then
-    case-matches them against the committed leg rows (matrix.files). This
+    case-matches them against the DERIVED leg rows (matrix.files, #9539). This
     pin reproduces the echo transform for every selection shape and asserts
     the round-trip holds — a strip/join format drift (suffix leak, JSON,
-    newline) would silently empty BOTH legs to a green gate, and this
+    newline) would silently empty EVERY leg to a green gate, and this
     tier-2 partial shape never runs in CI outside a real tier-2 PR."""
     m = load_manifest()
-    wf = _load_python_ci()
-    legs = set()
-    for i in wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]:
-        legs.update(i["files"].split())
+    # #9539: the legs are the DERIVED matrix — the same set the run step
+    # expands from `changes.outputs.slow_matrix` — so the round-trip is checked
+    # against what will actually run rather than against committed rows.
+    legs = set(slow_leg_files(m))
     shapes = [
         ([], "push"),
         ([], "schedule"),

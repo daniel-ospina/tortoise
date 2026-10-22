@@ -53,6 +53,34 @@ fast_shards: 9
 # clock for aggregate runner-minutes, exactly like `fast_shards`.
 carve_shards: 3
 
+# #9539: the SLOW pool's leg count. `test-slow` is the merge ceiling: measured
+# over the 5 newest completed main runs (jobs API + each leg's own junit.xml,
+# 2026-10-21) the job is 14.2–23.0m while the pool it runs is 37.05m of
+# measured test time (37.88m on the committed `durations` map) split two ways
+# with no xdist — one serial pytest process per leg.
+#
+# The legs were ALREADY LPT-optimal (per-file medians pack to 18.52/18.52;
+# observed medians 18.25/18.80, and the run-to-run imbalance flips sign), so
+# rebalancing is not the lever and setup is only 1.9–2.1m of a ~20.5m leg. The
+# remaining lever is the number of legs, and 5 is that arithmetic rather than a
+# preference: `ceil(37.88 / (10m guideline − 2m setup)) = 5` → 7.58m of test
+# time per leg, ~9.6m projected job wall. 2 legs cannot fit a 37.9m pool into
+# 10m at any split, because the best a split can do is pool/2 = 18.9m.
+#
+# The legs are DERIVED (`tools/ci_selection.slow_shard_entries()` LPT-packs
+# `slow_files - carve_out` from the same `durations` map the fast band uses) so
+# no hand-maintained list can rot — the failure mode that made the two-leg
+# lists drift to 6.4:1 before #9017. WHAT IT COSTS: aggregate runner-minutes
+# scale with the leg count (~41 → ~48 for the setup term), the same trade
+# `fast_shards`/`carve_shards` make; wall clock is the objective (#9539).
+#
+# Absence means 2 — the shape this repo ran until now — so deleting this key is
+# a complete rollback. The balance and wall-target guards recompute from the map
+# (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
+# the_wall_target`), so a growing slow file reds here rather than silently
+# restoring the ceiling.
+slow_shards: 5
+
 surfaces:
   api:
   # #9189: REGISTERED, not diff-carrying — the file is a `carve_out:` member, so
