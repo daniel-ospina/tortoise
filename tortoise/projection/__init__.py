@@ -10566,8 +10566,13 @@ class FalkorProjection(
             # either default would be minted as a measured fact downstream.
             return None
         try:
-            used = int(info.get("used_memory", 0) or 0)
-            cap = int(info.get("maxmemory", 0) or 0)
+            # Presence is established above, so read the keys directly: the
+            # `or 0` default would turn a present-but-falsy value (`""`, None)
+            # into the same measured-looking 0 the presence check exists to
+            # refuse (reviewed, #7392). `int()` on those raises into the
+            # `except`, which is the contract the docstring states.
+            used = int(info["used_memory"])
+            cap = int(info["maxmemory"])
         except (TypeError, ValueError):
             return None
         if cap < 0:
@@ -10590,14 +10595,18 @@ class FalkorProjection(
         branch exists to say "full, not corrupt", and the only fact the probe
         establishes is that the server REFUSED A COMMAND for memory reasons. A
         ceiling is one step further, and it is claimed (with the ceiling-only
-        ``--maxmemory`` lever as its remedy) only when ``INFO memory`` actually
-        returned one. Two other shapes reach here and must not borrow that
+        ``--maxmemory`` lever as its remedy) only when ``INFO memory``
+        returned one AND the reading shows it was reached (``used >= cap``).
+        Three shapes must not borrow that
         claim: ``maxmemory == 0``, where the datum says there is NO ceiling and
         the operator has to be pointed at that ABSENCE (the LOCUS of the
         pressure is not asserted — "a per-query cap" is a limit OF the
-        instance), and an unusable reading, where no ceiling was established at
-        all. Sending someone to raise a ceiling
-        that does not exist is the defect this clause closes.
+        instance); an unusable reading, where no ceiling was established at
+        all; and a ratio that was read but sits BELOW the ceiling, where
+        quoting "has reached" would contradict the numbers in the same
+        parenthesis. Sending someone to raise a ceiling
+        that does not exist — or was not reached — is the defect this clause
+        closes.
         """
         if exc is None:
             return None
@@ -10651,11 +10660,31 @@ class FalkorProjection(
                 "reports it by name once it exists).")
         else:
             used, cap = pressure
-            lead = (f"the server has reached its memory ceiling (used_memory "
-                    f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
-            remedy = ("Remedy: raise / relieve the instance's maxmemory "
-                      "ceiling — the --maxmemory in a container's REDIS_ARGS, "
-                      "or the provider's console on a managed instance.")
+            if used >= cap:
+                lead = ("the server has reached its memory ceiling (used_memory "
+                        f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
+                remedy = ("Remedy: raise / relieve the instance's maxmemory "
+                          "ceiling — the --maxmemory in a container's "
+                          "REDIS_ARGS, or the provider's console on a managed "
+                          "instance.")
+            else:
+                # #7392 — a ratio was READ, but the reading does not support
+                # "reached": it shows the refusal happened BELOW the ceiling.
+                # Keeping the ceiling sentence here would print the
+                # contradiction "has reached its ceiling (used_memory 1.0 KiB of
+                # maxmemory 512.0 MiB)", and the ceiling lever would be a
+                # remedy for a limit that was never met. The issue's proposal
+                # assumed "the ratio was read" implies "the ceiling was
+                # reached"; this branch is where that assumption is false, so
+                # the message states the two measured facts instead.
+                lead = (f"the refusal came at used_memory {_fmt_bytes(used)}, "
+                        f"BELOW the maxmemory ceiling "
+                        f"({_fmt_bytes(cap)}), so reaching the ceiling does "
+                        "not explain it")
+                remedy = ("Remedy: do not raise the ceiling — the reading says "
+                          "the refusal came below it. The pressure is "
+                          "elsewhere: host/kernel memory, another client on "
+                          "this instance, or a per-query cap.")
         # The remedy must NOT restate the ownership policy in prose: a name
         # list here is wrong in one direction or the other, and nothing keeps
         # it in sync with the predicate that owns the rule. So the message

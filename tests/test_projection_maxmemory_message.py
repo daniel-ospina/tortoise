@@ -230,7 +230,7 @@ def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatc
     maxmemory unreadable))" plus the `--maxmemory` lever — so both absence
     assertions above fail on it.
 
-    What it must say instead is what was OBSERVED: the server refused a write
+    What it must say instead is what was OBSERVED: the server refused a command
     for memory reasons. That keeps the operator away from `rebuild` (the
     #2981 job) without inventing a ceiling to tune.
 
@@ -304,8 +304,11 @@ def test_a_real_unset_ceiling_reaches_the_message_without_a_ceiling_claim():
     The other `cap == 0` cases stub `_memory_pressure`, so reverting its
     contract to `(used, cap) if cap > 0 else None` was caught only by the
     contract test — the message branch never saw a reading. This drives the
-    real probe (`INFO memory` answering `maxmemory 0`, the shape measured on
-    the shared container) all the way into the operator message.
+    real probe (`INFO memory` answering `maxmemory 0`) all the way into the
+    operator message. That shape is the CI provisioner's today (its REDIS_ARGS
+    passes no --maxmemory, pinned by test_7357_memory_ceiling_legibility); it
+    was ALSO the shared container's when #7392 was filed (2026-10-04, before the
+    #9204/#9506 ceilings landed), so the branch is not hypothetical.
     """
 
     class _Conn:
@@ -330,16 +333,20 @@ def test_a_real_unset_ceiling_reaches_the_message_without_a_ceiling_claim():
     # the issue's own reachability argument is exercised, not just asserted.
     "Out of memory",
 ])
-def test_unset_maxmemory_names_the_absence_and_the_outside_cause(monkeypatch, refusal):
-    """#7392 — `maxmemory == 0` means NO ceiling, measured on this box.
+def test_unset_maxmemory_names_the_absence_without_asserting_a_locus(monkeypatch, refusal):
+    """#7392 — `maxmemory == 0` means NO ceiling; the LOCUS is not asserted.
 
-    Measured 2026-10-04: the shared container reports `maxmemory = 0`. A write
-    refused there is a host-level / per-query OOM, and sending the operator to
-    "raise the container's --maxmemory" is not a remedy for it. The message
-    must name the absence and point OUTSIDE the instance instead.
+    The reading establishes one thing: `maxmemory` is not the cause. It does not
+    establish WHERE the pressure is — and the example the message gives, "a
+    per-query cap", is a limit OF the instance — so "outside the instance" would
+    contradict its own example. Pin the absence AND that non-claim.
 
-    NON-VACUOUS: `_memory_pressure()` returned `None` for this case pre-fix,
-    so the message made the same false ceiling claim as the unreadable branch.
+    Reachability: `maxmemory = 0` was measured on the shared container 2026-10-04
+    (before the #9204/#9506 ceilings landed); today the ceiling-less instance is
+    the CI provisioner's, whose REDIS_ARGS passes no --maxmemory.
+
+    NON-VACUOUS: `_memory_pressure()` returned `None` for this case pre-fix, so
+    the message made the same false ceiling claim as the unusable-reading one.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
     proj = _projection(probe_error=RuntimeError(refusal))
@@ -350,10 +357,42 @@ def test_unset_maxmemory_names_the_absence_and_the_outside_cause(monkeypatch, re
     _assert_no_ceiling_claim(msg)
     lowered = msg.lower()
     assert "no maxmemory ceiling is set" in lowered, msg
-    # The measured used_memory is still reported — the reading was readable.
+    # The reading is still reported — it WAS readable.
     assert "512.0 MiB" in msg, msg
-    # The cause is named as OUTSIDE the instance, not a ceiling to raise.
+    # A candidate cause is offered AS a candidate, and the locus is NOT asserted:
+    # "outside the instance" would contradict the in-instance per-query cap.
     assert "host" in lowered, msg
+    assert "outside the instance" not in lowered, msg
+
+
+def test_a_ratio_below_the_ceiling_does_not_claim_the_ceiling_was_reached(monkeypatch):
+    """#7392 — a ratio that was READ but sits under `maxmemory` is not "reached".
+
+    The issue's proposal kept the ceiling sentence whenever the ratio could be
+    read, assuming "read" implies "reached". It does not: the generic
+    `out of memory` marker reaches this branch with a reading of
+    `used_memory 1.0 KiB of maxmemory 512.0 MiB`, and quoting "has reached its
+    memory ceiling" there contradicts the numbers in the same parenthesis —
+    and prescribes raising a ceiling the reading says was never met.
+
+    NON-VACUOUS: on the pre-fix code this message asserts the ceiling AND the
+    `--maxmemory` lever for exactly these numbers.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError("Out of memory"))
+    proj._memory_pressure = lambda: (1024, 512 * 1024 * 1024)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError("Out of memory"))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    # It says WHAT the reading shows: the refusal is below the ceiling.
+    assert "below the maxmemory ceiling" in lowered, msg
+    assert "reaching the ceiling does not explain it" in lowered, msg
+    assert "1.0 kib" in lowered and "512.0 mib" in lowered, msg
+    # …and the ceiling lever is NOT the remedy this branch prescribes.
+    assert "do not raise the ceiling" in lowered, msg
+    assert "--maxmemory" not in msg, msg
 
 
 def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
