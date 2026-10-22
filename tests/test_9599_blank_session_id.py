@@ -20,18 +20,29 @@ attributed the padded position to #9553 — #9553 is "materialise the
 point-property edge families" and states no position on padded ids; the
 citation is corrected here rather than re-pointed at a neighbour.)
 
-What this module pins is the half that IS ours: the rule *"a blank is not an
-identity"* has ONE home (``tortoise.ids.session_id_refusal``), TWO enforcement
-points (the SDK capture doors and the hosted ``/v1/sessions`` boundary — the
-``capture_consent`` idiom: one predicate, two gates), and ONE replay gate
-(``projection.entities._fold_session_recorded`` and
-``projection.entities._link_session`` — the two folds that merge the session
-key), so a record that reaches the graph by ANY path — live, or replayed from a
+What this module pins is the half that IS ours, with TWO homes at two layers:
+
+* the DOOR half — a caller-supplied ``session_id`` — is
+  ``tortoise.ids.session_id_refusal``, applied at the SDK capture doors and the
+  hosted ``/v1/sessions`` boundary (the ``capture_consent`` idiom: one
+  predicate, two gates); and
+* the REPLAY half — a merge key on a journal record — is
+  ``projection._writable_container_id`` (``_writable_id`` PLUS the blank
+  clause), applied at BOTH folds that merge the session key,
+  ``projection.entities._fold_session_recorded`` and
+  ``projection.entities._link_session``. That predicate already existed on main
+  (#9553) for the ``contains_session`` carrier; this lane extends it to
+  ``SessionRecorded``, which used bare ``_writable_id``. It is ONE predicate for
+  both carriers, not a second one stacked in front of the first.
+
+So a record that reaches the graph by ANY path — live, or replayed from a
 journal written before the doors existed, on EITHER carrier — cannot create a
 ``:Session`` whose id names nothing.
 
-⛔ ``projection._writable_id`` is NOT where this rule lives, deliberately. It is
-the fold's shared identity predicate, and widening it to ``val.strip()`` looks
+⛔ ``projection._writable_id`` is NOT where this rule lives, deliberately, and
+neither is it widened here: the blank clause lives in ``_writable_container_id``
+beside it. ``_writable_id`` is the fold's shared identity predicate, and
+widening it to ``val.strip()`` looks
 like the same rule but reaches the entity NAMES folded through it: measured,
 that silently dropped a blank-named entity at ``create_subject``/``create_object``
 (a ``200 {}`` for a write that happened nowhere) and turned a client-supplied
@@ -252,7 +263,8 @@ def test_the_skip_report_names_a_blank_identity_as_blank():
     from tortoise.projection.nonfolded import _unwritable_shape
 
     for blank in BLANK_IDS:
-        assert "blank" in _unwritable_shape(blank), _unwritable_shape(blank)
+        shape = _unwritable_shape(blank)
+        assert "blank" in shape.lower(), shape
     # ...and this is not a catch-all: the pre-existing shapes still read true.
     assert _unwritable_shape(5) == "it is a int, not a str"
     assert "NUL" in _unwritable_shape("a\x00b")
@@ -364,6 +376,38 @@ def test_the_fold_still_replays_a_padded_real_session_id(sdk):
     proj._fold_session_recorded(
         {"type": "SessionRecorded", "id": "  s1  ", "turn_count": 1})
     assert _session_ids(client) == ["  s1  "], _session_ids(client)
+
+
+def test_the_record_projection_refuses_the_blank_session_node_too():
+    """The OTHER projection must not claim the container the fold drops.
+
+    `SessionRecorded` keys a `session` ROW on `id` in the record projection
+    (Postgres), and the graph fold refuses a whitespace-only key. Projecting
+    the row anyway would make a record-sourced rebuild RICHER than a
+    journal-sourced one by exactly the container the fold dropped — the
+    divergence `projection._writable_container_id` exists to prevent. So the
+    session NODE gate is the same predicate, and this leg pins it value by
+    value against the fold's.
+
+    MUTATION THAT REDS THIS: delete the `node.table == "session"` gate in
+    `record_projection.mutations_for` — a blank id projects a `session` row
+    again while the graph has none.
+    """
+    from tortoise import record_projection as rp
+    from tortoise.projection import _writable_container_id
+
+    def statements_for(sid):
+        return rp.mutations_for(
+            {"type": "SessionRecorded", "ts": "T", "id": sid, "turn_count": 1},
+            org_id="o", graph_id="g")
+
+    for blank in BLANK_IDS:
+        assert statements_for(blank) == [], blank
+        assert _writable_container_id(blank) is False, blank
+    # Non-vacuity: the gate must not eat the ids the fold still writes.
+    for ok_value in ("s1", *PADDED_REAL):
+        assert statements_for(ok_value), ok_value
+        assert _writable_container_id(ok_value) is True, ok_value
 
 
 # ── the OTHER replay carrier: `PointAdded.contains_session` ─────────

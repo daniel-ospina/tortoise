@@ -424,21 +424,25 @@ def _unwritable_shape(value) -> str:
     precisely because non-str ids occur) — so the shape is named here, in ONE
     home, and both the log line and ``reason`` read it (#8840 review P3).
 
-    ⛔ A BLANK is named here too (#9599), even though ``_writable_id`` ADMITS
-    one on purpose. The two are not in conflict: this function is MESSAGE-ONLY
-    (its sole call site is ``IdentitySkip.describe``), and the session arms that
-    DO refuse a blank — ``_fold_session_recorded`` and ``_link_session`` —
-    report through ``_log_identity_skip``. Without this arm they logged a blank
-    id as "carries a lone surrogate", a cause that is false for the record it
-    describes (the #8018/#8702 class). Widening ``_writable_id`` itself is what
-    was measured harmful and reverted (#9599): it gates entity NAMES.
+    A FOURTH shape comes from ``_writable_container_id``, which adds the BLANK
+    refusal for the SESSION-ID gate (#9599) — the gate BOTH session folds apply
+    (``_link_session`` for a ``contains_session`` field, ``_fold_session_recorded``
+    for a ``SessionRecorded`` id). It must be named here too: without this branch
+    a whitespace-only id fell through to the surrogate message and told the
+    operator the value carried an encoding corruption it does not have — the
+    #8018 "a cause that is false for the record it describes" class, and it
+    shipped into ``consistency``'s returned ``reason`` as well (#9553 review).
+    ``_writable_id`` itself still ADMITS a blank on purpose (it gates entity
+    NAMES, where widening was measured harmful and reverted, #9599), so the two
+    predicates are not in conflict: this function is MESSAGE-ONLY (its sole call
+    site is ``IdentitySkip.describe``).
     """
     if not isinstance(value, str):
         return f"it is a {type(value).__name__}, not a str"
     if "\x00" in value:
         return "it carries a NUL"
     if not value.strip():
-        return "it is blank (it names nothing)"
+        return "it is BLANK (whitespace only) — no indexed lookup matches it (#9599)"
     return "it carries a lone surrogate"
 
 

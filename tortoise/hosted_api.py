@@ -30,6 +30,7 @@ import os
 import re
 import threading
 import time
+import unicodedata
 from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Hashable
 from concurrent.futures import ThreadPoolExecutor
@@ -7478,7 +7479,14 @@ async def _check_turnstile(request: Request, body: dict) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator  # noqa: E402
+from pydantic import (  # noqa: E402
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 
 class CreatePointRequest(BaseModel):
@@ -12320,6 +12328,76 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     return resp
 
 
+# #4356 (code-review P2): the invisible class, declared ONCE.
+#
+# `Default_Ignorable_Code_Point` is a Unicode BINARY property, and neither
+# `unicodedata` nor stdlib `re` can ask it (and the `regex` package is not a
+# declared dependency of this module — importing it here to get `\p{...}`
+# would add an undeclared runtime dep to the hosted API). So the guard is the
+# category rule PLUS this set of named exceptions. It must be exactly the code
+# points the category rule would otherwise wave through while a human sees
+# nothing: the four `Lo` members of `Default_Ignorable` (the Hangul fillers —
+# its `M`-category members are already refused by the category rule) and
+# BRAILLE PATTERN BLANK (U+2800), which is in NEITHER `Cf` nor
+# `Default_Ignorable`.
+#
+# This set is pinned as an EQUALITY, not a subset, by
+# `test_the_blank_class_enumeration_is_complete` (it derives the whole class
+# from the property's ranges and the category rule), so a partial enumeration
+# cannot recur silently — see the P2 that added the four fillers.
+_NON_REVEALABLE_BLANKS = frozenset(
+    "\u115f\u1160\u3164\uffa0"   # Hangul fillers — Default_Ignorable, category Lo
+    "\u2800"                     # BRAILLE PATTERN BLANK — category So, not Default_Ignorable
+)
+
+
+def _revealable_plaintext(value) -> bool:
+    """#4356: is this a secret a human — or a Copy button — can actually use?
+
+    The SERVER half of the predicate the dashboard already owns in
+    ``website/apps/dashboard/src/sessionKey.js::revealablePlaintext`` (#4342),
+    same polarity and same reason: a shown-once secret is useless if it is
+    blank or invisible, so "we handed back a string" is not the question — "can
+    it be read/copied" is. ``str.strip()`` alone is NOT a blankness test: it
+    strips whitespace but not zero-width / format characters, so a value of
+    only those would pass and reproduce the exact symptom (a visually empty
+    reveal, or an agent that cannot use the key).
+
+    A value is revealable when it contains at least ONE character a person can
+    see — a letter, number, punctuation or symbol. That rule is total over the
+    invisible classes that are NOT in the visible categories (whitespace /
+    separators, ``Cf`` format such as U+200B/U+FEFF, ``Cc`` controls, ``Cn``
+    unassigned, and ``Mn`` combining marks such as the variation selectors),
+    because none of those categories is in ``LNPS``.
+
+    ⛔ But the category rule is NOT total over the invisible class on its own,
+    and this predicate says so instead of implying otherwise:
+    ``Default_Ignorable_Code_Point`` has four members in category ``Lo`` —
+    U+115F, U+1160, U+3164, U+FFA0 (Hangul fillers) — which are visually blank
+    and would pass as "a letter". Those four are named in
+    ``_NON_REVEALABLE_BLANKS`` along with BRAILLE PATTERN BLANK (U+2800, ``So``,
+    in neither ``Cf`` nor ``Default_Ignorable``). Without them the predicate is
+    FAIL-OPEN on exactly the shape it exists to refuse — and out of step with
+    the dashboard predicate it is the server half of, which strips
+    ``\\p{Default_Ignorable_Code_Point}`` and refuses all four.
+
+    Only the DECISION reads a copy; nothing here rewrites the secret.
+
+    Deliberately fail-CLOSED and deliberately not a format check: refusing a
+    rotation is recoverable (the old key keeps working), destroying one is not.
+    It must never become a validator for the token FORMAT — a legitimate
+    non-ASCII or future-format secret must be waived through, not refused.
+    """
+    if not isinstance(value, str):
+        return False
+    return any(
+        not ch.isspace()
+        and unicodedata.category(ch)[0] in "LNPS"
+        and ch not in _NON_REVEALABLE_BLANKS
+        for ch in value
+    )
+
+
 @app.post("/v1/team/keys/{key_id}/rotate")
 async def rotate_api_key(key_id: str, request: Request, response: Response,
                          org: dict = Depends(get_current_org_session)):  # noqa: B008
@@ -12367,6 +12445,22 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
     plaintext is still returned (reveal-once: the only alternative is losing a
     live secret). There is NO cross-lane transaction and none is claimed — see
     the #4355 scoping comment for the declared residuals.
+
+    #4356 — a revealable replacement is a PRECONDITION of the destructive leg.
+    Create-first is not enough on its own: a create that returns a ROW but no
+    usable secret (the silent-falsy shape — no raise, empty/unrevealable
+    plaintext) would otherwise revoke the displaced key and hand back a
+    credential nobody can use, which is strictly worse than refusing. So the
+    mint envelope is tested for a revealable plaintext immediately after the
+    mint and BEFORE `_claim_key_revocation`: falsy ⇒ the destructive leg is not
+    attempted at all, the displaced row is left untouched, and the call refuses
+    with a truthful 500 naming the unusable replacement row. The unusable
+    replacement is NOT auto-revoked — #4356's AC(3) pins that a
+    plaintext-less rotate fires no revoke of its own, so the cleanup stays
+    manual (disclosed in the detail, and named there by its prefix so the user
+    does not revoke the WRONG row: the mint carries the displaced row's label
+    over, so two live rows can share one name). Success-path ordering is
+    unchanged: `mint → revoke`.
     """
     from tortoise.quota import api_key_occupies_slot
 
@@ -12481,9 +12575,50 @@ async def rotate_api_key(key_id: str, request: Request, response: Response,
         ) from None
 
     kid = minted["id"]
-    api_key = minted["key_plaintext"]
+    # `.get` on purpose: an ABSENT field is the same failure as a falsy one and
+    # must take the same refusal, not raise a KeyError/500 with no explanation.
+    api_key = minted.get("key_plaintext")
     key_prefix = minted["key_prefix"]
     now = minted["created_at"]
+
+    # ── #4356: is the replacement USABLE? A precondition of the destructive
+    # leg, so it is tested BEFORE it. #4342's client-side guard sat after the
+    # revoke: truthful about the wreckage, but too late — the old key was dead
+    # and the replacement's secret was gone. A failed replacement must never
+    # destroy a working credential.
+    if not _revealable_plaintext(api_key):
+        _logger.error(
+            "rotate: replacement %s for %s (org %s, prefix %r) minted with no "
+            "revealable plaintext — refusing to revoke the displaced key",
+            kid, key_id, org["org_id"], key_prefix)
+        # The row was created, so the trail must say so — otherwise the only
+        # record of the unused replacement is a log line that rotates away.
+        await _async_audit(
+            request, org["org_id"], "api_key_rotate",
+            resource_type="api_key", resource_id=kid,
+            detail={
+                "replaced_key_id": key_id,
+                "replaced_revoked": False,
+                "destructive_leg": "not_attempted",
+                "reason": "replacement_plaintext_not_revealable",
+            },
+        )
+        prefix_note = (
+            f" (its prefix is {key_prefix}; the replacement carries this key's "
+            "name, so use the prefix to tell them apart)"
+            if key_prefix else ""
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "The rotation did not complete: the replacement key was "
+                "created but its value could not be shown, so it would be "
+                "unusable. Nothing was revoked — the key you rotated is "
+                "unchanged and behaves exactly as before. An unusable "
+                f"replacement row now exists{prefix_note}: revoke that row "
+                "from the key table, then retry the rotation."
+            ),
+        )
 
     # ── Destructive leg: a CLAIM, so exactly one concurrent rotate wins ──
     replaced_revoked = True
@@ -16543,14 +16678,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # last divergent copy. Guards inherited: terminal keep-first (the fold
     # never blind-overwrites), self-supersession skip, >1-name never-guess,
     # visible-successor gate, legacy id-less canonical-id synthesis. Skips
-    # surface via _logger.warning (hosted attribution) — except the helper's
-    # documented SILENT class (no warn()): entity same-successor dedup
-    # (idempotent no-op) and terminal pt_ absorbs REGARDLESS of the claimed
-    # successor (no divergence probe — the #2164 P3 asymmetry; divergent
-    # pt_ re-claims are out-of-band-only, S3 point search excludes terminal
-    # priors, #1391). The summary log therefore INFOs zero-warn applies even
-    # when applied<total — a WARNING means a record actually warned. Per-
-    # record fail-open (warn-only — never fails the commit). Same-commit
+    # surface via _logger.warning (hosted attribution) under the helper's
+    # BOUNDED #5654 contract — the first _MAX_SUPERSESSION_WARNS (20)
+    # per-record warns are logged individually, the rest are counted and
+    # reported in ONE summary WARN (emitted only when something was withheld)
+    # carrying the batch size, the true warning total and the withheld count,
+    # so past that budget a skip is SIZED but not named individually. The
+    # helper's documented SILENT class still
+    # never warns at all: entity same-successor dedup (idempotent no-op) and
+    # terminal pt_ absorbs REGARDLESS of the claimed successor (no divergence
+    # probe — the #2164 P3 asymmetry; divergent pt_ re-claims are
+    # out-of-band-only, S3 point search excludes terminal priors, #1391).
+    # The summary log therefore INFOs zero-warn applies even
+    # when applied<total, and WARNINGs once any record warned — a WARNING on
+    # that line means a record warned OR the helper closed with its summary
+    # (which also increments `warned`; see _supersession_warn). Per-record
+    # fail-open (warn-only — never fails the commit). Same-commit
     # supersession chains fold in dependency order inside apply_supersessions
     # (#2249) — emission order is irrelevant; the helper's pre-pass sorts so
     # each fold runs while its successor is still live. Cross-commit
@@ -16571,7 +16714,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # terminal pt_ absorbs never call warn()) — applied < total with
         # zero warns is a silent no-op/absorb, not an operator signal;
         # WARNING is reserved for records that actually warned (real skips:
-        # dangling/self/never-guess/keep-first conflicts, emit failures).
+        # dangling/self/never-guess/keep-first conflicts, emit failures) PLUS
+        # the helper's ONE closing summary warn, which is emitted outside the
+        # #5654 per-record budget and reaches this sink too. So `warned`
+        # over-counts records once the budget is spent — it is a log-level
+        # signal, never a tally of records (the helper's summary carries the
+        # true total).
         nonlocal warned
         warned += 1
         _logger.warning(msg, *args, **kwargs)
@@ -19722,7 +19870,8 @@ async def _provision_preflight(org: dict) -> None:
 def _provision_graph(org: dict, name: str,
                      requested_scopes: list | None,
                      caller_key_id: str | None,
-                     session_user_id: str | None = None) -> dict:
+                     session_user_id: str | None = None,
+                     *, packs: list[dict] | None = None) -> dict:
     """The ONE mint flow. Caller holds the per-org lock (or this is
     called within it). Returns the 201 envelope. On ANY post-write
     failure the graph rolls back (D11 — no orphan graph/key).
@@ -19730,10 +19879,19 @@ def _provision_graph(org: dict, name: str,
     session_user_id (session alias only): recorded as the minted key's
     creator (#1511 attribution — session mints carry the user UUID;
     key-driven mints record "api" and the caller key id rides
-    created_by_key_id — P2-6, NEVER a key id in created_by)."""
+    created_by_key_id — P2-6, NEVER a key id in created_by).
+
+    ``packs`` (#9667): the optional desired pack set from the create body.
+    ``None`` = no pack decision (the graph stays UNCONFIGURED, catalog union).
+    A list — including ``[]`` — configures the graph at birth, in the SAME
+    call and against the new graph's own physical namespace; the resolved set
+    rides back in the envelope under ``packs``. A refusal rolls the graph back
+    and raises 422, so an invalid or unauthorised pack fails the CREATION and
+    never leaves a half-created graph."""
     sdk = _make_sdk(namespace="registry")
     graph = None
     minted = None
+    applied_packs = None
     try:
         # Graph write (both modes). Supabase: graphs row via the seam
         # (C1 deferred the INSERT; C2 owns it). Registry: _graph_create
@@ -19761,6 +19919,33 @@ def _provision_graph(org: dict, name: str,
             graph = {"id": g["graph_id"], "name": name, "kind": "custom",
                      "namespace": g["namespace"], "status": "active",
                      "created_at": datetime.now(UTC).isoformat()}
+
+        # #9667: create-with-packs — the ATOMIC form. Applied to the new
+        # graph's OWN physical namespace, with ``expected_revision=None``
+        # because this call is the graph's only owner: the namespace is
+        # brand-new, so nothing can race it and its revision is 0 by
+        # construction (the documented "internal callers that own the graph"
+        # arm of ``set_graph_packs``, exactly as provisioning was anticipated
+        # there). ``set_graph_packs`` stays the single validation authority
+        # (catalog membership, status vocabulary, duplicate namespaces) —
+        # re-deriving "is this namespace installable" here would mint a
+        # second, driftable answer — and a refusal rolls the graph back so
+        # the acceptance holds: the creation fails, never a half-created
+        # graph plus a follow-up call.
+        if packs is not None:
+            from tortoise.pack_state import set_graph_packs
+            try:
+                applied_packs = set_graph_packs(
+                    _make_sdk(graph_name=graph["namespace"]),
+                    packs=packs,
+                    expected_revision=None,
+                    updated_by=session_user_id or caller_key_id,
+                ).to_dict()
+            except ValueError as exc:
+                _rollback_graph(org["id"], graph)
+                graph = None  # rolled back — the except must not re-delete
+                raise HTTPException(status_code=422,
+                                    detail=_pack_error_detail(exc)) from None
 
         # Post-insert re-count backstop (D3/E2E-11): the per-process lock
         # serializes count-then-insert within one worker, but a multi-worker
@@ -19795,7 +19980,7 @@ def _provision_graph(org: dict, name: str,
         minted = _mint_graph_key(org["id"], graph["id"],
                                  requested_scopes, caller_key_id,
                                  session_user_id=session_user_id)
-        return {
+        result = {
             "graph": {
                 "id": graph["id"], "name": graph["name"],
                 "kind": graph["kind"], "namespace": graph["namespace"],
@@ -19809,6 +19994,11 @@ def _provision_graph(org: dict, name: str,
             "key_plaintext": minted["key_plaintext"],
             "revealed_once": True,
         }
+        # Present ONLY when the caller asked for a pack set, so a pre-#9667
+        # caller's 201 envelope is byte-identical to what it always was.
+        if applied_packs is not None:
+            result["packs"] = applied_packs
+        return result
     except _KeyCapExceeded:
         # Roll back the graph (the key never landed) — no orphan.
         _rollback_graph(org["id"], graph)
@@ -20014,7 +20204,8 @@ async def create_org_graph(org_id: str, body: dict,
 
 
 @app.post("/v1/graphs", status_code=201)
-async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
+async def create_graph(body: dict, request: Request,
+                       user: dict = Depends(get_current_user)):  # noqa: B008
     """E5 — session-authed alias for the ONE provisioning service (C2).
     Existing dashboard caller; the response CHANGES from the old top-level
     {graph_id, name, kind, graph_name} to the nested 201 envelope
@@ -20022,14 +20213,38 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
     dashboard createGraph (main.jsx), reads status only, so the shape
     change is safe; C7 owns any UI that surfaces the envelope). The stale
     402 here is REMOVED: the shared service owns tier(402)+quota(409)
-    semantics (D2)."""
+    semantics (D2).
+
+    #9667 — ``packs``: create and configure in ONE call, so an unconfigured
+    graph is a CHOICE rather than the only possibility. Absent ⇒ the graph
+    is born unconfigured and keeps the catalog-union default (the owner's
+    decided behaviour — #2714 indicator 3); ``[]`` ⇒ born configured with an
+    EMPTY set; a list ⇒ exactly that set, and the 201 envelope carries the
+    resolved ``packs`` so the caller never has to re-read. An invalid or
+    unauthorised namespace fails the CREATION (rolled back, 422) rather than
+    a follow-up call."""
     org_id = body.get("org_id")
     name = (body.get("name") or "").strip()
     if not org_id or not name:
         raise HTTPException(status_code=422, detail="org_id and name required")
+    # Parse BEFORE any write, so a malformed pack set leaves nothing behind.
+    # Catalog membership is deliberately NOT checked here — the write core is
+    # the single authority (see :func:`_pack_entries_from_body`).
+    packs = _pack_entries_from_body(body.get("packs"))
     membership = await _membership_org(user["user_id"], org_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
+    if packs is not None and membership.get("role") not in ("owner", "admin"):
+        # Pack selection is the MANAGEMENT plane (#2728): the per-graph PUT
+        # requires owner/admin, so the create-time form must not become the
+        # back door that lets a ``member`` narrow a graph's ontology under
+        # cover of provisioning. Checked BEFORE any write — the refusal
+        # creates nothing.
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "PACKS_REQUIRE_ADMIN",
+                    "message": "Setting packs requires the owner or admin "
+                               "role in the team."})
     org = await _org_node(org_id)
     if org is None:
         raise HTTPException(status_code=404, detail="Unknown organization")
@@ -20043,7 +20258,8 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
         # Session-alias mint: record WHO minted (#1511 attribution parity
         # with create_api_key — session mints carry the user UUID, not "api").
         provisioned = _provision_graph(org, name, body.get("scopes"), None,
-                                       session_user_id=user["user_id"])
+                                       session_user_id=user["user_id"],
+                                       packs=packs)
         # #528 analytics (plan Task 4 Step 6) — success-only; the session
         # user is the distinct_id.
         await asyncio.to_thread(
@@ -20054,6 +20270,20 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
         )
         # #308 R2 key-create evaluation (mirror create_api_key).
         await _abuse_evaluate_keys(org["id"])
+        if packs is not None:
+            # Audit parity with PUT /v1/graphs/{graph_id}/packs — same event
+            # name and detail shape, so an operator querying pack changes sees
+            # a graph's BIRTH configuration instead of a gap between "created"
+            # and "first configured".
+            await _async_audit(
+                request, org["id"], "graph_packs_update",
+                resource_type="graph",
+                resource_id=provisioned["graph"]["id"],
+                actor_user_id=user["user_id"],
+                detail={"via": "session",
+                        "at": "create",
+                        "revision": provisioned["packs"]["revision"],
+                        "packs": packs})
         return provisioned
 
 
@@ -20285,6 +20515,74 @@ class GraphPacksPut(BaseModel):
 
     packs: list[GraphPackEntry]
     expected_revision: int
+
+
+def _pack_error_detail(exc: Exception) -> dict:
+    """Map a pack-write refusal to the ONE 422 detail shape (#2728/#9667).
+
+    Every surface that can refuse a desired pack set — ``PUT
+    /v1/graphs/{graph_id}/packs`` and a graph CREATE carrying ``packs`` —
+    speaks through this mapper, so a client that branches on ``error_code``
+    cannot be told two different things about the same refusal. The three
+    refusal classes are the write core's own vocabulary (``pack_state``);
+    they all subclass ``ValueError``, so callers catch that and hand it here.
+    """
+    from tortoise.pack_state import (  # local: hosted_api imports pack_state lazily
+        InvalidPackStatus,
+        UnknownPackNamespace,
+    )
+    if isinstance(exc, UnknownPackNamespace):
+        return {"error_code": "UNKNOWN_PACK_NAMESPACE",
+                "message": "Unknown pack namespace",
+                "namespace": exc.namespace}
+    if isinstance(exc, InvalidPackStatus):
+        return {"error_code": "INVALID_PACK_STATUS",
+                "message": str(exc), "status": exc.status}
+    return {"error_code": "INVALID_PACK_SET", "message": str(exc)}
+
+
+def _pack_entries_from_body(raw: object) -> list[dict] | None:
+    """#9667 — parse the optional ``packs`` field of a graph-CREATE body.
+
+    ``None`` (field absent) means NO pack decision: the graph is created
+    UNCONFIGURED and keeps the catalog-union default (#2714 indicator 3), which
+    is the owner's decided behaviour — creation is not the place to narrow it
+    by accident. ``[]`` is the opposite and deliberate: the graph is born
+    CONFIGURED with an empty set, so nothing outside core is writable on it.
+    That is the whole point of the atomic form — an unconfigured graph becomes
+    a choice instead of the only possibility.
+
+    Entries are validated by the SAME ``GraphPackEntry`` model the PUT body
+    uses (non-empty namespace, ``active``/``disabled`` only), so the two
+    surfaces share one vocabulary. Catalog membership is deliberately NOT
+    checked here: ``pack_state.set_graph_packs`` is the single authority for
+    "is this namespace installable", and re-deriving it would mint a second,
+    driftable answer.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": "INVALID_PACK_SET",
+                    "message": "packs must be a list of "
+                               "{namespace, status}"})
+    entries: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=422,
+                detail={"error_code": "INVALID_PACK_SET",
+                        "message": "each pack entry must be an object "
+                                   "with namespace and status"})
+        try:
+            entries.append(GraphPackEntry(**entry).model_dump())
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail={"error_code": "INVALID_PACK_SET",
+                        "message": f"invalid pack entry: {exc}"}) from None
+    return entries
 
 
 def _registry_graph_list(org_id: str) -> list[dict]:
@@ -20601,11 +20899,7 @@ async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
                                     or key_ctx.get("session_user_id")))
         return _graph_packs_view(gsdk)
 
-    from tortoise.pack_state import (
-        InvalidPackStatus,
-        PackRevisionConflict,
-        UnknownPackNamespace,
-    )
+    from tortoise.pack_state import PackRevisionConflict  # 422s: _pack_error_detail
     try:
         resolved, rows = await asyncio.to_thread(_write)
     except PackRevisionConflict as exc:
@@ -20615,23 +20909,11 @@ async def _apply_graph_packs_put(graph_id: str, body: GraphPacksPut,
                     "message": "The graph's pack set changed since you "
                                "loaded it — reload and retry.",
                     "current_revision": exc.current}) from None
-    except UnknownPackNamespace as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error_code": "UNKNOWN_PACK_NAMESPACE",
-                    "message": "Unknown pack namespace",
-                    "namespace": exc.namespace}) from None
-    except InvalidPackStatus as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error_code": "INVALID_PACK_STATUS",
-                    "message": str(exc),
-                    "status": exc.status}) from None
     except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail={"error_code": "INVALID_PACK_SET",
-                    "message": str(exc)}) from None
+        # UnknownPackNamespace / InvalidPackStatus / a bare ValueError
+        # (duplicate namespace) — one mapper, one 422 shape (#9667).
+        raise HTTPException(status_code=422,
+                            detail=_pack_error_detail(exc)) from None
     except Exception:
         _logger.exception("pack write failed for team %s graph %s",
                           org_id, graph_id)

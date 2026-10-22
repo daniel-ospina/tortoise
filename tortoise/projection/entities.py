@@ -27,7 +27,6 @@ from datetime import datetime, timezone
 from tortoise.entity_identity import all_name_holder_ids
 from tortoise.ids import content_hash as _content_hash
 from tortoise.ids import entity_name_id as _entity_name_id
-from tortoise.ids import session_id_refusal as _session_id_refusal
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
     epistemic_disjunction,  # #5380: the target-position widening
@@ -2674,31 +2673,31 @@ class _EntityHandlers:
         from tortoise.projection import (
             _annotator_value_ok,
             _log_identity_skip,
-            _writable_id,
+            _writable_container_id,
         )
 
         if not isinstance(ev, dict):
             return 0
         sid = ev.get("id")
-        if not _writable_id(sid) or not sid:
-            return 0
         # #9599: a BLANK id is not an identity, and this is the REPLAY half of
-        # the refusal the capture doors now make. `_writable_id` deliberately
-        # still admits a blank (#9599) because it is shared with entity NAMES,
-        # whose fold must not be widened; the session key gets the narrower
-        # rule here, where it is unambiguously a session id. Without it a
-        # journal written before the doors refused resurrects a
-        # `:Session {id:'   '}` on rebuild — an indexed key the engine cannot
-        # serve back to an equality seek, so the container is invisible and
-        # every later capture mints a duplicate on it.
+        # the refusal the capture doors make. The rule is `_writable_container_id`
+        # — the SAME gate `_link_session` applies to `contains_session`, one
+        # owner for both journal carriers. `_writable_id` deliberately still
+        # admits a blank (#9599) because it is shared with entity NAMES, whose
+        # fold must not be widened. Without the extra clause a journal written
+        # before the doors refused resurrects a `:Session {id:'   '}` on
+        # rebuild — an indexed key the engine cannot serve back to an equality
+        # seek, so the container is invisible and every later capture mints a
+        # duplicate on it. An ABSENT id is ordinary here: `_log_identity_skip`
+        # stays silent for it (no identity was named at all).
         # ⛔ `drops_record=True`: this `return` IS the record's death — the
         # container is not written at all — so the replay accounting must count
         # it as dropped. Without the flag `consistency` reads this arm as a
         # NESTED skip on a record that folded, reports the record as APPLIED
         # and says nothing about the missing `:Session` (#8702/#8840). The
-        # sibling `_link_session` arm below deliberately does NOT pass it: an
-        # edge is lost there, not a record.
-        if _session_id_refusal(sid) is not None:
+        # sibling `_link_session` arm deliberately does NOT pass it: an edge is
+        # lost there, not a record.
+        if not _writable_container_id(sid):
             _log_identity_skip("Session", sid, "id (MERGE key)",
                                event_id=ev.get("event_id"),
                                where="FalkorProjection._fold_session_recorded",
@@ -2836,19 +2835,23 @@ class _EntityHandlers:
         # #7369: `session_id` is the Session MERGE key (`MERGE (s:Session
         # {id:$sid})`), reached from `PointAdded.contains_session` off the raw
         # journal envelope — an unwritable one aborts after the wipe.
-        from tortoise.ids import session_id_refusal
-        from tortoise.projection import _log_identity_skip, _writable_id
-        if not _writable_id(session_id):
-            _log_identity_skip("Session", session_id, "id (MERGE key)")
-            return
-        # #9599: the OTHER carrier of the blank session id. `_writable_id`
-        # admits a blank on purpose (it is shared with entity NAMES), so the
-        # narrower session rule is applied here, next to the merge key it
-        # guards. This is the `contains_session` arm — a pre-fix journal's
-        # PointAdded still names the session, and replaying it would write the
-        # same invisible container AND silently drop the CONTAINS edge (the
-        # measured #9599 symptom), which is why both carriers are gated.
-        if session_id_refusal(session_id) is not None:
+        #
+        # #9553 review P2: the gate is `_writable_container_id`, which adds the
+        # BLANK refusal to `_writable_id` — measured, because an indexed graph
+        # cannot match a whitespace-only key at all, so this method would both
+        # mint a DUPLICATE `:Session` and land no edge (see that predicate's
+        # docstring). The record projection refuses the same ids, and the two
+        # gates are pinned equal, so a whitespace-only `contains_session` is
+        # dropped by BOTH routes instead of by one. ⛔ ONE owner, both carriers
+        # (#9599 review): this is the `contains_session` arm, and
+        # `_fold_session_recorded` below applies the SAME predicate to its
+        # `SessionRecorded` id — a pre-fix journal can name the blank session
+        # through either one. An earlier revision of this branch stacked a
+        # THIRD predicate (`tortoise.ids.session_id_refusal`) here in front of
+        # this gate; it is removed, because two predicates for one identity
+        # rule is how the pins and the code drift apart.
+        from tortoise.projection import _log_identity_skip, _writable_container_id
+        if not _writable_container_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
         # #7951 R2-P2: mirror `_link_source`'s pre-delete gate. A `CONTAINS`
