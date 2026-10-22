@@ -943,6 +943,21 @@ def apply_plan(
                 f"the output's {declared} ({declared_n}) no longer matches its {len(rows)} row(s)"
             )
     if revert:
+        # ⛔ A revert whose plan carries NO renames is not an undo — it is a
+        # no-op wearing one. `apply_plan` would apply nothing, and the proof
+        # below then compares the unchanged input against a plan built FROM that
+        # same input, so it "passes": the run exits 0 and reports a restore that
+        # never happened (measured: run documented step 2 twice — the second
+        # pass renames nothing and REWRITES the report with `renames: []` — and
+        # step 3 then "restores" the normalised dump while the original ids
+        # survive in no artifact, because `entity_name_id` is a sha256 and they
+        # are not re-derivable). Refused instead.
+        if not plan.renames:
+            problems.append(
+                "the report carries no renames — it is a no-op pass, not a plan "
+                "to undo; the original ids exist only in the report that DOES "
+                "carry them, so this revert would report a restore it never made"
+            )
         # A revert's own proof: the restored artifact must BE the snapshot the
         # plan was built from, not merely look like it (node keys AND edges).
         restored = _dump_fingerprint(out)

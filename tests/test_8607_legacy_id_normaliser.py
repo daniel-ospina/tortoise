@@ -1075,3 +1075,195 @@ def test_the_report_is_on_disk_before_a_snapshot_write_that_fails(tmp_path):
         )
     assert json.loads(report.read_text(encoding="utf-8"))["renamed"] == _renamed_population()
     assert json.loads(dump_path.read_text(encoding="utf-8"))["node_count"] == 9_738
+
+
+def test_a_report_with_no_renames_cannot_pose_as_an_undo(tmp_path):
+    """A no-op plan is not an undo, and its proof is vacuous.
+
+    Run documented step 2 twice: the second pass renames nothing and rewrites
+    the report with `renames: []`. Step 3 then "restores" the normalised dump,
+    exits 0, and the original ids survive in NO artifact — `entity_name_id` is a
+    sha256, so they are not re-derivable.
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out, report = tmp_path / "n.json", tmp_path / "plan.json"
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    assert (
+        main(
+            [
+                "--dump",
+                str(out),
+                "--revert",
+                "--report",
+                str(report),
+                "--out",
+                str(tmp_path / "a.json"),
+            ]
+        )
+        == 0
+    )
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"renames": [], "dump_sha256": "x"}), encoding="utf-8")
+    with pytest.raises(LegacyIdError) as exc:
+        apply_plan(
+            json.loads(out.read_text(encoding="utf-8")),
+            build_plan(json.loads(out.read_text(encoding="utf-8"))),
+            revert=True,
+        )
+    assert any("carries no renames" in p for p in exc.value.problems)
+    assert (
+        main(
+            [
+                "--dump",
+                str(out),
+                "--revert",
+                "--report",
+                str(empty),
+                "--out",
+                str(tmp_path / "b.json"),
+            ]
+        )
+        == 2
+    )
+    assert not (tmp_path / "b.json").exists()
+
+
+def test_a_no_op_apply_cannot_destroy_a_plan_that_can_undo_the_pass(tmp_path):
+    """The destructive half: step 2 re-run over an already-normalised snapshot."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out, report = tmp_path / "n.json", tmp_path / "plan.json"
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    before = report.read_text(encoding="utf-8")
+    assert json.loads(before)["renamed"] == _renamed_population()
+    assert (
+        main(
+            [
+                "--dump",
+                str(out),
+                "--apply",
+                "--out",
+                str(tmp_path / "n2.json"),
+                "--report",
+                str(report),
+            ]
+        )
+        == 2
+    )
+    assert report.read_text(encoding="utf-8") == before, "the plan survived"
+    assert not (tmp_path / "n2.json").exists(), "and no snapshot was written"
+
+
+def test_a_revert_report_is_on_stdout_and_parses(tmp_path, capsys):
+    """Pins the half of the revert change that REPLACED the removed write."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out, report = tmp_path / "n.json", tmp_path / "plan.json"
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "--dump",
+                str(out),
+                "--revert",
+                "--report",
+                str(report),
+                "--out",
+                str(tmp_path / "b.json"),
+            ]
+        )
+        == 0
+    )
+    emitted = json.loads(capsys.readouterr().out)
+    assert emitted["mode"] == "revert"
+    assert emitted["renamed"] == _renamed_population()
+    assert emitted["dump_sha256"]
+
+
+def test_a_report_without_a_fingerprint_is_a_usage_error_not_a_refusal(tmp_path):
+    """A malformed report is exit 1; exit 2 is reserved for an unsafe snapshot."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out = tmp_path / "n.json"
+    assert (
+        main(
+            [
+                "--dump",
+                str(dump_path),
+                "--apply",
+                "--out",
+                str(out),
+                "--report",
+                str(tmp_path / "p.json"),
+            ]
+        )
+        == 0
+    )
+    nosha = tmp_path / "nosha.json"
+    nosha.write_text(
+        json.dumps(
+            {
+                "renames": [
+                    {"dump_id": 1, "label": "Point", "key_property": "id", "old": "a", "new": "b"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--dump",
+                str(out),
+                "--revert",
+                "--report",
+                str(nosha),
+                "--out",
+                str(tmp_path / "z.json"),
+            ]
+        )
+    assert "dump_sha256" in str(exc.value.code)
+    assert not (tmp_path / "z.json").exists()
+
+
+def test_stdout_redirected_onto_the_snapshot_is_refused(tmp_path):
+    """`--revert … --out restored.json > restored.json` shares one file, and the
+    gate cannot see it as a path pair — one destination is fd 1."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out, report = tmp_path / "n.json", tmp_path / "plan.json"
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    target = tmp_path / "restored.json"
+    saved = os.dup(1)
+    try:
+        with open(target, "w", encoding="utf-8") as handle:
+            os.dup2(handle.fileno(), 1)
+            with pytest.raises(SystemExit) as exc:
+                main(
+                    ["--dump", str(out), "--revert", "--report", str(report), "--out", str(target)]
+                )
+            assert "standard output is redirected" in str(exc.value.code)
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+    assert not target.exists() or "nodes" not in target.read_text(encoding="utf-8")

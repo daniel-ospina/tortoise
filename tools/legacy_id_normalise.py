@@ -15,14 +15,17 @@ pass is planned against (``legacy``, not the carried ~9,700).
     python tools/legacy_id_normalise.py --dump snapshot.json \\
         --apply --out normalised.json --report plan.json
 
-    # 3. undo it from that report — the pass is reversible, not one-way
+    # 3. undo it from that report — the pass is reversible, not one-way. Capture
+    #    the revert's own report: it goes to stdout, and NOTHING else on disk
+    #    records that a revert ran or which artifact it undid.
     python tools/legacy_id_normalise.py --dump normalised.json \\
-        --revert --report plan.json --out restored.json
+        --revert --report plan.json --out restored.json > revert.json
 
 ⚠️ In ``--revert`` mode ``--report`` is the INPUT (the plan being undone), so it is
-**never rewritten**: the revert's own report goes to stdout, and ``--out`` is the
-artifact. Rewriting it would replace the apply-time record in the very file this
-workspace calls the way back.
+**never rewritten**: the revert's own report goes to stdout (redirect it, as above),
+and ``--out`` is the artifact. Rewriting it would replace the apply-time record in
+the very file this workspace calls the way back; and a revert from a report that
+carries NO renames is refused, because it would report a restore it never made.
 
 Nothing here connects to a graph. The input is a ``tortoise-logical-dump-v1``
 snapshot (``tortoise.hosted_backup.dump_graph``; the encrypted ``tortoise
@@ -78,6 +81,8 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import json
+import os
+import stat
 from pathlib import Path
 from typing import NoReturn
 
@@ -199,6 +204,16 @@ def _load_revert_plan(path: Path, dump: dict) -> LegacyIdPlan:
     payload = _load_json(path, "plan")
     if not isinstance(payload, dict) or not isinstance(payload.get("renames"), list):
         raise SystemExit(f"plan is not a report this tool wrote: {path}")
+    if not payload.get("dump_sha256"):
+        # Without the fingerprint the revert has no proof it restored the
+        # original ARTIFACT, so `apply_plan` would refuse it — that is a
+        # malformed report, i.e. the usage/IO class (exit 1), not a snapshot the
+        # tool judged unsafe (exit 2). A caller keying on 2 == refused must not
+        # be told a bad file was a bad snapshot.
+        raise SystemExit(
+            f"plan is not a report this tool wrote: {path} — it carries no "
+            "`dump_sha256`, so a revert could not prove it restored the original"
+        )
     renames = []
     for index, row in enumerate(payload["renames"]):
         try:
@@ -288,7 +303,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--report",
         type=Path,
-        help="write the census/plan/reconciliation report here (default: stdout)",
+        help=(
+            "write the report here in a dry run / --apply (default: stdout); in "
+            "--revert mode this is the PLAN READ, never written — the revert's "
+            "report goes to stdout"
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -342,6 +361,29 @@ def main(argv: list[str] | None = None) -> int:
                 )
             seen[key] = flag
 
+    # ⛔ AND STDOUT IS A DESTINATION TOO. In `--revert` mode the report goes to
+    # stdout, so `--revert … --out restored.json > restored.json` (a shell
+    # redirect to the artifact path) makes the report and the snapshot share a
+    # file: the run exits 0 and the snapshot is gone — which one survives then
+    # depends on stdout buffering. The path gate above cannot see it, because
+    # one destination is fd 1. Same identity key, read from the fd.
+    try:
+        # fd 1, not sys.stdout.fileno(): under a captured/wrapped stdout the
+        # object is not what the shell redirected into.
+        stdout_stat = os.fstat(1)
+        stdout_identity: object | None = (
+            ("inode", stdout_stat.st_dev, stdout_stat.st_ino)
+            if stat.S_ISREG(stdout_stat.st_mode)
+            else None
+        )
+    except (AttributeError, OSError, ValueError):
+        stdout_identity = None  # a captured or closed stdout: no file identity
+    if stdout_identity is not None and stdout_identity in seen:
+        parser.error(
+            f"standard output is redirected to the same file as {seen[stdout_identity]}: "
+            "the report would overwrite an artifact — redirect to a separate path"
+        )
+
     dump = _load_json(args.dump, "dump")
     if not isinstance(dump, dict):
         raise SystemExit(f"dump is not a JSON object: {args.dump}")
@@ -374,15 +416,38 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if out is not None:
+        # ⛔ APPLY must not destroy a plan that can undo a previous pass. A
+        # re-run of the documented step 2 over an already-normalised snapshot
+        # renames nothing and would write `renames: []` over the report that
+        # holds every original id — and those ids are not re-derivable
+        # (`entity_name_id` is a sha256). Refuse before anything is written.
+        if not args.revert and not report["renamed"] and args.report.exists():
+            earlier = _load_json(args.report, "report")
+            earlier_renames = earlier.get("renames") if isinstance(earlier, dict) else None
+            if isinstance(earlier_renames, list) and earlier_renames:
+                print("REFUSED — nothing was written:", file=sys.stderr)
+                print(
+                    f"  - this pass renames nothing and would overwrite {args.report} "
+                    f"({len(earlier_renames)} recorded rename(s)) — that report is the "
+                    "only way back; pass a different --report",
+                    file=sys.stderr,
+                )
+                return 2
         # ⛔ In APPLY mode the report is an OUTPUT, written FIRST: if the snapshot
         # write fails, the plan that can undo it must already exist on disk.
         # ⛔ In REVERT mode `--report` is an INPUT — it is the plan being undone —
         # so rewriting it would destroy the apply-time record (`mode: apply`, the
         # before/after counts) in the very file the docstring calls the way back.
-        # The revert's own report therefore goes to stdout; the artifact that
-        # matters (the restored snapshot) is `--out`.
-        _dump_json(report, None if args.revert else args.report, "report")
-        _dump_json(out, args.out, "snapshot")
+        # The revert's own report therefore goes to stdout, and the snapshot is
+        # written FIRST on that path: there is no undo record to protect, so a
+        # failed snapshot write must not leave a report describing a restore that
+        # did not happen.
+        if args.revert:
+            _dump_json(out, args.out, "snapshot")
+            _dump_json(report, None, "report")
+        else:
+            _dump_json(report, args.report, "report")
+            _dump_json(out, args.out, "snapshot")
         print(_summary(report), file=sys.stderr)
     else:
         print(_census_line(report["census"]), file=sys.stderr)
