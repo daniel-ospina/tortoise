@@ -240,18 +240,30 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
             # D10 B1: aboutDocument's target is a DOCUMENT — a :Source carrying
             # `documentKind` and addressable by `url` (ONTOLOGY §4.4). This
             # replay match carries that target-KIND contract and it is
-            # load-bearing rather than defensive on the ONE route that reaches
-            # it: a supersede descriptor is keyed on `url` ALONE (`stub_key`
-            # cannot tell a document from a provenance :Source), and supersede 2b
+            # load-bearing rather than defensive on the DESCRIPTOR route: a
+            # supersede descriptor is keyed on `url` ALONE (`stub_key` cannot
+            # tell a document from a provenance :Source), and supersede 2b
             # enumerates `(old:Point)-[rel]->` only — so a descriptor written by
             # a pre-#5206 build (when `create_edge` refused nothing) would be
             # RE-ATTACHED to a provenance :Source at rebuild unless the kind
             # test runs in this match. Refusing SKIPS the descriptor (the edge is
             # absent from the rebuild) instead of minting a mis-pointed one —
             # the #2489 "one create path / byte-identical stubs" invariant.
+            # ⚠️ The descriptor route is not the only caller: the name-path arm
+            # of `replay_about_links` above calls this same match — with
+            # `rel='aboutDocument'`, `target_label='Source'` and the journaled
+            # `resolve_key` — whenever a pinned endpoint value does not resolve
+            # by id (its `resolve_key` fallback; the key `resolve_about_link`
+            # pins there is a DOCUMENT's `url`, guarded by that arm's own
+            # `documentKind IS NOT NULL`). So the predicate is load-bearing on
+            # the descriptor route only; on that arm the key already came from a
+            # document and the kind test is a defence, not the witness.
             # Pinned by tests/test_pointsuperseded_rebuild.py::
             # test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
-            # (delete the predicate below and it reds).
+            # (delete the predicate below and it reds), and the
+            # `replay_about_links` route above by
+            # tests/test_8398_aboutobject_replay.py::
+            # test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver.
             # ⚠️ This replay arm is STRICTER than two live writers, which apply
             # NO kind test at all: `create_about_edge` — the about* name/handle
             # seam `create_event(aboutDocument=…)` reaches, label filter only —

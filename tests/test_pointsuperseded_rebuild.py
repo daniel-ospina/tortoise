@@ -738,8 +738,8 @@ def test_url_less_source_target_skipped_at_emission(sup):
 
 
 def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source(sup):
-    """#5265: the resolver's ``documentKind`` test is LOAD-BEARING on the ONE
-    route that reaches it — a descriptor a pre-#5206 build journaled.
+    """#5265: the resolver's ``documentKind`` test is LOAD-BEARING on the
+    descriptor route — a descriptor a pre-#5206 build journaled.
 
     ``create_edge`` refused nothing before #5206, so a graph can already hold
     ``(old:Point)-[:aboutDocument]->(provenance :Source)``. Superseding it
@@ -747,9 +747,17 @@ def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
     (``stub_key`` carries no kind — the label is ``Source`` for a document and
     for a provenance node alike), and supersede 2b enumerates
     ``(old:Point)-[rel]->`` only, so no Event-sourced ``about*`` seam edge
-    reaches this resolver. Replay must therefore apply the kind test ITSELF:
-    with it the descriptor is SKIPPED (the edge is absent from the rebuild),
-    without it the successor is re-pointed at a non-document Source.
+    produces a *descriptor* — and a descriptor carries no kind of its own, so
+    nothing else on this route supplies the test. Replay must therefore apply
+    the kind test ITSELF: with it the descriptor is SKIPPED (the edge is absent
+    from the rebuild), without it the successor is re-pointed at a non-document
+    Source.
+
+    ⚠️ Scoped to the descriptor route on purpose: ``resolve_structural_target``
+    IS reached from elsewhere — the name-path arm of ``replay_about_links`` —
+    but with a ``url`` ``resolve_about_link`` pinned to a document, so the kind
+    test is a defence there rather than the only witness. This test exercises
+    the descriptor route.
 
     Non-vacuity: dropping ``AND s.documentKind IS NOT NULL`` from
     ``resolve_structural_target``'s ``Source``/``aboutDocument`` match reds the
@@ -773,7 +781,9 @@ def test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
     assert r["edges_transferred"] >= 1
     descs = [d for d in _descriptors(events)
              if d.get("edge_type") == "aboutDocument"]
-    assert descs, "precondition: a pre-#5206 edge emits no repoint descriptor"
+    assert descs, (
+        "precondition: supersede must emit a DirectEdgeRepoint descriptor for "
+        "the pre-#5206 edge")
     assert descs[0]["tgt"] == "https://x/5265-prov", descs
     assert descs[0]["target_label"] == "Source", descs
 
