@@ -8008,6 +8008,7 @@ durations:
   # with `# unmeasured` so `render_refreshed_manifest` clears it on that first
   # sweep (#9110 review P2).
   test_code_freshness_9494.py: 2.0  # unmeasured — new in #9494: flat default until the first post-merge sweep
+  test_9583_openapi_read_only_claim.py: 2.0  # unmeasured — new in #9583 (#3400/#4348 one-file trap): the file is ADDED BY THIS PR, so the refresher (which samples push-to-main junit artifacts) cannot have measured it, and an absent row packs it at the flat 2.0s default while `duration_coverage_issues()` falls under the 90% floor — MEASURED this turn: WITHOUT this row `ci_selection.py --integrity` exits 1 on the merged tree at `durations coverage 89.9% (892/992 fast files)`, while `origin/main` (1ff23919c) exits 0, so this PR alone tipped it. The weight is the flat default deliberately, the same choice the `test_9208_change_feed_degraded.py` row above states: a LOCAL reading is not a shard-layout input (#3419/#2788). For context only, not as the weight: on the private docker lane the file collects 8 tests that pass in 3.68 s (`testcase/@time` sum), whole-file wall 6.0 s including pytest startup — it asserts served OpenAPI descriptions and AST pins, so it takes no graph and pays no per-leg embedder load. Refresh from the first post-merge sweep that includes it.
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py
