@@ -1,0 +1,19 @@
+# 05 — steps 3/10 dashboard copy: the capture-disclosure reason + the ChatGPT harness row, MEASURED — 2026-10-22T21:04:25Z
+# command: (cd website/apps/dashboard && node --test src/captureStatus.test.js src/harnesses.test.js)
+# (no node_modules needed: these two modules are pure constants — no react/vite import)
+# git HEAD: 653980445f251013d3d033120d559201b172950a
+
+ok 38 - \#3661: every capture surface names the opt-in, and none claims capture happens by default
+  ---
+  duration_ms: 2.566292
+  type: 'test'
+  ...
+1..38
+# tests 38
+# suites 0
+# pass 38
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 229.513458
