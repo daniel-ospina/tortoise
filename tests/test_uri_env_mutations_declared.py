@@ -273,6 +273,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_event_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
     "test_entity_key_expansion.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                       r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],  # #2518 entity-key expansion: module live-FalkorDB probe (DELIBERATE_URI) + per-test docker force
+    # #8658: the product hit's provenance keys. Module-level live-FalkorDB probe
+    # (set + save/restore in `finally` at import, so nothing leaks — the raw-site
+    # restoration guard is satisfied; DELIBERATE_URI because the probe IS what
+    # asserts the docker/FTS lane is reachable, and a URI-less run would prove
+    # nothing about a read path that only exists there) + a per-test
+    # `monkeypatch.setenv` fresh-graph fixture (setenv IS the test input — each
+    # test gets its OWN graph, auto-restored at teardown).
+    "test_8658_product_hit_provenance.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
+                                              r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # C6 #2520: time-aware query expansion — module-level live-FalkorDB probe
     # (set + restore) + per-test fresh-graph fixture (the test_coverage_loop
     # pattern; the monkeypatch.setenv auto-restores).

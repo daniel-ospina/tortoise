@@ -186,6 +186,53 @@ def test_capture_extraction_runs_off_the_event_loop(client, monkeypatch, mode):
         f"of it (the auth middleware's abuse hooks among them) (#3060)")
 
 
+def test_capture_points_estimate_reads_off_the_event_loop(client, monkeypatch):
+    """#4625 leg 72: the pre-write points estimate must not run on the loop.
+
+    Before it 402-gates a capture, ``_capture_session_impl`` reads
+    ``count_org_usage(org, "points")`` — a SYNC full-graph FalkorDB count — and
+    resolves the SDK it passes with ``_data_sdk(org)``, which performs tenancy
+    resolution and, for a graph-bound key, an ownership query. Called inline
+    from an ``async def`` both park the single event loop on EVERY capture that
+    is not a replay AND extracts: a cold or large graph then stalls ``/health``,
+    every other route, and the auth middleware sharing that loop — the
+    #3718/#2988 class this file's siblings already measure. (The store-only
+    lanes skip this gate entirely — ``store_only`` short-circuits the estimate —
+    so the blast radius is non-replay *extracting* captures.)
+
+    The discriminator is the thread the count ran on: a worker thread has no
+    running event loop. ``count_org_usage`` is patched on its SOURCE module
+    because the capture path imports it inside the guard, at call time — so a
+    patch that the code path silently bypassed would leave ``ran_on_loop``
+    absent and fail on the first assertion rather than passing vacuously.
+    """
+    seen: dict[str, object] = {}
+
+    import tortoise.quota as quota_mod
+
+    def _fake_count(org_id, resource, sdk=None):
+        seen["thread"] = threading.current_thread().name
+        try:
+            asyncio.get_running_loop()
+            seen["ran_on_loop"] = True
+        except RuntimeError:
+            seen["ran_on_loop"] = False
+        # Under the cap on purpose: this test measures WHERE the read ran, and
+        # a 402 would end the request before any later leg is exercised.
+        return 0
+
+    monkeypatch.setattr(quota_mod, "count_org_usage", _fake_count)
+    r = client.post("/v1/sessions", json={"conversation": _CONV})
+
+    assert "ran_on_loop" in seen, (
+        "the points estimate never ran "
+        f"({r.status_code}: {r.text[:200]})")
+    assert seen["ran_on_loop"] is False, (
+        f"the capture's points-quota count ran ON the event loop "
+        f"(thread {seen['thread']!r}) — a cold or large graph parks every "
+        f"other request on the single loop (#4625 leg 72)")
+
+
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 

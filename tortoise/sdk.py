@@ -143,7 +143,14 @@ from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .graph_ops import counts_capture_ops, phased  # #3359: per-capture graph-op accounting
-from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
+from .quota import (
+    DOCUMENT_METER_PREDICATE,
+    MAX_EXTRACTIONS_PER_TURN,
+    MAX_SESSION_TURNS,
+    is_metered_document_kind,
+    refuse_document_writer_demotion,  # #5140: the document writers' loud refusal
+    stored_source_document_kinds,     # #5140: ONE reader of the meter key
+)
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
 # (no `tortoise` imports), so this adds no import-cycle risk to this hot module.
@@ -3961,6 +3968,122 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # because the SHARED projection writer (`_upsert_point_props`) is the door every
 # write reaches and it needs the same rule (#8006). `create_point`,
 # `update_point` and `update_entity` still call it here, under this name.
+
+
+def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
+                                   none_demotes: bool = False) -> None:
+    """#5140 P1: `documentKind` is the documenthood/METER key, not metadata.
+
+    THE DEFECT THIS CLOSES. The `documents` cap counts
+    ``MATCH (s:Source) WHERE s.documentKind IS NOT NULL AND
+    s.documentKind <> 'transcript'`` (`quota.DOCUMENT_METER_PREDICATE`) — that
+    predicate is what decides whether a node is a document at all (the #5013
+    Q-S2 ruling, Option B). Under D10 a document IS a `:Source` keyed
+    ``url = <doc id>``, which is the node `create_source`/`update_entity` merge
+    by `url`/`id`, and `documentKind` is caller-settable on both surfaces
+    (`_SOURCE_EXTRA_PROPS` on the passthrough, `_SOURCE_NODE_PROPS` on the
+    generic entity surface). So ONE caller call rewrote an existing document's
+    genre to `transcript` and the meter dropped out from under it — repeatable
+    per document, so the cap did not hold. MEASURED before this guard, 3 seeded
+    document Sources: meter 3 -> 2 via
+    ``create_source(did, 'document', documentKind='transcript')``, then 2 -> 1
+    via ``update_entity(did, documentKind='transcript')``.
+
+    THE RULE. A write may SET a genre where none is stored (promotion — that is
+    how a document `:Source` is minted through these surfaces) and may retarget
+    one metered genre to another (`report` -> `brief`, both metered), but a
+    caller surface may not move a metered document OUT of the metered class
+    (`None` / `'transcript'`). Demotion is the escape; the forgery direction
+    (`documentKind` added to a provenance Source) only over-counts — it fails
+    closed — and is deliberately left alone.
+
+    Both spellings are refused on a METERED document, for DIFFERENT reasons —
+    stated truthfully because the earlier wording claimed a mechanism the code
+    did not implement. The camelCase `documentKind` is the key the meter reads,
+    so refusing a demotion through it is the demotion guard itself (a promotion
+    or a metered -> metered retarget still lands). One asymmetry belongs with
+    it: `documentKind=None` is a REFUSAL on `update_entity` (its write is
+    `SET n += $p`, where a null REMOVES the property) and a NO-OP on
+    `create_source` (the passthrough skips null values, so nothing is written)
+    — hence `none_demotes`. The snake_case
+    `document_kind` is INERT as a node property (no reader in the tree reads
+    `s.document_kind`; the meter reads `s.documentKind`), so it cannot demote by
+    itself — it is refused for EVERY value, because the only thing a snake
+    write can do on a document is put the genre on the node in a SECOND place,
+    one of them the one every reader ignores: the `raw_state`/`rawState`
+    ambiguity class (`_SOURCE_HANDLED`'s "the state in TWO places" note), and a
+    `DocumentCreated` payload carrying it DOES reach the genre via
+    `_upsert_document`'s `$dk`. One home for the genre, and it is
+    `documentKind`.
+
+    ⛔ That last point was the review-cycle-3 defect and it is why the rule is
+    "refuse the whole SPELLING on a document" rather than "refuse the demoting
+    VALUE": the value-scoped rule ADMITTED `document_kind='brief'` on a
+    metered document (creating exactly the second home this docstring refuses)
+    while REFUSING `document_kind=None`, the one snake write that cannot
+    demote and is the cleanup of that second home. The predicate was inverted
+    against its own stated purpose in both directions. The refusal is scoped to
+    a METERED document because that is where the genre already has a home; on a
+    non-document `:Source` the property is inert and a promotion is how a
+    document is minted through these surfaces at all.
+
+    Deliberately NOT in `_DOC_RETIRED_KEYS`: `documentKind` is LIVE (D10 §4.4,
+    the genre axis) and a member there is SCRUBBED off every document. On the
+    caller surfaces it is refused LOUDLY rather than dropped, because a silent
+    no-op would leave the caller believing it wrote. (The DOCUMENT writer,
+    `_upsert_document`, instead DROPS a demotion inside its own clause: the
+    same statement is the journal replay fold, so it must stay total and must
+    not abort a rebuild over a pre-guard record. Its PRODUCERS —
+    `EventAPI.add_document` and `sdk._doc_write` — refuse loudly before the
+    journal append, via `quota.refuse_document_writer_demotion`, so the drop
+    is reached only by a REPLAY. `create_source`/`update_entity` are never
+    replay, so they raise here.)
+    """
+    incoming = [(k, props[k]) for k in ("documentKind", "document_kind")
+                if k in props]
+    if not incoming:
+        return
+    # ⛔ FAIL CLOSED over EVERY node the write can reach: `update_entity` writes
+    # `MATCH (n:Source {key:$id}) SET n += $p`, which applies to ALL matching
+    # nodes, so one non-metered sibling must not be able to answer for a metered
+    # one (#5140 review cycle 4 reproduced exactly that: meter 1 -> 0).
+    metered = [k for k in stored_kinds if is_metered_document_kind(k)]
+    if not metered:
+        # Nothing metered stored to demote: a fresh node, a transcript, or a
+        # non-document `:Source`. Setting/promoting the genre is allowed.
+        return
+    stored_kind = metered[0]
+    for key, value in incoming:
+        if key == "document_kind":
+            # The WHOLE spelling, whatever its value — see the docstring.
+            raise ValueError(
+                f"`document_kind={value!r}` cannot be written to a metered "
+                f"document (stored documentKind={stored_kind!r}): the genre "
+                f"lives in `documentKind` ONLY, and `document_kind` is an "
+                f"inert second spelling that no reader reads. Write "
+                f"`documentKind`, which carries the demotion rule (#5140)."
+            )
+        if is_metered_document_kind(value):
+            continue
+        if value is None and not none_demotes:
+            # `None` is PRESERVE on a passthrough that skips null values
+            # (`_persist_extra_props`: "None values are excluded — Cypher null
+            # semantics in SET maps are unreliable"), so it writes nothing and
+            # is not a demotion. On a `SET n += $p` surface it REMOVES the
+            # property, which is, and the caller passes `none_demotes=True`.
+            continue
+        raise ValueError(
+            f"`{key}={value!r}` would move this :Source out of the metered "
+            f"`documents` set (stored documentKind={stored_kind!r}; the "
+            f"`documents` cap counts "
+            f"`{DOCUMENT_METER_PREDICATE}`). `documentKind` is the "
+            f"documenthood key, not metadata: it cannot be demoted to "
+            f"`transcript`/empty through `{surface}` (#5140 — metering a node "
+            f"a caller can un-meter is not a cap). Retarget among metered "
+            f"genres is allowed (`report` -> `brief`). To drop a document's "
+            f"metering, delete the document; to record that a source became "
+            f"unavailable, use `create_source(..., raw_state=...)`."
+        )
 
 
 def _coerce_props(props: dict) -> dict:
@@ -24786,7 +24909,25 @@ class TortoiseSDK:
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
             evidence by the repo's own resolution (``backfill_v25`` fills
             'statement'; EP reads no kind at all), so a legacy kind-less
-            Point is gated like the statement it is. NORMALISED first — case
+            Point is gated like the statement it is. #9592: an EMPTY-after-
+            normalisation kind is in that SAME arm, because it means the same
+            thing to the consumer — no kind at all. It used to fall into the
+            string arm and fail membership, so an empty kind was a CONSUMED
+            claim with no prior while an absent kind was demanded (measured:
+            the gate answered ``[]``, ``calibrate_summary()`` said
+            uncalibrated, and a ``require_calibration=True`` run stamped the
+            node anyway) — the fail-open shape #7478 exists to prevent, and an
+            internal disagreement between the audit and the gate (#9063).
+            "Empty" means empty AFTER the normalisation below, so a
+            whitespace-only kind out of the SAME family
+            (``_KIND_WHITESPACE_CHARS``: space, tab, LF, VT, FF, CR, NBSP) is
+            covered too. The family's DECLARED BOUNDARY is unchanged and still
+            holds here: a kind padded with Unicode whitespace OUTSIDE it (em
+            space, ideographic space, ZWSP, BOM…) normalises to itself, so it
+            is still neither empty nor a member and stays ungated — the
+            pre-existing residual recorded at ``_KIND_WHITESPACE_CHARS`` and
+            filed as #9287, not a coverage claim of this arm.
+            NORMALISED first — case
             and surrounding whitespace — because the write path accepts an
             unrecognised kind VERBATIM with only a warning
             (``create_point('Statement', ...)``, ``' statement'``) and EP reads
@@ -24843,12 +24984,26 @@ class TortoiseSDK:
             return []
         proj = self._get_proj()
         kinds = ", ".join(f"'{k}'" for k in _CALIBRATION_EVIDENCE_KINDS)
+        # #9592: an EMPTY-after-normalisation kind is ABSENT, not a
+        # non-evidence kind: EP reads no kind at all, so a node whose kind is
+        # '' (or whitespace-only within the normalised family) is a consumed
+        # claim exactly like the kind-less legacy Point — the "absence is
+        # evidence" rule this predicate already carries. It is folded into the
+        # SAME membership list rather than added as an ``OR`` arm, so the
+        # widening costs one LIST ENTRY: the query text keeps ONE
+        # ``replace()`` chain and the engine evaluates the normalisation once
+        # per row (an ``OR {kind_norm} = ''`` arm interpolates the chain a
+        # SECOND time — measured +58% on the ``limit=1`` existence probe every
+        # scoped EP surface pays, 6.5 ms vs 4.1 ms at 2,000 Points). Inside the
+        # ``typeof = 'string'`` guard the normalised value is never NULL, so
+        # ``x = '' OR x IN [...]`` and ``x IN ['', ...]`` are the same
+        # predicate.
+        kind_norm = f"toLower({_strip_whitespace('n.pointKind')})"
         where = (
             f"(n.is_operator IS NULL OR n.is_operator = false) "
             f"AND (n.pointKind IS NULL "
             f"     OR (toLower(typeof(n.pointKind)) = 'string' "
-            f"         AND toLower({_strip_whitespace('n.pointKind')}) "
-            f"             IN [{kinds}])) "
+            f"         AND {kind_norm} IN ['', {kinds}])) "
             f"AND {_live_only('n.status')} "
             "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
             "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "
@@ -27965,10 +28120,16 @@ class TortoiseSDK:
                 # runs, and the snapshot keeps a deliberately LEAN projection
                 # (``fallback_snapshot._SNAPSHOT_QUERY`` — no session column),
                 # so a degraded hit still carries ``sessionId == ""`` and
-                # renders ``[session ?]``. Widening that cached corpus is the
+                # renders ``[session ?]``. #8658's four verbatim-provenance
+                # columns (``quote`` / ``source_turn_id`` / ``span_start`` /
+                # ``span_end``) are read here, so a DEGRADED hit carries none of
+                # them either and Slice A's own-source leg stays inert on that
+                # tier (``retrieval._is_own_source`` returns False on its empty
+                # quote). Widening that cached corpus is the
                 # same separate, policy-governed change
                 # ``search_provenance_enabled`` already declares for
-                # provenance — a declared boundary, not an oversight of #3804.
+                # provenance — a declared boundary, not an oversight of #3804
+                # or of #8658.
                 #
                 # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
                 # DELIBERATE content change, so the assembly goldens were
@@ -27977,12 +28138,21 @@ class TortoiseSDK:
                 # #3804 is that record.
                 _prov = search_provenance_enabled()
                 _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
+                # #8658: the verbatim provenance columns Slice A (#2683) and the
+                # #2684 span surface key on. Read UNCONDITIONALLY (they are
+                # plain row properties of a Point — no extra join, no policy
+                # flag: they are what a distilled claim's source anchor IS), and
+                # folded into the hit PRESENT-ONLY, so an unprovenanced hit is
+                # byte-identical. Placed AFTER ``_prov_cols`` so the #3837
+                # provenance indices above never shift.
+                _prov_q = 9 if _prov else 7   # first #8658 column index
                 rows = graph.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
-                    "       n.session_id, sess.id" + _prov_cols,
+                    "       n.session_id, sess.id" + _prov_cols
+                    + ", n.quote, n.source_turn_id, n.span_start, n.span_end",
                     params={"ids": result_ids},
                 ).result_set
                 # A Point contained by MORE THAN ONE :Session yields one row
@@ -28004,11 +28174,30 @@ class TortoiseSDK:
                         "has_answer": bool(row[3]),
                         "sessionId": (row[4] or "") if len(row) > 4 else "",
                         # #3804: the snake spelling ``create_point(
-                        # session_id=…)`` writes — read here as the second
+                        # session_id=… )`` writes — read here as the second
                         # explicit identity source, never emitted raw (the
                         # wire key stays camel ``sessionId``).
                         "session_id": (row[5] or "") if len(row) > 5 else "",
                     }
+                    # #8658: verbatim provenance — PRESENT-ONLY, exactly like
+                    # the row's other optional fields. A falsy ``at``-style
+                    # empty quote and a null ``source_turn_id`` (FalkorDB
+                    # drops null props, #2949) mean the Point carries no
+                    # verbatim anchor, so NO key is added and the hit renders
+                    # / packages exactly as it did before. ``span_start == 0``
+                    # is a real address — presence, never truthiness.
+                    _quote = (row[_prov_q] or "") if len(row) > _prov_q else ""
+                    if _quote:
+                        entity_data[pid]["quote"] = _quote
+                    _turn = (row[_prov_q + 1]
+                             if len(row) > _prov_q + 1 else None)
+                    if _turn is not None and _turn != "":
+                        entity_data[pid]["source_turn_id"] = _turn
+                    for _off, _key in ((2, "span_start"), (3, "span_end")):
+                        if len(row) > _prov_q + _off:
+                            _v = row[_prov_q + _off]
+                            if _v is not None:
+                                entity_data[pid][_key] = _v
                     if _prov:
                         # Provenance (#3837): the Source/document ref and the
                         # capture time — additive, read ONLY when the flag is
@@ -28325,6 +28514,13 @@ class TortoiseSDK:
                 source_path=cap_source_path,
                 # A5 (#2070): stored evidence mark (additive in to_dict).
                 has_answer=pt.get("has_answer", False),
+                # #8658: the Point's verbatim provenance when the fetch found
+                # it — absent keys ⇒ the dataclass defaults ⇒ ``to_dict`` emits
+                # nothing, so an unprovenanced hit is byte-identical.
+                quote=pt.get("quote", ""),
+                source_turn_id=pt.get("source_turn_id"),
+                span_start=pt.get("span_start"),
+                span_end=pt.get("span_end"),
                 # Provenance (#3837): present only when the flag fetched it;
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),
@@ -32134,6 +32330,26 @@ class TortoiseSDK:
                     "`rebuild_all` to scrub them.", id_val, len(_denied), _denied)
         return _props
 
+    def _stored_source_document_kinds(self, g, id_val: str):
+        """EVERY `documentKind` the write below could overwrite (a list).
+
+        #5140: resolves with the SAME key discipline as the write (primary key
+        then secondary — `_source_reachable_by`'s rule and its #5196 rationale),
+        so a url-only STUB cannot hide a stored genre from the guard the way it
+        once hid its identity from the `:Source` allowlist.
+
+        A LIST, not one kind: `update_entity`'s write is
+        `MATCH (n:Source {key:$id}) SET n += $p`, which applies to EVERY
+        matching node, so the guard must answer for all of them (fail closed)
+        rather than for whichever row the engine happens to return first.
+
+        The reader itself lives in `quota.stored_source_document_kinds` because
+        the DOCUMENT writers (`EventAPI.add_document`, `_doc_write` below) read
+        the meter key too and cannot import the SDK; one reader, one key
+        discipline (#5140 review cycles 3-4).
+        """
+        return stored_source_document_kinds(g, id_val)
+
     def _source_reachable_by(self, g, id_val: str) -> int:
         """Count the `:Source` nodes the WRITE below would reach for `id_val`.
 
@@ -32308,6 +32524,17 @@ class TortoiseSDK:
             # itself satisfied.
             _is_source = self._source_reachable_by(self._get_proj().g, id_val)
             if _is_source:
+                # #5140 P1: the `documents` METER KEY (#1726 predicate) cannot
+                # be demoted through the generic entity surface either — it
+                # merges the SAME `:Source` node `create_source` does, so a
+                # guard on one door and not the other is decoration (#5135's
+                # third-door lesson). Presence-tested first for the same reason
+                # as the `create_source` call above.
+                if "documentKind" in props or "document_kind" in props:
+                    _refuse_document_kind_demotion(
+                        self._stored_source_document_kinds(
+                            self._get_proj().g, id_val),
+                        props, surface="update_entity", none_demotes=True)
                 _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
                 if _managed:
                     # #3998: the STATE and the merge TOKEN are refused through the
@@ -35012,6 +35239,20 @@ class TortoiseSDK:
             "suppress_embedding": True,
             "topics": topics,
         }
+        # #5140 P1 (review cycle 3): the DOCUMENT writer may not demote an
+        # existing document out of the metered `documents` set. `doc_kind`
+        # comes from a TENANT-CONTROLLED file's frontmatter `type:`, and the id
+        # is DERIVED from the path (`derive_document_id`), so editing one line
+        # of one file and re-indexing reached the SAME `:Source` and rewrote
+        # its genre — the resume fast-skip is keyed on (size, mtime), so an
+        # edited file is WRITTEN, not skipped. Runs BEFORE the journal append
+        # (`_emit_event` is the commit point), so a refusal leaves nothing to
+        # replay. The fold's CASE clause would drop the value silently; this
+        # refuses it loudly, because `/v1/index/docs` reporting a document as
+        # re-indexed while the graph kept the old genre is exactly the
+        # silent-no-op the SDK guards refuse (#5140 review cycle 3).
+        refuse_document_writer_demotion(
+            proj.g, doc_id, ev["document_kind"], surface="_doc_write")
         if frontmatter.get("domain") is not None:
             ev["domain"] = str(frontmatter["domain"])
         # ── #5475 (residual): ``document_kind`` comes from FRONTMATTER ──
@@ -36151,6 +36392,20 @@ class TortoiseSDK:
         for _emit_name in (*_RESERVED_ENVELOPE_PROPS, *_RESERVED_EMIT_CALL_PROPS,
                            *_RESERVED_ACTOR_PROPS):
             ev.pop(_emit_name, None)
+        # #5140 P1: the documents METER KEY is not caller-writable IN THE
+        # DEMOTION DIRECTION. Runs BEFORE the journal append below, so a
+        # refused write leaves no record to replay.
+        # ⛔ The PRESENCE test is hoisted out of the helper on purpose: the
+        # stored-kind read is a graph round trip (plus `_resolve_source_url`'s
+        # own), and `documentKind` is absent on essentially every producer
+        # (`_index_source_merge` calls this per file), so an unconditional
+        # lookup would put 2-3 queries on the hottest `:Source` write path and
+        # a new pre-write failure mode — for a key nobody supplied.
+        if "documentKind" in ev or "document_kind" in ev:
+            _refuse_document_kind_demotion(
+                self._stored_source_document_kinds(
+                    self._get_proj().g, self._resolve_source_url(url)),
+                ev, surface="create_source")
         if is_episodic is not None:
             # #1488: server-managed quota discriminator — explicit param only
             # (mirrors create_point). The props passthrough is rejected above.

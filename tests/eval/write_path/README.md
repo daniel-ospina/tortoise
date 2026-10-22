@@ -475,3 +475,105 @@ comparable again — see the scoping note's "Sealed run required to activate".
 > `.env` held a healthy evals key. The wrapper strips the ambient provider
 > keys, loads `.env` with override, and prints the source + fingerprint of
 > every key it set — paste that into the receipt.
+
+## E4 on the real extraction leg (issue #9077)
+
+The epic's E4 row asks whether the planted-operator corpus goes from the
+historical 0/4 to N/N — *"wired AND persisted, endpoint refs remapped"* — on
+the **real** path. The three lanes above answer three different questions, and
+only PRODUCT answers this one; the section exists because two closed issues
+(#2552, #4716) are a *claim*, and E4 is where the claim is checked.
+
+### The receipt must be evidence, not a numerator
+
+`runner run` now records, per completed run, two additive blocks the E4 gate
+reads (both absent from older receipts, which `validate-receipt` therefore
+still accepts — back-compat is deliberate):
+
+| Block | Carries | Why it cannot be inferred |
+|---|---|---|
+| `extractor` | `{module, qualname, source_file, real}` | `resolved_config.extractor_posture` reads `llm` on a monkeypatched run too, so it can never rule out the WIRE lane. `real` is true only for the shipped `tortoise.extractor_v2.extract_session_v2`. |
+| `operator_audit.results` | per edge: `verdict`, `edge_correct`, `cause` (on a miss), `forms_found`, `edge_op_ids`, `endpoints.{from,to}[{pre_ref, post_ref, remapped, resolves}]`, `persisted` | The two id spaces the commit crosses (#4716) are observable only per endpoint, and "wired" without "retrievable" is the historical 0/4 half. |
+
+`pre_ref` is the **payload** id space (`pt_<sha256(content)>` — content-addressed,
+so derivable from the content the graph holds), `post_ref` the graph id the audit
+anchored on, and `remapped = (pre_ref != post_ref)` — the #4716 re-key.
+`persisted` means both anchored endpoints are in the eventId-keyed memory layer
+AND every operator node that formed the edge is eventId-stamped.
+
+### The gate
+
+```bash
+# 1. measure on the REAL path (product lane — env-selected, there is no
+#    --lane flag: TORTOISE_SESSION_EXTRACTOR=m2 is what selects the echo lane)
+PYTHONPATH=$PWD .venv/bin/python -m tests.eval.write_path.runner run \
+    --session wp01_quarry_debug --session wp02_lumen_refactor \
+    --session wp03_ember_design --session wp04_aurora_perf \
+    --session wp05_retro_writeup --session wp06_quarry_rollout \
+    --session wp07_bluepeak_followup --no-ep-pass \
+    --out tests/eval/write_path/receipts/w2b-operator-$(date +%F).json
+
+# 2. check the evidence (exit 0 = valid evidence, NOT "the extractor is perfect")
+.venv/bin/python tools/operator_receipt_check.py \
+    tests/eval/write_path/receipts/w2b-operator-<date>.json
+```
+
+`tools/operator_receipt_check.py` refuses, by name: a denominator that is not
+the live gold's (**the discarded 4** in particular), a rate with no denominator,
+**a count override that contradicts a readable gold** (the live gold wins — a
+caller who wants a different gold must declare its edge set), **a receipt whose
+verdicts are the right COUNT but not the gold's edge set**, **an edge whose
+`expected_kind` is not the kind the gold plants**, a missing/false
+`extractor.real` (the monkeypatched WIRE lane), a non-`llm` posture, a
+wired-but-not-persisted edge, an edge with no pre/post refs or an unresolved
+post-ref, a `remapped` flag that contradicts its own refs, a receipt missing
+edges from its own denominator (**E4-COVERAGE** — the one coverage rule that
+holds even when the gold cannot be read, so a truncated receipt cannot ride the
+`--denominator` offline route), and — the rule the epic needs — **an
+unexplained miss**.
+
+> ⛔ A RED E4 with every miss named is a VALID, exit-0 outcome. #9077 says so
+explicitly: the fix for a behavioural miss is scoped separately, and "fixing"
+the extractor to make the number green is out of scope for the measurement.
+
+### MEASURED at `6164c683c` (2026-10-19T01:39Z) — `receipts/w2b-operator-2026-10-19.json`
+
+| Dimension | Result |
+|---|---|
+| planted-operator edges | **2/15 wired + persisted** (`wp05_retro_writeup_op_02` SUPPORTS→IMPL, `wp07_bluepeak_followup_op_02` NEGATE→NAND) |
+| misses | **13, every one individually named** — 7 content-level (`from_`/`to_content_missing`: the extractor emitted no Point carrying that endpoint claim) and 6 edge-level (`edge_missing`: both endpoint claims present, no qualifying edge committed) |
+| persistence (the structural half) | **27/27** committed operator nodes retrievable (eventId-stamped) — the `operator_counts == {}` silent drop is NOT what E4 is seeing |
+| endpoint refs | every wired edge carries both sides' pre/post refs; **0 re-keyed in this run** (the mint kept every content-addressed payload id), so the recorded remap is the identity — the re-key path itself is pinned deterministically by the FOLD/COMMIT lane (#4716 Part 4) |
+| extractor | real (`tortoise.extractor_v2.extract_session_v2`), product lane, `deepseek-direct` / `deepseek-v4-flash` (the provider served `deepseek-flash`) |
+
+**Reading it:** the structural half of #2552 is genuinely fixed — a committed
+operator node IS retrievable on the real path. The behavioural half is not: the
+extractor forms only 2 of 15 planted edges, and the miss *classes* split cleanly
+(most misses are the endpoint claim never being emitted at all, which is an
+upstream S2 emission question, not a connect no-op). E4 is **red with causes**,
+which is the measurement the epic needed — not a green number.
+
+**Variance (measured, not assumed).** The run is NOT deterministic — LLM
+sampling. Two full-corpus observations at this HEAD both read **2/15** for the
+corpus total, while a single-session replay of `wp01_quarry_debug` alone swung
+**1/2 → 0/2** between runs. So: a *corpus-level* figure is stable enough to
+state at N=2, but a *per-session* figure is not — treat any single-session
+operator number as one sample, and quote the denominator plus the run count.
+
+**Denominator provenance.** The receipt's `corpus_hash` (`sha256:943a…`) is NOT
+the current corpus hash (`sha256:dd7e…`), and that is benign: between the
+measurement sha and HEAD the gold gained **`planted_qualifiers`** blocks
+(#9075's scoring rule), while the **15 planted-operator entries — every `id`
+and `expected_kind` — are byte-identical** (verified across all 7 sessions).
+So the denominator and edge set this number is scored against are unchanged;
+the checker binds the receipt to that id/kind set rather than to the hash, which
+is the stable identity. A receipt graded against a *re-authored* operator gold
+fails `E4-COVERAGE-IDS` / `E4-KIND`.
+
+**Key provenance.** This worktree has no repo `.env` and the fleet's evals key
+was unavailable, so the run used the fleet DeepSeek key from the pi agent store
+(`deepseek-direct`); `tools/run-with-eval-keys.sh` remains the mandated route for
+a **sealed** publish (it strips ambient keys and prints their fingerprints for
+the receipt). The extraction lane cost is not metered by the runner
+(`cost_usd: 0.0` with the runner's own "cost not tracked" note, never a fake
+figure).

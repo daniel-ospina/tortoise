@@ -4253,6 +4253,28 @@ class _EntityHandlers:
         # #133: needs_extraction — explicit signal for --upgrade-all discovery.
         # coalesce-null sentinel: None default so partial updates preserve.
         nx = ev.get("needs_extraction")
+        # #5140 P1: the clause below DROPS a demotion instead of applying it
+        # (see its comment — the same statement is the replay fold, so it must
+        # stay total). Dropping a value the caller supplied in silence is the
+        # #2795 "a declaration rots into a mystery" class, so name it. The read
+        # is gated on the ONLY demoting value, so the fingerprint path pays
+        # nothing: `document_kind` is `'transcript'` on ~no document write.
+        if ev.get("document_kind") == "transcript":
+            # ⛔ EVERY node the MERGE can reach, through the ONE reader — not
+            # `rows[0]` of an inline query. A first-row read here reproduced the
+            # very defect review cycle 4 removed from the guard: with a
+            # non-metered sibling listed first the advisory went missing, so a
+            # dropped demotion went back to being silent (#5140 cycle 5).
+            from tortoise.quota import is_metered_document_kind, stored_source_document_kinds
+            _metered_dks = [k for k in stored_source_document_kinds(self.g, did)
+                            if is_metered_document_kind(k)]
+            if _metered_dks:
+                logger.warning(
+                    "#5140: `document_kind='transcript'` on %s DROPPED — the "
+                    "node is a metered document (documentKind=%r) and its "
+                    "genre cannot be demoted out of the `documents` cap. "
+                    "Delete the document and re-ingest it if it really is a "
+                    "transcript.", did, _metered_dks[0])
         # #5422: the document's contentHash — the version anchor on the
         # extraction path. None (absent key, or a metadata-only re-emit) is
         # the preserve sentinel: the clause below must never clear an anchor
@@ -4373,7 +4395,38 @@ class _EntityHandlers:
             # (topics/summary/sessionId/eventId/needs_extraction); on a
             # re-write that OMITS the kind the middle term preserves the
             # stored value (#125 coalesce semantics).
-            "    s.documentKind=coalesce($dk, s.documentKind, ''), "
+            #
+            # ⛔ #5140 P1 (review cycle 2): this clause is what made the
+            # `documents` meter escapable from THIS writer too. `documentKind`
+            # is the METER key (`quota.DOCUMENT_METER_PREDICATE`), and the
+            # plain coalesce OVERWROTE an existing document's genre with
+            # whatever `$dk` carried — `EventAPI.add_document(<doc id>,
+            # document_kind='transcript')` and `_doc_write(frontmatter
+            # type='transcript', <doc id>)` (the `/v1/index/docs`
+            # re-index path) both demoted a metered document to `transcript`
+            # and dropped it out of the cap: MEASURED, 3 seeded documents,
+            # meter 3 -> 2 -> 1, one call each. A metered document therefore
+            # KEEPS its genre: `$dk` may ADD a kind where none is stored, and
+            # RETARGET one metered genre to another (report -> brief — both
+            # are counted), but it cannot move the node out of the metered
+            # class. Enforced in THIS clause rather than in the Python caller
+            # because the same statement is the REPLAY fold: a journal that
+            # already holds a pre-guard demotion must re-materialise to the
+            # metered genre, not abort the rebuild (a raise here would make
+            # `rebuild_all` fail on an existing log). The PRODUCERS that take a
+            # genre from a TENANT (`EventAPI.add_document`, `_doc_write`)
+            # REFUSE BEFORE the journal append
+            # (`quota.refuse_document_writer_demotion`), and the two `:Source`
+            # surfaces (`create_source`/`update_entity`) raise
+            # (`sdk._refuse_document_kind_demotion`) — neither is replay, and a
+            # silent no-op would leave the caller believing it wrote. So a LIVE
+            # write reaches this CASE only when nothing metered is stored.
+            "    s.documentKind=CASE "
+            "        WHEN s.documentKind IS NOT NULL "
+            "             AND s.documentKind <> 'transcript' "
+            "             AND $dk = 'transcript' "
+            "        THEN s.documentKind "
+            "        ELSE coalesce($dk, s.documentKind, '') END, "
             "    s.format=coalesce($fmt, s.format), "
             "    s.topics=coalesce($topics, s.topics, []), "
             "    s.summary=coalesce($summary, s.summary, ''), "

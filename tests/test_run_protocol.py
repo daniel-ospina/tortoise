@@ -157,6 +157,10 @@ def test_build_command_uses_base_runner_flags(tmp_path):
         joined = " ".join(cmd)
         assert "--ingest-mode v2" in joined
         assert "--checkpoint" in joined and "--output" in joined
+        # #8486: EVERY v2 run step arms the belief layer — an un-activated v2
+        # graph is EP-inert (#2598), so a step that omits the arm produces a
+        # number whose epistemic layer contributes nothing.
+        assert "--activate-beliefs" in joined
     # step 3 (pilot) is a TYPE-STRATIFIED subset file — never the split head
     # (#2516: `--limit 50` measured ~100% single-session-user)
     pilot = rp.build_command(rp.STEPS_BY_NUMBER[3], [], state=state)

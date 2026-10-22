@@ -25,6 +25,10 @@ MIGRATIONS = [
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # The erasure RPC (#7968): a FUNCTION, so this Postgres gains a function and
+    # no column. Applied anyway — the list is pinned to
+    # `record_projection.RECORD_MIGRATIONS` in EQUALITY (#9550).
+    "20261012000005_record_org_purge_rpc.sql",
     "20261014000001_record_subject_props_no_derived.sql",
     # FORWARD `ALTER TABLE public.point ADD COLUMN` (#2782's money value). The
     # probe drives the SHIPPED projection, whose schema read comes from
