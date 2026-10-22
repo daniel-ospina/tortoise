@@ -948,8 +948,13 @@ def registry_never_provisioned(error: str) -> bool:
         "filenotfound" in lowered
         or "no such file or directory" in lowered
         # A bare errno 2 with the exception's name stripped (a caller that
-        # rebuilt the message from ``exc.strerror``).
-        or "errno 2" in lowered
+        # rebuilt the message from ``exc.strerror``). ⛔ MATCHED AS A TOKEN, not
+        # as a substring: `"errno 2" in …` is a PREFIX of "errno 20", "errno
+        # 21", "errno 26", "errno 27" and "errno 28" — so a roster that EXISTS
+        # and could not be read (ENOTDIR, EISDIR — the docstring's own example —
+        # ENOSPC, EROFS, EMFILE) was classified as NEVER PROVISIONED, and the
+        # reader was sent to provision a file that is already there.
+        or re.search(r"\berrno 2\b", lowered) is not None
     )
 
 
@@ -2785,7 +2790,16 @@ def build_state(
             # `registry_measured: false` is an artefact of the failure, not an
             # empty fleet), so a reader can say "roster rows: 1" out loud.
             "registry_rows": len(registry),
-            "workspaces_count": len(workspaces),
+            # ⛔ AND SO IS THE WORKSPACE COUNT (review P1): EVERY failure path of
+            # `cmux_workspaces` returns an EMPTY map with `measured=False`, so
+            # `len()` there is an artefact of the failed read, never a
+            # measurement. Publishing it published "vs 0 live workspace(s)" for
+            # a fleet nobody asked successfully, which reads as "every roster
+            # row is a ghost lane" — the same absent-is-not-zero rule this block
+            # already obeys for the provenance fields, one field over. `None` is
+            # the board saying "this read did not happen"; a reader that prints
+            # counts must skip it (`collision_preflight._board_count` does).
+            "workspaces_count": len(workspaces) if workspaces_measured else None,
             # #8175: was the OPEN-ISSUE read WIDE ENOUGH to prove a negative? A
             # truncated read cannot support "no lane is attributed to issue N"
             # for an N it did not see, so the flag travels with the board and the

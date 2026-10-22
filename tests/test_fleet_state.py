@@ -1579,6 +1579,35 @@ def test_registry_remedy_has_three_arms_and_never_lists_the_rebuild() -> None:
         assert "rebuild the fleet board" not in fs.registry_remedy(error).lower()
 
 
+def test_other_errnos_are_not_read_as_a_missing_roster() -> None:
+    """⛔ `"errno 2" in text` IS A PREFIX of errno 20/21/26/27/28 (review P2).
+
+    So `IsADirectoryError` — the predicate's OWN docstring example of a roster
+    that is PRESENT and unreadable — ENOTDIR, ENOSPC, EROFS and EMFILE were all
+    classified as NEVER PROVISIONED, and the reader was sent to provision a file
+    that is already there while the arm it needed ("EXISTS but could not be
+    read") was withheld. The errno is matched as a TOKEN.
+    """
+    absent_errnos = {
+        20: "NotADirectoryError: [Errno 20] Not a directory: /x/lane-registry.tsv",
+        21: "IsADirectoryError: [Errno 21] Is a directory: /x/lane-registry.tsv",
+        26: "OSError: [Errno 26] Text file busy: /x/lane-registry.tsv",
+        27: "OSError: [Errno 27] File too large: /x/lane-registry.tsv",
+        28: "OSError: [Errno 28] No space left on device: /x/lane-registry.tsv",
+    }
+    for errno, text in absent_errnos.items():
+        with_name_and_without = (text, text.split(": ", 1)[1].lower())
+        for shape in with_name_and_without:
+            assert fs.registry_never_provisioned(shape) is False, shape
+        assert "EXISTS but could not be read" in fs.registry_remedy(text), errno
+        assert "NEVER PROVISIONED" not in fs.registry_remedy(text), errno
+    # …and the cause it MUST still catch, in both shapes, is unchanged.
+    for absent in (_ABSENT_ROSTER, "[errno 2] no such file or directory",
+                   "errno 2"):
+        assert fs.registry_never_provisioned(absent) is True, absent
+        assert "NEVER PROVISIONED" in fs.registry_remedy(absent), absent
+
+
 def test_the_board_publishes_the_roster_size_beside_its_provenance(monkeypatch) -> None:
     """#9392's silent half: a ONE-ROW roster is indistinguishable from a full one.
 
@@ -1605,6 +1634,43 @@ def test_the_board_publishes_the_roster_size_beside_its_provenance(monkeypatch) 
                          sample_s=0.0, do_pane=False)["reconciliation"]
     assert rec["registry_rows"] == 1, "the roster of one is visible as one"
     assert rec["workspaces_count"] == 3
+
+
+def test_an_unmeasured_workspace_read_publishes_no_count(monkeypatch) -> None:
+    """⛔ ABSENT IS NOT ZERO, for the LIVE count too (review P1).
+
+    EVERY failure path of `cmux_workspaces` returns an EMPTY `WorkspaceMap`, so
+    `len()` beside a failed read is an artefact of the failure. Publishing it
+    made the claim gate print "vs 0 live workspace(s)" for a fleet nobody asked
+    successfully — the documented fail-open of #7738, where the beat cannot
+    reach cmux — i.e. it asserted an empty live fleet and read every roster row
+    as a ghost lane. The board must say "this read did not happen" (`None`), not
+    `0`.
+    """
+    monkeypatch.setattr(fs, "load_registry",
+                        lambda: fs.RegistryRows([("cell-t3", "WS-A", "")],
+                                                measured=True))
+    # The REAL fail-open shape: no workspaces AND `measured=False`.
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {}, measured=False, error="could not confirm a single cmux window"))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    rec = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                         sample_s=0.0, do_pane=False)["reconciliation"]
+    assert rec["workspaces_measured"] is False
+    assert rec["workspaces_count"] is None, (
+        "an unmeasured workspace read must not publish a count")
+    # …while the MEASURED roster beside it is still published: the fix is one
+    # field, not a refusal to say anything.
+    assert rec["registry_rows"] == 1
 
 
 

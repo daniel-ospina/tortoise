@@ -3850,6 +3850,12 @@ class HolderRead:
     # must never be reported as an empty one.
     roster_rows: int | None = None
     workspaces_count: int | None = None
+    # Whether the LIVE WORKSPACE read actually happened (#9392 review P1). The
+    # count beside it is only a measurement when this is True: an unreachable
+    # cmux (`workspaces_measured: false`, the documented fail-open of #7738)
+    # publishes NO workspaces, so a bare `0` there is an artefact of the failed
+    # read and printing it asserts an empty live fleet.
+    workspaces_measured: bool = False
 
 
 def _board_can_answer(state: dict) -> str:
@@ -4460,6 +4466,14 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
             state.get("reconciliation") or {}, "registry_rows"),
         workspaces_count=_board_count(
             state.get("reconciliation") or {}, "workspaces_count"),
+        # ⛔ THE COUNT'S PROVENANCE, read with the same strict-true polarity the
+        # board-level checks use: only a literal `True` says the workspace read
+        # happened, and an OLDER board that carries the count but not the flag is
+        # treated as unmeasured (fail-closed — it prints one fewer number, never
+        # a fact it cannot support).
+        workspaces_measured=(
+            (state.get("reconciliation") or {}).get("workspaces_measured")
+            is True),
     )
 
 
@@ -4480,7 +4494,12 @@ def _holder_gate_note(read: HolderRead) -> str:
     counts = ""
     if read.roster_rows is not None:
         counts = f"; lane roster: {read.roster_rows} row(s)"
-        if read.workspaces_count is not None:
+        # ⛔ THE LIVE COUNT ONLY WHEN IT WAS MEASURED (#9392 review P1). Every
+        # failure path of `cmux_workspaces` returns an EMPTY map, so an
+        # unmeasured read would print "vs 0 live workspace(s)" — telling a
+        # reader that every roster row is a ghost lane, from a read that never
+        # happened. `registered: N` alone is a smaller answer than a false one.
+        if read.workspaces_count is not None and read.workspaces_measured:
             counts += f" vs {read.workspaces_count} live workspace(s)"
     if not read.measured:
         return (

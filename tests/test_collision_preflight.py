@@ -516,6 +516,7 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
                        registry_error="", github_measured=True,
                        reconciliation=True,
                        registry_rows=None, workspaces_count=None,
+                       workspaces_measured=True,
                        generated_at=None, repo=SLUG,
                        liveness_unmeasured=False,
                        open_issues_truncated=False) -> dict:
@@ -574,8 +575,13 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
         }
         # The roster SIZE, only when a test asks for it: a board from an older
         # writer carries no counts, and `None` here models exactly that (#9392).
+        # `workspaces_measured` travels with `workspaces_count` because the count
+        # is only a measurement when that read SUCCEEDED — an unreachable cmux
+        # publishes no workspaces, and `False` + a count is the fail-open shape
+        # that must not print "0 live workspace(s)" (#9392 review P1).
         for key, value in (("registry_rows", registry_rows),
-                           ("workspaces_count", workspaces_count)):
+                           ("workspaces_count", workspaces_count),
+                           ("workspaces_measured", workspaces_measured)):
             if value is not None:
                 state["reconciliation"][key] = value
     for number, entries in (issues or {}).items():
@@ -681,6 +687,10 @@ class CollisionPreflightTest(unittest.TestCase):
         # holder writes its own with `fleet_board`.
         self.home = self.tmp / "home"
         self.fleet_board()
+        # Where a REBUILD's shadowed `gh`/`cmux` stubs record that they were
+        # called, so a test can prove the rebuild ran through THIS path and not
+        # the network (see `failing_rebuild_path`).
+        self.rebuild_stub_log = self.tmp / "rebuild-stub-calls.log"
         # Default: every GitHub surface is queryable and empty.
         self.gh_fixtures(open_prs=[], closed_prs=[], issue=self.issue_payload())
         # #8560: the landed surface's timeline is queryable by default (one empty
@@ -888,6 +898,39 @@ class CollisionPreflightTest(unittest.TestCase):
             _fleet_board_state(**kwargs),
         )
 
+    def failing_rebuild_path(self) -> str:
+        """A `PATH` on which a REBUILD's own reads fail locally (review P2).
+
+        ⛔ A REBUILD RUNS IN THE TOOL SUBPROCESS (`_read_board` →
+        `fleet_state.build_state`), so it cannot be mocked from here, and it
+        deliberately uses BARE `gh`/`cmux` from `PATH` rather than this tool's
+        `--gh`. An unanswerable board therefore reaches the network: bare `gh
+        pr list` / `gh issue list` against a nonexistent repo, plus a bare `cmux
+        list-workspaces`. On an authenticated box that is two real GraphQL calls;
+        on a box where cmux IS reachable the rebuild reads the OPERATOR's real
+        workspace list. Both are the non-hermetic path this harness exists to
+        avoid.
+
+        So the two binaries are shadowed with stubs that FAIL. `_run` degrades a
+        non-zero exit to "", i.e. exactly the production fail-open shape, and the
+        cause under test — the REAL `FileNotFoundError` from `load_registry`,
+        which runs BEFORE either — is untouched.
+
+        The stubs RECORD that they were called (`self.rebuild_stub_log`), so a
+        test can prove the rebuild really ran and really went through THIS path
+        — a test that stopped rebuilding would otherwise still pass.
+        """
+        stub_dir = self.tmp / "rebuild-stubs"
+        stub_dir.mkdir(exist_ok=True)
+        log = self.rebuild_stub_log
+        for name in ("gh", "cmux"):
+            _write_exec(stub_dir / name,
+                        "#!/usr/bin/env bash\n"
+                        f'printf \'%s\\n\' "$0 $*" >> {log}\n'
+                        f'echo "{name}-stub: rebuilds never leave the test" >&2\n'
+                        "exit 127\n")
+        return f"{stub_dir}:{os.environ.get('PATH', '')}"
+
     # ── runner ──────────────────────────────────────────────────────────────
 
     def run_tool(self, issue: int = ISSUE,
@@ -963,10 +1006,15 @@ class CollisionPreflightTest(unittest.TestCase):
         redirected HOME, so the tool rebuilds through the real
         `fleet_state.build_state`, meets the real `FileNotFoundError`, and must
         end with the PROVISIONING remedy — not the rebuild that just failed.
+
+        ⛔ THE REBUILD IS KEPT LOCAL (review P2): its bare `gh`/`cmux` reads are
+        shadowed by failing stubs, so the FILE read under test is still the real
+        one while no GraphQL call and no operator cmux read can happen.
         """
         self.fleet_board(registry_measured=False,
                          registry_error=ABSENT_ROSTER)
-        rc, out = self.run_tool()
+        rc, out = self.run_tool(
+            env_extra={"PATH": self.failing_rebuild_path()})
         self.assertEqual(rc, 2, out)
         verdict = self._verdict_line(out)
         self.assertIn("LANE ROSTER is UNKNOWN", verdict)
@@ -985,6 +1033,13 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertEqual(len(rows), 1, out)
         self.assertIn("lane-registry.tsv", rows[0])
         self.assertIn("PROVISIONING", rows[0])
+        # ⛔ AND THE REBUILD REALLY RAN — through the LOCAL stubs (review P2).
+        # Without this a later change that stopped rebuilding would leave the
+        # test green while the reason it exists (the tool meets the REAL
+        # `FileNotFoundError` from `load_registry`) silently disappeared.
+        log = self.rebuild_stub_log.read_text()
+        self.assertIn("/gh ", log)
+        self.assertIn("/cmux ", log)
 
     # ── one stubbed/real hit per hit-capable surface ────────────────────────
 
@@ -7732,7 +7787,8 @@ class HolderGateTests(unittest.TestCase):
         one visibly a roster of one — disclosure, not a dismissal switch: the
         verdict still keys on `registry_measured`."""
         note = self.cp._holder_gate_note(self.cp.HolderRead(
-            True, "cache", roster_rows=1, workspaces_count=11))
+            True, "cache", roster_rows=1, workspaces_count=11,
+            workspaces_measured=True))
         self.assertIn("lane roster: 1 row(s) vs 11 live workspace(s)", note)
         # An OLDER board publishes no counts. Absent is not zero: saying
         # "0 row(s)" would report an unmeasured roster as an empty one.
@@ -7744,14 +7800,55 @@ class HolderGateTests(unittest.TestCase):
                 self.assertIsNone(
                     self.cp._board_count({"registry_rows": bad}, "registry_rows"))
 
+    def test_an_unmeasured_workspace_read_never_prints_a_live_count(self):
+        """⛔ EVERY failure path of `cmux_workspaces` returns an EMPTY map, so the
+        count beside a FAILED read is `0` — an artefact, not a measurement.
+
+        Printing it said "lane roster: 12 row(s) vs 0 live workspace(s)" in the
+        documented fail-open state (#7738: the launchd beat cannot reach cmux),
+        i.e. it asserted an EMPTY live fleet from a read that never happened and
+        invited the reader to conclude all 12 rows are ghost lanes — the exact
+        class #9392 exists to fix, in the sibling field (review P1).
+        """
+        unmeasured = self.cp.HolderRead(
+            True, "cache", roster_rows=12, workspaces_count=0,
+            workspaces_measured=False)
+        note = self.cp._holder_gate_note(unmeasured)
+        self.assertIn("lane roster: 12 row(s)", note)
+        self.assertNotIn("live workspace(s)", note)
+        self.assertNotIn("vs 0", note)
+        # The count itself is still threaded (the board MEASURED the roster); the
+        # published NUMBER is what the failed read cannot support.
+        self.assertEqual(unmeasured.workspaces_count, 0)
+
     def test_read_holders_threads_the_roster_size_from_the_board(self):
         _write_board(self.board, _fleet_board_state(registry_rows=1,
                                                     workspaces_count=11))
         read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
         self.assertTrue(read.measured)
         self.assertEqual((read.roster_rows, read.workspaces_count), (1, 11))
+        self.assertTrue(read.workspaces_measured)
         # An unmeasured board never carries a count to print.
         self.assertIsNone(self.cp.HolderRead(False, "unmeasured").roster_rows)
+
+    def test_read_holders_carries_the_workspace_read_provenance(self):
+        """The count is only as good as the read behind it (review P1)."""
+        _write_board(self.board, _fleet_board_state(
+            registry_rows=12, workspaces_count=0, workspaces_measured=False))
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured)
+        self.assertFalse(read.workspaces_measured)
+        self.assertNotIn("live workspace(s)", self.cp._holder_gate_note(read))
+        # An OLDER board that carries a count but NOT the flag is UNMEASURED:
+        # the strict-true polarity, so the gate prints one fewer number rather
+        # than a fact it cannot support.
+        _write_board(self.board, _fleet_board_state(
+            registry_rows=12, workspaces_count=3,
+            workspaces_measured=None))
+        stale = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(stale.measured)
+        self.assertFalse(stale.workspaces_measured)
+        self.assertNotIn("live workspace(s)", self.cp._holder_gate_note(stale))
 
 
     def test_the_claim_gate_never_clobbers_an_existing_incomplete_reason(self):
