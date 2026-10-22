@@ -151,7 +151,7 @@ from tortoise.numeric_domain import (
     _INT64_MIN,
     numeric_alteration_reason,
 )
-from tortoise.retry import explain_instance_unavailable
+from tortoise.retry import explain_instance_unavailable, explain_memory_ceiling
 
 #: The #7357 note's own failure channel. A note that cannot be built is
 #: DEBUG-only: the caller is about to re-raise the ORIGINAL exception, and a
@@ -1817,11 +1817,53 @@ def _note_instance_outage(exc: BaseException, *, mutating: bool | None) -> None:
     guaranteed writable on every exception type. Each of those is a raise on
     the error path, which without this belt would REPLACE the original error
     with the applier's — the exact swap this function exists to prevent.
+
+    TWO families reach here, and the ORDER is what keeps a message to one
+    suffix (#7357): the instance going AWAY
+    (:func:`explain_instance_unavailable`) and the instance REFUSING at its
+    dataset ceiling (:func:`explain_memory_ceiling` — an answered
+    ``OutOfMemoryError``). The outage arm runs first and the ceiling arm only
+    as its fallback, so one message can never carry both suffixes.
+
+    ⚠️ The exclusivity does NOT rest on "the outage arm only explains the
+    absence of a reply" — that would be false: the outage arm also owns the
+    ANSWERED ``BusyLoadingError`` (``LOADING``), which is an answer of a
+    different kind (#9352 review P2). The discriminator for a GIVEN exception
+    object's own class/text is the CLASS: :func:`_answered_refusal` in
+    ``tortoise/retry.py`` excludes every ``ResponseError`` from the outage
+    family, ``OutOfMemoryError`` IS a ``ResponseError``, and ``LOADING`` is not
+    an ``OutOfMemoryError``.
+
+    ⚠️ …and that class partition is per LINK, not a universal disjointness
+    between the two predicates (#9532 cycle 3 P3). Both walk the
+    ``__cause__``/``__context__`` chain, so a ``TimeoutError`` whose cause is a
+    ceiling refusal is admitted by BOTH — this function's ORDER is what makes
+    the outcome single-suffix, not the sets being disjoint. Read those two
+    predicates before touching the order: swapping the arms would apply the
+    ceiling note ("Nothing was applied … re-issuing it now will be refused the
+    same way") to a transport failure whose reply was LOST, which is the claim
+    :func:`explain_instance_unavailable` exists to forbid.
     """
     try:
         if len(getattr(exc, "args", ())) != 1 or not isinstance(exc.args[0], str):
             return
         explained = explain_instance_unavailable(exc, mutating=mutating)
+        if explained is None:
+            # #7357: the OTHER way a memory failure reaches a caller on this
+            # repository's own containers. #9506 gave the lane's instance a
+            # Redis-side `--maxmemory` BELOW its cgroup cap, so an overshoot is
+            # now an ANSWERED `OutOfMemoryError` instead of a SIGKILL — a shape
+            # this seam must explain too, or the issue's defect has merely
+            # moved. Fallback, never a second suffix: the families are
+            # disjoint by CLASS (`_answered_refusal` rejects every
+            # `ResponseError`, and `OutOfMemoryError` is one), not because the
+            # arm above "only explains the absence of a reply" — it also owns
+            # the ANSWERED `BusyLoadingError`. ORDER, not disjointness: the
+            # class partition is per LINK, and both predicates walk the chain,
+            # so a `TimeoutError` whose cause is a ceiling refusal is admitted
+            # by both — running the outage arm first is what makes that one
+            # suffix (see `_note_instance_outage`'s docstring, #9532 cycle 3).
+            explained = explain_memory_ceiling(exc)
         if explained is not None:
             exc.args = (explained,)
     except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained

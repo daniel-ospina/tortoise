@@ -957,6 +957,14 @@ SOURCE_PATTERNS = {
              # (surfaces=[], full=False) and that test never runs on the PR
              # that owns the launch-gate number (the #3616 pattern).
              "tools/capture_cost_report.py",
+             # #9077 (E4): the operator-receipt EVIDENCE checker. `tools/` is in
+             # NON_PYTHON_PREFIXES, so without this entry a change to the
+             # checker itself selects no surface of its own and its regression
+             # suite (`eval/write_path/test_write_path_operator_receipt.py`, 62
+             # dict-fixture tests) never runs on the PR that weakens the gate —
+             # the same #1349/#2938/#3616 silent-drop class as the entries
+             # above. The suite is registered on `eval` below.
+             "tools/operator_receipt_check.py",
              # P2-1 (code review): an embeddings.py/cross_lens.py-only PR must
              # select eval so probe/vector-arm/threshold tests run (they assert
              # the EMBEDDING_MODEL + threshold constants — drift class #1260).
