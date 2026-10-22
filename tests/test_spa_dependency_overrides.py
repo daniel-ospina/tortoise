@@ -15,17 +15,28 @@ its LOCK refreshed (`nanoid 3.3.16 -> 3.3.20`, `source-map-js 1.2.1 -> 1.2.2`,
 `vite 8.1.5 -> 8.3.5`), stating no floor at all — so the next lock refresh can
 walk it straight back below the fixed version, silently.
 
-So this file pins three properties, all mechanical and offline (no network, no
-`npm` binary):
+So this file pins three properties, all mechanical, no `npm` binary and no DB:
 
 1. every declared override is RECORDED below with what it clears — a new
-   override cannot land as an unexplained mitigation (fails on the pre-fix
-   tree: blog-admin declared nine, five of which clear nothing);
+   override cannot land as an unexplained mitigation (reds on an earlier
+   REVISION OF THIS BRANCH, which declared nine overrides in blog-admin, five
+   of which cleared nothing: that state is not in the base tree — `main`
+   declares no `overrides` block at all, so on the base tree this leg is
+   vacuously green and proves nothing);
 2. the two shared transitive floors are declared by EVERY SPA — parity, so the
-   fix exists in the manifest and not only in a lock resolution (fails on the
+   fix exists in the manifest and not only in a lock resolution (reds on the
    pre-fix tree: graph-viz had no `overrides` block at all);
 3. every declared floor is actually met by the committed lock — the floor and
    the resolution cannot drift apart.
+
+Exactly one corner is not offline, and it is named rather than hidden: the
+`base` column of `RESOLUTIONS` is read from `PRE_FIX_REVISION`'s locks, and a
+SHALLOW checkout (which is what CI's `test` job checks out) does not contain
+that revision. `_ensure_commit` therefore runs `git fetch --depth={120,400,1500}
+origin main` there — a NETWORK call with a side effect on the checkout under
+test — and the leg SKIPS, never passes, when the revision stays unreachable. A
+`git show` that merely returned `None` in CI left this whole half dark on every
+PR run (PR #9524 review, round 3 I3 / round 4 ISSUE 1).
 
 The measurements behind the records below were taken on this branch head with
 `npm audit --package-lock-only` against each app's `package.json` +
@@ -39,13 +50,15 @@ dashboard lock resolved `3.3.17` — `3.3.16` is graph-viz's base, carried over 
 the wrong app (the security conclusion held: 3.3.17 is below the 3.3.18 fix, so
 it was a record defect, not a shipped one). So the base and head resolutions are
 no longer prose only: `RESOLUTIONS` below keys them BY APP, and two tests hold
-the table to the two locks that can be read offline — this tree's lock, and
-`PRE_FIX_REVISION`'s lock through `git show` (skipped, with its reason, where
-the history is unavailable: an unreadable revision is not evidence of no copies).
+the table to the two locks that can be read locally — this tree's lock, and
+`PRE_FIX_REVISION`'s lock through `git show` (reached through `_ensure_commit`
+where the checkout is shallow; skipped, with its reason, only where the history
+is genuinely unreachable: an unreadable revision is not evidence of no copies).
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import subprocess
@@ -116,10 +129,20 @@ RETIRED_NO_OPS = {
     "postcss-nested": "its moderate is inherited from postcss-selector-parser (I1)",
 }
 
-# The pre-fix revision of #9524 (the branch's merge base with `main`). The
-# `base` column of RESOLUTIONS is measured from THIS commit's locks — never from
-# a recollection of another app's lock.
+# The pre-fix revision of #9524: the PARENT of this branch's first commit, i.e.
+# the base tree of this PR's own work (`f2451b7c1`), NOT the branch's merge base
+# with `main` — the branch has since merged `main`, so `git merge-base origin/main
+# origin/chore/security-2026-10-21-npm` moves and is the wrong anchor for a
+# pre-fix figure. It is an ANCESTOR OF `main`, which is what lets
+# `_ensure_commit` reach it in a shallow CI clone with a bounded `origin main`
+# fetch. The `base` column of RESOLUTIONS is measured from THIS commit's locks —
+# never from a recollection of another app's lock.
 PRE_FIX_REVISION = "69390341fb152feb4c20287709634f68c5b4004c"
+
+# Depths tried, in order, to make PRE_FIX_REVISION reachable in a shallow clone.
+# Measured 2026-10-22: PRE_FIX_REVISION is 5 commits behind `origin/main`, so the
+# first depth already covers it; the ladder is the #9397 helper's, unchanged.
+_SHALLOW_DEPTHS = (120, 400, 1500)
 
 # package -> app -> (pre-fix at PRE_FIX_REVISION, head in this tree's lock).
 # Tuples, and every copy at every depth: an override's job is usually to
@@ -195,6 +218,73 @@ def _resolved_versions(slug: str, package: str) -> list[str]:
     return _versions_in(_lock(slug)["packages"], package)
 
 
+def _has_commit(rev: str) -> bool:
+    """True when `rev` resolves to a commit in this checkout's history."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "cat-file", "-e", f"{rev}^{{commit}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def _is_shallow() -> bool:
+    """True when this checkout is a SHALLOW clone."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--is-shallow-repository"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0 and done.stdout.strip() == "true"
+
+
+def _ensure_commit(rev: str) -> bool:
+    """Make `rev` reachable IF the checkout is shallow — bounded, best effort.
+
+    Adopted from `tests/test_9397_about_edge_properties.py::_ensure_commit`, and
+    for the same reason: without it the `base` half of `RESOLUTIONS` never runs
+    in CI. The `test` job checks out with `actions/checkout`'s default
+    `fetch-depth: 1`, a depth-1 PR merge ref contains no ancestors, `git show
+    PRE_FIX_REVISION:...` fails, and the leg SKIPS — a green run that verifies
+    nothing, which is exactly the record class (a base figure recalled from
+    another app's lock) the leg exists to stop.
+
+    ⛔ A non-shallow clone is NEVER touched: `git fetch --depth=N` on a full
+    clone converts it to shallow and truncates its history (measured in #9397:
+    6106 -> 120 commits, `.git/shallow` created). So the fetch is gated on
+    `_is_shallow()` FIRST; a full clone that somehow lacks the rev returns False
+    and the caller skips honestly.
+    """
+    if _has_commit(rev):
+        return True
+    if not _is_shallow():
+        return False
+    for depth in _SHALLOW_DEPTHS:
+        try:
+            subprocess.run(
+                [
+                    "git", "-C", str(ROOT), "fetch", "--quiet",
+                    f"--depth={depth}", "origin", "main",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        if _has_commit(rev):
+            return True
+    return False
+
+
 def _resolved_versions_at_revision(
     slug: str, package: str, revision: str
 ) -> list[str] | None:
@@ -205,6 +295,7 @@ def _resolved_versions_at_revision(
     copies, and reporting `[]` would let a wrong recorded figure pass as
     "nothing to compare" (the measured-absence-from-an-unreadable-source trap).
     """
+    _ensure_commit(revision)
     try:
         done = subprocess.run(
             [
@@ -286,9 +377,10 @@ def test_recorded_pre_fix_resolution_matches_the_pre_fix_lock(package: str) -> N
         if measured is None:
             pytest.skip(
                 f"git cannot read {PRE_FIX_REVISION}:{slug}/package-lock.json "
-                "(shallow clone, or no git binary) — the recorded base "
-                f"{sorted(base)} for {package} is unverified here; fetch that "
-                "revision (e.g. `git fetch --unshallow`) to verify it"
+                "even after the bounded `_ensure_commit` fetch (no git binary, "
+                "no network, or a full clone that lacks the revision) — the "
+                f"recorded base {sorted(base)} for {package} is unverified "
+                "here; `git fetch --unshallow` verifies it"
             )
         assert sorted(measured) == sorted(base), (
             f"{slug}'s pre-fix lock ({PRE_FIX_REVISION[:9]}) resolved {package} "
@@ -341,3 +433,83 @@ def test_every_declared_floor_is_met_by_the_committed_lock(slug: str) -> None:
                 f"{slug}: {package} resolves {version}, outside the {range_str} "
                 "floor's major — a caret floor cannot express a cross-major pin"
             )
+
+
+def test_the_base_half_is_reachable_in_a_shallow_checkout() -> None:
+    """The base-half leg must TRY to reach `PRE_FIX_REVISION`, not skip first.
+
+    Structural on purpose. In CI the `test` job checks out at
+    `actions/checkout`'s default `fetch-depth: 1`, so before this pin the leg
+    called `git show 69390341f:...`, got a non-zero exit, and SKIPPED — all four
+    `base` cases dark on every PR run, inside an otherwise green shard, with
+    nothing red (`tools/skip-guard.py` only guards the live-FalkorDB reason
+    family). A skip is indistinguishable from a pass in the summary line, so it
+    has to be pinned structurally: the behaviour it replaces is only reachable
+    in a shallow clone (PR #9524 review, round 3 I3 / round 4 ISSUE 1).
+
+    Red before the fix: `_ensure_commit` / `_is_shallow` / `_SHALLOW_DEPTHS` did
+    not exist in this file at all, so the first assertion below fails.
+    """
+    module = ast.parse(
+        (ROOT / "tests/test_spa_dependency_overrides.py").read_text(encoding="utf-8")
+    )
+    funcs = {
+        node.name: node for node in module.body if isinstance(node, ast.FunctionDef)
+    }
+    assert {"_ensure_commit", "_is_shallow", "_has_commit"} <= set(funcs), (
+        "the shallow-checkout helpers are gone: the base half of RESOLUTIONS is "
+        "back to a bare `git show` + `pytest.skip`, i.e. unverified on every CI "
+        "run (PR #9524 review, round 4 ISSUE 1)"
+    )
+
+    # The base-half leg must CALL the helper, not merely have it in the file.
+    reader = funcs["_resolved_versions_at_revision"]
+    assert "_ensure_commit" in ast.dump(reader), (
+        "`_resolved_versions_at_revision` no longer calls `_ensure_commit`, so a "
+        "shallow clone cannot reach PRE_FIX_REVISION and the base half skips "
+        "green again"
+    )
+
+    # `git fetch --depth=N` TRUNCATES a full clone (measured in #9397: 6106 ->
+    # 120 commits, `.git/shallow` created), so the `_is_shallow` gate must come
+    # BEFORE the fetch loop — order is what is pinned, not intent.
+    body = funcs["_ensure_commit"].body
+    gate_at = next(
+        (
+            index
+            for index, node in enumerate(body)
+            if isinstance(node, ast.If)
+            and "_is_shallow" in ast.dump(node.test)
+            and any(
+                isinstance(inner, ast.Return)
+                and isinstance(inner.value, ast.Constant)
+                and inner.value.value is False
+                for inner in node.body
+            )
+        ),
+        None,
+    )
+    fetch_at = next(
+        (
+            index
+            for index, node in enumerate(body)
+            if isinstance(node, ast.For) and "_SHALLOW_DEPTHS" in ast.dump(node.iter)
+        ),
+        None,
+    )
+    assert gate_at is not None, (
+        "`_ensure_commit` no longer returns False on a NON-shallow clone, so the "
+        "fetch would shallow (and truncate) a developer's full clone"
+    )
+    assert fetch_at is not None, (
+        "`_ensure_commit` has no bounded `_SHALLOW_DEPTHS` fetch loop, so it "
+        "cannot make PRE_FIX_REVISION reachable in CI"
+    )
+    assert gate_at < fetch_at, (
+        f"the `_is_shallow` gate is statement {gate_at} and the fetch loop "
+        f"{fetch_at}: the gate must come FIRST or the fetch runs on a full clone"
+    )
+    assert "is-shallow-repository" in ast.dump(funcs["_is_shallow"]), (
+        "`_is_shallow` no longer asks git `--is-shallow-repository`, so the gate "
+        "above does not mean what it assumes"
+    )
