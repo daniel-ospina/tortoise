@@ -34,6 +34,15 @@ formatters by ``tests/test_5051_capture_receipt_key_registry.py``, so changing a
 key name here fails there instead of silently drifting the registry (an
 unregistered key is dropped by the ``_update_onboarding_state`` allowlist
 filter).
+
+The dicts are the ONLY literal spelling left (#5051). Every other consumer
+DERIVES its keys from these formatters, and the registry test pins each
+derivation, so the safe direction — change the format HERE and everything
+follows — holds rather than being merely intended: the delete path's orphan
+sweep (``_capture_receipt_buckets``), the client-write-refusal set
+(``_capture_server_owned_keys``, #3681), and the dashboard's own JS reader
+(``website/apps/dashboard/src/captureStatus.js``, the one consumer in another
+language).
 """
 from __future__ import annotations
 

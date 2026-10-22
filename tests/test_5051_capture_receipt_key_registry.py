@@ -23,10 +23,18 @@ The exact-set assertions below pin that too.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import tortoise.hosted_api as hosted_api
 from tortoise.capture_receipts import capture_last_error_key, capture_receipt_key
+
+# The one consumer that cannot import the formatter — the dashboard (JS).
+_CAPTURE_STATUS_JS = (
+    Path(__file__).resolve().parent.parent
+    / "website" / "apps" / "dashboard" / "src" / "captureStatus.js"
+)
 
 # The two registries, by their real module-level names.
 _REGISTRY_NAMES = ("DEFAULT_ONBOARDING_STATE", "_ONBOARDING_DEFAULT_STATE")
@@ -111,3 +119,66 @@ def test_both_registries_agree_and_hold_the_state_key_spelling() -> None:
         assert "claude_desktop" not in key and "claude_web" not in key, key
     assert "session_capture_receipt_claude-desktop" in provision
     assert "session_capture_receipt_claude_desktop" not in provision
+
+
+# ── the two DERIVATIONS that used to re-spell the format inline ─────────────
+#
+# The dicts above are a legitimate TABLE (the dashboard needs a registered row
+# per harness). These two are not tables — they are code that CONSUMES the key
+# format, and both spelled it out as an inline f-string until #5051 landed here.
+# Drift at either is silent and one-sided:
+#
+#   * ``_capture_receipt_buckets`` — the delete path's orphan sweep looks up
+#     keys no writer produces after a format change, so ``state.get(key)`` is
+#     always falsy and an orphaned receipt is never cleared;
+#   * ``_capture_server_owned_keys`` — the live receipt keys fall OUT of the
+#     client-write-refusal set, so a client PATCH can fabricate the receipt
+#     ``captureStatus.js`` reads as the present-tense claim (#3681).
+
+
+def test_reconcile_buckets_are_the_formatter_output() -> None:
+    """The orphan sweep's buckets come from ``capture_receipt_key`` — one
+    bucket per harness plus the bare legacy one, keyed by the formatter."""
+    buckets = hosted_api._capture_receipt_buckets()
+    harnesses = [harness for harness, _ in buckets]
+    keys = [key for _, key in buckets]
+
+    assert harnesses[0] is None, "the bare legacy bucket must come first"
+    assert set(harnesses[1:]) == set(hosted_api._SESSION_HARNESS_VALUES)
+    assert len(set(keys)) == len(keys), f"duplicate receipt key: {keys}"
+    assert dict(buckets) == {
+        None: capture_receipt_key(None),
+        **{h: capture_receipt_key(h) for h in hosted_api._SESSION_HARNESS_VALUES},
+    }
+
+
+def test_capture_server_owned_keys_are_the_formatter_output() -> None:
+    """The client-write-refusal set covers exactly the formatter's receipt and
+    last-error keys — every live key is refused, and no stale one is listed."""
+    owned = hosted_api._CAPTURE_SERVER_OWNED_KEYS
+    harnesses = set(hosted_api._SESSION_HARNESS_VALUES)
+
+    receipts = {key for key in owned if key.startswith(_RECEIPT_FAMILY)}
+    last_errors = {key for key in owned if key.startswith(_LAST_ERROR_FAMILY)}
+    assert receipts == (
+        {capture_receipt_key(None)} | {capture_receipt_key(h) for h in harnesses}
+    ), f"receipt half drifted: {sorted(receipts)}"
+    assert last_errors == {capture_last_error_key(h) for h in harnesses}, (
+        f"last-error half drifted: {sorted(last_errors)}")
+    # The live constant IS the derivation, so the callable cannot rot unused.
+    assert hosted_api._capture_server_owned_keys() == owned
+
+
+def test_dashboard_reads_the_same_key_names() -> None:
+    """The dashboard is the one consumer that cannot import the formatter
+    (another language), so its two template literals are a deliberate second
+    spelling — and they are PINNED to the formatter's prefix here. A format
+    change that updates the Python side leaves this red instead of silently
+    blanking every per-harness status row."""
+    source = _CAPTURE_STATUS_JS.read_text(encoding="utf-8")
+    for formatter in (capture_receipt_key, capture_last_error_key):
+        prefix = formatter("_harness_marker_")[:-len("_harness_marker_")]
+        expected = "`" + prefix + "${harness}`"
+        assert expected in source, (
+            f"captureStatus.js does not build {expected!r} — the dashboard's "
+            f"key spelling drifted from tortoise.capture_receipts")
