@@ -6577,11 +6577,6 @@ durations:
   # `tools/ci_timing.py::_locate_durations_block` REFUSES a duplicated key, and
   # that tool is the map's only writer, so the duplicate would have redded the
   # next `ci-timing` refresh while every local check stayed green.
-  # #9017: ONE ROW PER KEY. A merge earlier in this change kept BOTH this row and
-  # main's predecessor, and that is not harmless — PyYAML silently last-wins, but
-  # `tools/ci_timing.py::_locate_durations_block` REFUSES a duplicated key, and
-  # that tool is the map's only writer, so the duplicate would have redded the
-  # next `ci-timing` refresh while every local check stayed green.
   test_relationships_bounded.py: 40.5  # #9017 CI-junit 2026-10-18 (run 39165691659); was 16.8
   test_expand_relationships_6976.py: 5.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 12.0
   test_extractor_v2.py: 18.7  # #9017 CI-junit 2026-10-18 (run 39165691659); was 10.1
@@ -6638,8 +6633,6 @@ durations:
   # exactly the direction that hurts a PR-added file (#3514 note above). Both
   # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
   test_6211_ep_result_shape.py: 19.0
-  # #6211 (hop anchoring): locally measured on this host, whole file, 7 tests /
-  # 5.4-7.6 s (it builds an 8k-edge fixture and profiles one hop). The count is
   # #6211 (hop anchoring): locally measured on this host, whole file, 8 tests /
   # 5.6-9.0 s (6 readings; the spread is fleet load. It builds an 8k-edge
   # fixture and profiles one hop; the test #9304 ADDED — the journal-read plan
@@ -6806,8 +6799,6 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 23.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.6 — ci-timing top-15 2026-10-21 (run 39467226356): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (16.6s) is a LOWER bound; kept 23.5
-  # #5052: the claim CAS on the graph — 58 tests: 55 in-memory double + 3 live-SDK
-  # legs (skip visibly without TORTOISE_DB_URI: acquire→release→acquire, the two-contender
   # #5052: the claim CAS on the graph — 90 tests: 87 in-memory double + 3 live-SDK
   # legs (the live legs skip visibly whenever TORTOISE_DB_URI is unset —
   # `TORTOISE_TEST_CARVE_OUT=1` relaxes the session URI GATE only, so a URI-less
