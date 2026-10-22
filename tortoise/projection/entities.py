@@ -2691,8 +2691,17 @@ class _EntityHandlers:
         # `:Session {id:'   '}` on rebuild — an indexed key the engine cannot
         # serve back to an equality seek, so the container is invisible and
         # every later capture mints a duplicate on it.
+        # #8840 review P1: `drops_record=True` — this `return` IS the drop. The
+        # record is not written at all, so the replay accounting must count it
+        # as a DROPPED record (`identity_skipped`), not as an identity refused
+        # INSIDE a record that still replayed — that clause states the record IS
+        # in the graph, which is false here, and it hides a missing `:Session`
+        # container from the operator. Same convention as the Point creation
+        # anchors (`FalkorProjection.apply`).
         if _session_id_refusal(sid) is not None:
-            _log_identity_skip("Session", sid, "id (MERGE key)")
+            _log_identity_skip("Session", sid, "id (MERGE key)",
+                               event_id=ev.get("event_id"),
+                               drops_record=True)
             return 0
         sets: list[str] = []
         params: dict = {"sid": sid}
