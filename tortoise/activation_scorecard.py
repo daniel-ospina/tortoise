@@ -147,10 +147,12 @@ RESULT_COUNT_PROP = "result_count"
 
 # ── Stage 4: the pinned retrieval-tool allowlist ───────────────────────────
 # PINNED BY NAME — deliberately NOT derived from ``readOnlyHint`` / ``_ro()``.
-# ``_ro()`` covers 52 tools, including ``tortoise_health``, ``tortoise_status``
-# and every ``tortoise_list_*``; agents call those automatically at connect
-# time, so deriving the set from the annotation would mark an org "activated"
-# the moment it connected. Precedent for a pinned frozenset:
+# The read-annotated set covers every ``tortoise_list_*`` and the plain status
+# tools; agents call those automatically at connect time, so deriving the set
+# from the hint would mark an org "activated" the moment it connected.
+# (#4122 retired ``_ro()`` from the registry — the count that used to be quoted
+# here was already stale, so it is not restated: the allowlist is the names
+# below, and the hint is not an input to it.) Precedent for a pinned frozenset:
 # ``tortoise/mcp_server.py`` (``_QUOTA_GATED``).
 #
 # NARROW = answer-seeking retrieval: a call made to *get remembered content

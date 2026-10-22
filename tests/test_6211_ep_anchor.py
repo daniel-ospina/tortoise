@@ -25,8 +25,9 @@ WHAT IS PINNED HERE, and why each test is discriminating:
    queries the four captured entry points of ``ep.py`` actually EMIT (captured
    off the graph handle, not re-written in the test) plan through ``Node By
    Index Scan`` and contain no ``Node By Label Scan``. (``run()``'s own
-   evidence-prewrite journal read is not captured and is not index-planned —
-   it names no label, so no per-label index can anchor it; #9304.) Measured
+   evidence-prewrite journal read is not reached by this capture — the four
+   entry points below never call ``run()`` — so it is pinned by its own
+   ``run()`` capture, item 5.) Measured
    discriminating power, per site: removing
    the barrier reddens it at the seed neighbourhood, the plain-seed direct-edge
    expansion, the bridge hop, Batch 1 and — in the selector test — all four
@@ -63,7 +64,26 @@ WHAT IS PINNED HERE, and why each test is discriminating:
    Measured ``All Node Scan (t)`` at 242.5 ms -> ``Node By Index Scan (op)``
    at 12.6 ms on the same fixture, and 1.4-1.5 s -> under 0.1 s for the whole
    selection (best of 3).
-5. ``test_the_records_that_state_this_files_size_are_true`` — the manifest row
+5. ``test_the_evidence_prewrite_journal_read_is_planned_as_an_index_read`` —
+   #9304: the pass's LAST unanchored id-set leg, and the one that is not a
+   ``WITH *`` barrier fix. The evidence pre-write's journal read was a
+   LABEL-FREE disjunction (``MATCH (n) WHERE (n:Point OR …) AND n.id IN $ids``),
+   and a label-free match has no per-``(label, property)`` index to anchor on,
+   so it was planned ``All Node Scan | (n)`` with the id predicate applied per
+   record — cost tracking the GRAPH. It is now a per-label sweep anchored by
+   the label+id pattern (``Node By Index Scan``), and #7853's "a
+   ``:Point:Object`` node is journaled exactly ONCE" is carried by a node-keyed
+   dedupe over the swept rows — keyed on ``id(n)``, per ``live.EPISTEMIC_ID_KEYS``'
+   rule that a dedupe key is never the coalesced ``id`` value (#8879) —
+   instead of by the label-free form. THREE families are asserted on a 7-node
+   ``run()`` fixture: the PLAN of every journal read; the ROWS (non-baseline
+   evidence ids once each, the double-labelled id once rather than twice, the
+   baseline'd id and the absent id not at all); and the sweep's label
+   COVERAGE (one statement per ``EPISTEMIC_LABELS`` entry — the count
+   ``docs/capacity.md`` §7 states — made observable by an evidence id under
+   ``:Event`` alone, so a sweep narrowed to one label is red rather than
+   green).
+6. ``test_the_records_that_state_this_files_size_are_true`` — the manifest row
    that carries this file's ``durations`` weight states its test COUNT in the
    comment above it, and that count was wrong when it was written (#9282
    review): a measured row whose stated count does not match what was measured
@@ -85,6 +105,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from tortoise.ep import TortoiseEP
+from tortoise.live import EPISTEMIC_LABELS
 from tortoise.sdk import TortoiseSDK
 
 #: Operators wired into the hub claim — the hop's real neighbourhood, and much
@@ -336,6 +357,14 @@ def test_direct_edge_factors_are_collected_once_per_edge_from_both_ends(graph):
 #: selector's frontier (`$frontier`) and expansion (`$ops`) sets.
 _ID_PARAMS = ("$ids", "$oids", "$frontier", "$ops")
 
+#: The evidence pre-write's journal read is the ONE id-set statement of the
+#: pass whose `$ids` binding is not a frontier: it re-reads the evidence-prior
+#: ids to record the posterior clear. Its distinguishing text is the
+#: `baseline_set ... = false` predicate, which no other statement carries (the
+#: cache's node-params read RETURNS `coalesce(n.baseline_set, false)` without
+#: filtering on it), so this needle identifies the leg precisely (#9304).
+_JOURNAL_NEEDLE = "coalesce(n.baseline_set, false) = false"
+
 
 def test_the_or_split_statement_counts_are_anchors_times_labels(graph):
     """The split emits 2 anchors x 4 epistemic labels at each OR site (8 + 8).
@@ -349,7 +378,6 @@ def test_the_or_split_statement_counts_are_anchors_times_labels(graph):
     sentence true-sounding and false (the pre-#6211 code emits 1 and 4 here,
     so this assertion is discriminating rather than decorative).
     """
-    from tortoise.live import EPISTEMIC_LABELS
 
     ep = TortoiseEP(graph._get_proj())
     affected = ep._affected_claims([HUB], 2, False)
@@ -385,6 +413,201 @@ def test_the_or_split_statement_counts_are_anchors_times_labels(graph):
                     f"{site} emitted no {anchor}-anchored {label} statement — the "
                     f"per-endpoint split lost an anchor/label pair"
                 )
+
+
+#: Evidence-prior ids for the journal-read test below. `J_EV_MULTI` is the
+#: `:Point:Object` shape: it matches the per-label sweep under BOTH labels, so
+#: it is the only id in this fixture that can be journaled twice (#7853).
+#: `J_EV_EVENT` carries NO `:Point` label, so it is reachable only by the
+#: `:Event` arm of the sweep — the id that makes a sweep narrowed to one label
+#: observable (without it, a `:Point`-only sweep journals every other id
+#: correctly and passes). `J_EV_TWIN` is a SECOND `:Event` node that shares
+#: `J_EV_A`'s `id` value (the `_event_guarded_merge` suffix shape, #8879): the
+#: only shape in which a dedupe keyed on the `id` VALUE and one keyed on `id(n)`
+#: disagree, so it is what makes the key itself observable.
+J_EV_A = "j-ev-a"
+J_EV_B = "j-ev-b"
+J_EV_MULTI = "j-ev-multi"
+J_EV_BASELINE = "j-ev-baseline"
+J_EV_EVENT = "j-ev-event"
+J_EV_MISSING = "j-ev-missing"
+J_EV_TWIN_ID = J_EV_A  # same `id` VALUE as J_EV_A, on a distinct node
+
+
+@pytest.fixture(scope="module")
+def journal_graph():
+    """A SMALL graph: `run()` writes, so it must not share the plan fixture.
+
+    The plan assertion does not need the 8k-edge field — an unlabelled
+    `MATCH (n)` is `All Node Scan` at any size (measured at 3 nodes), and a
+    label+id pattern is `Node By Index Scan` at any size. What the fixture DOES
+    have to carry is the shape that makes the dedupe observable: an evidence id
+    under two epistemic labels.
+    """
+    with tempfile.TemporaryDirectory(prefix="tt6211j_") as td:
+        sdk = TortoiseSDK(os.path.join(td, "j.db"))
+        try:
+            g = sdk._get_proj().g
+            g.query(
+                "UNWIND $ids AS id CREATE (n:Point) "
+                "SET n.id = id, n.is_operator = false, n.status = 'live', "
+                "    n.ep_alpha = 4.0, n.ep_beta = 1.0",
+                params={"ids": [J_EV_A, J_EV_B, J_EV_MULTI, J_EV_BASELINE]},
+            )
+            g.query("MATCH (n:Point {id: $id}) SET n:Object", params={"id": J_EV_MULTI})
+            # A claim under NO epistemic label but `:Event` — the arm a sweep
+            # narrowed to `:Point` would never reach.
+            g.query(
+                "CREATE (n:Event) "
+                "SET n.id = $id, n.is_operator = false, n.status = 'live', "
+                "    n.ep_alpha = 2.0, n.ep_beta = 2.0",
+                params={"id": J_EV_EVENT},
+            )
+            # ... and a DISTINCT `:Event` node carrying the SAME `id` VALUE as
+            # `J_EV_A` — the #8879 collision shape two real Events can reach
+            # (`_event_guarded_merge`'s suffix branch). A dedupe keyed on the
+            # `id` value collapses these two into one record; a dedupe keyed on
+            # `id(n)` journals both, which is what `live.EPISTEMIC_ID_KEYS`
+            # requires. This is the ONLY shape that tells the two keys apart.
+            g.query(
+                "CREATE (n:Event) "
+                "SET n.id = $id, n.is_operator = false, n.status = 'live', "
+                "    n.ep_alpha = 2.0, n.ep_beta = 2.0",
+                params={"id": J_EV_TWIN_ID},
+            )
+            # An explicit baseline: the pre-write keeps its posterior, so it
+            # must NOT be journaled as cleared (its CASE arm is a no-op).
+            g.query(
+                "MATCH (n:Point {id: $id}) "
+                "SET n.baseline_set = true, n.ep_alpha = 7.0, n.ep_beta = 2.0",
+                params={"id": J_EV_BASELINE},
+            )
+            g.query(
+                "CREATE (o:Point {id: 'j-op', is_operator: true, op_type: 'IMPL', "
+                "direction: 'bidirectional', status: 'live'})"
+            )
+            g.query(
+                "MATCH (o:Point {id: 'j-op'}), (a:Point {id: $a}), (b:Point {id: $b}) "
+                "CREATE (o)-[:IMPL {idx: 0, direction: 'bidirectional'}]->(a), "
+                "       (o)-[:IMPL {idx: 1, direction: 'bidirectional'}]->(b)",
+                params={"a": J_EV_A, "b": J_EV_B},
+            )
+            yield sdk
+        finally:
+            sdk.close()
+
+
+def test_the_evidence_prewrite_journal_read_is_planned_as_an_index_read(journal_graph):
+    """#9304: the last unanchored id-set leg of the `ep.py` pass.
+
+    The shipped form was a LABEL-FREE disjunction query —
+
+        MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event)
+              AND n.id IN $ids AND coalesce(n.baseline_set, false) = false
+        RETURN n.id
+
+    — so it had no label for a per-`(label, property)` index to anchor on and
+    was planned `All Node Scan | (n)`: cost tracked the GRAPH, on the leg every
+    journal-wired, evidence-carrying `compute_confidence()` call pays for
+    (#6211's defect class; measured on the 23k-node / 160k-edge PROFILE
+    fixture as `Results -> Project -> Filter -> All Node Scan | (n)`). It was
+    outside this file's pinned set because `_statements_under_test` never calls
+    `run()` — nothing reddened if it regressed.
+
+    Three families of assertion are pinned here, none of them decoration — each
+    catches a different way this leg can be wrong while the other two stay
+    green:
+
+    * the PLAN — every journal read the pass emits is `Node By Index Scan` with
+      no `All Node Scan` / `Node By Label Scan`. Reverting the code to the
+      label-free disjunction reddens it (`All Node Scan | (n)`), and so does
+      dropping the label from the pattern while keeping the `UNWIND`.
+    * the COVERAGE — one statement per `EPISTEMIC_LABELS` entry (the count
+      `docs/capacity.md` §7 states). A sweep narrowed to `:Point` plans as an
+      index read and journals every `:Point` id correctly, so without this a
+      claim sitting under `:Event` alone would have its posterior clear
+      silently unjournaled (#2884 D3: a rebuild then resurrects a posterior the
+      live graph no longer has). The `:Event`-only evidence id is what makes
+      that observable.
+    * the ROWS — #7853's "journal exactly once" invariant, which the label-free
+      form used to carry on its own. A per-label sweep matches a
+      `:Point:Object` node under BOTH labels, so without the node-keyed dedupe
+      `J_EV_MULTI` is journaled twice; and because the dedupe key must be
+      `id(n)` and not the `id` VALUE (`live.EPISTEMIC_ID_KEYS`, #8879), the two
+      distinct nodes sharing `J_EV_A`'s id must BOTH appear. The baseline'd id
+      must be journaled zero times (its posterior is not cleared) and an
+      evidence id that is not in the graph not at all.
+    """
+    emitted: list[dict] = []
+    ep = TortoiseEP(
+        journal_graph._get_proj(),
+        evidence={
+            J_EV_A: (2.0, 3.0),
+            J_EV_B: (1.5, 1.5),
+            J_EV_MULTI: (3.0, 3.0),
+            J_EV_BASELINE: (9.0, 9.0),
+            J_EV_EVENT: (2.5, 2.5),
+            J_EV_MISSING: (1.0, 1.0),
+        },
+        emit=lambda kind, **kw: emitted.append({"kind": kind, **kw}),
+    )
+    statements = _capture(ep, ep.run, ["j-op"], 2)
+
+    journal = [(q, p) for q, p in statements if _JOURNAL_NEEDLE in q]
+    assert journal, (
+        "the evidence pre-write's journal read was not captured — either the run "
+        "emitted no journal records (a wired `emit` + evidence priors must "
+        "reach it) or the statement no longer carries the baseline predicate, "
+        f"and this test is blind. Captured: {[q[:70] for q, _ in statements]}"
+    )
+    # The sweep must cover EVERY epistemic label, not just the one most claims
+    # carry: this is the `docs/capacity.md` §7 count (4 statements, one per
+    # label) and the coverage the `:Event`-only evidence id below makes
+    # observable. A sweep narrowed to `:Point` plans fine and journals the
+    # `:Point` ids correctly, so without this it passes while silently leaving a
+    # `:Subject`/`:Object`/`:Event`-only claim's posterior clear unjournaled —
+    # the #2884 D3 bug class (a rebuild resurrects a cleared posterior).
+    assert len(journal) == len(EPISTEMIC_LABELS), (
+        f"the journal read emitted {len(journal)} statement(s), not one per "
+        f"epistemic label ({len(EPISTEMIC_LABELS)}): "
+        f"{[q[:70] for q, _ in journal]}"
+    )
+    for label in EPISTEMIC_LABELS:
+        assert any(f"MATCH (n:{label} {{" in q for q, _ in journal), (
+            f"no journal-read statement sweeps `:{label}` — an evidence claim "
+            f"labelled only `:{label}` would have its posterior clear "
+            f"unjournaled"
+        )
+    offenders = []
+    for cypher, params in journal:
+        plan = _plan_text(ep.g, cypher, params)
+        if "Node By Index Scan" not in plan or "All Node Scan" in plan or "Node By Label Scan" in plan:
+            offenders.append((cypher, plan))
+    assert not offenders, (
+        "the evidence pre-write's journal read is not index-anchored, so its "
+        "cost tracks the GRAPH rather than the evidence set (#9304):\n"
+        + "\n".join(f"  {q}\n      plan: {plan}" for q, plan in offenders)
+    )
+
+    cleared = [
+        rec["id"] for rec in emitted
+        if rec["kind"] == "ConfidenceChanged"
+        and rec.get("posterior_alpha") is None
+        and rec.get("posterior_beta") is None
+        and "confidence" not in rec
+    ]
+    expected = sorted([J_EV_A, J_EV_TWIN_ID, J_EV_B, J_EV_MULTI, J_EV_EVENT])
+    assert cleared == expected, (
+        "the pre-write's journal records are wrong: expected the non-baseline "
+        f"evidence ids {expected} exactly ONCE PER NODE (a `{J_EV_MULTI}` is "
+        f":Point:Object, so a per-label sweep without a node-keyed dedupe "
+        f"journals it twice — #7853; the two `:{J_EV_TWIN_ID}` records are TWO "
+        f"distinct nodes sharing one `id` value, so a dedupe keyed on the value "
+        f"instead of `id(n)` drops one — #8879), in sorted order, with no "
+        f"baseline'd id (`{J_EV_BASELINE}` keeps its posterior), no id the "
+        f"graph does not hold (`{J_EV_MISSING}`) and the `:Event`-only claim "
+        f"(`{J_EV_EVENT}`) present. Got {cleared}"
+    )
 
 
 def test_the_operator_selection_queries_are_planned_as_index_reads(graph):
