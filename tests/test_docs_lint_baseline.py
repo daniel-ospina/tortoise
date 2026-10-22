@@ -1837,9 +1837,12 @@ def test_sweep_is_green_when_the_finding_is_in_the_baseline(tmp_path: Path, caps
 def test_sweep_reads_the_tracked_set_not_the_working_tree(tmp_path: Path, capsys):
     """The defect the whole step exists for (#7876).
 
-    `skills/` and `scripts/` are tracked symlinks whose TARGETS live outside the
-    tree, so a target behind one is present for anything that asks the
-    filesystem — which is how a filesystem-based detector both fails to record
+    `skills/` is a tracked symlink whose TARGET lives outside the tree
+    (`scripts/` had the same shape until #9475 untracked it — it is now
+    gitignored and materialised per machine from `$AGENT_INFRA_PATH`, so a fresh
+    clone has no such path at all rather than a dangling one), so a target
+    behind one is present for anything that asks the filesystem — which is how a
+    filesystem-based detector both fails to record
     the finding and lets it red an unrelated PR in CI. The fixture writes the
     file at the link's RESOLVED target (docs/skills/thing.md) AFTER the commit,
     so it is on disk and in no `git ls-files`: a `Path.exists()` implementation

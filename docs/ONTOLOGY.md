@@ -474,6 +474,14 @@ model**, never as an invitation to merge the two nodes. The reasoning is pinned 
 > **deferred** decision (#5013 §4.4 · #5088 · `OVERRIDES:` posted on #5013), not an accident
 > of history.
 
+**The self-loop is now refused at the writer, and that does not lift the deferral (`#5151`).**
+`link_source_to_entity` (`tortoise/projection/edges.py`) writes NO `references` edge when a
+`Source` target resolves to the same node as the source — the node is still merged, only the
+degenerate edge is suppressed — so a caller that hands it colliding keys can no longer mint
+`(:Source {url:'X'})-[:references]->(:Source {url:'X'})`. That guard makes the *edge* safe; it
+does **not** merge the two nodes, because the collapse's cost in the deferred decision above is
+node TOPOLOGY (two addresses for one document), not merely the edge.
+
 **`documentKind` — the genre axis.** When `sourceKind: document`, `documentKind` names the **genre** of the document. The core vocabulary and the pack extension point are in **§5** (single home).
 
 **`documentKind` is not `sourceKind`.** `sourceKind` answers *what kind of source this is* (`document`, `conversation`, `github_issue`, `agentSession` — the full vocabulary is in §5); `documentKind` answers *what genre of document it is*. Different questions — **neither absorbs the other**.
