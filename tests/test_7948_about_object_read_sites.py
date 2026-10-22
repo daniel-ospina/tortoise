@@ -4090,7 +4090,9 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       not a share). What IS closed is the productive
       morphology — the ordinal SHAPES (`-teenth`, `-tieth`, `hundredth` … `trillionth`,
       each with its plural) together with the enumerated `third` … `twelfth`, each
-      percentage SPELLING (`80%`, `80 per cent`, `80 pct`), the pronoun ANAPHORS, and
+      percentage SPELLING (the `N %` / `N%` / `N per cent` / `N pct` forms — written
+      without a concrete number here, so this description is not itself a bare figure),
+      the pronoun ANAPHORS, and
       the multiplicative forms in every numeral SPELLING (`4 times`, `quadruples`,
       `threefold`, `3 in 4`, `9 out of 10`, `3/4`, `2× the walk`) — because those are
       the spellings a rewording reaches for first, and this guard has already been
@@ -4187,6 +4189,15 @@ def _magnitude_ratios(figures: dict[str, list[float]], framing: str) -> list[flo
     ]
 
 
+#: The percentage SPELLINGS a bare claim can hide in — the same family as
+#: `_MAGNITUDE_WORDS`' `percent` alternative (the literals are duplicated on purpose:
+#: the sweep is the wider of the two, so a drift here over-blocks rather than fails open).
+#: The sweep used to match only the `N %` (space) form, so `17%` / `17 per cent` /
+#: `17 pct` outside a claim row were silent (`#9528` review P2) — a one-keystroke
+#: re-spelling retiring the arm.
+_BARE_PERCENTAGE = r"\d+(?:\.\d+)?\s*(?:%|per\s?cent|pct)"
+
+
 def _magnitude_ratio_findings(prose: str) -> list[str]:
     """What is wrong with the ratio claims in `prose`, recomputed from its own rows.
 
@@ -4254,7 +4265,7 @@ def _magnitude_ratio_findings(prose: str) -> list[str]:
                         f"`{sha}` {framing}: the prose states {state:g} %, its own "
                         f"figures give {recomputed:.1f} %"
                     )
-    for bare in re.finditer(r"\d+(?:\.\d+)? %", prose):
+    for bare in re.finditer(_BARE_PERCENTAGE, prose):
         if not any(row.start() <= bare.start() < row.end() for row in claims):
             findings.append(
                 f"{bare.group()!r} is stated in prose that no arm recomputes, so it "
@@ -4270,13 +4281,16 @@ def _magnitude_ratio_findings(prose: str) -> list[str]:
 #: so the non-vacuity leg below is a statement about the shipped text.
 _PREFIX_MAGNITUDE_PARAGRAPH = """\
 Measured at this PR's base (fresh process, `_literal_files()`
-warm, two runs) with `_literal_files()` replaced by a rebuild over `_sources().items()`:
+warm, two runs) with `_literal_files()` replaced by a rebuild over
+`_sources().items()`:
 the rebuild costs 2.5–3.0 s of `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over
 half** the arm, not a small fraction of it. (The first measurement, at
 `69390341f`, read 1.70 s / 1.81 s of 3.35 s / 3.14 s — the same over-half
 direction on a box ~15 % faster, so a slightly lower ratio.) It reaches ~17 % only
 if "this arm" is read as the whole gate walk, with the ungated pass folded in —
-which is not the arm the comment sits in.
+which is not the arm the comment sits in. A ratio whose truth depends on an unstated
+reading of "this arm" is the same unsettleable claim as `10.36 s of 10.85 s`,
+written so the duration guard misses it.
 """
 
 
@@ -4331,6 +4345,19 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
         "a folded percentage that disagrees with its own row's figures passes, so the "
         f"recomputation is not comparing them: {mismatched}"
     )
+
+    # The bare-percentage sweep must close every spelling, not one of them: a rotated
+    # figure re-spelt `43%` / `43 per cent` / `43 pct` sat outside every row and was
+    # silent, which is the rot this third shape exists to catch (`#9528` review P2).
+    # The figure is one the paragraph does not carry, and the assertion names it, so the
+    # leg reds on the APPENDED text rather than on any pre-existing bare figure.
+    for spelling in ("~43 %", "~43%", "~43 per cent", "~43 pct"):
+        rotated = f"{prose}\nIt reaches {spelling} only if read as the whole walk.\n"
+        rotated_findings = _magnitude_ratio_findings(rotated)
+        assert any("43" in finding and "free to rot" in finding for finding in rotated_findings), (
+            f"a percentage written `{spelling}` outside every claim row passes the "
+            f"sweep, so the closure misses that spelling: {rotated_findings}"
+        )
 
     base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
     assert base is not None, (
