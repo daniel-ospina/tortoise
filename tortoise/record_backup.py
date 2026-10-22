@@ -124,6 +124,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import stat
 import subprocess
 import tempfile
@@ -1195,10 +1196,44 @@ def run_restore_drill(
             "database": unquote(parts.path).strip("/"),
         }
 
-    if _identity(dsn) == _identity(scratch_dsn):
+    def _addresses(host: str) -> frozenset[str]:
+        """The addresses a name actually reaches (#9601 review cycle 3, P1).
+
+        `_identity` compares the host LEXICALLY, and coordinate equality is not
+        server equality across names: `localhost` and `127.0.0.1`, an IP and its
+        DNS name, a CNAME and its target are ONE server spelled two ways, so a
+        scratch DSN using the other spelling passed this guard — and with
+        `--reset-scratch` the drill then TRUNCATEs the record's own tables and
+        reports `RESTORED`.
+
+        Resolving both sides closes that WITHOUT a database round trip (a
+        connection here would touch the scratch before the guard has decided
+        anything is safe, and the drill's "nothing was connected" assertion is
+        part of the contract). An unresolvable name yields the empty set and the
+        guard falls back to the lexical comparison it has always made: that is
+        fail-open on THIS axis only, and deliberately so — it cannot refuse a
+        real drill whose scratch name does not resolve from the host running it,
+        while every name that DOES resolve is now compared by address.
+        """
+        try:
+            infos = socket.getaddrinfo(host or "localhost", None,
+                                       proto=socket.IPPROTO_TCP)
+        except OSError:
+            return frozenset()
+        return frozenset(str(info[4][0]) for info in infos)
+
+    source_id, scratch_id = _identity(dsn), _identity(scratch_dsn)
+    same_server = source_id["host"] == scratch_id["host"]
+    if not same_server:
+        same_server = bool(_addresses(source_id["host"]) & _addresses(scratch_id["host"]))
+    if (
+        same_server
+        and source_id["port"] == scratch_id["port"]
+        and source_id["database"] == scratch_id["database"]
+    ):
         raise RecordRestoreRefused(
             "the drill's scratch DSN resolves to the SAME database as the "
-            f"source ({_identity(dsn)!r}) — a drill must not restore over, or "
+            f"source ({source_id!r}) — a drill must not restore over, or "
             "reset, the record it is protecting"
         )
     before = record_row_counts(dsn, connect=connect)
@@ -1249,11 +1284,24 @@ def run_restore_drill(
         )
     for table in source:
         want = None if not claimed else claimed.get(table)
-        ceiling = after.get(table)
-        if want is not None and ceiling is not None and int(want) > int(ceiling):
+        # The CEILING is the LARGER of the two source reads, never the later one
+        # alone (#9601 review cycle 3, P1). The record is NOT append-only: a
+        # `delete`/`merge` journal op emits `DELETE` on
+        # `point`/`subject`/`object`/`node_identity`/`relation`
+        # (`record_projection.py`), and the erasure RPC removes all nine tables.
+        # A NET DELETION inside the dump window therefore leaves `after` BELOW
+        # the artifact's own count on a perfectly healthy backup, and an
+        # `after`-only ceiling read that as an impossible artifact and refused
+        # (exit 2) with a diagnosis that was simply false — the record DID hold
+        # those rows. Taking the maximum keeps the check one-sided (an artifact
+        # still cannot claim more than the record ever held during the run)
+        # without reading a legitimate deletion as an impossible artifact.
+        seen = [int(n) for n in (source.get(table), after.get(table)) if n is not None]
+        ceiling = max(seen) if seen else None
+        if want is not None and ceiling is not None and int(want) > ceiling:
             raise RecordRestoreRefused(
-                f"the artifact claims {want} {table} row(s) but the source held "
-                f"{int(ceiling)} once the dump had finished — an artifact cannot "
+                f"the artifact claims {want} {table} row(s) but the source never "
+                f"held more than {ceiling} during the drill — an artifact cannot "
                 "carry rows the record never held, so the drill produced no "
                 "verdict (nothing was restored)"
             )

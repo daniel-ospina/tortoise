@@ -650,6 +650,31 @@ def test_the_drill_refuses_an_EQUIVALENT_scratch_spelling_and_never_resets(
         "the drill touched its scratch target after refusing it as the source")
 
 
+def test_the_drill_refuses_a_scratch_target_reached_by_another_NAME():
+    """#9601 review cycle 3 (P1): coordinate equality was still LEXICAL on the host.
+
+    `localhost` and `127.0.0.1` are ONE server with two names, so a scratch DSN
+    spelled with the other name passed the "resolves to the SAME database"
+    guard — and with `--reset-scratch` the drill then TRUNCATEed the record's
+    nine tables, restored the artifact over it, and printed `RESTORED`. The
+    guard compares the ADDRESSES both names resolve to now, so an alias cannot
+    slip past it. FakeDB records every connection, and the assertion below is
+    what proves the refusal happened BEFORE anything touched the source.
+    """
+    loopback = "postgresql://record_user:s3cr3t-pw@localhost:5432/postgres"
+    alias = "postgresql://record_user:s3cr3t-pw@127.0.0.1:5432/postgres"
+    db = FakeDB(SOURCE_COUNTS)
+    with pytest.raises(rb.RecordRestoreRefused,
+                       match="resolves to the SAME database"):
+        rb.run_restore_drill(
+            loopback, MemoryStorage(), alias, run=FakeRunner(),
+            connect=db.connect, key=KEY, reset_scratch=True,
+        )
+    assert db.connections == [], (
+        "the drill connected after refusing an aliased scratch target — a reset "
+        "or a dump would have followed")
+
+
 def test_the_drill_refuses_an_empty_record_because_the_pass_would_be_vacuous():
     """An empty record is a REFUSAL (no verdict) — never a data-loss mismatch.
 
@@ -782,6 +807,43 @@ def test_an_artifact_claiming_rows_the_source_never_held_is_a_REFUSAL(monkeypatc
     # No restore ran, and the scratch target was not touched.
     assert [argv[0] for argv, _kw in runner.calls] == ["pg_dump"]
     assert db.scratch == dict.fromkeys(THE_RECORD_TABLES, 0)
+
+
+def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
+    """#9601 review cycle 3 (P1): the record is NOT append-only.
+
+    `record_projection` emits `DELETE` for `delete`/`merge` journal ops and the
+    erasure RPC removes all nine tables, so a NET DELETION inside the dump window
+    leaves the post-dump re-count BELOW the artifact's own count on a healthy
+    backup. A ceiling of `after` alone read that as an impossible artifact and
+    refused with exit 2 — a false red on the daily drill, and one that also
+    stopped retention, because the prune runs only on exit 0. The ceiling is the
+    larger of the two source reads, so a legitimate deletion cannot red it.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    real_connect = db.connect
+    reads = {"source": 0}
+    # The artifact carries 512 journal rows; by the time the ceiling is read the
+    # record has aged 12 of them out.
+    after_counts = {**SOURCE_COUNTS, "journal_event": 500}
+
+    def connect(dsn):
+        if dsn == DSN:
+            reads["source"] += 1
+            if reads["source"] >= 3:
+                db.source = dict(after_counts)
+        return real_connect(dsn)
+
+    report = rb.run_restore_drill(
+        DSN, MemoryStorage(), SCRATCH_DSN,
+        run=FakeRunner(on_restore=lambda: db.scratch.update(SOURCE_COUNTS)),
+        connect=connect, key=KEY,
+    )
+    assert reads["source"] >= 3, "the deletion must land before the ceiling read"
+    assert report["verdict"] == "RESTORED"
+    assert report["tables"]["journal_event"] == {
+        "source": 512, "source_after": 500, "restored": 512,
+    }
 
 
 def test_a_lost_table_is_STILL_red_on_a_record_that_moved():
