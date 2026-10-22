@@ -107,19 +107,20 @@ def _load_input(args) -> dict:
 #
 # The identity used here is the graph's own operator shape, not a second model:
 # `create_operator` wires `(source)-[:INPUT {idx:0}]->(op)` and
-# `(op)-[IMPL|NAND {idx:n>0}]->(target)`. `label` is part of the identity — two
-# edges with different Layer-3 predicates over the same triple are two claims.
+# `(op)-[op_type|hasPart {idx:n>0}]->(target)`, for ANY accepted op_type
+# (IMPL/NAND and the part/whole family, whose bridge is mirrored as `hasPart`).
+# `label` is part of the identity — two edges with different Layer-3 predicates
+# over the same triple are two claims. The endpoint labels are deliberately NOT
+# in the identity: the write door admits :Point/:Subject/:Object/:Event
+# endpoints (#7902), so anchoring on `:Point` would miss a Subject/Object
+# endpoint and duplicate the very edge this guards.
 # ─────────────────────────────────────────────────────────────────────────────
-
-#: Operator op_types whose bridge edge is the op_type itself (SDK
-#: create_operator: part/whole ops are mirrored as `hasPart`). Used to keep the
-#: lookup from comparing an op_type against an edge label it never writes.
-_SELF_LABELLED_OPS = frozenset({"IMPL", "NAND"})
 
 
 def _find_operators(proj, op_type: str, source_id: str, target_id: str,
-                    label: str | None, *, any_label: bool = False) -> list[str]:
-    """Existing operator ids on this (source, op_type, target, label) bridge.
+                    label: str | None, *,
+                    any_label: bool = False) -> list[tuple[str, str]]:
+    """Existing ``(operator_id, status)`` pairs on this bridge.
 
     Returns ALL matches, not just the first: a graph already polluted by an
     earlier run of this script has duplicate copies of every edge, and a
@@ -132,44 +133,62 @@ def _find_operators(proj, op_type: str, source_id: str, target_id: str,
     (source, op_type, target) — including a labeled one the same decision filed
     without repeating the label — instead of minting a parallel unlabeled
     operator to damp.
+
+    The status is returned because a reused operator may be `draft`, and EP
+    excludes draft operators (#780) — reusing one silently would drop the
+    decision's own edge from the ranking (see `_resolve_or_create_operator`).
+    A status-less operator reads as `live`, the graph's own default.
     """
-    if op_type not in _SELF_LABELLED_OPS:
-        # Part/whole ops (composedOf, contains, …) mirror `hasPart`; rather than
-        # guess a second edge-label map here, do not claim reuse for them — a
-        # duplicate is worse than an extra operator, but a WRONG reuse (two
-        # different operators treated as one) is worse than both.
-        return []
     label_arm = "" if any_label else \
         "AND coalesce(op.label, '') = coalesce($label, '') "
     rows = proj.g.query(
-        "MATCH (s:Point {id:$sid})-[ri:INPUT]->(op:Point {is_operator:true})"
-        "-[ro]->(t:Point {id:$tid}) "
+        # Label-free endpoints: the write door admits :Point/:Subject/:Object/
+        # :Event endpoints (#7902), so a `:Point` anchor would miss a
+        # Subject/Object endpoint and duplicate the edge. The op node keeps
+        # `:Point` (an operator IS a Point, is_operator:true).
+        "MATCH (s {id:$sid})-[ri:INPUT]->(op:Point {is_operator:true})"
+        "-[ro]->(t {id:$tid}) "
         "WHERE op.op_type = $op AND ri.idx = 0 AND ro.idx > 0 "
         + label_arm +
         "RETURN op.id, op.status",
         params={"sid": source_id, "tid": target_id, "op": op_type,
                 "label": label},
     ).result_set
-    return [row[0] for row in rows]
+    return [(row[0], row[1] or "live") for row in rows]
 
 
 def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
                                 target_id: str, label: str | None,
                                 cache: dict[tuple[str, str, str, str], str],
                                 *, any_label: bool = False
-                                ) -> tuple[str, bool]:
-    """Write the edge idempotently — returns ``(operator_id, reused)``."""
+                                ) -> tuple[str, bool, str | None]:
+    """Write the edge idempotently.
+
+    Returns ``(operator_id, reused, note)`` — ``note`` is a warning to print
+    (or None). A match is elected only if it is LIVE: EP excludes draft
+    operators (#780), so adopting a draft would silently drop this decision's
+    edge from the ranking. When only draft copies exist the write creates the
+    live operator the decision needs and says so; the next run then reuses it,
+    so the run count still converges (#6671).
+    """
     key = (source_id, op_type, target_id, "" if any_label else (label or ""))
     if key in cache:
-        return cache[key], True
+        return cache[key], True, None
     existing = _find_operators(proj, op_type, source_id, target_id, label,
                                any_label=any_label)
+    live = [op_id for op_id, status in existing if status == "live"]
+    if live:
+        cache[key] = live[0]
+        return live[0], True, None
+    note = None
     if existing:
-        cache[key] = existing[0]
-        return existing[0], True
+        drafts = ", ".join(op_id for op_id, _st in existing)
+        note = (f"only DRAFT operator(s) {drafts} on this bridge — EP excludes "
+                "drafts (#780), so a LIVE operator is created; the draft copy "
+                "stays and does not participate")
     op = sdk.create_operator(op_type, source_id, [target_id], label=label)
     cache[key] = op["id"]
-    return op["id"], False
+    return op["id"], False, note
 
 
 def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
@@ -229,7 +248,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
               tick: str, *, any_label: bool = False) -> str | None:
         src, tgt = _resolve(src_key), _resolve(tgt_key)
         try:
-            op_id, reused = _resolve_or_create_operator(
+            op_id, reused, note = _resolve_or_create_operator(
                 sdk, proj, op_type, src, tgt, label, created_ops,
                 any_label=any_label)
         except Exception as e:
@@ -243,6 +262,8 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         })
         suffix = f" (reused {op_id})" if reused else ""
         print(f"  {tick} {src_key} --{op_type}--> {tgt_key}{suffix}")
+        if note:
+            print(f"  ⚠ {src_key} --{op_type}--> {tgt_key}: {note}")
         return op_id
 
     # ── Regular edges (IMPL/NAND from criteria/findings → options) ──
@@ -288,13 +309,13 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # polluted by an earlier non-idempotent run carries duplicate
             # copies; mitigating only the first would leave the others at full
             # weight — the exact asymmetry #6671 measured.
-            targets = _find_operators(proj, op_type, _resolve(src),
-                                      _resolve(tgt), label,
-                                      any_label=True) or [op_id]
+            targets = [found_id for found_id, _st in _find_operators(
+                proj, op_type, _resolve(src), _resolve(tgt), label,
+                any_label=True)] or [op_id]
             for target_id in targets:
                 sdk.mitigate_operator(target_id, reason, strength)
-            print(f"     (mitigated {strength:.2f} on {len(targets)} "
-                  f"operator(s): {reason})")
+            extra = "" if len(targets) == 1 else f" on {len(targets)} operators"
+            print(f"     (mitigated {strength:.2f}{extra}: {reason})")
         except Exception as e:
             print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
 

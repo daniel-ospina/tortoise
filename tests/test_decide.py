@@ -659,3 +659,90 @@ class TestIssue6671CriterionKindRegistered:
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
             sdk.create_point("criterion", f"Developer adoption {uuid.uuid4().hex[:6]}")
         assert "Unrecognized pointKind" not in caplog.text, caplog.text
+
+
+class TestIssue6671ReviewGaps:
+    """The three gaps a fresh reviewer found in the first fix attempt — each one
+    was a way the re-run could still duplicate an operator or silently drop an
+    edge, and each is pinned here so it cannot come back."""
+
+    def _data(self, edge, *, truth_edges=None, relevance_edges=None):
+        return {
+            "context": "issue-6671-gaps",
+            "options": {"opt:a": "Option A"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [edge],
+            "truth_edges": truth_edges or [],
+            "relevance_edges": relevance_edges or [],
+        }
+
+    def test_rerun_does_not_duplicate_part_whole_operators(self, sdk):
+        """`composedOf` (and the rest of the part/whole family) mirrors its
+        bridge as `hasPart`; the lookup is edge-type agnostic, so it must reuse
+        those too — refusing to look them up re-created #6671's defect for
+        every op_type `create_operator` accepts."""
+        decide = _load_decide_script()
+        data = self._data(["crit:1", "composedOf", "opt:a"])
+
+        decide.file_decision(sdk, data)
+        first = _operator_census(sdk)
+        decide.file_decision(sdk, data)
+        second = _operator_census(sdk)
+
+        assert first.get("composedOf") == 1, first
+        assert second == first, f"part/whole edge duplicated on re-run: {second}"
+
+    def test_rerun_does_not_duplicate_non_point_endpoints(self, sdk):
+        """Operator endpoints may be :Point/:Subject/:Object/:Event (#7902). An
+        endpoint anchored as `:Point` in the lookup misses a Subject/Object
+        endpoint and duplicates the edge."""
+        decide = _load_decide_script()
+        subject = sdk.create_subject(f"Subject {_mk()}")
+        option = sdk.create_point("option", f"Option {_mk()}")
+
+        data = {
+            "context": "issue-6671-gaps",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[subject["id"], "IMPL", option["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        decide.file_decision(sdk, data)
+        first = _operator_census(sdk)
+        decide.file_decision(sdk, data)
+        second = _operator_census(sdk)
+
+        assert first.get("IMPL") == 1, first
+        assert second == first, (
+            f"Subject→Point edge duplicated on re-run: {second}")
+
+    def test_draft_operator_is_not_silently_adopted(self, sdk, capsys):
+        """A draft operator is EXCLUDED from EP (#780). Reusing one would report
+        success while the decision's own edge never reaches the ranking, so the
+        write must create the live operator it needs and say why."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        draft = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+                                    promote_source=False)
+        assert draft.get("status") == "draft"
+
+        data = {
+            "context": "issue-6671-gaps",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        result = decide.file_decision(sdk, data)
+
+        elected = [row for row in result["operators"] if row["op_type"] == "IMPL"]
+        assert len(elected) == 1, elected
+        assert elected[0]["id"] != draft["id"], (
+            "the draft operator was adopted as the decision's bridge — EP "
+            "excludes drafts, so the ranking silently lost this edge")
+        statuses = {row[1] for row in sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true}) RETURN op.id, op.status"
+        ).result_set}
+        assert "live" in statuses, statuses
+        assert "DRAFT operator" in capsys.readouterr().out
