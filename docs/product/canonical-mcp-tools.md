@@ -98,7 +98,7 @@ handshake, and the ruling's own *"credentials never pass through the model"* con
 what keeps it out of an agent-callable list/enable/disable operation.
 
 Permission is the condition the owner attached to the ruling and is enforced at the tool
-boundary: the entry declares `risk="write"` (#4122 — `writes` is derived from it), so
+boundary: the entry declares `risk="admin"` (#4122 — `writes` is derived from it), so
 `_enforce_mcp_tool_scope` requires `graphs:write` and denies an unresolvable name. Agent
 session recording keeps its recorded `#1927` default (ON — the optional off-switch, ToS-covered);
 the ruling's "deny-by-default"
@@ -108,7 +108,7 @@ is taken to govern what the assistant may DO, not to reverse what the product AL
 > and `beta-sdk-surface.md`'s "account tenancy is not on the MCP" — the owner ruled for **one**
 > consolidated operation that both lists and switches sources, over per-source tools
 > (2026-10-12, on #3540). The permission condition is what makes the departure safe rather than
-> the split: `risk="write"` (and the `writes` permission derived from it, #4122) means a
+> the split: `risk="admin"` (and the `writes` permission derived from it, #4122) means a
 > read-only key is refused even for `action="list"`, so the
 > read inside a write-gated tool can never be reached by a read-scoped caller. A future lane
 > that "fixes" this by splitting `list` into its own read tool would restore the principle and

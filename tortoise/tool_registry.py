@@ -114,11 +114,13 @@ class ToolDefinition:
 #      ├─ readOnlyHint               ← read
 #      └─ idempotentHint             ← maintenance (or an explicit `idempotent`)
 #
-# `maintenance` is a class of its own, following PostgreSQL 16's `MAINTAIN`
-# privilege (VACUUM / ANALYZE / REINDEX …), which is deliberately separate from
-# INSERT/UPDATE/DELETE and runs under DEFINER rights so the caller needs only
-# read. A confined refresh that recomputes and stores a DERIVED value is
-# therefore neither a plain read nor a caller-authored write — and calling it a
+# `maintenance` is a class of its own, following the PostgreSQL MAINTAIN privilege
+# (added in **PostgreSQL 17**, not 16: `GRANT MAINTAIN ON <table>` alongside
+# SELECT/INSERT/UPDATE/DELETE, plus the `pg_maintain` role). PostgreSQL's own
+# answer is to mint a SEPARATE grant; ours cannot — a new scope would be a
+# surface change — so we keep the read key and refuse to CLAIM read-only instead.
+# A confined refresh that recomputes and stores a DERIVED value is therefore
+# neither a plain read nor a caller-authored write — and calling it a
 # write (`writes=True`) would break integrations AND stop metering the expensive
 # recompute as a read (`maybe_record_mcp_read` skips writers), which is the cost
 # lever OWASP API4 asks us to watch. Hence the third tier, and hence the
@@ -563,6 +565,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.get_confidence",
         description="Get EP confidence for a claim: {mean, variance, alpha, beta}.",
         risk="maintenance",
+        # same lazy refresh path as compute_confidence: a repeat call can store a
+        # re-derived score, so it is NOT a no-op (#4122 review)
+        idempotent=False,
         http_policy=True,
         sdk_method="get_confidence",
     ),
@@ -647,7 +652,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.mitigate_operator",
         description="Create a mitigation Point that modulates an operator's edge strength. "
                     "Idempotent — second call updates existing mitigation.",
-        risk="write",
+        risk="destructive",
         idempotent=True,
         http_policy=True,
         sdk_method="mitigate_operator",
@@ -717,6 +722,14 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "PointRevised reaches the store, and the response adds `changes` "
                     "(per-claim before→after deltas), only while TORTOISE_CHANGE_FEED "
                     "is enabled.",
+        # `read` WITH A RECORDED CARVE-OUT (#4122 review): the handler also runs
+        # interval-gated retention housekeeping on SYSTEM-owned rows
+        # (`purge_expired`/`purge_overflow` -> `DETACH DELETE` of expired
+        # :GraphEvent rows). It stays `read` because `writes=True` would take a
+        # poll away from read keys and `maintenance` would drop the read hint on a
+        # tool agents poll in a loop (a confirmation prompt per poll). See the
+        # `read` row of the tier axis above; reopen #4122 rather than re-tiering
+        # it silently.
         risk="read",
         http_policy=True,
         sdk_method="poll_events",
@@ -1061,7 +1074,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         description="DEPRECATED — use tortoise_index_files. Index session .md files "
                     "as AgentSession Events. "
                     "EXCLUDED from tenant HTTP — walks server filesystem with user-supplied path.",
-        risk="write",
+        risk="destructive",
         http_policy=False,
         sdk_method="index_sessions",
     ),
@@ -1382,10 +1395,12 @@ def get_http_allowed() -> frozenset[str]:
 
 
 def get_write_tool_names() -> frozenset[str]:
-    """Derive the write-tool name set from each entry's declared `writes`.
+    """Derive the write-tool name set from each entry's `risk` tier.
 
-    Replaces the hand-maintained parallel list: the permission lives on the
-    tool entry, so a rename or a merge cannot leave it behind (#4170).
+    `writes` is a DERIVED permission (#4122): a tool needs `graphs:write` iff its
+    tier is `write` / `destructive` / `admin`. This is the set `WRITE_TOOL_NAMES`
+    and the read-velocity meter both consume, so a rename or a merge cannot leave
+    the permission behind (#4170).
 
     Covers the SERVED set (#3883): a retired name still answers through the
     warning shim, so a write served under a retired name must not be recorded as

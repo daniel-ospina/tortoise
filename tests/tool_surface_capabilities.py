@@ -926,6 +926,19 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
         reached_writes = (
             handler_operations(e.name, mcp_src).operations & mutators
         ) - set(READ_THROUGH_WRITE_METHODS)
+        # 2a-prime (#4122 review): the RUNG ITSELF must be honest. An HTTP-excluded
+        # entry that self-guards is safe from the SURFACE, but a `read`/`maintenance`
+        # tier on a handler that reaches a graph mutation is exactly the #4122
+        # defect, and the self-guard branch below used to excuse the tier along with
+        # the surface — leaving four destructive rows (`dream`, `backfill_v25`,
+        # `index_files`, `ingest_corpus`) unpinned if a later lane demoted one.
+        # `maintenance` is exempt only for its declared derived-value refresh, which
+        # is what `READ_THROUGH_WRITE_METHODS` subtracts above.
+        if reached_writes and e.risk in ("read", MAINTENANCE_TIER):
+            out.append(
+                f"{e.name}: risk={e.risk!r} but its handler reaches "
+                f"write(s) {sorted(reached_writes)} (#4122: only `maintenance` may "
+                f"refresh, and only the operations READ_THROUGH_WRITE_METHODS names)")
         if reached_writes:
             if e.http_policy:
                 if e.annotations is None or e.annotations.readOnlyHint is not False:

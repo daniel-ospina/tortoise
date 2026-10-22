@@ -109,8 +109,8 @@ class TestTheRiskAxis:
         assert census == {
             "read": 48,
             "maintenance": 3,
-            "write": 23,
-            "destructive": 19,
+            "write": 21,
+            "destructive": 21,
             "admin": 6,
         }, census
         assert sum(census.values()) == len(served())
@@ -125,6 +125,10 @@ class TestTheRiskAxis:
         first tiered `write`, which silently removed the client's
         `destructiveHint` confirmation for them.
         """
+        # A tool belongs here whenever a REPEAT or a WRAPPER call reaches an
+        # overwrite: `mitigate_operator` re-runs `update_point` +
+        # `set_point_baseline` on its idempotent path, and `index_sessions` is a
+        # thin wrapper over the corpus re-index.
         destructive = {e.name for e in served() if e.risk == "destructive"}
         assert destructive == {
             # the delete family — their own descriptions say "cannot be undone"
@@ -135,13 +139,14 @@ class TestTheRiskAxis:
             "tortoise_update", "tortoise_update_point", "tortoise_update_entity",
             "tortoise_annotate_operator", "tortoise_operator_action",
             "tortoise_set_point_baseline", "tortoise_assess_source",
-            "tortoise_set_source_tier",
+            "tortoise_set_source_tier", "tortoise_mitigate_operator",
             # terminal status writes / replacement
             "tortoise_supersede", "tortoise_invalidate", "tortoise_promote_point",
             # whole-graph rewrites
             "tortoise_dream", "tortoise_backfill_v25",
             # bulk re-ingest that rewrites an existing corpus' stored rows
             "tortoise_index_files", "tortoise_ingest_corpus",
+            "tortoise_index_sessions",
         }, sorted(destructive)
 
     def test_the_admin_set_is_pinned_by_name(self):
@@ -176,9 +181,9 @@ class TestTheRiskAxis:
             "tortoise_create_point", "tortoise_create_source",
             "tortoise_create_subject", "tortoise_diary_write",
             "tortoise_file_decision", "tortoise_file_human_approval",
-            "tortoise_get_source_reliability", "tortoise_index_sessions",
+            "tortoise_get_source_reliability",
             "tortoise_ingest", "tortoise_mine_conversations",
-            "tortoise_mitigate_operator", "tortoise_onboarding_demo_create",
+            "tortoise_onboarding_demo_create",
             "tortoise_onboarding_github_index", "tortoise_onboarding_seed",
             "tortoise_session_capture",
         }, sorted(writes)
@@ -265,11 +270,51 @@ class TestHintsCannotDrift:
             assert annotations_for_risk(tier).destructiveHint is True
             assert annotations_for_risk(tier).readOnlyHint is False
 
+    def test_no_registry_entry_overrides_its_derived_hints(self):
+        """`annotations_override` exists ONLY so a probe can construct a
+        disagreeing entry and prove the drift guards fire.
+
+        Pinned because an override that AGREES with its tier is invisible to
+        `test_every_hint_is_reproduced_by_the_derivation`, yet survives
+        `dataclasses.replace(risk=...)` — bringing the stale-hint drift back
+        through the one door the property design left open.
+        """
+        overridden = [e.name for e in served() if e.annotations_override is not None]
+        assert overridden == [], overridden
+
+    def test_the_idempotent_overrides_are_pinned_by_name(self):
+        """`idempotent` is the ONE element a tier does not decide, so which
+        entries override it must be a deliberate, visible act — otherwise a
+        `destructive` tool could claim retry-safety by adding a keyword."""
+        overrides = {(e.name, e.idempotent) for e in served()
+                     if e.idempotent is not None}
+        assert overrides == {
+            # write tier, idempotent by operation (dedup on content/identity)
+            ("tortoise_approve_merge", True),
+            ("tortoise_checkpoint", True),
+            ("tortoise_create_document", True),
+            ("tortoise_create_operator", True),
+            ("tortoise_create_point", True),
+            ("tortoise_create_source", True),
+            ("tortoise_ingest", True),
+            ("tortoise_onboarding_demo_create", True),
+            # destructive tier, idempotent by operation (same id → same row)
+            ("tortoise_mitigate_operator", True),
+            # maintenance tier, NOT idempotent: a repeat call re-stores a
+            # re-derived score (#4122 measurement: 0.693315 -> 0.693320)
+            ("tortoise_compute_confidence", False),
+            ("tortoise_get_confidence", False),
+        }, sorted(overrides)
+
     def test_write_names_are_exactly_the_writing_tiers(self):
         """`WRITE_TOOL_NAMES` (the permission set AND the read-velocity
         classification set) is the tier derivation, over the served set."""
+        from tortoise.mcp_server import WRITE_TOOL_NAMES
+
         expected = frozenset(e.name for e in served() if e.risk in WRITE_RISK_TIERS)
-        assert get_write_tool_names() == expected
+        # Both spellings of the derivation AND the set the scope gate actually
+        # reads must agree — re-deriving alone would be tautological.
+        assert get_write_tool_names() == expected == WRITE_TOOL_NAMES
         assert len(expected) == 48, sorted(expected)  # census, hard-coded
 
 
@@ -301,14 +346,16 @@ class TestTheReadThroughToolsRegressionPin:
                 f"and this tool refreshes stored state (#4122)")
             # and it is NOT a write, so it never needs graphs:write
             assert entry.writes is False, name
-        # idempotent by default — except the one the measurement says is not
-        assert entries["tortoise_compute_confidence"].annotations.idempotentHint is False
-        for name in ("tortoise_get_confidence", "tortoise_packs_list"):
-            assert entries[name].annotations.idempotentHint is True, name
+        # idempotent by default — except the two that re-store a re-derived score on
+        # a repeat call (both take the same lazy `dream(dirty_only=True)` path).
+        for name in ("tortoise_get_confidence", "tortoise_compute_confidence"):
+            assert entries[name].annotations.idempotentHint is False, name
+        assert entries["tortoise_packs_list"].annotations.idempotentHint is True
 
     def test_the_hint_the_client_sees_is_the_false_one(self):
-        """The regression is about the SERVED hint, not the registry field — read
-        it back off the registered tool, as a client would."""
+        """The regression is about the SERVED hint, not the registry value — read
+        it back off the registered tool, as a client would — and check ALL THREE
+        hints for EVERY served tool, not just the trio's `readOnlyHint`."""
         import asyncio
 
         from tortoise.mcp_server import mcp
@@ -317,10 +364,32 @@ class TestTheReadThroughToolsRegressionPin:
             return {t.name: t for t in await mcp._list_tools()}
 
         tools = asyncio.run(_tools())
+        assert tools, "served tool list is empty — the check would be vacuous"
         for name in MAINTENANCE_TOOLS:
-            hint = getattr(tools[name].annotations, "readOnlyHint",
-                           getattr(tools[name].annotations, "read_only_hint", None))
-            assert hint is not True, f"{name}: served readOnlyHint is {hint!r}"
+            ann = tools[name].annotations
+            assert ann is not None, f"{name}: no annotations on the served tool"
+            assert ann.readOnlyHint is False, (
+                f"{name}: served readOnlyHint is {ann.readOnlyHint!r} — clients "
+                f"auto-approve on it and this tool refreshes stored state (#4122)")
+        # The served surface must equal the derivation for every advertised tool.
+        by_name = {e.name: e for e in served()}
+        mismatches = []
+        for name, tool in tools.items():
+            entry = by_name.get(name)
+            if entry is None:
+                mismatches.append(f"{name}: served but absent from the registry")
+                continue
+            ann = tool.annotations
+            for attr, expected in (
+                ("readOnlyHint", entry.annotations.readOnlyHint),
+                ("destructiveHint", entry.annotations.destructiveHint),
+                ("idempotentHint", entry.annotations.idempotentHint),
+            ):
+                served_value = getattr(ann, attr, None)
+                if served_value is not expected:
+                    mismatches.append(
+                        f"{name}: served {attr}={served_value!r}, tier says {expected!r}")
+        assert mismatches == [], mismatches
 
 
 class TestPureReadsStillOnlyNeedReadScope:
