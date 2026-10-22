@@ -105,6 +105,7 @@ and ``test_workflow_secret_interpolation.py``.
 
 from __future__ import annotations
 
+import posixpath
 import re
 import shlex
 import tomllib
@@ -1458,6 +1459,9 @@ def _ruff_argv_problem(command: str) -> str | None:
         if consume_value:
             consume_value = False
             continue
+        if token in {">", "1>", "2>"}:
+            consume_value = True  # `> /dev/null`: the target is the next token
+            continue
         # Redirection (`2>&1`, `2>/dev/null`) cannot change what is checked or the
         # exit code, so it is not a narrowing. A pipe/`;`/`&&`/`||` is a shell
         # escape and stays a non-flag token, which fails the `.`-only comparison.
@@ -1477,7 +1481,8 @@ def _ruff_argv_problem(command: str) -> str | None:
                 f"{['--output-format=<fmt>', *_RUFF_PRESENTATION_FLAGS]}"
             )
         paths.append(token)
-    if paths != ["."]:
+    normalised = [posixpath.normpath(path) for path in paths]
+    if normalised != ["."]:
         return (
             f"it checks {paths or 'nothing'} rather than the whole tree — ruff reads "
             "`.`, and any narrower target leaves the rest of main unguarded"
@@ -1578,6 +1583,29 @@ def _pinned_install_problem(commands: list[str], pin: str) -> str | None:
     return None
 
 
+_INERT_SHELLS = {"bash", "sh"}
+
+
+def _inert_step_key(key: str, value: object) -> bool:
+    """True when ``key: value`` on the ruff step cannot change what the step does.
+
+    The pin must not red an honest tidy-up: `continue-on-error: false`, the default
+    shell, `working-directory: .` and an empty `env:` are all no-ops — and the same
+    file already models `defaults.run.shell: bash` as inert. Any OTHER value of
+    these keys is rejected, with a message that says the pin does not model it
+    rather than asserting an effect the artifact does not have.
+    """
+    if key == "continue-on-error":
+        return value is False
+    if key == "shell":
+        return str(value).strip() in _INERT_SHELLS
+    if key == "working-directory":
+        return str(value).strip() in {".", "./"}
+    if key == "env":
+        return not value
+    return False
+
+
 def _condition_terms(condition: str) -> set[str]:
     """The `&&` conjuncts of an `if:` expression, normalised and order-free.
 
@@ -1591,6 +1619,8 @@ def _condition_terms(condition: str) -> set[str]:
     whole = _EXPRESSION.fullmatch(stripped)
     if whole is not None:
         stripped = whole.group(1)
+    # `steps['ruff'].outcome` and `steps.ruff.outcome` are the SAME accessor.
+    stripped = re.sub(r"steps\['([^']+)'\]", r"steps.\1", stripped)
     return {
         _normalise_condition(part)
         for part in re.split(r"&&", stripped)
@@ -1678,14 +1708,18 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "one can still supersede another"
         )
     group = str(conc.get("group", ""))
-    terms = [t.strip() for expr in _EXPRESSION.findall(group) for t in expr.split("||")]
+    # `||` returns the FIRST TRUTHY operand, so a starveable term AHEAD of the sha
+    # decides the group: `github.ref || github.sha` resolves to the constant
+    # `refs/heads/main`. Only the LEADING term of each expression can make the group
+    # unstarveable (the same structural rule `_per_issue_key_problem` uses).
+    leads = [expr.split("||")[0].strip() for expr in _EXPRESSION.findall(group)]
     if conc.get("cancel-in-progress") is not False:
         return (
             "its `concurrency:` does not declare `cancel-in-progress: false` — the "
             "value this workflow documents as load-bearing: a half-run guard is not a "
             "reading, and the literal `false` is what the next editor copies"
         )
-    if not (_UNSTARVEABLE_GROUP_TERMS & set(terms)):
+    if not (_UNSTARVEABLE_GROUP_TERMS & set(leads)):
         return (
             f"its concurrency group {group!r} carries none of "
             f"{sorted(_UNSTARVEABLE_GROUP_TERMS)}. GitHub keeps ONE pending run per "
@@ -1806,19 +1840,28 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "an empty workspace exits 0, so the guard would be green having "
                 "measured nothing (the silent pass this pin exists for)"
             )
-        checkout = checkouts[0]
-        if "if" in checkout or checkout.get("continue-on-error"):
+        if len(checkouts) > 1:
             return (
-                "the `actions/checkout` step before the guard carries "
-                f"{sorted(k for k in ('if', 'continue-on-error') if k in checkout)} — a "
-                "skipped checkout leaves an empty tree that ruff passes"
+                f"{len(checkouts)} `actions/checkout` steps run before the guard — a "
+                "second checkout re-points the workspace, so the tree ruff measures is "
+                "not necessarily the pinned one"
             )
-        if str((checkout.get("with") or {}).get("ref", "")).strip() != "${{ github.sha }}":
-            return (
-                "the `actions/checkout` step does not pin `with.ref: ${{ github.sha }}` "
-                "— the workflow's own comment claims a deterministic tree ('mid-run "
-                "main advance must not move the tree'), and it is unchecked"
-            )
+        # EVERY checkout before the guard is checked, not just the first: a second
+        # one re-points the tree at a moving ref while the first stays correct.
+        for checkout in checkouts:
+            if "if" in checkout or checkout.get("continue-on-error"):
+                return (
+                    "the `actions/checkout` step before the guard carries "
+                    f"{sorted(k for k in ('if', 'continue-on-error') if k in checkout)} — a "
+                    "skipped checkout leaves an empty tree that ruff passes"
+                )
+            if str((checkout.get("with") or {}).get("ref", "")).strip() != "${{ github.sha }}":
+                return (
+                    "an `actions/checkout` step before the guard does not pin "
+                    "`with.ref: ${{ github.sha }}` — the workflow's own comment claims a "
+                    "deterministic tree ('mid-run main advance must not move the tree'), "
+                    "and it is unchecked"
+                )
     ruff_steps = [
         (idx, step)
         for idx, step in enumerate(job.get("steps") or [])
@@ -1839,13 +1882,19 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 f"step {step.get('name') or step.get('id') or idx!r} runs "
                 f"{step['run'].strip()!r}: {argv_problem}"
             )
-        extra = sorted(set(step) - _RUFF_STEP_KEYS)
+        extra = sorted(
+            key
+            for key, value in step.items()
+            if key not in _RUFF_STEP_KEYS and not _inert_step_key(key, value)
+        )
         if extra:
             return (
-                f"the ruff step carries {extra}, which can silently defuse it: `if:` "
-                "means it never runs, `continue-on-error:` means a finding never "
-                "fails the job, and `shell:`/`working-directory:`/`env:` run "
-                "something other than the repo's config on the merged tree"
+                f"the ruff step carries {extra}, which this pin does not model. The "
+                "inert spellings are accepted (`continue-on-error: false`, "
+                "`shell: bash|sh`, `working-directory: .`, an empty `env:`); anything "
+                "else — `if:`, `continue-on-error: true`, `shell: echo`, a real "
+                "`working-directory` — can make a finding not fail the job. Remove it, "
+                "or extend `_inert_step_key` with the reason"
             )
         step_id = step.get("id")
         if not step_id:
@@ -1896,13 +1945,26 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                     "for is not in it"
                 )
             expected_terms = {"failure()", f"steps.{step_id}.outcome == 'failure'"}
-            if _condition_terms(str(other["if"])) != expected_terms:
+            actual_terms = _condition_terms(str(other["if"]))
+            if not any(
+                function in str(other["if"]) for function in ("failure(", "always(", "cancelled(")
+            ):
                 return (
                     f"the step keyed on `steps.{step_id}.outcome` has "
                     f"`if: {other['if']}` — with no status function GitHub prepends an "
                     "implicit `success()`, which is false once the ruff step failed, "
                     "so this step is SKIPPED on exactly the path it exists for "
                     "(measured on run 39734942845: step 6 skipped, step 5 ruff failed)"
+                )
+            if actual_terms != expected_terms:
+                extra = sorted(actual_terms - expected_terms)
+                missing = sorted(expected_terms - actual_terms)
+                return (
+                    f"the step keyed on `steps.{step_id}.outcome` has "
+                    f"`if: {other['if']}`, which is not the pinned condition: "
+                    f"extra {extra or 'none'}, missing {missing or 'none'}. An extra "
+                    "conjunct (a constant, another event filter) can only narrow it — "
+                    "a step that never fires notifies nobody"
                 )
         # The install must be in THIS job, BEFORE the ruff step, and the LAST word:
         # a decoy pinned install in another job (or after the guard) leaves the real
@@ -2349,6 +2411,47 @@ def _set_branches_negated_main(doc: dict) -> None:
     _trigger_block(doc)["push"]["branches"] = ["main", "!main"]
 
 
+def _set_starveable_leading_term(doc: dict) -> None:
+    """`||` returns the FIRST truthy operand: a constant ahead of the sha wins."""
+    doc["concurrency"]["group"] = "main-lint-${{ github.ref || github.sha }}"
+
+
+def _set_second_checkout(doc: dict) -> None:
+    steps = doc["jobs"]["lint"]["steps"]
+    steps.insert(1, {"uses": "actions/checkout@v4", "with": {"ref": "main"}})
+
+
+def _set_inert_continue_on_error(doc: dict) -> None:
+    _ruff_step(doc)["continue-on-error"] = False
+
+
+def _set_inert_shell(doc: dict) -> None:
+    _ruff_step(doc)["shell"] = "bash"
+
+
+def _set_echo_shell(doc: dict) -> None:
+    _ruff_step(doc)["shell"] = "echo"
+
+
+def _set_step_working_directory(doc: dict) -> None:
+    _ruff_step(doc)["working-directory"] = "docs"
+
+
+def _set_bracket_notifier(doc: dict) -> None:
+    """The bracket accessor is the same expression; it must be ACCEPTED."""
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"failure() && steps['{step_id}'].outcome == 'failure'"
+
+
+def _set_notifier_extra_conjunct(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"failure() && always() && steps.{step_id}.outcome == 'failure'"
+
+
 def _set_cancel_in_progress(doc: dict) -> None:
     doc["concurrency"]["cancel-in-progress"] = True
 
@@ -2454,7 +2557,6 @@ _STARVED_SHAPES = [
     ("a narrowed `--select` after the path", _set_selected_rules),
     ("an unpinned ruff install", _set_unpinned_ruff),
     ("a piped invocation (`| tee`)", _set_pipe),
-    ("`ruff check ./` (not the whole tree)", _set_dot_slash),
     # ── the install is not really pinned ──
     ("a commented decoy pinned install", _set_decoy_commented_install),
     ("a pinned install AFTER the ruff step", _set_decoy_later_install),
@@ -2492,6 +2594,14 @@ _STARVED_SHAPES = [
     # ── one more unpinned install, in a spelling the first-word rule missed ──
     ("a `sudo pip install ruff` line", _set_sudo_install),
     ("an unparseable install line", _set_unparseable_install),
+    # ── the group resolves to a constant even though a sha term is present ──
+    ("a starveable operand ahead of the sha", _set_starveable_leading_term),
+    # ── the tree is re-pointed after the pinned checkout ──
+    ("a second checkout of a moving ref", _set_second_checkout),
+    # ── a step-level key that can silence the finding ──
+    ("`shell: echo` on the ruff step", _set_echo_shell),
+    ("`working-directory: docs` on the ruff step", _set_step_working_directory),
+    ("an extra conjunct on the notifier", _set_notifier_extra_conjunct),
 ]
 
 
@@ -2560,6 +2670,10 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
         ("`pip install -q ruff==<pin>`", _set_quiet_install),
         ("`pip install --upgrade ruff==<pin>`", _set_upgrade_install),
         ("a quoted `'ruff==<pin>'`", _set_quoted_install),
+        ("`ruff check ./` (the same tree)", _set_dot_slash),
+        ("the bracket notifier accessor", _set_bracket_notifier),
+        ("`continue-on-error: false` on the ruff step", _set_inert_continue_on_error),
+        ("`shell: bash` on the ruff step", _set_inert_shell),
         ("`uv run ruff check .`", _set_uv_run),
         ("`ruff check . 2>&1`", _set_redirect_stderr),
     ):
