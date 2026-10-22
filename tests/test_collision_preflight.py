@@ -6255,70 +6255,53 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertLess(absent, present)
         self.assertLess(present, nocause)
         self.assertLess(nocause, board)
-        # ⛔ EVERY ARM'S OWN REMEDY IS ASSERTED POSITIVELY (review, cycle 3). The
-        # slice checks below are satisfied TRIVIALLY when a sentence is deleted
-        # altogether, so a partial undo — an arm that names a cause and gives
-        # no remedy, the exact defect class this pin exists for — would have
-        # stayed green. Each arm must carry its own instruction: the POSITIVE
-        # half (where to go) AND, where the arm states one, the negative half
-        # (what cannot work). Pinning only the negative half was cycle 5's
-        # under-pin — the arm could lose "start from the FILE" and stay green.
-        self.assertIn(
-            "PROVISION", flat[absent:present], "the ABSENT roster's remedy is provisioning it"
-        )
-        # The unreadable arm's own remedy is fixing the FILE, and the rebuild
-        # sentence belongs to the LATER arm only — so the first "rebuild the
-        # board" must not appear before the board arm begins.
-        self.assertTrue(
-            any(k in flat[present:nocause] for k in ("FIX THE FILE", "fix the file itself")),
-            "the unreadable roster's remedy is fixing the file",
-        )
-        self.assertNotIn(
-            "rebuild the board",
-            flat[present:nocause],
-            "a rebuild cannot repair an unreadable roster",
-        )
-        self.assertTrue(
-            any(k in flat[nocause:board] for k in ("start from the FILE", "start from the file")),
-            "a roster read that recorded no cause sends the reader to the file",
-        )
-        self.assertTrue(
-            any(
-                k in flat[nocause:board]
-                for k in ("cannot create or repair", "cannot repair or create")
+        # ⛔ ONE TABLE FOR ALL FOUR ARMS (review, cycles 3-7). Every cycle found
+        # the same class of defect "one arm over" — a remedy asserted in one arm
+        # and not the next, a phrase forbidden in one and not the next, a
+        # prohibition that was case-sensitive while its siblings were not. Per-arm
+        # ad-hoc asserts kept leaving a leg out, so the checks are structural
+        # instead: EVERY arm must state its own instruction, and every arm EXCEPT
+        # the board arm must refuse both forms of the dead end #9392 files —
+        # `fleet_state.py build` builds the board FROM the roster and fails on the
+        # same read, so prescribing it is never an answer to a roster cause.
+        # Each requirement is a tuple of accepted SPELLINGS: `registry_remedy`
+        # prints its own wording for these arms, and a lane aligning the header to
+        # it is a consistency edit, not a regression. The bare
+        # `fleet_state.py build` stays allowed — it appears inside the arms' own
+        # negations, so only the `tools/`-prefixed (runnable) form is a dead end.
+        arms = {
+            "ABSENT": (flat[absent:present], [("PROVISION",)]),
+            "unreadable": (
+                flat[present:nocause],
+                [("FIX THE FILE", "fix the file itself")],
             ),
-            "the no-cause arm says the rebuild cannot create or repair the roster",
-        )
-        # ⛔ AND ITS NEGATIVE HALF, exactly as arm 2 has one (review, cycle 6 P2).
-        # The command form is needed too: "rebuild the board" alone missed the
-        # injection "run uv run python tools/fleet_state.py build", and the
-        # tools/-prefixed target is the right one because the bare
-        # `fleet_state.py build` legitimately appears INSIDE this arm's own
-        # negation. Without this, the arm could regain the dead end #9392
-        # files — the rebuild that fails on the same read — and stay GREEN.
-        self.assertNotIn(
-            "rebuild the board",
-            flat[nocause:board],
-            "the no-cause arm must not prescribe the rebuild that fails on the same read",
-        )
-        self.assertNotIn(
-            "tools/fleet_state.py build",
-            flat[nocause:board],
-            "the no-cause arm must not carry the runnable rebuild command",
-        )
-        # ⛔ THE COMMAND IS PART OF THE REMEDY (review, cycle 4 P3). Pinning only
-        # "rebuild the board" let the arm lose `… fleet_state.py build` and stay
-        # green — the instruction minus the thing that makes it runnable.
-        self.assertIn(
-            "rebuild the board",
-            flat[board:],
-            "the ambiguous-attribution arm's remedy is the board rebuild",
-        )
-        self.assertIn(
-            "tools/fleet_state.py build",
-            flat[board:],
-            "the board arm's remedy must carry the command that runs it",
-        )
+            "no-cause": (
+                flat[nocause:board],
+                [
+                    ("start from the FILE", "start from the file"),
+                    ("cannot create or repair", "cannot repair or create"),
+                ],
+            ),
+            "board": (
+                flat[board:],
+                [("rebuild the board",), ("tools/fleet_state.py build",)],
+            ),
+        }
+        for arm, (region, requirements) in arms.items():
+            for accepted in requirements:
+                self.assertTrue(
+                    any(k in region for k in accepted),
+                    f"the {arm} arm's remedy must state {' or '.join(accepted)}",
+                )
+            if arm == "board":
+                continue
+            for dead_end in ("rebuild the board", "tools/fleet_state.py build"):
+                self.assertNotIn(
+                    dead_end,
+                    region.lower(),
+                    f"the {arm} arm must not offer {dead_end!r}: that rebuild fails "
+                    "on the same read it is prescribed for",
+                )
 
     def test_the_header_contract_matches_the_surface_set(self):
         # #8629 review (P2, claim mismatch). This tool states its contract in the
