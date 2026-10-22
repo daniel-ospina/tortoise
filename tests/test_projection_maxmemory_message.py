@@ -248,7 +248,14 @@ def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatc
     assert "info memory" in lowered, msg
 
 
-def test_unset_maxmemory_names_the_absence_and_the_outside_cause(monkeypatch):
+@pytest.mark.parametrize("refusal", [
+    _MAXMEMORY_ERROR,
+    # The generic engine wording `_WRITE_REFUSAL_MARKERS` accepts — the reason
+    # this branch is reachable on a server with NO ceiling at all. Pinned so
+    # the issue's own reachability argument is exercised, not just asserted.
+    "Out of memory",
+])
+def test_unset_maxmemory_names_the_absence_and_the_outside_cause(monkeypatch, refusal):
     """#7392 — `maxmemory == 0` means NO ceiling, measured on this box.
 
     Measured 2026-10-04: the shared container reports `maxmemory = 0`. A write
@@ -260,10 +267,10 @@ def test_unset_maxmemory_names_the_absence_and_the_outside_cause(monkeypatch):
     so the message made the same false ceiling claim as the unreadable branch.
     """
     monkeypatch.delenv("FLY_APP_NAME", raising=False)
-    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj = _projection(probe_error=RuntimeError(refusal))
     proj._memory_pressure = lambda: (512 * 1024 * 1024, 0)  # type: ignore[method-assign]
 
-    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    msg = proj._write_refusal_message(RuntimeError(refusal))
     assert msg is not None
     _assert_no_ceiling_claim(msg)
     lowered = msg.lower()
@@ -285,11 +292,20 @@ def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
     """
 
     class _Conn:
+        """An `INFO memory` stand-in that RAISES on a wrong section.
+
+        Deliberately a raise and not a bare `assert`: `_memory_pressure`
+        swallows every exception, so an AssertionError here would surface as
+        the generic `None == (1024, 0)` failure instead of naming the wrong
+        section — a misleading red (found in review of this change).
+        """
+
         def __init__(self, reply):
             self._reply = reply
 
         def info(self, section):
-            assert section == "memory"
+            if section != "memory":
+                raise RuntimeError(f"wrong INFO section requested: {section!r}")
             if isinstance(self._reply, Exception):
                 raise self._reply
             return self._reply
@@ -306,6 +322,9 @@ def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
     # Only a FAILED read is `None`.
     assert _proj_with(RuntimeError("no INFO on this server"))._memory_pressure() is None
     assert _proj_with("not-a-dict")._memory_pressure() is None
+    # An OMITTED maxmemory is an unanswered datum, not "no limit": the
+    # `or 0` default must not mint the positive claim the message then makes.
+    assert _proj_with({"used_memory": 1024})._memory_pressure() is None
 
 
 def test_genuine_corruption_still_advises_rebuild(monkeypatch):

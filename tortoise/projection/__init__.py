@@ -10543,6 +10543,12 @@ class FalkorProjection(
         assert a memory ceiling on an instance that reported none (measured on
         the shared container, 2026-10-04). Only a reply that could not be
         obtained or parsed is ``None``; an absent ceiling is not a failed READ.
+
+        A reply that omits ``maxmemory`` entirely is NOT an absent ceiling — it
+        is an unread datum, and it is reported as ``None``. The ``or 0`` default
+        below would otherwise turn "this server did not answer" into the
+        positive claim "this server has no ceiling", which is exactly the
+        over-claim #7392 is about, one level down.
         """
         info = None
         try:
@@ -10554,6 +10560,9 @@ class FalkorProjection(
         except Exception:
             return None
         if not isinstance(info, dict):
+            return None
+        if "maxmemory" not in info:
+            # Unanswered is not "no limit" — see the docstring (#7392).
             return None
         try:
             used = int(info.get("used_memory", 0) or 0)
@@ -10596,10 +10605,10 @@ class FalkorProjection(
             remedy = (
                 "Remedy: read the instance's INFO memory before relieving "
                 "anything — if maxmemory is 0 there is no ceiling to raise "
-                "and the pressure is outside the instance (host/kernel "
-                "memory, or a per-query cap); if it is set, raise / relieve "
-                "it — the --maxmemory in a container's REDIS_ARGS, or the "
-                "provider's console on a managed instance.")
+                "and the pressure is outside the instance (such as "
+                "host/kernel memory or a per-query cap); if it is set, raise "
+                "/ relieve it — the --maxmemory in a container's REDIS_ARGS, "
+                "or the provider's console on a managed instance.")
         elif pressure[1] <= 0:
             # Readable, and it says NO limit. Name the absence, not a ceiling.
             # The value is interpolated rather than spelled "0": the predicate
@@ -10610,10 +10619,10 @@ class FalkorProjection(
                     f"is {pressure[1]} — NO maxmemory ceiling is set)")
             remedy = (
                 "Remedy: this instance has no ceiling to raise, so the "
-                "pressure is OUTSIDE it — host/kernel memory, or a per-query "
-                "cap. Do not go looking for a --maxmemory to tune: none is "
-                "set (one would be added in a container's REDIS_ARGS or in "
-                "the provider's console on a managed instance, and this "
+                "pressure is OUTSIDE it — such as host/kernel memory or a "
+                "per-query cap. Do not go looking for a --maxmemory to tune: "
+                "none is set (one would be added in a container's REDIS_ARGS "
+                "or in the provider's console on a managed instance, and this "
                 "message reports it by name once it exists).")
         else:
             used, cap = pressure
