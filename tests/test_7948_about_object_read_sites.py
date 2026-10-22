@@ -350,14 +350,16 @@ WHAT THIS PINS
    `_unframed_durations` is deliberately NOT flattened: its framing window is the
    number's own LINE by design, and the wrap residual there is filed as `#9531`.
    ⚠️ **The SIXTH arm is the third alphabet, and the one no predicate can see.** The
-   comment had also come to pin three site counts two lines below "No magnitude is
-   pinned here on purpose": true, deterministic, and measured by NOTHING, since bare
-   digits carry no UNIT for `_unframed_durations` to match and are not words for
-   `_unsettleable_magnitudes`. The digits are gone rather than restated, and the claim
-   they stood for is EXECUTED by `test_the_narrow_gate_walk_rebuild_buys_nothing`: it
-   substitutes a rebuild of the same `_File`s for `_literal_files()` and runs the REAL
-   `_narrow_gate_walk_sites` body, so "same values, same order, same derivations" is
-   measured through the walk the comment sits in rather than written down beside it.
+   comment had also come to pin a bare count two lines below a sentence saying no
+   magnitude was pinned ("the same 29 `_File`s" next to "No magnitude is pinned: the
+   rebuild is a small fraction of this arm's cost"): true, deterministic, and measured
+   by NOTHING, since bare digits carry no UNIT for `_unframed_durations` to match and
+   are not words for `_unsettleable_magnitudes`. The count is gone rather than
+   restated, and the claim it stood for is EXECUTED by
+   `test_the_narrow_gate_walk_rebuild_buys_nothing`: it substitutes a rebuild of the
+   same `_File`s for `_literal_files()` and runs the REAL `_narrow_gate_walk_sites`
+   body, so "same values, same order, same derivations" is measured through the walk
+   the comment sits in rather than written down beside it.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -3974,6 +3976,25 @@ _MAGNITUDE_NUMERAL = r"(?:\d+(?:\.\d+)?|one|two|three|four|five|six|seven|eight|
 #: "state the framing that produced it" for a sentence holding no figure): it takes a
 #: subject (`2× the walk`) or a `than <subject>` comparison (`2x faster than the walk`,
 #: `2x longer than the run`) — prose naming neither stays GREEN.
+#: A number written as a WORD, for the percentage slot below. ⚠️ The slot was
+#: DIGIT-ONLY, so `# forty per cent of the arm is the re-parse` was GREEN while its
+#: digit twin REDded — the `#9528` review's round-2 P2, and the same one-word-swap
+#: retirement the whole guard exists to refuse. It is a closed vocabulary (tens,
+#: their hyphenated compounds, teens, units, and the `hundred` forms) rather than
+#: `[a-z]+`, because a generic word slot turns every `<word> per cent` into a hit.
+_WORD_NUMERAL = (
+    r"(?:(?:a\s+|one\s+|two\s+)?hundred"
+    r"|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)"
+    r"(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?"
+    r"|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen"
+    r"|ten|one|two|three|four|five|six|seven|eight|nine)"
+)
+
+#: A percentage figure — a DIGIT or a number WORD — in every spelling the file
+#: closes. One constant serves both the word-form guard and the ratio arm's bare
+#: sweep, so a spelling cannot be closed in one and open in the other.
+_PERCENTAGE_FIGURE = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})\s*(?:%|per\s?cent|pct)"
+
 _MAGNITUDE_WORDS = re.compile(
     rf"\b(?P<proportion>"
     rf"(?:(?:small|large|tiny|negligible|modest|minor|major|significant|"
@@ -3983,7 +4004,7 @@ _MAGNITUDE_WORDS = re.compile(
     rf"\w+tieths?|(?:hundred|thousand|million|billion|trillion)ths?|"
     rf"fraction|share|portion|part|proportion|percentage|percent|"
     rf"ratio|majority|minority|sliver|chunk))\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
-    rf"|\b(?P<percent>(?:\d+(?:\.\d+)?\s*%|\d+\s*(?:per\s?cent|pct)))"
+    rf"|\b(?P<percent>{_PERCENTAGE_FIGURE})"
     rf"\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
     rf"|\b(?P<bulk>(?:the\s+)?(?:bulk|lion's\s+share))\s+of\s+{_MAGNITUDE_SUBJECT}"
     rf"|\b(?P<share>(?:most|half)\s+(?:of\s+)?{_MAGNITUDE_SUBJECT})"
@@ -4189,14 +4210,13 @@ def _magnitude_ratios(figures: dict[str, list[float]], framing: str) -> list[flo
     ]
 
 
-#: The percentage SPELLINGS a bare claim can hide in — the same family as
-#: `_MAGNITUDE_WORDS`' `percent` alternative (the literals are duplicated on purpose:
-#: the two predicates answer different questions, and a drift here is covered by the
-#: per-spelling leg below rather than by the shape of this constant).
-#: The sweep used to match only the `N %` (space) form, so `17%` / `17 per cent` /
-#: `17 pct` outside a claim row were silent (`#9528` review P2) — a one-keystroke
-#: re-spelling retiring the arm.
-_BARE_PERCENTAGE = r"\d+(?:\.\d+)?\s*(?:%|per\s?cent|pct)"
+#: The percentage SPELLINGS a bare claim can hide in — a DIGIT or a number WORD, in
+#: every spelling the word-form guard closes (`_PERCENTAGE_FIGURE`), so a spelling
+#: cannot be closed in one predicate and open in the other. It used to match only the
+#: `N %` (space) form, so `17%` / `17 per cent` / `17 pct` outside a claim row were
+#: silent (`#9528` review P2), and it used to require a DIGIT, so `sixty-four percent`
+#: in the guarded paragraph was unrecomputed (round-2 P3) — one word swapped either way.
+_BARE_PERCENTAGE = _PERCENTAGE_FIGURE
 
 
 def _magnitude_ratio_findings(prose: str) -> list[str]:
@@ -4362,6 +4382,18 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
             f"a percentage written `{spelling}` outside every claim row passes the "
             f"sweep, so the closure misses that spelling: {rotated_findings}"
         )
+
+    # …and the same closure in the WORD alphabet: the sweep needed a DIGIT, so a
+    # percentage spelled out could be appended to this very paragraph and stay green
+    # while its digit twin red (`#9528` review round 2, P3).
+    spelled_out = f"{prose}\nIt is sixty-four percent of the arm.\n"
+    assert any(
+        "sixty-four percent" in finding and "free to rot" in finding
+        for finding in _magnitude_ratio_findings(spelled_out)
+    ), (
+        "a percentage written with a number WORD outside every claim row passes the "
+        f"sweep, so the rot closure is digit-only: {_magnitude_ratio_findings(spelled_out)}"
+    )
 
     base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
     assert base is not None, (
@@ -4811,6 +4843,30 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
             "needs the literal `of`, is green on the defect one word away"
         )
 
+    # ⚠️ The percentage slot was DIGIT-ONLY, so a proportion re-spelt with a number WORD
+    # retired the guard while its digit twin red — the same one-word swap, one alphabet
+    # over (`#9528` review round 2, P2: `# forty per cent of the arm` was GREEN, and it
+    # could be pasted into the live comment with 48 tests still passing).
+    for spelled, expected in (
+        ("# 40 per cent of the arm is the re-parse.", ["40 per cent"]),
+        ("# forty per cent of the arm is the re-parse.", ["forty per cent"]),
+        ("# 40 pct of the arm is the re-parse.", ["40 pct"]),
+        ("# forty pct of the arm is the re-parse.", ["forty pct"]),
+        ("# 40% of the arm is the re-parse.", ["40%"]),
+        ("# sixty-four percent of the arm is the re-parse.", ["sixty-four percent"]),
+        ("# one hundred per cent of the arm is the re-parse.", ["one hundred per cent"]),
+    ):
+        assert not _unframed_durations(spelled), (
+            "the premise of this leg: a percentage carries no digit-and-unit duration, "
+            "so only the word-form predicate can red it"
+        )
+        assert _unsettleable_magnitudes(spelled) == expected, (
+            f"the word-form predicate must red on {spelled!r} as {expected!r} "
+            f"({_unsettleable_magnitudes(spelled)}) — a percentage whose NUMERAL is a "
+            "word is the identical claim to its digit twin, and a slot that needs a "
+            "digit is retired by one word"
+        )
+
     # …and the other direction, so this is a rule about CLAIMS rather than about
     # adverbs: prose about WHICH modules are walked asserts no magnitude, and reding on
     # it would fail a merge gate over a sentence holding no figure (with "state the
@@ -5005,14 +5061,15 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
 def test_the_narrow_gate_walk_rebuild_buys_nothing():
     """The gate-walk comment's MECHANISM, executed — no figure left to rot (`#9501`).
 
-    ⚠️ **The comment pinned three site counts while denying it pinned anything.** The
-    sentence read "No magnitude is pinned here on purpose" next to `20 named / 15
-    empty-pattern / 9 call-time either way`, and no arm measured those three numbers:
-    the first module added to or removed from the module set — or the first derivation
-    change — made the sentence false with every arm still green. Same rot as the
-    wall-clock figure (`#9506`), in a third alphabet: a bare count is a number with NO
-    UNIT, so `_unframed_durations` cannot see it, and it is not a magnitude WORD, so
-    `_unsettleable_magnitudes` cannot either.
+    ⚠️ **The comment pinned a bare count while denying it pinned anything.** On
+    `origin/main` it read "`_literal_files()` is already parsed and cached; re-reading
+    `_sources()` and rebuilding the same 29 `_File`s is redundant work for
+    byte-identical output … No magnitude is pinned: the rebuild is a small fraction of
+    this arm's cost" — so a number with NO UNIT sat two lines from a sentence claiming
+    no magnitude was pinned, and no arm measured it: the first module added to or
+    removed from the module set made the count false with every arm still green. (The
+    same sentence also carried the refuted *word-form* proportion the arm above reds
+    on, which is the same defect in the second alphabet.)
 
     The counts are DETERMINISTIC, so the fix is to execute the claim they stood for
     rather than to restate them: walking `_sources().items()` and rebuilding the same
