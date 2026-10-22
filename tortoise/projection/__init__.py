@@ -6565,6 +6565,7 @@ from tortoise.ids import content_hash as _content_hash  # noqa: E402
 # mention mints, so they read the stub id from the ONE generator the fold
 # uses (`entities._entity_name_id`, #7936) rather than re-deriving it.
 from tortoise.ids import entity_name_id as _entity_name_id  # noqa: E402
+from tortoise.ids import session_id_refusal as _session_id_refusal  # noqa: E402
 
 # #244: Event FTS index migration (subject-only → subject+name) is tracked by a
 # persisted DB marker (Meta node 'event_fts_v2'), not a process-local flag — a
@@ -7000,11 +7001,12 @@ def _writable_id(val) -> bool:
     that never happened, with a metered write op billed for it — and it turns a
     client-supplied blank entity name in ``/v1/sessions/commit`` into a
     deterministic 500 that advises an impossible retry. Both were MEASURED when
-    this PR first tried it. The blank SESSION key is therefore refused at the
-    two folds that merge it (``entities._fold_session_recorded`` and
-    ``entities._link_session``, both via ``tortoise.ids.session_id_refusal``)
-    and at the two capture doors; the blank-NAME class needs the Layer-1 /
-    ingest shape gates, not this predicate.
+    this PR first tried it. The blank SESSION key is therefore refused at every
+    place that writes it: the two capture doors, the two journal folds
+    (``entities._fold_session_recorded``, ``entities._link_session``) and the
+    ``rebuild_all`` snapshot restore (``rebuild_all``'s ``session_snapshot``
+    loop) — all via ``tortoise.ids.session_id_refusal``; the blank-NAME class
+    needs the Layer-1 / ingest shape gates, not this predicate.
     """
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
@@ -14817,6 +14819,17 @@ class FalkorProjection(
             if not _writable_id(sid):
                 _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
                 continue
+            # #9599: the SIDEcar is the OTHER way a pre-fix blank container
+            # comes back. `_writable_id` admits a blank on purpose (it is
+            # shared with entity NAMES), so without this the standard recovery
+            # command (`rebuild_all`) restored the very `:Session {id:'   '}`
+            # the journal fold now refuses — and journal-only `rebuild()` over
+            # the SAME journal ended with none. Two entry points disagreeing
+            # about one journal is worse than either rule: the operator's log
+            # says "dropped" while the node is present.
+            if _session_id_refusal(sid) is not None:
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self._restore_write(
                 "MERGE (s:Session {id:$id}) SET s += $props",
@@ -14824,6 +14837,11 @@ class FalkorProjection(
                 reason=":Session containers (#3947)",
             )
         for sid, pid in session_point_links:
+            # #9599: same rule for the CONTAINS link restore — a link is only
+            # meaningful against a container that was restored.
+            if _session_id_refusal(sid) is not None:
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             self._restore_write(
                 "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                 "MERGE (s)-[:CONTAINS]->(p)",

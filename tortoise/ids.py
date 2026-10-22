@@ -118,9 +118,13 @@ def session_id_refusal(session_id: str | None) -> str | None:
     Layer-1 (``commit_schema.CommitRecord._non_blank_session_id``, #4005), and
     this is the same sentence at the doors.
 
-    PADDED-but-REAL (``"  s1  "``) is NOT a refusal — #9553 records those as
-    legitimate identities. The engine still cannot index them; refusing them
-    would be a product-surface decision and is deliberately NOT taken here.
+    PADDED-but-REAL (``"  s1  "``) is NOT a refusal — #9599's body records those
+    as legitimate identities ("those are legitimate identities, and ducking them
+    in one projection would not stop the engine duplicating nodes on the other
+    paths"). ⚠️ Do NOT cite #9553 for this: that issue is R5 (materialising
+    point-property edge families) and records no such position. The engine still
+    cannot index a padded id; refusing one would be a product-surface decision
+    and is deliberately NOT taken here (#9599's open owner question).
     """
     if session_id is None or (isinstance(session_id, str) and session_id == ""):
         return None

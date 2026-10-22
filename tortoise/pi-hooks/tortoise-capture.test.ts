@@ -63,6 +63,7 @@ import {
   listSpoolEntries,
   modelLabel,
   normaliseLane,
+  normaliseSessionId,
   postInstallProbe,
   pruneSpool,
   quarantineEntry,
@@ -285,6 +286,45 @@ test("buildCapturePayload carries harness + session_id (the idempotency key)", (
   // with 'hook'; dropping this stores no lane and the hook-liveness check
   // reports a WORKING hook as not-live (mutation: delete it — must go red).
   assert.equal(payload.capture_lane, "hook");
+});
+
+test("buildCapturePayload never puts a BLANK session id on the wire (#9599)", () => {
+  // The server refuses a blank id with 422 and `classifyFailure` calls a 422
+  // PERMANENT, so an un-normalised blank strands the capture in the spool
+  // forever. Absent (the key dropped) is the "let the server mint" contract
+  // the Python leg wires. MUTATION: revert `session_id` to `args.sessionId` —
+  // the three blank cases below then carry "   "/"\t"/" " and red.
+  const base = {
+    turns: [{ role: "user" as const, content: "hi" }],
+    source: "s",
+    machineId: "m",
+  };
+  for (const blank of ["   ", "\t", " \t\n ", "",
+    // ⛔ These five are the class Python's `str.strip` blanks and JS `trim`
+    // does NOT — membership here is what makes the rule a twin rather than a
+    // lookalike. Remove them from the regex and these cases red; replace the
+    // regex with `value.trim() === ""` and they red too.
+    "\u001c", "\u001d", "\u001e", "\u001f", "\u0085"]) {
+    const payload = buildCapturePayload({ ...base, sessionId: blank });
+    assert.equal(payload.session_id, undefined, `blank ${JSON.stringify(blank)}`);
+    // ⛔ Assert the SERIALISED form, not just the property: `JSON.stringify`
+    // drops an `undefined` value, and the serialised body is the actual wire
+    // contract (`postJson` sends what `stringify` yields).
+    assert.ok(
+      !("session_id" in JSON.parse(JSON.stringify(payload))),
+      "the key must leave the serialised body, not merely be undefined");
+  }
+  // A padded-but-REAL id is a legitimate identity (#9599) — it must reach the
+  // wire BYTE-IDENTICAL, or the capture is filed under a session the client
+  // never named.
+  for (const real of ["s1", "  s1  ", "\ts2\t",
+    // ⛔ U+FEFF is a BOM: JS `\s` calls it whitespace, Python does NOT. The
+    // twin follows PYTHON (the server's side of the contract), so a
+    // BOM-bearing id is forwarded rather than silently replaced by a minted
+    // one — `[^\S\uFEFF]` is what makes this case pass.
+    "\uFEFF"]) {
+    assert.equal(buildCapturePayload({ ...base, sessionId: real }).session_id, real);
+  }
 });
 
 test("buildCapturePayload forwards the ENTRY's lane, never a hardcoded one", () => {

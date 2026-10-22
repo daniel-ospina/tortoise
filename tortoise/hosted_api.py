@@ -13253,7 +13253,9 @@ class SessionRequest(BaseModel):
     # #4005); this is the same predicate at the boundary — one home
     # (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and the
     # hosted door cannot drift apart. ``None``/absent still mints (the caller
-    # named no session), and a PADDED-but-real id stays legitimate (#9553) —
+    # named no session), and a PADDED-but-real id stays legitimate (#9599's
+    # own body — NOT #9553, which is R5/edge families and records no such
+    # position) —
     # the engine defect is #9599's owner question, not a reason to refuse it.
     @field_validator("session_id")
     @classmethod

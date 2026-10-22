@@ -2826,7 +2826,6 @@ class _EntityHandlers:
         # #7369: `session_id` is the Session MERGE key (`MERGE (s:Session
         # {id:$sid})`), reached from `PointAdded.contains_session` off the raw
         # journal envelope — an unwritable one aborts after the wipe.
-        from tortoise.ids import session_id_refusal
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
@@ -2838,7 +2837,7 @@ class _EntityHandlers:
         # PointAdded still names the session, and replaying it would write the
         # same invisible container AND silently drop the CONTAINS edge (the
         # measured #9599 symptom), which is why both carriers are gated.
-        if session_id_refusal(session_id) is not None:
+        if _session_id_refusal(session_id) is not None:
             _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
         # #7951 R2-P2: mirror `_link_source`'s pre-delete gate. A `CONTAINS`

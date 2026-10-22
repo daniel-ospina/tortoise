@@ -13,7 +13,9 @@ normalise the query side — so:
 
 (The engine half is measured in the issue and cannot be fixed here; the
 padded-but-REAL case — ``"  s1  "`` — stays a legitimate identity on purpose,
-#9553, which is why refusing it is an owner question rather than this fix.)
+#9599's body, which is why refusing it is an owner question rather than this
+#fix — do NOT cite #9553 for this: it is R5 (edge families) and records no
+#such position.)
 
 What this module pins is the half that IS ours: the rule *"a blank is not an
 identity"* has ONE home (``tortoise.ids.session_id_refusal``), TWO enforcement
@@ -64,7 +66,7 @@ CONV = [
 #: Present-but-blank spellings: every one names no session.
 BLANK_IDS = ("   ", "\t", "\n", " \t\n ")
 
-#: Padded but REAL: legitimate identities (#9553's recorded position). The
+#: Padded but REAL: legitimate identities (#9599's recorded position). The
 #: engine still cannot index them — that is #9599's owner question, NOT a
 #: reason to refuse them here.
 PADDED_REAL = ("  s1  ", "\ts2\t")
@@ -117,7 +119,7 @@ def test_an_absent_session_id_is_minted_not_refused(absent):
 
 @pytest.mark.parametrize("padded", PADDED_REAL)
 def test_a_padded_but_real_session_id_is_not_refused(padded):
-    """The #9553 position: surrounding whitespace around a real id is an id."""
+    """#9599's position: surrounding whitespace around a real id is an id."""
     assert ids_mod.session_id_refusal(padded) is None
 
 
@@ -334,7 +336,7 @@ def test_the_fold_writes_no_session_for_a_blank_session_recorded(sdk, blank):
 
 
 def test_the_fold_still_replays_a_padded_real_session_id(sdk):
-    """The narrow rule must not eat a legitimate id (#9553's position)."""
+    """The narrow rule must not eat a legitimate id (#9599's position)."""
     client, _ = sdk
     proj = client._get_proj()
     proj._fold_session_recorded(
@@ -366,13 +368,13 @@ def test_the_fold_writes_no_session_for_a_blank_contains_session(sdk, blank):
 
 
 def test_the_contains_carrier_still_links_a_padded_real_session(sdk):
-    """A padded real id is a legitimate identity (#9553) — it must still land.
+    """A padded real id is a legitimate identity (#9599) — it must still land.
 
     ⛔ The CONTAINS edge is NOT asserted here, and that is the measured engine
     half of #9599, not an omission: the MERGE's own ``MATCH (s:Session
     {id:$sid})`` cannot see a padded key (the index stores the trimmed term, the
     seek does not trim), so the container is written and the edge is dropped.
-    Refusing padded ids is an OWNER question (#9553 records them as legitimate);
+    Refusing padded ids is an OWNER question (#9599 records them as legitimate);
     refusing a BLANK one is not — the difference between a container that
     exists-but-cannot-be-addressed and an id that names nothing at all.
     """
@@ -383,3 +385,93 @@ def test_the_contains_carrier_still_links_a_padded_real_session(sdk):
     pid = created.get("id") or created["point"]["id"]
     proj._link_session("  s1  ", pid)
     assert _session_ids(client) == ["  s1  "], _session_ids(client)
+
+
+# ── the THIRD writer: the `rebuild_all` pre-wipe sidecar ─────────────────
+
+@pytest.mark.parametrize("blank", BLANK_IDS)
+def test_rebuild_all_does_not_restore_a_blank_session_from_the_sidecar(
+        tmp_path, blank):
+    """`rebuild_all` must not resurrect what the journal fold refuses.
+
+    The standard recovery command restores `:Session` containers from its
+    pre-wipe SIDEcar, gated (before #9599) only by ``_writable_id`` — which
+    admits a blank on purpose. So a graph that already carried a pre-fix blank
+    container kept it across `rebuild_all` while journal-only `rebuild()` over
+    the SAME journal dropped it: two entry points disagreeing about one
+    journal, and the operator's log saying "dropped" while the node is present.
+    """
+    from tortoise.sdk import TortoiseSDK as _SDK
+
+    db = str(tmp_path / "g.db")
+    log = str(tmp_path / "events" / "sdk.jsonl")
+    c = _SDK(db, event_log_path=log)
+    try:
+        proj = c._get_proj()
+        # Seed a point (so `rebuild_all` has a graph to rebuild) and then the
+        # blank container written the way a PRE-FIX capture wrote it.
+        created = c.create_point(kind="observation", content="sidecar probe")
+        pid = created.get("id") or created["point"]["id"]
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            params={"sid": blank})
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+            "MERGE (s)-[:CONTAINS]->(p)",
+            params={"sid": blank, "pid": pid})
+        assert _session_ids(c) == [blank], _session_ids(c)
+
+        proj.rebuild_all(str(tmp_path / "events"), confirm_destructive=True)
+
+        assert _session_ids(c) == [], _session_ids(c)
+        assert proj.g.query(
+            "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r)"
+        ).result_set[0][0] == 0
+        # The point itself must survive — this is a container rule, not a wipe.
+        assert proj.g.query(
+            "MATCH (p:Point {id:$pid}) RETURN p.id",
+            params={"pid": pid}).result_set, "the Point was lost"
+    finally:
+        c.close()
+
+
+def test_rebuild_all_still_restores_a_padded_real_session(tmp_path):
+    """The narrow rule must not eat a legitimate id (#9599's position)."""
+    from tortoise.sdk import TortoiseSDK as _SDK
+
+    db = str(tmp_path / "g.db")
+    log = str(tmp_path / "events" / "sdk.jsonl")
+    c = _SDK(db, event_log_path=log)
+    try:
+        proj = c._get_proj()
+        c.create_point(kind="observation", content="padded sidecar probe")
+        proj.g.query(
+            "MERGE (s:Session {id:$sid}) SET s.is_episodic=true",
+            params={"sid": "  s1  "})
+        proj.rebuild_all(str(tmp_path / "events"), confirm_destructive=True)
+        assert _session_ids(c) == ["  s1  "], _session_ids(c)
+    finally:
+        c.close()
+
+
+# ── the RECORD projection, whose rule is DELIBERATELY the other way ──────
+
+def test_the_record_projection_keeps_the_blank_session_row_on_purpose():
+    """The asymmetry is a DECISION, and this pins it (#9599 review finding 3).
+
+    The graph fold REFUSES a blank session key because the engine cannot serve
+    it back to an equality seek. The record layer KEEPS the row: it is the
+    faithful carrier of what the client sent, and a Postgres key is addressable.
+    #9599's own body names this as the expected state (the journal fold minted a
+    duplicate `:Session` "while the Postgres record projection (no such quirk)
+    held the row"). Without a pin, a later lane "fixes" one side to match the
+    other and silently changes which projection is authoritative.
+    """
+    from tortoise.record_projection import replay_plan
+
+    stmts = replay_plan(
+        [{"type": "SessionRecorded", "seq": 1, "id": "   ", "turn_count": 3}],
+        org_id="org-x", graph_id="g-x")
+    keys = [s.params[3] for s in stmts if "node_identity" in s.sql]
+    assert keys == ["   "], keys
+    assert any("INSERT INTO public.session" in s.sql for s in stmts)

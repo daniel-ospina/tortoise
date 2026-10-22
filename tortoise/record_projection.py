@@ -730,7 +730,17 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "SessionRecorded": Mutation(
         NodeSnapshot(Node("session", "Session", "id"), path=None, key_from="id"),
         note="four records per capture, merged onto one row — see the "
-             "first-writer-wins / last-writer-wins split below",
+             "first-writer-wins / last-writer-wins split below. #9599: a BLANK "
+             "session id is NOT refused here, deliberately — the RECORD keeps "
+             "what the client sent (it is the faithful carrier, and a Postgres "
+             "key is addressable), while the GRAPH fold refuses it because the "
+             "engine cannot serve a blank indexed key back to an equality "
+             "seek. #9599's own body names this asymmetry as the expected "
+             "state ('the journal fold then minted a duplicate :Session … "
+             "while the Postgres record projection (no such quirk) held the "
+             "row'). Pinned by tests/test_9599_blank_session_id.py — do not "
+             "'fix' one side to match the other without deciding which "
+             "projection is authoritative.",
     ),
     "SessionDeleted": Mutation(
         NodeDelete(

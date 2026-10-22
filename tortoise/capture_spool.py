@@ -1105,9 +1105,11 @@ def _normalise_session_id(value: object) -> str | None:
 
     Mirrors ``tortoise.ids.session_id_refusal``'s ABSENT/BLANK split without
     importing the doors' refusal TEXT: the spool needs the value, not the
-    message. A padded-but-real id passes through unchanged — #9553 records
-    those as legitimate identities (the engine-hostility is #9599's owner
-    question, not the spool's to decide).
+    message. A padded-but-real id passes through unchanged — #9599's body
+    records those as legitimate identities. ⚠️ #9553 is NOT the source of that
+    position: it is R5, edge families, and records nothing about padded ids.
+    The engine-hostility of a padded key is #9599's open owner question, not
+    the spool's to decide.
     """
     return value if isinstance(value, str) and value.strip() else None
 

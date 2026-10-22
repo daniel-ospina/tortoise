@@ -1,4 +1,4 @@
-// tortoise-hook-version: 5
+// tortoise-hook-version: 6
 // tortoise-capture — the in-repo Pi capture extension (#3575, #1727 T1).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -568,6 +568,39 @@ export function boundAttribution(value: unknown, maxLength: number): string | un
   return clean ? clean.slice(0, maxLength) : undefined;
 }
 
+/** The wire's session id: a NON-BLANK string, or `undefined` (the server mints).
+ *
+ *  ⛔ The twin of the Python leg's `capture_spool._normalise_session_id`
+ *  (#9599), and it is load-bearing, not tidying. A present but BLANK id
+ *  (`"   "`, `"\t"`) is truthy, so every `?? ""`/`||` default upstream keeps
+ *  it; the server now answers `POST /v1/sessions` with **422**, and
+ *  `classifyFailure` calls a 422 PERMANENT — so an un-normalised blank would
+ *  strand the capture in the spool FOREVER instead of letting the server mint
+ *  an id. Sending `undefined` (the key is dropped by JSON.stringify) is the
+ *  same "name no session, let the server mint" contract the Python spool
+ *  wires, which is what the two legs must agree on.
+ *
+ *  A padded-but-REAL id (`"  s1  "`) passes through unchanged: it is a
+ *  legitimate identity (#9599's recorded position), and trimming here would
+ *  silently file the capture under a DIFFERENT session than the client named.
+ *
+ *  ⚠️ `String.prototype.trim` and Python's `str.strip` do NOT agree on the
+ *  whitespace class: `trim` misses `\u001c-\u001f` and `\u0085`, which Python
+ *  treats as blank, and it ADDS `\uFEFF` (a BOM), which Python does not. Both
+ *  directions are wrong for this wire: the first would put a blank on the wire
+ *  the server refuses PERMANENTLY, the second would silently replace a
+ *  client-named id with a minted one. So the class is spelled out rather than
+ *  borrowed from `trim` — `[^\S\uFEFF]` is "whitespace, but not the BOM", plus
+ *  the two ranges Python has and JS `\s` lacks. The twin has to be the SAME
+ *  rule, not a similar one, and both halves are pinned in the test.
+ */
+const BLANK_SESSION_ID = /^(?:[^\S\uFEFF]|[\u001c-\u001f\u0085])*$/;
+
+export function normaliseSessionId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return BLANK_SESSION_ID.test(value) ? undefined : value;
+}
+
 /** The POST /v1/sessions payload — the same shape `tortoise session capture` sends. */
 export function buildCapturePayload(args: {
   sessionId: string;
@@ -593,7 +626,10 @@ export function buildCapturePayload(args: {
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
-    session_id: args.sessionId,
+    // #9599: normalised at the WIRE — a blank id must not reach the server's
+    // 422 (classified PERMANENT, which strands the capture). See
+    // `normaliseSessionId`.
+    session_id: normaliseSessionId(args.sessionId),
     source: args.source,
     conversation: args.turns,
     // #8531 review: capped at the WIRE (`machine_id` ≤256, `model` ≤128 are
