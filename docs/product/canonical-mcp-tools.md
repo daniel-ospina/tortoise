@@ -119,9 +119,10 @@ status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 **Amended 2026-10-22** (owner-filed and owner-scoped on **#9575**, **PR #9582**): the
 `tortoise_packs_list` description no longer claims *"Read-only;"*. The handler reaches
 `pack_state.get_tenant_packs`, whose `ensure_tenant_packs` MERGEs a missing starter
-`:PackInstall` activation, so a `graphs:read` caller can cause a write — which is why PR #9573
-(#4122), now **landed on `main`**, re-tiers that entry to **`maintenance`** and stops it declaring
-`readOnlyHint: true`, and why it deliberately left the description — the other string an agent
+`:PackInstall` activation, so a `graphs:read` caller can cause a write — which is why **#4122**
+re-tiered that entry to **`maintenance`** and stopped it declaring `readOnlyHint: true` (PR #9573
+landed the tier; PR #9546 then rewrote the axis so every hint is *derived* from `risk`), and why it
+deliberately left the description — the other string an agent
 reads before deciding to call — asserting the opposite (#9575). The new text states what the call
 does instead of asserting a read-only guarantee: a
 graph carrying no `PackInstall` record at all gets its starter set re-seeded before the answer,

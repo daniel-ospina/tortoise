@@ -1,0 +1,6 @@
+# 03 — steps 5/8/9 server-side closure, MEASURED by running the pins — 2026-10-22T21:01:00Z
+# command: TORTOISE_DB_URI=<private lane container> .venv/bin/python -m pytest tests/test_onboarding_auto_complete.py -q -p no:cacheprovider
+# git HEAD: 653980445f251013d3d033120d559201b172950a
+
+..........................................                               [100%]
+42 passed in 7.29s

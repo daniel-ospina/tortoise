@@ -86,6 +86,23 @@ slow_shards: 5
 
 surfaces:
   api:
+  - test_9583_openapi_read_only_claim.py
+  # #9583: a served GET docstring IS the OpenAPI operation `description` a customer
+  # reads, and `/v1/packs` advertised "read-only pack introspection" while its handler
+  # calls `pack_state.get_tenant_packs`, whose self-heal `ensure_tenant_packs` MERGEs a
+  # missing starter `:PackInstall`. This is the REST half of #9575's registry lint: it
+  # derives the offender from the ALREADY-SERVED schema of BOTH FastAPI apps this repo
+  # serves (`hosted_api` and the self-host daemon), so a NEW GET fronting a declared
+  # read-through writer fails without anyone remembering the file exists.
+  #
+  # `api` is the row that RUNS it: `tortoise/hosted_api.py` is an EXACT `api`
+  # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()` (measured:
+  # `--changed-files tortoise/hosted_api.py` -> surfaces ['api','onboarding']). The
+  # `core` row below is the OTHER half: the D4a record this file asserts lives in
+  # `tortoise/pack_state.py`, which matches no SOURCE_PATTERN and falls through to `core`
+  # (measured: that diff selects `core` ALONE). Reverting the fix is a diff to BOTH
+  # files, so this is the #1349/#2938/#3154 silent-drop class: without these rows the
+  # gate that exists to catch the regression would not run on the change that causes it.
   # #9189: REGISTERED, not diff-carrying — the file is a `carve_out:` member, so
   # `select()` strips it from `test_files` (`files -= carve`) on every non-full
   # selection and it RUNS through the carve-out leg instead (`carve_out_run` ->
@@ -1488,6 +1505,13 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_9583_openapi_read_only_claim.py
+  # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
+  # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that
+  # `tortoise/pack_state.py`'s D4a record still states the ensure half. `pack_state.py`
+  # matches no SOURCE_PATTERN, so a pack_state.py-only change selects `core` alone and
+  # the `api` row never applies — and D4a is exactly what such a change re-stales.
+  # `--integrity` also requires every `tests/**/test_*.py` to carry a classification.
   - test_5412_empty_query_vector_leg_trace.py
   # #8093: the `:Graph.namespace` cell of `docs/registry-graph-schema.md` vs the
   # namespace the code derives (`acl_graph_users._graph_namespace`,
@@ -1719,6 +1743,17 @@ surfaces:
   # `created` / team key could land green; this is a fast, no-DB file scan.
   # Dual-registered in `tier1` because a docs-only diff runs `tier1` only.
   - test_doc_affiliation_frontmatter.py
+  # #9664 review P2 (fail-open-instrument): the capstone's premise census must
+  # measure exactly the clause each row prints — the two-clause premises it used
+  # to read from one condition (the `team-named` org-create half, and
+  # "every completion gate" read from `state._GATES` which OMITS
+  # `_GATE_COMPACT`), and the tool names the PR's own correction introduces
+  # (`tortoise_health` / its advertised replacement) that the tools section never
+  # measured. Registered in `core` as the `--integrity` CLASSIFICATION only;
+  # `tier1` below is LOAD-BEARING, because the guarded artifacts are all under
+  # `docs/` and a docs-only diff runs `tier1` only (the `test_doc_affiliation_
+  # frontmatter.py` precedent).
+  - test_9664_premise_census.py
   # #7818: the §4.7 coverage-boundary record vs `_covers` (closed `[vF, vT]`, the
   # one shared instant of a well-formed contiguous chain, and the OPEN
   # closed-vs-half-open decision). The hermetic doc half of the #7818 guard — the
@@ -4854,6 +4889,12 @@ surfaces:
   # the refusal of an invalid status, and the published-only rules are driven
   # here. Same Node harness, same Function, no wrangler/network/DB.
   - test_blog_post_status_validation.py
+  # #9680: IndexNow on the publish transition. Drives the same Function (PATCH
+  # draft → published) to prove the notification fires exactly once and only on
+  # that transition, that a failed submission never fails the publish, and that
+  # the 24h window holds — plus the repo-side key file that makes the submission
+  # acceptable at all. Same Node harness, no wrangler/network/DB.
+  - test_blog_indexnow.py
   # #4311: the strict tsc project + CI job that typecheck website/functions/**
   # (tools/ts/README.md). A gate is worth what its wiring is worth, so the
   # tsconfig, the pinned toolchain and the workflow job are pinned here too.
@@ -5637,6 +5678,7 @@ tier1:
 - test_durability_posture.py  # #2881: durability authority + scoped source-of-truth gate
 - test_5142_ontology_record.py  # #5142: docs/ONTOLOGY.md §4.4/§4.6 record vs the code (format/`_SOURCE_HANDLED`, the deferred node collapse + its `OVERRIDES:`, the document `:Source` scoping) — dual-registered with `core`
 - test_doc_affiliation_frontmatter.py  # #8738 review P2: the changelog companions' required doc-affiliation frontmatter — a docs-only diff runs `tier1` only; dual-registered with `core`
+- test_9664_premise_census.py  # #9664 review P2: the capstone census measures the clause it prints (two-clause premises, all three completion gates, the corrected tool names) — a docs-only diff runs `tier1` only; dual-registered with `core`
 - test_7818_ontology_record.py  # #7818: docs/ONTOLOGY.md §4.7 coverage-boundary record vs `_covers` (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_8474_ontology_record.py  # #8474: docs/ONTOLOGY.md §4.6 rawState/rawStateAt availability record vs the declared write surface (hermetic doc pin; a docs-only ONTOLOGY edit runs only tier1) — dual-registered with `core`
 - test_7818_plan_record_5362.py  # #7818/#5362: the #5362 plan's RES-1 / out-of-scope read-path record vs the shipped reply contract (hermetic doc pin; a docs-only plan edit runs only tier1) — dual-registered with `core`
@@ -7242,6 +7284,7 @@ durations:
   test_capstone_1976_report_claims.py: 1.0  # #2008 review: four doc-text/section reads + three source-file reads, plus one `tests/**` def/class index for the citation resolver (now covering module/path/glob citations, not only bare symbols) and one batch-table parse; no DB
   test_test_design_1992_traceability.py: 0.1  # #1992 review: doc-text table/row scans + two file reads; no DB. A file ADDED BY A PR has no CI junit measurement (#3400 — the refresher samples push-to-main runs only), so this is a local reading: 0.01–0.02 s per test of call time (`--durations=0`), the same no-DB shape as the doc guards above
   test_doc_affiliation_frontmatter.py: 0.1  # #8738 review P2: six frontmatter-block reads + one directory glob; same no-DB shape as the doc guards above
+  test_9664_premise_census.py: 2.0  # unmeasured — new in #9664 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading — the #2818/#3419 convention, and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it. What the weight covers: one `importlib` load of the census probe PER TEST (the `probe` fixture is function-scoped) plus one in-process section call per test, with `monkeypatch` over `_GATE_SELF` / `_GATE_BUILD` / `_GATE_COMPACT` / `_NON_AGENT_STEPS` / `onboarding_node_init_fragment` / `restart_pending`. The imports the probe pulls in (`tortoise.tool_registry`, `tortoise.onboarding.state`, and — for the onboarding section — `tortoise.hosted_api` and `tortoise.oauth`) dominate the cost and are shared with the interpreter; `hosted_api` is the largest of them. No DB, no network, no graph fixture, no file read of its own. Per-test counts are deliberately NOT restated: they re-stale with every added test, and the packer only reads the weight. Required on BOTH halves: the `core` surface row alone is manifest CLASSIFICATION, not a durations weight (#4348). Refresh from the first post-merge run that includes it.
   test_9397_about_edge_properties.py: 2.0  # unmeasured — #9397 (#3400 trap): doc-text/section scans over two markdown files, a whole-tree relationship-variable `SET` census, a map-form census and an inline pattern-map census (regex over the writer modules' source TEXT — nothing is imported), plus AST passes over `tortoise/sdk.py` and `tortoise/projection/__init__.py` for the extractor branch and the two declared false positives, and the two provenance legs, which shell out to `git cat-file`, `git show` and — where the pre-fix revision is absent — a bounded `git fetch --depth=… origin main` (so it can reach the network and deepen a shallow checkout; it skips where the history stays unreachable); no DB. A file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention: The derivation is recorded so the first post-merge sweep can repeat it (`--junitxml`, then sum `testcase/@time` across the file's own testcases; no DB). No timing figure is restated here: the packer reads the 2.0 default above, not this note, and a host reading that does not reproduce is a claim, not a measurement. The co-max legs are the whole-tree walkers (`test_the_code_still_agrees_with_the_corrected_evidence`, `test_no_unrecorded_property_bearing_about_edge_writer`) plus the doc-text sweep. The count is re-derived at every revision by MEASUREMENT, never carried forward: an earlier version of this note enumerated the count per review round, and the review found it still saying 26 while the file collected 27 — a list of counts is exactly what re-stales, so the enumeration is gone and only the rule remains. The row stays at the flat 2.0 default with the leading `# unmeasured` marker, because a first-cut row without a CI junit measurement must not adopt a host reading: `render_refreshed_manifest` clears the note only when the tail LEADS with the `# unmeasured` marker, so the first post-merge sweep sets the real value. Refresh from that run.
   test_9399_search_path_claim_scope.py: 2.0  # unmeasured — #9399 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading — the #2818/#3419 convention (`tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it`), and the LEADING marker is what lets `tools/ci_timing.py::render_refreshed_manifest` clear this note once a sweep measures it (#8254 review P3). LOCAL reading, recorded as provenance for the `2.0` and NOT adopted: embedded carve-out lane, `--junitxml`, 3 tests, sum of `testcase/@time` 2.52s, max single test 2.10s, whole-file wall 2.77–4.76s — and the max-single is the FIRST test absorbing the once-per-leg conftest setup the #3400 method attributes to no file (`--durations=5`: setup 2.60s vs call 0.02–0.04s), which is exactly why the local figure is not substituted. Text-only (doc-line read + three file scans + two source reads); no DB, no network. Required on BOTH halves: the `core` surface row alone is manifest CLASSIFICATION, not a durations weight (#4348). Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the coverage floor at that head.
   test_file_indexer.py: 0.7
@@ -7543,6 +7586,7 @@ durations:
   test_battery_recall_wiring.py: 0.3
   test_blog_agent_delete_guard.py: 2.5
   test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact
+  test_blog_indexnow.py: 2.5  # #9680: analogous estimate (same Node type-stripping harness); refresh from the first post-merge junit artifact
   test_website_functions_typecheck.py: 2.0  # #4311: analogue estimate (measured 1.9s locally — JSON/YAML reads + the executed gate script); refresh from the first post-merge junit artifact
   test_capture_cost_measurement.py: 4.3
   test_capture_entity_attachment_3664.py: 5.9
@@ -8067,6 +8111,7 @@ durations:
   # with `# unmeasured` so `render_refreshed_manifest` clears it on that first
   # sweep (#9110 review P2).
   test_code_freshness_9494.py: 2.0  # unmeasured — new in #9494: flat default until the first post-merge sweep
+  test_9583_openapi_read_only_claim.py: 2.0  # unmeasured — new in #9583 (#3400/#4348 one-file trap): the file is ADDED BY THIS PR, so the refresher (which samples push-to-main junit artifacts) cannot have measured it, and an absent row packs it at the flat 2.0s default while `duration_coverage_issues()` falls under the 90% floor — MEASURED this turn: WITHOUT this row `ci_selection.py --integrity` exits 1 on the merged tree at `durations coverage 89.9% (892/992 fast files)`, while `origin/main` (1ff23919c) exits 0, so this PR alone tipped it. The weight is the flat default deliberately, the same choice the `test_9208_change_feed_degraded.py` row above states: a LOCAL reading is not a shard-layout input (#3419/#2788). For context only, not as the weight: on the private docker lane the file collects 8 tests that pass in 3.68 s (`testcase/@time` sum), whole-file wall 6.0 s including pytest startup — it asserts served OpenAPI descriptions and AST pins, so it takes no graph and pays no per-leg embedder load. Refresh from the first post-merge sweep that includes it.
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

@@ -1447,3 +1447,70 @@ def test_a_name_equal_to_the_Events_OWN_name_resolves_to_the_SUBJECT_arm(
         "RETURN type(r), labels(t), t.id, t.name",
         params={"id": ev}).result_set == rows, (
         "the resolved link did not survive rebuild_all")
+
+
+def test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver(
+        wired, monkeypatch) -> None:
+    """#5265: the ``documentKind`` test in the replay resolver is NOT reached by
+    the supersede-descriptor route alone.
+
+    ``replay_about_links``' name-path arm has a SECOND production call site of
+    ``resolve_structural_target``, and it passes the journaled ``rel`` — so an
+    ``aboutDocument`` link calls the same ``Source``/``aboutDocument`` match,
+    with the ``url`` ``resolve_about_link`` pinned to a document. That is the
+    reachability #5265's prose got wrong twice ("the ONE route that reaches
+    it", "so no Event-sourced ``about*`` seam edge reaches this resolver"), so
+    it is pinned here: a change that drops or bypasses this call makes the
+    corrected comment in ``edges.py`` wrong again and reds this test instead of
+    waiting for a reader to notice.
+
+    The journal in this test pins an endpoint value that is NOT a resolvable id
+    — the case the fallback arm's own comment names as the reason it exists
+    (a document ``:Source`` addressed by its ``url``). It is written that way
+    because a record the CURRENT cascade writes for a document carries
+    ``url == id``, so the by-value write wins and the fallback is skipped; the
+    fallback is what this test is about. The record is otherwise the one
+    ``create_event(aboutDocument=<title>)`` really journals (title-keyed
+    cascade, ``target_label='Source'``, ``resolve_key`` = the document's url).
+
+    ``resolve_structural_target`` is reached through the module global (the
+    caller does an unqualified lookup), so the spy sees the real call and
+    delegates to the real resolver — the rebuild still has to wire the link for
+    the last assert to hold.
+    """
+    from tortoise.projection import edges as edges_mod
+
+    sdk, proj, events, journal = wired
+    url = "https://example.test/docs/5265-reach"
+    sdk.create_source(url, "document", title="Reach Doc 5265",
+                      documentKind="report")
+    sdk.create_event("reach-5265", "event", aboutDocument="Reach Doc 5265")
+    assert _counts(proj)["aboutDocument"] == 1, (
+        "live did not wire the document link")
+
+    records = _records(journal)
+    pinned = [r for r in records if r.get("type") == "EventRecorded"]
+    assert len(pinned) == 1, pinned
+    link = pinned[0]["aboutLinks"][0]
+    assert (link["rel"], link["target_label"], link["resolve_key"]) == (
+        "aboutDocument", "Source", url), link
+    link["targets"] = ["ghost-id-not-a-node"]
+    with open(journal, "w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
+
+    real = edges_mod.resolve_structural_target
+    calls: list[tuple] = []
+
+    def spy(g, label, key, rel, **kw):
+        calls.append((label, key, rel))
+        return real(g, label, key, rel, **kw)
+
+    monkeypatch.setattr(edges_mod, "resolve_structural_target", spy)
+    proj.rebuild_all(str(events), confirm_destructive=True)
+
+    assert ("Source", url, "aboutDocument") in calls, (
+        "the name-path aboutDocument arm no longer resolves through the "
+        f"documentKind-guarded resolver: {calls}")
+    assert _counts(proj)["aboutDocument"] == 1, (
+        "the journaled document endpoint was not re-wired by key")

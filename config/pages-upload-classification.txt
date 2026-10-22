@@ -61,6 +61,13 @@ public self-hosted.html
 public sitemap-company.xml
 public sitemap-product.xml
 public tos.html
+# The IndexNow key file (#9680). MUST be `public` and MUST stay at the site ROOT:
+# the endpoint proves host ownership by fetching `${site}/${key}.txt`, so a
+# staged-elsewhere (or excluded) file means every submission is rejected 403.
+# The name is the key itself (`^[a-f0-9]{32}$`) — it cannot be renamed without
+# updating INDEXNOW_KEY in website/functions/blog/_shared/indexnow.ts in the same
+# commit (tests/test_blog_indexnow.py fails if the two disagree).
+public a7c41f0e9b2d63584e1c0af7d3b925e6.txt
 # The auth pages (signup.html = /auth, welcome.html, invite-accept.html) moved
 # to the tortoise-dashboard project (website/apps/dashboard/public/) in #4054.
 # They are staged by the dashboard's vite build, not by this upload.
