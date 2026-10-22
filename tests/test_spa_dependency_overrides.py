@@ -15,7 +15,7 @@ its LOCK refreshed (`nanoid 3.3.16 -> 3.3.20`, `source-map-js 1.2.1 -> 1.2.2`,
 `vite 8.1.5 -> 8.3.5`), stating no floor at all — so the next lock refresh can
 walk it straight back below the fixed version, silently.
 
-So this file pins three properties, all mechanical, no `npm` binary and no DB:
+So this file pins five properties, all mechanical, no `npm` binary and no DB:
 
 1. every declared override is RECORDED below with what it clears — a new
    override cannot land as an unexplained mitigation (reds on an earlier
@@ -27,7 +27,18 @@ So this file pins three properties, all mechanical, no `npm` binary and no DB:
    fix exists in the manifest and not only in a lock resolution (reds on the
    pre-fix tree: graph-viz had no `overrides` block at all);
 3. every declared floor is actually met by the committed lock — the floor and
-   the resolution cannot drift apart.
+   the resolution cannot drift apart;
+4. the DIRECT dependencies carrying the same advisory wave are floored too
+   (`DIRECT_DEPENDENCY_FLOORS`) — property 2 above only sees the two *transitive*
+   packages, so a direct `vite` floor below the fixed version stayed green
+   forever: `apps/graph-viz` sat on `^8.1.1`, which admits the advisory-named
+   `8.1.5`, while its audit read 0 only because the committed lock resolved
+   `8.3.5` (PR #9524 review, round 5 ISSUE 1 — I3's finding one layer down);
+5. the manifest records that describe this file's COST state the fetch it
+   performs — `config/ci-surfaces.yml`'s two registration comments and its
+   `durations` row said "no network" for a file that runs `git fetch`, the exact
+   record class `test_9397_about_edge_properties.py` pins for the sibling this
+   helper was adopted from (round 5 ISSUE 2).
 
 Exactly one corner is not offline, and it is named rather than hidden: the
 `base` column of `RESOLUTIONS` is read from `PRE_FIX_REVISION`'s locks, and a
@@ -36,7 +47,16 @@ that revision. `_ensure_commit` therefore runs `git fetch --depth={120,400,1500}
 origin main` there — a NETWORK call with a side effect on the checkout under
 test — and the leg SKIPS, never passes, when the revision stays unreachable. A
 `git show` that merely returned `None` in CI left this whole half dark on every
-PR run (PR #9524 review, round 3 I3 / round 4 ISSUE 1).
+PR run (PR #9524 review, round 3 I3 / round 4 ISSUE 1). The ladder is MEMOISED
+per revision (`_ENSURE_COMMIT_RESULTS`), so the eight per-(package, app)
+readers cost ONE ladder per run rather than eight — which is what makes the
+manifest's `durations` weight a bounded claim instead of an assertion.
+
+`test_the_base_half_is_reachable_in_a_shallow_checkout` pins the fetch's
+structure (the `_is_shallow` gate BEFORE the loop, so a full clone is never
+truncated) and the memo; `test_the_manifest_states_the_fetch_it_cannot_hide`
+pins the manifest records against the code, so neither can drift back to
+claiming a hermetic suite.
 
 The measurements behind the records below were taken on this branch head with
 `npm audit --package-lock-only` against each app's `package.json` +
@@ -62,6 +82,7 @@ import ast
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +102,31 @@ SPAS = {
 # directly, so a manifest that states no floor leaves the advisory closed by the
 # lock resolution alone — I3's finding.
 SHARED_TRANSITIVE_FLOORS = ("nanoid", "source-map-js")
+
+# Direct (DECLARED, not transitive) dependencies whose own advisory wave this
+# branch closes, with the FIXED version per app. `SHARED_TRANSITIVE_FLOORS`
+# cannot see these — `vite` is a devDependency of all three apps, so its range is
+# not an `overrides` entry and `test_every_declared_floor_is_met_by_the_committed_lock`
+# never reads it. That blind spot is round 5's ISSUE 1: `apps/graph-viz` was left
+# on `^8.1.1`, whose floor admits the advisory-named `8.1.5`, while the app's
+# audit read 0 purely because the committed LOCK had refreshed to `8.3.5` — no
+# declared intent, exactly the asymmetry the I3 correction was written to remove
+# (and the other two apps already had their floor raised in the same commit).
+#
+# The figures are MEASURED, 2026-10-22, `npm audit --package-lock-only` on each
+# pre-fix lock (`git show 69390341f:<app>/package-lock.json`): the SAME five
+# advisories on both vite lines — GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22,
+# GHSA-698v-4r3x-3vcv, GHSA-r825-w8mm-5pxw, GHSA-587h-7wmj-h5pm — affected
+# `<=6.4.3` on the 6.x line (dashboard's base lock resolved 6.4.3) and
+# `>=8.0.0 <=8.1.5` on the 8.x line (graph-viz's base lock resolved 8.1.5). The
+# fixed version per app is what this branch ships: `6.4.5` / `8.3.5`.
+DIRECT_DEPENDENCY_FLOORS = {
+    "vite": {
+        "website/apps/dashboard": (6, 4, 5),
+        "website/apps/blog-admin": (6, 4, 5),
+        "apps/graph-viz": (8, 3, 5),
+    },
+}
 
 # Every override that may legitimately appear, with WHAT it clears. A package
 # whose advisory has no fixed version in the declared major does not belong here
@@ -169,6 +215,21 @@ RESOLUTIONS: dict[str, dict[str, tuple[tuple[str, ...], tuple[str, ...]]]] = {
 
 _FLOOR_RE = re.compile(r"^\^(\d+)\.(\d+)\.(\d+)$")
 
+# The retracted manifest claims (round 5 ISSUE 2). `config/ci-surfaces.yml`
+# described this file as network-free in two registration comments and in its
+# `durations` row, while `_ensure_commit` fetches `origin main`; the row went
+# further and called the flat default an OVER-estimate, which is the inverse of
+# the truth on a shallow checkout. Matched case-insensitively over the flattened
+# text.
+_RETRACTED_NETWORK_FREE = (
+    "no network",
+    "network-free",
+    "over-estimates rather than under-estimates",
+)
+
+_MARKUP_RE = re.compile(r"[*`\"]+")
+_WHITESPACE_RE = re.compile(r"\s+")
+
 
 def _manifest(slug: str) -> dict:
     return json.loads((ROOT / slug / "package.json").read_text(encoding="utf-8"))
@@ -218,6 +279,21 @@ def _resolved_versions(slug: str, package: str) -> list[str]:
     return _versions_in(_lock(slug)["packages"], package)
 
 
+def _declared_range(slug: str, package: str) -> str:
+    """The app's DECLARED range for a direct dependency (any dependency block).
+
+    Returns `""` when the app does not declare the package at all, so the caller
+    can say that instead of raising `KeyError` — an app that drops a direct
+    dependency must not crash the floor leg.
+    """
+    manifest = _manifest(slug)
+    for block in ("dependencies", "devDependencies", "optionalDependencies"):
+        declared = manifest.get(block) or {}
+        if package in declared:
+            return declared[package]
+    return ""
+
+
 def _has_commit(rev: str) -> bool:
     """True when `rev` resolves to a commit in this checkout's history."""
     try:
@@ -246,6 +322,15 @@ def _is_shallow() -> bool:
     return done.returncode == 0 and done.stdout.strip() == "true"
 
 
+# Memo for `_ensure_commit`: revision -> reachable. `_resolved_versions_at_revision`
+# is called once per (package, app) pair — eight times — and each call would
+# otherwise re-run the `_SHALLOW_DEPTHS` ladder, i.e. up to 24 fetches at a 120 s
+# timeout each when the revision stays unreachable (round 5 ISSUE 2). Memoised,
+# the ladder runs at most ONCE per revision per process, which is what makes the
+# bound the manifest's `durations` note states true rather than asserted.
+_ENSURE_COMMIT_RESULTS: dict[str, bool] = {}
+
+
 def _ensure_commit(rev: str) -> bool:
     """Make `rev` reachable IF the checkout is shallow — bounded, best effort.
 
@@ -262,10 +347,16 @@ def _ensure_commit(rev: str) -> bool:
     6106 -> 120 commits, `.git/shallow` created). So the fetch is gated on
     `_is_shallow()` FIRST; a full clone that somehow lacks the rev returns False
     and the caller skips honestly.
+
+    Memoised in `_ENSURE_COMMIT_RESULTS`, so the eight readers cost one ladder.
     """
+    if rev in _ENSURE_COMMIT_RESULTS:
+        return _ENSURE_COMMIT_RESULTS[rev]
     if _has_commit(rev):
+        _ENSURE_COMMIT_RESULTS[rev] = True
         return True
     if not _is_shallow():
+        _ENSURE_COMMIT_RESULTS[rev] = False
         return False
     for depth in _SHALLOW_DEPTHS:
         try:
@@ -279,9 +370,12 @@ def _ensure_commit(rev: str) -> bool:
                 timeout=120,
             )
         except (OSError, subprocess.SubprocessError):
+            _ENSURE_COMMIT_RESULTS[rev] = False
             return False
         if _has_commit(rev):
+            _ENSURE_COMMIT_RESULTS[rev] = True
             return True
+    _ENSURE_COMMIT_RESULTS[rev] = False
     return False
 
 
@@ -435,6 +529,176 @@ def test_every_declared_floor_is_met_by_the_committed_lock(slug: str) -> None:
             )
 
 
+@pytest.mark.parametrize("package", sorted(DIRECT_DEPENDENCY_FLOORS))
+def test_direct_dependency_floors_clear_their_advisory(package: str) -> None:
+    """A DIRECT dependency's declared range must not admit the bad version.
+
+    Red before the round-5 fix: `apps/graph-viz` declared `vite: ^8.1.1`, whose
+    floor (8.1.1) is below the recorded fixed version (8.3.5) and admits the
+    advisory-named 8.1.5 — so a from-scratch resolution could walk that app back
+    on to the advisory while every other leg stayed green, because the audit read
+    0 off the committed LOCK, not off any declared intent (PR #9524 review,
+    round 5 ISSUE 1).
+    """
+    for slug, fixed in sorted(DIRECT_DEPENDENCY_FLOORS[package].items()):
+        declared = _declared_range(slug, package)
+        assert declared, (
+            f"{slug} no longer declares {package!r}, so the fixed version this "
+            "record carries has nothing to hold — drop the record with the "
+            "dependency, or restore the dependency"
+        )
+        floor = _floor(declared)
+        assert floor >= fixed, (
+            f"{slug} declares {package} {declared!r}, whose floor "
+            f"{'.'.join(str(part) for part in floor)} is below the fixed "
+            f"version {'.'.join(str(part) for part in fixed)}: a from-scratch "
+            "resolution may pick the advisory-named version again (PR #9524 "
+            "review, round 5 ISSUE 1)"
+        )
+        resolved = _resolved_versions(slug, package)
+        assert resolved, (
+            f"{slug} declares {package!r} but its lock resolves no copy of it — "
+            "the declared floor binds nothing"
+        )
+        for version in resolved:
+            parts = tuple(int(part) for part in version.split(".")[:3])
+            assert parts >= fixed, (
+                f"{slug}: {package} resolves {version} in package-lock.json, "
+                f"below the fixed {'.'.join(str(part) for part in fixed)} — "
+                "re-run the install so the fix is actually shipped"
+            )
+
+
+_MANIFEST = ROOT / "config/ci-surfaces.yml"
+
+
+def _flat(text: str) -> str:
+    """Marker-insensitive, single-spaced, lower-case form of a claim.
+
+    `**no network**` and `no network` are the SAME claim; matching raw
+    substrings is how a pin becomes dead. Emphasis and code markers are
+    decoration on a claim, not part of it.
+    """
+    return _WHITESPACE_RE.sub(" ", _MARKUP_RE.sub("", text)).strip().lower()
+
+
+def _comment_block_above(lines: list[str], index: int) -> str:
+    """The contiguous `#` comment block directly above `lines[index]`."""
+    block: list[str] = []
+    for position in range(index - 1, -1, -1):
+        if not lines[position].lstrip().startswith("#"):
+            break
+        block.append(lines[position])
+    return "\n".join(reversed(block))
+
+
+def test_the_manifest_states_the_fetch_it_cannot_hide() -> None:
+    """`config/ci-surfaces.yml` may not call this suite network-free.
+
+    The manifest is the record a later lane reads to decide whether a fast-lane
+    file is hermetic and how much to weight it in a shard. All three of its
+    notes for this file said "no network" — and the `durations` row concluded
+    that the flat default OVER-estimates — while `_ensure_commit` runs a
+    `git fetch` on exactly the checkout shape CI uses (`fetch-depth: 1`), so
+    both claims were inverted for the lane that matters (round 5 ISSUE 2; the
+    sibling `test_9397_about_edge_properties.py` pins the same property for the
+    file this helper was adopted from).
+
+    Re-derived from the SOURCE and from the manifest text, so the record can
+    only say what the code does — and it reds if the fetch is removed without
+    the records being corrected with it.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert '"fetch"' in src and "--depth=" in src, (
+        "`_ensure_commit` no longer fetches `origin main` — re-derive this "
+        "pin's premise before trusting the manifest notes it guards"
+    )
+    manifest_lines = _MANIFEST.read_text(encoding="utf-8").splitlines()
+    registrations = [
+        index
+        for index, line in enumerate(manifest_lines)
+        if line.strip() == "- test_spa_dependency_overrides.py"
+    ]
+    assert registrations, (
+        "this file is not registered in config/ci-surfaces.yml at all, so the "
+        "surface records this leg measures are gone"
+    )
+    for line_number in registrations:
+        block = _flat(_comment_block_above(manifest_lines, line_number))
+        assert block, (
+            f"the registration at config/ci-surfaces.yml:{line_number + 1} "
+            "carries no rationale comment — nothing then states the fetch it "
+            "performs"
+        )
+        assert "git fetch" in block, (
+            f"the registration comment above config/ci-surfaces.yml:"
+            f"{line_number + 1} does not name the `git fetch --depth=… origin "
+            "main` this file performs on a shallow checkout, so the record "
+            "again reads as a hermetic suite (PR #9524 review, round 5 ISSUE 2)"
+        )
+        for claim in _RETRACTED_NETWORK_FREE:
+            assert claim not in block, (
+                f"the registration comment above config/ci-surfaces.yml:"
+                f"{line_number + 1} claims {claim!r} while `_ensure_commit` runs "
+                "`git fetch --depth=… origin main` (PR #9524 review, round 5 "
+                "ISSUE 2)"
+            )
+
+    duration_rows = [
+        line
+        for line in manifest_lines
+        if line.strip().startswith("test_spa_dependency_overrides.py:")
+    ]
+    assert len(duration_rows) == 1, (
+        f"expected exactly one `durations` row for this file, found "
+        f"{len(duration_rows)} — the weight the shard packer reads is ambiguous"
+    )
+    row = _flat(duration_rows[0])
+    assert "git fetch" in row, (
+        "the `durations` row does not name the bounded `git fetch` this file "
+        "performs in a shallow checkout, so its weight reads as a plain "
+        "JSON-parse cost (PR #9524 review, round 5 ISSUE 2)"
+    )
+    for claim in _RETRACTED_NETWORK_FREE:
+        assert claim not in row, (
+            f"the `durations` row claims {claim!r} while the file fetches on the "
+            "CI checkout shape — the weight justification is then the inverse "
+            "of what the code does (PR #9524 review, round 5 ISSUE 2)"
+        )
+
+
+def test_the_fetch_ladder_runs_at_most_once_per_revision(monkeypatch) -> None:
+    """Eight readers, ONE ladder — the memo the `durations` bound rests on.
+
+    `_resolved_versions_at_revision` calls `_ensure_commit` once per (package,
+    app) pair, eight times. Unmemoised, the unreachable case re-runs the
+    three-depth ladder each time: up to 24 fetches at a 120 s timeout before the
+    four `base` cases skip, which is what made the manifest's small weight an
+    assertion rather than a bound (round 5 ISSUE 2).
+    """
+    module = sys.modules[__name__]
+    fetches: list[list[str]] = []
+
+    def _counting_run(args, *rest, **kwargs):
+        fetches.append(list(args))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(module, "_has_commit", lambda rev: False)
+    monkeypatch.setattr(module, "_is_shallow", lambda: True)
+    monkeypatch.setattr(module, "_ENSURE_COMMIT_RESULTS", {})
+    monkeypatch.setattr(module.subprocess, "run", _counting_run)
+
+    for _ in range(len(RESOLUTIONS) * len(SPAS)):  # the per-pair reader count
+        assert module._ensure_commit(PRE_FIX_REVISION) is False
+    assert len(fetches) == len(_SHALLOW_DEPTHS), (
+        f"`_ensure_commit` ran {len(fetches)} fetches across "
+        f"{len(RESOLUTIONS) * len(SPAS)} calls; memoised it must run one ladder "
+        f"({len(_SHALLOW_DEPTHS)} fetches) at most — unmemoised it repeated the "
+        "ladder on every call and the unreachable case could spend 24 fetch "
+        "timeouts before the base half skips (PR #9524 review, round 5 ISSUE 2)"
+    )
+
+
 def test_the_base_half_is_reachable_in_a_shallow_checkout() -> None:
     """The base-half leg must TRY to reach `PRE_FIX_REVISION`, not skip first.
 
@@ -500,6 +764,28 @@ def test_the_base_half_is_reachable_in_a_shallow_checkout() -> None:
     assert gate_at is not None, (
         "`_ensure_commit` no longer returns False on a NON-shallow clone, so the "
         "fetch would shallow (and truncate) a developer's full clone"
+    )
+    # The MEMO must be consulted BEFORE the ladder: round 5 ISSUE 2 measured that
+    # the eight per-(package, app) readers each re-ran the ladder (up to 24
+    # fetches), which is why the manifest's weight could not be stated as a bound.
+    memo_at = next(
+        (
+            index
+            for index, node in enumerate(body)
+            if isinstance(node, ast.If)
+            and "_ENSURE_COMMIT_RESULTS" in ast.dump(node.test)
+        ),
+        None,
+    )
+    assert memo_at is not None, (
+        "`_ensure_commit` no longer memoises, so the `RESOLUTIONS` readers re-run "
+        "the fetch ladder (up to 24 fetches before the base half skips) — the "
+        "bound the manifest's `durations` note states is then false (PR #9524 "
+        "review, round 5 ISSUE 2)"
+    )
+    assert fetch_at is None or memo_at < fetch_at, (
+        f"the memo is consulted at statement {memo_at} but the fetch ladder runs "
+        f"at {fetch_at}: a memo read AFTER the ladder saves nothing"
     )
     assert fetch_at is not None, (
         "`_ensure_commit` has no bounded `_SHALLOW_DEPTHS` fetch loop, so it "

@@ -4304,7 +4304,12 @@ surfaces:
   # is the arm that runs the guard on those two diffs. DUAL-REGISTERED with
   # `onboarding`: `website/apps/blog-admin/` IS a SOURCE_PATTERNS match, which
   # REPLACES the `core` fallback in `select()` (the #1349/#2938 silent-drop
-  # class). Text-only: it parses the three manifests + locks, no node, no network.
+  # class). Cost: it parses the three manifests + locks (no node, no DB, no
+  # fixture) PLUS, in a SHALLOW checkout, ONE bounded `git fetch --depth={120,
+  # 400,1500} origin main` for the base half of its `RESOLUTIONS` record — a
+  # NETWORK call that deepens the clone, memoised per revision, so at most one
+  # ladder (3 fetches) per run; where the revision stays unreachable the base
+  # cases SKIP, never pass. See the `durations` row.
   - test_spa_dependency_overrides.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
@@ -4528,7 +4533,10 @@ surfaces:
   # blog-admin `package.json`-only diff selects `onboarding` and would run
   # neither arm if the guard lived only in `core`. The `core` arm carries the
   # other two apps (`website/apps/dashboard/` and `apps/graph-viz/` manifests
-  # match no pattern and fall back). Text-only: three manifests + three locks.
+  # match no pattern and fall back). Cost: three manifests + three locks, no
+  # node, no DB — plus the same bounded `git fetch --depth=… origin main` the
+  # `core` arm names (a NETWORK call on a shallow checkout, memoised per
+  # revision, skipping where the pre-fix history stays unreachable).
   - test_spa_dependency_overrides.py
   # #9068 review P1: MULTI-REGISTERED with `core` (below), `api` and `onboarding`
   # (above), and `ep` / `eval` / `sdk` — the six surfaces a module the #5475 door
@@ -6062,7 +6070,7 @@ durations:
   test_9362_sweep_mirror_order.py: 2.0  # unmeasured — new in #9362; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and the local whole-file reading here (135.6s) is ~124s of SESSION cost that lands on whichever test runs first (measured both ways: `-k stale_epoch` alone 125.2s, `-k peer_already_cleared` alone 123.9s, and the same two cost ~1s each when not first — the #3400 attribution the map's header warns about), so a locally derived row would misstate the file by whatever order the shard happens to run. It matters here rather than being cosmetic: at b76de57c the map sat at 96/961 missing = coverage 0.900104 against the 0.90 floor with ZERO headroom, so one more unweighted fast file reds `--integrity`'s `duration_coverage_issues`. `tools/ci_timing.py --refresh-durations` is the sole writer and replaces this from junit.
   test_9121_onboarding_residual_pins.py: 2.0  # unmeasured — new in #9121; no sweep has collected it, so it carries the flat default for an unmeasured file (same convention as test_prod_csp_monitor.py / test_venture_pack.py). Do NOT substitute a local timing: the map is a SHARD-LAYOUT input modelling CI, and a locally measured weight that does not model CI must not decide what runs together. Measured 2026-10-19: 15 cases, source-structural only (no graph fixture). `test_9079_onboarding_declared_lane.py` already carries a measured row in the #3400-trap block below (3.6) — do NOT add a second key here; a duplicate mapping key is refused by `tools/registry_integrity.py` and silently keeps the LAST value (#5373).
   test_9157_eager_init_declared.py: 2.0  # unmeasured — new in #9157; no CI sweep has collected it yet, so it carries the same flat default as its siblings (test_9121_onboarding_residual_pins.py, test_9079_ep_epoch_declared.py) rather than a local timing, which this map forbids as a SHARD-LAYOUT input: a local reading here is dominated by the #3400 first-fixture session cost (~124 s), not by this file's weight, and substituting it would pack a real graph fixture into an already-heavy shard. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
-  test_spa_dependency_overrides.py: 2.0  # unmeasured — new in #9524; no CI sweep has collected it, so it carries the header's flat `DEFAULT_FAST_WEIGHT` (the #2818/#3419 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. It parses three `package.json` + three `package-lock.json` files from the repo (no node, no network, no fixture), so its weight is small and the flat default over-estimates rather than under-estimates it. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
+  test_spa_dependency_overrides.py: 2.0  # unmeasured — new in #9524; no CI sweep has collected it, so it carries the header's flat `DEFAULT_FAST_WEIGHT` (the #2818/#3419 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What it costs: it parses three `package.json` + three `package-lock.json` files from the repo (no node, no DB, no fixture) AND — on a SHALLOW checkout, which is what CI's `test` job checks out (`fetch-depth: 1`) — runs ONE bounded `git fetch --depth=120 origin main` to reach `PRE_FIX_REVISION` for the base half of its record. That fetch is a NETWORK call with a side effect on the clone under test, it is NOT in the flat default, and the ladder is memoised per revision, so the file costs one JSON-parse pass plus at most one ladder (bounded by 3 × 120 s timeouts in the unreachable case, where its four base cases skip rather than pass). The flat 2.0 is therefore an UNDER-estimate on a shallow clone, not an over-estimate; it is kept only because a first-cut row must not adopt a host reading. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep collects it.
 # #3395: per-file CI wall time (seconds), swept from the junit artifacts of four
 # completed 2026-09-22 runs rather than entered by hand — two push-to-main runs
 # (35770984825 at b8ded3646, 35779482728 at 45aa52f70) and two runs of branch
