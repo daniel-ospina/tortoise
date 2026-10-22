@@ -282,6 +282,23 @@ def _uninstall_env(tmp_path: Path, **extra: str) -> dict[str, str]:
     return env
 
 
+def _deregisterable(runner: Path) -> Path:
+    """A configured runner install whose `config.sh remove` SUCCEEDS (rc=0, like the real thing).
+
+    ⛔ `config.sh` IS PART OF THE FIXTURE, and its absence is why the uninstall "positive arms"
+    used to be vacuous: with no `config.sh` in the directory, `./config.sh remove` could only FAIL,
+    and the pre-fix script deleted the directory and exited 0 anyway — so each arm exercised the
+    failure path while asserting a successful removal. The stub exits 0 exactly as a real
+    `config.sh remove` does against a registered runner, so the arm now reaches the path it names.
+    The refused arm is pinned separately in
+    `test_a_failed_deregistration_leaves_the_directory_and_exits_3`.
+    """
+    runner.mkdir(parents=True, exist_ok=True)
+    (runner / ".runner").write_text("{}\n")
+    _stub_tool(runner, "config.sh", "exit 0")
+    return runner
+
+
 def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path: Path):
     """`CI_RUNNER_BASE` is operator input; "a directory exists" is not proof of a runner.
 
@@ -316,13 +333,29 @@ def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path:
     assert r.returncode == 2 and "not a runner install" in r.stderr, r.stderr
 
     # positive arm: `.runner` is proof of a configured runner, so this one IS removed
-    runner = tmp_path / "a-runner"
-    runner.mkdir()
-    (runner / ".runner").write_text("{}\n")
+    runner = _deregisterable(tmp_path / "a-runner")
     r = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(runner)})
     assert r.returncode == 0, r.stderr
     assert not runner.exists(), f"a configured runner directory must be removed: {r.stderr}"
     assert "rm -rf" in calls.read_text(), "the sudo stub never saw the delete — the arm is vacuous"
+
+    # ⛔ AND THE OTHER HALF OF THAT GATE: an install whose DEREGISTRATION FAILED is not deleted and
+    # is not reported as success. `config.sh` and `.runner` live in the directory, so deleting it is
+    # what turns "still registered in the repo" into an unrecoverable state — no local record, and a
+    # re-run that reports "nothing to uninstall". The exit code is the file's own contract:
+    # `3 OPERATION failed — … config.sh …`, never 0.
+    failed = _deregisterable(tmp_path / "a-runner-that-could-not-be-removed")
+    _stub_tool(failed, "config.sh", "exit 1")
+    r = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(failed)})
+    assert r.returncode == 3, (
+        "a failed deregistration is an OPERATION failure — it must not be reported as a clean "
+        f"removal: {r.returncode} {r.stderr}"
+    )
+    assert failed.is_dir() and (failed / ".runner").exists(), (
+        "a failed deregistration deleted the directory that holds its registration — the retry "
+        f"(and `--status`) now has nothing to read: {r.stderr}"
+    )
+    assert "could not deregister" in r.stderr and "LEFT" in r.stderr, r.stderr
 
     # ⛔ THE UNIT-DIR PIN IS LOAD-BEARING, so this arm must be able to see it: the SAME runner
     # directory, with its unit present in the pinned dir and no `svc.sh`, is refused with rc=3 and
@@ -387,9 +420,7 @@ def test_uninstall_never_deletes_under_an_enabled_unit_it_failed_to_remove(tmp_p
     # positive control: the unit IS removable, so the directory IS deleted and nothing is warned
     env = _uninstall_env(tmp_path / "clean")
     (Path(env["CI_RUNNER_UNIT_DIR"]) / unit).write_text("[Unit]\n")
-    runner = tmp_path / "clean" / "base"
-    runner.mkdir(parents=True)
-    (runner / ".runner").write_text("{}\n")
+    runner = _deregisterable(tmp_path / "clean" / "base")
     _stub_tool(runner, "svc.sh", "exit 0")
     r = _run("--uninstall", "--count", "1", env=env)
     assert r.returncode == 0, r.stderr
@@ -474,6 +505,7 @@ def test_the_arch_refusal_governs_install_but_not_uninstall(tmp_path: Path):
     assert runner.is_dir(), "a dry run removed the directory"
 
     # …and the removal itself completes, so the runner can be decommissioned from this host
+    _stub_tool(runner, "config.sh", "exit 0")
     done = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(runner)})
     assert done.returncode == 0, f"a non-x86_64 host must be able to decommission a runner: {done.stderr}"
     assert not runner.exists(), done.stderr

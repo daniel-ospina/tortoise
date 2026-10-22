@@ -59,9 +59,9 @@
 #        with a smaller --count, on an x86_64 host, with an explicit --fallback, or with the
 #        right CI_RUNNER_BASE.
 #     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh (a
-#        failed systemd unit removal included — its target directory is then LEFT intact rather
-#        than deleted out from under an enabled unit), a tool missing from PATH, or a failed
-#        remote read (`--status`).
+#        failed systemd unit removal, or a failed `config.sh remove`, included — that target is then
+#        LEFT intact rather than deleted out from under an enabled unit or a live registration), a
+#        tool missing from PATH, or a failed remote read (`--status`).
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -235,13 +235,16 @@ if [ "$MODE" = repair ]; then
     [ -f "$d/.runner" ] || { say "skip: $d is not configured"; continue; }
     agent="$(sed -n 's/.*"agentName": "\([^"]*\)".*/\1/p' "$d/.runner")"
     id="$(gh api --paginate "repos/$REPO/actions/runners" --jq ".runners[]|select(.name==\"$agent\")|.id" | head -1)"
-    case "$id" in ''|*[!0-9]*) say "WARNING: $agent not found in the repo's runners"; rc=1; continue ;; esac
+    # An operation that was ATTEMPTED and failed is 3, never 1: the EXIT contract above reserves 1
+    # for "usage — nothing was attempted", and a caller keying on it would read a failed relabel as a
+    # bad flag (measured: `--repair-labels` against a `gh` that returns no id exited 1).
+    case "$id" in ''|*[!0-9]*) say "WARNING: $agent not found in the repo's runners"; rc=3; continue ;; esac
     body="$(printf '{"labels":["%s"]}' "$(printf '%s' "$LABELS" | sed 's/,/","/g')")"
     if [ "$DRY" = 1 ]; then say "dry-run: would PUT $body to runner $id ($agent)"; continue; fi
     if printf '%s' "$body" | gh api -X PUT "repos/$REPO/actions/runners/$id/labels" --input - >/dev/null 2>&1; then
       say "relabelled $agent → $LABELS"
     else
-      say "WARNING: relabel FAILED for $agent (id $id)"; rc=1
+      say "WARNING: relabel FAILED for $agent (id $id)"; rc=3
     fi
   done
   exit "$rc"
@@ -384,8 +387,18 @@ if [ "$MODE" = uninstall ]; then
       say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand, then re-run"; rc=3; continue
     fi
     tok="${uninstall_tokens[$i]}"
-    ( cd "$d" && ./config.sh remove --token "$tok" --unattended >/dev/null 2>&1 ) \
-      && say "deregistered $name" || say "WARNING: $name may still be registered — check --status"
+    # ⛔ A FAILED DEREGISTRATION IS AN OPERATION FAILURE, AND IT STOPS THE DELETE FOR THIS TARGET —
+    # the same rule as the unit branch above, and the one remaining hole in this loop. The pre-fix
+    # pair discarded the status (`&& say` / `|| say`) and deleted `$d` unconditionally under it, so a
+    # runner the repo still lists lost the ONLY state a retry can use (`config.sh` and `.runner` live
+    # in `$d`), the re-run then reported "nothing to uninstall", and the caller was told `0` — against
+    # this file's own EXIT contract (`3 OPERATION failed — … config.sh …`) and the runbook's copy of
+    # it. Leave the target INTACT, report it, and let the retry retry.
+    if ( cd "$d" && ./config.sh remove --token "$tok" --unattended >/dev/null 2>&1 ); then
+      say "deregistered $name"
+    else
+      say "WARNING: could not deregister $name — LEFT $d and its registration intact so this can be retried; it may still be listed in the repo, check --status"; rc=3; continue
+    fi
     sudo rm -rf "$d"
   done
   exit "$rc"
@@ -395,6 +408,12 @@ tarball="actions-runner-linux-x64-$RUNNER_VERSION.tar.gz"
 url="https://github.com/actions/runner/releases/download/v$RUNNER_VERSION/$tarball"
 actor="${GITHUB_ACTOR:-cmux}"
 
+# ⛔ `need gh` BEFORE the fallback read, on the non-dry path only. `resolve_labels`' `auto` branch
+# asks `fallback_engaged` first, and with `gh` absent its command-not-found text was captured as an
+# unreadable state — so a missing tool REFUSED with exit 2 ("GUARD refused, nothing attempted")
+# while the EXIT contract above promises 3 for "a tool missing from PATH". A dry run keeps working
+# with no gh: its label path short-circuits before any read.
+if [ "$DRY" != 1 ]; then need gh; fi
 resolve_labels
 for t in $JOB_TOOLS $RUNNER_TOOLS; do
   command -v "$t" >/dev/null 2>&1 || say "WARNING: '$t' is not on PATH — jobs needing it will exit 2 (#9018)"

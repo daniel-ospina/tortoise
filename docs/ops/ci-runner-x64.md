@@ -122,16 +122,16 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:403` (the scale loop) · guards at `:275-325`
-  (forks `:283`, disk `:303`, cpu/memory `:310`) · sha256 pin + registration at `:414-422`
-  (verify `:414`, token `:417`, one argv `:420-421`, `config.sh` `:422`) · systemd
-  install/start at `:432-434` · label resolution at `:169-207` (`fallback_engaged` `:173`,
-  `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:259`.
+- `--count N` → `tools/install-ci-runner-x64.sh:422` (the scale loop) · guards at `:278-327`
+  (forks `:286`, disk `:306`, cpu/memory `:313`) · sha256 pin + registration at `:433-441`
+  (verify `:433`, token `:436`, one argv `:439-440`, `config.sh` `:441`) · systemd
+  install/start at `:451-453` · label resolution at `:169-207` (`fallback_engaged` `:173`,
+  `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:262`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:327-392`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
+  gone** (`:327-405`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
   `bin/Runner.Listener` must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
@@ -139,14 +139,16 @@ falls back.
   gate was exactly that, and `CI_RUNNER_BASE=/opt --uninstall` would have run `sudo rm -rf /opt`.
   A validation refusal is exit 2 and nothing is removed. A target whose systemd unit cannot be
   removed (`svc.sh uninstall` fails while the unit is still installed, or the unit is installed and
-  the directory has no `svc.sh`) is **left intact, registration and all**, and reported: the unit
-  would otherwise survive pointing at a deleted working directory while `--uninstall` exited 0.
+  the directory has no `svc.sh`), **or whose `config.sh remove` fails**, is **left intact,
+  registration and all**, and reported (exit 3): the unit would otherwise survive pointing at a
+  deleted working directory, and a still-registered runner would lose the only local record that a
+  retry — and `--status` — can read, so `--uninstall` reported a clean removal while exiting 0.
 - **Exit codes** (`:53-66`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
   refused — headroom, arch, an undecidable fallback, or an uninstall target that is not provably
   a runner, with nothing downloaded or registered, so re-run with a smaller `--count` · `3`
   operation failed — download, sha256 verify, extract, token mint, `config.sh`, `svc.sh` (including
-  a unit removal that failed, whose target directory is then left intact), a tool missing from
-  PATH, or a failed remote read.
+  a unit removal that failed, whose target directory is then left intact, or a deregistration that
+  failed, likewise left intact), a tool missing from PATH, or a failed remote read.
 - `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
   checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
   arch refusal still governs every INSTALL — and only an install (`:275`, inside the `MODE =
