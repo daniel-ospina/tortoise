@@ -7154,14 +7154,17 @@ def _writable_id(val) -> bool:
     is therefore refused at EVERY place that writes it, with ONE predicate per
     layer: the two journal folds and the two snapshot/restore paths
     (``entities._fold_session_recorded``, ``entities._link_session``,
-    ``rebuild_all``'s ``session_snapshot`` loop, ``rebuild_from_record``) all
-    use ``_writable_container_id`` — this predicate PLUS the blank clause, i.e.
-    the same owner, so a journal replay and a sidecar restore cannot disagree —
-    while the caller-facing doors (the SDK's ``capture_session`` /
-    ``commit_session`` and the hosted ``SessionRequest`` boundary) use
-    ``tortoise.ids.session_id_refusal``, where a caller can be told WHY. The
-    blank-NAME class needs the Layer-1 /
-    ingest shape gates, not this predicate.
+    ``rebuild_all``'s ``session_snapshot`` loop, and the record-sourced rebuild
+    — ``rebuild_from_record``, whose node filter lives in
+    ``_project_record_view``) all use ``_writable_container_id`` — this
+    predicate PLUS the blank clause, i.e. the same owner, so a journal replay
+    and a sidecar restore cannot disagree — while the caller-facing doors (the
+    SDK's ``capture_session`` / ``commit_session`` and the hosted
+    ``SessionRequest`` boundary) use ``tortoise.ids.session_id_refusal``, where
+    a caller can be told WHY. ⚠️ That list is the whole replay surface: a new
+    carrier outside it is ungated by construction, so add it here AND in
+    ``tests/test_9599_blank_session_id.py``'s docstring. The blank-NAME class
+    needs the Layer-1 / ingest shape gates, not this predicate.
     """
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
