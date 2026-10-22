@@ -160,6 +160,7 @@ the legacy population.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
@@ -871,7 +872,10 @@ def apply_plan(
                 "reading it as empty would silently drop every edge"
             ]
         )
-    edge_digest_before = _edge_digest(edges_in)
+    # A SNAPSHOT of the edges, taken before any node is rewritten. `out` below
+    # shares the input's `edges` list object, so re-digesting that object after
+    # the loop cannot detect an in-place edit to an edge row — only a copy can.
+    edges_before = copy.deepcopy(edges_in)
 
     by_dump_id: dict[int, Rename] = {rename.dump_id: rename for rename in plan.renames}
     out_nodes: list[dict] = []
@@ -914,11 +918,13 @@ def apply_plan(
         )
 
     out: dict = {**dump, "nodes": out_nodes}
-    # Invariant 5: nodes in == out, edges unchanged (compared as a digest), and
-    # the counts the dump declares still hold.
+    # Invariant 5: nodes in == out, edges unchanged, and the counts the dump
+    # declares still hold. The edge half is a DIGEST over a pre-pass copy, not
+    # an identity comparison: `out["edges"] is edges_in`, so an in-place edit
+    # during the loop is invisible to `==` and visible here.
     if len(out_nodes) != len(nodes_in):
         problems.append(f"{len(nodes_in)} nodes in, {len(out_nodes)} out")
-    if _edge_digest(out.get("edges", [])) != edge_digest_before:
+    if _edge_digest(out.get("edges", [])) != _edge_digest(edges_before):
         problems.append("the edge list changed — a key rename must not touch edges")
     if "nodes" in dump and not isinstance(dump.get("nodes"), list):
         problems.append("the dump's `nodes` is not a list")

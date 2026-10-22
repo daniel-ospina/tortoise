@@ -37,9 +37,15 @@ Exit codes — ``2`` is the REFUSAL and nothing else, so a wrapper can key on it
   fingerprint does not match, a legacy id maps twice, a target collides …).
   Every problem is on stderr and **nothing was written**;
 * ``1`` — usage or IO: a bad invocation (**including two artifacts named on one
-  file** — that is a wrong command line, found before anything is read), a
+  file** — that is a wrong command line, found before anything is written), a
   missing/unreadable dump or report, or a report that is not one this tool
   wrote.
+
+⚠️ "The same file" is decided by IDENTITY, not by path text: the inode, the
+symlink-resolved name, and the case-folded name in the same directory all count.
+So ``--out plan.json --report Plan.json`` is refused everywhere, not only on the
+case-insensitive filesystems where the snapshot write would silently truncate
+the report that ``--revert`` needs.
 
 ⚠️ ``argparse``'s own status for a usage error is ``2`` — the code this contract
 reserves for a REFUSAL — so :class:`_Parser` overrides it to ``1``. Without
@@ -128,6 +134,52 @@ def _dump_json(payload: object, path: Path | None, what: str) -> None:
     except OSError as exc:
         raise SystemExit(f"could not write {what} to {path}: {exc}") from exc
     print(f"wrote {what}: {path}", file=sys.stderr)
+
+
+def _artifact_keys(path: Path) -> tuple[object, ...]:
+    """Every identity ``path`` has **right now**, as mutually comparable keys.
+
+    ⛔ ONE SHAPE FOR EVERY TARGET. The gate this replaces keyed an existing path
+    as ``("inode", dev, ino)`` and a missing one as ``("path", text)``: two
+    tuples of different shapes are never equal, so for every pair where ONE
+    artifact already existed — the ``--dump`` itself, or a ``plan.json`` left by
+    the earlier dry run the documented workflow prescribes — the rail was
+    skipped by the shape mismatch alone, whatever the two names were.
+
+    Each path therefore contributes every key it has, and two paths collide when
+    they share **any** of them:
+
+    * the symlink-resolved text (a ``..`` segment, a symlinked directory, a
+      dangling symlink whose target exists only later);
+    * the parent directory's identity joined with the **case-folded** name —
+      ``--out plan.json --report Plan.json`` is one file on a case-insensitive
+      filesystem, and during the normal ``--apply`` neither exists yet, so
+      nothing on disk can settle it: the report is written first and the
+      snapshot write then truncates the same inode, destroying the plan
+      ``--revert`` reads. Refused on a case-SENSITIVE filesystem too, on
+      purpose: the same argv may be replayed somewhere that folds case, and a
+      false refusal costs a rename while a false pass costs the revert artifact;
+    * the inode (``st_dev``/``st_ino``) when the path exists — the only key that
+      sees a hardlink, a bind mount, or a second name on a case-folding mount.
+    """
+    resolved = path.resolve()
+    parent = resolved.parent
+    try:
+        parent_stat = parent.stat()
+    except OSError:
+        parent_key: object = ("dir-path", str(parent))
+    else:
+        parent_key = ("dir", parent_stat.st_dev, parent_stat.st_ino)
+    keys: list[object] = [
+        ("path", str(resolved)),
+        ("dir+name", parent_key, resolved.name.casefold()),
+    ]
+    try:
+        stat = path.stat()
+    except OSError:
+        return tuple(keys)
+    keys.append(("inode", stat.st_dev, stat.st_ino))
+    return tuple(keys)
 
 
 def _load_revert_plan(path: Path, dump: dict) -> LegacyIdPlan:
@@ -267,32 +319,22 @@ def main(argv: list[str] | None = None) -> int:
         if path is None:
             continue
         try:
-            # ⛔ IDENTITY, NOT PATH TEXT. Two names for one file — a hardlink, a
-            # bind mount, a symlink, a case-folding filesystem — all pass a
-            # `resolve()` comparison, and then the dry run's report REPLACES the
-            # snapshot it was reading and exits 0 (measured: `ln snapshot.json
-            # plan.json`). A path that does not exist yet is keyed by its
-            # resolved text, because its identity is the one it will be created
-            # with.
-            if path.exists():
-                st = path.stat()
-                identity: object = ("inode", st.st_dev, st.st_ino)
-            else:
-                identity = ("path", path.resolve())
+            keys = _artifact_keys(path)
         except (OSError, RuntimeError) as exc:
             # A symlink loop raises RuntimeError out of resolve(); an
             # unreadable parent raises OSError. Both are the same user error as
             # a collision and must not traceback.
             parser.error(f"{flag} cannot be resolved ({path}): {exc}")
             raise  # unreachable — parser.error exits; keeps type checkers honest
-        if identity in seen:
-            parser.error(
-                f"{flag} and {seen[identity]} are the same file ({path}): each is a "
-                "distinct artifact and overwriting one destroys it — use separate "
-                "paths (a hardlink, a symlink or a case-folding filesystem is the "
-                "same file too)"
-            )
-        seen[identity] = flag
+        for key in keys:
+            if key in seen:
+                parser.error(
+                    f"{flag} and {seen[key]} are the same file ({path}): each is a "
+                    "distinct artifact and overwriting one destroys it — use "
+                    "separate paths (a hardlink, a symlink, a bind mount or a name "
+                    "that differs only in case is the same file too)"
+                )
+            seen[key] = flag
 
     dump = _load_json(args.dump, "dump")
     if not isinstance(dump, dict):

@@ -36,6 +36,7 @@ membership claim: the flag is the session-wide "no URI" opt-in (`epic #1647`), w
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -292,6 +293,10 @@ def test_a_pass_leaves_two_canonical_shapes_on_point_and_says_so():
 
 def test_counts_reconcile_and_edges_survive():
     dump = _dump()
+    # Snapshotted BEFORE the pass: comparing `out["edges"] == dump["edges"]`
+    # afterwards is vacuous — `out` aliases the same list object, so the
+    # assertion stays green even if `apply_plan` mutated every row in place.
+    edges_before = copy.deepcopy(dump["edges"])
     plan = build_plan(dump)
     out, report = apply_plan(dump, plan)
 
@@ -305,7 +310,7 @@ def test_counts_reconcile_and_edges_survive():
     assert report["renamed"] + report["canonical_before"] == report["in_scope_in"], (
         "the ledger's two halves must account for every in-scope node"
     )
-    assert out["edges"] == dump["edges"], "a key rename must not touch edges"
+    assert out["edges"] == edges_before, "a key rename must not touch edges"
     assert out["node_count"] == dump["node_count"]
     assert [n["dump_id"] for n in out["nodes"]] == [n["dump_id"] for n in dump["nodes"]], (
         "dump_id is the store's internal id and is preserved — that is WHY the edges survive"
@@ -781,6 +786,65 @@ def test_cli_refuses_two_artifacts_on_one_path(tmp_path, target, other):
         main(argv)
     assert "error:" in str(exc.value.code), exc.value.code
     assert json.loads(same.read_text(encoding="utf-8"))["nodes"], "the dump survived"
+
+
+def test_cli_refuses_a_case_folded_alias_of_an_artifact_that_exists(tmp_path):
+    """One artifact exists, the other does not — the pair the OLD gate skipped.
+
+    The rail keyed an existing path as ``("inode", dev, ino)`` and a missing one
+    as ``("path", text)``. Two tuples of different SHAPES are never equal, so for
+    every pair where one side already existed — here the snapshot itself — the
+    check could not fire whatever the two names were. On a case-insensitive
+    filesystem ``--report Snapshot.json`` IS ``--dump snapshot.json``: the report
+    replaces the snapshot the run was asked to read, and the plan the revert
+    needs is the thing that overwrote it.
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "snapshot.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    report = tmp_path / "Snapshot.json"
+    assert not report.exists(), "case-sensitive here: the two names are two names"
+    with pytest.raises(SystemExit) as exc:
+        main(["--dump", str(dump_path), "--report", str(report)])
+    assert "are the same file" in str(exc.value.code)
+    assert "--report and --dump" in str(exc.value.code)
+    assert json.loads(dump_path.read_text(encoding="utf-8"))["nodes"], "the dump survived"
+    assert not report.exists(), "nothing was written"
+
+
+def test_cli_refuses_two_not_yet_created_artifacts_named_the_same_up_to_case(tmp_path):
+    """The normal `--apply`: neither `--out` nor `--report` exists yet.
+
+    Nothing on disk can settle whether the two names are one file, so the OLD
+    gate compared them as resolved TEXT and passed. On a case-insensitive
+    filesystem it then wrote the report first and truncated it with the
+    snapshot — the plan that undoes the pass was destroyed, and the run printed
+    "wrote report / wrote snapshot" and exited 0. Refused on a case-SENSITIVE
+    filesystem too, on purpose: the same argv may be replayed where case folds,
+    and a false refusal costs a rename while a false pass costs the plan.
+    """
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out_path = tmp_path / "normalised.json"
+    report_path = tmp_path / "Normalised.json"
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--dump",
+                str(dump_path),
+                "--apply",
+                "--out",
+                str(out_path),
+                "--report",
+                str(report_path),
+            ]
+        )
+    assert "are the same file" in str(exc.value.code)
+    assert "--report and --out" in str(exc.value.code)
+    assert not out_path.exists() and not report_path.exists(), "nothing was written"
 
 
 def test_cli_reports_a_usage_error_not_a_traceback_on_an_unreadable_dump(tmp_path):
