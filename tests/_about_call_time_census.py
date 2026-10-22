@@ -179,17 +179,22 @@ _UNKNOWN = ""
 #: entry's KEY already matched. The key is a symbol; the derivation is a site.
 #:
 #: ⚠️ **The count is NOT the net for a copy written INSIDE an already-registered
-#: query string.** A site is keyed on `(symbol, line)`, so a second `MATCH`
-#: appended to an existing statement (a `UNION` clause beside the first walk)
-#: produces no new site and the number never moves — measured on that cut, the
-#: second walk shipped green on the first walk's fact. What catches it is the
-#: guard's per-CLAUSE fact check: every walk-bearing clause of the resolved query
-#: must carry a fact of its own (an earlier clause of the same query counts only
-#: when it binds a variable the walk's pattern uses, which is the rule the `#9400`
-#: guard used before the fold). The count catches the other shape — a copy on its
-#: OWN line — and the union direction (`every fact is still carried by some
-#: site`) catches a fact whose ground the code lost while another fact still
-#: matches. Three nets, three different blind spots; none of them implies another.
+#: query string.** A site is keyed on `(symbol, line)`, so a second walk appended
+#: to an existing statement (a `UNION` arm beside the first walk) produces no new
+#: site and the number never moves — measured on that cut, the second walk shipped
+#: green on the first walk's fact. What catches it is the guard's per-WINDOW fact
+#: check: every walk OCCURRENCE must carry a fact inside its OWN window of the
+#: resolved query, where the window is delimited by the two boundaries a walk's
+#: bindings cannot cross — a `UNION` (an arm binds its own variables) and a
+#: top-level comma (a second pattern in one `MATCH` is a second walk). Two escapes
+#: were measured on the earlier-clause form of this rule and both shipped green:
+#: `, (x)-[rr]->(y)` appended to a registered `MATCH`, and a `UNION` arm that
+#: REUSED the first arm's variable name (the overlap was `n`, which the second
+#: arm's own `RETURN` happened to re-mention). The count catches the other shape —
+#: a copy on its OWN line — and the union direction (`every fact is still carried
+#: by some site`) catches a fact whose ground the code lost while another fact
+#: still matches. Three nets, three different blind spots; none of them implies
+#: another.
 #:
 #: Three grounds are legal, and each entry names the one it rests on:
 #:
@@ -265,8 +270,11 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
         "walks pin every endpoint to `:Point` (`(op:Point …)-[r1]->(a:Point)`, "
         "`(a:Point)-[r]-(b:Point)`). An `aboutObject` target is `:Object`, so the "
         "edge cannot be returned; the TYPE is deliberately left unbound, which "
-        "is what makes the shape derive at all",
-        ("-[r1]->(a:Point)", "MATCH (a:Point)-[r]-(b:Point)"),
+        "is what makes the shape derive at all. Each walk of the first statement "
+        "is stated separately: it carries TWO comma-separated patterns "
+        "(`-[r1]->(a:Point)`, `-[r2]->(b:Point)`) and a ground for the first does "
+        "not bound the second",
+        ("-[r1]->(a:Point)", "-[r2]->(b:Point)", "MATCH (a:Point)-[r]-(b:Point)"),
         2,
     ),
     (
@@ -842,6 +850,31 @@ def _reads_at(text: str, start: int) -> bool:
     return " ".join(clauses[-1].split()).upper() in ("MATCH", "OPTIONAL MATCH")
 
 
+def _walk_occurrences(text: str) -> tuple[int, ...]:
+    """The offsets of every untyped traversal that IS a walk of this class.
+
+    Positional, because the guard's clause net must know WHERE each walk sits and
+    not merely whether the text carries one: a single query can hold two walks in
+    ONE clause (`MATCH (a)-[r]->(b), (x)-[rr]->(y) …`), and each has to carry its
+    own bound. `_is_empty_pattern_read` is deliberately this function's boolean,
+    so a shape one admits the other cannot be blind to.
+    """
+    found: list[int] = []
+    for match in _EMPTY_TRAVERSAL.finditer(text):
+        if _type_slot(match.group(1)) is not None:
+            continue
+        if _reads_at(text, match.start()) or _inside_pattern_comprehension(
+            text, match.start()
+        ):
+            found.append(match.start())
+    found.extend(
+        match.start()
+        for match in _BARE_TRAVERSAL.finditer(text)
+        if _reads_at(text, match.start())
+    )
+    return tuple(found)
+
+
 def _is_empty_pattern_read(text: str) -> bool:
     """Does this Cypher traverse a relationship it does NOT name?
 
@@ -862,15 +895,12 @@ def _is_empty_pattern_read(text: str) -> bool:
     size([(n)-[r]-(m) | r]) AS deg`) must still derive, or a walk over every
     relationship type would be discarded as a write — a fail-open in the one
     direction this class exists to close.
+
+    This is the boolean of `_walk_occurrences`, which is the same predicate
+    asked positionally; there is one definition so the guard's per-walk net
+    cannot check a shape this derivation does not call a walk.
     """
-    for match in _EMPTY_TRAVERSAL.finditer(text):
-        if _type_slot(match.group(1)) is not None:
-            continue
-        if _reads_at(text, match.start()):
-            return True
-        if _inside_pattern_comprehension(text, match.start()):
-            return True
-    return any(_reads_at(text, match.start()) for match in _BARE_TRAVERSAL.finditer(text))
+    return bool(_walk_occurrences(text))
 
 
 def _is_gap_type_read(text: str) -> bool:

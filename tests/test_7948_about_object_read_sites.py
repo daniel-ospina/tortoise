@@ -341,9 +341,9 @@ WHAT THIS PINS
    on `(symbol, line)`, so a walk appended INSIDE an already-registered query
    string (`… properties(n) UNION MATCH (x)-[rr]->(y) …`) is the SAME site, the
    count does not move, and the first walk's fact vouched for it. Measured on
-   that cut, the copy shipped green; the per-CLAUSE net now reds naming the
-   clause, and the fixture pins both halves (one derived site, two walk
-   clauses, the second unbounded).
+   that cut, the copy shipped green; the per-WINDOW net now reds naming the
+   window, and the fixture pins both halves (one derived site, two walk
+   occurrences, the second unbounded).
 27. `test_a_stated_fact_no_site_carries_reds_the_entry` — the reverse direction
    an any-fact-per-site loop cannot express. It is REQUIRED for the two-site
    entries (each site carries only its own fact) and it silently dropped 4 of
@@ -351,6 +351,22 @@ WHAT THIS PINS
    `(old:Source {url:$u})` to `(old)` left the arm green while the walk started
    observing `aboutObject`, where `origin/main`'s all-facts rule reded. Every
    recorded fact must now be carried by SOME site of its entry.
+28. `test_the_walk_window_ends_at_a_union_and_at_a_comma` — the per-CLAUSE cut
+   of item 26 was still open in TWO directions, both measured GREEN: a second
+   pattern of the SAME `MATCH` (`… (a)-[r]->(b), (x)-[rr]->(y) …`) produces no
+   new clause segment, and a `UNION` arm that REUSES a variable name from the
+   first arm (`… RETURN type(r), labels(n)[0] … UNION MATCH (n)-[rr]->(m) …`)
+   satisfied the old earlier-clause escape's variable overlap. The window ends at
+   both boundaries now: two windows per query, the registered walk's window
+   carries the fact and the copy's does not. Pinned through the real derivation
+   too (the copy is still ONE site, so the count cannot see either shape).
+29. `test_the_live_fact_corpus_is_the_stripped_source` — item 24 exercises
+   `_code_lines` DIRECTLY, so nothing pinned its only production consumer.
+   Measured: reverting `_site_fact_text` to raw source left every other arm green,
+   because no live fact is comment-satisfiable today — the hole reverts one line
+   away and silently. The arm asserts the LIVE corpus is comment-free and that at
+   least one live site's statement carries a `#` comment in the raw source, so
+   the discriminator is live rather than hypothetical.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -445,6 +461,12 @@ _CLAUSE = re.compile(
     r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE|SET|DELETE|DETACH)\b", re.I
 )
 _READ_CLAUSES = {"MATCH", "OPTIONAL MATCH"}
+
+#: The two boundaries a walk's bindings cannot cross (`_top_level_offsets` finds
+#: them outside brackets and strings): a `UNION` arm binds its OWN variables, and
+#: a comma-separated pattern is a second, independently matched walk.
+_UNION_CLAUSE = re.compile(r"\bUNION\b", re.I)
+_COMMA = re.compile(r",")
 
 #: A table row: `| 3 | `module.py::Symbol.attr` | reads for | **reach** |`.
 _ROW = re.compile(
@@ -837,7 +859,7 @@ def _site_fact_text(rel: str, line: int) -> str:
     (`projection/entities.py`); both forms resolve here.
 
     This is the SOURCE-spelling corpus — the net that says a recorded ground is
-    still in the code. The CLAUSE net deliberately reads a different corpus,
+    still in the code. The walk net deliberately reads a different corpus,
     `_site_query_texts`, which is the RESOLVED query: comments and prose cannot
     reach it at all, and a walk the resolver assembles out of parts is visible
     there where no source-level scan of the bracket is.
@@ -878,7 +900,7 @@ def _file_by_rel() -> dict:
 def _site_query_texts(file, symbol: str, line: int) -> tuple[str, ...]:
     """The RESOLVED Cypher of the walk(s) derived at this site — the executed text.
 
-    ⚠️ **The corpus for the CLAUSE net is the resolved query, not the source, and
+    ⚠️ **The corpus for the walk net is the resolved query, not the source, and
     that is what makes it the same object the derivation saw.** `_resolve` folds
     adjacent literals, `+` concatenation, f-string parts and module constants, so
     a walk the derivation attributes to `(symbol, line)` appears here exactly as
@@ -900,65 +922,109 @@ def _site_query_texts(file, symbol: str, line: int) -> tuple[str, ...]:
     return tuple(dict.fromkeys(texts))
 
 
-def _walk_clauses(query: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Every CLAUSE of one resolved query that carries a walk, with its predecessors.
+def _top_level_offsets(text: str, needle: re.Pattern[str]) -> list[int]:
+    """Offsets where `needle` matches OUTSIDE brackets and quoted strings.
 
-    ⚠️ **The unit is the CLAUSE, not the query string, and `origin/main`'s retired
-    guard drew the line here.** `_is_empty_pattern_read` decides what a walk is, so
-    this cannot drift from the derivation; splitting on the census's own `_CLAUSE`
-    means the segments are the same clauses that predicate reasons about. A query
-    carrying two walks (`… UNION MATCH (x)-[rr]->(y) …`, or a second `MATCH` beside
-    the first) yields one entry per walk-bearing clause, which is what lets a fact
-    written about ONE of them be refused for the other.
+    Brackets are counted (`()`, `[]`, `{}` all nest in Cypher), so the commas of a
+    property map, a label list or a comprehension are not boundaries, and a quoted
+    string cannot introduce one. Shared by both boundaries below, so `UNION` and
+    the comma are measured the same way a query is read.
+    """
+    hits: list[int] = []
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and (match := needle.match(text, index)) is not None:
+            hits.append(index)
+            index = match.end()
+            continue
+        index += 1
+    return hits
+
+
+def _walk_windows(query: str) -> tuple[str, ...]:
+    """One entry per WALK OCCURRENCE in one resolved query — its own WINDOW.
+
+    ⚠️ **The unit is the window, not the query, not the clause, and not the
+    statement, and each coarser unit was MEASURED to leak.** The derivation keys a
+    site on `(symbol, line)`, so a walk appended inside an already-registered
+    query string produces no new site at all; what the fact check has to do is
+    decide how much text around the walk a fact may vouch for. Three answers were
+    tried and the first two shipped a live fail-open:
+
+    * a STATEMENT (the P1 cut) — `… properties(n) " "UNION MATCH (x)-[rr]->(y)
+      …` appended to `sdk.provenance` shipped green: the fact about the first walk
+      excused the second;
+    * a CLAUSE, plus an "an earlier clause counts when it binds a variable this
+      walk uses" escape — two escapes stayed green: `, (x)-[rr]->(y)` as a second
+      pattern of the same `MATCH` (no new clause, so no new segment), and a
+      `UNION` arm that REUSED a variable name from the first arm (the escape's
+      overlap came from the second arm's own `RETURN type(r)`);
+    * a WINDOW — this rule. Two hard boundaries, both of them things a walk's
+      bindings cannot cross: a `UNION` (each arm binds its OWN variables, so a
+      constraint in one says nothing about the other) and a top-level COMMA (a
+      second pattern in one `MATCH` matches independently, exactly as the escape's
+      own justification said).
+
+    The walk itself is `_walk_occurrences`, the census's positional form of
+    `_is_empty_pattern_read` — the same definition the derivation uses, so the net
+    can never check a shape the derivation does not call a walk (a bracket-less
+    `(n)--()`, or a comprehension after a `SET`).
     """
     census = _call_time_census()
-    starts = [match.start() for match in census._CLAUSE.finditer(query)]
-    bounds = sorted({0, *starts, len(query)})
-    segments = [query[bounds[i] : bounds[i + 1]] for i in range(len(bounds) - 1)]
+    arm_bounds = sorted({0, *_top_level_offsets(query, _UNION_CLAUSE), len(query)})
+    windows = [
+        (arm_bounds[i], arm_bounds[i + 1]) for i in range(len(arm_bounds) - 1)
+    ]
+    spans: list[tuple[int, int]] = []
+    for low, high in windows:
+        local = [low + offset for offset in _top_level_offsets(query[low:high], _COMMA)]
+        bounds = sorted({low, *local, high})
+        spans.extend((bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1))
+    covered = [query[low:high] for low, high in spans]
     return tuple(
-        (segment, tuple(segments[:index]))
-        for index, segment in enumerate(segments)
-        if segment.strip() and census._is_empty_pattern_read(segment)
+        covered[i]
+        for start in census._walk_occurrences(query)
+        for i, (low, high) in enumerate(spans)
+        if low <= start < high
     )
 
 
-def _pattern_variables(text: str) -> set[str]:
-    """The variable names a Cypher pattern binds — `(old:Source …)`, `(a)`, `(op)`."""
-    return {
-        name
-        for name in re.findall(r"\(\s*([A-Za-z_]\w*)\s*[:)\s]", text)
-        if name.upper()
-        not in {"MATCH", "OPTIONAL", "WHERE", "WITH", "RETURN", "SET", "DELETE"}
-    }
-
-
 def _unbounded_walks(query: str, facts: tuple[str, ...]) -> list[str]:
-    """The walk-bearing CLAUSES of `query` that NO stated fact bounds.
+    """The walk WINDOWS of `query` that NO stated fact bounds.
 
-    A fact bounds the walk whose clause it is written about. A fact in an EARLIER
-    clause of the same query also counts, but only when that clause binds a
-    variable this walk's pattern uses: `MATCH (old:Source {url:$u})` bounds a later
-    degree over `(old)-[x]-(y)`, while a constraint written for a DIFFERENT walk
-    does not, because Cypher matches each `MATCH` pattern independently.
+    A fact bounds only the walk it is written about — the window's own text — and
+    there is deliberately NO cross-window escape: `_walk_windows` records why both
+    forms of one (statement-wide, and earlier-clause-on-variable-overlap) were
+    measured open, and a walk whose bound is written in a DIFFERENT arm or pattern
+    of the same query is a walk nobody has stated a ground for.
 
-    This is the clause-scoped half of the fact check, and it exists because the
+    This is the per-walk half of the fact check, and it exists because the
     site-oriented half cannot see a second walk written into an already-registered
     query string: the derivation keys a site on `(symbol, line)`, so such a copy
     produces no new site, and a fact found ANYWHERE in the statement excused it.
     """
-    unbounded: list[str] = []
-    for segment, earlier in _walk_clauses(query):
-        if any(fact in segment for fact in facts):
-            continue
-        own = _pattern_variables(segment)
-        if any(
-            any(fact in prior for fact in facts)
-            and bool(own & _pattern_variables(prior))
-            for prior in earlier
-        ):
-            continue
-        unbounded.append(segment)
-    return unbounded
+    return [
+        window
+        for window in dict.fromkeys(_walk_windows(query))
+        if not any(fact in window for fact in facts)
+    ]
 
 
 def _uncarried_facts(facts: tuple[str, ...], text: str) -> list[str]:
@@ -3197,10 +3263,14 @@ def test_every_empty_pattern_entry_states_a_true_fact():
     * the SITE COUNT (`sites` fifth element) catches a walk added on its own line —
       a copy at the same `(symbol, line)` produces no new site, so the number cannot
       move, and that gap shipped a second walk on the first walk's fact;
-    * the CLAUSE net (`_unbounded_walks`) checks every walk-bearing clause of the
-      site's RESOLVED query, so a walk appended INSIDE an already-registered query
-      string has to carry a fact of its own — the `UNION MATCH (x)-[rr]->(y)`
-      copy of `sdk.provenance` now reds here, where the number stayed quiet;
+    * the WALK net (`_unbounded_walks`) checks every walk OCCURRENCE of the site's
+      RESOLVED query inside its own window (`_walk_windows`: a `UNION` arm or a
+      top-level comma ends a window), so a walk appended INSIDE an
+      already-registered query string has to carry a fact of its own — the
+      `UNION MATCH (x)-[rr]->(y)` copy of `sdk.provenance` reds here, where the
+      number stayed quiet, and so do the two escapes the earlier per-CLAUSE form
+      left open (a comma-separated pattern beside the registered walk, and a
+      `UNION` arm that reuses a variable name from the first arm);
     * the UNION net (`_uncarried_facts`) requires every recorded FACT to appear in
       some site, which is the direction an any-fact-per-site loop cannot express
       and which is what a retyped `_DEGREE` anchor (`(old:Source …)` → `(old)`)
@@ -3210,7 +3280,10 @@ def test_every_empty_pattern_entry_states_a_true_fact():
     module-level constants it names, over source with COMMENTS and PROSE STRINGS
     blanked (`_site_fact_text`): a fact satisfied by a comment is not a fact about
     executed code. The clause net reads the resolved query instead
-    (`_site_query_texts`), because that is the text the walk actually runs.
+    (`_site_query_texts`), because that is the text the walk actually runs, and it
+    bounds each walk OCCURRENCE inside its own window (`_walk_windows`) rather
+    than per statement or per clause — both coarser units were measured to let a
+    second walk ride on the first walk's fact.
     """
     census = _call_time_census()
     assert census.EMPTY_PATTERN, (
@@ -3255,16 +3328,17 @@ def test_every_empty_pattern_entry_states_a_true_fact():
         for line in lines:
             source_texts.append(_site_fact_text(rel, line))
             for query in _site_query_texts(file, symbol, line):
-                walks = _walk_clauses(query)
-                entry_walks += len(walks)
-                walks_checked += len(walks)
-                for segment in _unbounded_walks(query, facts):
+                windows = _walk_windows(query)
+                entry_walks += len(windows)
+                walks_checked += len(windows)
+                for window in _unbounded_walks(query, facts):
                     failures.append(
-                        f"  - {key}:{line} walks in the clause `{segment[:90]}` "
-                        f"and NO stated fact bounds THAT clause — a second walk "
-                        "written into an already-registered query string is a new "
-                        "reader of the edge, and it is not covered by the fact "
-                        "that bounds the walk beside it"
+                        f"  - {key}:{line} walks in the window `{window[:90]}` "
+                        f"and NO stated fact bounds THAT window — a second walk "
+                        "written into an already-registered query string (another "
+                        "`UNION` arm, or a comma-separated pattern beside the "
+                        "registered one) is a new reader of the edge, and it is "
+                        "not covered by the fact that bounds the walk beside it"
                     )
         if not entry_walks:
             failures.append(
@@ -3290,7 +3364,7 @@ def test_every_empty_pattern_entry_states_a_true_fact():
         "edge), or move the site to a §13 row."
     )
     assert walks_checked >= len(census.EMPTY_PATTERN), (
-        f"the clause net examined {walks_checked} walk clause(s) over "
+        f"the walk net examined {walks_checked} walk occurrence(s) over "
         f"{len(census.EMPTY_PATTERN)} entries — an entry whose walk the net "
         "cannot see is an entry whose reason nothing checks, so this floor is "
         "what keeps the per-clause half from going silent"
@@ -3400,17 +3474,17 @@ def test_a_walk_inside_an_already_registered_statement_is_unbounded():
         "properties(n) UNION MATCH (x)-[rr]->(y) RETURN type(rr), labels(y)[0], "
         "properties(y)"
     )
-    walks = _walk_clauses(query)
+    walks = _walk_windows(query)
     assert len(walks) == 2, (
-        f"the clause net found {len(walks)} walk-bearing clause(s) in a query that "
+        f"the walk net found {len(walks)} walk occurrence(s) in a query that "
         "carries two — a walk added beside a registered one inside ONE query "
         "string would then be invisible, which is the fail-open this net closes"
     )
-    assert any(fact in walks[0][0] for fact in facts), (
-        f"the FIRST walk is not the one the fact bounds: {walks[0][0]!r}"
+    assert any(fact in walks[0] for fact in facts), (
+        f"the FIRST walk is not the one the fact bounds: {walks[0]!r}"
     )
     unbounded = _unbounded_walks(query, facts)
-    assert unbounded == [walks[1][0]], (
+    assert unbounded == [walks[1]], (
         f"the appended walk is not reported as unbounded ({unbounded!r}) — the "
         "fact written about the first walk is vouching for it again"
     )
@@ -3440,6 +3514,155 @@ def test_a_walk_inside_an_already_registered_statement_is_unbounded():
     assert all(_unbounded_walks(q, facts) for q in derived_queries), (
         f"the appended walk is not unbounded through the site's RESOLVED query "
         f"({derived_queries!r}) — the net is reading source text, or the wrong line"
+    )
+
+
+def test_the_walk_window_ends_at_a_union_and_at_a_comma():
+    """The two escapes the per-CLAUSE form left open, each a live mutation shape.
+
+    ⚠️ **Measured on the per-CLAUSE cut, and BOTH shipped green there.** The clause
+    net segmented only at the census's `_CLAUSE` keyword, and let a fact in an
+    EARLIER clause count when that clause bound a variable the walk's text used.
+    The two shapes below are what that rule could not see:
+
+    * (a) a second pattern in the SAME `MATCH` — `, (x)-[rr]->(y)` introduces no
+      clause keyword, so no new segment was produced, and the whole segment carried
+      the registered walk's fact;
+    * (b) a `UNION` arm that REUSES a variable name from the first arm — the
+      first arm's `… RETURN type(r), labels(n)[0] …` re-mentions `n` and `r`, so the
+      overlap the escape tested was non-empty even though the second arm binds its
+      own `n` and matches its walk independently.
+
+    Each is asserted as a WINDOW (two windows, the second unbounded) AND through the
+    real derivation on a synthetic module — the site count cannot see either copy,
+    because both land at the same `(symbol, line)` as the registered walk.
+    """
+    census = _call_time_census()
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+
+    comma = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n), (x)-[rr]->(y) "
+        "RETURN type(r), labels(n)[0], type(rr)"
+    )
+    windows = _walk_windows(comma)
+    assert len(windows) == 2, (
+        f"the second pattern of one `MATCH` produced {len(windows)} window(s) — "
+        "it is a separate walk and the fact about its neighbour does not bound it"
+    )
+    assert any(fact in windows[0] for fact in facts), (
+        f"the registered walk is not the first window: {windows[0]!r}"
+    )
+    assert not any(fact in windows[1] for fact in facts), (
+        f"the comma-separated walk's window carries the neighbour's fact: "
+        f"{windows[1]!r} — the window boundary is not a top-level comma"
+    )
+    assert _unbounded_walks(comma, facts) == [windows[1]], (
+        f"the comma-separated walk is not reported unbounded "
+        f"({_unbounded_walks(comma, facts)!r}) — a second pattern beside a "
+        "registered one ships green again"
+    )
+
+    union = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), labels(n)[0], "
+        "properties(n) UNION MATCH (n)-[rr]->(m) RETURN type(rr), labels(m)[0], "
+        "properties(m)"
+    )
+    union_windows = _walk_windows(union)
+    assert len(union_windows) == 2, (
+        f"the second `UNION` arm produced {len(union_windows)} window(s) — an arm "
+        "binds its OWN variables, so the first arm's fact cannot bound it"
+    )
+    unbounded = _unbounded_walks(union, facts)
+    assert unbounded == [union_windows[1]], (
+        f"the reused-variable `UNION` arm is not reported unbounded "
+        f"({unbounded!r}) — a variable name shared with the first arm's `RETURN` "
+        "is being read as a bound"
+    )
+
+    comprehension = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) RETURN type(r), "
+        "[(x)-[rr]->(y) | type(rr)] AS pairs"
+    )
+    comp_windows = _walk_windows(comprehension)
+    assert len(comp_windows) == 2, (
+        f"a comprehension appended to the `RETURN` produced {len(comp_windows)} "
+        "window(s) — the census derives comprehensions as walks whatever clause "
+        "introduces them, so the net must demand a fact for this one too"
+    )
+    assert _unbounded_walks(comprehension, facts) == [comp_windows[1]], (
+        "the appended comprehension is vouched for by the registered walk's fact: "
+        f"{_unbounded_walks(comprehension, facts)!r}"
+    )
+
+    # The derivation half: no site-count can see any of these, because the copy
+    # lands on the already-registered line. Asserted on a synthetic module through
+    # the real derivation and the real resolver.
+    source = (
+        "def provenance(query):\n"
+        "    box = (\n"
+        '        "MATCH (s:Subject {id:$sid})-[r]->(n), (x)-[rr]->(y) "\n'
+        '        "RETURN type(r), type(rr)"\n'
+        "    )\n"
+        "    return query(box)\n"
+    )
+    file = census._File(Path("synthetic_comma.py"), "synthetic.py", source)
+    sites = census._empty_pattern_sites_in(file)
+    assert sites == {("provenance", 3)}, (
+        f"the comma-separated copy produced {sorted(sites)} — if it produced TWO "
+        "sites the COUNT would catch it and this fixture's premise would be wrong; "
+        "if it produced none the fixture is measuring nothing"
+    )
+    derived_queries = _site_query_texts(file, "provenance", 3)
+    assert derived_queries, (
+        "`_site_query_texts` resolved no query for a site the derivation reports — "
+        "the walk net would then check no walk at all"
+    )
+    assert all(_unbounded_walks(q, facts) for q in derived_queries), (
+        f"the comma-separated walk is not unbounded through the site's RESOLVED "
+        f"query ({derived_queries!r}) — the net is reading source text, or the "
+        "wrong line"
+    )
+
+
+def test_the_live_fact_corpus_is_the_stripped_source():
+    """The fact corpus is `_code_lines` — WIRED, not only unit-tested.
+
+    ⚠️ **`test_a_stated_fact_cannot_be_satisfied_by_prose` calls the stripper
+    directly, so nothing pinned its only production consumer.** Measured: reverting
+    `_site_fact_text`'s `lines = _code_lines(path)` to
+    `lines = tuple(path.read_text(encoding="utf-8").splitlines())` left every arm
+    green, because no live fact is comment-satisfiable TODAY — so the hole the
+    stripper closes would reopen silently on the next refactor of that function,
+    and this file's map item 24 would become false prose.
+
+    Asserted on the LIVE corpus: every live site's fact text is comment-free, and at
+    least ONE live site's statement carries a `#` comment in the raw source — so the
+    discriminator is live, and the arm reds if it ever stops being.
+    """
+    census = _call_time_census()
+    raw_carriers: list[str] = []
+    for rel, symbol, *_rest in census.EMPTY_PATTERN:
+        for line in census._empty_pattern_sites()[(rel, symbol)]:
+            path = PKG / rel.removeprefix("tortoise/")
+            span = _statement_span(_module_tree(path), line)
+            assert span is not None, (
+                f"`{_site_key(rel, symbol)}:{line}` has no statement span — the "
+                "raw-vs-stripped comparison below would measure nothing"
+            )
+            raw = path.read_text(encoding="utf-8").splitlines()
+            if "#" in "\n".join(raw[span[0] - 1 : span[1]]):
+                raw_carriers.append(f"{_site_key(rel, symbol)}:{line}")
+            text = _site_fact_text(rel, line)
+            assert "#" not in text, (
+                f"`{_site_key(rel, symbol)}:{line}` fact text carries a COMMENT "
+                "— the fact corpus is raw source again, so a fact can be "
+                "satisfied by prose that never runs. `_site_fact_text` must build "
+                "its text from `_code_lines`."
+            )
+    assert raw_carriers, (
+        "no live site's STATEMENT carries a comment, so the assertion above cannot "
+        "discriminate raw source from stripped source — the live discriminator "
+        "has moved, and this arm needs a new one before it can be trusted"
     )
 
 
