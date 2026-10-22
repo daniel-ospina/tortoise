@@ -1838,6 +1838,21 @@ def _pkg_session(h: dict) -> str:
     return ask_session_key(h)
 
 
+def _pkg_turn_key(h: dict) -> str:
+    """Slice A: a hit's ``source_turn_id`` as a COMPARABLE key, presence-gated.
+
+    ⛔ Not ``str(h.get("source_turn_id") or "")``: the turn index is **0-based**
+    (``commit_schema`` ``source_turn_id: int | None = Field(ge=0)``;
+    ``extractor_v2`` mints it with ``enumerate(conversation)``), so turn ``0`` is
+    a real turn and ``or ""`` erased it — the FIRST turn of every session could
+    never collapse through the same-source-turn leg. Absent means absent
+    (``None``, or the empty string FalkorDB's ``coalesce`` yields); ``0`` means
+    the first turn.
+    """
+    v = h.get("source_turn_id")
+    return "" if v is None else str(v)
+
+
 def _is_turn_point(h: dict) -> bool:
     """Slice A: True for a verbatim source TURN point (kind ``event`` or a
     ``[role] …`` content — the shape the deterministic leg writes turns as).
@@ -1944,8 +1959,8 @@ def _same_fact(a: dict, b: dict) -> bool:
     # never collapse (the aggregation numerator Slice B protects); a same-
     # turn quote pair that itself differs in a value is refused by the
     # quote-value guard below.
-    at = str(a.get("source_turn_id") or "")
-    bt = str(b.get("source_turn_id") or "")
+    at = _pkg_turn_key(a)
+    bt = _pkg_turn_key(b)
     if not (at and at == bt):
         return False
     qa = str(a.get("quote") or "")
