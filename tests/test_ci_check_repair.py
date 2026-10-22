@@ -379,14 +379,19 @@ def test_exit_zero_never_hides_an_unhandled_repair(monkeypatch):
                    for r in clean)
 
 
-# The two keys that green a run WITHOUT the step succeeding. `continue-on-error`
+# The keys that green a run WITHOUT the step succeeding. `continue-on-error`
 # is the obvious one; `if:` is the same green one line earlier — a SKIPPED job or
 # step concludes `success`, and #8254's whole failure mode is a required check
-# that nobody produced. The repo already bans the pair together in
-# `tests/test_ai_review_gate_contract.py` ("a {banned!r}-gated job reports
-# Success without evaluating any evidence"), so this is the established shape
-# rather than a new rule (#9365 review).
-_GREENING_KEYS = ("if", "continue-on-error")
+# that nobody produced. `needs:` is the third and the least obvious: a job whose
+# dependency was skipped is itself skipped, so `repair: needs: [<a job with
+# `if: false`>]` never runs the tool while the run concludes `success` — the same
+# fail-open, with neither of the first two keys present (#9365 re-review).
+# The repo already bans all three together in
+# `tests/test_ai_review_gate_contract.py` (`for banned in ("if", "needs",
+# "continue-on-error")`, "a {banned!r}-gated job reports Success without
+# evaluating any evidence"), so this is the established shape rather than a new
+# rule.
+_GREENING_KEYS = ("if", "needs", "continue-on-error")
 
 
 def _repair_step(job):
@@ -482,14 +487,26 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
 
     Reading the workflow through parsed YAML (rather than a substring window) is
     what makes the STRUCTURE half possible at all: a window anchored on the step's
-    `name:` cannot see a job-level key, which sits above that marker. It also
-    removes the old false red on an unrelated step further down the job that
-    legitimately sets `continue-on-error`.
+    `name:` cannot see a job-level key, which sits above that marker, and a
+    content-keyed step lookup survives a rename.
+
+    The key ban is applied to the ONE job this workflow has, and the job SET is
+    pinned too (#9365 re-review): banning keys on `repair` alone left
+    `repair: needs: [<a job with `if: false`>]` green — the dependency is skipped,
+    so `repair` is skipped, so the run concludes `success` and the fallback idles
+    while neither banned key appears on `repair` itself.
     """
     import yaml
 
     root = Path(__file__).resolve().parents[1]
     wf = yaml.safe_load((root / ".github/workflows/ci-check-repair.yml").read_text())
+    assert set(wf["jobs"]) == {"repair"}, (
+        "this workflow must carry exactly one job. A second job is not forbidden "
+        "for its own sake — it is forbidden because `repair: needs: [<it>]` skips "
+        "the repair whenever the other job is skipped, which greens the run "
+        "without the tool running (#9365). If a job genuinely has to be added, "
+        "extend this assertion deliberately and pin that it cannot skip. "
+        f"jobs={sorted(wf['jobs'])}")
     job = wf["jobs"]["repair"]
 
     for banned in _GREENING_KEYS:
@@ -506,32 +523,22 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
 
     # Behaviour: the exit code the step hands GitHub, whatever the shell spelling.
     #
-    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` has two —
-    # 1 (a PR needs a user credential) and 2 (`_could_not_measure`, the single
-    # exit-2 path) — and `workflow_state()` maps both to `ran-not-succeeded`, so
-    # both ARE the coverage signal; the record measures 5 of its 73 reds as exit 2.
+    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` has two
+    # exit-2 paths — `_could_not_measure` (a failed measurement) and the <3.12
+    # interpreter guard at the top of the module, which raises `SystemExit(2)`
+    # before the rest of the tool is even imported — and `workflow_state()` maps
+    # exit 2 to `ran-not-succeeded` just like exit 1, so both ARE the coverage
+    # signal; the record measures 5 of its 73 reds as exit 2.
     # Probing exit 1 alone let `[ "$rc" = 2 ] && rc=0` green that entire class
     # while this test stayed green: the window then reads `covered`, the local
     # fallback goes idle, and nobody produces the required checks (#9365 review).
     #
     # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
     # class must default to propagate, never to green. If a future arm greens one,
-    # the coverage signal has to move in the same commit — that is what this
-    # assertion says, and it is why it is not a plain (1, 2) enumeration.
-    script = step["run"]
-    # EVERY non-zero class, not the two spellings a reviewer would probe by hand.
-    # `tools/ci_check_repair.py` has two — 1 (a PR needs a user credential) and 2
-    # (`_could_not_measure`, the single exit-2 path) — and `workflow_state()` maps
-    # both to `ran-not-succeeded`, so both ARE the coverage signal; the record
-    # measures 5 of its 73 reds as exit 2. Probing exit 1 alone let
-    # `[ "$rc" = 2 ] && rc=0` green that entire class while this test stayed
-    # green (#9365 re-review).
-    #
-    # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
-    # class must default to propagate, never to green. If a future arm greens one,
     # the coverage signal has to move in the same commit.
     #
     # A FRESH tmp_path per call: the stub journals its argv into it.
+    script = step["run"]
     for tool_rc in (1, 2, 3):
         r, argv, summary_body = _run_repair_step(script, tmp_path / f"rc{tool_rc}", tool_rc)
         assert not r.stderr, (

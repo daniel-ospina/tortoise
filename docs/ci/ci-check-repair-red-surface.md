@@ -99,15 +99,20 @@ Two tests, because the coupling has two ends and pinning one proves nothing abou
 `tests/test_ci_check_repair.py::test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone`
 holds the **workflow** end, in two different ways:
 
-- **structure** — neither `continue-on-error` **nor** `if:` may appear at the **job** level or on the
-  repair step. Both conclude `success` without the repair succeeding: `continue-on-error` tolerates
-  the failure, and a skipped job or step is not a failure at all. `if:` is the same green one line
-  earlier, which is why it is banned alongside `continue-on-error` (the shape
-  `tests/test_ai_review_gate_contract.py` already uses for the same reason);
+- **structure** — neither `continue-on-error`, nor `if:`, nor `needs:` may appear at the **job** level
+  or on the repair step, and the workflow must carry no job other than `repair`. All three keys
+  conclude `success` without the repair succeeding: `continue-on-error` tolerates the failure, a
+  skipped job or step is not a failure at all, and `needs:` skips the job whenever its dependency
+  skipped — so `repair: needs: [<a job with `if: false`>]` never runs the tool and yet greens the
+  run. `if:` is the same green one line earlier, which is why it is banned alongside
+  `continue-on-error` (the shape `tests/test_ai_review_gate_contract.py` already uses for the same
+  reason, and it bans all three);
 - **behaviour** — the step's own shell is EXECUTED against a stubbed interpreter, and must hand back
   every non-zero class the tool can produce: `1` when the tool exits `1`, `2` when it exits `2`
-  (`_could_not_measure` is the single exit-2 path, and `workflow_state()` maps it to
-  `ran-not-succeeded` just like exit 1, so it is the coverage signal too — 5 of the 73 reds above),
+  (`_could_not_measure` is the exit-2 path for a *failed measurement*, and the <3.12 interpreter
+  guard at `tools/ci_check_repair.py:118-128` raises `SystemExit(2)` before the rest of the tool is
+  imported, so exit 2 has two sources; `workflow_state()` maps the class to `ran-not-succeeded` just
+  like exit 1, so it is the coverage signal too — 5 of the 73 reds above),
   and an unknown future class as well, which must default to propagate rather than green. `0` when it
   exits `0`. This is the half a text pin cannot do:
   `declare -i rc=0` *after* the assignment, `[ "$rc" -ne 0 ] && rc=0` and `printf -v rc 0` all force
@@ -135,7 +140,8 @@ This is not redundant with `workflow_state`'s own polarity test — `workflow_co
 unconditionally makes the fallback permanently idle while every classifier assertion still passes.
 
 Mutation-tested, each vector one at a time: job-level and step-level `continue-on-error`, job-level and
-step-level `if:`, `rc=0` after the pipeline, `declare -i rc=0` placed **after** the assignment,
+step-level `if:`, a second job with `if: false` that `repair` declares `needs:` on,
+`rc=0` after the pipeline, `declare -i rc=0` placed **after** the assignment,
 `[ "$rc" -ne 0 ] && rc=0`, `printf -v rc 0`, `[ "$rc" = 2 ] && rc=0` (the exit-2 class),
 `--apply` dropped from the step, and `workflow_covered()` returning `0` — all red; a renamed step
 stays green. Placement matters in both directions: `declare -i rc=0` **before** the pipeline is
