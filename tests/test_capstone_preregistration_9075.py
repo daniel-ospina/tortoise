@@ -1464,10 +1464,19 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #: from another ref, or drop a stub `python3` onto `PATH`, without touching the gate step at all.
 #: Nothing else pins this job's step list, so each sibling's whole definition is pinned: any edit
 #: here reds the pin and must be re-cut deliberately. Moving the gate to a peer job means declaring
-#: that job here; an undeclared owner is a violation, not a pass. Re-cut with:
+#: that job here; an undeclared owner is a violation, not a pass.
+#:
+#: The required aggregate (`python-ci-gate`) is declared here for the same reason, one scope out:
+#: its job-level `env:`/`defaults.run.*` refusals cannot see a step APPENDED to the job, and a
+#: membership test over its script cannot see that script being replaced by one that still carries
+#: the marker words (`echo 'needs.*.result failure'`) while the real sweep is deleted. Its steps are
+#: therefore pinned by whole-definition digest too — no sentinel, because that job has exactly one
+#: step and every byte of it is load-bearing.
+#:
+#: Re-cut with (set `job` to the job whose step list changed):
 #: `python3 -c "import json,hashlib,yaml; w=yaml.safe_load(open('.github/workflows/python-ci.yml'));
-#: print([(s.get('uses') or s.get('name'), hashlib.sha256(json.dumps(s,sort_keys=True,
-#: ensure_ascii=False).encode()).hexdigest()) for s in w['jobs']['changes']['steps']])"`
+#: job='changes'; print([(s.get('uses') or s.get('name'), hashlib.sha256(json.dumps(s,sort_keys=True,
+#: ensure_ascii=False).encode()).hexdigest()) for s in w['jobs'][job]['steps']])"`
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1486,6 +1495,13 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),
         ("Secrets scan (evidence artifacts,",
          "81dbfb18f5279f51455a71da92c66a6754fa01a497df1b43be5f974af62569ce"),
+    ),
+    # The only `merge_condition`'s own step: a step added here exports `BASH_ENV` through
+    # `$GITHUB_ENV` for the aggregate step, and replacing this step with a marker-carrying `echo`
+    # deletes the whole failure sweep. Both leave every other check in this pin clean.
+    "python-ci-gate": (
+        ("Aggregate matrix result",
+         "ea95699a4b934a6bf5852a0b35cec1be7b2e89a473b935753fcafe22ab121a5c"),
     ),
 }
 
@@ -1507,6 +1523,55 @@ def _step_digest(step: dict) -> str:
     return hashlib.sha256(
         json.dumps(step, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
+
+
+def _step_set_violation(job: dict, job_label: str, expected_steps, sentinel=None) -> str | None:
+    """`None` when the job's step list IS the declared one, else the message saying how it differs.
+
+    `sentinel` is the gate step, whose own definition is pinned by its allow-list (so an
+    `if: always()` guard or an `id:`/`timeout-minutes` stays permitted) while its POSITION is pinned
+    here; every other step is compared by WHOLE definition. A name+first-token signature is not a
+    signature: a sibling that keeps both and rewrites its script still neutralises the gate, and
+    the required aggregate's only step can be replaced by an `echo` that carries the marker words
+    while the real failure sweep is deleted (both measured).
+    """
+    got = [
+        (str(s.get("uses") or s.get("name") or "<unnamed>"),
+         _GATE_SENTINEL if s is sentinel else _step_digest(s))
+        for s in job.get("steps") or []
+    ]
+    if got == list(expected_steps):
+        return None
+    # Counter, not `dict`: two steps can share a label, and a `dict` would collapse them —
+    # so a step ADDED under an existing label would read as an empty added/removed pair and
+    # be reported as an ordering problem, misdescribing exactly the malicious case.
+    got_labels = Counter(label for label, _ in got)
+    expected_labels = Counter(label for label, _ in expected_steps)
+    expected_by_label = dict(expected_steps)
+    got_by_label = dict(got)
+    added = sorted((got_labels - expected_labels).elements())
+    removed = sorted((expected_labels - got_labels).elements())
+    rewritten = sorted(
+        label for label in set(got_labels) & set(expected_labels)
+        if got_labels[label] == expected_labels[label]
+        and got_by_label[label] != expected_by_label[label]
+    )
+    if added or removed or rewritten:
+        return (
+            f"{job_label}'s steps changed — added {added}, removed "
+            f"{removed}, rewritten {rewritten}: a sibling step can rewrite the tool or "
+            "restore the evidence tree from another ref without touching the gate step's "
+            "shape (if the edit is intended, re-cut this allow-list deliberately)"
+        )
+    # Same steps, different order: the message must still say what changed, or it reads
+    # as a violation that names nothing (a step moved above the checkout/gate is not
+    # cosmetic — a step before the gate can rewrite the tree it evaluates).
+    return (
+        f"{job_label}'s steps are out of order — got "
+        f"{[label for label, _ in got]}, expected "
+        f"{[label for label, _ in expected_steps]}: a step placed before the gate step "
+        "can rewrite the tree it evaluates"
+    )
 
 
 def _loose_pin_holds(workflow: dict) -> bool:
@@ -1545,7 +1610,9 @@ def ci_ordering_half_violations(workflow: dict) -> list[str]:
     code; no scope above it hooks the interpreter or shell (`env:`, `defaults.run.*`) or adds a step
     outside the declared set; the owning job checks out at `fetch-depth: 0` (the ordering half reads
     commit epochs) and feeds the required aggregate; and that aggregate can still report a red leg —
-    it is the only required context, so a silenced aggregate is a merge-green red gate.
+    it is the only `merge_condition`, so a silenced aggregate is a merge-green red gate. That
+    aggregate gets the same treatment one scope out: its job keys, its STEP-key allow-list, and its
+    STEP LIST pinned by whole definition.
 
     Split out of the pin so each silencing idiom can be tested in the failing direction: a
     membership assertion cannot see `|| true`, and that is exactly the defect this closes.
@@ -1650,43 +1717,9 @@ def ci_ordering_half_violations(workflow: dict) -> list[str]:
             "shape clean"
         )
     else:
-        got = [
-            (str(s.get("uses") or s.get("name") or "<unnamed>"),
-             _GATE_SENTINEL if s is step else _step_digest(s))
-            for s in job.get("steps") or []
-        ]
-        if got != list(expected_steps):
-            # Counter, not `dict`: two steps can share a label, and a `dict` would collapse them —
-            # so a step ADDED under an existing label would read as an empty added/removed pair and
-            # be reported as an ordering problem, misdescribing exactly the malicious case.
-            got_labels = Counter(label for label, _ in got)
-            expected_labels = Counter(label for label, _ in expected_steps)
-            expected_by_label = dict(expected_steps)
-            got_by_label = dict(got)
-            added = sorted((got_labels - expected_labels).elements())
-            removed = sorted((expected_labels - got_labels).elements())
-            rewritten = sorted(
-                label for label in set(got_labels) & set(expected_labels)
-                if got_labels[label] == expected_labels[label]
-                and got_by_label[label] != expected_by_label[label]
-            )
-            if added or removed or rewritten:
-                violations.append(
-                    f"the `{job_name}` job's steps changed — added {added}, removed "
-                    f"{removed}, rewritten {rewritten}: a sibling step can rewrite the tool or "
-                    "restore the evidence tree from another ref without touching the gate step's "
-                    "shape (if the edit is intended, re-cut this allow-list deliberately)"
-                )
-            else:
-                # Same steps, different order: the message must still say what changed, or it reads
-                # as a violation that names nothing (a step moved above the checkout/gate is not
-                # cosmetic — a step before the gate can rewrite the tree it evaluates).
-                violations.append(
-                    f"the `{job_name}` job's steps are out of order — got "
-                    f"{[label for label, _ in got]}, expected "
-                    f"{[label for label, _ in expected_steps]}: a step placed before the gate step "
-                    "can rewrite the tree it evaluates"
-                )
+        step_set = _step_set_violation(job, f"the `{job_name}` job", expected_steps, sentinel=step)
+        if step_set:
+            violations.append(step_set)
 
     checkouts = [
         s for s in job.get("steps") or [] if str(s.get("uses", "")).startswith("actions/checkout")
@@ -1718,9 +1751,9 @@ def ci_ordering_half_violations(workflow: dict) -> list[str]:
         )
 
     # The SINK. `needs` membership says a red leg FEEDS the aggregate; it says nothing about the
-    # aggregate still being able to report it — and the aggregate is the ONLY required context
-    # (`.mergify.yml` merge_conditions, `docs/ci/required-contexts.json`), so silencing it turns a
-    # red ordering half into a merge-green PR with every producer-side check still green.
+    # aggregate still being able to report it — and the aggregate is the ONLY `merge_condition`
+    # (`.mergify.yml`; it is one of 7 contexts in `docs/ci/required-contexts.json`), so silencing it
+    # turns a red ordering half into a merge-green PR with every producer-side check still green.
     if gate_job.get("if") not in _ALWAYS_RUN:
         violations.append(
             f"the `{gate_name}` job must be `if: always()` (got {gate_job.get('if')!r}): on the "
@@ -1753,6 +1786,29 @@ def ci_ordering_half_violations(workflow: dict) -> list[str]:
     if "container" in gate_job:
         violations.append(
             f"a `container:` on the `{gate_name}` job replaces the image the aggregate runs in"
+        )
+    # The sink's STEP LIST is a scope the per-step key allow-list below cannot see: a step APPENDED
+    # to the job carries only `name`/`run`, and its `run:` can write `BASH_ENV=` into `$GITHUB_ENV`
+    # (or a stub directory into `$GITHUB_PATH`) for the aggregate step, which is non-interactive
+    # bash and therefore sources `$BASH_ENV` before its script. A membership test over the
+    # aggregate's script is blind in the same way: the whole failure sweep can be replaced by an
+    # `echo` that still contains the marker words. So the aggregate's steps are pinned by whole
+    # definition, exactly as the gate's owner job is (`_step_set_violation`).
+    sink_step_set = _step_set_violation(
+        gate_job, f"the `{gate_name}` job", _EXPECTED_JOB_STEPS[gate_name])
+    if sink_step_set:
+        violations.append(sink_step_set)
+    sink_shims = sorted(
+        str(s.get("name") or s.get("uses") or "<unnamed>")
+        for s in gate_job.get("steps") or []
+        if "GITHUB_PATH" in _code(s) or "GITHUB_ENV" in _code(s)
+    )
+    if sink_shims:
+        violations.append(
+            f"a step on `{gate_name}` writes `$GITHUB_PATH`/`$GITHUB_ENV` ({sink_shims}) — a "
+            "`BASH_ENV`/`PATH` export from a preceding step hooks the aggregate itself, whose "
+            "`run:` is non-interactive bash, so it exits 0 on a red leg and the only "
+            "`merge_condition` certifies the merge"
         )
     # The sink's STEPS are a scope of their own, and the one the aggregate's own `env:` refusal
     # above cannot see: `env:` is a per-step key too, and the aggregate's `run:` is non-interactive
@@ -1821,6 +1877,9 @@ _EXPECTED_MESSAGE = {
     "a job-level `container:`": "container:",
     "a workflow-level PATH shim": "on python-ci.yml",
     "a job-level `defaults.run.working-directory`": "defaults.run.working-directory",
+    # `defaults.run.*` at WORKFLOW scope, not just on the job: same hook, one scope up.
+    "a workflow-level `defaults.run.shell`": "defaults.run.shell` on python-ci.yml",
+    "a workflow-level `defaults.run.working-directory`": "defaults.run.working-directory` on python-ci.yml",
     # The `env:` KEY allow-list, not just a `PATH` test: every one of these is the same hook
     # under the next key over, and each must be refused by the key it names.
     "a workflow-level `BASH_ENV` hook": "BASH_ENV",
@@ -1837,7 +1896,19 @@ _EXPECTED_MESSAGE = {
     # The runner is the same knob `container:` is refused for.
     "a `runs-on:` swap on the gate's job": "runs-on",
     "a `runs-on:` swap on the required aggregate": "runs-on",
-    # The SINK: the aggregate is the only required context, so it must be able to report a red leg.
+    # The SINK: the aggregate is the only `merge_condition`, so it must be able to report a red leg.
+    # Its own knobs are the highest-stakes branches here: a skipped or `continue-on-error`'d
+    # aggregate certifies nothing.
+    "an `if: success()` on the required aggregate": "must be `if: always()`",
+    "a `continue-on-error: true` on the required aggregate": "continue-on-error",
+    "a `container:` on the required aggregate": "replaces the image",
+    # The sink's STEP LIST and its shim scan: a step APPENDED to the aggregate job exports
+    # `BASH_ENV`/`PATH` for the aggregate step, and a membership test cannot see the sweep replaced
+    # by an `echo` that still carries the marker words.
+    "a `$GITHUB_ENV` writer step on the aggregate": "$GITHUB_ENV",
+    "a `$GITHUB_PATH` writer step on the aggregate": "$GITHUB_PATH",
+    "an aggregate step that writes `$GITHUB_ENV` in place": "$GITHUB_ENV",
+    "an aggregate step replaced by marker-carrying `echo`s": "rewritten [",
     "an aggregate `defaults.run.shell`": "defaults.run.shell",
     "an aggregate `env:` hook": "BASH_ENV",
     # The sink's STEPS are a separate scope: the job-level `env:` refusal above cannot see these.
@@ -1954,6 +2025,39 @@ def _mutations():
             "steps"][0].__setitem__("if", "false"),
         "an aggregate stripped of the failure sweep": lambda w: w["jobs"]["python-ci-gate"][
             "steps"].__setitem__(0, {"name": "Aggregate matrix result", "run": "echo ok"}),
+        # The sink's STEP LIST — the one scope the aggregate's per-step key allow-list cannot see.
+        # A step appended to the job carries only `name`/`run`, and its `run:` exports `BASH_ENV`
+        # (or a shim directory) for the aggregate step, which is non-interactive bash.
+        "a `$GITHUB_ENV` writer step on the aggregate": lambda w: w["jobs"][
+            "python-ci-gate"]["steps"].insert(0, {
+                "name": "Prepare env",
+                "run": 'echo "BASH_ENV=.ci/hook.sh" >> $GITHUB_ENV'}),
+        "a `$GITHUB_PATH` writer step on the aggregate": lambda w: w["jobs"][
+            "python-ci-gate"]["steps"].append({
+                "name": "Prepare path", "run": "echo /tmp/shim >> $GITHUB_PATH"}),
+        # …and the same write hidden INSIDE the declared step, where the step set is unchanged.
+        "an aggregate step that writes `$GITHUB_ENV` in place": lambda w: w["jobs"][
+            "python-ci-gate"]["steps"][0].__setitem__(
+                "run", w["jobs"]["python-ci-gate"]["steps"][0]["run"]
+                + '\necho "BASH_ENV=.ci/hook.sh" >> $GITHUB_ENV'),
+        # Membership vs whole definition: the marker words survive, the sweep does not. Every
+        # marker test in the pin was green on this before the step list was digest-pinned.
+        "an aggregate step replaced by marker-carrying `echo`s": lambda w: w["jobs"][
+            "python-ci-gate"]["steps"].__setitem__(
+                0, {"name": "Aggregate matrix result",
+                    "run": "echo 'needs.*.result failure'"}),
+        # The sink's own job-level knobs: each of them certifies nothing while it is set.
+        "an `if: success()` on the required aggregate": lambda w: w["jobs"][
+            "python-ci-gate"].__setitem__("if", "success()"),
+        "a `continue-on-error: true` on the required aggregate": lambda w: w["jobs"][
+            "python-ci-gate"].__setitem__("continue-on-error", True),
+        "a `container:` on the required aggregate": lambda w: w["jobs"][
+            "python-ci-gate"].__setitem__("container", "stub:latest"),
+        # `defaults.run.*` one scope ABOVE the job-level cases: same hook, same exit code.
+        "a workflow-level `defaults.run.shell`": lambda w: w.setdefault(
+            "defaults", {}).__setitem__("run", {"shell": "bash -c 'true'"}),
+        "a workflow-level `defaults.run.working-directory`": lambda w: w.setdefault(
+            "defaults", {}).__setitem__("run", {"working-directory": "tools"}),
         # Same name, same first `run:` token, different script — the case a name+token signature
         # could not see (`_step_digest` pins the sibling's whole definition instead).
         "a sibling rewritten in place": rewritten_sibling,
@@ -1969,12 +2073,15 @@ def test_the_ci_pin_rejects_every_silencing_idiom(label):
     Every case keeps the gate's command string present, so the old membership assertion stayed
     green while the check could never fail a PR; the strict pin must name the violation.
 
-    Every branch of the pin that can leave the gate GREEN has a case here. The one branch without
-    one — "the job must check out the repo" — is the opposite shape: deleting the `changes`
-    checkout reds the job instead of greening the gate, and the PRE-FIX pin already refused it,
-    the same way it already refused a shallow checkout
-    (`test_the_ci_pin_still_catches_a_shallow_checkout`), so claiming it here as a pre-fix hole
-    would overstate the gap.
+    Every branch of the pin that can leave the gate GREEN has a case here — including, one scope
+    out, the SINK's: a step appended to `python-ci-gate` that exports `BASH_ENV`/`PATH` through
+    `$GITHUB_ENV`/`$GITHUB_PATH`, its aggregate step rewritten into a marker-carrying `echo`, and
+    each of the aggregate job's own knobs (`if:`, `continue-on-error:`, `container:`) — plus
+    `defaults.run.*` at WORKFLOW scope. The one branch without a case — "the job must check out the
+    repo" — is the opposite shape: deleting the `changes` checkout reds the job instead of greening
+    the gate, and the PRE-FIX pin already refused it, the same way it already refused a shallow
+    checkout (`test_the_ci_pin_still_catches_a_shallow_checkout`), so claiming it here as a pre-fix
+    hole would overstate the gap.
 
     The `if: always()` allow-list has its own positive case
     (`test_the_ci_pin_allows_an_always_guard_on_the_gate_step`) so it cannot become dead code
