@@ -2112,26 +2112,64 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_worktree_path_substring_still_blocks_for_a_non_claim_branch_name(self):
         # ⛔ THE NARROWNESS IS THE SAFETY PROPERTY. Only the shape a lane uses to
-        # CLAIM an issue (`<type>/<number>-<slug>`) can contradict the path. A
-        # number that is not a claim — a date, a version — must not cancel it,
-        # or a reused worktree whose branch says `chore/bump-2024-10` would read
-        # a live lane as free. This is the fail-closed direction: a false CLEAN
-        # is strictly worse than a false COLLISION.
-        # ⛔ THE METRIC/SIZE NAMESPACES ARE CONTROL CASES, not filler: a
-        # fresh-context review found that an earlier, wider prefix list read
-        # `perf/1200-rps-cache` and `ci/1800-timeout` as ISSUE claims, so a real
-        # PATH hit would have been cancelled by a number that names no issue.
+        # CLAIM an issue (`fix/<n>-<slug>` / `feat/<n>-<slug>`) can contradict
+        # the path. A number that is not a claim — a date, a version, a metric —
+        # must not cancel it, or a reused worktree whose branch says
+        # `chore/bump-2024-10` would read a live lane as free.
+        #
+        # ⛔ EVERY CASE IS ASSERTED ON ITS OWN LINE, because worktrees ACCUMULATE
+        # in this fixture repo: a cumulative `assertNotEqual(rc, 0)` passed off an
+        # EARLIER subtest's blocking hit, so the widening it was supposed to catch
+        # was invisible (found in #9540's review cycle 2). The label line is
+        # unique per case, so this pins the CURRENT one.
         for i, branch in enumerate((f"chore/bump-2024-10", f"release-1.2.3",
-                                    f"fix/{ISSUE}1-lookalike",
                                     "perf/1200-rps-cache", "ci/1800-timeout",
-                                    "chore/5000-graph-cleanup",
-                                    "feat/2048-batch")):
+                                    "chore/5000-graph-cleanup")):
             with self.subTest(branch=branch):
-                self.add_worktree(f"wt-{ISSUE}-nonclaim-{i}", branch=branch)
+                name = f"wt-{ISSUE}-nonclaim-{i}"
+                self.add_worktree(name, branch=branch)
                 rc, out = self.run_tool()
+                label = f"{name} [refs/heads/{branch}]"
+                line = next((l for l in out.splitlines() if label in l), "")
+                self.assertTrue(line, f"no row for {label!r}\n{out}")
+                self.assertIn(f"matched issue-number ({ISSUE})", line)
+                self.assertNotIn("its PATH contains", line)
                 self.assertNotEqual(rc, 0, f"branch={branch!r}\n{out}")
                 self.assertIn("VERDICT: COLLISION", out)
-                self.assertIn(f"matched issue-number ({ISSUE})", out)
+
+    def test_a_branch_number_that_is_not_the_issue_does_not_cancel_the_path(self):
+        # `fix/3061cafe-mine` NAMES this issue (`number_present` matches 3061 —
+        # the digits LEAD a hex-looking run, #3611), so the branch itself is the
+        # claim and the path hit stands. Same line-scoped assertion as above.
+        branch = f"fix/{ISSUE}cafe-mine"
+        name = f"wt-{ISSUE}-lead-hex"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_worktree_path_substring_demotes_for_any_other_issue_claim(self):
+        # The demotion is a POSITIVE rule, not a special case for one example:
+        # any `<fix|feat>/<n>-<slug>` that names a DIFFERENT issue contradicts the
+        # path. `feat/2048-batch` is included deliberately — under the narrow
+        # prefix rule `feat/<n>-` IS a claim, and the cycle-1 finding was about
+        # `perf/`-style namespaces, not this. Pinned per-line, like the controls.
+        for i, branch in enumerate((f"fix/9397-about-edge-properties",
+                                    "feat/2048-batch",
+                                    f"fix/{ISSUE}1-lookalike")):
+            with self.subTest(branch=branch):
+                name = f"wt-{ISSUE}-claim-{i}"
+                self.add_worktree(name, branch=branch)
+                rc, out = self.run_tool()
+                label = f"{name} [refs/heads/{branch}]"
+                line = next((l for l in out.splitlines() if label in l), "")
+                self.assertTrue(line, f"no row for {label!r}\n{out}")
+                self.assertIn("its PATH contains", line)
+                self.assertIn("non-blocking", line)
 
     def test_branch_names_other_issue_reads_only_the_claim_shape(self):
         # Unit pin on the helper, so a later refactor of the worktree scan cannot
