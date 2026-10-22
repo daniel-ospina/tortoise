@@ -7041,5 +7041,14 @@ if not getattr(mcp, "_retired_tool_transform_registered", False):
     mcp.add_transform(_RetiredToolTransform(_RETIRED_SHIMS))
     mcp._retired_tool_transform_registered = True
 
+# #9494: baseline the WHOLE startup graph at startup. `monitoring` already
+# pulled `code_freshness` in (so the graph loaded up to that point is recorded),
+# but `tool_registry`, `mcp_auth`, `quota` and the rest load much later in this
+# module body — without this call they would only be observed by the first
+# `check()` (a health call, which on a long-lived server can be days away), and
+# an edit to them in between would read as clean. Measured: 25 of the 58
+# `tortoise.*` modules a server loads were outside the baseline before this.
+_code_freshness.observe()
+
 if __name__ == "__main__":
     main()

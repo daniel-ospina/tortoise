@@ -1,57 +1,76 @@
 """#9494: which module files this process loaded, and whether the repo moved on.
 
-A long-lived process imports its module graph **once**. The MCP server, the
-HTTP daemon and the standalone health server have no expiry, so a process
-started six days ago keeps answering from the files it read then. Measured on
-2026-10-21: four live ``tortoise.mcp_server`` processes, the oldest started
-**2d 4h before** ``_ledger_record`` was added to ``tortoise/sdk.py`` — so every
+A long-lived process imports its module graph **once**. The MCP server, the HTTP
+daemon and the standalone health server have no expiry, so a process started six
+days ago keeps answering from the files it read then. Measured on 2026-10-21:
+four live ``tortoise.mcp_server`` processes, the oldest started **2d 4h before**
+``_ledger_record`` was added to ``tortoise/sdk.py`` — so every
 ``mcp__tortoise__*`` call failed with
 
     cannot import name '_ledger_record' from 'tortoise.sdk'
 
-which reads as "the code is broken". The code was fine. The *process* was
-stale, and nothing anywhere said so — no health field, no log line, and the
-error named a symbol that exists in the repo.
+which reads as "the code is broken". The code was fine. The *process* was stale,
+and nothing anywhere said so — no health field, no log line, and the error named
+a symbol that exists in the repo.
 
 This module makes that state OBSERVABLE and nothing more. It does not restart,
-reload or refuse: those are runtime decisions (a reload can mid-flight break
-every lane sharing the server, and a refuse-to-serve turns a stale process into
-an outage). What it does is the part that was missing — a measurement.
+reload or refuse: those are runtime decisions (a reload can mid-flight break every
+lane sharing the server, and a refuse-to-serve turns a stale process into an
+outage). What it does is the part that was missing — a measurement.
 
-The measurement is a **per-module first-observation baseline**: the first time
-this process sees a loaded ``tortoise`` module, its file's ``(mtime_ns, size)``
-is recorded; ``check()`` re-stats every recorded file and reports the ones that
-no longer match. Comparing against a per-module baseline (rather than "the file
-is newer than process start") is what keeps a LAZILY imported module honest: a
-module imported at 10:05 that was edited at 10:04 is FRESH, and a start-time
-comparison would wrongly call it stale.
+## What is measured
 
-Known, documented window: a module that is imported and then edited *before*
-this process's first ``check()`` after that import is recorded at its edited
-state, so that edit is not seen. Shrinking it to zero would need an import
-hook; the smallest fix for the reported failure (a symbol added days into a
-long-lived server) does not, and ``observe()`` is called at import time of
-``tortoise.monitoring`` and ``tortoise.mcp_server`` so the window is
-call-scoped, never session-scoped.
+A **per-module first-observation baseline**: the first time this process sees a
+loaded ``tortoise`` module, its file's ``(mtime_ns, size)`` is recorded; a later
+``check()`` re-stats every recorded file and reports the ones that no longer
+match. Per-module rather than "the file is newer than process start" is
+load-bearing: a module imported at 10:05 that was edited at 10:04 is FRESH, and a
+start-time comparison would call it stale and hand the reader a restart that
+cannot change anything.
 
-Consumers (see the #9494 wiring):
+Because mtime alone would false-alarm on a **content-identical rewrite** — which
+is routine in this fleet (``git checkout <branch>``, ``git stash``/``lane_stash.py
+pop``, ``git rebase`` all rewrite files byte-identically) — a mismatched stat is
+then compared by **content digest**. A rewrite that left the bytes identical is
+not drift: the process is serving exactly the repo's current code, so the stat
+baseline is re-armed and the file is counted in ``mtime_only`` instead of
+``changed``. Digest computation is deferred to the first ``check()`` (stat still
+matching ⇒ the bytes are the ones that were loaded), so importing this module
+costs a handful of ``stat`` calls, never a read of the package.
+
+The baseline covers the graph that the README of this fix cares about: the
+serving entrypoints call :func:`observe` at the END of their module body
+(``tortoise.mcp_server``), so every module the server loaded at startup is
+baselined at startup. Modules imported lazily at call time are baselined by the
+next ``check()`` after that import; an edit inside that window is not seen. That
+window is documented rather than closed with an import hook: closing it costs a
+hook on every import in the process for a case the reported failure does not
+need.
+
+## Consumers (see the #9494 wiring)
 
 * ``monitoring.metrics()`` → ``server_code`` — what ``tortoise_health`` and
   ``serve_health`` serve, so the first health call an agent makes can say
-  "stale".
-* ``mcp_server._safe`` — an ``ImportError``/``AttributeError`` raised by a
-  stale process is answered with the measured drift AND the restart, instead of
-  a symbol name that sends the reader into a correct file.
+  "stale" before the first failing call does.
+* ``mcp_server._safe`` — an ``ImportError``/``AttributeError`` that NAMES a
+  module which actually drifted is answered with the drift AND the restart,
+  instead of a symbol name that sends the reader into a correct file. The
+  attribution is by PROVENANCE (the module the failure names), never by exception
+  class alone: a ``ModuleNotFoundError`` (an absent extra), a ``NoneType``
+  ``AttributeError``, or a symbol miss in a module that did NOT drift keeps
+  reading as the code defect it is.
 
 Scope, stated so it is not assumed: the HOSTED app builds its own ``/health``
-dict (``hosted_api``) and does not route through ``monitoring.metrics()``, so
-that endpoint does not carry ``server_code`` — the surfaces this reaches are
+dict (``hosted_api``) and does not route through ``monitoring.metrics()``, so that
+endpoint does not carry ``server_code`` — the surfaces this reaches are
 ``tortoise_health`` (MCP, stdio and HTTP) and ``monitoring.serve_health``.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -63,11 +82,13 @@ _PACKAGE = "tortoise"
 #: When this process began. Reported so a stale report can be read as an AGE.
 _STARTED_AT = time.time()
 
-#: ``module name -> (file, mtime_ns, size)`` as first observed by this process.
-_baseline: dict[str, tuple[str, int, int]] = {}
+#: ``module name -> (file, mtime_ns, size, content digest | None)`` as first
+#: observed by this process. The digest is filled in lazily by ``check()``.
+_baseline: dict[str, tuple[str, int, int, str | None]] = {}
 _baseline_at: float | None = None
-#: ``(module, disk_mtime_ns, disk_size)`` already warned about — one WARNING
-#: per distinct drift, never one per health call.
+#: ``(module, disk_mtime_ns, disk_size)`` already warned about — one WARNING per
+#: distinct drift, never one per health call. Bounded: a process that drifts
+#: hundreds of times must not grow this without limit.
 _warned: set[tuple[str, int | None, int | None]] = set()
 _WARNED_CAP = 512
 _lock = threading.Lock()
@@ -81,17 +102,10 @@ HINT = (
     "current code — the symbol you are looking for may exist on disk already."
 )
 
-
-def _compose_hint(names: list[str], process_started: str | None) -> str:
-    """The report's ``hint``: WHICH modules drifted, how old the process is,
-    and the fix. A hint that does not name the drifted module leaves the reader
-    exactly where the issue's ``ImportError`` did — guessing."""
-    shown = ", ".join(sorted(names))
-    return (
-        f"STALE PROCESS (not stale code): this server imported {shown} at start "
-        f"and {'they have' if len(names) > 1 else 'it has'} changed on disk since "
-        f"(process started {process_started}). {HINT}"
-    )
+#: The two symbol-shaped failure messages a stale process produces, and the
+#: module each one NAMES (the provenance the hint is gated on).
+_CANNOT_IMPORT = re.compile(r"cannot import name .* from '([\w.]+)'")
+_NO_ATTRIBUTE = re.compile(r"module '([\w.]+)' has no attribute")
 
 
 def _stat(path: str) -> tuple[int, int] | None:
@@ -103,11 +117,25 @@ def _stat(path: str) -> tuple[int, int] | None:
     return (st.st_mtime_ns, st.st_size)
 
 
+def _digest(path: str) -> str | None:
+    """A content digest for ``path`` (16-byte blake2b), or ``None`` unreadable.
+
+    Only ever called from ``check()`` — never from ``observe()`` — so importing
+    this module reads no source files. 16 bytes is ample for equality here: the
+    comparison is between two snapshots of the same file, not a security check.
+    """
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.blake2b(fh.read(), digest_size=16).hexdigest()
+    except OSError:
+        return None
+
+
 def _package_files() -> list[tuple[str, str]]:
     """``(module name, .py file)`` for every loaded ``tortoise`` module.
 
-    Source files only: an extension module (``.so``) has no meaningful
-    "newer source" relation, and a namespaceless module carries no ``__file__``.
+    Source files only: an extension module (``.so``) has no meaningful "newer
+    source" relation, and a namespace module carries no ``__file__``.
     """
     out: list[tuple[str, str]] = []
     for name, module in list(sys.modules.items()):
@@ -123,9 +151,10 @@ def _package_files() -> list[tuple[str, str]]:
 def observe() -> int:
     """Record a baseline for every loaded module not yet observed.
 
-    Returns the number of modules newly recorded. Called at import time by the
-    serving entrypoints (``tortoise.monitoring``, ``tortoise.mcp_server``) and
-    at the start of every :func:`check`.
+    Returns the number of modules newly recorded. The serving entrypoints call
+    this at the END of their module body (``tortoise.mcp_server``) so the whole
+    startup graph is baselined at startup rather than at the first health call,
+    and :func:`check` calls it again to pick up lazily imported modules.
     """
     global _baseline_at
     added = 0
@@ -136,11 +165,16 @@ def observe() -> int:
             st = _stat(path)
             if st is None:
                 continue
-            _baseline[name] = (path, st[0], st[1])
+            _baseline[name] = (path, st[0], st[1], None)
             added += 1
         if added and _baseline_at is None:
             _baseline_at = time.time()
     return added
+
+
+def _tracked_names() -> list[str]:
+    with _lock:
+        return sorted(_baseline)
 
 
 def tracked() -> list[str]:
@@ -151,17 +185,16 @@ def tracked() -> list[str]:
     detail, the coverage is not.
     """
     observe()
-    with _lock:
-        return sorted(_baseline)
+    return _tracked_names()
 
 
 def _display_path(path: str) -> str:
     """The repo-relative spelling of a tracked file, never an absolute one.
 
     ``metrics()`` is served to TENANTS (the ``tortoise_health`` MCP tool over
-    HTTP), so an absolute ``/Users/<operator>/.../.venv/...`` path in the
-    payload leaks the host's layout and user name. Two components is enough to
-    identify a drift (``tortoise/sdk.py``) and carries nothing about the host.
+    HTTP), so an absolute ``/Users/<operator>/...`` path in the payload leaks the
+    host's layout and user name. Two components identify the file
+    (``tortoise/sdk.py``) and carry nothing about the host.
     """
     parts = path.replace(os.sep, "/").split("/")
     return "/".join(parts[-2:]) if len(parts) >= 2 else path
@@ -171,6 +204,61 @@ def _iso(ts: float | None) -> str | None:
     if ts is None:
         return None
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def _compose_hint(names: list[str], process_started: str | None) -> str:
+    """WHICH modules drifted, how old the process is, and the fix.
+
+    A hint that does not name the drifted module leaves the reader exactly where
+    the issue's ``ImportError`` did — guessing.
+    """
+    shown = ", ".join(sorted(names))
+    return (
+        f"STALE PROCESS (not stale code): this server imported {shown} at start "
+        f"and {'they have' if len(names) > 1 else 'it has'} changed on disk since "
+        f"(process started {process_started}). {HINT}"
+    )
+
+
+def _drifted() -> tuple[list[dict], int]:
+    """The FULL drift list (never capped) plus the content-identical count.
+
+    ``check()`` caps what it publishes; ``staleness_hint()`` needs the whole set
+    to decide whether a failure's named module is one that actually drifted.
+    """
+    observe()
+    with _lock:
+        items = list(_baseline.items())
+    changed: list[dict] = []
+    mtime_only = 0
+    for name, (path, mtime_ns, size, blake) in items:
+        st = _stat(path)
+        if st == (mtime_ns, size):
+            if blake is None:
+                # Deferred: establish the baseline digest now. The stat still
+                # matches, so these bytes ARE the bytes that were loaded.
+                fresh = _digest(path)
+                if fresh is not None:
+                    with _lock:
+                        _baseline[name] = (path, mtime_ns, size, fresh)
+            continue
+        disk_digest = _digest(path) if st is not None else None
+        if st is not None and blake is not None and disk_digest == blake:
+            # A content-identical rewrite (git checkout / stash round-trip /
+            # rebase): the bytes did not move, so this is NOT drift. Re-arm the
+            # stat baseline so the next real edit is measured from here.
+            mtime_only += 1
+            with _lock:
+                _baseline[name] = (path, st[0], st[1], blake)
+            continue
+        changed.append({
+            "module": name,
+            "file": _display_path(path),
+            "loaded_mtime": _iso(mtime_ns / 1e9),
+            "disk_mtime": _iso(st[0] / 1e9) if st is not None else None,
+            "removed": st is None,
+        })
+    return changed, mtime_only
 
 
 def check() -> dict:
@@ -184,69 +272,83 @@ def check() -> dict:
          "tracked": int,                    # module files compared
          "changed": [{module, file, loaded_mtime, disk_mtime, removed}],
                                             # `file` is repo-relative, never absolute
-         "changed_count": int,              # len(changed) is capped at 20
-         "hint": str | None}                # the restart, when stale
+         "changed_count": int,              # `changed` is capped at 20
+         "mtime_only": int,                 # content-identical rewrites, NOT drift
+         "hint": str | None}                # which modules drifted + the restart
+
+    ``mtime_only`` exists so the mtime-vs-content distinction is VISIBLE: a
+    rewrite that left the bytes identical is reported as such instead of being
+    either a false alarm or a silent pass.
     """
-    observe()
+    changed, mtime_only = _drifted()
     with _lock:
-        items = list(_baseline.items())
-    changed: list[dict] = []
-    fresh_drifts: list[tuple[str, int | None, int | None, str | None]] = []
-    for name, (path, mtime_ns, size) in items:
-        st = _stat(path)
-        if st is not None and st == (mtime_ns, size):
-            continue
-        disk_mtime = st[0] if st else None
-        disk_size = st[1] if st else None
-        loaded_iso = _iso(mtime_ns / 1e9)
-        changed.append({
-            "module": name,
-            "file": _display_path(path),
-            "loaded_mtime": loaded_iso,
-            "disk_mtime": _iso(disk_mtime / 1e9) if disk_mtime is not None else None,
-            "removed": st is None,
-        })
-        fresh_drifts.append((name, disk_mtime, disk_size, loaded_iso))
-    for name, disk_mtime, disk_size, loaded_iso in fresh_drifts:
-        key = (name, disk_mtime, disk_size)
+        tracked_count = len(_baseline)
+    for row in changed:
+        key = (row["module"], row["disk_mtime"], row["file"])
         if key in _warned or len(_warned) >= _WARNED_CAP:
             continue
         _warned.add(key)
         _log.warning(
             "STALE PROCESS: %s changed on disk since this process imported it "
             "(%s -> %s). %s",
-            name,
-            loaded_iso or "?",
-            _iso(disk_mtime / 1e9) if disk_mtime is not None else "removed",
-            HINT,
+            row["module"], row["loaded_mtime"],
+            row["disk_mtime"] or "removed", HINT,
         )
     started = _iso(_STARTED_AT)
     return {
         "stale": bool(changed),
         "process_started_at": started,
         "baseline_at": _iso(_baseline_at),
-        "tracked": len(items),
+        "tracked": tracked_count,
         "changed": changed[:20],
         "changed_count": len(changed),
+        "mtime_only": mtime_only,
         "hint": _compose_hint([row["module"] for row in changed], started) if changed else None,
     }
 
 
+def _named_module(exc: BaseException) -> str | None:
+    """The MODULE a symbol-shaped failure names — the hint's provenance.
+
+    ``None`` means "this failure names no module we could have loaded", which is
+    the fail-safe direction: an unrelated error must never be relabelled.
+    """
+    # A ``ModuleNotFoundError`` is an ``ImportError``, but it means the module is
+    # ABSENT (a ``uv sync`` without the extra), and no restart can create it.
+    if isinstance(exc, ModuleNotFoundError):
+        return None
+    if isinstance(exc, ImportError):
+        name = getattr(exc, "name", None)
+        if isinstance(name, str) and name:
+            return name
+        match = _CANNOT_IMPORT.search(str(exc))
+        return match.group(1) if match else None
+    if isinstance(exc, AttributeError):
+        # Only the MODULE-shaped message carries provenance. `'NoneType' object
+        # has no attribute 'get'` names no module, and answering it with
+        # "restart the server" would steer the reader away from a real bug.
+        match = _NO_ATTRIBUTE.match(str(exc))
+        return match.group(1) if match else None
+    return None
+
+
 def staleness_hint(exc: BaseException) -> str | None:
-    """A restart hint for a symbol-shaped failure **only when drift is measured**.
+    """A restart hint for a failure whose NAMED module has actually drifted.
 
     The reported failure — ``cannot import name '_ledger_record' from
     'tortoise.sdk'`` — names a symbol that exists in the repo, so the reader is
-    sent into a correct file. This answers the same failure with the measurement
-    instead. ``None`` when the process is not stale: an ``ImportError`` on a
-    FRESH process is a real code defect and must keep reading as one.
+    sent into a correct file. This answers that failure with the measurement
+    instead. ``None`` when the named module is not a drifted one: a symbol miss
+    on a FRESH process (or in a module that did not move) is a real code defect
+    and must keep reading as one.
     """
-    if not isinstance(exc, (ImportError, AttributeError)):
+    owner = _named_module(exc)
+    if owner is None:
         return None
-    report = check()
-    if not report["stale"]:
+    drifted, _ = _drifted()
+    if not any(row["module"] == owner for row in drifted):
         return None
-    return report["hint"]
+    return _compose_hint([row["module"] for row in drifted], _iso(_STARTED_AT))
 
 
 def _reset_for_tests() -> None:
@@ -258,7 +360,12 @@ def _reset_for_tests() -> None:
         _baseline_at = None
 
 
-# The earliest observation this module can make: everything already imported
-# when the serving entrypoint pulls this in (``tortoise.monitoring`` imports it,
-# and ``mcp_server`` imports monitoring, so this runs before either serves).
+# The earliest observation this module can make, taken the moment a serving
+# entrypoint pulls it in (`tortoise.monitoring` imports it, and `mcp_server`
+# imports monitoring). `tortoise.mcp_server` calls `observe()` again at the END
+# of its module body so the whole startup graph — including modules imported long
+# after monitoring (`tool_registry`, `mcp_auth`, `quota`) — is baselined at
+# startup, not at the first health call. Without that second call 25 of the 58
+# modules a server loads would be baselined days later, i.e. their edits would be
+# invisible for exactly the window #9494 is about.
 observe()
