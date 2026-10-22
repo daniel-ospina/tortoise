@@ -66,6 +66,19 @@ POLICY_ROW = re.compile(r"^\|\s*\*\*(S\d+(?:\.\d+)?)")
 PIN_HEADER_MARKER = "Code citations — revision pin"
 BASE_PIN = "c79ba1cf2"
 _PIN_TOKEN = re.compile(r"`([0-9a-f]{7,40})`")
+#: The pin's evidence says how many cited files are OUT OF RANGE at the base pin
+#: (`five of the cited files are shorter at `c79ba1cf2``). The count and the
+#: enumeration beside it must agree — see
+#: `test_the_pin_evidence_counts_exactly_the_files_it_names` (#9654 review P2).
+_SHORTER_COUNT_CLAIM = re.compile(
+    r"(?P<count>[a-z]+)\s+of\s+(?:the|these)\s+(?:cited\s+)?files\s+are\s+shorter",
+    re.I)
+#: The number words that claim uses, so the guard can compare against a list.
+_COUNT_WORDS = {word: value for value, word in enumerate(
+    ["zero", "one", "two", "three", "four", "five", "six", "seven",
+     "eight", "nine", "ten"])}
+#: A backticked `*.py` name — how the enumeration spells the files.
+_ENUMERATED_PY = re.compile(r"`([A-Za-z0-9_./-]+\.py)`")
 #: `file.py:NNNN` — the citation form the header's rule governs.
 _CODE_CITATION = re.compile(r"`?[A-Za-z0-9_./-]+\.py:\d+`?")
 #: `§4.N` followed on the SAME line by a failure direction — a pointer that
@@ -296,6 +309,43 @@ def test_the_state_of_code_citation_names_its_revision_pin():
 # ── a failure policy must be POINTED AT where it is declared (#5333 review) ──
 
 
+def test_the_pin_evidence_counts_exactly_the_files_it_names():
+    """P2 (review of #9654): the stated count must match the enumeration.
+
+    BOTH statements of the pin's evidence — the header's fourth-pin clause and
+    the subsection's own pin line — say how many cited files are shorter at
+    `c79ba1cf2`. The pre-fix header said "three" and named no file at all, and
+    the pin test's own docstring said "three" while naming four (`sdk.py`,
+    `assembly.py`, `projection/entities.py`, `projection/__init__.py`) and
+    omitting `commit_ops.py`, which the subsection cites at `:51`, `:59` and
+    `:1408` and whose vocabulary the whole passage rests on: a lane refreshing
+    the pin would re-check the named files and leave it silently unverified.
+
+    This guards INTERNAL CONSISTENCY, not the measured truth (five was measured
+    at both refs when the pin was added) — the count a reader can check against
+    the list beside it is the cheapest falsifier, and a new citation has to
+    update both together, which is the point.
+    """
+    text = _document()
+    claims = list(_SHORTER_COUNT_CLAIM.finditer(text))
+    assert len(claims) >= 2, (
+        "the pin's evidence no longer states a count of shorter files in both "
+        "the header AND the subsection — re-point this guard at whichever "
+        f"passage now carries it ({len(claims)} occurrence(s)): #5333"
+    )
+    for claim in claims:
+        expected = _COUNT_WORDS[claim.group("count").lower()]
+        tail = text[claim.end():claim.end() + 400]
+        stop = tail.find(")")
+        names = _ENUMERATED_PY.findall(tail if stop == -1 else tail[:stop])
+        assert len(names) == expected, (
+            f"this sentence says {expected} cited files are shorter at "
+            f"`{BASE_PIN}` but enumerates {len(names)}: {names}. Name every "
+            "out-of-range file and update the count — a lane refreshing the pin "
+            "re-checks exactly the names given here (#5333)."
+        )
+
+
 def _g5_destructive_half() -> str:
     """§4.3's relocation subsection, bounded by the next `###` heading."""
     text = _document()
@@ -394,10 +444,10 @@ def test_the_relocation_subsection_citations_name_their_revision_pin():
 
     The header pins every `file.py:NNNN` to `c79ba1cf2` *except where a passage
     names a later pin*. The subsection's citations are HEAD numbers: at the base
-    pin three of the cited files (`sdk.py`, `assembly.py`,
-    `projection/entities.py`, `projection/__init__.py`) are shorter than the
-    cited line and `tortoise/definite_description_backfill.py` does not exist at
-    all — so an unpinned passage is not a *stale* citation, it is no citation.
+    pin five of the cited files (`sdk.py`, `assembly.py`, `projection/entities.py`,
+    `projection/__init__.py`, `commit_ops.py`) are shorter than the cited line and
+    `tortoise/definite_description_backfill.py` does not exist at all — so an
+    unpinned passage is not a *stale* citation, it is no citation.
     The passage pins the measurement ONCE for the whole subsection (that is its
     shape: a measurement-scope pin, not a per-line one), and the header must
     list that pin among its exceptions so an adopter can find it.
