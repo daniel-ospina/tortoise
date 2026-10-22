@@ -137,6 +137,11 @@ def _load_json(path: Path, what: str) -> object:
 def _dump_json(payload: object, path: Path | None, what: str) -> None:
     text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     if path is None:
+        if sys.stdout is None:
+            # fd 1 closed (`>&-`): `sys.stdout` is None, and `None.write` is an
+            # AttributeError — the module's own standard is a message, not a
+            # traceback.
+            raise SystemExit(f"could not write {what} to stdout: standard output is closed")
         sys.stdout.write(text)
         return
     try:
@@ -204,6 +209,15 @@ def _load_revert_plan(path: Path, dump: dict) -> LegacyIdPlan:
     payload = _load_json(path, "plan")
     if not isinstance(payload, dict) or not isinstance(payload.get("renames"), list):
         raise SystemExit(f"plan is not a report this tool wrote: {path}")
+    if not payload.get("renames"):
+        # The same class as a missing fingerprint, and the same home: the SNAPSHOT
+        # is fine, the PLAN cannot undo anything. Exit 1 (usage/IO), not 2 — a
+        # wrapper keying `2 == the snapshot is not safe` must not be pointed at a
+        # healthy dump. `apply_plan` still refuses this at the API level.
+        raise SystemExit(
+            f"plan is not a plan to undo: {path} — it carries no renames (a no-op "
+            "pass, or a revert report); the ids it did not rename are not in it"
+        )
     if not payload.get("dump_sha256"):
         # Without the fingerprint the revert has no proof it restored the
         # original ARTIFACT, so `apply_plan` would refuse it — that is a
@@ -239,6 +253,46 @@ def _load_revert_plan(path: Path, dump: dict) -> LegacyIdPlan:
         census=census(dump),
         dump_sha256=str(payload.get("dump_sha256") or ""),
     )
+
+
+def _overwrite_blocker(path: Path, report: dict, flag: str) -> str | None:
+    """Why writing ``report`` to ``path`` would lose the only way back, or None.
+
+    A pass may legitimately rewrite its OWN plan (a re-run of step 2 over the
+    same dump is byte-identical), so the test is the fingerprint, not existence.
+    ``dump_sha256`` is the ORIGINAL artifact's fingerprint in both an apply and a
+    revert report, which is what makes the two comparable across modes.
+    """
+    if path is None:
+        return None  # a dry run with no --report: it writes to stdout
+    try:
+        if not path.is_file():
+            # A sink (`/dev/null`, a pipe, a terminal) or a missing path: nothing
+            # to protect, and reading a pipe here would hang.
+            return None
+        earlier = _load_json(path, "report")
+    except SystemExit:
+        return None  # not a report this tool wrote: nothing of ours to lose
+    if not isinstance(earlier, dict):
+        return None
+    earlier_renames = earlier.get("renames")
+    if not isinstance(earlier_renames, list) or not earlier_renames:
+        return None
+    if not report["renamed"]:
+        return (
+            f"this pass renames nothing and would overwrite {path} "
+            f"({len(earlier_renames)} recorded rename(s)) — that is the only record of "
+            f"the ids it renamed; pass a different {flag}"
+        )
+    if earlier.get("dump_sha256") not in (None, report.get("dump_sha256")):
+        return (
+            f"{path} is the plan for a DIFFERENT snapshot "
+            f"({str(earlier.get('dump_sha256'))[:16]}… vs this dump's "
+            f"{str(report.get('dump_sha256'))[:16]}…) and holds "
+            f"{len(earlier_renames)} rename(s) — overwriting it would leave that pass "
+            f"unrevertible; pass a different {flag}"
+        )
+    return None
 
 
 def _summary(report: dict) -> str:
@@ -379,10 +433,19 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, OSError, ValueError):
         stdout_identity = None  # a captured or closed stdout: no file identity
     if stdout_identity is not None and stdout_identity in seen:
-        parser.error(
-            f"standard output is redirected to the same file as {seen[stdout_identity]}: "
-            "the report would overwrite an artifact — redirect to a separate path"
-        )
+        collided = seen[stdout_identity]
+        # ⛔ `--report /dev/stdout > plan.json` in a dry run / `--apply` IS the
+        # report's one destination: the report is the only thing on stdout, so
+        # naming it twice is one write to one file, not a collision. Only a
+        # SECOND artifact on that file is destructive — `--dump` (reading what it
+        # overwrites), `--out` (two artifacts, one file), and `--report` in
+        # REVERT mode (there it is a different artifact: the plan being read).
+        destructive = collided != "--report" or args.revert
+        if destructive:
+            parser.error(
+                f"standard output is redirected to the same file as {collided}: "
+                "the report would overwrite an artifact — redirect to a separate path"
+            )
 
     dump = _load_json(args.dump, "dump")
     if not isinstance(dump, dict):
@@ -415,24 +478,33 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 2
 
+    # ⛔ THE REPORT WRITE MUST NOT DESTROY A PLAN THAT UNDOES A DIFFERENT PASS —
+    # in EVERY mode, not only `--apply`. Two measured routes that exited 0
+    # before this guard, and a third that existed one mode over:
+    #   0. a DRY RUN over the normalised snapshot with the same `--report`
+    #      overwrites the apply-time plan with `mode: dry-run` (this is why the
+    #      check cannot live inside the `--apply` branch);
+    #   1. a re-run of documented step 2 over an already-normalised snapshot
+    #      renames nothing and writes `renames: []` over the report holding
+    #      every original id;
+    #   2. a second pass over a DIFFERENT dump with the same `--report`
+    #      overwrites that report with its own renames — the first pass's
+    #      original ids then survive in NO file.
+    # The ids are not re-derivable (`entity_name_id` is a sha256), and after
+    # `rm snapshot` (the documented workflow) the report is the only way back.
+    # So the check runs before EVERY report write and compares FINGERPRINTS: the
+    # same dump's plan may be rewritten (byte-identical — a re-run is harmless),
+    # a different dump's may not.
+    if not args.revert:
+        blocked = _overwrite_blocker(args.report, report, "--report")
+        if blocked is None and out is not None:
+            blocked = _overwrite_blocker(args.out, report, "--out")
+        if blocked is not None:
+            print("REFUSED — nothing was written:", file=sys.stderr)
+            print(f"  - {blocked}", file=sys.stderr)
+            return 2
+
     if out is not None:
-        # ⛔ APPLY must not destroy a plan that can undo a previous pass. A
-        # re-run of the documented step 2 over an already-normalised snapshot
-        # renames nothing and would write `renames: []` over the report that
-        # holds every original id — and those ids are not re-derivable
-        # (`entity_name_id` is a sha256). Refuse before anything is written.
-        if not args.revert and not report["renamed"] and args.report.exists():
-            earlier = _load_json(args.report, "report")
-            earlier_renames = earlier.get("renames") if isinstance(earlier, dict) else None
-            if isinstance(earlier_renames, list) and earlier_renames:
-                print("REFUSED — nothing was written:", file=sys.stderr)
-                print(
-                    f"  - this pass renames nothing and would overwrite {args.report} "
-                    f"({len(earlier_renames)} recorded rename(s)) — that report is the "
-                    "only way back; pass a different --report",
-                    file=sys.stderr,
-                )
-                return 2
         # ⛔ In APPLY mode the report is an OUTPUT, written FIRST: if the snapshot
         # write fails, the plan that can undo it must already exist on disk.
         # ⛔ In REVERT mode `--report` is an INPUT — it is the plan being undone —

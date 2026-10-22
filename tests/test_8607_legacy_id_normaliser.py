@@ -1116,7 +1116,9 @@ def test_a_report_with_no_renames_cannot_pose_as_an_undo(tmp_path):
             revert=True,
         )
     assert any("carries no renames" in p for p in exc.value.problems)
-    assert (
+    # Exit 1 (usage/IO), not 2: the SNAPSHOT is healthy, the PLAN cannot undo
+    # anything — the same class as a report with no fingerprint, and the same home.
+    with pytest.raises(SystemExit) as exc2:
         main(
             [
                 "--dump",
@@ -1128,8 +1130,7 @@ def test_a_report_with_no_renames_cannot_pose_as_an_undo(tmp_path):
                 str(tmp_path / "b.json"),
             ]
         )
-        == 2
-    )
+    assert "carries no renames" in str(exc2.value.code)
     assert not (tmp_path / "b.json").exists()
 
 
@@ -1267,3 +1268,136 @@ def test_stdout_redirected_onto_the_snapshot_is_refused(tmp_path):
         os.dup2(saved, 1)
         os.close(saved)
     assert not target.exists() or "nodes" not in target.read_text(encoding="utf-8")
+
+
+def test_a_second_pass_over_a_different_dump_cannot_overwrite_the_first_plan(tmp_path):
+    """The P1: two passes, one `--report`, the first pass's ids lost.
+
+    Measured before the guard: pass 1 over dump A writes plan.json; `rm` the dump
+    (the documented workflow — the plan IS the way back); pass 2 over dump B with
+    the same `--report` overwrites it, exits 0, and A's original ids then survive
+    in no file. `entity_name_id` is a sha256, so they are not re-derivable.
+    """
+    from tools.legacy_id_normalise import main
+
+    def write(path, prefix):
+        rows = [_node(i, ["Point"], id=f"{prefix}-{i}") for i in range(1, 4)]
+        path.write_text(
+            json.dumps(
+                {
+                    "format": "tortoise-logical-dump-v1",
+                    "dump_revision": 2,
+                    "node_count": 3,
+                    "edge_count": 0,
+                    "nodes": rows,
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    dump_a, dump_b = tmp_path / "a.json", tmp_path / "b.json"
+    write(dump_a, "alpha-legacy")
+    write(dump_b, "beta-legacy")
+    report = tmp_path / "plan.json"
+    assert (
+        main(
+            [
+                "--dump",
+                str(dump_a),
+                "--apply",
+                "--out",
+                str(tmp_path / "na.json"),
+                "--report",
+                str(report),
+            ]
+        )
+        == 0
+    )
+    first = report.read_text(encoding="utf-8")
+    assert "alpha-legacy-1" in first
+    assert (
+        main(
+            [
+                "--dump",
+                str(dump_b),
+                "--apply",
+                "--out",
+                str(tmp_path / "nb.json"),
+                "--report",
+                str(report),
+            ]
+        )
+        == 2
+    )
+    assert report.read_text(encoding="utf-8") == first, "the first pass's plan survived"
+    assert not (tmp_path / "nb.json").exists()
+
+
+def test_the_same_dumps_plan_may_be_rewritten(tmp_path):
+    """The guard must NOT block a re-run of the same pass — that is byte-identical."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    report = tmp_path / "plan.json"
+    out = tmp_path / "n.json"
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    first = report.read_text(encoding="utf-8")
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    assert report.read_text(encoding="utf-8") == first
+
+
+def test_a_report_on_device_that_is_not_a_file_is_not_read(tmp_path):
+    """`--report /dev/null` on a no-op pass must not be read (nor refused).
+
+    The guard reads the existing report to compare fingerprints; reading a sink
+    is either a false refusal (`/dev/null` is not valid JSON) or a hang (a pipe).
+    """
+    from tools.legacy_id_normalise import main
+
+    normalised = tmp_path / "norm.json"
+    normalised.write_text(json.dumps(_dump()), encoding="utf-8")
+    out = tmp_path / "o.json"
+    assert (
+        main(["--dump", str(normalised), "--apply", "--out", str(out), "--report", "/dev/null"])
+        == 0
+    )
+
+
+def test_the_report_may_be_named_as_stdout_in_a_dry_run(tmp_path, capsys):
+    """`--report /dev/stdout > plan.json` is ONE write to one file, not a collision."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    target = tmp_path / "plan.json"
+    saved = os.dup(1)
+    try:
+        with open(target, "w", encoding="utf-8") as handle:
+            os.dup2(handle.fileno(), 1)
+            assert main(["--dump", str(dump_path), "--report", "/dev/stdout"]) == 0
+    finally:
+        os.dup2(saved, 1)
+        os.close(saved)
+    assert json.loads(target.read_text(encoding="utf-8"))["renamed"] == _renamed_population()
+
+
+def test_a_dry_run_over_the_normalised_snapshot_cannot_wipe_the_apply_plan(tmp_path):
+    """The same destruction, one mode over: step 1 re-measured on step 2's output."""
+    from tools.legacy_id_normalise import main
+
+    dump_path = tmp_path / "dump.json"
+    dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
+    out, report = tmp_path / "n.json", tmp_path / "plan.json"
+    assert (
+        main(["--dump", str(dump_path), "--apply", "--out", str(out), "--report", str(report)]) == 0
+    )
+    before = report.read_text(encoding="utf-8")
+    assert json.loads(before)["mode"] == "apply"
+    assert main(["--dump", str(out), "--report", str(report)]) == 2
+    assert report.read_text(encoding="utf-8") == before, "the apply plan survived a dry run"
