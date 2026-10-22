@@ -57,11 +57,23 @@ RECEIPTS = REPO_ROOT / "tests/eval/write_path/receipts"
 # The receipt that recorded the historical 0/4 — the one #9077 exists to
 # supersede. It is COMMITTED, so this is a regression on real evidence.
 HISTORICAL_0_OF_4 = RECEIPTS / "w2b-phaseg-llm-2026-09-08-2514corpus.json"
-# The E4 receipt this issue produces: 2/15 wired+persisted on the REAL path,
-# 13 misses individually named, measured at `6164c683c`. Its `date` field is
-# 2026-10-19T01:39Z UTC = 2026-10-18 local, which is why an earlier filename
-# carried the 18th; the file is named after the receipt's own date.
-E4_RECEIPT = RECEIPTS / "w2b-operator-2026-10-19.json"
+# The E4 receipt the epic's closing rule reads. Two artifacts, and the SECOND
+# is the one that must pass the checker:
+#
+#   * `w2b-operator-2026-10-19.json` — the #9520 measurement (2/15 wired +
+#     persisted, 13 misses named) at `6164c683c`. It publishes only the COUNT
+#     of provenanced operators, so it is REFUSED by name on the #9569 rule
+#     (`operators_provenanced_ids` absent on a run with wired edges). It stays
+#     committed as the recorded artifact of that gap — see the README.
+#   * `w2b-operator-2026-10-22.json` — #9569's regeneration from a real run at
+#     `e3017cd00`, which publishes the provenanced id set the checker binds
+#     every `edge_op_ids` entry against. Its `date` field is
+#     ../../2026-10-22T03:02Z UTC, so the filename and the receipt agree.
+E4_RECEIPT = RECEIPTS / "w2b-operator-2026-10-22.json"
+# The pre-#9569 artifact: kept because it is the evidence FOR the issue (a
+# fabricated, shape-valid `edge_op_ids` entry passed it) and it must keep
+# failing the new rule rather than quietly disappearing.
+PRE_9569_RECEIPT = RECEIPTS / "w2b-operator-2026-10-19.json"
 
 
 # ── fixture builders ────────────────────────────────────────────────────────
@@ -967,3 +979,41 @@ def test_checker_rejects_a_provenanced_set_larger_than_its_own_count(field):
     receipt["operator_audit"]["operators_provenanced_ids"] = sorted(
         {_op_id("a"), _op_id("b")})
     assert "E4-FORMING" in _failures(_check(receipt))
+
+
+# ── #9569 on REAL artifacts, not fixtures ───────────────────────────────────
+
+
+def test_the_committed_receipt_binds_every_wired_edge_to_a_provenanced_id():
+    """The regenerated artifact, read as an auditor would: every operator node a
+    wired edge names is a member of the published set, and the set's size IS
+    the count published beside it (one predicate, one number)."""
+    receipt = json.loads(E4_RECEIPT.read_text(encoding="utf-8"))
+    audit = receipt["operator_audit"]
+    prov_ids = audit["operators_provenanced_ids"]
+    assert prov_ids, "the regenerated receipt publishes no provenanced id set"
+    assert len(prov_ids) == len(set(prov_ids)) == audit["operators_provenanced"]
+    assert len(prov_ids) <= audit["operators_total"]
+    wired = [d for d in audit["results"].values() if d.get("edge_correct")]
+    assert wired, "fixture drift: the E4 receipt no longer wires any edge"
+    for edge in wired:
+        assert edge["edge_op_ids"], edge["id"]
+        assert set(edge["edge_op_ids"]) <= set(prov_ids), edge["id"]
+
+
+def test_the_pre_9569_receipt_is_refused_for_its_missing_provenanced_set():
+    """The issue's own artifact must keep failing the rule it motivated — the
+    2026-10-19 receipt publishes the COUNT (`27/27`) and no ids, which is
+    exactly why a fabricated name passed it. It stays committed as evidence of
+    the gap; it is never passed as a current receipt."""
+    receipt = json.loads(PRE_9569_RECEIPT.read_text(encoding="utf-8"))
+    assert "operators_provenanced" in receipt["operator_audit"]
+    assert "operators_provenanced_ids" not in receipt["operator_audit"]
+    result = checker.check_receipt(receipt)
+    assert result["ok"] is False
+    detail = " ".join(r["detail"] for r in result["rules"]
+                      if r["rule"] == "E4-FORMING" and not r["ok"])
+    assert "operators_provenanced_ids" in detail
+    # ...and shape validation still accepts it: only the E4 CHECKER refuses a
+    # receipt that predates the field.
+    assert runner.validate_receipt(receipt) == []
