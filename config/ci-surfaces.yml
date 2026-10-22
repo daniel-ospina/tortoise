@@ -3461,6 +3461,13 @@ surfaces:
   # on — a sdk.py-only PR must run it (dual-registered with battery).
   - test_battery_parity_vector_guard.py
   - test_monitoring.py
+  # #9494: the staleness measurement (`tortoise/code_freshness.py`) and its two
+  # consumers — `tortoise/monitoring.py` (the `server_code` health field) and
+  # `tortoise/mcp_server.py` (`_safe`'s measured-stale branch). None of those
+  # three files matches a SOURCE_PATTERN, so a diff touching only them selects
+  # `core` — unregistered, the file that carries this fix runs in NO leg at all
+  # (and `ci_selection.py --integrity` reds on the unclassified file).
+  - test_code_freshness_9494.py
   # #4491: dual-registered with `api` (see that surface's entry). It pins
   # tortoise/monitoring.py — which resolves to `core`, NOT `api` — so a
   # monitoring.py-only change (broken cap, lost clamp, reset bug) would
@@ -7764,6 +7771,17 @@ durations:
   # sweep instead of leaving a stale note attached to a CI value (#9110 review P2).
   test_measure_ask_distilled.py: 2.0  # unmeasured — new in #9097: flat default until the first post-merge sweep
   eval/ask/test_ask_corpus.py: 2.0  # unmeasured — new in #9097: flat default until the first post-merge sweep
+  # #9494: a file ADDED BY THIS PR cannot appear in a junit artifact (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # under the #3419/#2818 convention — the row is REQUIRED, not cosmetic: the
+  # `core` surface entry alone puts it in the fast pool and an absent `durations`
+  # key packs it at `DEFAULT_FAST_WEIGHT` while still moving the durations
+  # coverage RATIO (`duration_coverage_issues()`, the #3400/#4348 one-file trap).
+  # Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only
+  # a measured CI junit value models the leg that carries the file. The tail LEADS
+  # with `# unmeasured` so `render_refreshed_manifest` clears it on that first
+  # sweep (#9110 review P2).
+  test_code_freshness_9494.py: 2.0  # unmeasured — new in #9494: flat default until the first post-merge sweep
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

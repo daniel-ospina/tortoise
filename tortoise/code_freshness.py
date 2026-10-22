@@ -93,13 +93,23 @@ _warned: set[tuple[str, int | None, int | None]] = set()
 _WARNED_CAP = 512
 _lock = threading.Lock()
 
+#: How many drifted modules the report LISTS. ``changed`` is sliced to this and
+#: ``hint`` names at most this many, so neither the structured field nor the
+#: string field can grow with the size of the drift — and the size of the drift
+#: is exactly what a ``git checkout``/rebase makes large (dozens of modules), so
+#: a cap on one and not the other bounds nothing that matters.
+_MAX_LISTED = 20
+
 #: The sentence a stale report carries. Deliberately names the FIX, because the
 #: reported failure mode is a reader who spends the time proving the code is
-#: correct (`_ledger_record` was, all along).
+#: correct (`_ledger_record` was, all along). No relative wording ("the files
+#: above"): the same sentence is served by ``_safe`` as a suffix to an
+#: ``ImportError`` string, where there is no list above it to point at.
 HINT = (
-    "this process is serving the module graph it imported at start; the files "
-    "above changed on disk since. Restart the MCP server so it serves the repo's "
-    "current code — the symbol you are looking for may exist on disk already."
+    "this process is serving the module graph it imported at start, and one or "
+    "more of those files changed on disk since. Restart the MCP server so it "
+    "serves the repo's current code — the symbol you are looking for may exist "
+    "on disk already."
 )
 
 #: The two symbol-shaped failure messages a stale process produces, and the
@@ -206,17 +216,25 @@ def _iso(ts: float | None) -> str | None:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
-def _compose_hint(names: list[str], process_started: str | None) -> str:
+def _compose_hint(
+    names: list[str], total: int, process_started: str | None,
+) -> str:
     """WHICH modules drifted, how old the process is, and the fix.
 
     A hint that does not name the drifted module leaves the reader exactly where
     the issue's ``ImportError`` did — guessing.
+
+    ``names`` is the already-capped list and ``total`` the real drift count, so a
+    truncated report says ``and N more`` instead of either dropping the fact that
+    there are more (silently understating the drift) or enumerating every name
+    (the unbounded string the cap exists to prevent).
     """
     shown = ", ".join(sorted(names))
+    more = f" and {total - len(names)} more" if total > len(names) else ""
     return (
-        f"STALE PROCESS (not stale code): this server imported {shown} at start "
-        f"and {'they have' if len(names) > 1 else 'it has'} changed on disk since "
-        f"(process started {process_started}). {HINT}"
+        f"STALE PROCESS (not stale code): this server imported {shown}{more} at "
+        f"start and {'they have' if total > 1 else 'it has'} changed on disk "
+        f"since (process started {process_started}). {HINT}"
     )
 
 
@@ -271,10 +289,12 @@ def check() -> dict:
          "baseline_at": iso,                # first observation of the graph
          "tracked": int,                    # module files compared
          "changed": [{module, file, loaded_mtime, disk_mtime, removed}],
-                                            # `file` is repo-relative, never absolute
-         "changed_count": int,              # `changed` is capped at 20
+                                            # `file` is repo-relative, never absolute;
+                                            # at most ``_MAX_LISTED`` rows
+         "changed_count": int,              # TOTAL drifted modules, NOT capped
          "mtime_only": int,                 # content-identical rewrites, NOT drift
-         "hint": str | None}                # which modules drifted + the restart
+         "hint": str | None}                # which modules drifted + the restart;
+                                            # names at most ``_MAX_LISTED`` modules
 
     ``mtime_only`` exists so the mtime-vs-content distinction is VISIBLE: a
     rewrite that left the bytes identical is reported as such instead of being
@@ -295,15 +315,19 @@ def check() -> dict:
             row["disk_mtime"] or "removed", HINT,
         )
     started = _iso(_STARTED_AT)
+    shown = changed[:_MAX_LISTED]
     return {
         "stale": bool(changed),
         "process_started_at": started,
         "baseline_at": _iso(_baseline_at),
         "tracked": tracked_count,
-        "changed": changed[:20],
+        "changed": shown,
         "changed_count": len(changed),
         "mtime_only": mtime_only,
-        "hint": _compose_hint([row["module"] for row in changed], started) if changed else None,
+        "hint": (
+            _compose_hint([row["module"] for row in shown], len(changed), started)
+            if changed else None
+        ),
     }
 
 
@@ -348,7 +372,13 @@ def staleness_hint(exc: BaseException) -> str | None:
     drifted, _ = _drifted()
     if not any(row["module"] == owner for row in drifted):
         return None
-    return _compose_hint([row["module"] for row in drifted], _iso(_STARTED_AT))
+    # Same cap as `check()`: the hint is a STRING field served over the MCP wire
+    # by ``_safe``, so it must not enumerate an arbitrarily large drift either.
+    return _compose_hint(
+        [row["module"] for row in drifted[:_MAX_LISTED]],
+        len(drifted),
+        _iso(_STARTED_AT),
+    )
 
 
 def _reset_for_tests() -> None:

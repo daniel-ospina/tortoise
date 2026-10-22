@@ -230,10 +230,15 @@ def test_the_real_sdk_is_tracked_and_its_row_is_repo_relative(monkeypatch):
     assert "tortoise.sdk" in report["hint"]
 
 
-def test_the_report_caps_the_row_list_but_not_the_count(tmp_path, monkeypatch):
-    """``changed`` is bounded (the payload is served per health call) while
-    ``changed_count`` stays truthful, and the hint still names more than one
-    module."""
+def test_the_report_caps_the_row_list_and_the_hint_but_not_the_count(tmp_path, monkeypatch):
+    """``changed`` AND the hint are bounded (both are served per health call and
+    on every ``_safe`` error) while ``changed_count`` stays truthful.
+
+    Capping ``changed`` alone bounded nothing: the one event that raises
+    ``stale`` — a ``git checkout``/rebase moving dozens of ``tortoise/*.py`` —
+    is also the event that makes the list long, so the string field grew with
+    it while the structured field stayed at 20 (review P2).
+    """
     probes = []
     for i in range(21):
         module, path = _probe_module(tmp_path, name=f"tortoise._probe_cap_{i}")
@@ -247,7 +252,11 @@ def test_the_report_caps_the_row_list_but_not_the_count(tmp_path, monkeypatch):
 
     assert report["changed_count"] == 21
     assert len(report["changed"]) == 20
-    assert report["hint"].count("_probe_cap_") >= 2  # the plural branch
+    # The hint names the SAME capped list and says how many it left out — never
+    # the full 21 names, and never silently short of the truth.
+    assert report["hint"].count("_probe_cap_") == 20
+    assert "and 1 more" in report["hint"]
+    assert code_freshness._MAX_LISTED == 20
 
 
 def test_a_clean_process_reports_clean():
@@ -375,6 +384,26 @@ def test_a_stale_process_answers_a_symbol_failure_with_the_restart(monkeypatch):
     assert _SYMBOL_ERROR in payload["error"]  # the original cause is kept
     assert "Restart the MCP server" in payload["error"]
     assert "tortoise.sdk" in payload["error"]
+
+
+def test_the_restart_sentence_stands_alone_after_an_error_message(monkeypatch):
+    """``HINT`` is served as a SUFFIX to an error string by ``_safe``.
+
+    It used to say "the files above changed on disk since" — a referent that
+    exists only in the health payload's ``changed`` list. After an
+    ``ImportError`` there is nothing above it, so the one sentence the reader
+    needs points at something they cannot see (review P2).
+    """
+    _pretend_sdk_drifted()
+
+    def boom():
+        raise ImportError(_SYMBOL_ERROR, name="tortoise.sdk")
+
+    payload = _call_safe(boom, monkeypatch)
+
+    assert " above" not in payload["error"]
+    assert " above" not in code_freshness.HINT
+    assert "Restart the MCP server" in payload["error"]
 
 
 def test_a_clean_process_keeps_the_import_error_reading_as_a_code_defect(monkeypatch):
