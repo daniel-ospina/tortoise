@@ -10536,8 +10536,8 @@ class FalkorProjection(
         both paths are tried. An unreadable value must never change the error
         CLASS — only how rich its message is.
 
-        #7392 — ``(used, 0)`` is a READING and is returned AS one. ``maxmemory
-        = 0`` means the server has NO ceiling, which is a different fact from
+        #7392 — ``(used, 0)`` is a READING and is returned AS one.
+        ``maxmemory = 0`` means the server has NO ceiling, which is a different fact from
         "the ratio could not be read" and calls for a different message;
         collapsing both to ``None`` is how the write-refusal message came to
         assert a memory ceiling on an instance that reported none (measured on
@@ -10684,6 +10684,13 @@ class FalkorProjection(
             # safe, because the below branch withholds nothing and asks for a
             # re-read.
             drift = max(64 << 10, min(cap // 100, 1 << 20))
+            if cap <= 2 * drift:
+                # #7392 cycle 7 — a tolerance larger than the ceiling's own
+                # scale makes the below branch UNREACHABLE and prints "has
+                # reached its memory ceiling" for e.g. 0 B of 4 KiB, which is
+                # the over-claim this branch exists to remove. At those sizes
+                # the absolute floor is meaningless, so scale to the cap.
+                drift = max(1, cap // 100)
             if used + drift >= cap:
                 lead = ("the server has reached its memory ceiling (used_memory "
                         f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")

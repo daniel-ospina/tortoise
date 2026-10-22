@@ -475,6 +475,35 @@ def test_the_ceiling_is_printed_in_bytes_so_no_two_figures_read_as_equal(cap):
     assert _fmt_bytes(cap - used) in msg, msg
 
 
+@pytest.mark.parametrize("used,cap,branch", [
+    (0, 100, "below"),      # 0 % of its ceiling
+    (0, 4096, "below"),     # 0 % of its ceiling
+    (1, 2048, "below"),     # 50 % of its ceiling
+    (4096, 4096, "ceiling"),
+    (2048, 2048, "ceiling"),
+])
+def test_a_tiny_cap_can_still_reach_the_below_ceiling_branch(monkeypatch, used, cap, branch):
+    """#7392 cycle 7 — the tolerance must scale DOWN with the cap.
+
+    A flat 64 KiB floor made `used + drift >= cap` true for EVERY reading when
+    the ceiling itself is small, so the below branch was unreachable and a
+    reading of 0 B of 4 KiB was reported as "has reached its memory ceiling" —
+    the over-claim this branch exists to remove, in the direction whose remedy
+    is `--maxmemory`.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (used, cap)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    if branch == "ceiling":
+        assert "has reached its memory ceiling" in msg, msg
+    else:
+        _assert_no_ceiling_claim(msg)
+        assert "does not show the ceiling being reached" in msg, msg
+
+
 def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
     """#7392 — "no ceiling" and "could not read" are DIFFERENT answers.
 
@@ -523,6 +552,13 @@ def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
     # Redis reports one — `CONFIG SET maxmemory` refuses it), so it must not
     # become a "no ceiling" claim either.
     assert _proj_with({"used_memory": 1024, "maxmemory": -1})._memory_pressure() is None
+    # A PRESENT but unusable value is unread too — otherwise the `or 0` default
+    # mints a measured 0 and the message claims "NO maxmemory ceiling is set"
+    # for a field nobody could read (found by review, #7392).
+    assert _proj_with({"used_memory": 1024, "maxmemory": None})._memory_pressure() is None
+    assert _proj_with({"used_memory": 1024, "maxmemory": "abc"})._memory_pressure() is None
+    # A negative USAGE is as broken as a negative ceiling.
+    assert _proj_with({"used_memory": -5, "maxmemory": 2048})._memory_pressure() is None
 
 
 def test_genuine_corruption_still_advises_rebuild(monkeypatch):
