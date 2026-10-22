@@ -25,35 +25,57 @@ reason in flight only closes the UN-NESTED part of a rebuild: `rebuild_all` open
 those nests re-opened the raw lane. MEASURED on that shape: the mutating `CREATE`
 landed under all three nests. The fix therefore carries the closure BESIDE the
 lane reason (`_handle_only_write_scope` → `_RAW_QUERY_CLOSED_DEPTH`), so it
-travels with the scope stack; T2 below is the pin for that, and it is the test
-the window-only shape failed.
+travels with the scope stack; `test_a_lane_nested_inside_the_window_cannot_reopen_the_raw_lane`
+is the pin for that, and it is the test the window-only shape failed.
 
-⛔ THE INSTRUMENT IS THE REAL DOOR, not a copy of its predicate. Every test issues
-a real statement through `FalkorProjection.query` (the raw lane) or `proj.g.query`
-(the write handle) on a journal-armed projection and reads whether it LANDED, and
-the handle tests flip the REAL switch (`_HANDLE_GUARD_ENFORCES`) so "inside the
-window the handle still works" is measured against a REFUSING door rather than a
-measuring one.
+⛔ THE INSTRUMENT IS THE REAL DOOR, not a copy of its predicate. Every test EXCEPT
+the declaration pin (`test_the_narrowing_is_declared_and_named_by_the_scope`,
+which reads constants and is labelled as such) issues a real statement through
+`FalkorProjection.query` (the raw lane) or `proj.g.query` (the write handle) on a
+journal-armed projection and reads whether it LANDED, and the handle tests flip
+the REAL switch (`_HANDLE_GUARD_ENFORCES`) so "inside the window the handle still
+works" is measured against a REFUSING door rather than a measuring one.
 
-MUTATION (measured: each of these reddens the named tests): drop `"replay"` from
-`_HANDLE_ONLY_WRITE_LANES` → T1, T2, T4 red; make `_handle_only_write_scope` set
-the lane reason without the depth (the window-only shape this file's review
-rejected) → T2 red and T1 still green; delete the `_replay_write_scope()` wrapper
-from `rebuild_from_record` → T5 red (the armed handle refuses the fold). Two
-mutations are NOT reddening by design and are stated so they are not mistaken for
-gaps: making the raw lane refuse unconditionally would leave T3 green (a read is
-still a read) while changing six other lanes' width, and adding a TEMPLATED lane
-to the set is only a no-op if the match were exact-string — which is why T4 pins
-`_lane_of` as the matcher.
+MUTATION — measured on the landed code, and stated for what it is. There are TWO
+mechanisms and they are pinned SEPARATELY, which is the point of the next
+paragraph:
+
+* revert the raw-lane guard to `_CACHE_WRITE_AUTHORIZED.get() is None` (the
+  pre-fix guard) → the window test and the nested-lane test both red (the
+  regression the issue names);
+* make `_handle_only_write_scope` set the lane reason WITHOUT the depth (the
+  window-only shape this file's first review rejected) → the nested-lane test
+  reds, the window test stays green;
+* delete the `_replay_write_scope()` wrapper from `rebuild_from_record` → the
+  rebuild-engines test reds (the armed handle refuses the fold);
+* match the reason instead of the lane (`reason in _HANDLE_ONLY_WRITE_LANES`),
+  monkeypatch the set, or drop the set check altogether → ONLY
+  `test_the_lane_name_branch_narrows_without_a_window` reds. That is deliberate:
+  `_RAW_QUERY_CLOSED_DEPTH` closes the whole replay window on its own, so the
+  lane-name branch is NOT load-bearing there — its live use is a `replay`
+  declaration with no window at all (a second, importable site:
+  `event_store.reestablish_watermark`'s default), which is what that test pins,
+  and `test_a_second_replay_declaration_site_carries_the_closure` pins the site
+  structurally;
+* `_lane_of` → identity → the declaration pin and the lane-name test red;
+* dropping a member from `_HANDLE_ONLY_WRITE_LANES` → the declaration pin reds
+  (member equality), and the lane-name test reds only when the dropped member is
+  the one a live path declares.
+
+NOT a reddening mutation by design, stated so it is not mistaken for a gap:
+making the raw lane refuse unconditionally would leave the read test green (a
+read is still a read) while changing six other lanes' width — that is `#9079`'s
+call, not this file's.
 
 WHAT IS *NOT* CLAIMED. This file narrows and measures the `replay` lane only.
-Every lane NOT in `_HANDLE_ONLY_WRITE_LANES` still yields a raw-query permit —
-amongst others the pre-wipe restore/synthetic, apply-first, derived-recompute,
-graph-metadata, onboarding, live-door, `webhook.delivery-store`, structural-edge
-and test-fixture lanes — so the complete statement is "every lane outside the set
-still opens that lane", and that width is `#9079`'s sanctioning decision (a
-wholesale refusal there is a measured P0: it silently degraded a hosted writer
-family). The set is pinned member-exactly so adding a lane is a deliberate act.
+Every lane NOT in `_HANDLE_ONLY_WRITE_LANES` still yields a raw-query permit
+**when it is not nested inside a handle-only window** — amongst others the
+pre-wipe restore/synthetic, apply-first, derived-recompute, graph-metadata,
+onboarding, live-door, `webhook.delivery-store`, structural-edge and test-fixture
+lanes — and nested inside one, the depth closes that lane too (which is the fix,
+not an exception to it). That remaining width is `#9079`'s sanctioning decision:
+a wholesale refusal at the raw lane is a measured P0 (it silently degraded a
+hosted writer family — `tests/test_7951_enforce_atomic_write.py`).
 """
 from __future__ import annotations
 
@@ -65,6 +87,7 @@ from tortoise.projection import (
     _RAW_QUERY_CLOSED_DEPTH,
     _REPLAY_WRITE_LANE,
     DirectCacheWriteRefused,
+    _cache_write_authorized,
     _graph_metadata_write_scope,
     _lane_of,
     _prewipe_restore_write_scope,
@@ -97,7 +120,7 @@ def armed_sdk(tmp_path):
 
 
 def _view():
-    """The record view T5 projects: one `:Point`, no relations."""
+    """The record view the rebuild-engines test projects: one `:Point`."""
     from tortoise import cache_projection as cp
 
     return cp.RecordView(
@@ -263,6 +286,71 @@ def test_the_narrowing_is_declared_and_named_by_the_scope():
         assert _CACHE_WRITE_AUTHORIZED.get() == _REPLAY_WRITE_LANE, (
             "the scope's reason is not the literal the set names, so the "
             "narrowing would silently stop applying")
+
+
+def test_the_lane_name_branch_narrows_without_a_window(armed_sdk, monkeypatch):
+    """The lane-name branch has its OWN live use, and this is its pin.
+
+    `_RAW_QUERY_CLOSED_DEPTH` closes the whole replay window by itself, so the
+    set is deliberately NOT load-bearing there (a mutation that drops it leaves
+    the window tests green — stated in the module docstring). Its live use is a
+    `replay` declaration with NO window: `event_store.reestablish_watermark`
+    declares the lane through an importable helper, any caller can do the same,
+    and templated lanes are `f"{PREFIX}: {detail}"`. So the three things the set
+    promises are measured here AT THE DOOR: the pinned literal, a TEMPLATE of it
+    (which is what `_lane_of` exists for), and a member reached only through a
+    monkeypatched set (which is what proves the guard reads the SET and the
+    LANE, not one hard-coded string).
+    """
+    import tortoise.projection as projection
+
+    proj = armed_sdk._get_proj()
+    cases = [
+        ("bare", _REPLAY_WRITE_LANE),
+        ("templated", f"{_REPLAY_WRITE_LANE}: some detail"),
+    ]
+    for point_id, reason in cases:
+        with _cache_write_authorized(reason):
+            assert _RAW_QUERY_CLOSED_DEPTH.get() == 0, (
+                "this case must exercise the lane-name branch, not the "
+                "window depth")
+            assert _raw_query_lane_permit() is None, (
+                f"lane {reason!r} yields a raw-query permit — the "
+                "handle-only lane branch is not applying")
+            with pytest.raises(DirectCacheWriteRefused):
+                proj.query(_MUTATING % f"lane-{point_id}")
+        assert _point_count(proj, f"raw-lane-lane-{point_id}") == 0
+
+    monkeypatch.setattr(projection, "_HANDLE_ONLY_WRITE_LANES",
+                        frozenset({"probe-lane"}))
+    with _cache_write_authorized("probe-lane: a detail"), \
+            pytest.raises(DirectCacheWriteRefused):
+        proj.query(_MUTATING % "lane-probe")
+    assert _point_count(proj, "raw-lane-lane-probe") == 0, (
+        "a lane named in `_HANDLE_ONLY_WRITE_LANES` did not narrow the raw lane "
+        "— the guard is not reading the set through `_lane_of`")
+
+
+def test_a_second_replay_declaration_site_carries_the_closure():
+    """Every `replay` declaration must go through the HANDLE-ONLY helper.
+
+    `_replay_write_scope()` is not the only site: `event_store.reestablish_watermark`
+    declares the lane itself (its `MERGE` cannot be wrapped by its caller — an
+    inner scope shadows an outer one, `#9210`). Declared the plain way, that
+    window carries no closure, so a lane nested inside it re-opens the raw-query
+    lane — the exact shape `#9391` closes. Structural, because the window is
+    internal to the helper and cannot be entered from a test; it reds the moment
+    that site reverts to a bare `_cache_write_authorized`.
+    """
+    import inspect
+
+    from tortoise.event_store import reestablish_watermark
+
+    source = inspect.getsource(reestablish_watermark)
+    assert "_handle_only_write_scope(_REPLAY_WRITE_LANE)" in source, (
+        "`reestablish_watermark` declares the replay lane WITHOUT the "
+        "handle-only closure — a lane nested inside its window would re-open "
+        "the raw-query lane (#9391)")
 
 
 # ── the engine that opened the window ────────────────────────────────────

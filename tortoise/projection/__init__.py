@@ -3898,9 +3898,12 @@ def _raw_query_lane_permit() -> str | None:
     shadowing the reason); or the innermost lane itself named in
     `_HANDLE_ONLY_WRITE_LANES`.
 
-    ⛔ NOT CLAIMED: every OTHER lane still yields a permit here. That width is
-    `#9079`'s sanctioning decision — narrowing it needs the hosted writer family
-    that a wholesale refusal broke (measured P0) to be declared first.
+    ⛔ NOT CLAIMED: every OTHER lane still yields a permit here WHEN IT IS NOT
+    NESTED inside a handle-only window — nested inside one, the depth closes it
+    too (so a restore leg under a replay window is not a raw-lane permit, which
+    is the whole point of the depth). The non-nested width is `#9079`'s
+    sanctioning decision — narrowing it needs the hosted writer family that a
+    wholesale refusal broke (measured P0) to be declared first.
     """
     reason = _CACHE_WRITE_AUTHORIZED.get()
     if reason is None:

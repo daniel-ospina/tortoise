@@ -715,12 +715,25 @@ def reestablish_watermark(proj, carried_last_seq: int | None, *,
     # every scope uses, so an undeclared caller still fails closed on `None`;
     # the lane is opened here because an inner scope shadows an outer one, so a
     # `with` at the call site could never be the declaration.
-    # ⛔ The replay lane's name is IMPORTED, not re-spelled (`#9391`): since that
-    # lane became HANDLE-ONLY, the reason string is the KEY the raw-query lane's
+    # ⛔ The replay lane is declared through the HANDLE-ONLY helper, and its name
+    # is IMPORTED rather than re-spelled (`#9391`). Two reasons, both measured by
+    # that issue's review: the reason string is now the KEY the raw-query lane's
     # narrowing matches on, so a second literal here would be a second definition
-    # of the lane — rename one and this default silently stops being narrowed.
-    from .projection import _REPLAY_WRITE_LANE, _cache_write_authorized
-    with _cache_write_authorized(restore_reason or _REPLAY_WRITE_LANE):
+    # of the lane; and a bare `_cache_write_authorized(_REPLAY_WRITE_LANE)` carries
+    # no closure, so a lane nested inside this window would re-open the raw-query
+    # lane — the exact shape `_replay_write_scope()` exists to prevent. This is
+    # the SECOND `replay` declaration site in the tree (the other is
+    # `_replay_write_scope()`), so it goes through the same helper.
+    # A caller-supplied restore reason keeps the ordinary lane: those lanes are
+    # not handle-only, and narrowing them is not this seam's decision.
+    from .projection import (
+        _REPLAY_WRITE_LANE,
+        _cache_write_authorized,
+        _handle_only_write_scope,
+    )
+    scope = (_handle_only_write_scope(_REPLAY_WRITE_LANE) if not restore_reason
+             else _cache_write_authorized(restore_reason))
+    with scope:
         rows = proj.g.query(
             "MERGE (m:GraphEventMeta) "
             "ON CREATE SET m.last_seq = $last, m.first_seq = $first "
