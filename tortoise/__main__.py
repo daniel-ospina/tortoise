@@ -787,6 +787,157 @@ def _cmd_record_reconcile(args):
     return exit_code_for(result)
 
 
+def _cmd_record_restore(args):
+    """#9556 / R8 — the record-sourced RESTORE: rebuild a lost cache from the record.
+
+    ``rebuild_from_record`` is the seam (record → cache) and it had **no CLI
+    verb and no production caller** (measured for #9556: 0 non-test call
+    sites), so *"the graph is gone, restore it"* had no operator answer. This
+    verb is that answer; the composition and its four refusals live in
+    :mod:`tortoise.record_restore`, and the runbook section is
+    ``docs/infra-runbook.md`` §9.
+
+    Exit codes, because an operator's next step keys on them:
+      ``0`` restored · ``3`` REFUSED, nothing written (empty source, the cache's
+      L2 destructive-op guard, a rebuild that wrote nothing) · ``2`` no verdict
+      (no/invalid DSN, ``psycopg2`` absent, an unreadable record or cache, a
+      usage error). ``2``'s caveat is ``record-reconcile``'s, inherited
+      verbatim: argparse's own ``error()`` also exits ``2``, so ``2`` means
+      only *no verdict was produced*.
+
+    ⛔ ``--cache-graph`` is REQUIRED, with no derived default, for the reason
+    ``record-reconcile`` requires it — and the consequence here is worse than a
+    wrong verdict: a wrong guess opens an EMPTY graph, so the run would report
+    a restore into a graph nobody reads while the operator's real graph stayed
+    destroyed. That is why the pre-wipe node count is reported too.
+
+    ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
+    on the record, the same constants ``record-reconcile`` uses): an operator's
+    restore must not hang with no output.
+
+    ⛔ No storage allowance is consulted (G5 on #9556): #9559's byte gate must
+    exempt this lane, because the billing path must never be able to defeat the
+    durability path mid-rebuild.
+    """
+    import json as _json
+
+    from tortoise.cache_projection import read_record_view
+    from tortoise.record_reconcile import (
+        RECORD_CONNECT_TIMEOUT_S,
+        RECORD_STATEMENT_TIMEOUT_MS,
+    )
+    from tortoise.record_restore import (
+        EXIT_REFUSED,
+        EXIT_RESTORED,
+        EXIT_UNAVAILABLE,
+        RestoreRefused,
+        RestoreUnavailable,
+        log_result,
+        restore_from_record_view,
+    )
+
+    # The DSN is resolved by the module that DECLARES the arming surface, so a
+    # rename cannot silently disarm this verb while `RecordWriter` stays armed,
+    # and a non-Postgres value is the MISCONFIGURATION it is rather than an
+    # unreadable record (an outage).
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    try:
+        dsn = record_dsn(args.record_dsn)
+    except RecordWriteError as e:
+        print(f"Error: {e} — nothing was restored, and the cache's state is "
+              f"UNCHANGED.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn or set "
+              "TORTOISE_RECORD_DSN. Nothing was restored: this verb cannot "
+              "tell an empty record from an unarmed one, so it reports "
+              "neither. The cache's state is UNCHANGED.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    # Usage-shaped refusals come BEFORE the optional-dependency check: an
+    # operator who forgot `--cache-graph` must not be told to install an extra
+    # first (measured — that ordering answered a missing flag with "psycopg2 is
+    # not installed" on a lane without the `postgres` extra).
+    if not args.cache_graph:
+        print(
+            "Error: --cache-graph is required — the cache graph's name is not "
+            "the record's --graph scope. This tree names it org_<org_id> (the "
+            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
+            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
+            "this run would report a restore into a graph nobody reads while "
+            "the real graph stayed destroyed. Nothing was restored.",
+            file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if args.limit is not None and args.limit < 0:
+        print(f"Error: --limit must be >= 0, got {args.limit} — a negative "
+              f"bound is not a bound, so nothing was restored.",
+              file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    try:
+        import psycopg2
+    except ImportError:
+        print("Error: psycopg2 is not installed — the record cannot be read, "
+              "so nothing was restored and the cache's state is UNCHANGED. "
+              "Install the `postgres` extra.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    from tortoise.projection import FalkorProjection
+
+    conn = None
+    proj = None
+    try:
+        try:
+            conn = psycopg2.connect(
+                dsn,
+                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
+                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
+            )
+            view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except Exception as e:
+            raise RestoreUnavailable(
+                f"the record is unreadable ({type(e).__name__}) — nothing was "
+                f"restored and the cache's state is UNCHANGED") from e
+
+        try:
+            proj = FalkorProjection.from_uri(args.db,
+                                             graph_name=args.cache_graph)
+        except Exception as e:
+            raise RestoreUnavailable(
+                f"cache {args.cache_graph!r} could not be opened "
+                f"({type(e).__name__}) — nothing was restored") from e
+
+        outcome = restore_from_record_view(
+            view,
+            org_id=args.org,
+            graph_id=args.graph,
+            cache_graph=args.cache_graph,
+            project=proj,
+            allow_empty=bool(args.allow_empty),
+            limit=args.limit,
+        )
+    except RestoreRefused as e:
+        print(f"Restore REFUSED: {e}", file=sys.stderr)
+        return EXIT_REFUSED
+    except RestoreUnavailable as e:
+        print(f"Restore UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    finally:
+        # The verb OWNS both handles (the `record-reconcile` rule): an operator
+        # command that leaks a connection per run is a slow outage.
+        if proj is not None:
+            proj.close()
+        if conn is not None:
+            conn.close()
+
+    line = log_result(outcome)
+    if args.json:
+        print(_json.dumps(outcome.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"\u2713 {line}")
+    return EXIT_RESTORED
+
+
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
     import json as _json  # noqa: I001
@@ -11131,6 +11282,43 @@ def main(argv: list[str] | None = None) -> int:
                          "— it never returns a partial answer")
     rr.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
+    # #9556 / R8: the record → cache RESTORE. A sibling of `record-reconcile`
+    # and deliberately NOT a `--from-record` flag on `rebuild`: `rebuild`'s
+    # `--dir` is the journal the replay reads, so a flag that silently makes it
+    # meaningless would make the two SOURCES indistinguishable on the one
+    # command that destroys a graph. The exit codes are the operator's next
+    # step (0 restored / 3 refused, nothing written / 2 no verdict) and the
+    # composition is `tortoise/record_restore.py`.
+    rr2 = sp.add_parser(
+        "record-restore",
+        help="Restore a lost cache graph from the Postgres record (R8) — the "
+             "record-sourced sibling of `rebuild`. Exit 0 restored / 3 "
+             "refused (nothing written) / 2 no verdict")
+    rr2.add_argument("--db", required=True,
+                     help="Cache target: FalkorDB docker:// URI")
+    rr2.add_argument("--record-dsn", default=None,
+                     help="Postgres record DSN (default: $TORTOISE_RECORD_DSN)")
+    rr2.add_argument("--org", required=True, help="Record org_id (the scope)")
+    rr2.add_argument("--graph", required=True,
+                     help="Record graph_id (the scope)")
+    rr2.add_argument("--cache-graph", default=None,
+                     help="Cache graph to RESTORE — REQUIRED in practice (the "
+                          "verb refuses without it, exit 2). NOT the record's "
+                          "--graph scope: this tree names it org_<org_id> or "
+                          "org_<org_id>_<graph_id>. No default is derived — a "
+                          "wrong guess opens an EMPTY graph and the run would "
+                          "report a restore into a graph nobody reads")
+    rr2.add_argument("--limit", type=int, default=None,
+                     help="Write at most N nodes (a bounded run declares "
+                          "coverage=partial, whose unwritten keys read as "
+                          "not-hot on the read path — never empty)")
+    rr2.add_argument("--allow-empty", action="store_true",
+                     help="DANGER: proceed when the record holds NO rows for "
+                          "this scope. Without it an empty source is REFUSED "
+                          "(exit 3) because such a run wipes the cache and "
+                          "puts nothing back")
+    rr2.add_argument("--json", action="store_true",
+                     help="Machine-readable JSON output")
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
     bk.add_argument("--db", required=True, help="Path to database file")
     bk.add_argument("--events", default="events.jsonl", help="Path to event log")
@@ -11720,6 +11908,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reconcile(args)
     elif args.cmd == "record-reconcile":
         return _cmd_record_reconcile(args)
+    elif args.cmd == "record-restore":
+        return _cmd_record_restore(args)
     elif args.cmd == "backfill":
         _cmd_backfill(args)
         return 0

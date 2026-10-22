@@ -115,6 +115,13 @@ surfaces:
   # "what carries the file" on an `__main__.py`-only diff. It is not —
   # `carve_out_run` carries it, and did so before this row.
   - test_record_reconcile_trigger.py
+  # #9556 (R8): the record-sourced RESTORE. `tortoise/record_restore.py` is the
+  # composition and the `record-restore` CLI verb is its production caller —
+  # `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERN whose match REPLACES
+  # the `core` fallback, so THIS row is what selects the pins on an
+  # `__main__.py`-only diff (the #1349/#2938/#3154 silent-drop class). The file
+  # is NOT in `carve_out:` — it rides in `test_files`.
+  - test_9556_record_restore_verb.py
   # PR #9196 review P1: DUAL-REGISTERED with `core`, and THIS one IS
   # diff-carrying — the file is NOT in `carve_out:`, so it rides in
   # `test_files` for the surfaces `select()` matches. The S2 census pin
@@ -3991,6 +3998,11 @@ surfaces:
   # `core` fallback, so a `core`-only entry would never run on the change that
   # breaks the trigger path — the #1349/#2938/#3154 silent-drop class).
   - test_record_reconcile_trigger.py
+  # #9556 (R8): DUAL-REGISTERED with `api` (above) for the same reason the
+  # reconciler's trigger is: `record_restore.py` — the composition, its four
+  # refusals and the exit-code contract — matches no SOURCE_PATTERN, so a
+  # readers-only diff falls through to `core` and this row carries the pins.
+  - test_9556_record_restore_verb.py
   # #7950 (capstone S2 evidence) / PR #8609 review finding 3: the end-to-end
   # chain probe's RECONCILIATION READERS must map the REAL property sets. They
   # originally returned `{}` per key, which made `field_mismatches`

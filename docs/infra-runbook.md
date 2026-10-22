@@ -2569,6 +2569,132 @@ on the rest; and it is one issue per **failing step** rather than one per run,
 because a key carrying `${{ github.run_id }}` files a new issue on every failing
 run (#2706).
 
+## 9. Restore a lost cache graph from the record (#9556 / R8)
+
+**When to run this.** The FalkorDB (hot) graph for an org is gone, corrupt, or
+wrong, and the **Postgres record is intact** — the record is the truth store and
+the graph is the derived cache (§2.0 of `STORAGE-ARCHITECTURE.md`: *"data goes
+to postgres and it's loaded to hot (falkor)"*). This verb rebuilds the cache
+from the **record**. It is NOT the journal replay (`tortoise rebuild`), and it
+never reads a journal: a destroyed cache's journal may be gone too, which is the
+whole reason this path exists.
+
+```bash
+# 1. Arm and read the record scope FIRST — a restore writes what the record
+#    holds for exactly this (org_id, graph_id), so read it before you wipe:
+#      export TORTOISE_RECORD_DSN='postgresql://…'          # or --record-dsn
+#
+# 2. Restore. --cache-graph is REQUIRED and has no default (see below).
+python -m tortoise record-restore \
+    --db "docker://<user>:<pw>@<falkordb-host>:<port>" \
+    --org <org_id> --graph <graph_id> \
+    --cache-graph <the graph to restore>
+
+# Bounded run (writes at most N nodes; declares coverage=partial):
+python -m tortoise record-restore … --limit 500
+# Machine-readable:
+python -m tortoise record-restore … --json
+```
+
+**Exit codes — the next step keys on the code, not on the log:**
+
+| code | meaning | next step |
+|---|---|---|
+| `0` | restored; the counts printed are what was written | compare `nodes_written`/`relations_written` with the record's own counts |
+| `3` | **REFUSED, nothing was written** (empty source, the cache's wipe guard, a rebuild that wrote 0) | read the printed reason — each has a different remedy |
+| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, usage error) | fix the input; the cache's state is unchanged |
+
+`2`'s caveat is `record-reconcile`'s, inherited verbatim: argparse's own
+`error()` also exits `2`, so `2` means only *no verdict was produced* — not "the
+record is unreachable".
+
+### The four refusals, and why each exists
+
+1. **An EMPTY record scope is refused** (`--allow-empty` overrides, deliberately
+   verbose). A restore from no rows wipes the cache and writes nothing — the
+   shipped path reports `nodes_written: 0` under a `complete` coverage
+   declaration, i.e. a successful-looking run that destroyed the cache. The
+   commonest cause is a mistyped `--org`/`--graph`: a scope that was never
+   written reads exactly like a mistyped one.
+2. **A rebuild that wrote nothing is refused separately** — the record HAD rows
+   and the report says 0. Different failure, different remedy; do not collapse
+   them.
+3. **`--cache-graph` cannot be guessed.** The cache graph's name is not the
+   record's `graph_id` scope column: this tree names it `org_<org_id>` (the org
+   SDK's isolated graph) or `org_<org_id>_<graph_id>` (the registry/ACL
+   namespace). A wrong guess does **not** fail — FalkorDB opens an EMPTY graph —
+   so the run would report a restore into a graph nobody reads while the real
+   graph stayed destroyed. The result prints the target's **pre-wipe node
+   count** for the same reason: `target held 0 node(s) before the wipe` beside
+   `wrote 412` is either a correct restore into a freshly-minted graph or a
+   restore into the wrong one, and only the operator can tell which.
+4. **The cache's wipe guard (L2, #2944) is reported, not swallowed.** A server
+   graph whose name does not start with `test_`/`tortoise_test` is refused as
+   destructive. ⚠️ **Every production graph name is `org_*`, so this fires on a
+   real restore today** (exit `3`, with the guard's own reason). The verb does
+   not paper over it: the production door is blocked on #2944's disposable-graph
+   registry, and what runs **today** is the **drill** (below) against a
+   `test_`-named graph. Do not "make it work" by renaming a production graph into
+   a test-prefixed one to get past the guard — the next real wipe would then have
+   a name that lies about what it is.
+
+### The two declared-partial operator states
+
+A restore can be correct and still leave the cache **not fully hot**. Both
+states have their own reason string, and neither is an absence (§17.3):
+
+- **`not-hot`** — a bounded restore (`--limit`) AND any run whose declaration is
+  `coverage=partial` (see `declared_keys` vs `record_nodes` in the output) wrote
+  only part of the record. A read for an unwritten key is a **residency miss**:
+  it `degraded` on read and is served from the record, and it is **never**
+  reported as `empty`. To make the cache fully hot, re-run without `--limit`.
+- **`cache-unreachable`** — the cache did not answer **at all**. This is the
+  fourth residency branch: a residency miss with its own reason, never an
+  insufficiency and never an absence. While you see this, *no* read of the
+  cache — including one that returns 0 rows — is evidence that there is nothing
+  there. Fix reachability before drawing any conclusion from a read.
+
+### Quota: a restore is not a billable write (#9556 G5)
+
+The restore door must never be refused by the org's own storage allowance.
+#9559 lands a fail-closed byte gate on the write path; because `rebuild_from_record`
+WRITES the graph, a gate inherited here would let the **billing** path defeat the
+**durability** path mid-rebuild. Nothing in the verb consults an allowance today;
+when the gate lands it must **exempt this lane** (or account it explicitly), and
+that is a property of the gate, not of the restore.
+
+### The drill — NOT MEASURED yet, and it says so
+
+A restore that has never been run is not a restore (the `#3895` precedent: a
+restore that returned **9,687 / 10,000** edges because its logical dump filtered
+the node export but not the edge export — an artifact unrestorable *by
+construction*, and a count that read as "nearly fine"). The drill is therefore
+part of this section, and its status is stated rather than implied:
+
+| drill step | status |
+|---|---|
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (16 pins, live cache graph included) |
+| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
+| the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
+
+When the record is armed, the drill is: capture into the record (scenario A of
+#9567), flush the `test_`-named drill graph, run this verb, then compare
+`nodes_written`/`relations_written` **and** a per-label count against the
+pre-flush baseline captured in the same run — equality, not "close". Record the
+counts in the run's artifact; do not put them in this section, where they would
+rot.
+
+### What this does not do (so it cannot be cited for it later)
+
+- **It does not migrate the owner's existing graphs** into the record — deferred
+  by owner statement (2026-10-22, #9567). A restore copies record → cache; a
+  graph that never reached the record is not in the record to restore from.
+- **It does not serve reads** — that is #7970. It does not reconcile
+  (`record-reconcile`) and it does not write the record (`record_writer`).
+- **It is not a backup of the record.** Restoring the *record* itself is the
+  backup/restore posture in #9557; this verb restores the **cache** from an
+  already-restored record.
+
 ## Secrets Matrix
 
 | Secret | tortoise-y4mjjq (Fly.io) | FalkorDB Cloud | GitHub Actions |
