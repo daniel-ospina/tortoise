@@ -1470,19 +1470,33 @@ def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
         "a degenerate posterior is not evidence of contest")
 
 
-def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(sdk):
-    """#8504 end-to-end: the pair ``_write_node`` persists, on a real graph.
+@pytest.mark.parametrize("degenerate_write", [
+    # The pair _write_node persists (posterior arm of ep_measured_cypher).
+    "SET n.posterior_alpha = 0.0, n.posterior_beta = 0.0",
+    # The legacy arm of ep_measured_cypher: `ep_alpha IS NOT NULL AND NOT
+    # baseline_set` — a pre-#2199 graph, which reaches the SAME division.
+    "SET n.ep_alpha = 0.0, n.ep_beta = 0.0",
+], ids=["measured-posterior-arm", "legacy-ep-prior-arm"])
+def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(
+        sdk, degenerate_write):
+    """#8504 end-to-end: the degenerate pair reaches the graph, on a real one.
 
-    The stub above pins the assembly arithmetic; this pins that the (0.0, 0.0)
-    row survives the whole decoration — both the in-Cypher contested projection
-    (which yields ``nan`` for 0/0, not an error) and the Python assembly.
+    Covers BOTH arms of ``ep_measured_cypher`` that can make a ``(0.0, 0.0)``
+    pair read as MEASURED — the persisted posterior ``_write_node`` writes, and
+    a legacy ``ep_alpha``/``ep_beta`` pair on a graph that never got a #2199
+    baseline. They coalesce into the same α/β and reach the same division, so
+    pinning only the posterior arm would let a change to the coalesce or the
+    legacy arm reintroduce a batch-losing raise with every test still green.
+
+    The stub above pins the assembly arithmetic; this pins that the row
+    survives the WHOLE decoration — both the in-Cypher contested projection
+    (``nan`` for 0/0, not an error) and the Python assembly.
     """
     a = _point(sdk, content="claim whose only peer is degenerate")
-    b = _point(sdk, content="peer carrying a persisted (0.0, 0.0) posterior")
+    b = _point(sdk, content="peer carrying a degenerate (0.0, 0.0) posterior")
     sdk.create_operator("IMPL", a["id"], [b["id"]])
     _graph(sdk).query(
-        "MATCH (n:Point) WHERE n.id = $id "
-        "SET n.posterior_alpha = 0.0, n.posterior_beta = 0.0",
+        "MATCH (n:Point) WHERE n.id = $id " + degenerate_write,
         params={"id": b["id"]},
     )
     out = get_relationships_bounded(_graph(sdk), [a["id"]])
@@ -1491,6 +1505,8 @@ def test_degenerate_persisted_posterior_peer_decorates_on_a_real_graph(sdk):
         f"{out.decoration_error}")
     entries = out[a["id"]]
     assert [e["related_id"] for e in entries] == [b["id"]], entries
+    # 0.5 (not None) is what makes this an arm that read as MEASURED: an
+    # unmeasured peer carries confidence None and would never reach the divide.
     assert entries[0]["peer"]["confidence"] == 0.5, entries[0]["peer"]
     assert entries[0]["peer"]["variance"] == 0.0, entries[0]["peer"]
     assert entries[0]["peer"]["contested"] is False, entries[0]["peer"]
