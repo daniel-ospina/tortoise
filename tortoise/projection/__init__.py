@@ -16454,7 +16454,9 @@ class FalkorProjection(
           enumerating what it wrote. That is the seam through which the
           completeness marker (#7952) can FIRE — it is not an eviction policy
           (§2.0 holds the FalkorDB limit high; the trigger for partiality is
-          still §17.3's).
+          still §17.3's). ``limit`` must be >= 1: a 0 bound is empty-slice after
+          an UNCONDITIONAL wipe, i.e. "clear it and put nothing back", so it is
+          refused (#9556 review).
 
         ``limit`` is a bound and nothing more: nodes are taken in a
         deterministic key order, and a relation whose endpoint falls outside
@@ -16516,8 +16518,16 @@ class FalkorProjection(
 
         nodes = tuple(view.nodes)
         if limit is not None:
-            if limit < 0:
-                raise ValueError(f"limit must be >= 0, got {limit}")
+            if limit < 1:
+                # ⚠️ 0 is the destructive no-op: `nodes[:0]` is empty, but the
+                # WIPE below is unconditional, so a 0 bound clears the cache and
+                # writes nothing — a caller asking for "nothing" gets "gone".
+                # Refused at the SEAM, not only at `record-restore`'s own door
+                # (#9556 review P2), so the next caller cannot reach it by
+                # forgetting a check.
+                raise ValueError(
+                    f"limit must be >= 1, got {limit} — a 0 bound would wipe "
+                    f"the graph and project nothing")
             nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
             kept = {(n.label, n.key) for n in nodes}
             relations = tuple(

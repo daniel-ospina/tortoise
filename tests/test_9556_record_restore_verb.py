@@ -11,11 +11,13 @@ sibling verb).
 What is pinned here, and each one is a way a restore verb is worthless:
 
 1. **An EMPTY source is REFUSED, and the cache is provably untouched.** A view
-   with no rows wipes the cache and writes nothing — the shipped path reports
-   ``nodes_written: 0`` under a ``complete`` declaration, i.e. a
-   successful-looking run that destroyed the cache. The live test seeds a real
-   graph, then asserts the refusal AND that the graph's node is still there: a
-   verb that wiped first and refused after would pass any exit-code-only pin.
+   with no rows wipes the cache and writes nothing — the shipped path RETURNS
+   NORMALLY (``nodes_written: 0``, ``coverage: partial``), i.e. an
+   exit-0-shaped success that destroyed the cache. Two live tests: one seeds a
+   real graph and asserts the refusal AND that its node is still there (a verb
+   that wiped first and refused after would pass any exit-code-only pin), and
+   one asserts the source refusal fires BEFORE the target graph is opened —
+   opening a projection creates the graph and MERGEs its ``:Meta`` marker.
 2. **A rebuild that wrote nothing is refused too**, separately from (1) — the
    record HAD rows and the report says 0 written. A verb that trusted the
    return code would report that as a restore.
@@ -569,6 +571,86 @@ def test_the_pre_wipe_count_is_BOUNDED(monkeypatch):
 
     assert seen and "timeout" in seen[0], seen
     assert seen[0]["timeout"] == rrestore.CACHE_READ_TIMEOUT_MS, seen
+
+
+def test_the_pre_wipe_count_ignores_the_projections_own_marker(
+        shared_proj, cache_graph):
+    """A never-served graph must read 0, not 1 — the count's whole job.
+
+    Opening a projection MERGEs `:Meta {key:'point_fts_v2'}` into the target
+    (measured: a plain `MATCH (n) RETURN count(n)` on a freshly-created graph
+    read **1**), which made `target held 0 node(s)` unprintable and a mistyped
+    target indistinguishable from a used one.
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    # Reproduce the marker the SHIPPED construction writes.
+    cache_graph.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+
+    assert rrestore._target_nodes_before(proj) == 0, (
+        "the projection's own `:Meta` marker must not read as restorable data")
+    cache_graph.query("CREATE (:Point {id:'p-9556-counted'})")
+    assert rrestore._target_nodes_before(proj) == 1
+
+
+def test_the_source_refusals_run_BEFORE_the_target_graph_is_opened(
+        monkeypatch, capsys):
+    """A refused run must not CREATE the graph it was asked about.
+
+    Opening a projection is a write (its `:Meta` marker), so `python -m tortoise
+    record-restore` used to create a mistyped target on its way to refusing an
+    empty record — the exact case where touching the named graph is worst.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.projection import FalkorProjection
+
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        FalkorProjection, "from_uri",
+        staticmethod(lambda uri, graph_name=None: opened.append(
+            {"uri": uri, "graph_name": graph_name})))
+
+    conn = _FakeConn()
+
+    def _connect(dsn, **kw):
+        return conn
+
+    fake = types.ModuleType("psycopg2")
+    fake.connect = _connect                            # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+    monkeypatch.setattr(cp, "read_record_view",
+                        lambda conn, *, org_id, graph_id: cp.RecordView(),
+                        raising=True)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "typo",
+                   "--cache-graph", "test_9556_never_opened"])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_REFUSED, err
+    assert opened == [], (
+        "the target graph was opened (and therefore created + marked) before "
+        "the empty-source refusal")
+    assert conn.closed
+
+
+def test_the_seam_refuses_a_zero_bound_and_leaves_the_graph_alone(
+        shared_proj, cache_graph):
+    """The destructive no-op is refused at the SEAM, not only at the verb.
+
+    `_project_record_view` accepted `limit == 0`, sliced `nodes[:0]` and still
+    ran the unconditional wipe — so any future caller of `rebuild_from_record`
+    could clear a cache by asking for "nothing".
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-seam'})")
+
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        proj.rebuild_from_record(_view(2), confirm_destructive=True, limit=0)
+
+    assert cache_graph.query(
+        "MATCH (p:Point) RETURN count(p)").result_set[0][0] == 1, (
+        "a refused 0 bound must not reach the wipe")
 
 # ── the live drive: a real cache, restored from a real view ───────────────
 

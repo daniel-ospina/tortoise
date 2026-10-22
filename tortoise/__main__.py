@@ -834,6 +834,7 @@ def _cmd_record_restore(args):
         RestoreRefused,
         RestoreUnavailable,
         log_result,
+        refuse_unrestorable_source,
         restore_from_record_view,
     )
 
@@ -901,6 +902,16 @@ def _cmd_record_restore(args):
                 f"the record is unreadable ({type(e).__name__}) — nothing was "
                 f"restored and the cache's state is UNCHANGED") from e
 
+        # The SOURCE-side refusals run BEFORE the target graph is opened: a
+        # projection's construction MERGEs its own `:Meta {key:'point_fts_v2'}`
+        # bookkeeping marker, which CREATES a mistyped graph — and a mistyped
+        # scope is the commonest empty source, i.e. exactly the case where
+        # touching the named graph is worst (`refuse_unrestorable_source`).
+        refuse_unrestorable_source(
+            view, org_id=args.org, graph_id=args.graph,
+            cache_graph=args.cache_graph, allow_empty=bool(args.allow_empty),
+            limit=args.limit)
+
         try:
             proj = FalkorProjection.from_uri(args.db,
                                              graph_name=args.cache_graph)
@@ -920,6 +931,16 @@ def _cmd_record_restore(args):
         )
     except RestoreRefused as e:
         print(f"Restore REFUSED: {e}", file=sys.stderr)
+        # ⚠️ "REFUSED" is about the RESTORE, not about the database. The
+        # source-side refusals are now raised before the target graph is
+        # opened, but the L2 refusal is asked OF a projection (the one owner of
+        # the name rule), and opening one MERGEs its `:Meta` marker. Saying
+        # "nothing was written" unqualified would be false in exactly the case
+        # an operator is reading this line (recorded on #9556's review).
+        print("  No row of the record's state was written to the cache. The "
+              "target graph may have been CREATED by opening it, with its own "
+              "`:Meta` bookkeeping marker — that is the projection, not a "
+              "restore.", file=sys.stderr)
         return EXIT_REFUSED
     except RestoreUnavailable as e:
         print(f"Restore UNAVAILABLE: {e}", file=sys.stderr)

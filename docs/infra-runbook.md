@@ -2605,7 +2605,7 @@ reporting a code whose documented meaning is "nothing was written".
 | code | meaning | next step |
 |---|---|---|
 | `0` | restored; the counts printed are what was written | compare `nodes_written`/`relations_written` with the record's own counts |
-| `3` | **REFUSED, nothing was written** (empty source, the cache's wipe guard, a rebuild that wrote 0) | read the printed reason — each has a different remedy |
+| `3` | **REFUSED — the restore did not run** (empty source, the cache's wipe guard, a rebuild that wrote 0): no row of the record's state was written | read the printed reason — each has a different remedy. ⚠️ The source-side refusals fire BEFORE the target graph is opened, but the L2 refusal is asked of a **projection**, and opening one creates the graph and MERGEs its own `:Meta` bookkeeping marker — so a refused run can leave an empty graph behind. That is the projection, not a restore |
 | `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, usage error, **a failure during the rebuild itself**) | fix the input; on the last case the wipe may already have run, so treat the cache as **UNKNOWN**, not empty |
 
 `2`'s caveat is `record-reconcile`'s, inherited verbatim: argparse's own
@@ -2628,10 +2628,15 @@ record is unreachable".
    SDK's isolated graph) or `org_<org_id>_<graph_id>` (the registry/ACL
    namespace). A wrong guess does **not** fail — FalkorDB opens an EMPTY graph —
    so the run would report a restore into a graph nobody reads while the real
-   graph stayed destroyed. The result prints the target's **pre-wipe node
-   count** for the same reason: `target held 0 node(s) before the wipe` beside
-   `wrote 412` is either a correct restore into a freshly-minted graph or a
-   restore into the wrong one, and only the operator can tell which.
+   graph stayed destroyed. The result prints the target's **pre-wipe count of
+   RESTORABLE nodes** (the labels the record can put back) for the same reason:
+   `target held 0 node(s) before the wipe` beside `wrote 412` is either a
+   correct restore into a freshly-minted graph or a restore into the wrong one,
+   and only the operator can tell which. Read it as "restorable nodes", not as
+   "every node": opening a projection MERGEs a `:Meta` bookkeeping marker into
+   the target, and `:Meta` also carries real state (`calibration_milestone`), so
+   the count is stated over the record's own node population rather than
+   defined as "everything except bookkeeping".
 4. **The cache's wipe guard (L2, #2944) is reported, not swallowed.** A server
    graph whose name does not start with `test_`/`tortoise_test` is refused as
    destructive. ⚠️ **Every production graph name is `org_*`, so this fires on a
@@ -2681,7 +2686,7 @@ part of this section, and its status is stated rather than implied:
 
 | drill step | status |
 |---|---|
-| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (16 pins, live cache graph included) |
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (live cache graph included) |
 | a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 

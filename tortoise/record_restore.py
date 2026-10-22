@@ -95,6 +95,7 @@ from typing import Any
 
 #: The bound on the pre-wipe count read. Imported from the sibling verb that
 #: bounds the SAME full-graph shape, so the two cannot drift apart.
+from tortoise.cache_projection import NODE_TABLES
 from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
 from tortoise.residency import COVERAGE_COMPLETE
 
@@ -107,6 +108,7 @@ __all__ = [
     "RestoreRefused",
     "RestoreUnavailable",
     "log_result",
+    "refuse_unrestorable_source",
     "restore_from_record_view",
 ]
 
@@ -234,23 +236,37 @@ def log_result(outcome: RestoreOutcome,
 
 
 def _target_nodes_before(project: Any) -> int | None:
-    """The cache's node count BEFORE the wipe — informational, never an input.
+    """How many RESTORABLE nodes the target held BEFORE the wipe (or ``None``).
 
-    A BOUNDED read (``MATCH (n) RETURN count(n)``) on the projection's own
-    handle: it does not decide what to project (§2.0's one-way rule leaves that
-    to the record), it only makes a mistyped/absent target VISIBLE in the
-    result. The bound is the sibling verb's
-    (``record_reconcile.CACHE_READ_TIMEOUT_MS``): it is a full-graph count, and
-    an operator's restore must not hang before it prints anything. An
-    unreadable handle yields ``None`` and the render says ``unknown`` — a
+    Two things this count is not, both measured on the shipped entry point:
+
+    * It is **not** ``MATCH (n) RETURN count(n)``. Opening a projection MERGEs
+      its own bookkeeping marker (``:Meta {key:'point_fts_v2'}``,
+      ``projection/__init__.py``), so a just-created, never-served graph reads
+      ``1`` — and this number's whole job is to let an operator recognise a
+      mistyped target. Counting only the labels the RECORD can actually put
+      back (``cache_projection.NODE_TABLES`` — the projection's own node
+      population) makes ``0`` mean what the operator needs it to mean. It is
+      not a ``:Meta`` exclusion: ``:Meta`` also carries real state
+      (``calibration_milestone`` is DATA), which is why the population is
+      stated as "restorable" rather than "everything except bookkeeping".
+    * It is **not** a decision. What gets projected is the record's, and the
+      read is bounded by the sibling verb's ``CACHE_READ_TIMEOUT_MS`` — a
+      full-graph count must not hang an operator's restore before it prints
+      anything.
+
+    An unreadable handle yields ``None`` and the render says ``unknown`` — a
     reporting gap must not be reported as a number.
     """
     g = getattr(project, "g", None)
     if g is None:
         return None
     try:
-        rows = g.query("MATCH (n) RETURN count(n)",
-                       timeout=CACHE_READ_TIMEOUT_MS).result_set
+        rows = g.query(
+            "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
+            "RETURN count(n)",
+            params={"labels": sorted(NODE_TABLES)},
+            timeout=CACHE_READ_TIMEOUT_MS).result_set
     except Exception:
         return None
     if not rows or not rows[0]:
@@ -291,29 +307,21 @@ def _ask_the_wipe_guard(project: Any, cache_graph: str) -> None:
             f"disposable-graph registry), not a retry") from e
 
 
-def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
-                             cache_graph: str, project: Any,
-                             allow_empty: bool = False,
-                             limit: int | None = None,
-                             scope: str = "") -> RestoreOutcome:
-    """Restore ``cache_graph`` from ``view`` (the record's state for one scope).
+def refuse_unrestorable_source(view: Any, *, org_id: str, graph_id: str,
+                              cache_graph: str, allow_empty: bool = False,
+                              limit: int | None = None) -> None:
+    """The refusals that need NO cache: an empty source, and a bound below 1.
 
-    ``project`` is a ``FalkorProjection`` built over the TARGET graph — the
-    caller owns building it and closing it. ``confirm_destructive=True`` is
-    passed HERE, at this entry point, for the same reason ``_cmd_rebuild``
-    passes it at its own: the human running the restore is the authorization,
-    and a future caller of ``rebuild_from_record`` must not be able to wipe a
-    graph by forgetting it.
+    Split out so the CLI can run them **before it opens the target graph**.
+    Opening a projection is not free of side effects — its construction MERGEs
+    a ``:Meta {key:'point_fts_v2'}`` bookkeeping marker and therefore CREATES a
+    mistyped graph — so a run that is going to refuse must refuse first. A
+    mistyped ``--org/--graph`` is the commonest cause of an empty source, which
+    makes this the exact case where touching the named graph is worst.
 
-    Refusals (:class:`RestoreRefused` — **nothing was written**):
-      * an empty view without ``allow_empty`` (see the module docstring, 1);
-      * a wipe the cache's L2 guard refuses (a non-``test_`` server graph,
-        asked BEFORE the rebuild — see :func:`_ask_the_wipe_guard`);
-      * a rebuild that reported writing no nodes while the record held some.
-    Unavailability (:class:`RestoreUnavailable` — no verdict, the cache's state
-    must be treated as UNKNOWN): ``--limit`` below 1, a rebuild whose reported
-    counts contradict the record, and **any failure raised during the rebuild**
-    — the pre-wipe guard passed, so the wipe may already have run.
+    The composition calls this too (idempotent), so a caller that skips it is
+    still refused — the CLI calls it early for the SIDE EFFECT, not to make the
+    guard exist.
     """
     record_nodes = len(getattr(view, "nodes", ()) or ())
     record_relations = len(getattr(view, "relations", ()) or ())
@@ -338,6 +346,44 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
             f"--limit must be >= 1, got {limit} — 0 wipes the cache and writes "
             f"nothing, so it is refused before any write. Nothing was "
             f"restored")
+
+
+def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
+                             cache_graph: str, project: Any,
+                             allow_empty: bool = False,
+                             limit: int | None = None,
+                             scope: str = "") -> RestoreOutcome:
+    """Restore ``cache_graph`` from ``view`` (the record's state for one scope).
+
+    ``project`` is a ``FalkorProjection`` built over the TARGET graph — the
+    caller owns building it and closing it. ``confirm_destructive=True`` is
+    passed HERE, at this entry point, for the same reason ``_cmd_rebuild``
+    passes it at its own: the human running the restore is the authorization,
+    and a future caller of ``rebuild_from_record`` must not be able to wipe a
+    graph by forgetting it.
+
+    Refusals (:class:`RestoreRefused`):
+      * an empty view without ``allow_empty`` (see the module docstring, 1);
+      * a wipe the cache's L2 guard refuses (a non-``test_`` server graph,
+        asked BEFORE the rebuild — see :func:`_ask_the_wipe_guard`);
+      * a rebuild that reported writing no nodes while the record held some.
+    Unavailability (:class:`RestoreUnavailable` — no verdict, the cache's state
+    must be treated as UNKNOWN): ``--limit`` below 1, a rebuild whose reported
+    counts contradict the record, and **any failure raised during the rebuild**
+    — the pre-wipe guard passed, so the wipe may already have run.
+
+    ⚠️ "Nothing was written" is about the RESTORE'S OWN STATE. The two
+    cache-side refusals happen before the wipe and write none of the record's
+    rows, but opening the projection can create the target graph and MERGE its
+    ``:Meta`` bookkeeping marker — which is why the two source-side refusals are
+    split out above, and why every message names what was and was not written
+    instead of saying "nothing happened".
+    """
+    refuse_unrestorable_source(view, org_id=org_id, graph_id=graph_id,
+                               cache_graph=cache_graph,
+                               allow_empty=allow_empty, limit=limit)
+    record_nodes = len(getattr(view, "nodes", ()) or ())
+    record_relations = len(getattr(view, "relations", ()) or ())
 
     target_before = _target_nodes_before(project)
 

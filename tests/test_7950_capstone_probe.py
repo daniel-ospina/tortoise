@@ -335,11 +335,20 @@ def test_the_s2_census_records_the_callers_that_now_exist():
     `cache_projection.read_record_view` while `tortoise/__main__.py`'s
     `record-reconcile` verb already called it, so the evidence artifact
     contradicted the merged code it is the evidence for.
+
+    `#9556` (R8) adds the SECOND caller — `python -m tortoise record-restore` —
+    and the FIRST production caller of `rebuild_from_record` (0 → 1). Both are
+    pinned EXACTLY: a future unwiring reddens here instead of quietly leaving
+    the count in the log, and the numbers are re-measured against the tree by
+    `test_the_s2_census_log_is_a_LIVE_measurement` beside this.
     """
     log = _S2_CENSUS_LOG.read_text(encoding="utf-8")
-    assert "== cache_projection.read_record_view: 1 production call site(s) ==" in log, (
-        "the census no longer records the production caller #9189 added — "
-        "re-run docs/evidence/7950-capstone/probes/s2_wiring_census.py")
+    assert "== cache_projection.read_record_view: 2 production call site(s) ==" in log, (
+        "the census no longer records the production callers #9189 and #9556 "
+        "added — re-run docs/evidence/7950-capstone/probes/s2_wiring_census.py")
+    assert "== FalkorProjection.rebuild_from_record: 1 production call site(s) ==" in log, (
+        "`rebuild_from_record` has no production caller recorded — the R8 "
+        "restore verb is that caller (#9556)")
     verdict = next(ln for ln in _readme_text().splitlines()
                    if ln.startswith("| **S2** |") and "divergence is OBSERVED" in ln)
     assert "all have **0 production call sites**" not in verdict, (
