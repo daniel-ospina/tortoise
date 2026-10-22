@@ -11959,9 +11959,7 @@ class TortoiseSDK:
         #   * `updatedAt` carries the instant the write stamped, so the fold's
         #     stub-completion arm reproduces it instead of the replay clock.
         #
-        #   * `ingestedAt` is emitted and IS faithful on BOTH arms of the stub's
-        #     existence (#8501 corrected this note once; #9451 closed the arm it
-        #     left open). It carries `stored_ingested_at` — the instant READ BACK
+        #   * `ingestedAt` carries `stored_ingested_at` — the instant READ BACK
         #     from the node the SET just wrote — not `now`. On the lane where this
         #     door's own mint CREATES the stub, the two are the same value (the
         #     mint is `_mint_source_stub(..., now=now)`, and the SET coalesces
@@ -11972,13 +11970,26 @@ class TortoiseSDK:
         #     pin. On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
         #     keeps the earlier writer's instant (#398's never-overwrite contract
         #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
-        #     record stating `now` would journal a value the write never wrote.
+        #     record stating `now` journals a value the write never wrote (#9451).
         #     `_upsert_source`'s ON CREATE arm reads the recorded value (#5024)
         #     and its ON MATCH arm now applies it under the `$stub_completion`
-        #     gate, so BOTH replay engines reproduce the node's value on both
-        #     arms — pinned by `tests/test_9451_pre_existing_stub_ingest_instant.py`
-        #     (whole-bag live vs after `rebuild_all()` AND after `rebuild()`,
-        #     mutation-measured red on the pre-#9451 tree).
+        #     gate, so for a record written BY THIS VERSION both replay engines
+        #     reproduce the node's value on both arms — pinned by
+        #     `tests/test_9451_pre_existing_stub_ingest_instant.py` (whole-bag live
+        #     vs after `rebuild_all()` AND after `rebuild()`, mutation-measured red
+        #     on the pre-#9451 tree).
+        #
+        #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied (#9451
+        #     review round 3): a `SourceCreated` line written BEFORE this change
+        #     states `now`, which the live write never stored on a pre-existing
+        #     stub — and no record can correct that, because the instant the mint
+        #     chose was never journaled. Such a line used to be replayed to the
+        #     replay clock; the ON MATCH clause now applies its RECORDED `now`
+        #     instead, which is still not the live node's value. So `live ==
+        #     rebuilt` for those legacy lines needs a RE-CAPTURE of the session
+        #     (which writes a faithful record) or a migration — not this fix.
+        #     What #9451 closes is the DOOR: every capture from this version
+        #     onward journals the instant it stored, on either arm.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
