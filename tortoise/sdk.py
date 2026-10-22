@@ -148,6 +148,8 @@ from .quota import (
     MAX_EXTRACTIONS_PER_TURN,
     MAX_SESSION_TURNS,
     is_metered_document_kind,
+    refuse_document_writer_demotion,  # #5140: the document writers' loud refusal
+    stored_source_document_kinds,     # #5140: ONE reader of the meter key
 )
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
@@ -3968,7 +3970,7 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
 # `update_point` and `update_entity` still call it here, under this name.
 
 
-def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
+def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
                                    none_demotes: bool = False) -> None:
     """#5140 P1: `documentKind` is the documenthood/METER key, not metadata.
 
@@ -3995,18 +3997,31 @@ def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
     (`documentKind` added to a provenance Source) only over-counts — it fails
     closed — and is deliberately left alone.
 
-    Both spellings are refused, for DIFFERENT reasons — stated truthfully
-    because the earlier wording claimed a mechanism that does not exist. The
-    camelCase `documentKind` is the key the meter reads, so refusing it is the
-    demotion guard itself. The snake_case `document_kind` is INERT as a node
-    property (no reader in the tree reads `s.document_kind`; the meter reads
-    `s.documentKind`), so a bare snake write cannot demote — it is refused
-    because it would put the genre on the node in TWO places, one of them the
-    one every reader ignores: the `raw_state`/`rawState` ambiguity class
-    (`_SOURCE_HANDLED`'s "the state in TWO places" note), and because a
+    Both spellings are refused on a METERED document, for DIFFERENT reasons —
+    stated truthfully because the earlier wording claimed a mechanism the code
+    did not implement. The camelCase `documentKind` is the key the meter reads,
+    so refusing a demotion through it is the demotion guard itself (a promotion
+    or a metered -> metered retarget still lands). The snake_case
+    `document_kind` is INERT as a node property (no reader in the tree reads
+    `s.document_kind`; the meter reads `s.documentKind`), so it cannot demote by
+    itself — it is refused for EVERY value, because the only thing a snake
+    write can do on a document is put the genre on the node in a SECOND place,
+    one of them the one every reader ignores: the `raw_state`/`rawState`
+    ambiguity class (`_SOURCE_HANDLED`'s "the state in TWO places" note), and a
     `DocumentCreated` payload carrying it DOES reach the genre via
     `_upsert_document`'s `$dk`. One home for the genre, and it is
     `documentKind`.
+
+    ⛔ That last point was the review-cycle-3 defect and it is why the rule is
+    "refuse the whole SPELLING on a document" rather than "refuse the demoting
+    VALUE": the value-scoped rule ADMITTED `document_kind='brief'` on a
+    metered document (creating exactly the second home this docstring refuses)
+    while REFUSING `document_kind=None`, the one snake write that cannot
+    demote and is the cleanup of that second home. The predicate was inverted
+    against its own stated purpose in both directions. The refusal is scoped to
+    a METERED document because that is where the genre already has a home; on a
+    non-document `:Source` the property is inert and a promotion is how a
+    document is minted through these surfaces at all.
 
     Deliberately NOT in `_DOC_RETIRED_KEYS`: `documentKind` is LIVE (D10 §4.4,
     the genre axis) and a member there is SCRUBBED off every document. On the
@@ -4014,18 +4029,36 @@ def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
     no-op would leave the caller believing it wrote. (The DOCUMENT writer,
     `_upsert_document`, instead DROPS a demotion inside its own clause: the
     same statement is the journal replay fold, so it must stay total and must
-    not abort a rebuild over a pre-guard record. `create_source`/
-    `update_entity` are never replay, so they raise.)
+    not abort a rebuild over a pre-guard record. Its PRODUCERS —
+    `EventAPI.add_document` and `sdk._doc_write` — refuse loudly before the
+    journal append, via `quota.refuse_document_writer_demotion`, so the drop
+    is reached only by a REPLAY. `create_source`/`update_entity` are never
+    replay, so they raise here.)
     """
     incoming = [(k, props[k]) for k in ("documentKind", "document_kind")
                 if k in props]
     if not incoming:
         return
-    if not is_metered_document_kind(stored_kind):
+    # ⛔ FAIL CLOSED over EVERY node the write can reach: `update_entity` writes
+    # `MATCH (n:Source {key:$id}) SET n += $p`, which applies to ALL matching
+    # nodes, so one non-metered sibling must not be able to answer for a metered
+    # one (#5140 review cycle 4 reproduced exactly that: meter 1 -> 0).
+    metered = [k for k in stored_kinds if is_metered_document_kind(k)]
+    if not metered:
         # Nothing metered stored to demote: a fresh node, a transcript, or a
         # non-document `:Source`. Setting/promoting the genre is allowed.
         return
+    stored_kind = metered[0]
     for key, value in incoming:
+        if key == "document_kind":
+            # The WHOLE spelling, whatever its value — see the docstring.
+            raise ValueError(
+                f"`document_kind={value!r}` cannot be written to a metered "
+                f"document (stored documentKind={stored_kind!r}): the genre "
+                f"lives in `documentKind` ONLY, and `document_kind` is an "
+                f"inert second spelling that no reader reads. Write "
+                f"`documentKind`, which carries the demotion rule (#5140)."
+            )
         if is_metered_document_kind(value):
             continue
         if value is None and not none_demotes:
@@ -4042,11 +4075,9 @@ def _refuse_document_kind_demotion(stored_kind, props, *, surface: str,
             f"`{DOCUMENT_METER_PREDICATE}`). `documentKind` is the "
             f"documenthood key, not metadata: it cannot be demoted to "
             f"`transcript`/empty through `{surface}` (#5140 — metering a node "
-            f"a caller can un-meter is not a cap), and `document_kind` is a "
-            f"second spelling of the same key, not a second key — the genre "
-            f"lives in `documentKind` only. Retarget among metered genres is "
-            f"allowed (`report` -> `brief`). To drop a document's metering, "
-            f"delete the document; to record that a source became "
+            f"a caller can un-meter is not a cap). Retarget among metered "
+            f"genres is allowed (`report` -> `brief`). To drop a document's "
+            f"metering, delete the document; to record that a source became "
             f"unavailable, use `create_source(..., raw_state=...)`."
         )
 
@@ -32222,26 +32253,25 @@ class TortoiseSDK:
                     "`rebuild_all` to scrub them.", id_val, len(_denied), _denied)
         return _props
 
-    def _stored_source_document_kind(self, g, id_val: str):
-        """The `documentKind` the write below would PRESERVE, or ``None``.
+    def _stored_source_document_kinds(self, g, id_val: str):
+        """EVERY `documentKind` the write below could overwrite (a list).
 
         #5140: resolves with the SAME key discipline as the write (primary key
         then secondary — `_source_reachable_by`'s rule and its #5196 rationale),
         so a url-only STUB cannot hide a stored genre from the guard the way it
         once hid its identity from the `:Source` allowlist.
-        """
-        from tortoise.projection import secondary_entity_id_props
 
-        _keys = (_ENTITY_ID_PROP.get("Source", "id"),
-                 *secondary_entity_id_props("Source"))
-        for _k in _keys:
-            _rows = g.query(
-                f"MATCH (n:Source {{{_k}:$id}}) RETURN n.documentKind",
-                params={"id": id_val},
-            ).result_set
-            if _rows:
-                return _rows[0][0]
-        return None
+        A LIST, not one kind: `update_entity`'s write is
+        `MATCH (n:Source {key:$id}) SET n += $p`, which applies to EVERY
+        matching node, so the guard must answer for all of them (fail closed)
+        rather than for whichever row the engine happens to return first.
+
+        The reader itself lives in `quota.stored_source_document_kinds` because
+        the DOCUMENT writers (`EventAPI.add_document`, `_doc_write` below) read
+        the meter key too and cannot import the SDK; one reader, one key
+        discipline (#5140 review cycles 3-4).
+        """
+        return stored_source_document_kinds(g, id_val)
 
     def _source_reachable_by(self, g, id_val: str) -> int:
         """Count the `:Source` nodes the WRITE below would reach for `id_val`.
@@ -32425,7 +32455,7 @@ class TortoiseSDK:
                 # as the `create_source` call above.
                 if "documentKind" in props or "document_kind" in props:
                     _refuse_document_kind_demotion(
-                        self._stored_source_document_kind(
+                        self._stored_source_document_kinds(
                             self._get_proj().g, id_val),
                         props, surface="update_entity", none_demotes=True)
                 _managed = sorted(k for k in props if k in _SOURCE_SERVER_MANAGED_PROPS)
@@ -35132,6 +35162,20 @@ class TortoiseSDK:
             "suppress_embedding": True,
             "topics": topics,
         }
+        # #5140 P1 (review cycle 3): the DOCUMENT writer may not demote an
+        # existing document out of the metered `documents` set. `doc_kind`
+        # comes from a TENANT-CONTROLLED file's frontmatter `type:`, and the id
+        # is DERIVED from the path (`derive_document_id`), so editing one line
+        # of one file and re-indexing reached the SAME `:Source` and rewrote
+        # its genre — the resume fast-skip is keyed on (size, mtime), so an
+        # edited file is WRITTEN, not skipped. Runs BEFORE the journal append
+        # (`_emit_event` is the commit point), so a refusal leaves nothing to
+        # replay. The fold's CASE clause would drop the value silently; this
+        # refuses it loudly, because `/v1/index/docs` reporting a document as
+        # re-indexed while the graph kept the old genre is exactly the
+        # silent-no-op the SDK guards refuse (#5140 review cycle 3).
+        refuse_document_writer_demotion(
+            proj.g, doc_id, ev["document_kind"], surface="_doc_write")
         if frontmatter.get("domain") is not None:
             ev["domain"] = str(frontmatter["domain"])
         # ── #5475 (residual): ``document_kind`` comes from FRONTMATTER ──
@@ -36282,7 +36326,7 @@ class TortoiseSDK:
         # a new pre-write failure mode — for a key nobody supplied.
         if "documentKind" in ev or "document_kind" in ev:
             _refuse_document_kind_demotion(
-                self._stored_source_document_kind(
+                self._stored_source_document_kinds(
                     self._get_proj().g, self._resolve_source_url(url)),
                 ev, surface="create_source")
         if is_episodic is not None:
