@@ -253,8 +253,8 @@ CASES: dict[str, dict] = {
     # through the pure function. The probes below pin `shouldSubmit` itself; this
     # pins the CALLER, because "never re-submit once stamped" re-implemented one
     # level up (`if (!shouldSubmit(...) || lastSubmittedAt)`) leaves the pure
-    # probes green. The stamp is relative to the REAL clock because the handler
-    # stamps `Date.now()`; `STATES["expired"]`/`["fresh"]` are built at import.
+    # probes green. The sentinel stamps below are materialised by the `payload`
+    # fixture, milliseconds before node runs.
     "expired_stamp_resubmits": {"status": "draft", "lastSubmittedAt": "@expired", "steps": [{"status": "published"}]},
     "fresh_stamp_does_not_resubmit": {"status": "draft", "lastSubmittedAt": "@fresh", "steps": [{"status": "published"}]},
     # The stamp write fails (our own control plane 5xx). The submission still
@@ -400,32 +400,76 @@ def _logs_matching(res: dict, needle: str) -> list[str]:
 
 
 # ── The operator doc must not advertise a log surface it has lost a row of ──
-def test_every_log_shape_the_module_can_emit_is_in_the_operator_table() -> None:
-    """The doc table is the runbook's only discovery mechanism — keep it complete.
+#: The status-level rows the runbook PROMISES to explain, one per distinct
+#: operator action. A template like `submit failed (status ${res.status})` can emit
+#: any code, so coverage of the template is not coverage of the statuses: each of
+#: these is a row an operator reads, and each one's remedy is different. Deleting
+#: any of them reds the test below.
+DOC_ROWS = (
+    "submitted (status 200)",
+    "submitted (status 202)",
+    "submit failed (status 400)",
+    "submit failed (status 403)",
+    "submit failed (status 422)",
+    "submit failed (status 429)",
+    "submit failed (status 5xx)",
+    "submit failed (no status — timeout/network)",
+    "submit failed (unusable url)",
+    "stamp failed (supabase <n>)",
+    "stamp failed (upstream unreachable)",
+    "skipped (submitted <ts>)",
+    "skipped (state unreadable, supabase 400)",
+    "skipped (state unreadable, supabase 401|403|5xx)",
+    "skipped (state unreadable, upstream unreachable)",
+    "skipped (state unreadable, no row)",
+    "unexpected failure",
+)
 
-    An operator diagnoses a notification failure by filtering for `[indexnow]` and
-    reading the table. A shape the code emits and the table omits is a failure
-    nobody can interpret, and a table row the code can no longer emit points at an
-    action that no longer exists. Both directions are asserted from the SOURCE, so
-    adding a `console.*` to the module reds here until the operator doc is updated
-    with it — the same shape as the V1 key-file assertion, which reads the
-    committed file rather than a copy of its name.
 
+def test_the_operator_table_documents_every_shape_and_loses_no_row() -> None:
+    """The doc table is the runbook's only discovery mechanism — keep it honest.
+
+    Two directions, both read from the SOURCE rather than from a copy of its names:
+
+    * **Emitted ⊆ documented** — EVERY `console.<method>(` in the module must be an
+      `[indexnow]` log whose shape is in the table. The denominator is every console
+      call of any method (so `console.debug`, or a call re-wrapped across lines,
+      cannot hide from it) and the numerator is the parsed `[indexnow]` shapes: the
+      two must be equal, so a log line written in a form this test cannot read reds
+      instead of silently escaping the pin.
+    * **the promised rows still exist** — ``DOC_ROWS`` names each status/qualifier
+      the table promises to explain, because one template can emit many statuses
+      with different remedies. Delete a row an operator relies on and this reds.
+
+    This is the same shape as the V1 key-file assertion: it reads the committed
+    artifact, not a restatement of it.
     """
     source = INDEXNOW_MODULE.read_text(encoding="utf-8")
+    calls = len(re.findall(r"console\.\w+\(", source))
     shapes = set()
-    for match in re.finditer(r"console\.(?:log|warn|error)\(`\[indexnow\] ([^`]+)`", source):
+    for match in re.finditer(r"console\.\w+\(\s*`\[indexnow\] ([^`]+)`", source):
         # Everything before the first interpolation, minus the trailing separator.
         head = match.group(1).split("${", 1)[0].rstrip(": ")
         if head:
             shapes.add(head)
-    assert len(shapes) >= 10, f"expected the module's log shapes, found {sorted(shapes)}"
+    assert len(shapes) == calls, (
+        f"{calls} console calls but {len(shapes)} parsed [indexnow] shapes — a log line "
+        "was written in a form this test cannot see, so it is not actually pinned:"
+        f" {sorted(shapes)}"
+    )
 
-    doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8")
+    # Backslash-escaped pipes (`401\|403`) are markdown table syntax for one
+    # cell — unescape before comparing so the row key reads as an operator sees it.
+    doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8").replace("\\|", "|")
     missing = sorted(s for s in shapes if s not in doc)
     assert missing == [], (
         "docs/blog-authoring.md's [indexnow] table omits log shapes the module emits: "
         f"{missing} — an operator cannot act on a line the runbook does not describe"
+    )
+    lost = [row for row in DOC_ROWS if f"| `{row}`" not in doc]
+    assert lost == [], (
+        f"the [indexnow] table lost rows an operator acts on: {lost} — a status row is "
+        "not covered by its template's row, because each status implies a different action"
     )
 
 
@@ -553,9 +597,11 @@ def test_an_expired_stamp_resubmits_through_the_handler(results) -> None:
     These two cases drive a real age through ``notifyPublished`` instead, so that
     caller-side mutant reds: 25 h submits, 23 h does not.
 
-    The stamps are built against the real clock at import (the handler stamps
-    ``Date.now()``), so they cannot be vacuously in the future like a fixed
-    probe-time stamp would be.
+    The stamps are materialised in the ``payload`` fixture — at serialisation,
+    milliseconds before node runs — from ``STAMP_SENTINEL_HOURS``, so the "still
+    inside the window" case's margin is the subprocess, not the whole pytest
+    session (an import-time 23 h stamp would spend an hour of budget on unrelated
+    collection and would false-red after 3600 s).
     """
     expired = results["expired_stamp_resubmits"]
     assert len(expired["submissions"]) == 1, (
