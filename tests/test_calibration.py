@@ -12,6 +12,7 @@ from tortoise.sdk import TortoiseSDK
 from tortoise.sdk import BASELINE_SOURCE_INHERITED
 from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
 from tortoise.exceptions import CalibrationError
+from tortoise.exceptions import UnaddressableClaimError
 
 
 @pytest.fixture
@@ -1457,3 +1458,86 @@ def test_out_of_contract_kind_shapes_do_not_abort_the_gate(sdk):
     # And the run itself still works on that graph (the assertion above would
     # pass even if the query raised inside a caller that swallows it).
     sdk.compute_confidence(require_calibration=True)
+
+
+# ── #9275 — an unaddressable claim refuses the RUN, not the ordering ────────
+
+def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
+    """#9275: a claim that names no node refuses the pass, BEFORE it stamps.
+
+    MEASURED on ``origin/main`` at ``02e18e752``: the id-less ``:Point`` rode
+    ``_affected_claims`` into ``dream.py``'s ``sorted(affected)`` and the pass
+    died with ``TypeError: '<' not supported between instances of 'str' and
+    'NoneType'`` — AFTER it had flushed the posteriors of both NAMED claims
+    (``3.24647986469106``/``1.10312233616541`` and ``3.2020772952``/``1.04032``),
+    leaving the run unreturnable and half-written. The same graph now refuses
+    with a diagnosis, and asserts the invariant that made the old behaviour
+    unacceptable: nothing is stamped.
+
+    The traceback used to name a sort, which is why it could not be diagnosed
+    from the SDK surface: an id-less node cannot be named, so it cannot be
+    repaired by ``set_point_baseline`` — the message has to carry the repair
+    query instead of an id.
+    """
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
+                 "content:'no id'})")
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (c:Point) WHERE c.id IS NULL "
+        "CREATE (o)-[:IMPL {id:'e-9275'}]->(c)",
+        params={"o": op["id"]})
+
+    with pytest.raises(UnaddressableClaimError) as exc:
+        sdk.compute_confidence()
+    message = str(exc.value)
+    assert "carry no `id`" in message
+    # Actionable, not merely loud: the repair is a graph write because the node
+    # has no id to pass to set_point_baseline.
+    assert "SET n.id" in message
+    assert "DETACH DELETE" in message
+    assert "#9275" in message
+
+    # THE invariant: the refusal comes before any stamp. A partial stamp is what
+    # made the old TypeError unrecoverable (a retry stamps the same claims
+    # twice), so it is asserted on the SAME namable claims the old run stamped.
+    stamped = dict(proj.g.query(
+        "MATCH (n:Point) WHERE n.id IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha").result_set)
+    assert stamped[anchor["id"]] is None
+    assert stamped[claim["id"]] is None
+
+
+def test_an_id_that_is_not_a_string_is_ordered_not_crashed(sdk):
+    """#9275 sibling: a numeric id is ADDRESSABLE — only the ordering choked.
+
+    ``create_point(..., id=X)`` mints string ids, so a numeric one is the same
+    hand-written-graph class as the id-less node (and ``set_point_baseline(42,
+    …)`` — the remedy ``calibrate_summary`` already prints for it — proves it is
+    addressable). MEASURED on ``origin/main`` at ``02e18e752``: the pass ran and
+    then died in ``sorted(affected)`` with ``TypeError: '<' not supported
+    between instances of 'str' and 'int'``, again AFTER stamping. The sort is
+    now total (``key=str``, the same guard the calibration gate's own sorted
+    message uses) and the claim is computed like any other.
+    """
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+
+    proj = sdk._get_proj()
+    proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
+                 params={"id": claim["id"]})
+
+    out = sdk._get_dreamer().dream([anchor["id"], 42], warm_start=False)
+    assert 42 in out["affected_claims"]
+    posterior = proj.g.query(
+        "MATCH (n:Point {id:42}) RETURN n.posterior_alpha").result_set
+    assert posterior[0][0] is not None, (
+        "the numeric-id claim was ordered but never computed")

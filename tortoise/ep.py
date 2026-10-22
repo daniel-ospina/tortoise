@@ -14,6 +14,7 @@ import random
 import re
 import time
 
+from .exceptions import UnaddressableClaimError
 from .projection import _declares_apply_first_write_lane
 from .quadrature import tilted_moments, moments_to_beta, phi_nand, phi_impl
 from .live import (
@@ -1458,6 +1459,45 @@ class TortoiseEP:
                 frontier = new_frontier
                 if not frontier:
                     break
+        # #9275: an id-less claim is UNNAMEABLE, so it is not a claim this run
+        # can compute. Every admission point above collects `c.id`/`b.id`/`m.id`
+        # verbatim from the engine, and a `:Point` written outside the SDK (no
+        # writer mints one — every id-binding write path refuses a missing id on
+        # its own post-write check) can carry none, so the engine returns a row
+        # whose id is NULL and `None` lands in this set.
+        #
+        # WHY REFUSE HERE rather than order around it. `affected` is not a
+        # report: every member is loaded into the node cache, run through its
+        # factors, and written back by `WHERE id = $id`. A member that names no
+        # node can therefore be neither hydrated nor stamped, and no SDK caller
+        # can repair it (`set_point_baseline(None)` names nothing — the #9063
+        # gate excludes it for exactly that reason, and that exclusion stays
+        # sound only while the run REFUSES such a node rather than admitting it).
+        # MEASURED before this guard (origin/main 02e18e752): the `None` rode the
+        # set to `dream.py`'s `sorted(affected)` and the pass died with
+        # `TypeError: '<' not supported between instances of 'str' and
+        # 'NoneType'` AFTER flushing the named claims' posteriors (3.246/1.103 and
+        # 3.202/1.040 written, the id-less node left null). A crash that has
+        # already written half a pass is not fail-closed, and the caller could
+        # not diagnose it — the traceback names a sort, not the graph. So the one
+        # place every affected claim is collected refuses, before `_load_cache`
+        # and before any posterior is stamped, and names the repair.
+        if None in affected:
+            _idless = sum(1 for _c in affected if _c is None)
+            raise UnaddressableClaimError(
+                f"EP cannot run: {_idless} node(s) in this run's affected set "
+                "carry no `id`. An id-less :Point wired as an operator's claim "
+                "(or as a direct-edge endpoint) cannot be addressed by EP — "
+                "every claim is keyed on `id` for hydration, for message "
+                "caching and for the posterior write-back — so it can be "
+                "neither computed nor stamped, and no SDK caller can repair it. "
+                "Refused BEFORE any posterior was stamped, so nothing is "
+                "half-written (#9275). Find and repair the node(s):\n"
+                "  MATCH (n:Point) WHERE n.id IS NULL "
+                "RETURN n.pointKind, left(coalesce(n.content, ''), 80)\n"
+                "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<uuid>'  "
+                "-- or DETACH DELETE it"
+            )
         # Final strip: FAIL-SAFE only — every admission point into `affected`
         # already excludes drafts (seed predicates, _live_neighbors, direct-edge
         # filters); the strip guards the nuclear-risk invariant against future
@@ -2429,7 +2469,13 @@ class TortoiseEP:
             random.shuffle(factors)
             for op_id, op_type, input_ids, weight, label, direction in factors:
                 if warm_snapshot is not None:
-                    key = (op_id, op_type, tuple(sorted(input_ids)))
+                    # #9275: `key=str` — a hand-written graph can carry an id
+                    # that is not a string (a numeric id is addressable and
+                    # legitimately runnable), and a mixed-type ordering would
+                    # raise here for the same reason it raised in
+                    # `sorted(affected)`.
+                    key = (op_id, op_type,
+                           tuple(sorted(input_ids, key=str)))
                     last = warm_snapshot.get(key)
                     if last is not None:
                         delta = 0.0

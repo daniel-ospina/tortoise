@@ -297,8 +297,14 @@ class Dreamer:
                 # (the zero-affected retention path, #780).
                 if stamp_dreamed_at and trivial_stamp:
                     stamped = self._trivial_stamp(proj, anchors)
+                    # #9275: `key=str` — `_trivial_stamp` returns `n.id` from the
+                    # engine, and a hand-written numeric id is orderable only
+                    # against its own type. (An id-LESS node never reaches here:
+                    # `_affected_claims` refuses it before any EP work, and the
+                    # trivial-stamp scan cannot admit a node that carries an
+                    # IMPL|NAND edge.)
                     return {"iterations": 0, "converged": True,
-                            "affected_claims": sorted(stamped)}
+                            "affected_claims": sorted(stamped, key=str)}
                 return {"iterations": 0, "converged": True, "affected_claims": []}
             ep = self._sdk._get_ep()  # noqa: F841
             # #330: dream must honour the SDK's persistent evidence (baselines)
@@ -317,7 +323,16 @@ class Dreamer:
             return {
                 "iterations": iterations,
                 "converged": converged,
-                "affected_claims": sorted(affected),
+                # #9275: `key=str`. Every member of `affected` is an id the
+                # engine returned, and `_affected_claims` refuses an id-less one
+                # (an unaddressable claim — see `UnaddressableClaimError`). A
+                # PRESENT id that is not a string (a numeric id in a hand-written
+                # graph) is addressable and runs fine; only this ordering could
+                # not take it — measured: `TypeError: '<' not supported between
+                # instances of 'str' and 'int'`, after the pass had stamped. The
+                # same `key=str` the calibration gate uses for its own sorted
+                # message (sdk.py `_uncalibrated_ep_participants`).
+                "affected_claims": sorted(affected, key=str),
             }
 
     def _ep_run_batch(self, proj, seed_ids: list[str], max_hops: int,
@@ -602,7 +617,7 @@ class Dreamer:
                 "converged_all": converged_all,
                 "operators_deduped": len(seen_ops),
                 "budget_used": len(seen_ops),
-                "affected_claims": sorted(affected),
+                "affected_claims": sorted(affected, key=str),  # #9275: see dream()
             }
 
     def _trivial_stamp(self, proj, claim_ids: list[str] | None = None) -> set[str]:
