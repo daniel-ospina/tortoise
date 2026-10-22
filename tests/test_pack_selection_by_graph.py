@@ -968,3 +968,304 @@ def test_ps_public_helpers_are_importable():
     for name in ("resolved_pack_set", "set_graph_packs", "read_pack_selection",
                  "PackSelection", "ResolvedPackSet", "PackRevisionConflict"):
         assert hasattr(ps, name), name
+
+
+# ── #9667: create-with-packs (the ATOMIC provisioning form) ────────────────
+#
+# #2728 shipped the per-graph picker; #9667's gap was that PROVISIONING could
+# not use it, so an unconfigured graph was not a choice but the only
+# possibility. ``POST /v1/graphs`` now takes an optional ``packs`` set.
+#
+# The contract asserted here is #9667's own acceptance criteria:
+#   1. a graph created with packs returns EXACTLY that set on GET;
+#   2. an invalid (or unauthorised) pack fails the CREATION — no half-created
+#      graph, no follow-up call;
+#   3. the decided default is untouched: a create that says nothing about
+#      packs is still born UNCONFIGURED (catalog union, #2714 indicator 3).
+
+
+def _seed_create_team(db_path: str, org_id: str, *, tier: str = "solo",
+                      role: str = "owner", user_id: str = "creator-1",
+                      max_graphs: int = 5) -> None:
+    """A provisioning-ready team: ``Team`` (+quota columns), its ``default``
+    Graph node (``graph_count`` starts at 1), and ONE session ``Membership``.
+
+    NOT ``_seed_org``: that seeds a FREE team, and ``_provision_preflight``
+    402s a free team before any pack code runs — the test would fail on the
+    tier gate instead of on what it pins.
+    """
+    sdk = TortoiseSDK(db_path=db_path, namespace="registry")
+    sdk._get_registry().query(
+        "MERGE (t:Team {id:$id}) SET t.name=$id, t.tier=$tier, "
+        "t.max_graphs=$mg, t.graph_name=$gn",
+        params={"id": org_id, "tier": tier, "mg": max_graphs,
+                "gn": f"org_{org_id}"})
+    sdk._graph_create(org_id, "default", kind="default",
+                      namespace=f"org_{org_id}")
+    sdk._get_registry().query(
+        "MERGE (m:Membership {user_id:$u, org_id:$t}) "
+        "SET m.status='active', m.role=$r",
+        params={"u": user_id, "t": org_id, "r": role})
+
+
+def _act_as(tc, user_id: str, org_id: str) -> None:
+    """Resolve BOTH session dependencies as one session user: the create
+    alias (``get_current_user``) and the per-graph pack READ
+    (``get_current_org_session``'s session lane, ``key_id=None``)."""
+    from tortoise.hosted_api import (
+        app,
+        get_current_org_session,
+        get_current_user,
+    )
+    app.dependency_overrides[get_current_user] = \
+        lambda: {"user_id": user_id, "email": f"{user_id}@example.com"}
+    app.dependency_overrides[get_current_org_session] = \
+        lambda: {"org_id": org_id, "key_id": None, "tier": "solo",
+                 "scopes": [], "session_user_id": user_id,
+                 "graph_id": None}
+
+
+@pytest.fixture
+def create_client(monkeypatch):
+    """Registry-mode TestClient with a temp embedded DB, plus a cleanup that
+    REMOVES the auth overrides — ``app`` is a module singleton, so a leaked
+    override would silently authenticate every later test."""
+    from fastapi.testclient import TestClient
+
+    from tortoise.hosted_api import app, get_current_org_session, get_current_user
+    monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "create.db")
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            try:
+                yield tc, db_path
+            finally:
+                app.dependency_overrides.pop(get_current_user, None)
+                app.dependency_overrides.pop(get_current_org_session, None)
+
+
+def _graph_names(db_path: str, org_id: str) -> list[str]:
+    return [g["name"] for g in
+            TortoiseSDK(db_path=db_path, namespace="registry").graph_list(org_id)]
+
+
+class TestCreateGraphWithPacks:
+    def test_create_with_packs_returns_exactly_that_set_on_get(
+            self, create_client):
+        """#9667 acceptance 1 — create and configure in ONE call.
+
+        FAIL-ON: an implementation that ignores the ``packs`` field leaves the
+        graph UNCONFIGURED, so ``GET .../packs`` reports ``configured: false``
+        and the catalog union instead of the requested pair. ``marketing`` is
+        requested ``disabled`` specifically: a create path that only recorded
+        ACTIVE namespaces would return it as ``active`` (or drop it).
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-1")
+        _act_as(tc, "creator-1", "t-cwp-1")
+        r = tc.post("/v1/graphs", json={
+            "org_id": "t-cwp-1", "name": "born-configured",
+            "packs": [{"namespace": DEV},
+                      {"namespace": MARKETING, "status": "disabled"}]})
+        assert r.status_code == 201, r.text
+        body = r.json()
+        gid = body["graph"]["id"]
+        # The envelope carries the resolved set, so no re-read is needed.
+        assert body["packs"]["configured"] is True, body["packs"]
+        assert body["packs"]["revision"] == 1, body["packs"]
+
+        got = tc.get(f"/v1/graphs/{gid}/packs?org_id=t-cwp-1")
+        assert got.status_code == 200, got.text
+        view = got.json()
+        assert view["configured"] is True, (
+            "a graph created WITH packs must not read as unconfigured")
+        assert view["revision"] == 1, view
+        assert {p["namespace"]: p["status"] for p in view["packs"]} == {
+            DEV: "active", MARKETING: "disabled"}, view["packs"]
+
+        # …and the COMPILE seam agrees with the API view (the #2714 bridge).
+        # ``disabled`` is a STORED state, not an approved namespace: the view
+        # lists it (so the picker can re-enable it) while the write gate's
+        # approval set excludes it — #2728's ``recorded(active) ∪ data``.
+        import tortoise.hosted_api as ha
+        resolver = ha._make_sdk(graph_name=body["graph"]["namespace"])
+        assert resolved_pack_set(resolver).namespaces == frozenset({DEV}), (
+            "the approval set the write gate reads differs — a disabled "
+            "namespace must not stay writable")
+
+    def test_an_unknown_namespace_fails_the_creation_and_leaves_no_graph(
+            self, create_client):
+        """#9667 acceptance 2 — atomic, not a follow-up call.
+
+        FAIL-ON: a create-then-configure implementation returns 201 (or a 422
+        AFTER the graph node landed) and ``graph_list`` then carries
+        ``bad-packs`` — a graph whose pack set the caller believes it set. The
+        check is on the GRAPH LIST, not just the status code, because that is
+        the difference between "refused" and "refused but leaked".
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-2")
+        _act_as(tc, "creator-1", "t-cwp-2")
+        r = tc.post("/v1/graphs", json={
+            "org_id": "t-cwp-2", "name": "bad-packs",
+            "packs": [{"namespace": "no-such-shipped-pack"}]})
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["error_code"] == "UNKNOWN_PACK_NAMESPACE", \
+            r.text
+        assert "bad-packs" not in _graph_names(db_path, "t-cwp-2"), (
+            "the refused creation left a graph behind (D11 no-orphan)")
+
+    def test_a_removed_status_is_refused_before_anything_is_written(
+            self, create_client):
+        """``removed`` is a DERIVED tombstone, never an input status (#2728).
+        The create form must not accept it either — and must refuse it before
+        the write, so the refusal creates nothing at all.
+
+        FAIL-ON: forwarding the raw entries to the write core would surface
+        this as ``UNKNOWN_PACK_NAMESPACE``/500 after a graph was created; the
+        pinned shape is a pre-write 422 ``INVALID_PACK_SET``.
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-3")
+        _act_as(tc, "creator-1", "t-cwp-3")
+        r = tc.post("/v1/graphs", json={
+            "org_id": "t-cwp-3", "name": "tombstone-in",
+            "packs": [{"namespace": DEV, "status": "removed"}]})
+        assert r.status_code == 422, r.text
+        assert r.json()["detail"]["error_code"] == "INVALID_PACK_SET", r.text
+        assert "tombstone-in" not in _graph_names(db_path, "t-cwp-3")
+
+    def test_an_empty_pack_list_is_a_deliberate_empty_set(
+            self, create_client):
+        """``packs: []`` is the NARROWEST deliberate act — the whole reason
+        #9667 exists (an unconfigured graph is the decided default, so
+        narrowing must be expressible at birth).
+
+        FAIL-ON: ``if packs:`` (truthiness) instead of ``is not None`` treats
+        an explicit empty set as "no decision": the graph is born
+        UNCONFIGURED and resolves to the catalog union, which is the exact
+        opposite of what the caller asked for.
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-4")
+        _act_as(tc, "creator-1", "t-cwp-4")
+        r = tc.post("/v1/graphs", json={
+            "org_id": "t-cwp-4", "name": "core-only", "packs": []})
+        assert r.status_code == 201, r.text
+        gid = r.json()["graph"]["id"]
+        view = tc.get(f"/v1/graphs/{gid}/packs?org_id=t-cwp-4").json()
+        assert view["configured"] is True, view
+        assert view["packs"] == [], view
+        import tortoise.hosted_api as ha
+        resolver = ha._make_sdk(graph_name=r.json()["graph"]["namespace"])
+        assert resolved_pack_set(resolver).namespaces == frozenset(), (
+            "an explicit empty set must resolve to NO packs, not the union")
+
+    def test_omitting_packs_keeps_the_decided_union_default(
+            self, create_client):
+        """The owner's decision (#2714 indicator 3 / #9667 OVERRIDES): a graph
+        nobody configured reads as the catalog union. #9667 must not have
+        changed that for existing callers.
+
+        FAIL-ON: always calling the pack write (marker on every create) flips
+        every pre-#9667 caller to ``configured: true`` with an EMPTY set —
+        silently narrowing every new graph to core-only, the one direction the
+        decision forbids. The envelope assertion pins the other half: a caller
+        that asked for no pack set gets the byte-identical pre-#9667 shape.
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-5")
+        _act_as(tc, "creator-1", "t-cwp-5")
+        r = tc.post("/v1/graphs",
+                    json={"org_id": "t-cwp-5", "name": "plain"})
+        assert r.status_code == 201, r.text
+        assert "packs" not in r.json(), (
+            "the 201 envelope gained a key for a caller that asked for none")
+        gid = r.json()["graph"]["id"]
+        view = tc.get(f"/v1/graphs/{gid}/packs?org_id=t-cwp-5").json()
+        assert view["configured"] is False, view
+        assert view["revision"] == 0, view
+
+    def test_a_plain_member_cannot_set_packs_at_create(self, create_client):
+        """Pack selection is the MANAGEMENT plane (#2728): the per-graph PUT
+        requires owner/admin. The create-time form must not be the back door —
+        otherwise a ``member`` narrows a graph's ontology by provisioning it.
+
+        FAIL-ON: dropping the role gate lets the member's create succeed with
+        the packs applied — a privilege escalation dressed as provisioning.
+        The SECOND half (the same member creating WITHOUT packs) is what keeps
+        the gate honest: it proves the refusal is about packs, not about
+        members being unable to create graphs at all.
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-6", role="member",
+                          user_id="member-1")
+        _act_as(tc, "member-1", "t-cwp-6")
+        r = tc.post("/v1/graphs", json={
+            "org_id": "t-cwp-6", "name": "member-narrowed",
+            "packs": [{"namespace": DEV}]})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["error_code"] == "PACKS_REQUIRE_ADMIN", r.text
+        assert "member-narrowed" not in _graph_names(db_path, "t-cwp-6"), (
+            "the refused create left a graph behind")
+
+        ok = tc.post("/v1/graphs",
+                     json={"org_id": "t-cwp-6", "name": "member-plain"})
+        assert ok.status_code == 201, ok.text
+
+    def test_create_with_packs_is_audited_like_a_pack_write(
+            self, create_client, monkeypatch):
+        """Audit parity with ``PUT .../packs``: an operator querying pack
+        changes must see a graph's BIRTH configuration, not a gap between
+        "created" and "first configured".
+
+        FAIL-ON: no audit call on the create path leaves ``calls`` empty even
+        though the graph's approved ontology was set by the request.
+        """
+        calls: list[dict] = []
+        import tortoise.hosted_api as ha
+
+        async def _capture(request, org_id, operation, **kwargs):
+            calls.append({"org_id": org_id, "operation": operation, **kwargs})
+
+        monkeypatch.setattr(ha, "_async_audit", _capture)
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-7")
+        _act_as(tc, "creator-1", "t-cwp-7")
+        r = tc.post("/v1/graphs", json={
+            "org_id": "t-cwp-7", "name": "audited",
+            "packs": [{"namespace": DEV}]})
+        assert r.status_code == 201, r.text
+        pack_calls = [c for c in calls
+                      if c["operation"] == "graph_packs_update"]
+        assert len(pack_calls) == 1, calls
+        assert pack_calls[0]["resource_id"] == r.json()["graph"]["id"]
+        assert pack_calls[0]["actor_user_id"] == "creator-1"
+        assert pack_calls[0]["detail"]["via"] == "session"
+        assert pack_calls[0]["detail"]["revision"] == 1
+        assert pack_calls[0]["detail"]["packs"] == [
+            {"namespace": DEV, "status": "active"}]
+
+    def test_a_malformed_packs_field_is_a_422_not_a_500(self, create_client):
+        """``packs`` is accepted as a raw JSON field on this endpoint (the
+        body is a plain dict), so its shape has to be validated explicitly.
+        A non-list, or an entry missing a namespace, must be a 422 that names
+        the problem — never a 500 from a later ``**entry``.
+
+        FAIL-ON: no shape check lets ``{"packs": "dev"}`` reach the entry
+        loop, where iterating a string feeds characters to ``GraphPackEntry``
+        and the request dies as a 500 with no ``error_code``.
+        """
+        tc, db_path = create_client
+        _seed_create_team(db_path, "t-cwp-8")
+        _act_as(tc, "creator-1", "t-cwp-8")
+        for bad in ("dev", [{"status": "active"}], [{"namespace": "  "}]):
+            r = tc.post("/v1/graphs",
+                        json={"org_id": "t-cwp-8", "name": "shape",
+                              "packs": bad})
+            assert r.status_code == 422, (bad, r.status_code, r.text)
+            assert r.json()["detail"]["error_code"] == "INVALID_PACK_SET", \
+                (bad, r.text)
+        assert "shape" not in _graph_names(db_path, "t-cwp-8")

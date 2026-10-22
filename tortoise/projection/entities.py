@@ -2809,8 +2809,16 @@ class _EntityHandlers:
         # #7369: `session_id` is the Session MERGE key (`MERGE (s:Session
         # {id:$sid})`), reached from `PointAdded.contains_session` off the raw
         # journal envelope — an unwritable one aborts after the wipe.
-        from tortoise.projection import _log_identity_skip, _writable_id
-        if not _writable_id(session_id):
+        #
+        # #9553 review P2: the gate is `_writable_container_id`, which adds the
+        # BLANK refusal to `_writable_id` — measured, because an indexed graph
+        # cannot match a whitespace-only key at all, so this method would both
+        # mint a DUPLICATE `:Session` and land no edge (see that predicate's
+        # docstring). The record projection refuses the same ids, and the two
+        # gates are pinned equal, so a whitespace-only `contains_session` is
+        # dropped by BOTH routes instead of by one.
+        from tortoise.projection import _log_identity_skip, _writable_container_id
+        if not _writable_container_id(session_id):
             _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
         # #7951 R2-P2: mirror `_link_source`'s pre-delete gate. A `CONTAINS`
