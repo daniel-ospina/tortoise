@@ -6292,16 +6292,26 @@ class CollisionPreflightTest(unittest.TestCase):
         # rebuild the fleet board) and re-run", and the sibling pin above forbids
         # it by THAT wording — a list carrying only "rebuild the board" would let
         # a lane reintroduce the archived sentence into a roster arm and stay
-        # green. The runnable `tools/fleet_state.py build` is a separate dead end
-        # and is never something a roster arm should carry.
-        dead_ends = ("rebuild the fleet board", "rebuild the board")
-        command = "tools/fleet_state.py build"
-        # ⛔ PRESCRIPTIVE, NOT MENTIONED (review, cycle 8). A bare substring test
-        # forbids NAMING the dead end, so the strongest wording a header author
-        # has — "do not rebuild the board" — is the one that fails. A sentence
-        # that NAMES a dead end and states no negation is offering it; one that
-        # negates it is doing the pin's job. Hence the sentence split.
-        negation = re.compile(r"\b(?:not|never|cannot|can't|instead)\b")
+        # green. The runnable `tools/fleet_state.py build` is the form a lane is
+        # most likely to name explicitly, so it is a dead end too.
+        dead_ends = (
+            "rebuild the fleet board",
+            "rebuild the board",
+            "tools/fleet_state.py build",
+        )
+        # ⛔ PRESCRIPTIVE, NOT MENTIONED — and GOVERNED, not merely present
+        # (review, cycles 8-9). A bare substring test forbids NAMING the dead end,
+        # so the strongest warning a header author has — "never run `tools/
+        # fleet_state.py build`", "do not rebuild the board" — is the one that
+        # fails. A negation anywhere in the SENTENCE is not enough either: these
+        # arms are one long sentence each and already contain "a rebuild cannot
+        # help", so #9392's exact sentence could ride in as a later clause. The
+        # negation must GOVERN the occurrence, i.e. sit immediately before it.
+        # `instead` is deliberately NOT a negation token — it marks an ALTERNATIVE
+        # offer ("rebuild the board instead"), which is the prescription itself.
+        governs = re.compile(
+            r"(?:\b(?:not|never|cannot|can't)\s+[^,.;]{0,30}|\binstead of\s+[^,.;]{0,20})$"
+        )
         for arm, (region, requirements) in arms.items():
             low = region.lower()
             for accepted in requirements:
@@ -6311,17 +6321,15 @@ class CollisionPreflightTest(unittest.TestCase):
                 )
             if arm == "board":
                 continue
-            self.assertNotIn(
-                command,
-                low,
-                f"the {arm} arm must not carry the runnable rebuild command",
-            )
-            for sentence in re.split(r"(?<=[.;])\s+", low):
-                for dead_end in dead_ends:
-                    self.assertFalse(
-                        dead_end in sentence and not negation.search(sentence),
-                        f"the {arm} arm offers {dead_end!r} ({sentence.strip()!r}): that "
-                        "rebuild fails on the same read it is prescribed for",
+            for dead_end in dead_ends:
+                for hit in re.finditer(re.escape(dead_end), low):
+                    window = low[max(0, hit.start() - 45) : hit.start()]
+                    self.assertRegex(
+                        window,
+                        governs,
+                        f"the {arm} arm offers {dead_end!r} un-negated "
+                        f"({low[max(0, hit.start() - 45) : hit.end()]!r}): that rebuild "
+                        "fails on the same read it is prescribed for",
                     )
 
     def test_the_header_contract_matches_the_surface_set(self):
