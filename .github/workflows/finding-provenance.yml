@@ -153,8 +153,11 @@ permissions:
 # as "visible": nothing alerts on a cancelled run's owed verdict (the only trace
 # is a `cancelled` conclusion and an unannotated comment), so the loss is silent
 # in exactly the way #9115 feared — it is ACCEPTED, not mitigated. Bounding the
-# run COUNT across issues without dropping verdicts is still #9115's separate
-# change (batching/coalescing with a catch-up sweep); it is not smuggled in here.
+# run COUNT across issues without dropping verdicts is #9595's separate change
+# (batching/coalescing with a catch-up sweep); it is not smuggled in here. That
+# residue USED to be cited as "#9115's separate change" — but #9115 is CLOSED as
+# COMPLETED (2026-10-19, while its own last comment recorded the flood
+# recurring), and a closed issue is not a tracking home, so the work had none.
 #
 # `comment.id` is still READ by this workflow (`COMMENT_ID` fetches that
 # comment's body by id) — it just must never be part of the concurrency KEY.
@@ -258,15 +261,29 @@ jobs:
           fi
 
   # THE EXPENSIVE HALF — full history, and it only runs for a body that IS a
-  # finding. Everything that posts (label, annotation, reply) lives here. On the
-  # COMMENT arm a superseded run was impossible under the old per-comment key, so
-  # "the job runs to completion and annotates" was true there; with
-  # `cancel-in-progress` finally FIRING (#9577), a cancel can land BETWEEN the
-  # label edit and the reply — leaving `provenance-stale` applied with no
-  # annotation explaining it. (The dispatch arm could already supersede itself
-  # — see the key's note above — so this is the comment arm joining a state the
-  # dispatch arm always had.) That is a live state, not a scar; it fails CLOSED
-  # (a visible label), and the documented `workflow_dispatch` re-run clears it.
+  # finding. Everything that posts (label, annotation, reply) lives here.
+  #
+  # WHAT A CANCEL LOSES — PER ARM, because the two arms differ (#9577 review).
+  # With `cancel-in-progress` finally FIRING (#9577) a mid-flight cancel lands
+  # in one of two windows, and only ONE of them leaves a visible trace:
+  #   * ISSUE-BODY arm — the recoverable one. Only this arm applies the
+  #     issue-level `provenance-stale` label (further down), so a comment
+  #     arriving mid-flight can cancel the body gate BETWEEN the label edit and
+  #     the reply, leaving the label applied with no annotation explaining it.
+  #     That is a live state, not a scar: it fails CLOSED (a visible label), and
+  #     the documented `workflow_dispatch -f issue_number=` re-run re-gates the
+  #     body and clears it.
+  #   * COMMENT arm — NOT visible and NOT recoverable in place. This arm has no
+  #     label edit at all (#4732 keeps the issue-level label for the body gate),
+  #     so a cancel anywhere before the reply posts nothing and labels nothing:
+  #     that comment's verdict is silently dropped, and no dispatch can re-run
+  #     it (there is no `comment_id` input and `issue_comment` is `created`-only).
+  #     The lane's only recovery is to post a NEW comment — a new group member
+  #     with a verdict of its own; the original stays unreviewed.
+  # A cancel landing BEFORE the label step is therefore silent for BOTH arms.
+  # Do not read the body arm's label as a general fail-closed guarantee for this
+  # workflow: the run-level trade block at the top states the loss plainly, and
+  # it is ACCEPTED, not mitigated.
   provenance:
     needs: classify
     if: needs.classify.outputs.is_finding == 'true'
