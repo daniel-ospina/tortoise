@@ -4191,7 +4191,8 @@ def _magnitude_ratios(figures: dict[str, list[float]], framing: str) -> list[flo
 
 #: The percentage SPELLINGS a bare claim can hide in — the same family as
 #: `_MAGNITUDE_WORDS`' `percent` alternative (the literals are duplicated on purpose:
-#: the sweep is the wider of the two, so a drift here over-blocks rather than fails open).
+#: the two predicates answer different questions, and a drift here is covered by the
+#: per-spelling leg below rather than by the shape of this constant).
 #: The sweep used to match only the `N %` (space) form, so `17%` / `17 per cent` /
 #: `17 pct` outside a claim row were silent (`#9528` review P2) — a one-keystroke
 #: re-spelling retiring the arm.
@@ -4297,13 +4298,16 @@ written so the duration guard misses it.
 def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
     """The word form's percentages are computed from the figures beside them (`#9501`).
 
-    ⚠️ **A hand-computed percentage is a claim, and this paragraph shipped two wrong
-    ones.** The `#9501` review found it attributing `1.70 s / 1.81 s of 3.35 s / 3.14
-    s` to this PR's base (`81f5594dc`) while its own parentheses said `69390341f`, and
-    attaching `~17 %` to the reading "with the ungated pass folded in" — which that
-    arithmetic gives 12 % / 14 % for, the ~16–18 % belonging to the ungated pass
-    ALONE. A figure whose provenance does not survive recomputation is the defect
-    class this file exists to close, one alphabet over from the comment it guards.
+    ⚠️ **A hand-computed percentage is a claim, and this paragraph shipped one that was
+    wrong.** The `#9501` review found it attaching `~17 %` to the reading "with the
+    ungated pass folded in" — which that arithmetic gives 12 % / 14 % for, the ~16–18 %
+    belonging to the ungated pass ALONE. (An earlier revision of this paragraph is
+    where the `1.70 s / 1.81 s of 3.35 s / 3.14 s` pair and the base-labelled
+    `2.5–3.0 s of 3.9–4.4 s` pair sat in two different trees; in the text quoted by
+    `_PREFIX_MAGNITUDE_PARAGRAPH` below, the first pair is already parenthesised to
+    `69390341f`, so no base mislabelling survives there to find.) A figure whose
+    provenance does not survive recomputation is the defect class this file exists to
+    close, one alphabet over from the comment it guards.
 
     So the paragraph carries its measurements as commit-anchored ROWS and its claims as
     rows this arm recomputes: each percentage must equal the rebuild over the reading it
