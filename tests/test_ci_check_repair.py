@@ -408,6 +408,40 @@ def _repair_step(job):
     return steps[0]
 
 
+def _effective_shell(job, step, workflow):
+    """The shell Actions will ACTUALLY run this step with (#9365 review).
+
+    GitHub's precedence is step `shell:` > job `defaults.run.shell` > workflow
+    `defaults.run.shell` > the platform default (`bash -e {0}` on Linux; `-e` is
+    implied, which is why the step's own `set +e`/`set -e` matter). The test used
+    to hardcode `bash -c` and never read this at all, so `shell: 'echo {0}'` on
+    the step — which echoes the script path and exits 0 — left BOTH new tests
+    green while the tool never ran: the run concludes `success`,
+    `workflow_state()` reads `covered`, the local fallback idles, and nobody
+    produces the required checks.
+    """
+    return (step.get("shell")
+            or (job.get("defaults") or {}).get("run", {}).get("shell")
+            or (workflow.get("defaults") or {}).get("run", {}).get("shell"))
+
+
+# The runner variables the step is allowed to be influenced by. PINNED, not
+# inherited (#9365 review): the test used to run the step with `**os.environ`, so
+# a branch keyed on a runner-provided variable was invisible — prepending
+# `if [ "$GITHUB_EVENT_NAME" = schedule ]; then exit 0; fi` kept both tests green
+# in a developer shell (where the variable is unset) while the real 30-minute
+# `schedule` run exited 0 and never ran the tool. The values below are the ones
+# this workflow actually gets.
+_RUNNER_ENV = {
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_EVENT_NAME": "schedule",
+    "GITHUB_RUN_ATTEMPT": "1",
+    "GITHUB_REF": "refs/heads/main",
+    "GITHUB_REPOSITORY": "daniel-ospina/tortoise",
+    "CI": "true",
+}
+
+
 def _run_repair_step(script, tmp_path, tool_rc):
     """Execute the step's OWN shell with a stubbed `python3` that exits `tool_rc`.
 
@@ -417,6 +451,10 @@ def _run_repair_step(script, tmp_path, tool_rc):
     leaving `rc=${PIPESTATUS[0]}` AND `exit "$rc"` intact, so a text pin reads
     green on a real fail-open. Running the script measures the only thing that
     matters: what exit code the step actually hands GitHub.
+
+    The environment is a PINNED runner env, not the caller's (#9365 review) — see
+    `_RUNNER_ENV`. `PATH` still carries the system path so the script's own
+    `tee`/`cat` resolve; the stub `python3` wins by coming first.
 
     `tmp_path` must be FRESH per call — the journal below is the run's argv.
 
@@ -439,10 +477,14 @@ def _run_repair_step(script, tmp_path, tool_rc):
     stub.chmod(0o755)
     summary = tmp_path / "step-summary.md"
     summary.write_text("")
-    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
-           # The step appends to `$GITHUB_STEP_SUMMARY`. Unset, that redirect is
-           # an "ambiguous redirect" and the run fails for the wrong reason.
-           "GITHUB_STEP_SUMMARY": str(summary)}
+    env = dict(_RUNNER_ENV)
+    env.update({
+        "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "HOME": str(tmp_path),
+        # The step appends to `$GITHUB_STEP_SUMMARY`. Unset, that redirect is
+        # an "ambiguous redirect" and the run fails for the wrong reason.
+        "GITHUB_STEP_SUMMARY": str(summary),
+    })
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
                        timeout=120, env=env, cwd=tmp_path)
     argv = argv_log.read_text() if argv_log.exists() else ""
@@ -511,8 +553,14 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
 
     for banned in _GREENING_KEYS:
         assert banned not in job, (
-            f"job-level `{banned}` greens the RUN without the repair succeeding, "
-            "so `workflow_state()` reads the window as `covered` and the local "
+            # The hazard is a SKIPPABLE dependency: a job that carries `if:`,
+            # `continue-on-error` or a matrix that can end up empty makes `repair`
+            # inherit the skip. A dependency that can never skip does not green
+            # anything, which is why this is refused only where it can.
+            f"`{banned}` on the repair job can green the RUN without the repair "
+            "succeeding — as a skip key it drops the job (a skipped job is not a "
+            "failure), as a `needs:` target it inherits that job's skip — so "
+            "`workflow_state()` reads the window as `covered` and the local "
             "fallback stays idle for every `needs_user_actor` PR (#9365)")
 
     step = _repair_step(job)
@@ -521,14 +569,25 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
             f"`{banned}` on the repair step greens the run without the repair "
             f"succeeding — the #8254 fail-open, silently (#9365)")
 
-    # Behaviour: the exit code the step hands GitHub, whatever the shell spelling.
+    # The step must run under the shell the RUNNER will use (#9365 review): with
+    # `shell: 'echo {0}'` on this step — or the same at either `defaults.run`
+    # level — GitHub echoes the script path and exits 0, so the tool never runs
+    # while the run concludes `success`. Nothing else in this file read it.
+    shell = _effective_shell(job, step, wf)
+    assert shell in (None, "bash", "bash {0}"), (
+        "the repair step must run under bash (Actions' Linux default is `bash -e "
+        "{0}`). A custom `shell:` that does not execute the script greys the step "
+        f"without the tool running (#9365); got shell={shell!r}")
+
+    # Behaviour: the exit code the step hands GitHub, under the RUNNER's env.
     #
-    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` has two
-    # exit-2 paths — `_could_not_measure` (a failed measurement) and the <3.12
+    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` exits 2
+    # from `_could_not_measure` (a failed measurement) AND from the <3.12
     # interpreter guard at the top of the module, which raises `SystemExit(2)`
-    # before the rest of the tool is even imported — and `workflow_state()` maps
-    # exit 2 to `ran-not-succeeded` just like exit 1, so both ARE the coverage
-    # signal; the record measures 5 of its 73 reds as exit 2.
+    # before the rest of the tool is imported — so it is not the only exit-2 path,
+    # and `workflow_state()` maps the class to `ran-not-succeeded` just like exit
+    # 1, so it IS the coverage signal; the record measures 5 of its 73 reds as
+    # exit 2.
     # Probing exit 1 alone let `[ "$rc" = 2 ] && rc=0` green that entire class
     # while this test stayed green: the window then reads `covered`, the local
     # fallback goes idle, and nobody produces the required checks (#9365 review).

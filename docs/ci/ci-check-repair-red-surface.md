@@ -110,9 +110,9 @@ holds the **workflow** end, in two different ways:
 - **behaviour** — the step's own shell is EXECUTED against a stubbed interpreter, and must hand back
   every non-zero class the tool can produce: `1` when the tool exits `1`, `2` when it exits `2`
   (`_could_not_measure` is the exit-2 path for a *failed measurement*, and the <3.12 interpreter
-  guard at `tools/ci_check_repair.py:118-128` raises `SystemExit(2)` before the rest of the tool is
-  imported, so exit 2 has two sources; `workflow_state()` maps the class to `ran-not-succeeded` just
-  like exit 1, so it is the coverage signal too — 5 of the 73 reds above),
+  guard at `tools/ci_check_repair.py:120-128` raises `SystemExit(2)` before the rest of the tool is
+  imported — so it is **not the only** exit-2 path; `workflow_state()` maps the class to
+  `ran-not-succeeded` just like exit 1, so it is the coverage signal too — 5 of the 73 reds above),
   and an unknown future class as well, which must default to propagate rather than green. `0` when it
   exits `0`. This is the half a text pin cannot do:
   `declare -i rc=0` *after* the assignment, `[ "$rc" -ne 0 ] && rc=0` and `printf -v rc 0` all force
@@ -124,6 +124,14 @@ holds the **workflow** end, in two different ways:
 - **the invocation** — the stub records its argv, and the step must still call
   `tools/ci_check_repair.py --apply`. Without `--apply` the tool exits `0` for the state this run
   exists to report, so an exit-code-only probe greens on a deletion;
+- **the execution context** — the step must run under the shell the RUNNER will use (the Linux
+  default `bash -e {0}`, or `bash`/`bash {0}` declared anywhere in the precedence chain), and it is
+  executed against a PINNED runner environment, not the caller's. Both halves exist because the test
+  reproduced the script but not how it runs: `shell: 'echo {0}'` on the step (or at either
+  `defaults.run` level) echoes the script path and exits `0`, and a branch keyed on
+  `GITHUB_EVENT_NAME` exits `0` on the only trigger this workflow has — in each case the tool never
+  runs, the run concludes `success`, and the fallback idles, with every exit-code assertion still
+  green;
 - **the crash is not the signal** — stderr must be empty and the step summary must be written. The
   step re-arms `set -e` before its summary block and writes a fixed `/tmp` path, so a crashing block
   exits `1` on its own; without this arm the `must exit 1` assertion would pass without `rc` ever
@@ -143,10 +151,12 @@ Mutation-tested, each vector one at a time: job-level and step-level `continue-o
 step-level `if:`, a second job with `if: false` that `repair` declares `needs:` on,
 `rc=0` after the pipeline, `declare -i rc=0` placed **after** the assignment,
 `[ "$rc" -ne 0 ] && rc=0`, `printf -v rc 0`, `[ "$rc" = 2 ] && rc=0` (the exit-2 class),
-`--apply` dropped from the step, and `workflow_covered()` returning `0` — all red; a renamed step
-stays green. Placement matters in both directions: `declare -i rc=0` **before** the pipeline is
-harmless (the later `rc=${PIPESTATUS[0]}` overwrites it) and correctly stays green — only the
-post-assignment form is a fail-open.
+`--apply` dropped from the step, `shell: 'echo {0}'` at step level and at workflow
+`defaults.run` level, a `[ "$GITHUB_EVENT_NAME" = schedule ] && exit 0` branch in the script, and
+`workflow_covered()` returning `0` — all red; a renamed step, a `shell: bash` declaration (the
+platform default made explicit) and the launcher's own polarity stay green. Placement matters in both
+directions: `declare -i rc=0` **before** the pipeline is harmless (the later `rc=${PIPESTATUS[0]}`
+overwrites it) and correctly stays green — only the post-assignment form is a fail-open.
 
 ## What the owner still has to decide
 
