@@ -943,11 +943,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None,
     its withheld warnings counted, sized and reported in the summary but not
     named individually — whatever their cause (a legitimate batch can exceed
     the budget, e.g. many concurrent-race losses, so exceeding it is not by
-    itself evidence of malformed input). Caller-side comments that still
+    itself evidence of malformed input). The caller-side comments that used to
     promise a per-record "never a silent drop" (``sdk._extract_session_v2``'s
-    docstring and call site, ``hosted_api`` §6b, ``tools/longmem_eval/ingest_v2``)
-    describe the pre-#5654 contract; this bound NARROWS that promise, and the
-    comment updates are tracked in #5723. With ONE explicit
+    docstring and call site, ``hosted_api`` §6b,
+    ``tools/longmem_eval/ingest_v2``) now state this bounded contract — #5723
+    updated them. With ONE explicit
     asymmetry (final-review
     P3): terminal pt_ olds are treated as idempotent re-ingests and
     skipped SILENTLY regardless of the claimed successor (no
