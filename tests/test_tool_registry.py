@@ -1269,14 +1269,16 @@ class TestCapabilityModel:
         import tool_surface_capabilities as tsc
         from tool_surface_capabilities import served_registry
 
-        # A read-only CLAIM.  Negation-aware (`tortoise_get_source_reliability`
-        # says "so not read-only") and attributive-aware (`writes=True` tools do
-        # legitimately talk about "a read-only key", which is a different claim).
-        claim = re.compile(
-            r"(?<!not )(?<!never )read[\s\-]?only"
-            r"(?!\s+(?:key|keys|caller|callers|scope|credential|token|client))",
-            re.IGNORECASE,
-        )
+        # A read-only CLAIM.  Negation-aware: `tortoise_get_source_reliability`
+        # says "so not read-only", which is the opposite claim.  There is
+        # deliberately NO attributive exemption (the form "a read-only key" is
+        # used only in docs and comments, never in a registry description), because
+        # a lookahead would exempt the whole occurrence — "safe for a read-only
+        # client" describes the TOOL and must be caught.  If a future row genuinely
+        # needs one, record it in a ledger with its exact phrasing, the way
+        # `tool_surface_capabilities.READ_THROUGH_WRITE_METHODS` records its
+        # decisions, rather than widening this pattern.
+        claim = re.compile(r"(?<!not )(?<!never )read[\s\-]?only", re.IGNORECASE)
 
         entries = {e.name: e for e in served_registry()}
         by_method = {e.sdk_method: e.name for e in entries.values() if e.sdk_method}
@@ -1306,7 +1308,8 @@ class TestCapabilityModel:
         # The predicate itself is falsifiable in both directions.
         assert claim.search("Read-only; empty result when nothing is installed")
         assert not claim.search("a write-through projection, so not read-only")
-        assert not claim.search("a read-only key is refused even for action='list'")
+        # ... and a claim about the TOOL is caught even when a client noun follows.
+        assert claim.search("safe for a read-only client — it refreshes a cache")
 
         offenders = sorted(
             f"{name}: {claim.search(e.description).group(0)!r} in a "
