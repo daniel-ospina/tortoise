@@ -10541,14 +10541,14 @@ class FalkorProjection(
         "the ratio could not be read" and calls for a different message;
         collapsing both to ``None`` is how the write-refusal message came to
         assert a memory ceiling on an instance that reported none (measured on
-        the shared container, 2026-10-04). Only a reply that could not be
-        obtained or parsed is ``None``; an absent ceiling is not a failed READ.
+        the shared container, 2026-10-04).
 
-        A reply that omits ``maxmemory`` entirely is NOT an absent ceiling — it
-        is an unread datum, and it is reported as ``None``. The ``or 0`` default
-        below would otherwise turn "this server did not answer" into the
-        positive claim "this server has no ceiling", which is exactly the
-        over-claim #7392 is about, one level down.
+        What counts as a reading is BOTH halves present and usable. A reply that
+        OMITS a field, or that reports an unparseable or negative ``maxmemory``,
+        is an unread datum and is reported as ``None``: the ``or 0`` defaults and
+        a bare ``cap > 0`` test would otherwise turn "this server did not
+        answer" into the positive claims "nothing is used" and "this server has
+        no ceiling" — the over-claim #7392 is about, one level down.
         """
         info = None
         try:
@@ -10561,8 +10561,9 @@ class FalkorProjection(
             return None
         if not isinstance(info, dict):
             return None
-        if "maxmemory" not in info:
-            # Unanswered is not "no limit" — see the docstring (#7392).
+        if "maxmemory" not in info or "used_memory" not in info:
+            # An unanswered field is neither "no limit" nor "nothing used":
+            # either default would be minted as a measured fact downstream.
             return None
         try:
             used = int(info.get("used_memory", 0) or 0)
@@ -10587,14 +10588,15 @@ class FalkorProjection(
 
         #7392 — the lead sentence's STRENGTH must match what was READ. The
         branch exists to say "full, not corrupt", and the only fact the probe
-        establishes is that the server REFUSED A WRITE for memory reasons. A
+        establishes is that the server REFUSED A COMMAND for memory reasons. A
         ceiling is one step further, and it is claimed (with the ceiling-only
         ``--maxmemory`` lever as its remedy) only when ``INFO memory`` actually
         returned one. Two other shapes reach here and must not borrow that
         claim: ``maxmemory == 0``, where the datum says there is NO ceiling and
-        the operator has to be pointed outside the instance (host/kernel
-        memory, a per-query cap), and an unreadable ``INFO memory``, where no
-        ceiling was established at all. Sending someone to raise a ceiling
+        the operator has to be pointed at that ABSENCE (the LOCUS of the
+        pressure is not asserted — "a per-query cap" is a limit OF the
+        instance), and an unusable reading, where no ceiling was established at
+        all. Sending someone to raise a ceiling
         that does not exist is the defect this clause closes.
         """
         if exc is None:
@@ -10604,15 +10606,16 @@ class FalkorProjection(
             return None
         pressure = self._memory_pressure()
         if pressure is None:
-            # No ceiling established: the datum was not available in any of the
-            # ways `_memory_pressure` refuses one (a raised/absent INFO, a
-            # non-dict reply, a reply that OMITS `maxmemory`, unparseable
-            # values, a negative ceiling). The wording must be TRUE OF ALL of
-            # them — asserting "INFO memory is unreadable" would be false for a
-            # reply that answered without that field (reviewed, #7392).
-            lead = ("the server refused a write for MEMORY reasons (no "
-                    "maxmemory could be read from this instance, so NO "
-                    "ceiling was established)")
+            # No ceiling established: no usable datum came back in any of the
+            # ways `_memory_pressure` refuses one (a raised or non-dict reply, a
+            # reply missing `used_memory`/`maxmemory`, unparseable values, a
+            # negative ceiling). The wording must be TRUE OF ALL of them —
+            # "INFO memory is unreadable" is false for a reply that answered
+            # without a field, and "no maxmemory was read" is false for one that
+            # reported an unusable value (both found in review, #7392).
+            lead = ("the server refused a command for MEMORY reasons (no "
+                    "usable used_memory/maxmemory reading could be obtained "
+                    "from this instance, so NO ceiling was established)")
             # The lever is named CONDITIONALLY, after the reading, because on
             # this branch we do not know whether one exists — prescribing it
             # unread is exactly the defect #7392 closes. The flag itself
@@ -10631,7 +10634,7 @@ class FalkorProjection(
             # The value is interpolated rather than spelled "0": the predicate
             # is `<= 0`, and a message that hardcoded the literal would
             # misdescribe the reading it is quoting.
-            lead = ("the server refused a write for MEMORY reasons "
+            lead = ("the server refused a command for MEMORY reasons "
                     f"(used_memory {_fmt_bytes(pressure[0])}, and maxmemory "
                     f"is {pressure[1]} — NO maxmemory ceiling is set)")
             # The locus is NOT asserted: the reading establishes only that

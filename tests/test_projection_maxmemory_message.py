@@ -249,24 +249,25 @@ def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatc
     assert msg is not None
     _assert_no_ceiling_claim(msg)
     lowered = msg.lower()
-    assert "refused a write for memory reasons" in lowered, msg
-    # …it says the DATUM was not available, naming no failed read it cannot know…
-    assert "no maxmemory could be read" in lowered, msg
+    assert "refused a command for memory reasons" in lowered, msg
+    # …it says the DATUM was not usable, naming no failed read it cannot know…
+    assert "no usable used_memory/maxmemory reading" in lowered, msg
     assert "info memory is unreadable" not in lowered, msg
     # …the next action is to ESTABLISH it, so the flag is not offered as a lever.
     assert "info memory" in lowered, msg
     assert "--maxmemory" not in msg, msg
 
 
-def test_a_reply_missing_maxmemory_does_not_claim_the_info_read_failed():
+def test_a_reply_missing_a_field_does_not_claim_the_info_read_failed():
     """#7392 review — `None` has FIVE causes; the message must fit all five.
 
     `_memory_pressure()` refuses a datum when the reply raised, was not a dict,
-    omitted `maxmemory`, carried unparseable values, or reported a negative
-    ceiling. Asserting "INFO memory is unreadable" is false for a reply that
-    ANSWERED without the field, so this drives the REAL probe (an INFO reply of
-    `{"used_memory": 1024}`) into the message and pins the wording that is true
-    of every cause.
+    omitted `used_memory` or `maxmemory`, carried unparseable values, or
+    reported a negative ceiling. Asserting "INFO memory is unreadable" is false
+    for a reply that ANSWERED without a field, and "no maxmemory was read" is
+    false for one whose value was unusable — so this drives the REAL probe with
+    a reply missing `maxmemory` into the message and pins wording true of every
+    cause.
 
     NON-VACUOUS for this change, not for the pre-existing code: before it, a
     reply missing the field collapsed into the asserting branch instead (a
@@ -274,19 +275,52 @@ def test_a_reply_missing_maxmemory_does_not_claim_the_info_read_failed():
     """
 
     class _Conn:
+        def __init__(self, reply):
+            self._reply = reply
+
         def info(self, section):
-            return {"used_memory": 1024}  # answers, without `maxmemory`
+            return self._reply
+
+    def _proj_with(reply):
+        proj = object.__new__(FalkorProjection)
+        proj.db = type("DB", (), {"connection": _Conn(reply)})()
+        proj._probe_error = RuntimeError("Out of memory")
+        return proj
+
+    # `maxmemory` omitted, and `used_memory` omitted: both are unanswered, and
+    # each must reach the SAME wording rather than a cause-specific guess.
+    for reply in ({"used_memory": 1024}, {"maxmemory": 2048}):
+        msg = _proj_with(reply)._write_refusal_message(RuntimeError("Out of memory"))
+        assert msg is not None, reply
+        _assert_no_ceiling_claim(msg)
+        lowered = msg.lower()
+        assert "no usable used_memory/maxmemory reading" in lowered, (reply, msg)
+        assert "info memory is unreadable" not in lowered, (reply, msg)
+
+
+def test_a_real_unset_ceiling_reaches_the_message_without_a_ceiling_claim():
+    """#7392 review — the `cap == 0` MESSAGE must see a REAL reading.
+
+    The other `cap == 0` cases stub `_memory_pressure`, so reverting its
+    contract to `(used, cap) if cap > 0 else None` was caught only by the
+    contract test — the message branch never saw a reading. This drives the
+    real probe (`INFO memory` answering `maxmemory 0`, the shape measured on
+    the shared container) all the way into the operator message.
+    """
+
+    class _Conn:
+        def info(self, section):
+            return {"used_memory": 512 * 1024 * 1024, "maxmemory": 0}
 
     proj = object.__new__(FalkorProjection)
     proj.db = type("DB", (), {"connection": _Conn()})()
-    proj._probe_error = RuntimeError("Out of memory")
 
-    msg = proj._write_refusal_message(RuntimeError("Out of memory"))
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
     _assert_no_ceiling_claim(msg)
     lowered = msg.lower()
-    assert "no maxmemory could be read" in lowered, msg
-    assert "info memory is unreadable" not in lowered, msg
+    assert "no maxmemory ceiling is set" in lowered, msg
+    assert "512.0 mib" in lowered, msg
 
 
 @pytest.mark.parametrize("refusal", [
