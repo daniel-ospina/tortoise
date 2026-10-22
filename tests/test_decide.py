@@ -725,10 +725,12 @@ class TestIssue6671ReviewGaps:
         assert second == first, (
             f"Subject→Point edge duplicated on re-run: {second}")
 
-    def test_draft_operator_is_not_silently_adopted(self, sdk, capsys):
-        """A draft operator is EXCLUDED from EP (#780). Reusing one would report
-        success while the decision's own edge never reaches the ranking, so the
-        write must create the live operator it needs and say why."""
+    def test_draft_operator_is_reused_and_its_status_reported(self, sdk, capsys):
+        """A draft operator is EXCLUDED from EP (#780), and #6671's scoping
+        decides the posture: elect it, REPORT the status, and never file a live
+        twin — a twin is what lets `update_point(draft, status="live")` leave
+        two live copies on one bridge (measured), i.e. this issue's defect
+        returning permanently."""
         decide = _load_decide_script()
         crit = sdk.create_point("criterion", f"Criterion {_mk()}")
         opt = sdk.create_point("option", f"Option {_mk()}")
@@ -746,14 +748,17 @@ class TestIssue6671ReviewGaps:
 
         elected = [row for row in result["operators"] if row["op_type"] == "IMPL"]
         assert len(elected) == 1, elected
-        assert elected[0]["id"] != draft["id"], (
-            "the draft operator was adopted as the decision's bridge — EP "
-            "excludes drafts, so the ranking silently lost this edge")
-        statuses = {row[1] for row in sdk._get_proj().g.query(
-            "MATCH (op:Point {is_operator:true}) RETURN op.id, op.status"
-        ).result_set}
-        assert "live" in statuses, statuses
-        assert "NON-LIVE operator" in capsys.readouterr().out
+        assert elected[0]["id"] == draft["id"], (
+            "a live twin was filed instead of electing the existing bridge — "
+            "one operator per bridge, promoted in place, is the #6671 decision")
+        bridges = sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true}) RETURN count(op)").result_set
+        assert bridges[0][0] == 1, f"twin operator created: {bridges}"
+        out = capsys.readouterr().out
+        assert "status=draft" in out, (
+            "the run did not say which bridge it used: " + out)
+        assert "update_point(id, status='live')" in out, (
+            "the warning does not name the promotion path: " + out)
 
     def test_non_live_status_is_named_accurately(self, sdk, capsys):
         """A non-live operator is not necessarily a DRAFT. `retracted` is a
@@ -782,10 +787,14 @@ class TestIssue6671ReviewGaps:
         result = decide.file_decision(sdk, data)
 
         elected = [row for row in result["operators"] if row["op_type"] == "IMPL"]
-        assert elected and elected[0]["id"] != op["id"], (
-            "a retracted operator was adopted as a live bridge")
+        assert elected and elected[0]["id"] == op["id"], (
+            "a terminal operator must be elected (one bridge, no twin), not "
+            "shadowed by a fresh one")
+        bridges = sdk._get_proj().g.query(
+            "MATCH (op:Point {is_operator:true}) RETURN count(op)").result_set
+        assert bridges[0][0] == 1, f"twin operator created: {bridges}"
         out = capsys.readouterr().out
-        assert "retracted" in out, (
+        assert "status=retracted" in out, (
             "the warning does not name the operator's real status: " + out)
         assert "DRAFT" not in out, (
             "a retracted operator is reported as a draft: " + out)

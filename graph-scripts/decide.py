@@ -162,38 +162,43 @@ def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
                                 cache: dict[tuple[str, str, str, str], str],
                                 *, any_label: bool = False
                                 ) -> tuple[str, bool, str | None]:
-    """Write the edge idempotently.
+    """Write the edge idempotently — ONE operator per bridge, always.
 
-    Returns ``(operator_id, reused, note)`` — ``note`` is a warning to print
-    (or None). A match is elected only if it is LIVE: EP excludes draft
-    operators (#780), so adopting a draft would silently drop this decision's
-    edge from the ranking. When only draft copies exist the write creates the
-    live operator the decision needs and says so; the next run then reuses it,
-    so the run count still converges (#6671).
+    Returns ``(operator_id, reused, note)``; ``note`` is a warning to print.
+
+    The existing operator is elected WHATEVER its status, and the status is
+    reported. That is the decision recorded on #6671's scoping: filing a live
+    twin instead would re-create the duplicate this issue exists to remove, and
+    the twin is not merely cosmetic — `update_point(draft_id, status="live")` is
+    a legitimate public-SDK call, and after a twin exists it leaves TWO live
+    operators on one bridge (measured), which EP reads twice: #6671's defect,
+    permanently, with no edge-delete API. One operator per bridge stays one
+    operator when promoted.
+
+    A non-live operator is excluded from EP (drafts #780; terminal statuses are
+    excluded too), so the note names the real status and the promotion verb —
+    the run says which bridge it used instead of ranking silently on a bridge
+    EP ignores.
     """
     key = (source_id, op_type, target_id, "" if any_label else (label or ""))
     if key in cache:
         return cache[key], True, None
     existing = _find_operators(proj, op_type, source_id, target_id, label,
                                any_label=any_label)
-    live = [op_id for op_id, status in existing if status == "live"]
-    if live:
-        cache[key] = live[0]
-        return live[0], True, None
-    note = None
     if existing:
-        # Report the REAL statuses: a non-live operator is not necessarily a
-        # draft — `retracted` is a stored status too (`POINT_STATUS_VALUES`), and
-        # calling a retracted claim a "draft" would hide that the run just
-        # re-asserted it at full EP weight with a live twin.
-        named = ", ".join(f"{op_id} ({status})" for op_id, status in existing)
-        note = (f"only NON-LIVE operator(s) {named} on this bridge — EP excludes "
-                "draft operators (#780) and this decision needs a live bridge, "
-                "so a LIVE operator is created; the non-live copy stays and does "
-                "not participate")
+        op_id, status = existing[0]
+        cache[key] = op_id
+        note = None
+        if status != "live":
+            note = (f"elected operator {op_id}, status={status} — EP excludes "
+                    "non-live operators (#780), so this bridge does not "
+                    "participate in the ranking until it is promoted "
+                    "(update_point(id, status='live')); it is NOT duplicated "
+                    "(#6671)")
+        return op_id, True, note
     op = sdk.create_operator(op_type, source_id, [target_id], label=label)
     cache[key] = op["id"]
-    return op["id"], False, note
+    return op["id"], False, None
 
 
 def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
@@ -249,22 +254,31 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
     # denote the same points converge on one operator).
     created_ops: dict[tuple[str, str, str, str], str] = {}
 
-    def _wire(src_key: str, op_type: str, tgt_key: str, label: str | None,
-              tick: str, *, any_label: bool = False) -> str | None:
+    def _elect(src_key: str, op_type: str, tgt_key: str, label: str | None,
+               *, any_label: bool = False) -> tuple[str | None, bool, str | None]:
+        """Resolve-or-create the bridge and record it. Never creates a twin."""
         src, tgt = _resolve(src_key), _resolve(tgt_key)
         try:
             op_id, reused, note = _resolve_or_create_operator(
                 sdk, proj, op_type, src, tgt, label, created_ops,
                 any_label=any_label)
         except Exception as e:
-            print(f"  ⚠ {src_key} --{op_type}--> {tgt_key}: {e}")
-            return None
+            return None, False, str(e)
         if op_id not in all_operator_ids:
             all_operator_ids.append(op_id)
         operator_rows.append({
             "source": src_key, "op_type": op_type, "target": tgt_key,
             "label": label, "id": op_id, "reused": reused,
         })
+        return op_id, reused, note
+
+    def _wire(src_key: str, op_type: str, tgt_key: str, label: str | None,
+              tick: str, *, any_label: bool = False) -> str | None:
+        op_id, reused, note = _elect(src_key, op_type, tgt_key, label,
+                                     any_label=any_label)
+        if op_id is None:
+            print(f"  ⚠ {src_key} --{op_type}--> {tgt_key}: {note}")
+            return None
         suffix = f" (reused {op_id})" if reused else ""
         print(f"  {tick} {src_key} --{op_type}--> {tgt_key}{suffix}")
         if note:
@@ -305,9 +319,9 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         # any_label: a relevance edge damps the bridge the caller names; it is
         # not a claim of its own, so it never mints a parallel operator just
         # because the decision did not repeat the Layer-3 label here.
-        op_id = _wire(src, op_type, tgt, label, "⚖ relevance:",
-                      any_label=True)
+        op_id, reused, note = _elect(src, op_type, tgt, label, any_label=True)
         if op_id is None:
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {note}")
             continue
         try:
             # Damp EVERY operator on this bridge (normally one). A graph
@@ -320,7 +334,18 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             for target_id in targets:
                 sdk.mitigate_operator(target_id, reason, strength)
             extra = "" if len(targets) == 1 else f" on {len(targets)} operators"
-            print(f"     (mitigated {strength:.2f}{extra}: {reason})")
+            # ONE line, the shape every other decide writer prints: the
+            # mitigation detail belongs to the relevance tick, not to a second
+            # line (the pre-#6671 script printed it inline, and
+            # `tortoise/__main__.py::_cmd_decide` still does).
+            parts = []
+            if reused:
+                parts.append(f"reused {op_id}")
+            parts.append(f"mitigated {strength:.2f}{extra}: {reason}")
+            print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
+                  f"({'; '.join(parts)})")
+            if note:
+                print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {note}")
         except Exception as e:
             print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
 
