@@ -14,9 +14,9 @@
 // Run (Node >= 22.6):
 //   node --experimental-strip-types tests/test_blog_markdown.mjs
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
-import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref } from "../website/functions/blog/_lib.ts";
+import { renderMarkdown, extractFaq, faqPageJsonLd, articleJsonLd, jsonLd, extractVideo, validHref, authorBylineHtml, authorJsonLd, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL } from "../website/functions/blog/_lib.ts";
 import { VIDEO_EMBED_ORIGINS } from "../website/functions/blog/_shared/video.ts";
 // The marketing project's policy — the one `blog/_lib.ts` `ok()` stamps on every
 // article response, so it is the policy that decides whether the embed displays.
@@ -715,6 +715,362 @@ console.log("JSON-LD cannot break out of its script element");
   assert(!tag.includes("</script><script>"), "a `</script>` in the content is neutralised");
   assert(tag.includes("\\u003c"), "angle brackets are escaped as unicode");
   assert(tag.startsWith('<script type="application/ld+json">'), "the tag is a JSON-LD script");
+}
+
+// ── the author byline + Person structured data (#1383) ──────────────────────
+// The bug this change fixes is that every post shipped as the anonymous
+// 'Tortoise team' with no face. The risk IN the fix is the opposite failure: an
+// avatar `<img>` emitted on a post that has no image, which renders as a broken
+// image (src="") or an empty circle. So the null path is asserted as an EXACT
+// string, not as a substring absence.
+console.log("article author identity (#1383 — the byline's null-image path)");
+{
+  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+
+  assertEq(
+    authorBylineHtml({ author: "Daniel Ospina", author_image_url: AVATAR }),
+    `<span class="byline"><img class="byline-avatar" src="${AVATAR}" alt="" width="22" height="22" loading="lazy"><span>By Daniel Ospina</span></span>`,
+    "an author WITH an image renders the avatar and the name",
+  );
+
+  // ⛔ THE NULL PATH — the assertion that would otherwise ship a broken <img>.
+  const noImage = authorBylineHtml({ author: "Daniel Ospina", author_image_url: null });
+  assertEq(
+    noImage,
+    '<span class="byline"><span>By Daniel Ospina</span></span>',
+    "an author with NO image renders the name alone — no <img>, no empty circle, no leftover wrapper",
+  );
+  assert(!noImage.includes("<img"), "...and specifically no <img> element at all");
+  assert(!noImage.includes("src="), "...and no src attribute to resolve into a broken image");
+
+  // An empty string is NOT null: a column defaulted to '' (the shape this change
+  // deliberately refuses) would pass a naive null-check and emit <img src="">.
+  const emptyImage = authorBylineHtml({ author: "Daniel Ospina", author_image_url: "" });
+  assertEq(
+    emptyImage,
+    '<span class="byline"><span>By Daniel Ospina</span></span>',
+    "an EMPTY image URL renders the name alone too ('' is not an image)",
+  );
+
+  // A non-http(s) scheme in the column must never reach the markup.
+  for (const hostile of ["javascript:alert(1)", "data:image/svg+xml,<svg/>", "/relative.jpg"]) {
+    const html = authorBylineHtml({ author: "Daniel Ospina", author_image_url: hostile });
+    assert(!html.includes("<img"), `a non-absolute URL emits no <img>: ${hostile}`);
+    assert(!html.includes("javascript:") && !html.includes("data:"), `...and never embeds it: ${hostile}`);
+  }
+
+  // The name is author-controlled text and stays HTML-escaped in the byline.
+  const hostileName = authorBylineHtml({ author: "Daniel <script>alert(1)</script>", author_image_url: null });
+  assert(!hostileName.includes("<script>"), "a hostile author name cannot open a <script> in the byline");
+  assert(hostileName.includes("&lt;script&gt;"), "...it is escaped, not dropped");
+  // A quote in the name must not survive into the avatar URL's attribute context.
+  const quoted = authorBylineHtml({ author: "Daniel Ospina", author_image_url: `${AVATAR}?"onload="alert(1)` });
+  assert(!quoted.includes('"onload="'), "a quote smuggled through the image URL is escaped");
+
+  // No stored author at all → the real default, never the retired anonymous one.
+  const anon = authorBylineHtml({ author: null, author_image_url: AVATAR });
+  assertEq(DEFAULT_AUTHOR, "Daniel Ospina", "the renderer's default author is a real person");
+  assert(anon.includes("By Daniel Ospina"), "a null author falls back to the real author name");
+  assert(!anon.includes("Tortoise team"), "the anonymous 'Tortoise team' fallback is gone");
+}
+
+console.log("article author structured data (#1383 — Person, image omitted when absent)");
+{
+  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const base = {
+    id: "1",
+    slug: "an-article",
+    title: "An article",
+    body: "## A section\n\nText.",
+    excerpt: "An excerpt",
+    cover_image_url: null,
+    tags: [],
+    author: "Daniel Ospina",
+    author_image_url: AVATAR,
+    meta_title: null,
+    meta_description: null,
+    published_at: "2026-01-01T00:00:00Z",
+    updated_at: "2026-01-02T00:00:00Z",
+  };
+  const url = "https://tortoise.premiselabs.co/blog/an-article";
+
+  const withImage = articleJsonLd(base, url).find((n) => n["@type"] === "BlogPosting");
+  assertEq(withImage.author["@type"], "Person", "BlogPosting.author is a Person, not an Organization");
+  assertEq(withImage.author.name, "Daniel Ospina", "...carrying the byline's name");
+  assertEq(withImage.author.image, AVATAR, "...and the avatar URL");
+  assertEq(
+    articleJsonLd(base, url).some((n) => n["@type"] === "Organization"),
+    false,
+    "no Organization node is emitted for the author any more",
+  );
+
+  // ⛔ `image` must be OMITTED, not nulled: `image: null` claims there is an
+  // image and it is empty, which is the structured-data form of a broken <img>.
+  const noImage = articleJsonLd({ ...base, author_image_url: null }, url).find((n) => n["@type"] === "BlogPosting");
+  assertEq("image" in noImage.author, false, "an absent avatar OMITS the author.image property");
+  assertEq(
+    JSON.stringify(noImage.author).includes('"image":null'),
+    false,
+    "...and never serialises it as image:null",
+  );
+  assertEq(noImage.author.name, "Daniel Ospina", "...while the Person and its name remain");
+  assertEq(
+    articleJsonLd({ ...base, author: null, author_image_url: null }, url).find((n) => n["@type"] === "BlogPosting").author.name,
+    "Daniel Ospina",
+    "a null author falls back to the real author name in structured data too",
+  );
+
+  // JSON escaping, not HTML escaping, inside <script>: `O&#39;Brien` in valid
+  // JSON is a DIFFERENT author than `O'Brien`.
+  const apostrophe = articleJsonLd({ ...base, author: "O'Brien" }, url).find((n) => n["@type"] === "BlogPosting");
+  assertEq(apostrophe.author.name, "O'Brien", "the author name reaches JSON-LD un-HTML-escaped");
+  const rendered = articleJsonLd({ ...base, author: "Bad </script><script>alert(1)</script>" }, url).map(jsonLd).join("");
+  assert(!rendered.includes("</script><script>alert(1)"), "a hostile author name cannot close the JSON-LD script tag");
+}
+
+console.log("the ARTICLE PAGE wires the author byline + Person schema (#1383 — the template, not just the helper)");
+{
+  // The unit assertions above prove the helpers; they say nothing about whether
+  // the page USES them. So drive the real `onRequestGet` with a stubbed
+  // Supabase: a template line reverted to the old `<span>By …</span>` (no
+  // avatar, Organization schema) leaves every helper assertion green.
+  const { onRequestGet } = await import("../website/functions/blog/[[path]].ts");
+  const AVATAR = "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg";
+  const realFetch = globalThis.fetch;
+
+  const render = async (overrides) => {
+    const row = {
+      id: "1",
+      slug: "a-post",
+      title: "A post",
+      body: "## A section\n\nProse.",
+      excerpt: "An excerpt",
+      cover_image_url: null,
+      tags: ["memory"],
+      author: "Daniel Ospina",
+      author_image_url: AVATAR,
+      meta_title: null,
+      meta_description: null,
+      published_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-02T00:00:00Z",
+      ...overrides,
+    };
+    const requested = [];
+    globalThis.fetch = async (url) => {
+      requested.push(String(url));
+      return new Response(JSON.stringify([row]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    try {
+      const res = await onRequestGet({
+        request: new Request("https://tortoise.premiselabs.co/blog/a-post"),
+        env: {
+          SUPABASE_URL: "https://project.supabase.co",
+          SUPABASE_ANON_KEY: "anon-key",
+          ASSETS: { fetch: async () => new Response("", { status: 404 }) },
+        },
+        params: { path: ["a-post"] },
+        waitUntil() {},
+      });
+      return { html: await res.text(), status: res.status, requested };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+
+  const withImage = await render({});
+  assertEq(withImage.status, 200, "the article page renders");
+  assert(
+    withImage.requested[0]?.includes("author_image_url"),
+    "the article query ASKS for author_image_url (without it the page can never show an avatar)",
+  );
+  assert(
+    withImage.html.includes('<img class="byline-avatar" src="' + AVATAR + '"'),
+    "the rendered page carries the round avatar in the byline",
+  );
+  assert(withImage.html.includes("By Daniel Ospina"), "...beside the author's name");
+  assert(
+    withImage.html.includes('"@type":"Person"') && withImage.html.includes('"name":"Daniel Ospina"'),
+    "the JSON-LD author is a Person named in the byline",
+  );
+  assert(withImage.html.includes('"image":"' + AVATAR + '"'), "...with the avatar as its image");
+
+  // ⛔ THE FAILING PATH THIS CHANGE MUST NOT SHIP: a post with no image.
+  const noImage = await render({ author_image_url: null });
+  assert(!noImage.html.includes('<img class="byline-avatar"'), "a null-image post renders NO avatar on the page");
+  assert(!noImage.html.includes('src=""'), "...and no empty src anywhere (a broken image)");
+  assert(noImage.html.includes("By Daniel Ospina"), "...the byline still names the author");
+  assert(
+    noImage.html.includes('"@type":"Person"') && !noImage.html.includes('"image":null'),
+    "...and the Person node omits image rather than nulling it",
+  );
+}
+
+console.log("the AGENT publish API keeps the same author contract (#1383 — the write path, not just the page)");
+{
+  // The admin editor is not the only writer: agents publish through this API.
+  // `""` is the value that would defeat the whole null contract — it is not
+  // nullish, so a NULL-only guard would pass it through and the byline would
+  // emit <img src="">. Drive the real handler and assert on the row it writes.
+  const { onRequestPost } = await import("../website/functions/blog/api/posts/[[path]].ts");
+  const realFetch = globalThis.fetch;
+
+  const publish = async (body) => {
+    const inserted = [];
+    globalThis.fetch = async (url, init) => {
+      const u = String(url);
+      const method = String(init?.method ?? "GET").toUpperCase();
+      if (u.includes("/rest/v1/blog_agent_keys")) {
+        return Response.json([{ agent_name: "agent-under-test", active: true }]);
+      }
+      if (u.includes("/rest/v1/blog_posts") && method === "POST") {
+        const row = JSON.parse(String(init.body));
+        inserted.push(row);
+        return Response.json([{ id: "row-1", slug: row.slug }]);
+      }
+      return Response.json({ success: true });
+    };
+    try {
+      const res = await onRequestPost({
+        request: new Request("https://tortoise.premiselabs.co/blog/api/posts", {
+          method: "POST",
+          headers: { "X-Agent-Key": "test-key", "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+        env: { SUPABASE_URL: "https://db.test", SUPABASE_SERVICE_ROLE_KEY: "svc" },
+        params: {},
+        waitUntil() {},
+      });
+      return { status: res.status, body: await res.json().catch(() => null), inserted };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  };
+
+  const blank = await publish({ title: "T", slug: "author-blank-image", author_image_url: "" });
+  assertEq(blank.status, 201, "an agent can still publish with a blank image field");
+  assertEq(
+    blank.inserted[0]?.author_image_url,
+    null,
+    "an explicit empty-string image is stored as NULL, not '' ('' is not nullish and would emit <img src=\"\">)",
+  );
+
+  const hostile = await publish({ title: "T", slug: "author-bad-image", author_image_url: "javascript:alert(1)" });
+  assertEq(hostile.status, 400, "a non-absolute image URL is REFUSED by the API");
+  assertEq(hostile.inserted.length, 0, "...and nothing is written");
+  assertEq(
+    typeof hostile.body?.author_image_url,
+    "string",
+    "...with a field-specific error, not a generic failure",
+  );
+
+  const noAuthor = await publish({ title: "T", slug: "author-default" });
+  assertEq(noAuthor.status, 201, "an agent publish without an author still succeeds");
+  assertEq(
+    noAuthor.inserted[0]?.author,
+    DEFAULT_AUTHOR,
+    "...and the row carries the real author, not the retired anonymous default",
+  );
+  // ⛔ The avatar default must follow the NAME default (#1383). The admin editor
+  // prefills DEFAULT_AUTHOR_IMAGE_URL, so a post created here WITHOUT the field
+  // would otherwise render name-only while the same author's editor-written post
+  // renders an avatar — the byline still depending on which path wrote the post,
+  // which is the defect this change removes for the name. The agent is the
+  // primary writer on this surface, so this is the common case, not a corner.
+  assertEq(
+    noAuthor.inserted[0]?.author_image_url,
+    DEFAULT_AUTHOR_IMAGE_URL,
+    "an agent publish that OMITS the avatar gets the shipped one — the same byline the editor prefills",
+  );
+
+  // An explicit `""` is still a clear-to-NULL (see the `blank` case above), and a
+  // post by a DIFFERENT author never inherits the shipped avatar.
+  const otherAuthor = await publish({ title: "T", slug: "author-guest", author: "Someone Else" });
+  assertEq(otherAuthor.status, 201, "a guest author can be published without an image");
+  assertEq(
+    otherAuthor.inserted[0]?.author_image_url,
+    null,
+    "a post NOT by the shipped author gets NO avatar (the shipped avatar is not a global default)",
+  );
+}
+
+console.log("the shipped avatar exists, and is the URL the migration backfills (#1383)");
+{
+  // The failure this prevents is the one that CANNOT be caught by rendering:
+  // a byline whose <img> points at an asset nobody committed (a 404 avatar on
+  // every backfilled post), or a backfill that writes a URL the code no longer
+  // names. The constant, the file and the migration are checked against each
+  // other rather than each against a copy of the string.
+  assertEq(
+    DEFAULT_AUTHOR_IMAGE_URL,
+    "https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg",
+    "the shipped avatar URL is the blog's own asset path",
+  );
+  assertEq(
+    new URL(DEFAULT_AUTHOR_IMAGE_URL).pathname,
+    "/blog/author-daniel-ospina.jpg",
+    "...served from the /blog/ path the blog Functions and Assets fallback own",
+  );
+
+  const assetPath = new URL("../website/blog/author-daniel-ospina.jpg", import.meta.url);
+  const asset = statSync(assetPath);
+  assert(asset.isFile() && asset.size > 0, "the avatar file is committed where the URL says it is");
+  assert(
+    asset.size <= 100 * 1024,
+    `the avatar is a web asset, not a camera original (${asset.size} bytes)`,
+  );
+
+  const migration = readFileSync(
+    new URL("../supabase/migrations/20261021000001_blog_author_identity.sql", import.meta.url),
+    "utf8",
+  );
+  assert(
+    migration.includes(DEFAULT_AUTHOR_IMAGE_URL),
+    "the migration's backfill writes the SAME URL the renderer names (backfilled posts get a real avatar)",
+  );
+  assert(
+    migration.includes(`'Daniel Ospina'`),
+    "the migration's author default matches the renderer's DEFAULT_AUTHOR",
+  );
+}
+
+console.log("the apply RECIPE is the atomic one (#1383 — `psql -f` is not one transaction)");
+{
+  // The migration toggles `blog_posts_set_updated_at` OFF around the backfill and
+  // back ON. That pair is only atomic when the file is applied as ONE simple query
+  // (CLI `db push`, Management API, the PGlite harness). `psql -f` autocommits PER
+  // STATEMENT, so an abort halfway commits the DISABLE and never reaches the ENABLE
+  // — updated_at then stops moving for every blog post, silently. The guarantee
+  // therefore lives in the recipe, so the recipe is what gets guarded: a reworded
+  // runbook that drops `--single-transaction` or the ledger step re-opens the hole
+  // with every other test still green.
+  const norm = (s) => s.replace(/\s+/g, " ");
+  const readme = norm(readFileSync(new URL("../supabase/README.md", import.meta.url), "utf8"));
+  const mig = norm(
+    readFileSync(
+      new URL("../supabase/migrations/20261021000001_blog_author_identity.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  assert(
+    mig.includes("psql --single-transaction"),
+    "the migration STATES the apply precondition (without it the DISABLE/ENABLE pair is not atomic)",
+  );
+  assert(
+    readme.includes("psql --single-transaction"),
+    "the runbook's out-of-band apply uses `psql --single-transaction`, never a bare `psql -f`",
+  );
+  assert(
+    readme.includes("ON_ERROR_STOP=1"),
+    "...and stops at the first error instead of pressing on past it",
+  );
+  assert(
+    readme.includes("supabase migration repair --linked --status applied"),
+    "the runbook RECORDS the applied version — psql writes the schema, not the ledger, and `check-migration-drift` is fail-closed",
+  );
 }
 
 // ── House style: the shapes the already-published articles use ────────────

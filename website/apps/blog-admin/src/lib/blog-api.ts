@@ -35,10 +35,21 @@ export function queueKind(post: BlogPostRow): QueueItem['kind'] | null {
 }
 
 export const POST_SELECT = `
-  id, slug, title, body, excerpt, cover_image_url, tags, author, status,
+  id, slug, title, body, excerpt, cover_image_url, tags, author, author_image_url, status,
   meta_title, meta_description, published_at, published_by, created_by,
   reviewed_by, reviewed_at, review_note, hold_for_review, created_at, updated_at
 `;
+
+/**
+ * The shipped author identity (#1383). Must agree with the DB `author` DEFAULT
+ * (migration 20261021000001) and `DEFAULT_AUTHOR` in
+ * website/functions/blog/_lib.ts — a create default that disagrees with either
+ * prints a different author for the same post depending on which path wrote it.
+ */
+export const DEFAULT_AUTHOR = 'Daniel Ospina';
+/** The shipped avatar, also applied by the migration's backfill. */
+export const DEFAULT_AUTHOR_IMAGE_URL =
+  'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg';
 
 /** All posts for the admin surface (admin RLS allows SELECT ALL). */
 export async function listPosts(): Promise<BlogPostRow[]> {
@@ -181,7 +192,8 @@ function sanitizeInsert(input: Partial<BlogPostRow>): BlogPostInsert {
     slug: input.slug,
     body: input.body ?? '',
     tags: input.tags ?? [],
-    author: input.author ?? 'Tortoise team',
+    author: input.author ?? DEFAULT_AUTHOR,
+    author_image_url: input.author_image_url ?? null,
     status: input.status ?? 'draft',
     hold_for_review: input.hold_for_review ?? false,
     created_by: input.created_by ?? null,
@@ -203,6 +215,7 @@ function sanitizeUpdate(patch: Partial<BlogPostRow>): BlogPostUpdate {
   if (patch.body !== undefined) record.body = patch.body;
   if (patch.status !== undefined) record.status = patch.status;
   if (patch.author !== undefined) record.author = patch.author;
+  if (patch.author_image_url !== undefined) record.author_image_url = patch.author_image_url;
   if (patch.excerpt !== undefined) record.excerpt = patch.excerpt;
   if (patch.cover_image_url !== undefined) record.cover_image_url = patch.cover_image_url;
   if (patch.meta_title !== undefined) record.meta_title = patch.meta_title;
@@ -248,6 +261,8 @@ export interface SaveFormFields {
   excerpt: string;
   cover_image_url: string;
   tags: string;
+  author: string;
+  author_image_url: string;
   meta_title: string;
   meta_description: string;
   hold_for_review: boolean;
@@ -277,6 +292,11 @@ export function buildSaveRecord(
     body,
     excerpt: form.excerpt.trim() || null,
     cover_image_url: form.cover_image_url || null,
+    // Blank author → the shipped author (never an empty byline). Blank avatar →
+    // NULL, which the article page renders as the name ALONE; `''` would not be
+    // nullish and would ship <img src="">.
+    author: form.author.trim() || DEFAULT_AUTHOR,
+    author_image_url: form.author_image_url.trim() || null,
     tags,
     meta_title: form.meta_title.trim() || null,
     meta_description: form.meta_description.trim() || null,
