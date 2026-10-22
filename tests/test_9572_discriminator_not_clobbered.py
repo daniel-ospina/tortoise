@@ -468,3 +468,129 @@ def test_issue_linking_does_not_retype_a_stored_object(sdk):
     minted = g.query("MATCH (o:Object {id:'obj-9572-brand-new'}) "
                      "RETURN o.objectKind AS k").result_set
     assert minted and minted[0][0] == "issue", minted
+
+
+# ── the SECOND spelling of "nothing was named": BLANK ───────────────────────
+#
+# The seventh round drew the identity doors' line at `kind is not None`, so
+# `None` was "absent" — but the blank spelling was not. `""` is not `None`, so
+# it passed the approved-kind gate (a bare value names no pack, by design) and
+# reached the fold's `coalesce($k, stored)`, which returns the first argument
+# that is not NULL — and `""` is not NULL. Measured through the public REST
+# door: `{"name":"x","subjectKind":"team"}` then `{"name":"x","subjectKind":""}`
+# left the node carrying `""` — a discriminator no pack declares, which is worse
+# than the pre-fix `other`. On a FIRST create the same value beat the `'other'`
+# default (`coalesce("", 'other')` = `""`).
+#
+# The rule is `kind_fallbacks.named_kind`, the ONE predicate the payload doors
+# already applied (`writable_kind` returns None for blank) and that
+# `extractor._normalize_entity` applies (`not str(value).strip()` ⇒ not named).
+
+
+def test_named_kind_treats_blank_as_absent_but_keeps_a_named_value():
+    """The predicate itself, pinned before any door is asserted on it.
+
+    It is deliberately NOT `writable_kind`: that one also drops the classifier's
+    `core:other` repair, which is a PAYLOAD rule. An identity door's kind is
+    authored by the caller, not classified, so a caller naming `core:other` is
+    naming a kind and must stay writable (the alternative would silently make a
+    namespaced value unwritable at the door — a `core:other` value written by
+    the classifier is dropped by the payload rule, not by this one).
+    """
+    from tortoise.kind_fallbacks import named_kind, writable_kind
+
+    assert named_kind(None) is None
+    assert named_kind("") is None
+    assert named_kind("   ") is None
+    assert named_kind("team") == "team"
+    assert named_kind(" team ") == "team"
+    # a named value, even the classifier's spelling: the identity doors write it
+    assert named_kind("core:other") == "core:other"
+    # …and the PAYLOAD rule still drops it, so the two rules stay distinct
+    assert writable_kind("core:other") is None
+
+
+def test_sdk_subject_door_does_not_write_a_blank_kind(sdk):
+    """`create_subject(name, "")` must not reset a stored kind, nor store ``""``."""
+    sdk.create_subject("Probe Blank Subject Z", "team")
+    node = sdk.create_subject("Probe Blank Subject Z", "")
+    assert node["subjectKind"] == "team", (
+        f"a blank subjectKind reset the stored discriminator to "
+        f"{node['subjectKind']!r}")
+    assert node["subjectKind"] != "", "the door stored a blank discriminator"
+
+    # a blank FIRST create still gets the fold's ON CREATE default
+    fresh = sdk.create_subject("Probe Blank Subject Y", "  ")
+    assert fresh["subjectKind"] == "other", fresh.get("subjectKind")
+
+
+def test_sdk_object_door_does_not_write_a_blank_kind(sdk):
+    sdk.create_object("Probe Blank Object Z", "capability")
+    node = sdk.create_object("Probe Blank Object Z", "")
+    assert node["objectKind"] == "capability", (
+        f"a blank objectKind reset the stored discriminator to "
+        f"{node['objectKind']!r}")
+    fresh = sdk.create_object("Probe Blank Object Y", "   ")
+    assert fresh["objectKind"] == "other", fresh.get("objectKind")
+
+
+def test_create_entity_door_does_not_write_a_blank_kind(sdk):
+    """The consolidated door, where the alias default does not run at all."""
+    sdk.create_entity("subject", "Probe Blank Entity Z", subjectKind="team")
+    node = sdk.create_entity("subject", "Probe Blank Entity Z",
+                             subjectKind="")["node"]
+    assert node["subjectKind"] == "team", node.get("subjectKind")
+    obj = sdk.create_entity("object", "Probe Blank Entity Obj Z",
+                            objectKind="capability")
+    node2 = sdk.create_entity("object", "Probe Blank Entity Obj Z",
+                              objectKind="  ")["node"]
+    assert node2["objectKind"] == "capability", (
+        obj.get("objectKind"), node2.get("objectKind"))
+
+
+def test_event_api_blank_kind_does_not_reset_the_stored_kind(sdk, tmp_path):
+    """The EventAPI lane journals a mention, so a blank one reaches the record."""
+    from tortoise.api import EventAPI
+    from tortoise.log import EventLog
+
+    api = EventAPI(EventLog(str(tmp_path / "api-blank.jsonl")),
+                   initiated_by="user", agent_id="test",
+                   projection=sdk._get_proj())
+    api.add_subject("Probe Blank Api Z", "team")
+    api.add_subject("Probe Blank Api Z", "")
+    row = _graph(sdk).query(
+        "MATCH (s:Subject {name:'Probe Blank Api Z'}) RETURN s.subjectKind"
+    ).result_set
+    assert row and row[0][0] == "team", row
+
+    api.add_object("Probe Blank Api Obj Z", "capability")
+    api.add_object("Probe Blank Api Obj Z", "   ")
+    row2 = _graph(sdk).query(
+        "MATCH (o:Object {name:'Probe Blank Api Obj Z'}) RETURN o.objectKind"
+    ).result_set
+    assert row2 and row2[0][0] == "capability", row2
+
+
+def test_seed_surfaces_do_not_write_a_blank_kind(sdk):
+    """Both duck-typed seed surfaces forward the kind — blank included."""
+    from tortoise.hosted_api import _OrgSeedSurface
+    from tortoise.onboarding.selfhost import _SdkSeedSurface
+
+    org = _OrgSeedSurface(sdk)
+    org.create_subject("Probe Blank Seed Z", "team")
+    assert org.create_subject("Probe Blank Seed Z", "")["subjectKind"] == "team"
+
+    selfhost = _SdkSeedSurface(sdk)
+    selfhost.create_subject("Probe Blank Seed Y", "organization")
+    node = selfhost.create_subject("Probe Blank Seed Y", "  ")
+    assert node["subjectKind"] == "organization", node.get("subjectKind")
+
+
+def test_blank_kind_journals_no_kind_at_all(sdk, tmp_path):
+    """live == replay for the blank spelling too: no key, not a blank key."""
+    sdk.create_subject("Probe Blank Journal Z", "")
+    journal = EventLog(str(tmp_path / "events" / "events.jsonl")).read_all()
+    payloads = [e for e in journal if e.get("type") == "SubjectAdded"]
+    assert len(payloads) == 1, payloads
+    assert "subject_kind" not in payloads[0], payloads[0]
+    assert "subjectKind" not in payloads[0], payloads[0]

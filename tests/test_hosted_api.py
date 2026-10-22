@@ -1909,6 +1909,51 @@ class TestTeamInfo:
         r = client.post("/v1/objects", json={"objectKind": "project"})
         assert r.status_code == 422
 
+    def test_create_subject_blank_kind_does_not_reset_the_named_kind(self, client):
+        """#9572 review P2: the SECOND spelling of "no kind named" — blank.
+
+        The route pins above cover an ABSENT kind. `""` is not `None`, so it
+        passed the handler's `is not None` gate (a bare value names no pack, by
+        design), was forwarded as a real kind, and the fold's
+        `coalesce($k, stored)` — first NON-NULL argument — stored `""` over the
+        caller's `team`. A discriminator no pack declares is worse than the
+        pre-fix `other`; a blank FIRST create beat the `'other'` default too.
+        """
+        r1 = client.post("/v1/subjects", json={"name": "probe-rest-blank-z",
+                                               "subjectKind": "team"})
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["subjectKind"] == "team", r1.json()
+        r2 = client.post("/v1/subjects", json={"name": "probe-rest-blank-z",
+                                               "subjectKind": ""})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["subjectKind"] == "team", (
+            f"a blank subjectKind reset the stored kind: "
+            f"{r2.json().get('subjectKind')!r}")
+        # …and a blank FIRST create still gets the fold's ON CREATE default
+        r3 = client.post("/v1/subjects", json={"name": "probe-rest-blank-y",
+                                               "subjectKind": "   "})
+        assert r3.status_code == 200, r3.text
+        assert r3.json()["subjectKind"] == "other", (
+            f"a blank first create stored {r3.json().get('subjectKind')!r}")
+
+    def test_create_object_blank_kind_does_not_reset_the_named_kind(self, client):
+        """#9572 review P2: the Object twin of the blank-kind route pin."""
+        r1 = client.post("/v1/objects", json={"name": "probe-rest-blank-obj-z",
+                                              "objectKind": "capability"})
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["objectKind"] == "capability", r1.json()
+        r2 = client.post("/v1/objects", json={"name": "probe-rest-blank-obj-z",
+                                              "objectKind": ""})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["objectKind"] == "capability", (
+            f"a blank objectKind reset the stored kind: "
+            f"{r2.json().get('objectKind')!r}")
+        r3 = client.post("/v1/objects", json={"name": "probe-rest-blank-obj-y",
+                                              "objectKind": "  "})
+        assert r3.status_code == 200, r3.text
+        assert r3.json()["objectKind"] == "other", (
+            f"a blank first create stored {r3.json().get('objectKind')!r}")
+
     def test_point_with_about_object_wires_edge(self, client):
         """#1643 (Task 2): an about_object on the point write wires the
         (p)-[:aboutObject]->(o) EDGE (never a bare prop) — visible to

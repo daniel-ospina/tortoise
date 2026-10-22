@@ -41,6 +41,10 @@ from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
+# #9572: the "nothing was named" predicate for the identity doors, ONE home
+# shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
+# no cycle — see the module docstring for why it is not a private in sdk.py).
+from .kind_fallbacks import named_kind
 from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
     reject_unrepresentable_number as _reject_unrepresentable_number,
 )
@@ -3341,8 +3345,16 @@ def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
     ``props`` is returned as a NEW dict in the door's established key order
     (name, kind?, status, *caller props*) so a caller-supplied ``status`` still
     overrides the ``"live"`` seed, exactly as before.
+    #9572 review P2: BLANK is not a kind either. ``""`` / ``"   "`` is not
+    ``None``, so it survived the ``is not None`` line and reached the fold as a
+    real value — ``coalesce("", stored)`` returns ``""``, so a blank re-create
+    still destroyed a stored ``team`` and a blank FIRST create stored a
+    discriminator no pack declares. The blank rule is the leaf module's
+    ``named_kind``, shared with the aliases, ``EventAPI``, the two hosted REST
+    handlers and the two seed surfaces, so it cannot be drawn differently at
+    the next door.
     """
-    kind = props.pop(kind_key, None)
+    kind = named_kind(props.pop(kind_key, None))
     out: dict = {"name": name}
     if kind is not None:
         out[kind_key] = kind
@@ -33851,12 +33863,16 @@ class TortoiseSDK:
         ``coalesce($sk, s.subjectKind)`` clobbered the stored, user-authored
         kind. The ``'other'`` default now comes from the fold's ON CREATE arm,
         which is the only place it belongs — see ``sdk._entity_door_props``.
+        A BLANK ``subjectKind`` (``""`` / ``"   "``) is "not supplied" too
+        (#9572 review P2): ``kind_fallbacks.named_kind`` normalizes it, so it
+        can neither reset a stored kind nor store ``""``.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
         return self._flat_entity_result(
@@ -33868,12 +33884,14 @@ class TortoiseSDK:
 
         ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
         #9572 — the Object twin of ``create_subject``'s fabricated default.
+        Blank is absent here too (#9572 review P2) — ``named_kind``.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        objectKind = named_kind(objectKind)
         if objectKind is not None:
             props["objectKind"] = objectKind
         return self._flat_entity_result(

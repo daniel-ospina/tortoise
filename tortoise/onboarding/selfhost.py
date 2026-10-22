@@ -131,7 +131,11 @@ class _SdkSeedSurface:
 
     def create_subject(self, name, subjectKind=None, **props):
         # #9572: ``None`` = not supplied, forwarded as absent (see
-        # ``hosted_api._OrgSeedSurface`` for the hosted twin).
+        # ``hosted_api._OrgSeedSurface`` for the hosted twin). A BLANK kind is
+        # "not supplied" too (review P2) — ``kind_fallbacks.named_kind``.
+        from tortoise.kind_fallbacks import named_kind
+
+        subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
         return self._sdk.create_subject(name, **props)

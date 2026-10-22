@@ -35,16 +35,45 @@ def is_family_fallback(kind: object) -> bool:
     return str(kind).strip().lower() in FAMILY_FALLBACK_KINDS
 
 
-def writable_kind(kind: object) -> str | None:
-    """The kind to WRITE, or ``None`` when it must not be written at all.
+def named_kind(kind: object) -> str | None:
+    """The caller-authored kind, or ``None`` when the caller named NONE.
 
-    ``None`` for an absent/blank kind (nothing was named) and for the family
-    fallback (a repair); the value itself for a named kind.
+    The IDENTITY doors' predicate (``sdk._entity_door_props``,
+    ``create_subject``/``create_object``, ``EventAPI.add_subject``/
+    ``add_object``, the two hosted REST handlers, the two seed surfaces).
+    #9572's line was drawn at ``kind is not None``, so **blank was still a
+    kind**: ``subjectKind=""`` is not ``None``, so it passed the approved-kind
+    gate (a bare value names no pack, by design) and reached the fold's
+    ``coalesce($k, stored)`` — which returns the first NON-NULL argument, and
+    ``""`` is not null. A blank re-create therefore reset a stored ``team`` to
+    ``""``, and a blank FIRST create stored ``""`` instead of the ``'other'``
+    default. Blank is not a kind: the same rule ``extractor._normalize_entity``
+    already applied (``not str(value).strip()`` ⇒ not named) and that
+    ``writable_kind`` applied to the payload doors.
+
+    It lives HERE, beside ``writable_kind``, so the two spellings of
+    "nothing was named" cannot diverge again — one predicate per rule, shared
+    by every door. It is NOT ``writable_kind``: that one also drops the
+    classifier's ``core:other`` repair, which is a PAYLOAD rule. An identity
+    door's kind is authored by the caller, not classified, so a caller who
+    names ``core:other`` is naming a kind and stays writable.
     """
     if kind is None:
         return None
     _kind = str(kind).strip()
-    if not _kind or is_family_fallback(_kind):
+    if not _kind:
+        return None
+    return _kind
+
+
+def writable_kind(kind: object) -> str | None:
+    """The kind to WRITE, or ``None`` when it must not be written at all.
+
+    ``None`` for an absent/blank kind (nothing was named — ``named_kind``) and
+    for the family fallback (a repair); the value itself for a named kind.
+    """
+    _kind = named_kind(kind)
+    if _kind is None or is_family_fallback(_kind):
         return None
     return _kind
 

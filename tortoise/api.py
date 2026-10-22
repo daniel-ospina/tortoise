@@ -14,6 +14,9 @@ import logging
 from . import record_writer
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
+# #9572 review P2: "nothing was named" (absent OR blank) has ONE predicate,
+# shared with the SDK doors and the hosted surfaces — see the leaf module.
+from .kind_fallbacks import named_kind
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
 from .projection import _live_write_scope, fold
@@ -521,6 +524,7 @@ class EventAPI:
         """
         sid = ulid()
         ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
+        subject_kind = named_kind(subject_kind)
         if subject_kind is not None:
             ev["subject_kind"] = subject_kind
         self._emit("SubjectAdded", **ev)
@@ -542,6 +546,7 @@ class EventAPI:
         """
         oid = id or ulid()
         ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}
+        object_kind = named_kind(object_kind)
         if object_kind is not None:
             ev["object_kind"] = object_kind
         self._emit("ObjectRegistered", **ev)

@@ -119,6 +119,10 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
     KIND_RESTORE_DRILL_FAILED,
     KIND_SIZE_GUARD_ABORT,
 )
+# #9572 review P2: the "nothing was named" predicate (absent OR blank) — ONE
+# home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
+# spellings cannot be drawn differently at the next door.
+from tortoise.kind_fallbacks import named_kind
 from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
@@ -9244,15 +9248,20 @@ async def create_object(body: CreateObjectRequest, request: Request,
     sdk = await _data_sdk_offloaded(org)
     # #5475: the kind must not widen the graph's own approval set. #9572: only a
     # NAMED kind is checked — an absent one is not a kind, and the fold supplies
-    # the ``'other'`` default ON CREATE.
-    if body.objectKind is not None:
-        await _require_approved_kind(sdk, body.objectKind, door="create_object")
+    # the ``'other'`` default ON CREATE. #9572 review P2: BLANK is not a kind
+    # either — ``""`` is not ``None``, so it passed this gate (a bare value names
+    # no pack, by design) and reached the fold's ``coalesce($k, stored)``, which
+    # returns the first NON-NULL argument: a blank re-create reset a stored kind
+    # to ``""``. ``kind_fallbacks.named_kind`` is the ONE predicate for that.
+    _okind = named_kind(body.objectKind)
+    if _okind is not None:
+        await _require_approved_kind(sdk, _okind, door="create_object")
     try:
         props = {}
         if body.status:
             props["status"] = body.status
-        if body.objectKind is not None:
-            props["objectKind"] = body.objectKind
+        if _okind is not None:
+            props["objectKind"] = _okind
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
@@ -9300,16 +9309,17 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
     # #5475: the same input constraint as /v1/objects, on the subject door
-    # (#9572: only a NAMED kind — see CreateObjectRequest).
-    if body.subjectKind is not None:
-        await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
+    # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
+    # per ``kind_fallbacks.named_kind``).
+    _skind = named_kind(body.subjectKind)
+    if _skind is not None:
+        await _require_approved_kind(sdk, _skind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
         # create_object above for the pattern and rationale). #9572: forward the
         # kind ONLY when the caller named one, so a bare re-create cannot reset
         # a stored kind to the default.
-        _kind = ({"subjectKind": body.subjectKind}
-                 if body.subjectKind is not None else {})
+        _kind = ({"subjectKind": _skind} if _skind is not None else {})
         node = await asyncio.to_thread(
             sdk.create_subject, body.name, **_kind)
     except Exception:
@@ -31059,6 +31069,8 @@ class _OrgSeedSurface:
     def create_subject(self, name, subjectKind=None, **props):
         # #9572: ``None`` = not supplied, forwarded as absent — a fabricated
         # ``"other"`` default here would re-open the clobber the SDK doors had.
+        # A BLANK kind is "not supplied" too (review P2): ``named_kind``.
+        subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
         return self._sdk.create_subject(name, **props)
