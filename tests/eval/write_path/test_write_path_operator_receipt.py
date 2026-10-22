@@ -820,21 +820,32 @@ def test_checker_rejects_more_forming_operators_than_the_run_committed():
     assert "E4-FORMING" in _failures(_check(receipt))
 
 
-def test_a_non_list_duplicate_is_not_also_blamed_for_uncovered_rows():
-    """A wrongly-TYPED duplicate earns one refusal, not a second about coverage.
+def test_a_duplicate_whose_rows_are_not_a_list_is_not_blamed_for_coverage():
+    """A wrongly-TYPED `planted_operators` earns one refusal, not two.
 
-    The artifact supplied the cross-check; it supplied it in a shape the checker
-    cannot read. Reporting "covers 0 of the 2 graded rows" as well misdescribes
-    the defect and would make a shape error look like an omission (#9618 r7).
+    The artifact supplied the cross-check; it supplied one session's rows in a
+    shape the checker cannot read. Without `duplicate_shape_ok` the coverage
+    arm then appends "covers 0 of the 2 graded rows", which misdescribes the
+    defect as an omission — the receipt named every row, it just named them in
+    a non-list (#9618 r7).
+
+    This is the suppression site the `session_results`-is-not-a-list case does
+    NOT reach: that one is coerced to `[]` before the loop, so its coverage arm
+    is unreachable and only the absent/empty arm needs suppressing there (pinned
+    by `test_checker_names_a_non_list_session_results`). Here the duplicate IS a
+    list and IS non-empty, so `duplicate_shape_ok` is the only thing standing
+    between a shape error and a second, misleading refusal.
     """
     receipt = _receipt()
-    receipt["session_results"] = {"wp01_quarry_debug": []}
+    receipt["session_results"] = [{"session_id": "wp01_quarry_debug",
+                                  "planted_operators": 5}]
     result = _check(receipt)
     assert result["ok"] is False
     numerator = [r for r in result["rules"]
                  if not r["ok"] and r["rule"] == "E4-NUMERATOR"]
     assert len(numerator) == 1, [r["detail"] for r in numerator]
     assert "expected a list" in numerator[0]["detail"]
+    assert "graded rows" not in numerator[0]["detail"]
 
 
 @pytest.mark.parametrize("field,value", [
