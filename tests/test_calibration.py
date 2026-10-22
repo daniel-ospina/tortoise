@@ -13,6 +13,7 @@ from tortoise.sdk import BASELINE_SOURCE_INHERITED
 from tortoise.source_credibility import AUTHOR_ASSERTION_WEAK_PC
 from tortoise.exceptions import CalibrationError
 from tortoise.exceptions import UnaddressableClaimError
+from tortoise.ep import TortoiseEP
 from tortoise.live import direction_flows
 
 
@@ -1879,3 +1880,35 @@ def test_an_nary_operator_with_every_id_present_does_not_refuse(sdk):
         "MATCH (n:Point) WHERE n.id IN $ids AND n.posterior_alpha IS NOT NULL "
         "RETURN count(n)", params={"ids": [a["id"], b["id"], c["id"]]}).result_set
     assert stamped[0][0] == 3
+
+
+@pytest.mark.parametrize("op_type,inputs,direction,sends", [
+    # IMPL star: input_ids[0] sends under `->`, each target under `<-`.
+    ("IMPL", ["a", "b", "c"], "->", False),          # no NULL at all
+    ("IMPL", [None, "b", "c"], "->", True),          # the star's SOURCE sends
+    ("IMPL", ["a", None, "c"], "->", False),         # a star TARGET only receives
+    ("IMPL", ["a", None, "c"], "<-", True),          # ...and sends back under `<-`
+    ("IMPL", [None, "b", "c"], "<-", False),         # the source only receives
+    ("NAND", ["a", None, "c"], "->", False),         # directed NAND is a star too
+    ("NAND", ["a", None, "c"], "<-", True),
+    ("NAND", ["a", None, "c"], "bidirectional", True),   # mutual NAND is a CLIQUE
+    ("NAND", ["a", "b", None], "bidirectional", True),
+    ("IMPL", ["a", "b", None], "-", False),          # `-`: nothing transfers
+])
+def test_nary_null_sends_only_where_the_pairs_send(op_type, inputs, direction, sends):
+    """#9275 (review round 8): an n-ary star's `->` NULL target only RECEIVES.
+
+    `_update_nary_factor` decomposes into pairs from `_factor_pairs` — a STAR for
+    IMPL and directed NAND, a CLIQUE for mutual NAND — and `_update_factor` sends
+    the pair's source under `fwd` and its target under `bwd`. So a star's `->`
+    NULL at idx >= 1 is inert (it is read as Beta(1,1), exactly like an
+    addressable uncalibrated sibling, dilution included), and refusing it would
+    reject a graph `origin/main` converges. Round 8 shipped that false refusal;
+    round 7 shipped the opposite one (refusing every 3+-input operator).
+    """
+    factor = ("op", op_type, inputs, 1.0, None, direction)
+    assert TortoiseEP._null_input_sends(factor) is sends
+    # The pairs this guard reads are the SAME definition the engine computes with.
+    fwd, bwd = direction_flows(direction)
+    if fwd or bwd:
+        assert TortoiseEP._factor_pairs(op_type, inputs, fwd and bwd)

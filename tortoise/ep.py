@@ -999,15 +999,7 @@ class TortoiseEP:
         if not (fwd or bwd):
             # `-`: the connection exists and NO confidence transfers.
             return
-        if op_type == "IMPL":
-            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
-        elif op_type == "NAND" and not mutual:
-            # Directed NAND: the source (and, for `<-`, the receiving end)
-            # pairs with each target only; targets do not attack each other.
-            pairs = [(input_ids[0], input_ids[j]) for j in range(1, n)]
-        else:
-            pairs = [(input_ids[i], input_ids[j])
-                     for i in range(n) for j in range(i + 1, n)]
+        pairs = self._factor_pairs(op_type, input_ids, mutual)
         if not pairs:
             return
 
@@ -1548,6 +1540,23 @@ class TortoiseEP:
         )
 
     @staticmethod
+    def _factor_pairs(op_type: str, input_ids: list, mutual: bool) -> list[tuple]:
+        """The (source, target) pairs an n-ary factor decomposes into.
+
+        ONE definition, read by BOTH `_update_nary_factor` (which computes them)
+        and `_null_input_sends` (which must ask whether a NULL sits on either
+        end's sending slot) — a guard that re-derived this would drift from what
+        it guards (#9275).
+        """
+        n = len(input_ids)
+        if op_type == "IMPL" or (op_type == "NAND" and not mutual):
+            # IMPL is a star: `input_ids[0]` is the source. Directed NAND too:
+            # targets do not attack each other (#795).
+            return [(input_ids[0], input_ids[j]) for j in range(1, n)]
+        return [(input_ids[i], input_ids[j])
+                for i in range(n) for j in range(i + 1, n)]
+
+    @staticmethod
     def _null_input_sends(factor: tuple) -> bool:
         """#9275: can this factor deliver a message FROM a NULL input?
 
@@ -1556,14 +1565,14 @@ class TortoiseEP:
         writes source→target while `bwd` writes target→source — so only a NULL on
         an enabled SENDING end can move a named claim. A receive-only NULL is
         exempt (measured: it leaves every named posterior identical to the `-`
-        case). The n-ary arm is deliberately CONSERVATIVE *once a NULL is
-        present*: `_update_nary_factor` fans a source out over its targets with
-        `scale = 1/(n-1)`, and rather than re-derive its per-endpoint sender
-        semantics in a guard, ANY NULL among an n-ary star's inputs is refused.
-        An n-ary factor with no NULL is an ordinary 3+-input operator and is not
-        refused — this function answers "is a NULL input here able to send?", so
-        it must first find one (round 7 shipped that arm without the search and
-        refused every 3+-input operator outright).
+        case). The n-ary arm applies the SAME per-endpoint question to the pairs
+        `_update_nary_factor` decomposes the factor into (`_factor_pairs`, one
+        shared definition): an IMPL or directed-NAND STAR sends `input_ids[0]`
+        under `fwd` and each target under `bwd`, while a mutual NAND is a CLIQUE
+        in which every member sends. Two earlier arms were false refusals and are
+        recorded here as the falsifiers: refusing every 3+-input operator (no
+        NULL at all, round 7) and refusing a star `->` whose NULL only receives
+        (round 8).
         """
         _op_id, _op_type, input_ids, _weight, _label, direction = factor
         if len(input_ids) < 2:
@@ -1572,9 +1581,13 @@ class TortoiseEP:
         if not (fwd or bwd):
             return False          # `-`: no confidence transfers at all
         if len(input_ids) > 2:
-            # n-ary: conservative on WHICH end sends, never on WHETHER a NULL
-            # exists (see docstring).
-            return any(_i is None for _i in input_ids)
+            # n-ary: ask per PAIR, exactly as `_update_nary_factor` decomposes
+            # the star/clique — `fwd` sends the pair's source, `bwd` its target.
+            # A star's `->` therefore exempts a NULL at idx >= 1 (it only
+            # RECEIVES), while `<-` refuses it (it sends into the source).
+            return any((fwd and _a is None) or (bwd and _b is None)
+                       for _a, _b in TortoiseEP._factor_pairs(
+                           _op_type, input_ids, fwd and bwd))
         id_a, id_b = input_ids
         return (fwd and id_a is None) or (bwd and id_b is None)
 
