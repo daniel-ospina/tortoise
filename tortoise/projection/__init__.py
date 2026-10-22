@@ -6976,7 +6976,7 @@ def _writable_at_parse(val, _depth: int = 0) -> bool:
 
 
 def _writable_id(val) -> bool:
-    """True when ``val`` is a NON-EMPTY str FalkorDB can take as a parameter.
+    """True when ``val`` is a NON-BLANK str FalkorDB can take as a parameter.
 
     The ``id`` rides as a Cypher parameter exactly like a dim value, so it
     needs the SAME NUL/lone-surrogate gate — otherwise a corrupt journal line
@@ -6991,8 +6991,29 @@ def _writable_id(val) -> bool:
     record whose ``name`` was absent (it defaults to ``""``). Refusing it here
     keeps the rule in ONE home rather than repeating ``... and val`` at every
     call site.
+
+    ⛔ A WHITESPACE-ONLY value is the SAME case, one spelling further (#9599).
+    ``"   "`` is truthy, so the empty-string refusal above let it through — and
+    on an INDEXED string key the engine cannot serve a blank value back to an
+    equality seek (it indexes the term, the seek does not normalise), so
+    ``MERGE (s:Session {id:$sid})`` on a blank id minted a DUPLICATE container
+    and every ``MATCH …, MATCH … MERGE (a)-[:REL]->(b)`` binding it landed
+    nothing. Measured. A blank is not an identity; the rule was always "an
+    identity names something", and this makes the predicate say what its own
+    docstring already meant.
+
+    ⚠️ It is DELIBERATELY not extended to PADDED-but-real ids (``"  s1  "``):
+    #9553 records those as legitimate identities. They remain engine-hostile
+    (#9599's owner question) and are NOT ducked here, because quietly
+    refusing — or silently trimming — a legitimate id in one fold would not
+    stop the engine duplicating it on any other path.
     """
-    return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
+    return (
+        isinstance(val, str)
+        and bool(val)
+        and bool(val.strip())
+        and _annotator_value_ok(val)
+    )
 
 
 def _log_identity_skip(what: str, value, label: str = "identity", *,

@@ -59,6 +59,58 @@ def entity_name_id(label: str, name: str) -> str:
     return f"{label[:3].lower()}-{digest}"
 
 
+def mint_session_id() -> str:
+    """Mint a session id — the ONE spelling every capture door uses.
+
+    ``session_<12 hex>`` was hand-copied at FOUR create sites — the two SDK
+    doors (``commit_session``, ``capture_session``), ``extractor_v2.
+    extract_session_v2`` and the hosted ``/v1/sessions`` handler. Four
+    spellings of one value is the #5416 class: a caller reading one of them
+    cannot tell whether the others agree. All four now call this (#9599).
+    """
+    return f"session_{uuid.uuid4().hex[:12]}"
+
+
+#: The refusal text for a PRESENT-but-blank session id. One string, so the two
+#: enforcement points (the SDK doors and the hosted ``/v1/sessions`` boundary)
+#: cannot drift into two explanations of one rule.
+SESSION_ID_BLANK_REFUSAL = (
+    "session_id is blank — a session id must name something (be non-blank); "
+    "pass None to let Tortoise mint one. A blank id is not an identity: the "
+    "graph engine cannot serve it back to an equality seek, so the write "
+    "mints an unfindable duplicate :Session and silently drops its CONTAINS "
+    "edge (#9599)"
+)
+
+
+def session_id_refusal(session_id: str | None) -> str | None:
+    """The ONE home for the capture doors' session-id rule (#9599).
+
+    Returns a refusal reason, or ``None`` when the value may be used.
+
+    ABSENT (``None`` or ``""``) is not a refusal — the host named no session,
+    and every door mints one (``mint_session_id``). That is today's contract
+    and it is preserved exactly.
+
+    PRESENT-but-BLANK (``"   "``, ``"\t"``) IS a refusal. It is truthy, so the
+    doors' ``session_id or mint()`` default never fired for it and it went
+    straight to the write — where ``MERGE (s:Session {id:$sid})`` could not
+    match it again and the turn container's CONTAINS edge landed nothing
+    (#9599, measured). A blank is not an identity; the recorded rule already
+    says so at Layer-1 (``commit_schema.CommitRecord._non_blank_session_id``,
+    #4005), and this is the same sentence at the doors.
+
+    PADDED-but-REAL (``"  s1  "``) is NOT a refusal — #9553 records those as
+    legitimate identities. The engine still cannot index them; refusing them
+    would be a product-surface decision and is deliberately NOT taken here.
+    """
+    if session_id is None or session_id == "":
+        return None
+    if isinstance(session_id, str) and session_id.strip():
+        return None
+    return SESSION_ID_BLANK_REFUSAL
+
+
 def now_iso() -> str:
     """Current UTC time as ISO 8601 string."""
     from datetime import datetime, timezone

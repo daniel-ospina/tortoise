@@ -7782,8 +7782,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     active backend is embedded, S3 degrades gracefully and the pipeline
     proceeds treating everything as new).
     """
-    import uuid
-    session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`); the
+    # hand-copied literal here was one of the four this helper subsumes.
+    from tortoise.ids import mint_session_id
+
+    session_id = session_id or mint_session_id()
     errors: list[str] = []
     # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
     # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —

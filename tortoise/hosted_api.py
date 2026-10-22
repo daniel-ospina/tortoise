@@ -13243,6 +13243,28 @@ class SessionRequest(BaseModel):
     machine_id: str | None = Field(None, max_length=256)
     model: str | None = Field(None, max_length=128)
 
+    # #9599 — a PRESENT-but-blank session id is refused at the boundary, so it
+    # never reaches ``session_id = body.session_id or mint()`` (it is truthy,
+    # so that default never fired and the blank went straight to the write —
+    # where the engine cannot serve a blank key back to an equality seek: the
+    # next capture on the same id minted a DUPLICATE ``:Session`` and the turn
+    # container's CONTAINS edge landed nothing, measured). The rule is
+    # Layer-1's already (``commit_schema.CommitRecord._non_blank_session_id``,
+    # #4005); this is the same predicate at the boundary — one home
+    # (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and the
+    # hosted door cannot drift apart. ``None``/absent still mints (the caller
+    # named no session), and a PADDED-but-real id stays legitimate (#9553) —
+    # the engine defect is #9599's owner question, not a reason to refuse it.
+    @field_validator("session_id")
+    @classmethod
+    def _non_blank_session_id(cls, v):
+        from tortoise.ids import session_id_refusal
+
+        refusal = session_id_refusal(v)
+        if refusal is not None:
+            raise ValueError(refusal)
+        return v
+
     # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
     # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
     @field_validator("harness")
@@ -13651,7 +13673,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
-    import uuid
     from datetime import datetime
 
     from tortoise.quota import (
@@ -13794,7 +13815,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # first MATCH. `_capture_session_probe_off_loop` owns the hand-off (the same
     # off-loop seam the onboarding projection read uses); `session_id`/`now` are
     # pure computations, hoisted above it.
-    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    # #9599: the mint is ONE spelling (`tortoise.ids.mint_session_id`) — this
+    # site and `extractor_v2`'s were the two hand-copies the ids.py helper
+    # subsumes. A blank `body.session_id` never reaches here: `SessionRequest`
+    # refuses it at the boundary (`_non_blank_session_id`).
+    from tortoise.ids import mint_session_id
+
+    session_id = body.session_id or mint_session_id()
     now = datetime.now(UTC).isoformat()
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)

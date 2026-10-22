@@ -9297,8 +9297,16 @@ class TortoiseSDK:
         deployment's provider account; that divergence is warned about
         (``UserWarning``) rather than silently assumed (#6869)."""
         import os
-        import uuid
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+
+        # #9599: the mint keeps its ORIGINAL position — before the consent gate —
+        # so a consent-declined receipt still reports the minted id exactly as it
+        # did before this change (`session_id` is public receipt surface; moving
+        # the mint below the gate would have silently turned that field into
+        # `None`). The blank refusal runs AFTER the gate and still ahead of any
+        # work — see below.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        session_id = session_id or mint_session_id()
         # #3662: consent FIRST — this is the SDK sibling of the gated CLI
         # primitives (`session capture` / `sessions import`), which also refuse
         # before doing any work, so no extraction (and therefore no BYOK provider
@@ -9318,6 +9326,25 @@ class TortoiseSDK:
             # `not ok` does not KeyError on the decline branch alone.
             return {"session_id": session_id, "ok": False,
                     "errors": [declined], "error": declined,
+                    "payload": None}
+
+        # #9599: the consent gate above is the authorisation axis and keeps its
+        # FIRST position, unchanged. The blank refusal below is an INPUT
+        # diagnosis, so it runs after it and still ahead of any work: a
+        # PRESENT-but-blank id
+        # (``"   "``, ``"\t"``) is truthy, so ``session_id or mint()`` never
+        # replaced it and it went straight to the write — where the engine
+        # cannot serve a blank key back to an equality seek: the next capture on
+        # the same blank id minted a DUPLICATE ``:Session`` and the turn
+        # container's CONTAINS edge landed nothing (measured, #9599). The rule
+        # is not new here — Layer-1 already refuses it
+        # (``commit_schema.CommitRecord._non_blank_session_id``, #4005) — this is
+        # the same sentence at the SDK door, from ONE home
+        # (``tortoise.ids.session_id_refusal``).
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {"session_id": session_id, "ok": False,
+                    "errors": [_blank_session], "error": _blank_session,
                     "payload": None}
         # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
         # they never reach the extraction model. With extractor_model=None the
@@ -9708,8 +9735,27 @@ class TortoiseSDK:
         re-attempts extraction through the existing #2335 TRUE-retry path
         instead of silently replaying.
         """
-        import uuid
         from datetime import datetime, timezone
+
+        # #9599: the same door rule as ``commit_session``'s — see the long note
+        # there. Checked BEFORE the extractor, the projection handle or any
+        # graph write: a refused id writes nothing and journals nothing.
+        from tortoise.ids import mint_session_id, session_id_refusal
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": [_blank_session],
+                "diagnostics": [_blank_session],
+                "stats": {},
+                "warnings": [],
+                "capture_redactions": 0,
+            }
 
         # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
         # capture for a missing key — the key gates EXTRACTION, not storage.
@@ -9718,7 +9764,7 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+        session_id = session_id or mint_session_id()
         # #5632: snapshot the LIFETIME journal-failure counter at the START of
         # THIS capture. The receipt below must disclose only appends that
         # failed DURING it — a failure from an earlier, unrelated write on this
