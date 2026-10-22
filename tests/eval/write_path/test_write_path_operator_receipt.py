@@ -953,6 +953,17 @@ def _malformed(mutate):
     # which is the contract break this test exists for (#9618 review).
     ("results not a dict",
      lambda r: r["operator_audit"].__setitem__("results", 5), "E4-SHAPE"),
+    # `results` EMPTY, not merely the wrong type: with no graded rows the
+    # coverage arms are skipped by their own `and results` gates, so this
+    # refusal is the only one that fires — and the `or not results` half is
+    # what makes it (`{}` is a dict, so the isinstance half alone passes)
+    # (#9618 round 8).
+    ("results empty",
+     lambda r: (r["operator_audit"].__setitem__("results", {}),
+                r["operator_audit"].__setitem__("edge_correct", 0),
+                r["operator_audit"].__setitem__("content_ok", 0),
+                r["session_results"][0].__setitem__("planted_operators", [])),
+     "E4-SHAPE"),
     ("endpoints.from not a list",
      lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
      ["endpoints"].__setitem__("from", 5), "E4-REFS"),
@@ -967,6 +978,15 @@ def _malformed(mutate):
     ("edge_op_ids not a list",
      lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
      .__setitem__("edge_op_ids", {_op_id("forms"): 1}), "E4-FORMING"),
+    # …and the ELEMENT shape, which the list-ness half does not cover: a
+    # one-element list is truthy, so only `_non_empty_str` refuses these
+    # (#9618 round 8).
+    ("forms_found element blank",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("forms_found", [""]), "E4-FORMING"),
+    ("forms_found element not a string",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("forms_found", [5]), "E4-FORMING"),
     # `operators_total` is the same bool/`int` pair this PR pinned for
     # `planted`: `True == True` clears E4-PERSIST, and `"7"` reaches the `>`
     # comparison and raises TypeError with no rule named.
@@ -1004,6 +1024,24 @@ def test_checker_rejects_a_duplicate_that_contradicts_its_graded_row():
     assert "E4-NUMERATOR" in _failures(result)
     assert any("two answers" in r["detail"] for r in result["rules"]
                if not r["ok"]), _failures(result)
+
+
+@pytest.mark.parametrize("side", ["pre_ref", "post_ref"])
+def test_checker_refuses_a_half_blank_endpoint_ref(side):
+    """ONE blank ref is enough, and each side is pinned on its own.
+
+    The both-blank case below pins the conjunction, not either half — so
+    neutralising just `_non_empty_str(pre)` (or just `post`) left the suite
+    green while certifying a half-blank #4716 proof. Here the surviving side
+    keeps `remapped` consistent with it, so the non-empty arm is the only thing
+    that can refuse (#9618 round 8).
+    """
+    receipt = _receipt()
+    ref = receipt["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+    ref = ref["endpoints"]["from"][0]
+    ref[side] = ""
+    ref["remapped"] = True           # consistent: one side is still a payload id
+    assert "E4-REFS" in _failures(_check(receipt))
 
 
 def test_checker_refuses_a_receipt_whose_endpoint_refs_are_blank():
