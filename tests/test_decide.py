@@ -964,3 +964,114 @@ class TestIssue6671ReviewGaps:
         out = capsys.readouterr().out
         assert "outdated=true" in out, (
             "an EP-excluded (outdated) bridge was elected silently: " + out)
+
+    def test_rerun_ranks_its_own_options_alongside_foreign_state(self, sdk):
+        """The fallback must key on THIS decision's options, not on "the result
+        happened to carry some posterior": another writer's dirty roots make the
+        graph-wide pass non-empty while our options rank nothing, and the table
+        then vanished behind a successful-looking run."""
+        decide = _load_decide_script()
+        data = {
+            "context": "issue-6671-foreign",
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [["crit:1", "IMPL", "opt:a"], ["crit:1", "NAND", "opt:b"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        run1 = decide.file_decision(sdk, data)
+        assert run1["confidences"]
+
+        # A foreign writer dirties the graph with claims this decision does not
+        # own — the wide pass now has posteriors that are not ours.
+        f1 = sdk.create_point("statement", f"foreign {_mk()}")
+        f2 = sdk.create_point("statement", f"foreign {_mk()}")
+        sdk.create_operator("IMPL", f1["id"], [f2["id"]])
+
+        run2 = decide.file_decision(sdk, data)
+        assert run2["confidences"], (
+            "the re-run lost its ranking once another writer's dirty roots "
+            "existed — the fallback keyed on the wrong population")
+        assert run2["confidences"] == pytest.approx(
+            run1["confidences"], abs=1e-6)
+
+    def test_unlabelled_relevance_edge_refuses_an_ambiguous_triple(self, sdk, capsys):
+        """Two labels over one triple are two claims. A relevance edge that
+        names no label cannot say which one it damps, so it must damp NOTHING
+        rather than weaken both (and it never mints a claim to damp)."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
+
+        data = {
+            "context": "issue-6671-ambiguous",
+            "options": {}, "criteria": {}, "findings": {}, "edges": [],
+            "truth_edges": [],
+            "relevance_edges": [{"source": crit["id"], "op_type": "IMPL",
+                                 "target": opt["id"], "reason": "weak",
+                                 "strength": 0.20}],
+        }
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census.get("_mitigations") == 0, (
+            f"an unlabelled mitigation damped an ambiguous triple: {census}")
+        assert census.get("IMPL") == 2, (
+            f"the relevance edge minted a claim: {census}")
+        out = capsys.readouterr().out
+        assert "distinct labels" in out and "nothing damped" in out, out
+
+    def test_multi_target_operator_is_not_widened(self, sdk):
+        """An existing operator with several targets also claims other pairs.
+        Reusing it would silently widen this decision's claim (and a relevance
+        edge would damp those other pairs through it)."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        multi = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+
+        data = {
+            "context": "issue-6671-multi",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", a["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        run1 = decide.file_decision(sdk, data)
+        elected = [row for row in run1["operators"] if row["op_type"] == "IMPL"]
+        assert elected and elected[0]["id"] != multi["id"], (
+            "the decision adopted a multi-target operator — its claim was "
+            "widened to a target it never named")
+
+        run2 = decide.file_decision(sdk, data)
+        assert run2["operators"][0]["id"] == elected[0]["id"], (
+            "the single-pair bridge was re-created on the second run")
+
+    def test_draft_with_outdated_flag_names_the_dead_marker(self, sdk, capsys):
+        """`invalidate_point` can set `outdated=true` on an operator without
+        touching its status, and `update_point` refuses to clear it — so the
+        promotion remedy would be a dead end. The note must name the marker."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+                                 promote_source=False)
+        sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) SET p.outdated = true",
+            params={"i": op["id"]})
+
+        data = {
+            "context": "issue-6671-status",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        decide.file_decision(sdk, data)
+
+        out = capsys.readouterr().out
+        assert "outdated=true" in out, out
+        assert "update_point(id, status='live')" not in out, (
+            "a dead-end promotion remedy was offered for an outdated bridge: "
+            + out)

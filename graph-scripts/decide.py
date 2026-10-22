@@ -119,27 +119,27 @@ def _load_input(args) -> dict:
 
 def _find_operators(proj, op_type: str, source_id: str, target_id: str,
                     label: str | None, *,
-                    any_label: bool = False) -> list[tuple[str, str]]:
-    """Existing ``(operator_id, status)`` pairs on this bridge.
+                    any_label: bool = False) -> list[dict]:
+    """Existing operators on this bridge, as dicts with the facts EP needs.
+
+    Each row is ``{"id", "status", "outdated", "label", "targets"}``.
 
     Returns ALL matches, not just the first: a graph already polluted by an
     earlier run of this script has duplicate copies of every edge, and a
     relevance edge must damp every copy it finds — damping one leaves the other
     at full weight, which is the asymmetry #6671 measured.
 
-    ``any_label=True`` drops the label arm of the identity. That is the
-    UNLABELLED-relevance posture: a mitigation that does not name a Layer-3
-    predicate says "this criterion matters less for that option", so it damps
-    every bridge the caller names by (source, op_type, target) — including a
-    labeled one the same decision filed without repeating the label — instead of
-    minting a parallel unlabeled operator to damp.
+    ``any_label=True`` drops the label arm of the identity (used to ask "what
+    sits on this triple at all?", which the relevance arm needs before deciding
+    what it may damp).
 
-    The status AND the legacy ``outdated`` flag are returned because EP drops
-    both: `tortoise.live._live_only` is "not draft AND not terminal(status,
-    outdated)". Electing a copy EP ignores silently would drop the decision's
-    own edge from the ranking, so the caller needs both to classify the bridge
-    (`is_draft_status` / `is_terminal_status`). A status-less operator reads as
-    `live`, the graph's own default.
+    ``status``, the legacy ``outdated`` flag and the Layer-3 ``label`` come back
+    because the caller must know three things it cannot assume: whether EP reads
+    the bridge (`tortoise.live._live_only` = not draft AND not
+    terminal(status, outdated)), which claim it is (two labels over one triple
+    are two claims), and whether the operator IS this bridge (``targets`` > 1
+    means it also claims other pairs, so reusing it would widen this decision).
+    A status-less operator reads as `live`, the graph's own default.
     """
     label_arm = "" if any_label else \
         "AND coalesce(op.label, '') = coalesce($label, '') "
@@ -152,11 +152,55 @@ def _find_operators(proj, op_type: str, source_id: str, target_id: str,
         "-[ro]->(t {id:$tid}) "
         "WHERE op.op_type = $op AND ri.idx = 0 AND ro.idx > 0 "
         + label_arm +
-        "RETURN op.id, op.status, coalesce(op.outdated, false)",
+        "RETURN op.id, op.status, coalesce(op.outdated, false), "
+        "coalesce(op.label, '')",
         params={"sid": source_id, "tid": target_id, "op": op_type,
                 "label": label},
     ).result_set
-    return [(row[0], row[1] or "live", bool(row[2])) for row in rows]
+    if not rows:
+        return []
+    counts = dict(proj.g.query(
+        "MATCH (op:Point) WHERE op.id IN $ids MATCH (op)-[r]->() "
+        "WHERE r.idx > 0 RETURN op.id, count(r)",
+        params={"ids": [row[0] for row in rows]},
+    ).result_set)
+    return [{"id": row[0], "status": row[1] or "live",
+             "outdated": bool(row[2]), "label": row[3] or "",
+             "targets": int(counts.get(row[0], 0))} for row in rows]
+
+
+def _is_ranked(row: dict) -> bool:
+    """EP's own rule (`tortoise.live._live_only`): not draft, not terminal."""
+    from tortoise.live import is_draft_status, is_terminal_status
+
+    return (not is_draft_status(row["status"])
+            and not is_terminal_status(row["status"], row["outdated"]))
+
+
+def _status_note(row: dict) -> str | None:
+    """A TRUE one-line note about why this bridge is (or is not) ranked."""
+    from tortoise.live import is_draft_status, is_terminal_status
+
+    if row["outdated"]:
+        # `outdated=true` is server-managed (`invalidate_point`), and
+        # `update_point` refuses to clear it — so no promotion remedy is
+        # offered here, whatever the status says (#6699/#2422).
+        return (f"elected operator {row['id']}, outdated=true "
+                f"(status={row['status']}) — the legacy dead marker; EP "
+                "excludes it and update_point cannot clear it, so this bridge "
+                "stays out of the ranking; it is NOT duplicated (#6671)")
+    if is_draft_status(row["status"]):
+        return (f"elected operator {row['id']}, status=draft — EP excludes "
+                "draft operators (#780), so this bridge does not participate in "
+                "the ranking until it is promoted "
+                "(update_point(id, status='live')); it is NOT duplicated "
+                "(#6671)")
+    if is_terminal_status(row["status"], row["outdated"]):
+        return (f"elected operator {row['id']}, status={row['status']} — a "
+                "TERMINAL status; EP excludes it (#2422) and update_point "
+                "cannot resurrect it, so this bridge stays out of the ranking; "
+                "it is NOT duplicated (#6671)")
+    return None
 
 
 def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
@@ -164,68 +208,48 @@ def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
                                 cache: dict[tuple[str, str, str, str], str],
                                 *, any_label: bool = False
                                 ) -> tuple[str, bool, str | None]:
-    """Write the edge idempotently — ONE operator per bridge, always.
+    """Write the edge idempotently — ONE operator per single-pair bridge.
 
     Returns ``(operator_id, reused, note)``; ``note`` is a warning to print.
-    The elected bridge is the one EP actually reads whenever one exists — EP's
-    rule is `tortoise.live._live_only`: not draft, not terminal (the status
-    deny-list OR the legacy ``outdated=true`` flag).
 
-    The existing operator is elected WHATEVER its status, and the status is
-    reported. That is the decision recorded on #6671's scoping: filing a live
-    twin instead would re-create the duplicate this issue exists to remove, and
-    the twin is not merely cosmetic — `update_point(draft_id, status="live")` is
-    a legitimate public-SDK call, and after a twin exists it leaves TWO live
-    operators on one bridge (measured), which EP reads twice: #6671's defect,
-    permanently, with no edge-delete API. One operator per bridge stays one
-    operator when promoted.
+    Idempotence is by the graph's own operator identity, and it is bounded by
+    TWO facts read from the graph, not assumed:
 
-    A non-live operator is excluded from EP (drafts #780; terminal statuses are
-    excluded too), so the note names the real status and the promotion verb —
-    the run says which bridge it used instead of ranking silently on a bridge
-    EP ignores.
+    * a copy EP does not read (draft / terminal status / legacy
+      ``outdated=true``) is never preferred over one it does — and it is never
+      "fixed" by filing a live twin, which is the decision recorded on #6671's
+      scoping ("Creating a second operator instead would reintroduce the exact
+      duplication this issue is about"). A twin is not cosmetic:
+      ``update_point(draft_id, status="live")`` is a legitimate call, and after
+      a twin exists it leaves TWO live operators on one bridge (measured), which
+      EP reads twice — with no edge-delete API.
+    * an operator with ``targets > 1`` is NOT this bridge: it also claims other
+      pairs, so reusing it would silently widen the decision's claim (and a
+      relevance edge on the pair would damp the other pairs through it). A
+      single-pair bridge is written instead, which the next run then reuses.
     """
     key = (source_id, op_type, target_id, "" if any_label else (label or ""))
     if key in cache:
         return cache[key], True, None
-    existing = _find_operators(proj, op_type, source_id, target_id, label,
-                               any_label=any_label)
-    if existing:
-        from tortoise.live import is_draft_status, is_terminal_status
-
-        def _ranked(candidate: tuple[str, str, bool]) -> bool:
-            """EP's own rule (`tortoise.live._live_only`)."""
-            _oid, _status, _outdated = candidate
-            return (not is_draft_status(_status)
-                    and not is_terminal_status(_status, _outdated))
-
-        # Prefer the copy EP actually reads. On a graph polluted by an earlier
-        # run the copies are identical bridges and storage order is arbitrary;
-        # electing one EP ignores (draft / terminal / outdated) while a ranked
-        # copy sits on the same bridge would make the run report — and under
-        # --context-free RANK — the wrong one. Still ONE bridge: no twin.
-        op_id, status, outdated = ([pair for pair in existing if _ranked(pair)]
-                                   or existing)[0]
-        cache[key] = op_id
-        note = None
-        if is_draft_status(status):
-            note = (f"elected operator {op_id}, status=draft — EP excludes "
-                    "draft operators (#780), so this bridge does not "
-                    "participate in the ranking until it is promoted "
-                    "(update_point(id, status='live')); it is NOT duplicated "
-                    "(#6671)")
-        elif is_terminal_status(status, outdated):
-            why = (f"status={status}" if status != "live" else "")
-            if outdated:
-                why = (why + " and " if why else "") + "outdated=true"
-            note = (f"elected operator {op_id}, {why} — a TERMINAL/excluded "
-                    "bridge; EP does not rank it (#2422) and update_point "
-                    "cannot resurrect it, so it stays out of the ranking; it is "
-                    "NOT duplicated (#6671)")
-        return op_id, True, note
+    matches = _find_operators(proj, op_type, source_id, target_id, label,
+                              any_label=any_label)
+    single = [row for row in matches if row["targets"] == 1]
+    if single:
+        # Prefer the copy EP reads; on a polluted bridge the copies are
+        # identical, so storage order is arbitrary.
+        elected = ([row for row in single if _is_ranked(row)] or single)[0]
+        cache[key] = elected["id"]
+        return elected["id"], True, _status_note(elected)
+    note = None
+    if matches:
+        multi = ", ".join(f"{row['id']} ({row['targets']} targets)"
+                          for row in matches)
+        note = (f"existing operator(s) {multi} on this triple also claim other "
+                "pairs — not reused (it would widen this decision's claim); a "
+                "single-pair bridge is created")
     op = sdk.create_operator(op_type, source_id, [target_id], label=label)
     cache[key] = op["id"]
-    return op["id"], False, None
+    return op["id"], False, note
 
 
 def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
@@ -349,29 +373,41 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         # damping a `refutes` bridge on behalf of a `supports` mitigation would
         # silently weaken a claim the caller did not name). Without a label the
         # edge damps every bridge on the triple.
-        any_label = label is None
-        if not any_label and not _find_operators(
-                proj, op_type, _resolve(src), _resolve(tgt), label):
-            # A relevance edge is a mitigation, never a claim: if the labelled
-            # bridge it names does not exist, minting one would file a second
-            # operator on the triple (the #6671 shape) and damp a claim the
-            # input never declared, while the declared bridge keeps full weight.
+        # A relevance edge is a MITIGATION, never a claim: it never writes an
+        # operator of its own. It damps the claim the caller named — the
+        # labelled bridges when a label is given, the unlabelled ones
+        # otherwise — and refuses to guess when the triple carries several
+        # distinct labels and the edge names none (damping a `refutes` bridge
+        # on behalf of an unlabelled mitigation would silently weaken a claim
+        # the caller did not name).
+        found = _find_operators(proj, op_type, _resolve(src), _resolve(tgt),
+                                label, any_label=label is None)
+        if not found:
             print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: no "
-                  f"{label!r} bridge on this triple — nothing damped")
+                  f"{label + ' ' if label else ''}bridge on this triple — "
+                  "nothing damped (a relevance edge never mints a claim)")
             continue
-        op_id, reused, note = _elect(src, op_type, tgt, label,
-                                     any_label=any_label)
-        if op_id is None:
-            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {note}")
+        if label is not None:
+            targets = [row["id"] for row in found]
+        elif any(row["label"] == "" for row in found):
+            targets = [row["id"] for row in found if row["label"] == ""]
+        elif len({row["label"] for row in found}) == 1:
+            targets = [row["id"] for row in found]
+        else:
+            labels = sorted({row["label"] for row in found})
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: this triple "
+                  f"carries {len(labels)} distinct labels {labels} and the "
+                  "edge names none — nothing damped")
             continue
+        # Record the damped bridges as this run's edges too (they are the
+        # bridges the ranking reads).
+        if targets[0] not in all_operator_ids:
+            all_operator_ids.append(targets[0])
+        operator_rows.append({
+            "source": src, "op_type": op_type, "target": tgt,
+            "label": label, "id": targets[0], "reused": True,
+        })
         try:
-            # Damp EVERY operator on this bridge (normally one). A graph
-            # polluted by an earlier non-idempotent run carries duplicate
-            # copies; mitigating only the first would leave the others at full
-            # weight — the exact asymmetry #6671 measured.
-            targets = [found_id for found_id, _st, _od in _find_operators(
-                proj, op_type, _resolve(src), _resolve(tgt), label,
-                any_label=any_label)] or [op_id]
             for target_id in targets:
                 sdk.mitigate_operator(target_id, reason, strength)
             extra = "" if len(targets) == 1 else f" on {len(targets)} operators"
@@ -379,59 +415,70 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # mitigation detail belongs to the relevance tick, not to a second
             # line (the pre-#6671 script printed it inline, and
             # `tortoise/__main__.py::_cmd_decide` still does).
-            parts = []
-            if reused:
-                parts.append(f"reused {op_id}")
-            parts.append(f"mitigated {strength:.2f}{extra}: {reason}")
+            named = ", ".join(str(t) for t in targets)
             print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
-                  f"({'; '.join(parts)})")
-            if note:
-                print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {note}")
+                  f"(mitigated {strength:.2f}{extra}: {reason})")
+            if len(targets) > 1:
+                print(f"     damped: {named}")
         except Exception as e:
             print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
 
     # ── Compute confidence per option ──
     result: dict = {"context": ctx, "operators": operator_rows,
                     "confidences": {}, "iterations": 0, "converged": None}
+
+    def _option_confidences(ep: dict) -> dict[str, float]:
+        confs = ep.get("confidences") or {}
+        out: dict[str, float] = {}
+        for pid, cid in all_points.items():
+            if pid.startswith(("opt:", "option:")):
+                mean = confs.get(cid, {}).get("mean")
+                if isinstance(mean, (int, float)):
+                    out[pid] = float(mean)
+        return out
+
     try:
         if context_free and all_operator_ids:
             print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
             ep = sdk.compute_confidence(factors=all_operator_ids)
         else:
-            ep = sdk.compute_confidence()
-            if not ep.get("confidences") and all_operator_ids:
-                # #6671: the writes are idempotent now, so a RE-RUN dirties
-                # nothing and the incremental no-arg pass returns a
-                # 0-iteration "success" with no posteriors — the ranking would
-                # silently vanish on the second run while still printing
-                # `converged=True` (the `[ep-ran]` fail-open shape). Rank the
-                # operator factors this decision owns instead.
-                print("  (no dirty roots — ranking this decision's operator "
-                      "factors)")
-                ep = sdk.compute_confidence(factors=all_operator_ids)
-        confs = ep.get("confidences", {})
-        if confs:
-            print(f"\n✓ EP computed: {ep['iterations']} iterations, "
-                  f"converged={ep['converged']}")
-        else:
-            # A "successful" pass over zero posteriors is not a ranking.
-            print(f"\n⚠ EP produced NO posteriors ({ep['iterations']} "
-                  "iterations) — the ranking is EMPTY, not converged")
-
-        opt_conf: dict[str, float] = {}
-        for pid, cid in all_points.items():
-            if pid.startswith(("opt:", "option:")):
-                mean = confs.get(cid, {}).get("mean")
-                if isinstance(mean, (int, float)):
-                    opt_conf[pid] = float(mean)
+            try:
+                ep = sdk.compute_confidence()
+            except Exception as wide_err:
+                # The graph-wide pass can refuse on state that is not this
+                # decision's (an uncalibrated foreign claim, a fail-closed
+                # calibration posture); that must not cost us OUR ranking.
+                print(f"  ⚠ graph-wide EP pass refused: {wide_err}")
+                ep = {"confidences": {}, "iterations": 0, "converged": None}
+        opt_conf = _option_confidences(ep)
+        if not opt_conf and all_operator_ids and not context_free:
+            # #6671: the writes are idempotent now, so a re-run dirties nothing
+            # and the incremental no-arg pass can return a "successful" pass
+            # with NO posterior for THIS decision's options — the ranking would
+            # silently vanish while the run still reports success (the
+            # `[ep-ran]` fail-open shape). The graph may also carry another
+            # writer's dirty roots whose posteriors are not ours, so the test
+            # is "did OUR options rank", never "was the result non-empty".
+            print("  (no posterior for this decision's options — ranking this "
+                  "decision's operator factors)")
+            ep = sdk.compute_confidence(factors=all_operator_ids)
+            opt_conf = _option_confidences(ep)
 
         if opt_conf:
+            print(f"\n✓ EP computed: {ep['iterations']} iterations, "
+                  f"converged={ep['converged']}")
             print("\n=== OPTION CONFIDENCE (higher = more supported) ===")
             ranked = sorted(opt_conf.items(), key=lambda kv: kv[1], reverse=True)
             name_width = max(len(pid) for pid in opt_conf)
             for pid, c in ranked:
                 bar = "█" * int(c * 20) + "░" * (20 - int(c * 20))
                 print(f"  {pid:<{name_width}}  {c:.4f}  {bar}")
+        else:
+            # A pass over zero posteriors is not a ranking, and must not be
+            # reported as converged.
+            print(f"\n⚠ EP produced NO posterior for this decision's options "
+                  f"({ep['iterations']} iterations) — the ranking is EMPTY, "
+                  "not converged")
         result.update(confidences=opt_conf, iterations=ep["iterations"],
                       converged=ep["converged"])
     except Exception as e:
