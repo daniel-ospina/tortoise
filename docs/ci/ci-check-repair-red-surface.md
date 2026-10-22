@@ -28,9 +28,17 @@ automatic `GITHUB_TOKEN` cannot create. Most of the reds are therefore not a fai
 are the tool working, pointing at a queue item. The split is measured, because the gloss does not
 cover all of them — of the 73 reds below, **68 were the tool's own exit 1** (the handoff) and **5 were
 exit 2**, all five on `{"error": "could not run gh: [Errno 2] No such file or directory: 'gh'"}`: a
-measurement failure, not a queue item, and worth its own issue (the workflow relies on the runner
-image's `gh` and does not install it). Both are still `ran-not-succeeded`, so both are still the
-coverage signal — which is the point of Fact 2.
+measurement failure, not a queue item. **The cause is the runner that picked the job up, not a missing
+install step.** Read off `GET /actions/runs/<id>/jobs` for all 73 failures (2026-10-22): the five exit-2
+runs ran on a **self-hosted** runner — `runner_name: pi-runner-vm-3` / `-vm-4` / `-vm-6`,
+`runner_group_name: Default`, `labels: ["ubuntu-latest"]` — while the 68 exit-1 runs ran on the
+GitHub-hosted image (`runner_name: "GitHub Actions …"`, `runner_group_name: "GitHub Actions"`). That
+image ships `gh` in `/usr/bin` (measured, `config/ci-surfaces.yml`:2253-2254), so installing `gh` in the
+workflow would change nothing; the self-hosted runners advertise the `ubuntu-latest` **label** without
+carrying `gh` on `PATH`, which is the same shortage #9018 (open) records for `unzip` and `gh`. A
+mixed fleet means the exit-2 class recurs intermittently until that is fixed. (The five runs:
+`39321962358`, `39336862094`, `39364288888`, `39634379170`, `39642835446`.) Both classes are still
+`ran-not-succeeded`, so both are still the coverage signal — which is the point of Fact 2.
 
 **How often:** over the 233 scheduled runs of 2026-10-17 → 2026-10-21, **73 were red (31.3 %)**,
 including
