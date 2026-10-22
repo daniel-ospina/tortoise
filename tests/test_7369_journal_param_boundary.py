@@ -900,6 +900,27 @@ def test_an_unwritable_identity_skip_is_OBSERVABLE(caplog):
     )
 
 
+def test_a_BLANK_container_identity_states_the_TRUE_cause(caplog):
+    """The `contains_session` gate adds a FOURTH refusal — BLANK — and it must say so.
+
+    `_writable_container_id` refuses a whitespace-only id (#9599), so the skip is
+    PRESENT-but-unwritable and `describe()` must name the cause. Before this arm
+    the blank value fell through `_unwritable_shape`'s surrogate fallback and
+    told the operator the id carried a lone surrogate — an encoding corruption
+    that does not exist — and the same false sentence reached `consistency`'s
+    returned `reason` (#9553 review, the #8018 "cause false for the record it
+    describes" class).
+    """
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Session", "   ", "id (MERGE key)")
+    assert "skipping Session" in caplog.text, caplog.text
+    assert "BLANK" in caplog.text, caplog.text
+    assert "surrogate" not in caplog.text, (
+        "a BLANK identity was reported as carrying a lone surrogate — a false "
+        f"cause steers the operator at a corruption that is not there: {caplog.text!r}"
+    )
+
+
 def test_a_corrupt_entity_identity_skip_is_LOGGED_on_rebuild(superseded, caplog):
     """End-to-end: the record is dropped AND an operator can see it dropped.
 

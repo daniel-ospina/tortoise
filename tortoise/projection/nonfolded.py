@@ -423,11 +423,21 @@ def _unwritable_shape(value) -> str:
     class — a live journal shape (``#331`` review r4 kept ``isinstance(..., str)``
     precisely because non-str ids occur) — so the shape is named here, in ONE
     home, and both the log line and ``reason`` read it (#8840 review P3).
+
+    A FOURTH shape comes from ``_writable_container_id``, which adds the BLANK
+    refusal for the ``contains_session`` gate (#9599). It must be named here too:
+    without this branch a whitespace-only id fell through to the surrogate
+    message and told the operator the value carried an encoding corruption it
+    does not have — the #8018 "a cause that is false for the record it describes"
+    class, and it shipped into ``consistency``'s returned ``reason`` as well
+    (#9553 review).
     """
     if not isinstance(value, str):
         return f"it is a {type(value).__name__}, not a str"
     if "\x00" in value:
         return "it carries a NUL"
+    if not value.strip():
+        return "it is BLANK (whitespace only) — no indexed lookup matches it (#9599)"
     return "it carries a lone surrogate"
 
 

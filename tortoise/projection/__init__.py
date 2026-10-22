@@ -7026,8 +7026,9 @@ def _writable_container_id(val) -> bool:
     and the record fold agree (`record_projection._writable_endpoint_id`
     mirrors this predicate value-for-value, pinned by
     `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
-    `_writable_id` becomes a plain `_writable_id` again once #9599 is fixed —
-    the gate is the stopgap, the index defect is the cause.
+    `_link_session` becomes a plain `_writable_id` caller again once #9599 is
+    fixed — this gate (`_writable_container_id`) is the stopgap, the index
+    defect is the cause.
     """
     return _writable_id(val) and bool(val.strip())
 
