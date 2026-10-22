@@ -651,8 +651,11 @@ def _reset_vector_gap_warnings() -> None:
 # (0f9e6a2) and only survived in the legacy standalone projection.py, which
 # Phase 2 deletes. This is the ACTIVE wipe-protection: it must live in the
 # module the SDK actually imports.
-# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
-# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
+# A query is a bulk wipe when it contains a DELETE clause — with or without the
+# ``DETACH`` prefix (#8256: FalkorDB auto-detaches, so ``MATCH (n) DELETE n``
+# deletes every node exactly as ``MATCH (n) DETACH DELETE n`` does) — and has NO
+# property map ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause
+# on the deleted variable.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
 # parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
 # (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
@@ -806,12 +809,15 @@ _VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
 #: backtick-quoted type is a label too (``-[r:`extractedFrom`]->``, ``(n:`Point`)``),
 #: and ``_LITERAL_OR_COMMENT_RE`` replaces it with spaces. The residual shape is
 #: unambiguous, because a colon directly after a variable INSIDE a pattern
-#: bracket can only open a label: ``[r: ]``. Only the closing delimiter is
-#: asserted, so this cannot be satisfied by a label that appears in prose —
-#: comments and string literals are already blanked, delimiters and all.
+#: bracket can only open a label: ``[r: ]``. Only what may LEGALLY FOLLOW a type
+#: is asserted — the pattern's closing delimiter, a ``{`` property map, a FURTHER
+#: type (``(n:`A`:`B`)``) or a length marker (``[r:`X`*1..2]``) — so this cannot
+#: be satisfied by a label that appears in prose (comments and string literals
+#: are already blanked, delimiters and all), and a multi-type / variable-length
+#: pattern is not misread as unscoped.
 _VAR_LABEL_RE = (
     r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
-    r"|[\(\[]\s*{var}\s*:\s*(?=[)\]|\-]|\x7b)"
+    r"|[\(\[]\s*{var}\s*:\s*(?=[:*)\]\-\x7b]|$)"
 )
 #: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
 #: forward, so it scopes whatever the projection carries FROM that point.
@@ -933,7 +939,8 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
 
     (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
          DETACH DELETE n`` (a BACKTICKED type counts: ``-[r:`extractedFrom`]->``
-         is a label the masker blanked, #8256);
+         is a label the masker blanked, #8256 — including a MULTI-type or
+         variable-length one, ``(n:`A`:`B`)`` / ``[r:`X`*1..2]``);
     (a') a LABEL PREDICATE on it — ``WHERE n:Point``;
     (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``;
     (c)  a PROPERTY MAP on its own pattern — ``MATCH (n:Point {id:$id})``
@@ -951,19 +958,27 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     the name the pattern actually binds.
     """
     maps = _pattern_property_map_vars(text, delete_at)
+    # #8256 round 3: the label and WHERE signals are bounded at the DELETE too.
+    # Both used to be read over the WHOLE statement, so a construct AFTER the
+    # clause — ``MATCH (n) DELETE n MATCH (n:Point)`` /
+    # ``MATCH (n) DELETE n MATCH (x) WHERE n.id = $id`` — exempted a delete that
+    # had already removed every node. Nothing that can target a DELETE legally
+    # follows it: a pattern bounds rows before they are deleted, so the bound is
+    # a narrowing (fail-closed) and cannot refuse a real targeted delete.
+    bounded = text[: max(delete_at, 0)]
     for name in _scope_names(text, var):
         if name in maps:
             return True
         escaped = re.escape(name)
-        if re.search(_VAR_LABEL_RE.format(var=escaped), text) is not None:
+        if re.search(_VAR_LABEL_RE.format(var=escaped), bounded) is not None:
             return True
-        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", text, re.IGNORECASE) is not None:
+        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", bounded, re.IGNORECASE) is not None:
             return True
         # Only a WITH *before* the DELETE can bound the rows it deletes.
         for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
             if re.search(r"\b" + escaped + r"\b", wm.group(1)) is not None:
                 return True
-        if _where_scopes(text, name):
+        if _where_scopes(bounded, name):
             return True
     return False
 
@@ -1002,11 +1017,26 @@ def _is_bulk_wipe(cypher: str) -> bool:
     to the first one. A statement may carry several (``... DELETE r WITH old
     ... DELETE old`` is a legal Cypher shape this repo ships), and reading only
     the leftmost let a scoped first clause vouch for an unscoped second one.
+
+    #8256 round 3 (this review): "every clause" must mean every clause PRESENT,
+    and every signal must be read BEFORE the clause it is supposed to scope.
+    Two holes closed here: (i) a ``DELETE`` inside a ``CALL { ... }`` subquery is
+    blanked by ``_strip_call_subqueries`` and so was never read, letting a
+    scoped sibling clause vouch for it; (ii) the label and WHERE signals were
+    searched over the WHOLE statement, so a construct AFTER the DELETE
+    (``MATCH (n) DELETE n MATCH (n:Point)``) exempted a delete that had already
+    removed every node.
     """
     # Fast path: the overwhelming majority of statements are reads. A DELETE
     # clause cannot be MASKED INTO existence (masking only removes text), so a
     # raw-text miss proves the statement is not a wipe and the scan below is
-    # skipped entirely — the read path pays no more than it did before #3037.
+    # skipped entirely — a read that never mentions ``delete`` pays nothing
+    # (measured 0.17 µs). #8256 widened the discriminator from ``"DETACH" and
+    # "DELETE"`` to ``"DELETE"``, so a read whose text contains the substring
+    # WITHOUT a clause — ``WHERE t.deleted_at IS NULL`` is the common one — now
+    # pays one mask + one regex scan before the clause search returns None
+    # (measured 3.98 µs). Cheap enough not to special-case; the claim below is
+    # therefore about reads that do not contain the substring, not all reads.
     up_raw = cypher.upper()
     if "DELETE" not in up_raw:
         return False
@@ -1037,6 +1067,17 @@ def _is_bulk_wipe(cypher: str) -> bool:
     # empty target list (``DELETE`` followed by a clause keyword) is unscoped,
     # so it stays fail-closed.
     clauses = _delete_clauses(text)
+    # #8256 round 3: ``_strip_call_subqueries`` blanks a whole ``CALL { ... }``
+    # block, so a DELETE inside one is gone from ``text`` while the existence
+    # check above still saw it in ``masked`` (it is a DELETE, just an unread
+    # one). With round 2's ``all`` semantics a scoped SIBLING clause then
+    # vouched for the subquery's wipe:
+    # ``MATCH (a:Point {id:$a}) WITH a CALL { MATCH (m) DELETE m } DELETE a``
+    # read as targeted and dispatched on a production graph. Fewer clauses read
+    # than are present means an unread clause — fail closed, which is the
+    # conservative direction the strip's own docstring already claims.
+    if len(clauses) != len(_DELETE_HEAD_RE.findall(masked)):
+        return True
     if clauses and all(  # noqa: SIM103
         targets and all(_var_is_scoped(text, v, delete_at) for v in targets)
         for targets, delete_at in clauses
