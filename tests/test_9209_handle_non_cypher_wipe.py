@@ -1377,33 +1377,44 @@ def test_arguments_cannot_exempt_or_invent_a_wipe():
     ) == "OK", "a read-only call was refused for text in an ARGUMENT value"
 
 
-def test_the_L2_classifier_still_requires_DETACH():
-    """The boundary `call_procedure` inherits, stated as a pin (#9209 review).
+def test_the_L2_classifier_classifies_a_bare_DELETE_too():
+    """The boundary `call_procedure` inherits, stated as a pin (#9209, #8256).
 
     `_GuardedGraph.call_procedure` protects through `_is_bulk_wipe` — the SAME
-    L2 classifier `query` uses — so its reach is L2's reach, no wider: a BULK
-    ``DETACH DELETE`` is classified, a bare ``DELETE`` is not. A reviewer asked
-    for that boundary to be pinned or named, because otherwise the verb's
-    docstring reads wider than it is; both are done here, at the classifier, so
-    a future widening neither breaks this test silently nor leaves the docs
-    claiming a reach the classifier does not have.
+    L2 classifier `query` uses — so its reach is L2's reach, no wider: a bulk
+    ``DELETE`` is classified whether or not the ``DETACH`` prefix is written,
+    because FalkorDB auto-detaches (``MATCH (n) DELETE n`` deletes every node
+    exactly as ``MATCH (n) DETACH DELETE n`` does).
 
-    This is the pre-existing scope of L2 (#3007/#3037/#8215), not a regression:
-    the same bare DELETE passes through ``proj.g.query`` today, and #9124's
-    statement door — not L2 — is the layer that judges it.
+    #9209 pinned the OLD boundary here — a bare ``DELETE`` was NOT classified -
+    and its message asked that a widening be deliberate: update
+    `_GuardedGraph.call_procedure`'s docstring, this test, and the module
+    comment together, and check the event-retention maintenance delete (#3007)
+    still runs on a server graph. #8256 is that widening, and this test is the
+    record of it: all three were updated in the same change, and the #3007
+    statements are asserted below and in `tests/test_destructive_wipe_guard.py`.
     """
     assert _is_bulk_wipe("CALL db.labels() MATCH (n) DETACH DELETE n //") is True
-    assert _is_bulk_wipe("CALL db.labels() MATCH (n) DELETE n //") is False, (
-        "`_is_bulk_wipe` now classifies a bare DELETE. That is a WIDENING of L2: "
-        "it may be the right call, but it must be a deliberate one — update "
-        "`_GuardedGraph.call_procedure`'s docstring (which states the DETACH "
-        "boundary), this test, and the module comment together, and check the "
-        "event-retention maintenance delete (#3007) still runs on a server graph"
+    assert _is_bulk_wipe("CALL db.labels() MATCH (n) DELETE n //") is True, (
+        "a bare DELETE is a whole-graph wipe on FalkorDB (auto-detach); if this "
+        "reads False again, the #8256 widening was reverted and the wipe this "
+        "verb's docstring refuses is dispatchable again"
     )
     assert _is_bulk_wipe(
         "CALL db.labels() MATCH (n:Point {id:$p}) DETACH DELETE n //") is False, (
         "a scoped DETACH DELETE must stay classified as targeted, or every "
         "targeted delete becomes a bulk-wipe refusal"
+    )
+    assert _is_bulk_wipe(
+        "CALL db.labels() MATCH (n:Point {id:$p}) DELETE n //") is False, (
+        "#8256 left the TARGETING constructs untouched: a scoped bare DELETE "
+        "is exactly as targeted as the DETACH spelling"
+    )
+    assert _is_bulk_wipe(
+        "CALL db.labels() MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC "
+        "LIMIT $overflow DELETE n //") is False, (
+        "the #3007 event-retention maintenance delete must still run on a "
+        "server graph — widening the clause must not refuse it"
     )
 
 
