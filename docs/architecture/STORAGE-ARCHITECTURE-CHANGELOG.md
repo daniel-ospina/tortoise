@@ -1550,3 +1550,26 @@ an ARMED door, reads unblocked, the lane-name branch with no window, the
 declaration constants, the second declaration site, the rebuild engines still
 projecting INSIDE the window through an armed handle, and no permit past its
 `with`).
+
+## The narration stamp left §17.5, and the classification states its own ground (2026-10-22, `#8542`)
+
+`#9523` (W1b) corrected the id classification in §17.5 with a `corrected 2026-10-21` stamp and a
+"Provenance of that correction" preamble (the rule itself lives in the placement doc's §1.4). The
+stamp, the preamble, and the passage's reference to its own wording (*"the sentence above records
+three groups"*) are removed: a design document states the rule it settled on, and the record of what
+changed belongs here. The ground the classification rests on is stated in the same place instead — a
+re-derivation against `tortoise/ids.py` / `sdk._ULID_RE` and `tests/test_identity_contract.py`,
+**not** a re-census of the live graph, with the populations still the 2026-10-08 measurement. The
+two-store finding and the three id groups are unchanged.
+
+`#9562` (main `22deecf83`) had already taken out the two words the narration guard matched — the
+`corrected` before the date — so that arm is green there. What remained, and what this change
+removes, is the preamble and the self-reference — shapes the guard's arms did not reach either. That
+second gap is closed here too: `_CHANGE_NARRATION` now carries `Provenance of (that|this)
+(correction|change)` and `the|this sentence|passage|paragraph|line above records|states|…`, each
+measured at 0 hits across the three design documents at this head (so the widening reds nothing) and
+pinned in both directions — the verbatim pre-fix lines and a near-miss — in
+`test_the_class_check_is_neither_dead_nor_noisy`. Removing the word an arm happens to match is not
+the same as pinning the class, which is why the class is now pinned. The entry's own pointer is
+pinned by
+`tests/test_extractor_v4_citation_rot.py::test_the_changelog_entry_names_the_section_the_stamp_actually_left`.

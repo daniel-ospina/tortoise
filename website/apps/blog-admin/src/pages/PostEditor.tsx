@@ -4,7 +4,8 @@
  * PORTED from ElDato's GuideEditor (issue #1798, owner-validated editor UX),
  * adapted to the blog_posts schema:
  *   slug / title / body(markdown) / excerpt / cover_image_url / tags /
- *   meta_title / meta_description / status / hold_for_review / review_note
+ *   author / author_image_url / meta_title / meta_description / status /
+ *   hold_for_review / review_note
  *
  * STRIPPED: deal embeds, carousels, FAQs, columns, related-deal filters,
  * SEO-generation RPC (no guide-specific hooks on the blog surface).
@@ -38,6 +39,7 @@ import { wasAbandoned, resetAbandoned } from '@/lib/unsaved-guard';
 import {
   getPost, uploadBlogImage, deleteBlogImage, updatePost,
   isValidSlug, tagsError, parseTags, generateSeo, generateCover,
+  DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL,
   type BlogPostRow,
 } from '@/lib/blog-api';
 import { createSaveHandler } from '@/lib/save';
@@ -51,6 +53,8 @@ interface PostFormData {
   excerpt: string;
   cover_image_url: string;
   tags: string;
+  author: string;
+  author_image_url: string;
   meta_title: string;
   meta_description: string;
   hold_for_review: boolean;
@@ -62,6 +66,11 @@ const INITIAL_FORM: PostFormData = {
   excerpt: '',
   cover_image_url: '',
   tags: '',
+  // #1383: a new post starts with the real author identity, so nothing ships
+  // faceless by default. Both fields stay editable, and a blank name falls back
+  // to the same DEFAULT_AUTHOR in buildSaveRecord.
+  author: DEFAULT_AUTHOR,
+  author_image_url: DEFAULT_AUTHOR_IMAGE_URL,
   meta_title: '',
   meta_description: '',
   hold_for_review: false,
@@ -159,6 +168,11 @@ export default function PostEditor() {
       excerpt: existingPost.excerpt || '',
       cover_image_url: existingPost.cover_image_url || '',
       tags: (existingPost.tags || []).join(', '),
+      author: existingPost.author || DEFAULT_AUTHOR,
+      // The stored value, NOT the default: a post with no avatar must hydrate
+      // blank (the byline then renders the name alone) rather than silently
+      // gaining a face on the next save.
+      author_image_url: existingPost.author_image_url || '',
       meta_title: existingPost.meta_title || '',
       meta_description: existingPost.meta_description || '',
       hold_for_review: existingPost.hold_for_review || false,
@@ -573,6 +587,48 @@ export default function PostEditor() {
                 disabled={isArchived}
               />
               <p className="text-xs text-muted-foreground mt-1">Comma-separated (max 10)</p>
+            </div>
+          </Card>
+          <Card className="p-4 space-y-4 rounded-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-sm">Author</h3>
+              <span className="text-xs text-muted-foreground">Shown in the article byline</span>
+            </div>
+            <div>
+              <Label htmlFor="author">Author name</Label>
+              <Input
+                id="author"
+                value={form.author}
+                onChange={e => updateField('author', e.target.value)}
+                placeholder={DEFAULT_AUTHOR}
+                maxLength={100}
+                disabled={isArchived}
+              />
+              <p className="text-xs text-muted-foreground mt-1">Blank uses {DEFAULT_AUTHOR}.</p>
+            </div>
+            <div>
+              <Label htmlFor="author_image_url">Author image URL</Label>
+              <div className="flex items-center gap-2">
+                {/^https?:\/\//i.test(form.author_image_url.trim()) && (
+                  <img
+                    src={form.author_image_url.trim()}
+                    alt=""
+                    width={24}
+                    height={24}
+                    className="w-6 h-6 rounded-full object-cover border shrink-0"
+                  />
+                )}
+                <Input
+                  id="author_image_url"
+                  value={form.author_image_url}
+                  onChange={e => updateField('author_image_url', e.target.value)}
+                  placeholder={DEFAULT_AUTHOR_IMAGE_URL}
+                  disabled={isArchived}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground mt-1">
+                Absolute https URL. Leave blank to render the byline name alone — no avatar, no broken image.
+              </p>
             </div>
           </Card>
           <Card className="p-4 space-y-4 rounded-xl">
