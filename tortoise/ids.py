@@ -100,8 +100,14 @@ def session_id_refusal(session_id: str | None) -> str | None:
     and every door mints one (``mint_session_id``). That is today's contract
     and it is preserved exactly. The test is PRESENCE, not truthiness
     (``identity_absent``'s rule): ``0``/``False`` are PRESENT values of the
-    wrong shape, so they get the shape message rather than being silently
-    minted over.
+    wrong shape and get the shape message.
+
+    ⛔ BOTH doors therefore diagnose the caller's RAW argument BEFORE they mint
+    (#9599 review). Doing it the other way round — mint, then diagnose — let
+    ``session_id or mint()`` swallow a falsy non-``str``, so ``0``/``False``
+    were minted over inside the SDK while the hosted boundary's typed model
+    422'd them, and the two SDK doors disagreed with each other about
+    ``123``/``b"  "``. One order, both doors: diagnose, then mint.
 
     PRESENT-but-BLANK (``"   "``, ``"\t"``) IS a refusal. It is truthy, so the
     doors' ``session_id or mint()`` default never fired for it and it went

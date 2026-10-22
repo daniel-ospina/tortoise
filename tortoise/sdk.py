@@ -9298,14 +9298,23 @@ class TortoiseSDK:
         (``UserWarning``) rather than silently assumed (#6869)."""
         import os
 
-        # #9599: the mint keeps its ORIGINAL position — before the consent gate —
-        # so a consent-declined receipt still reports the minted id exactly as it
-        # did before this change (`session_id` is public receipt surface; moving
-        # the mint below the gate would have silently turned that field into
-        # `None`). The blank refusal runs AFTER the gate and still ahead of any
-        # work — see below.
+        # #9599: the caller's RAW argument is diagnosed BEFORE the mint, in the
+        # same order as `capture_session` (one rule, two doors). Diagnosing the
+        # minted value instead would make the doors disagree with each other and
+        # with the hosted boundary: `session_id or mint()` replaces a FALSY
+        # non-str (`0`, `False`), so the predicate would never see it here while
+        # `SessionRequest`'s typed model 422s it — a review finding.
         from tortoise.ids import mint_session_id, session_id_refusal
 
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {"session_id": session_id, "ok": False,
+                    "errors": [_blank_session], "error": _blank_session,
+                    "payload": None}
+        # The mint keeps its ORIGINAL position — before the consent gate — so a
+        # consent-declined receipt still reports the minted id exactly as it did
+        # before this change (`session_id` is public receipt surface; moving the
+        # mint below the gate would have silently turned that field into `None`).
         session_id = session_id or mint_session_id()
         # #3662: consent FIRST — this is the SDK sibling of the gated CLI
         # primitives (`session capture` / `sessions import`), which also refuse
@@ -9328,24 +9337,6 @@ class TortoiseSDK:
                     "errors": [declined], "error": declined,
                     "payload": None}
 
-        # #9599: the consent gate above is the authorisation axis and keeps its
-        # FIRST position, unchanged. The blank refusal below is an INPUT
-        # diagnosis, so it runs after it and still ahead of any work: a
-        # PRESENT-but-blank id
-        # (``"   "``, ``"\t"``) is truthy, so ``session_id or mint()`` never
-        # replaced it and it went straight to the write — where the engine
-        # cannot serve a blank key back to an equality seek: the next capture on
-        # the same blank id minted a DUPLICATE ``:Session`` and the turn
-        # container's CONTAINS edge landed nothing (measured, #9599). The rule
-        # is not new here — Layer-1 already refuses it
-        # (``commit_schema.CommitRecord._non_blank_session_id``, #4005) — this is
-        # the same sentence at the SDK door, from ONE home
-        # (``tortoise.ids.session_id_refusal``).
-        _blank_session = session_id_refusal(session_id)
-        if _blank_session is not None:
-            return {"session_id": session_id, "ok": False,
-                    "errors": [_blank_session], "error": _blank_session,
-                    "payload": None}
         # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
         # they never reach the extraction model. With extractor_model=None the
         # model is built from the AMBIENT environment (_default_byok_model →
@@ -9740,15 +9731,15 @@ class TortoiseSDK:
         from datetime import datetime, timezone
 
         # #9599: the same door rule as ``commit_session``'s, in the SAME ORDER —
-        # the mint first (as `commit_session` does), then the refusal — so the
-        # two doors cannot disagree about any input shape (a review finding:
-        # checking before the mint made `capture_session(0)` refuse where
-        # `commit_session(0)` minted). Checked BEFORE the extractor, the
-        # projection handle or any graph write: a refused id writes nothing and
-        # journals nothing.
+        # the caller's RAW argument is diagnosed first, then the mint — so the
+        # two doors cannot disagree about any input shape (a review finding: an
+        # earlier draft checked the MINTED value, so `0`/`False` were minted over
+        # here while `123`/`b"  "` were refused, and both doors disagreed with
+        # the hosted boundary, whose typed model 422s all four). Checked BEFORE
+        # the extractor, the projection handle or any graph write: a refused id
+        # writes nothing and journals nothing.
         from tortoise.ids import mint_session_id, session_id_refusal
 
-        session_id = session_id or mint_session_id()
         _blank_session = session_id_refusal(session_id)
         if _blank_session is not None:
             return {
@@ -9764,6 +9755,7 @@ class TortoiseSDK:
                 "warnings": [],
                 "capture_redactions": 0,
             }
+        session_id = session_id or mint_session_id()
 
         # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
         # capture for a missing key — the key gates EXTRACTION, not storage.

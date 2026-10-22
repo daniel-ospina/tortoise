@@ -124,25 +124,33 @@ def test_a_present_non_string_id_is_refused_with_its_own_cause(value):
 
 
 def test_a_falsy_non_string_is_present_not_absent():
-    """PRESENCE, not truthiness (``identity_absent``'s rule).
-
-    ``0``/``False`` are PRESENT values of the wrong shape, so they are refused
-    rather than silently minted over — and both SDK doors agree on that, which
-    is why the mint now runs BEFORE the check on BOTH doors (a review finding:
-    checking first made ``capture_session(0)`` refuse where
-    ``commit_session(0)`` minted).
-    """
+    """PRESENCE, not truthiness (``identity_absent``'s rule)."""
     assert ids_mod.session_id_refusal(0) is not None
     assert ids_mod.session_id_refusal(False) is not None
 
 
-def test_the_wire_normaliser_agrees_with_the_doors():
-    """The spool must not put a blank id on the wire (#9599 review P2).
+@pytest.mark.parametrize("value", (0, False, 123, b"  "))
+@pytest.mark.parametrize("door", ("capture", "commit"))
+def test_both_sdk_doors_refuse_a_present_non_string_id(sdk, door, value):
+    """The DOORS, not just the predicate — the predicate alone pins nothing.
 
-    A blank would be a 422, a 422 is PERMANENT, and the drain quarantines the
-    entry — the capture is then never filed. The spool normalises where its own
-    harness/lane/machine_id normalisers already do.
+    An earlier draft minted before diagnosing, so ``session_id or mint()``
+    swallowed ``0``/``False`` (minted over) while ``123``/``b"  "`` were
+    refused — the two doors disagreed with each other and with the hosted
+    boundary. This is the test that reds if that ordering ever comes back.
     """
+    client, _ = sdk
+    res = (client.capture_session(CONV, session_id=value) if door == "capture"
+           else client.commit_session(CONV, session_id=value))
+
+    assert res["ok"] is False, res
+    errors = [str(e) for e in (res.get("errors") or [])]
+    assert any("must be a string" in e for e in errors), errors
+    assert _session_ids(client) == [], _session_ids(client)
+
+
+def test_the_wire_normaliser_agrees_with_the_doors():
+    """The helper itself: blank -> None, padded-but-real passes through."""
     from tortoise.capture_spool import _normalise_session_id
 
     for blank in BLANK_IDS:
@@ -152,6 +160,48 @@ def test_the_wire_normaliser_agrees_with_the_doors():
     for padded in PADDED_REAL:
         assert _normalise_session_id(padded) == padded
     assert _normalise_session_id("s1") == "s1"
+
+
+def test_a_blank_id_is_never_put_on_the_spool_wire(tmp_path):
+    """The DRAIN's payload — the level the P2 defect actually lived at (#9599).
+
+    Pinning the helper alone would leave this green after a revert of the wire
+    line, and the defect would return: a blank id is a 422, a 422 is PERMANENT,
+    and the drain then quarantines the entry — the capture is never filed. So
+    this drives a real spool entry through a real flush and reads the payload
+    the server would have received.
+    """
+    from tortoise.capture_spool import (
+        PostOutcome,
+        Snapshot,
+        flush_spool,
+        read_spool_meta,
+        write_spool_entry,
+    )
+
+    turns = [{"role": "user", "content": "the spool wire probe"},
+             {"role": "assistant", "content": "acknowledged"}]
+    root = tmp_path
+    write_spool_entry(root, Snapshot(
+        session_id="   ", turns=turns, source="t.jsonl",
+        machine_id="m" * 64, harness="claude"))
+
+    seen = []
+
+    def _post(payload):
+        seen.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    summary = flush_spool(root, _post, now=1000.0)
+
+    assert len(seen) == 1, seen
+    # The blank never reaches the wire: the server is asked to MINT one.
+    assert seen[0]["session_id"] is None, seen[0]["session_id"]
+    assert summary.filed == 1, summary
+    assert not summary.discarded, summary.discarded
+    # ...and the entry is still filed under the id it was written with.
+    assert read_spool_meta(root, "   ").get("filed_key")
 
 
 def test_the_skip_report_names_a_blank_identity_as_blank():
