@@ -1,0 +1,30 @@
+# 02 — step-premise census (no browser, no ChatGPT, no tenant) — 2026-10-22T21:00:42Z
+# command: .venv/bin/python docs/evidence/9664-capstone/probes/step_premise_census.py
+# git HEAD: 653980445f251013d3d033120d559201b172950a
+
+#9664 capstone — step-premise census
+repo=/Users/danielospina/Documents/GitHub/tortoise/.worktrees/tm-9664  base=https://api.premiselabs.co
+
+step    premise                                                         measured
+------  --------------------------------------------------------------  ----------------------------------------
+6       tool `tortoise_load_skill` is on the MCP surface                ABSENT (registry holds 81 tools)
+7       tool `tortoise_list_graphs` is on the MCP surface               PRESENT (registry holds 81 tools)
+8       tool `tortoise_create_point` is on the MCP surface              PRESENT (registry holds 81 tools)
+9       tool `tortoise_file_decision` is on the MCP surface             PRESENT (registry holds 81 tools)
+6       the surface has ANY skill-loading tool                          NONE
+1       `team-named` is auto-satisfied, never an agent act              CONFIRMED (state._NON_AGENT_STEPS)
+5       `connection-written` is a completion input                      NO (absent from every gate)
+5       `connection-written` is in NO completion gate, and IS a client checkpoint (not a server observation)  CONFIRMED; checkpoint-writable=YES
+5       the `self` completion gate requires                             decide-completed, first-points-filed, harness-connected, team-named
+5       the `build` completion gate requires                            first-points-filed, harness-connected
+5       the `compact` completion gate requires                          first-points-filed, harness-connected
+5       `restart_pending` for the set step 5 describes (['team-named','connection-written'])  True — i.e. 'config written, harness NOT yet verified'
+5       `restart_pending` once the harness has connected                False
+4+ugly  bare /mcp (what ChatGPT's UI gets today)                        ACCEPTED → org_id=None
+4+ugly  origin root (ChatGPT echoes resource=origin)                    ACCEPTED → org_id=None
+4+ugly  org-scoped (the #1701 R1 team selector)                         ACCEPTED → org_id=11111111-2222-3333-4444-555555555555
+4+ugly  GRAPH-scoped (the ugly cases need this)                         REFUSED(400 invalid_resource)
+
+MEASURED: 17 premises, 0 unmeasured sections.
+
+exit=0
