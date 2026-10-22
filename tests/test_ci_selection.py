@@ -189,6 +189,44 @@ def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
     )
 
 
+def test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff():
+    """#9548 review (P1): the arming section's pins must run on the runbook.
+
+    `tests/test_deploy_workflow.py` binds `docs/infra-runbook.md` prose for the
+    first time in #9548 (§"Arming the Postgres record"):
+    `_record_arming_section()`, `_matrix_rows()` and
+    `test_the_record_arming_verify_recipe_reads_a_surface_that_exists`. `docs/`
+    is in NON_PYTHON_PREFIXES and the runbook matches no SOURCE_PATTERNS entry,
+    so a runbook-only diff filters to `changed == []` and takes the docs-only
+    early return — tier1 ONLY. Registered in `core` but not in `tier1`, those
+    pins were therefore asleep on the only realistic diff that can re-break
+    them: a docs-only PR re-introducing
+    `curl -s localhost:9090/metrics | grep record_write_failures` — which the
+    hosted app does not serve, so it prints nothing in EVERY state and the
+    empty grep reads as "0 failures" — or restoring the absolute
+    `record_write_failures == 0` bar, would merge green and only red `main`
+    post-merge (#4309 silent-drop class; the #8614 shape one runbook section
+    over). Dropping the tier1 entry re-opens that hole.
+    """
+    r = _sel(["docs/infra-runbook.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_deploy_workflow.py" in r["test_files"], (
+        "a docs/infra-runbook.md-only diff must select the pins that bind its "
+        "arming-section prose (`test_deploy_workflow.py`) — otherwise a "
+        "docs-only edit that restores the 9090/metrics recipe or the absolute "
+        "`record_write_failures == 0` bar merges green (#9548 review, #4309 "
+        "class)"
+    )
+    # ... and the pre-existing runbook owner must stay selected alongside it:
+    # the two files pin DIFFERENT halves of the same doc (Secrets Matrix +
+    # rotation recipes vs. the arming section), so neither substitutes.
+    assert "test_fly_secret_drift.py" in r["test_files"], (
+        "the #8614 runbook owner must stay in tier1 — #9548 adds a second "
+        "runbook reader, it does not replace the first"
+    )
+
+
 def test_b7_runbook_ok_semantics_gate_runs_on_a_runbook_only_diff():
     """#8135 review (P1, two reviews): the runbook's `ok` pin must run on the runbook.
 

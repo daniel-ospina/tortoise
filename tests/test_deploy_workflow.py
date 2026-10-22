@@ -2221,6 +2221,13 @@ _PROVENANCE_STEP = "Check Fly secret provenance (fail-closed)"
 _REPO_ROOT = _WORKFLOW.parents[2]
 _SECRET_MANIFEST = _REPO_ROOT / ".github" / "scripts" / "fly-managed-secrets.txt"
 _RUNBOOK = _REPO_ROOT / "docs" / "infra-runbook.md"
+_EPIC_DOC = (
+    _REPO_ROOT
+    / "docs"
+    / "epics"
+    / "2026-10-10-7879-postgres-record"
+    / "08-hosted-prerequisites.md"
+)
 
 #: A Secrets Matrix row, same shape the #8614 guard reads.
 _MATRIX_ROW = re.compile(
@@ -2536,6 +2543,79 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
         "the Secrets Matrix shows TORTOISE_RECORD_DSN with no GitHub Actions home, "
         "while the manifest declares it `gh-secret:` — the Fly-only rotation recipe "
         "looks correct for a name the next deploy overwrites"
+    )
+
+
+def _superseded_census_note() -> str:
+    """The epic's #9548 supersession note for the first census command, verbatim.
+
+    Scoped to that paragraph (through its fenced command), so a
+    `TORTOISE_RECORD_DSN` mention elsewhere in the doc — the §A8 rows — can
+    neither satisfy nor fail these assertions by accident.
+    """
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    marker = "The first census line is superseded by #9548"
+    assert marker in text, (
+        "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md "
+        "no longer carries the #9548 supersession note — the census claim the "
+        "operator reads is then gone or unattributed"
+    )
+    return text.split(marker, 1)[1].split("\n```", 1)[0]
+
+
+def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
+    """#9548 review P2: the provenance note must not credit a path it never greps.
+
+    The epic's census block records the "not in place" claim as
+    `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/\
+    docs/infra-runbook.md`. #9548 supersedes that line, and the note said the
+    command "now returns … the manifest declaration" — but
+    `.github/scripts/fly-managed-secrets.txt` is NOT in that path set, so it is
+    not returned. In a note whose whole purpose is provenance honesty about
+    which evidence moved, that is the sentence a later lane relies on before
+    re-running the census. Fail-closed on rewording: the check needs the note's
+    "it now returns …" clause and its "comment." terminus, so deleting either
+    (or softening the claim into prose) reds rather than passes.
+    """
+    note = _superseded_census_note()
+    # The census command's path set, read from the doc rather than retyped.
+    block = _EPIC_DOC.read_text(encoding="utf-8").split("Census commands", 1)[1]
+    cmd = re.search(r"grep -rn TORTOISE_RECORD_DSN(.*?)→", block, re.S)
+    assert cmd, "the doc's baseline census command is gone — the note has no referent"
+    paths = [t for t in cmd.group(1).replace("\\", " ").split() if t]
+    assert set(paths) == {
+        "fly.toml", "entrypoint.sh", ".github/workflows/", "docs/infra-runbook.md"
+    }, paths
+    manifest = ".github/scripts/fly-managed-secrets.txt"
+    assert manifest not in paths, (
+        "the baseline census command grew the manifest path, so the note's scope "
+        "claim has changed — re-derive it instead of trusting this assertion"
+    )
+    # Claim 1: what the baseline set RETURNS cannot include the manifest, because
+    # the manifest is not in its path set. Pre-#9548-P2 the note said it did.
+    returned = re.search(r"it now returns(.*?)comment\.", note, re.S)
+    assert returned, "the note no longer states what the baseline command returns"
+    assert "manifest" not in returned.group(1), (
+        "the note credits the baseline census command with the manifest "
+        "declaration, but `.github/scripts/fly-managed-secrets.txt` is not in "
+        "that command's path set — a later lane re-running the census then "
+        "finds the note false (#9548 review P2)"
+    )
+    # Claim 2: the surface it DOES live on is named, so the reader has a command
+    # that reaches it ...
+    assert manifest in note, (
+        "the note does not name where the manifest declaration lives — the "
+        "fourth arming surface is then undocumented in the provenance record"
+    )
+    # ... and that command really returns one declaration (executed, not asserted).
+    hits = [
+        line
+        for line in (_REPO_ROOT / manifest).read_text(encoding="utf-8").splitlines()
+        if _RECORD_DSN_ENV in line
+    ]
+    assert len(hits) == 1, (
+        f"`grep -rn {_RECORD_DSN_ENV} {manifest}` returns {len(hits)} lines, not "
+        "the 1 the note promises"
     )
 
 

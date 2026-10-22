@@ -5658,6 +5658,25 @@ tier1:
 # above, so tier1 is the correct lane. Pinned by
 # tests/test_ci_selection.py::test_fly_secret_drift_gate_runs_on_a_runbook_only_diff.
 - test_fly_secret_drift.py
+# #9548 review (P1): the SAME shape, one runbook section over — and #8614's
+# direct successor. `test_deploy_workflow.py` now binds `docs/infra-runbook.md`
+# prose for the first time (§"Arming the Postgres record": `_record_arming_section()`,
+# `_matrix_rows()`, the verify-recipe pins), but it was registered ONLY on
+# `surfaces: core`. `docs/` is in NON_PYTHON_PREFIXES and the runbook matches no
+# SOURCE_PATTERNS entry, so a runbook-only diff filters to `changed == []` and
+# takes the docs-only early return — tier1 ONLY. Registered in `core` but not
+# here, every new pin was therefore asleep on the ONLY realistic diff that can
+# re-break it: a docs-only PR re-introducing
+# `curl -s localhost:9090/metrics | grep record_write_failures` (which prints
+# nothing in EVERY state, so an empty grep reads as "0 failures" — the fail-open
+# operator recipe #9548 removed) or restoring the absolute `record_write_failures
+# == 0` bar would merge green and only red `main` post-merge (the
+# #1349/#3332/#3616/#4309 silent-drop class). It is hermetic and its measured
+# weight is 0.4 in the durations map (an artifact scan: YAML + the shipped
+# gate + two doc reads; no graph, no DB), so tier1 is the correct lane. Pinned by
+# tests/test_ci_selection.py::
+# test_the_record_arming_runbook_pins_run_on_a_runbook_only_diff.
+- test_deploy_workflow.py
 # #8135 review (P1, twice): `test_b7_runbook_ok_semantics_8135.py` binds the B7
 # operator runbook's meaning of `mcp_tool_call.status == "ok"`
 # (`docs/runbook/b7-activation-scorecard.md` — the claim #8135 corrected, whose

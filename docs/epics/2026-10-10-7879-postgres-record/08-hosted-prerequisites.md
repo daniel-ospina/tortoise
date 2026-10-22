@@ -317,7 +317,7 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 **What:** **there is no dedicated table for it** — the text is carried as data, in the `point.content`
 column and in the layer-1 `journal_event.payload` mirror of the record that wrote it (see below) —
 `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returns **0**; `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
+66 migrations returns **0**; `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
 text, not the extracted claim"* — measured 15.9 / 22.0 pts).
@@ -564,9 +564,18 @@ grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_bac
   tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
 
-⚠️ **The first census line is superseded by #9548 (2026-10-23)** — it now returns the deploy
-workflow's bind/probe/stage lines, the manifest declaration, the runbook's row and section, and
-`fly.toml`'s `[env]` comment. `entrypoint.sh` is deliberately still empty: R1's components are the
+⚠️ **The first census line is superseded by #9548 (2026-10-23)** — over that command's own path set
+(`fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md`) it now returns the deploy
+workflow's bind/probe/stage lines, the runbook's row and section, and `fly.toml`'s `[env]` comment.
+The manifest declaration (`TORTOISE_RECORD_DSN  gh-secret:TORTOISE_RECORD_DSN` in
+`.github/scripts/fly-managed-secrets.txt`) is the fourth surface, and it is **not** in that path set —
+naming the file is what returns it:
+
+```text
+grep -rn TORTOISE_RECORD_DSN .github/scripts/fly-managed-secrets.txt   → 1 line
+```
+
+`entrypoint.sh` is deliberately still empty: R1's components are the
 three surfaces above, and boot-time arming output is not part of it. What the old grep stood in for
 (`NOT_ARMED`) is unchanged until the GitHub secret exists; only its evidence moved, from *"the name
 is written nowhere"* to *"the name is staged and the secret is absent"*. The other six lines were
