@@ -1297,21 +1297,25 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     """Close the same REVERSE ratchet one level up: the guard's OWN inputs.
 
     `test_every_in_scope_page_is_selectable_by_ci` covers the pages in the derived
-    scope, but four inputs change that scope or the rule WITHOUT being a page, so a
-    PR editing only one of them selects no surface and this file never runs: the
+    scope, but four inputs change that scope or the rule WITHOUT being a page — the
     shared extractor `tests/_html_links.py` (the rule itself), `website/_redirects`
     (which pages `_canonical_redirect_targets` drops from scope),
     `website/functions/blog/[[path]].ts` (what `_function_serves` resolves the blog
     link against), and `tortoise/quadrature.py` (whose EP factors
     `test_docs_states_the_formulas_quadrature_actually_computes` derives the
-    /docs expectation FROM). That is the property this ratchet pins — *editing it
-    selects no surface* — not "every non-page input", and the count of four is a
-    count of exactly that property. `tortoise/sdk.py` is a fifth rule input of the
-    same shape (the status vocabulary, the capture cap, the `_extract_session_v2`
-    call sites are all parsed out of it), but it is a `SHARED_MODULES` member, so a
-    PR touching it selects the FULL matrix (`full=True`, measured) and cannot be
-    dropped this way. Verified before listing: `select(["website/_redirects"], ...)`
-    returned `surfaces=[]` with this file absent from `test_files`.
+    /docs expectation FROM). Before each was listed, a PR editing only that one
+    selected no surface and this file never ran — that is the property this ratchet
+    pins, and those four are the inputs a `SOURCE_PATTERNS` entry can make
+    selectable WITHOUT collateral loss (the two legal drafts at the end of this
+    docstring have the same select-no-surface shape and are NOT here, because that
+    route costs three tier-1 files there). `tortoise/sdk.py` is a fifth rule input
+    of the same shape
+    (the status vocabulary, the capture cap, the `_extract_session_v2` call sites
+    are all parsed out of it), but it is a `SHARED_MODULES` member, so a PR
+    touching it selects the FULL matrix (`full=True`, measured) and cannot be
+    dropped this way. Verified before listing, i.e. at the head that introduced
+    each entry: `select(["website/_redirects"], ...)` returned `surfaces=[]` with
+    this file absent from `test_files`.
 
     The fourth is the sharpest, and it was the one still broken at #9607 (the other
     three were selectable at that head — re-measured):
@@ -1323,7 +1327,8 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     diff took the `core` fallback, and this file is registered only under
     `onboarding` (measured on `02e18e752`: `select(["tortoise/quadrature.py"])` →
     `full=False`, `surfaces=['core']`, this file ABSENT from `test_files`). The
-    formula pin therefore could never run on the PR that changes a formula.
+    formula pin therefore could not run on a QUADRATURE-ONLY PR — a PR that also
+    touched a page selecting `onboarding` still ran it.
 
     `tests/test_ci_selection.py::test_every_source_pattern_is_selectable` cannot
     catch this direction: it is derived FROM `SOURCE_PATTERNS`, so deleting an entry

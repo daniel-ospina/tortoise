@@ -747,8 +747,9 @@ SOURCE_PATTERNS = {
                    # `SOURCE_PATTERNS` entry and is not in `SHARED_MODULES`, so a
                    # quadrature-only diff took the generic `core` fallback
                    # (`surfaces=['core']`, `full=False`) and landed in a pool this
-                   # file is not registered in — the formula pin could never run on
-                   # the one PR that changes a formula. Measured on `02e18e752`
+                   # file is not registered in — so a QUADRATURE-ONLY diff could not
+                   # run the formula pin (a PR that also touched a `docs`/website
+                   # page still did, via `onboarding`). Measured on `02e18e752`
                    # before listing: `select(["tortoise/quadrature.py"])` returned
                    # `full=False`, `surfaces=['core']`, this file ABSENT from
                    # `test_files`. Same #1349/#3332/#3616 silent-drop class as the
