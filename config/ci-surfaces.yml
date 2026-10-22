@@ -1586,6 +1586,19 @@ surfaces:
   # with `manifest drift: ['test_9079_record_replay_declared.py']`, and
   # `fast_pool()` is manifest-derived, so the four pins would run in NO leg.
   - test_9079_record_replay_declared.py
+  # #9391 (§17.1 width): the replay window is HANDLE-ONLY — the raw-query lane
+  # stays shut for the WHOLE window (the depth travels with the scope stack), so
+  # a nested `pre-wipe-restore` / `pre-wipe-synthetic` / `schema-ddl` lane cannot
+  # re-open it. `core` is the right arm for the same reason the `#9079` row above
+  # states: both subjects (`tortoise/projection/__init__.py`, the guard and the
+  # scope helpers, and `tortoise/event_store.py`, the second `replay` declaration
+  # site) match no `SOURCE_PATTERNS` entry and fall through to `core`, and the
+  # projection is a shared module so a diff to it already runs the FULL matrix —
+  # this row is what satisfies `--integrity` and what puts the nine pins in
+  # `fast_pool()`. Without it `uv run python tools/ci_selection.py --integrity`
+  # exits 1 with `manifest drift: ['test_9391_replay_window_raw_query_width.py']`,
+  # and `fast_pool()` is manifest-derived, so the pins would run in NO leg.
+  - test_9391_replay_window_raw_query_width.py
   # #7983 (§17.4.4/§17.4.6): the read ledger — the instrument the hot fraction
   # `f` never had. `core` is the right arm: neither tortoise/read_ledger.py (a NEW
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
@@ -3726,6 +3739,14 @@ surfaces:
   - test_session_reinjection.py  # #2517: source-session re-injection E2E (C4, docker-lane)
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
+  # #8658: the product read path's hits carry the four provenance keys Slice A
+  # consumes (`quote`/`source_turn_id`/`span_*`). DUAL with `sdk` (below): the
+  # hermetic test drives `retrieval.package_evidence_pool` (this surface's
+  # fallback subject is `search_engine.py`, which `SearchResult.to_dict` widens)
+  # and the docker-lane tests drive `tortoise/sdk.py` / `tortoise/retrieval.py`,
+  # which select `sdk` and REPLACE the `core` fallback — the same dual reason as
+  # test_entity_key_expansion.py / test_evidence_assembly.py above.
+  - test_8658_product_hit_provenance.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
@@ -5128,6 +5149,7 @@ surfaces:
   - test_time_aware_sdk_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_time_aware_eval_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
+  - test_8658_product_hit_provenance.py  # #8658 (docker-lane leg: the product hit's provenance keys + the collapse they enable; dual-registered with core because `retrieval.py`/`sdk.py` are this surface's own and a `search_engine.py`-only change falls to core)
   - longmem_eval/test_slice_a_flood_bound.py  # #8043: the Slice A flooding bound + its receipt's reproducibility — dual-registered (eval + sdk) because `tortoise/retrieval.py` is this surface's own: a retrieval.py-only change must re-run the gate that pins the window bound
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
@@ -5377,6 +5399,7 @@ surfaces:
   - longmem_eval/test_context_assembly_arms.py  # #3011: 4-arm (A/B/C/D) context-assembly runner — arm source selection, metrics 5/8/9, report shape (hermetic)
   - longmem_eval/test_context_assembly_leakage.py  # #3011: gold-leakage hard stop — static reference assertion + gold-field perturbation (hermetic)
   - longmem_eval/test_ep_activation.py  # #3011/#2598: EP activation — promote drafts, run EP, never fabricate a 0.5 (hermetic)
+  - longmem_eval/test_measurement_posture.py  # #8486: the run's measurement posture — ingest mode + belief-layer activation; the completed-receipt disclosure gate (hermetic, no DB/network)
   - longmem_eval/test_gold_evidence_claims.py  # #3011 §9.5: gold-evidence claim artifact builder — frozen tokenizer, MIN_GOLD_TOKENS, non-emptiness (hermetic)
   - longmem_eval/test_ingest_stall_guard.py  # #2969: bounded graph socket read (socket_timeout env knobs) + ingest heartbeat/no-progress budget → retryable `ingest:retries_exhausted` (hermetic: fake hung/pong TCP servers + injected clock)
   - longmem_eval/test_server_posture_2969.py  # #2969 suggested fix 3: the eval refuses a defragging graph server (`CONFIG GET activedefrag`); opt-in `disable` applies the incident mitigation + read-back and FAILS CLOSED when it cannot read the value or open the probe (the one exception to UNKNOWN-and-proceed, which stays soft for `require-off`/`allow`); a readable value that is neither `yes` nor `no` is UNKNOWN, never `off`; wiring aborts before BOTH model loads (R6 cross-encoder pre-warm + `--model` injection), the embedder pre-flight and the dataset download (hermetic: a fake connection records commands AND a loopback RESP2 server drives the REAL `_connection_from_uri` builder — the anti-inert leg)
@@ -6536,12 +6559,15 @@ durations:
   # are PR-ADDED files, so the push-to-main sweep cannot have measured them yet.
   test_6211_ep_result_shape.py: 19.0
   test_6211_ep_scale.py: 19.0
-  # #6211 (hop anchoring): locally measured on this host, whole file, 7 tests /
-  # 5.4-7.6 s (it builds an 8k-edge fixture and profiles one hop). The count is
+  # #6211 (hop anchoring): locally measured on this host, whole file, 8 tests /
+  # 5.6-9.0 s (6 readings; the spread is fleet load. It builds an 8k-edge
+  # fixture and profiles one hop; the test #9304 ADDED — the journal-read plan
+  # pin, 6th in the file — builds its own 7-node fixture). The count is
   # re-derived at every revision, never carried forward — an earlier revision of
   # this row read "5 tests" for a file that already defined six, and
   # `tests/test_6211_ep_anchor.py::test_the_records_that_state_this_files_size_are_true`
-  # now pins the count against the file's own `def test_` list (#9282 review).
+  # now pins the count against the file's own `def test_` list (#9282 review;
+  # it reddened for #9304's added test, which is how this line was re-derived).
   # The 9.0 weight is KEPT rather than raised: a 14.1 s whole-file reading was
   # also taken, but on a host under fleet load (the same class of reading the
   # #8098/#3429 rows record and deliberately do not adopt), and the weight is a
@@ -7729,6 +7755,7 @@ durations:
   test_7951_update_point_outbox.py: 7.2  # unmeasured — #7951 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red (790/878 = 90.0% at the floor, and the file packs at the flat 2.0s default) — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane reading 7.2s (6 tests; two of them rebuild the graph). The count is now 7: `test_the_promote_arm_stays_apply_first_a_recorded_deviation` is parametrized over both promote arms (see #9272), so it collects twice. Refresh from the first post-merge run that includes it.
   test_7951_delete_point_outbox.py: 5.0  # unmeasured — #7951 increment 4a (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default, which drops `duration_coverage_issues()` under the 90% floor — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 4.3–6.8 s when the file collected 6 tests; at this head it collects 17 (T1–T10 plus T3b, T3c, T3d, T3e, T3f, T3g and T3i, TWO of which call `rebuild_all` — T3 and T8) and measured 10.4 s here on the same lane, so the 5.0 weight is a lower-ish bound in the right neighbourhood rather than a stale one. Refresh from the first post-merge run that includes it.
   test_9079_ep_epoch_declared.py: 7.2  # unmeasured — #9123 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). MEASURED this turn: WITHOUT this row `duration_coverage_issues()` red at 840/934 = 89.9% — the same shape as the `test_7951_create_point_outbox.py` row above. Local embedded-lane readings 5.9/6.0/6.4 s over three runs (6 tests; one calls `rebuild_all`). ⚠️ A longer reading (148 s) is NOT this file's weight: the FIRST `create_point` in a process lazily loads the embedding model — 15.7 s standalone, and 134 s for the one test that pays it under fleet load 65 — after which creates are 0.16 s. That one-time load is paid once per file and is not what this weight packs. Declared above the quiet-box readings so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
+  test_9391_replay_window_raw_query_width.py: 10.0  # unmeasured — #9391 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default (and drops `duration_coverage_issues()` toward the 90% floor). Local embedded-carve-out reading at this head: 9 tests, `testcase/@time` sum 6.77 s, whole-file wall 10.1 s (each test builds its own journal-backed SDK; the rebuild-engines leg calls `rebuild_from_record`). Declared as the wall reading, the same rule the neighbouring `test_graph_census_7949.py` row states. Refresh from the first post-merge run that includes it.
   test_9079_record_replay_declared.py: 9.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default. Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR. Refresh from the first post-merge run that includes it.
   test_9206_apply_first_lane.py: 20.0  # unmeasured — #9206 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default AND drops `duration_coverage_issues()` under the 90% floor (measured this turn: WITHOUT the two #9206 rows the manifest sits at 866/963 = 89.9%). Local embedded-lane reading 16.2 s for the 16 tests on a box with the embedder warm: 11 build their own journal-backed SDK and drive REAL doors (capture_session alone issues a full capture + journal), the other 5 are pure unit/AST pins with no SDK. ⚠️ Do NOT "refresh" this row from a cold box: those same 16 tests measured 138–151 s here, ~123 s of it the FIRST `create_point`'s once-per-process embedding-model load blocked in huggingface_hub's HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` row above discloses at 134 s), not the battery. Declared above the quiet reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_8501_capture_path_anchor.py: 8.0  # unmeasured — #8501 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the row is declared from a local reading and marked for the first post-merge sweep. Local embedded-lane reading: 10 tests, `testcase/@time` sum ~7 s on a warm box (per-test bodies 0.50-1.00 s: five drive a REAL `capture_session` + journal, three run a full `rebuild_all()`); whole-file wall 10-14 s. ⚠️ Do NOT "refresh" this row from a cold box: the same file measured 191.6 s here, 185.5 s of it the FIRST test paying the once-per-process embedding-model load in huggingface_hub HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` and `test_9206_apply_first_lane.py` rows above disclose), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348).
