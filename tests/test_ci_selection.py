@@ -1064,7 +1064,7 @@ def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypat
     # `_readers_of` greps at `REPO`, the module global in THIS file — patch that one.
     monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
     monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
-    assert REPO == tmp_path, "the census must run against the throwaway tree"
+    assert tmp_path == REPO, "the census must run against the throwaway tree"
 
     # `scripts/` deliberately ABSENT — the fresh-clone / runner / new-lane state.
     assert _readers_of("AGENTS.md") == []
