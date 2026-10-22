@@ -30,7 +30,7 @@ from typing import NamedTuple
 
 import tortoise.mcp_server as mcp_server
 import tortoise.sdk as sdk_module
-from tortoise.tool_registry import RISK_MAINTENANCE
+from tortoise.tool_registry import MAINTENANCE_TIER, WRITE_RISK_TIERS
 
 # ── Declared sets (each with a reason; exactness is asserted by the guards) ──
 
@@ -43,10 +43,14 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 }
 
 # Operations that DO write on an internal self-heal / cache-refresh path but
-# are deliberately read-classified (a read-only MCP key may call them).  This
-# is a recorded posture (get_confidence/compute_confidence cite #1157; the
-# read-through decision is tracked in #4122).  The guard documents it and does
-# NOT override it.
+# are deliberately PERMISSIONED AS READ (a `graphs:read` key may call them).
+# The posture is #4122's owner ruling: they are `risk="maintenance"` — a
+# confined, idempotent refresh of a DERIVED value (PostgreSQL's `MAINTAIN`),
+# which is neither a pure read nor a caller-authored write.  They keep
+# `graphs:read` and, because they are not `read`, they must NOT claim
+# `readOnlyHint: true` — that hint is what clients auto-approve on.  The arms
+# below therefore require `risk == "maintenance"`: the declared set moves with
+# the code, so the posture cannot silently re-stale.
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
     "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
     "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
@@ -87,6 +91,57 @@ NON_SDK_READ_OPERATIONS: dict[str, str] = {
 # per TOOL NAME or it silently stops being checked (#4035 review).
 NON_SDK_READ_BINDINGS: dict[str, str] = {
     "get_tenant_packs": "tortoise_packs_list",
+}
+
+# ── #9576: read-classified RETENTION housekeeping through another module ─────
+#
+# `tortoise_events_poll` declares `readOnlyHint: true` and needs only
+# `graphs:read`, yet its handler path (`poll_events` -> `_maybe_purge_events`)
+# runs an interval-gated `DETACH DELETE` of expired-or-over-cap `:GraphEvent` rows
+# through
+# `event_store.purge_expired` / `purge_overflow`. That mutation lives OUTSIDE the
+# `sdk.py` derivation boundary, so `sdk_graph_mutators()` cannot see it: the
+# derivative sets are silent, `reached_writes` is EMPTY, and every arm below
+# would report a clean surface while a read-key call deletes rows (#9576).
+#
+# THE RECORDED DECISION (owner-facing answer to #9576) is that this stays `read`,
+# and it is a deliberate departure from "a read hint means nothing is deleted":
+#
+#   OVERRIDES: `readOnlyHint: true` ⇒ the call deletes nothing at all — the poll
+#   runs retention housekeeping on SYSTEM-owned `:GraphEvent` rows it owns on a
+#   timer. Both alternatives are worse for the caller: `writes=True` would take a
+#   poll away from read-only keys entirely (a subscription feed that now needs
+#   `graphs:write`), and a non-read tier would drop the hint on a tool agents poll
+#   in a loop, i.e. a confirmation prompt per poll. The rows are the store's own
+#   bookkeeping, deleted by policy and never replayed by a rebuild
+#   (`docs/retention-and-deletion.md`), and the delete is confined, timer-driven
+#   and idempotent.
+#
+# Two declarations make that decision checkable instead of a comment: the
+# CARVE-OUT (which tool, and why) and the OUT-OF-BOUNDARY MUTATOR (which
+# operation, and where the DELETE lives). The guard arms below are what make them
+# load-bearing — an UNDECLARED read tool that reaches one of these operations
+# fails, so "tidy it silently" is not available to the next lane, and neither is
+# adding a second one.
+RETENTION_CARVEOUTS: dict[str, str] = {
+    "tortoise_events_poll":
+        "poll_events -> event_store.purge_expired/purge_overflow: DETACH DELETE "
+        "of expired-or-over-cap :GraphEvent rows, then `_refresh_first_seq` SETs the "
+        "(:GraphEventMeta).first_seq watermark — both system-owned, "
+        "interval-gated — #9576/#4122",
+}
+
+# SDK operations that MUTATE storage from a module OUTSIDE the `sdk.py` derivation
+# boundary, so `sdk_graph_mutators()` cannot see them and `reached_writes` is empty
+# for any tool that reaches one. Declared so a read-classified entry touching one
+# must be named in `RETENTION_CARVEOUTS` — without this arm the carve-out ledger
+# was a comment and a NEW read tool that purged through another module would be
+# caught by nothing (#9576).
+OUT_OF_BOUNDARY_MUTATORS: dict[str, str] = {
+    "poll_events": "event_store.purge_expired/purge_overflow (DETACH DELETE of "
+                   "expired-or-over-cap :GraphEvent rows + the `_refresh_first_seq` "
+                   "(:GraphEventMeta).first_seq SET) — invisible to "
+                   "sdk_graph_mutators()",
 }
 
 # Registry `sdk_method` labels that do not resolve to a TortoiseSDK attribute.
@@ -911,7 +966,6 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
     carrying tool must be a self-guarding HTTP-excluded tool), and every
     writer-annotated tool must be in WRITE_TOOL_NAMES."""
     import tortoise.mcp_server as _ms
-
     mutators = sdk_graph_mutators()
     by_method: dict[str, list] = {}
     for e in entries:
@@ -922,6 +976,49 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
         reached_writes = (
             handler_operations(e.name, mcp_src).operations & mutators
         ) - set(READ_THROUGH_WRITE_METHODS)
+        # 2a-prime (#4122 review): the RUNG ITSELF must be honest. An HTTP-excluded
+        # entry that self-guards is safe from the SURFACE, but a `read`/`maintenance`
+        # tier on a handler that reaches a graph mutation is exactly the #4122
+        # defect, and the self-guard branch below used to excuse the tier along with
+        # the surface — leaving four destructive rows (`dream`, `backfill_v25`,
+        # `index_files`, `ingest_corpus`) unpinned if a later lane demoted one.
+        # `maintenance` is exempt only for its declared derived-value refresh, which
+        # is what `READ_THROUGH_WRITE_METHODS` subtracts above.
+        if reached_writes and e.risk in ("read", MAINTENANCE_TIER):
+            out.append(
+                f"{e.name}: risk={e.risk!r} but its handler reaches "
+                f"write(s) {sorted(reached_writes)} (#4122: only `maintenance` may "
+                f"refresh, and only the operations READ_THROUGH_WRITE_METHODS names)")
+        # 2a-double-prime (#9576): a mutation that lives OUTSIDE the sdk.py boundary
+        # is invisible to `sdk_graph_mutators()`, so `reached_writes` above is empty
+        # and NOTHING else in this function can see the tool deleting rows — the
+        # surface reports clean (#9576's measurement). An entry on the READING side
+        # that reaches one of those operations must therefore be DECLARED, with its
+        # reason, in `RETENTION_CARVEOUTS`. Without this arm the ledger was a
+        # comment: a new read-classified tool purging through another module was
+        # caught by nothing.
+        #
+        # The predicate is the RISK TIER, not the hint (#4122 + #9576 review round
+        # 3), and it is deliberately the SAME WIDTH as the sibling arm above. Both
+        # reading tiers must be covered, and a hint-keyed predicate misses one of
+        # them: `maintenance` derives `readOnlyHint: false` (it refreshes stored
+        # state on purpose) while remaining callable by a `graphs:read` key, so
+        # `readOnlyHint is True` would let a maintenance-tier purger through
+        # silently — and `readOnlyHint is not False` would then also catch every
+        # writer, which is the other arm's job. `read | maintenance` is exactly the
+        # set of tiers a read-only key can reach (`writes` is derived only for
+        # `WRITE_RISK_TIERS`).
+        out_of_boundary = (
+            handler_operations(e.name, mcp_src).operations
+            & set(OUT_OF_BOUNDARY_MUTATORS)
+        )
+        reading_tier = e.risk in ("read", MAINTENANCE_TIER)
+        if out_of_boundary and reading_tier and e.name not in RETENTION_CARVEOUTS:
+            out.append(
+                f"{e.name}: risk={e.risk!r} but its handler reaches "
+                f"out-of-boundary mutation(s) {sorted(out_of_boundary)} — declare it "
+                f"in RETENTION_CARVEOUTS with the reason, or take it off the reading "
+                f"tiers (#9576)")
         if reached_writes:
             if e.http_policy:
                 if e.annotations is None or e.annotations.readOnlyHint is not False:
@@ -933,25 +1030,26 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
             elif not handler_self_guards(e.name, mcp_src):
                 out.append(
                     f"{e.name}: HTTP-excluded writer whose handler does not self-guard")
-        # 2b — writer-annotated must be write-classified or self-guarded.
+        # 2b — a tool that is NOT a pure read must be write-classified, be a
+        # declared `maintenance` tool, or self-guard as an HTTP-excluded tool.
         # The self-guard branch is deliberate and stays (#4474's issue comment
         # pins it; `test_T1_exempted_tool_without_self_guard_fails` exercises
-        # it): an HTTP-excluded graph writer must self-guard. On a coherent
-        # registry the branch is reached only by a writer-annotated entry
-        # OUTSIDE WRITE_TOOL_NAMES — empty since #4474, and that class is caught
-        # by `exemption_set_violations` — so this arm remains the handler-side
-        # cross-check plus the synthetic-probe path, not the primary guard.
-        # #4122: "writer" is the PERMISSION class, not the annotation. A
-        # `maintenance` entry is annotated non-read on purpose (it must stop
-        # claiming readOnlyHint) while its permission is read — using the hint as
-        # the proxy for "this is a write" would now demand `graphs:write` for it
-        # and take the tool away from every read-only key.
-        writer_annotated = bool(e.writes)
+        # it): an HTTP-excluded graph writer must self-guard. The `maintenance`
+        # branch is #4122's third state — the tool refreshes stored state and so
+        # correctly drops `readOnlyHint`, yet a `graphs:read` key must still be
+        # able to call it — so it is legitimate for such an entry to sit OUTSIDE
+        # WRITE_TOOL_NAMES. Without that branch this arm would red on every
+        # read-through tool, and the only ways to green would be to re-declare
+        # the false read hint or to take the tool away from read keys.
+        writer_annotated = (
+            e.annotations is not None and e.annotations.readOnlyHint is False
+        )
         if writer_annotated and e.name not in _ms.WRITE_TOOL_NAMES and not (
-                e.http_policy is False and handler_self_guards(e.name, mcp_src)):
+                e.risk == MAINTENANCE_TIER
+                or (e.http_policy is False and handler_self_guards(e.name, mcp_src))):
             out.append(
                 f"{e.name}: writer-annotated but not in WRITE_TOOL_NAMES "
-                f"and not a self-guarding HTTP-excluded tool")
+                f"and not a declared maintenance / self-guarding HTTP-excluded tool")
         # 2c — empty sdk_method must be declared
         if not e.sdk_method and e.name not in (NON_SDK_WRITER_TOOLS | NON_SDK_READ_TOOLS):
             out.append(f"{e.name}: empty sdk_method but not declared non-SDK")
@@ -1066,70 +1164,49 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
 
 
 def exemption_set_violations(entries) -> list[str]:
-    """An entry's client hints and its declared permission must be the SAME
-    statement about the same entry, over the whole served set.
+    """An entry's MCP hints and its declared `risk` tier must be one statement,
+    over the whole served set — the drift guard #4122's ruling demands.
 
-    This used to pin "writer-annotated AND NOT in WRITE_TOOL_NAMES AND
-    `http_policy is False`" to exactly `NON_HTTP_WRITER_TOOLS` — the five entries
-    that were writer-annotated yet served as reads (#4474). After those five
-    declared `writes=True` (#4170: the permission lives on the entry) the
-    exemption is empty, so that name-list equality is either a permanent false
-    red (list kept at its five names) or a narrower, one-directional restatement
-    keyed to `http_policy is False` (list emptied to match). It was restated as
-    the property it was approximating and could only ever see half of:
-    `readOnlyHint` and the declared `writes` flag must agree, in both
-    directions, for any entry.
+    Two independent statements are checked, because the tier model has THREE
+    hint/permission states, not two (`read`, `maintenance`, and the writing
+    tiers):
 
-    ⚠️ #4122 replaced that 2-state agreement with the RISK axis. The old
-    `readOnlyHint is False ⇔ writes` rule expressed "if it is not a pure read it
-    needs graphs:write", and that is FALSE for a `maintenance` tool: it changes
-    the tenant's derived state, so it must stop declaring `readOnlyHint` (clients
-    auto-approve on that hint), yet it must KEEP `graphs:read` and stay counted
-    as a read by velocity metering. So the property is now the 3-state
-    derivation:
+    1. `readOnlyHint` must be True exactly for `risk == "read"`.  A
+       `readOnlyHint: true` on a tool that is not a pure read is the #4122
+       defect: clients auto-approve on that hint, so a wrong one changes client
+       approval behaviour with no visible description change.
+    2. `writes` (needs `graphs:write`) must be True exactly for the writing
+       tiers `write|destructive|admin`.  A writer served as a read is the #4170
+       defect; a read served as a writer is the #4474 defect.
 
-        read                       → readOnlyHint True,  writes False
-        maintenance                → readOnlyHint False, writes False
-        write/destructive/admin    → readOnlyHint False, writes True
+    `maintenance` is the state that used to be unrepresentable — `readOnlyHint:
+    false` (correctly, it does refresh stored state) while `writes` is False
+    (correctly, a `graphs:read` key may call it) — and it is why this is no
+    longer the single `annotated_write == bool(writes)` equality it was.
 
-    A `_rw()`/`_idem()` entry with `writes=False` — the #4474 defect — still
-    fails, because it is `risk=write` and its permission was hand-set False.
+    History: this replaced a hard-coded name list (`NON_HTTP_WRITER_TOOLS`) in
+    #4474 with the property that list approximated. Both directions still fail
+    loudly — pinned by the rogue probes in `test_exemption_set_is_exact`.
 
-    Note this is the ANNOTATION half, not the handler half: a handler that
-    reaches a graph mutation is caught by `write_classification_violations`.
+    Note this is the HINT half, not the handler half: a handler that reaches a
+    graph mutation is caught by `write_classification_violations`.
     """
-    from tortoise.tool_registry import RISK_READ, risk_writes
-
     out: list[str] = []
     for e in entries:
         if e.annotations is None:
             continue
-        risk = getattr(e, "risk", None)
-        if risk is None:
-            # A PRE-#4122 entry object, or a duck-typed probe (a SimpleNamespace
-            # standing in for an entry): keep the old 2-state check rather than
-            # skipping it. Note this arm is NOT what stops a real registry entry
-            # from omitting the axis — `risk` is a REQUIRED field on
-            # `ToolDefinition`, so omission is a TypeError at construction
-            # (failing OPEN here — silently defaulting to "read" — was a review P1
-            # on #4122: it would have made a forged entry auto-approvable).
-            annotated_write = e.annotations.readOnlyHint is False
-            if annotated_write != bool(e.writes):
-                out.append(
-                    f"{e.name}: writer annotation and declared `writes` disagree — "
-                    f"readOnlyHint={e.annotations.readOnlyHint}, writes={e.writes} "
-                    f"(#4170: the entry's `writes` flag is the permission)")
-            continue
-        expects_read_only = risk == RISK_READ
-        if bool(e.annotations.readOnlyHint) != expects_read_only:
+        read_hint = e.annotations.readOnlyHint is True
+        if read_hint != (e.risk == "read"):
             out.append(
-                f"{e.name}: readOnlyHint={e.annotations.readOnlyHint} but "
-                f"risk={risk!r} — readOnlyHint must be `risk == 'read'` "
-                f"(#4122: clients auto-approve on this hint)")
-        if bool(e.writes) != risk_writes(risk):
+                f"{e.name}: readOnlyHint disagrees with the risk tier — "
+                f"risk={e.risk!r}, readOnlyHint={e.annotations.readOnlyHint} "
+                f"(#4122: only risk='read' may claim readOnlyHint)")
+        if bool(e.writes) != (e.risk in WRITE_RISK_TIERS):
             out.append(
-                f"{e.name}: writes={e.writes} but risk={risk!r} — `writes` must "
-                f"be `risk in {{'write','destructive','admin'}}` (#4122)")
+                f"{e.name}: `writes` disagrees with the risk tier — "
+                f"risk={e.risk!r}, writes={e.writes} "
+                f"(#4122: writes is derived, writing tiers are "
+                f"{sorted(WRITE_RISK_TIERS)})")
     return out
 
 
@@ -1169,20 +1246,13 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
                 and op not in NON_SDK_READ_OPERATIONS \
                 and op not in DANGLING_SDK_DECLARATIONS:
             out.append(f"READ_THROUGH_WRITE_METHODS entry {op!r} does not resolve")
-        # ⚠️ #4122: this arm used to require `readOnlyHint is True` — i.e. it
-        # ENFORCED the defect (a handler that writes the tenant's derived state
-        # had to keep declaring itself a pure read, because clients auto-approve
-        # on that hint). The owner's 2026-10-21 ruling classifies such an op as
-        # `maintenance`: it may not claim `readOnlyHint`, and it must not be
-        # promoted to a write either (that would take it away from `graphs:read`
-        # keys and stop metering an expensive recompute as a read). So the
-        # property is now "bound to a MAINTENANCE HTTP tool".
         for e in by_method.get(op, []):
             if not e.http_policy or e.annotations is None \
-                    or getattr(e, "risk", None) != RISK_MAINTENANCE:
+                    or e.risk != MAINTENANCE_TIER:
                 out.append(
                     f"{e.name}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
-                    f"tool that is not `risk={RISK_MAINTENANCE!r}`")
+                    f"non-maintenance HTTP tool — a read-through write must declare "
+                    f"risk={MAINTENANCE_TIER!r} (#4122), not {e.risk!r}")
         # #4035 split: a read-through op carried by a handler-served tool has no
         # `sdk_method` declaration left for the `by_method` loop above to key on,
         # so it becomes UNREACHABLE and the read-classification property stops
@@ -1197,13 +1267,80 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
         if e is None:
             continue  # liveness ('has no tool binding') is asserted above
         if not e.http_policy or e.annotations is None \
-                or getattr(e, "risk", None) != RISK_MAINTENANCE:
+                or e.risk != MAINTENANCE_TIER:
             out.append(
                 f"{bound_tool}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
-                f"tool that is not `risk={RISK_MAINTENANCE!r}`")
+                f"non-maintenance HTTP tool — must declare "
+                f"risk={MAINTENANCE_TIER!r} (#4122), not {e.risk!r}")
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
+    # RETENTION_CARVEOUTS and OUT_OF_BOUNDARY_MUTATORS are LIVE (#9576): a carved-out
+    # tool that no longer exists, has moved to a WRITING tier, or no longer reaches
+    # the operation it was carved out for is a record that stopped describing the
+    # code, and it must be deleted deliberately rather than left to read as a
+    # standing decision. (⚠️ NOT "no longer claims the read hint": a `maintenance`
+    # move drops the hint and KEEPS the carve-out — see the arm below.)
+    #
+    # ⚠️ SUBSET SEMANTICS: `entries` may be a synthetic subset (`without_dream` and
+    # `without` in `tests/test_tool_registry.py` pass "served set minus one tool"),
+    # so an absent tool proves NOTHING on its own — the file's own
+    # `NON_SDK_WRITER_BINDINGS` idiom is to skip a missing tool rather than report
+    # it. Reporting on absence would make a future probe aimed at
+    # `tortoise_events_poll` emit `delete the carve-out (#9576)` — i.e. delete the
+    # decision record — which is the opposite of this ledger's purpose. Liveness is therefore decided against
+    # the SERVED set, not against whatever subset the caller handed in: an entry that
+    # is missing here but present there is a filtered call, not a dead declaration.
+    served_names = {e.name for e in served_registry()}
+    for op in sorted(OUT_OF_BOUNDARY_MUTATORS):
+        if op not in methods:
+            out.append(
+                f"OUT_OF_BOUNDARY_MUTATORS entry {op!r} does not resolve to an SDK "
+                f"method — delete the declaration (#9576)")
+    for name, reason in sorted(RETENTION_CARVEOUTS.items()):
+        if not reason.strip():
+            out.append(
+                f"{name}: RETENTION_CARVEOUTS entry carries no reason — the recorded "
+                f"decision is the point (#9576)")
+        e = by_name.get(name)
+        if e is None:
+            if name in served_names:
+                continue  # synthetic subset — not a liveness signal (see above)
+            out.append(
+                f"RETENTION_CARVEOUTS entry {name!r} names no served tool — "
+                f"delete the carve-out (#9576)")
+            continue
+        # ⚠️ The carve-out is invalidated by a WRITING tier, NOT by any non-`read`
+        # tier (review round 7): this arm and the retention arm must be satisfiable
+        # together. The retention arm demands a declaration for every READING tier
+        # (`read | maintenance`) that reaches the purge, so refusing a declaration on
+        # a `maintenance` entry made that the one state with no green — the
+        # prescribed "delete the carve-out" immediately tripped "declare it". A
+        # re-tier off `read` is NOT silently allowed by this: the ruling is pinned by
+        # `test_the_read_classification_this_issue_asked_about`, which reds on any
+        # re-tier and names #9576/#4122. The ledger's own job is only to stop a
+        # WRITER inheriting a reading-tier deletion record.
+        if bool(getattr(e, "writes", False)):
+            out.append(
+                f"{name}: RETENTION_CARVEOUTS records a reading-tier carve-out for "
+                f"retention housekeeping, but the entry is now a WRITING tier "
+                f"risk={getattr(e, 'risk', None)!r} — delete the carve-out entry "
+                f"(#9576)")
+        # ⚠️ RECORDED BOUND (review P3, deliberate): the carve-out is keyed on the
+        # TOOL, not the `(tool, mutation)` pair, and this arm asks only for a
+        # NON-EMPTY reach — so if the poll ever reached a SECOND declared
+        # out-of-boundary mutation it would stay green and the reason's named pair
+        # would drift out of date. That is inside the disclosed scope (the arm
+        # enforces the DECLARATION, not the discovery, `docs/retention-and-deletion.md`)
+        # — re-read the reason when the reach widens, and prefer a `(tool, op)` key
+        # here if a second reach ever appears.
+        reached = (handler_operations(name).operations
+                   & set(OUT_OF_BOUNDARY_MUTATORS))
+        if not reached:
+            out.append(
+                f"{name}: RETENTION_CARVEOUTS entry no longer reaches "
+                f"{sorted(OUT_OF_BOUNDARY_MUTATORS)} — the carve-out is stale, delete "
+                f"it (#9576)")
     # DECLARED_BINDING_DIVERGENCES liveness (#4337).  The divergence arm iterates
     # the ENTRIES, so a ledger key whose registry entry was removed or renamed is
     # never visited and would persist unexamined.  This function is the home for

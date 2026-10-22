@@ -135,7 +135,7 @@
     "provenance_free_assembly": {
       "admission_predicate": "shipped (#2978 skip)",
       "assembly": true,
-      "provenance": "quote/source_turn_id stripped on EVERY hit — the product ask-lane shape today (#8658)",
+      "provenance": "quote/source_turn_id stripped on EVERY hit — the PRE-#8658 product ask-lane shape (still the shape of a DEGRADED fallback read)",
       "package_stats": {
         "applied": true,
         "pool_items": 139,
@@ -247,7 +247,7 @@
     },
     "provenance_leg_is_lane_scoped": {
       "measured": "with provenance 1 verbatim refs kept / 2 flood slots; without it 0 refs kept / 12 flood slots",
-      "why": "pass 1 (the content legs) is provenance-independent, so the STATEMENT flood is bounded either way; pass 2 — a point's OWN source chunks/turns — is the leg that is INERT without quote/source_turn_id, and #8658 is that state on the product ask lane. The instrument measures it rather than assuming it away"
+      "why": "pass 1 (the content legs) is provenance-independent, so the STATEMENT flood is bounded either way; pass 2 — a point's OWN source chunks/turns — is the leg that is INERT without quote/source_turn_id, which was the product ask lane's state until #8658 landed and is still the state of a degraded fallback read. The instrument measures it rather than assuming it away"
     }
   }
 }

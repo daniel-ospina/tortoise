@@ -169,6 +169,19 @@ _SCOPE_CALL_NAMES = (
     "_graph_metadata_write_scope",
     "_onboarding_write_scope",
     "_prewipe_restore_write_scope",
+    # #9391: the HANDLE-ONLY helper (`_handle_only_write_scope`) — the opener
+    # BOTH `replay` declaration sites now use: `_replay_write_scope()` returns
+    # it, and `event_store.reestablish_watermark` opens it directly. Same reason
+    # as the openers above, and it was a live LATENT-RED rather than a
+    # cosmetic omission: `reestablish_watermark` writes
+    # `scope = (_handle_only_write_scope(...) if ... else _cache_write_authorized(...))`,
+    # so the census classified its `MERGE` as declared only through the ELSE
+    # arm of the same conditional and attributed the WRONG lane to it, while the
+    # first lane to write the natural `with _handle_only_write_scope(...):` form
+    # would have been reported UNDECLARED on correct product code — the exact
+    # false positive this tuple's docstring exists to prevent. Pinned by
+    # `test_the_handle_only_opener_is_visible_to_the_census`.
+    "_handle_only_write_scope",
     "_cache_write_authorized",
     "_declares_live_write_lane",
     # #9206: the APPLY-FIRST lane and its decorator. A declaration, so the
@@ -4173,11 +4186,13 @@ def test_the_event_store_declares_every_writer():
     assert not undeclared, (
         "every event_store write must declare a lane — "
         "`_graph_metadata_write_scope` for the store's own bookkeeping (schema, "
-        "seq allocator, append, retention), or `_cache_write_authorized("
-        "restore_reason or \"replay\")` at the write for the wipe+replay "
-        "repair (`#9224` for the replay lane, `#9210` for the restore lane; "
-        "the helper opens it there because an inner scope shadows any `with` "
-        "at the call site). Undeclared:\n  " + "\n  ".join(
+        "seq allocator, append, retention), or the HANDLE-ONLY helper "
+        "(`_handle_only_write_scope(_REPLAY_WRITE_LANE)`, `#9391`) at the write "
+        "for the wipe+replay repair (`#9224` for the replay lane, `#9210` for "
+        "the restore lane, whose caller-supplied reason keeps "
+        "`_cache_write_authorized(restore_reason)`; the helper opens it there "
+        "because an inner scope shadows any `with` at the call site). "
+        "Undeclared:\n  " + "\n  ".join(
             f"{name}:{fact['lineno']} {fact['writes'][0][1]}: "
             f"{fact['writes'][0][2]!r}" for name, fact in undeclared.items()))
     # The store is small enough to pin exactly: a NEW write here must be a
@@ -4186,6 +4201,47 @@ def test_the_event_store_declares_every_writer():
         "ensure_event_schema", "next_seq", "reestablish_watermark",
         "append_event", "purge_expired", "purge_overflow", "_refresh_first_seq",
     }, f"unexpected event_store handle surface: {sorted(surface)}"
+
+
+def test_the_handle_only_opener_is_visible_to_the_census():
+    """`#9391`'s helper is an OPENER, so the census must SEE it.
+
+    `_handle_only_write_scope` is the helper both `replay` declaration sites
+    open: `_replay_write_scope()` returns it, and
+    `event_store.reestablish_watermark` opens it directly. Leaving it out of
+    `_SCOPE_CALL_NAMES` was a LATENT-RED, not a cosmetic omission: the first
+    lane to spell the natural `with _handle_only_write_scope(...):` form would
+    have been reported UNDECLARED on correct product code — the false positive
+    the tuple's own docstring exists to prevent — and the flip gate would then
+    instruct the next lane to add a lane that is already there.
+
+    RED before the name is registered: the synthetic door below reports
+    `scopes == []` (so `_kind` is not `declared`), and the real
+    `reestablish_watermark` fact lists only the conditional's ELSE arm.
+    """
+    assert "_handle_only_write_scope" in _SCOPE_CALL_NAMES, (
+        "the census cannot see `#9391`'s opener, so a writer that DOES declare "
+        "through it reads as undeclared")
+    synthetic = '''
+class Door:
+    def a_handle_only_door(self, proj, pid):
+        with _handle_only_write_scope("replay"):
+            proj.g.query("CREATE (n:Point {id:$id})", params={"id": pid})
+'''
+    fact = enumerate_handle_surface(
+        synthetic, "<synthetic-handle-only>")["Door.a_handle_only_door"]
+    assert {opener for _line, opener in fact["scopes"]} == {
+        "_handle_only_write_scope"}, fact
+    assert _kind(fact) == "declared", fact
+
+    surface = enumerate_handle_surface(
+        EVENT_STORE_PY.read_text(), str(EVENT_STORE_PY))
+    openers = {opener for _line, opener
+               in surface["reestablish_watermark"]["scopes"]}
+    assert "_handle_only_write_scope" in openers, (
+        "`reestablish_watermark` opens the handle-only helper for its `replay` "
+        f"default (`#9391`), but the census sees only {sorted(openers)} — so it "
+        "attributes the ELSE arm's lane to the default path's write")
 
 
 def test_the_prewipe_restore_funnel_is_declared_not_a_remainder():

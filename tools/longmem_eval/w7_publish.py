@@ -76,6 +76,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import measurement_posture
+
 #: Receipt schema keys mandated by plan §6.6 (same vocabulary as the
 #: W2/W3 harness receipts).
 RUN_STATUS_VALUES = ("completed", "failed", "skipped")
@@ -336,10 +338,17 @@ def build_receipt(*, run_id: str, date: str, commit: str, corpus_hash: str,
                   ingest_mode: str, run_status: str, verdict: str,
                   failure_origin: str | None, cost_usd: float,
                   metrics: dict, notes: list[str],
-                  resolved_config: dict | None = None) -> dict:
+                  resolved_config: dict | None = None,
+                  measurement_posture: dict[str, Any] | None = None) -> dict:
     """Validated-receipt shape per plan §6.6 (same vocabulary as the W2/W3
     harness receipts). ``judge_pin`` = the pinned judge version label;
     ``judge_model`` + ``judge_rubric_id_hash`` carry the resolved identity.
+
+    #8486: ``measurement_posture`` carries the ingest mode AND whether the
+    belief layer was activated — the disclosure the number is unreadable
+    without. Omitted by a pre-#8486 producer, whose completed receipt the
+    validator then REFUSES (a number never publishes with an implied
+    posture).
     """
     return {
         "receipt_version": 1,
@@ -356,6 +365,7 @@ def build_receipt(*, run_id: str, date: str, commit: str, corpus_hash: str,
         "reader_model_spec": reader_model_spec,
         "reader_pinned": reader_pinned,
         "ingest_mode": ingest_mode,
+        "measurement_posture": measurement_posture,
         "resolved_config": resolved_config or {},
         "cost_usd": cost_usd,
         "metrics": metrics,
@@ -425,6 +435,48 @@ def validate_receipt(receipt: dict) -> list[str]:
                     "be present, n == 0 when the run carried none)")
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
+    # #8486: the MEASUREMENT POSTURE gate. A completed number must say which
+    # ingest mode produced it AND whether the belief layer was activated —
+    # without both it is not comparable to a competitor's full-pipeline
+    # number, and a v2 run without activation measures a Tortoise whose
+    # epistemic layer is EP-inert (#2598). Refused fail-closed when the
+    # disclosure is absent, unrecorded (``None``) or ``unknown`` — a number
+    # never publishes with an IMPLIED posture.
+    if receipt.get("run_status") == "completed":
+        posture = receipt.get("measurement_posture")
+        if not isinstance(posture, dict):
+            issues.append(
+                "receipt.measurement_posture: completed run requires the "
+                "posture block (ingest mode + belief-layer activation — "
+                "#8486)")
+        else:
+            beliefs = posture.get("beliefs_activated")
+            if not isinstance(beliefs, bool):
+                issues.append(
+                    "receipt.measurement_posture.beliefs_activated: completed "
+                    f"run requires an explicit boolean, got {beliefs!r} — an "
+                    "unrecorded belief-layer posture is not publishable "
+                    "(#8486)")
+            layer = posture.get("belief_layer")
+            if layer not in measurement_posture.BELIEF_LAYER_VALUES \
+                    or layer == measurement_posture.BELIEF_LAYER_UNKNOWN:
+                issues.append(
+                    "receipt.measurement_posture.belief_layer: completed run "
+                    f"requires a resolved state, got {layer!r} (#8486)")
+            p_mode = posture.get("ingest_mode")
+            if not isinstance(p_mode, str) or not p_mode.strip():
+                issues.append(
+                    "receipt.measurement_posture.ingest_mode: completed run "
+                    "requires the ingest mode the number was produced with "
+                    "(#8486)")
+            elif (isinstance(receipt.get("ingest_mode"), str)
+                  and receipt["ingest_mode"].strip()
+                  and p_mode != receipt["ingest_mode"]):
+                issues.append(
+                    "receipt.measurement_posture.ingest_mode: "
+                    f"{p_mode!r} disagrees with receipt.ingest_mode "
+                    f"{receipt['ingest_mode']!r} — one number, one mode "
+                    "(#8486)")
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(
             receipt.get("cost_usd"), (int, float)):
         issues.append("receipt.cost_usd: expected a number")
@@ -491,6 +543,14 @@ def _main(argv: list[str] | None = None) -> None:
             retrieval["session_recall@k"]["5"]
 
     methodology = report.get("methodology") or {}
+    # #8486: the posture the runner recorded (ingest mode + whether the belief
+    # layer was activated). Read from the report — never hand-set here — so a
+    # receipt cannot claim a posture the run did not take. Absent (a pre-#8486
+    # report) → the UNKNOWN posture, which ``validate_receipt`` REFUSES on a
+    # completed run.
+    posture = (measurement_posture.of_report(report)
+               or measurement_posture.build(
+                   ingest_mode=methodology.get("ingest_mode", "")))
     seal = seal_answer_keys(instances)
     integrity = report.get("integrity") or {}
     run_status = ("completed" if integrity.get("valid") is True
@@ -515,6 +575,7 @@ def _main(argv: list[str] | None = None) -> None:
         reader_model_spec=methodology.get("reader_model_spec", ""),
         reader_pinned=bool(methodology.get("reader_pinned")),
         ingest_mode=methodology.get("ingest_mode", ""),
+        measurement_posture=posture,
         run_status=run_status,
         verdict=verdict,
         failure_origin=None,
@@ -524,6 +585,8 @@ def _main(argv: list[str] | None = None) -> None:
         resolved_config={
             "split": report.get("split"),
             "ingest_mode": methodology.get("ingest_mode"),
+            "beliefs_activated": posture.get("beliefs_activated"),
+            "belief_layer": posture.get("belief_layer"),
             "workers": methodology.get("workers"),
             "audit_verdict": (methodology.get("dataset_semantics_audit")
                               or {}).get("verdict"),
