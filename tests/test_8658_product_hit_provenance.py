@@ -162,6 +162,30 @@ def test_unprovenanced_hit_stays_byte_identical(sdk):
             f"{key} must be ABSENT on an unprovenanced hit, not empty")
 
 
+def test_the_first_source_turn_is_a_turn():
+    """Turn index ``0`` is a REAL turn and must collapse like any other.
+
+    Hermetic (no graph): two duplicate extractions of the FIRST turn of a
+    session — same ``source_turn_id`` (0, 0-based per ``commit_schema`` and
+    ``extractor_v2``'s ``enumerate``), same verbatim ``quote``, deliberately
+    different CONTENT so the content legs cannot fire and the same-source-turn
+    leg is the only one left.
+
+    FAILS on ``str(h.get("source_turn_id") or "")``: ``0 or ""`` is ``""``, so
+    the leg reads "no turn id" and the duplicate stays a second slot."""
+    quote = "we paid a deposit of five hundred dollars for the venue"
+    a = {"id": "p-a", "content": "the deposit was paid up front",
+         "point_kind": "statement", "sessionId": SESSION,
+         "quote": quote, "source_turn_id": 0}
+    b = {"id": "p-b", "content": "booking the venue needed money first",
+         "point_kind": "statement", "sessionId": SESSION,
+         "quote": quote, "source_turn_id": 0}
+    _packaged, stats = package_evidence_pool([a, b])
+    assert stats["packages"] == 1, (
+        f"two extractions of turn 0 are the same fact, got "
+        f"{stats['packages']} packages (stats={stats})")
+
+
 def test_the_points_own_source_chunk_now_collapses_into_one_slot(sdk):
     """The product consequence (#2683 Pass 2): with the provenance on the hit,
     the distilled point and its own source chunk become ONE package (the point

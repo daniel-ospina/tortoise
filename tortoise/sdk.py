@@ -27965,10 +27965,16 @@ class TortoiseSDK:
                 # runs, and the snapshot keeps a deliberately LEAN projection
                 # (``fallback_snapshot._SNAPSHOT_QUERY`` — no session column),
                 # so a degraded hit still carries ``sessionId == ""`` and
-                # renders ``[session ?]``. Widening that cached corpus is the
+                # renders ``[session ?]``. #8658's four verbatim-provenance
+                # columns (``quote`` / ``source_turn_id`` / ``span_start`` /
+                # ``span_end``) are read here, so a DEGRADED hit carries none of
+                # them either and Slice A's own-source leg stays inert on that
+                # tier (``retrieval._is_own_source`` returns False on its empty
+                # quote). Widening that cached corpus is the
                 # same separate, policy-governed change
                 # ``search_provenance_enabled`` already declares for
-                # provenance — a declared boundary, not an oversight of #3804.
+                # provenance — a declared boundary, not an oversight of #3804
+                # or of #8658.
                 #
                 # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
                 # DELIBERATE content change, so the assembly goldens were

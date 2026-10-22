@@ -830,6 +830,20 @@ class SearchResult:
     # source — stays byte-identical to pre-change output. A default that
     # emitted four empty fields would make every legacy hit look provenanced to
     # the package's own truthiness gates.
+    #
+    # ⚠️ This is a DEFAULT-ON additive response field, and that is a departure
+    # from the #3986 carve-out recorded on ``search_provenance_enabled`` above
+    # ("a default-off response field is not a surface change"). It is taken
+    # deliberately, and it is NOT a surface expansion: the four values are the
+    # point's OWN stored verbatim anchor — already on the node, already emitted
+    # to any caller of the eval lane, and already named by
+    # ``package_evidence_pool``'s own docstring as the key it collapses on. A
+    # default-off gate would keep the read path's own documented contract inert
+    # by default, which is the defect #8658 exists to remove. Recorded here for
+    # the same reason the #3986 note exists: no ``response_fields`` surface
+    # exists to record it in (``config/surface-manifest.yml`` has no such key and
+    # ``tools/surface_manifest.py`` derives none — that rule is scoped to MCP
+    # tools / SDK methods, not to response fields).
     quote: str = ""
     source_turn_id: Any = None
     span_start: Any = None

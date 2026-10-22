@@ -37,7 +37,7 @@ instrument; `tests/longmem_eval/test_slice_a_flood_bound.py` fails on any diff).
 | **Reader** | **none** — and none may be substituted: wave §3 freezes GPT-4o + the official judge for every product measurement. |
 | **Answer quality** | **NOT measured.** No accuracy number exists here and none may be inferred from it (receipt `instrument.caveat`). |
 | **Population** | a **constructed C2 shape** (wave §1's duplicate flood + #2978's content-less class, in one 40-item window), **not** the frozen 50-Q slice. §1's other recorded phenomenon — the evidence-boost re-rank of 11 items — is **not** modelled. |
-| **Boundary of the numbers** | they hold for hits carrying `quote` / `source_turn_id` (the eval lane). The product ask-lane shape is measured **separately** — the `provenance_free_assembly` arm — because there the fields are absent and the leg is inert (**#8658**). |
+| **Boundary of the numbers** | they hold for hits carrying `quote` / `source_turn_id` (the eval lane). The provenance-free shape is measured **separately** — the `provenance_free_assembly` arm — because there the fields are absent and the leg is inert. That was the PRODUCT ask lane until **#8658** landed (the point fetch now reads all four provenance columns); the arm stays live as the **degraded-fallback** shape, whose lean projection still carries none. |
 
 The two arms are the A6 switches (`TORTOISE_LME_EVIDENCE_ASSEMBLY`, eval) and
 A8 (`TORTOISE_ASK_EVIDENCE_ASSEMBLY`, ask lane). The instrument exercises the
@@ -82,7 +82,7 @@ forced True, which removes exactly the one `continue` #2978 added).
 | `post_2978` *(shipped predicate)* | 40 | 0 | **40 (100.0%)** | **0/4** |
 | `post_2978_assembly` (**A6 arm ON**) | 14 | 0 | **2** (= 1 + `max_verbatim`) | **4/4** |
 | `post_2978_assembly_value_marked` | 14 | 0 | 2 | 4/4 (value-mark census: 4 packages) |
-| `provenance_free_assembly` (**#8658** shape) | 24 | 0 | **12** | 4/4 |
+| `provenance_free_assembly` (**#8658** — pre-fix product lane / today's degraded fallback) | 24 | 0 | **12** | 4/4 |
 
 Control: a duplicate-free, provenance-bearing pool of 8 **statement** facts
 comes back **byte-identical** from the arm (0 collapsed, same ids, same
@@ -112,7 +112,9 @@ receipt (#9114).
    than assuming it away.** Without `quote`/`source_turn_id`, pass 2 (a point's
    OWN source chunks/turns) is inert: 12 flood slots instead of 2. Pass 1's
    content legs are provenance-independent and still dedup the *statement*
-   flood. **#8658** is that state on the product ask lane.
+   flood. That was the product ask lane's state until **#8658** landed; it
+   remains the state of a **degraded fallback** read, whose projection carries
+   no provenance.
 
 > ⚠️ **The number this is NOT.** `2 vs 100%` is a *window composition* result,
 > not a QA result. The old T wanted "the 2 C2 flooding regressions recover" — an
@@ -226,9 +228,10 @@ Until that runs, `#2683`'s T is **owned, not silent** — which is #8043's targe
   here may be quoted next to one.
 * **No corpus claim.** The pool is the constructed C2 shape of wave §1, not the
   frozen 50-Q slice; the numbers characterise the mechanism, not the dataset.
-* **No product-lane win.** On the ask lane the measured state is the
-  `provenance_free_assembly` arm (**#8658**) — the bound does not apply there
-  until that bug is fixed.
+* **No product-lane win.** The ask lane's own-source leg was inert
+  (`provenance_free_assembly`, **#8658**) until that fix landed; this document
+  supplies no QA number for either side of it, and the arm's remaining reach is
+  the degraded-fallback shape.
 * **No ruling on the arms' future.** Whether A6/A8 should ever be enabled is a
   measurement question (T-2) plus an owner decision — this document supplies the
   structural half, not the ruling.
@@ -240,7 +243,8 @@ Until that runs, `#2683`'s T is **owned, not silent** — which is #8043's targe
 
 `#2683` (the slice) · `#2080` (the wave epic) · `#2978` / PR #3000 (the window
 change that expired the baseline) · `#8658` (the ask-lane provenance bug this
-instrument measures as a scope limit) · `#8486` (the end-to-end run carrying
+instrument measures as a scope limit — **landed**; the arm remains as the
+degraded-fallback shape) · `#8486` (the end-to-end run carrying
 T-2) · `#3011` (the A/B/C experiment — adjacent, **not** this verdict's owner) ·
 `#5064` / `config/v4-mechanisms.yml` (the write-path declared set — **not** the
 read-side assembly's home, §1).

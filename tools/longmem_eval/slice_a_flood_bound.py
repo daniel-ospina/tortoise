@@ -67,15 +67,20 @@ SCOPE NOTE (must travel with every number)
 -------------------------------------------
 The measured bounds hold for a hit that CARRIES its provenance (``quote`` /
 ``source_turn_id``) — the eval lane's shape (``tools/longmem_eval/ingest.py::
-point_props_for_hits``) and the shape ``package_evidence_pool`` keys on. On the
-PRODUCT ask lane those fields are absent from ``SearchResult``, so Slice A's
-own-source leg is inert there today — measured, open, owned by **#8658**. This
-instrument does not assume that bug away: the ``provenance_free_assembly`` arm
-measures the product shape instead of describing it — pass 1 (the content
-legs) is provenance-INDEPENDENT, so it still collapses 91 of the 139 items
+point_props_for_hits``) and the shape ``package_evidence_pool`` keys on. The
+PRODUCT ask lane did not put those fields on a ``SearchResult`` until **#8658**
+landed (the point fetch now reads all four provenance columns and emits them
+present-only), so before it Slice A's own-source leg was inert there. This
+instrument still does not assume that shape away: the
+``provenance_free_assembly`` arm measures the PRE-#8658 product shape — pass 1
+(the content legs) is provenance-INDEPENDENT, so it still collapses 91 of the
+139 items
 (139 -> 48 packages); what breaks is pass 2, so the one flooded fact costs
 **12** window slots instead of 2 (receipt
-``arms.provenance_free_assembly``). The bound is therefore stated for the
+``arms.provenance_free_assembly``). It remains live as the DEGRADED-fallback
+shape: those two read tiers still carry no provenance (see the
+``#3804 KNOWN LIMITATION`` note in ``sdk.py``), so the arm guards a state the
+product can still enter. The bound is therefore stated for the
 eval lane and measured, not assumed, for the ask lane.
 
 RUN
@@ -620,7 +625,8 @@ def measure() -> dict[str, Any]:
     ]
     clean_packaged, clean_stats = package_evidence_pool(clean)
 
-    # The provenance-free pool (the PRODUCT ask-lane shape today, #8658) —
+    # The provenance-free pool (the PRE-#8658 product ask-lane shape, and the
+    # shape a DEGRADED fallback read still has) —
     # recorded under ``arms.provenance_free_assembly``, not under ``controls``:
     # with no ``quote``/``source_turn_id`` the own-source leg is inert and the
     # flood is NOT bounded by pass 2. Measured, not assumed.
@@ -785,7 +791,8 @@ def measure() -> dict[str, Any]:
                 "admission_predicate": "shipped (#2978 skip)",
                 "assembly": True,
                 "provenance": "quote/source_turn_id stripped on EVERY hit — the "
-                "product ask-lane shape today (#8658)",
+                "PRE-#8658 product ask-lane shape (still the shape of a "
+                "DEGRADED fallback read)",
                 "package_stats": bare_stats,
                 **_slot_census(bare_assembly),
             },
@@ -915,8 +922,9 @@ def measure() -> dict[str, Any]:
             "why": "pass 1 (the content legs) is provenance-independent, so the "
             "STATEMENT flood is bounded either way; pass 2 — a point's "
             "OWN source chunks/turns — is the leg that is INERT without "
-            "quote/source_turn_id, and #8658 is that state on the "
-            "product ask lane. The instrument measures it rather than "
+            "quote/source_turn_id, which was the product ask lane's state "
+            "until #8658 landed and is still the state of a degraded "
+            "fallback read. The instrument measures it rather than "
             "assuming it away",
         },
     }
