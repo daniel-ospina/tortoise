@@ -294,3 +294,72 @@ def test_a_blank_stored_instant_is_journaled_as_blank_not_as_the_capture_clock(p
         f"{_differs(live, rebuilt)}"
         f"\n  live    ingestedAt={live.get('ingestedAt')!r}"
         f"\n  rebuilt ingestedAt={rebuilt.get('ingestedAt')!r}")
+
+
+def test_a_legacy_capture_record_does_not_move_a_journalled_instant(prov):
+    """#9451 review round 3, ISSUE 2 — a PRE-#9451 capture line must stay the
+    NO-OP it was, on both engines.
+
+    The shape: the node's instant is **journaled** by an earlier writer
+    (`create_source("session:<id>")`, the hosted commit path's own door — its
+    `SourceCreated` carries T0), and a capture written BEFORE this fix then
+    completed that node. That legacy line states `now` — the capture clock,
+    which the live write never stored, because `coalesce(s.ingestedAt, $now)`
+    keeps T0 — and it carries `_stub_completion=True` like every capture
+    completion record.
+
+    Pre-fix, both engines replayed it FAITHFULLY (the ON CREATE arm took T0 from
+    the journaled creator, the ON MATCH arm had no `ingestedAt` clause at all),
+    so live == replay held. A clause gated on `$stub_completion` ALONE would
+    apply the never-stored `now` here and MANUFACTURE the divergence this issue
+    exists to remove. That is why the fold is also gated on the writer's own
+    ``_ingestedAtStored`` marker: a legacy line has no marker and stays inert.
+
+    FAILS ON A `$stub_completion`-ONLY GATE (measured: both engines land the
+    legacy record's `2099-01-01` against a live T0).
+
+    ⚠️ Only `ingestedAt` is compared, not the whole bag: a legacy capture line
+    carries other payload keys the live write of THIS version derives
+    differently (`updatedAt`, `summary`, …), which is a separate, documented
+    legacy residual — not the field this issue owns.
+    """
+    sdk, events, log_path = prov
+    url = "session:S6"
+    # 1. A JOURNALLED creator: T0 is in the journal, so replay can reproduce it.
+    sdk.create_source(url, "agentSession")
+    logged_t0 = _bag(sdk, url)["ingestedAt"]
+    assert logged_t0, "guard: create_source journaled no ingest instant"
+
+    # 2. A PRE-#9451 capture-completion line: `_stub_completion` set, NO
+    #    `_ingestedAtStored` marker, `ingestedAt` = the capture's clock (a value
+    #    the live coalesce never stored). Emitted through the real journal
+    #    writer, which is how the pre-fix writer wrote it.
+    legacy_now = LATER_NOW
+    sdk._emit_event(
+        "SourceCreated", id=url, url=url,
+        sourceKind="agentSession", ingestedAt=legacy_now,
+        updatedAt=legacy_now, capturedAt=legacy_now,
+        _stub_completion=True,
+    )
+    legacy = [r for r in _capture_records(events)
+              if r.get("url") == url and r.get("_stub_completion") is True]
+    assert legacy, "guard: the legacy line did not reach the journal"
+    assert "_ingestedAtStored" not in legacy[-1], (
+        "guard: this line must look PRE-#9451 (no stored-instant marker)")
+
+    live = _bag(sdk, url)
+    assert live["ingestedAt"] == logged_t0, (
+        "the harness is not modelling the legacy shape: appending a journal "
+        f"record moved the live node ({live['ingestedAt']!r})")
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _bag(sdk, url)["ingestedAt"] == logged_t0, (
+        "a PRE-#9451 capture line MOVED the rebuilt node's ingest instant on "
+        f"rebuild_all(): rebuilt={_bag(sdk, url)['ingestedAt']!r} "
+        f"live={logged_t0!r} legacy_record={legacy_now!r}")
+
+    sdk._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+    assert _bag(sdk, url)["ingestedAt"] == logged_t0, (
+        "a PRE-#9451 capture line MOVED the rebuilt node's ingest instant on "
+        f"rebuild(): rebuilt={_bag(sdk, url)['ingestedAt']!r} "
+        f"live={logged_t0!r} legacy_record={legacy_now!r}")

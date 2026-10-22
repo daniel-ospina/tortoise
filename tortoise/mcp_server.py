@@ -2066,6 +2066,15 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # the write is attempted; `sdk.create_source` refuses it in its own
     # `**props` guard and `sdk._sanitize_props` is the direct-SDK backstop.
     "_stub_completion",
+    # #9451: the sibling key on the same record — `True` states that the record's
+    # `ingestedAt` is the instant the live write STORED (read back off the node)
+    # rather than the capture clock, which is what licenses `_upsert_source`'s ON
+    # MATCH arm to apply it. Forging it lets a tenant move a `:Source`'s
+    # `ingestedAt` on replay (and out of the recency computation), so the same
+    # three refusals as `_stub_completion`: MCP here, `sdk.create_source`'s own
+    # `**props` guard, and `sdk._sanitize_props` as the direct-SDK backstop. The
+    # ONE producer is `sdk._materialize_session_source`'s trailing `_emit_event`.
+    "_ingestedAtStored",
 })
 
 

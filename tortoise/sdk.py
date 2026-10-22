@@ -3847,6 +3847,18 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'_stub_completion' is a server-managed capture-completion "
             "discriminator and cannot be set via props."
         )
+    # #9451: the sibling key on the same `SourceCreated` record. It states that
+    # the record's `ingestedAt` is the instant the write STORED (not the capture
+    # clock), which is what licenses the fold's ON MATCH arm to apply it — so a
+    # caller able to set it could move a `:Source`'s `ingestedAt` on replay, i.e.
+    # out of the recency/decay ordering, and the key rides the journal so every
+    # rebuild would restore it. Same class and same hard-reject as
+    # `_stub_completion` above; the ONE producer never re-enters this intake.
+    if "_ingestedAtStored" in props:
+        raise ValueError(
+            "'_ingestedAtStored' is a server-managed journal discriminator and "
+            "cannot be set via props."
+        )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
     # `mitigate_operator`, which validate it and run the authored-assertion
@@ -11939,9 +11951,15 @@ class TortoiseSDK:
         # pins the resulting property set against the pre-#8501 shape.
         from .projection.edges import _mint_source_stub
         # `now` is the CAPTURE's instant, not a fresh clock read: for a capture
-        # that mints no Point this is the only writer of `ingestedAt`, and the
-        # `SourceCreated` record below carries `now` — so a fresh clock here
-        # would make the live node disagree with the replayed one (#8501).
+        # that mints no Point this is the only writer of `ingestedAt` on the arm
+        # where the mint CREATES the stub, and the `SourceCreated` record below
+        # states `now` on that arm — the SET coalesces into `$now`, so the
+        # read-back it journals is this same value. (#9451: on a PRE-EXISTING
+        # stub the mint's ON MATCH leaves `ingestedAt` alone and the SET's
+        # `coalesce` KEEPS the earlier writer's instant, so the record carries
+        # THAT, not `now` — the mint's clock is inert there.) A fresh clock here
+        # would make the live node on the create arm disagree with the replayed
+        # one (#8501).
         #
         # ⛔ THE RETURNED KEY IS USED, NEVER DISCARDED (#8501 review P3).
         # `_mint_source_stub`'s contract is explicit — callers MUST address
@@ -12018,6 +12036,19 @@ class TortoiseSDK:
             validFrom=prior_valid_from,
             is_episodic=prior_is_episodic,
             _stub_completion=True,
+            # #9451: the record's `ingestedAt` above is the instant this write
+            # STORED (read back from the node), not the capture clock. This
+            # marker is what tells the two apart at FOLD time: a record written
+            # before #9451 carries `_stub_completion` but no marker and states a
+            # `now` the live write never stored on a pre-existing stub, so the
+            # ON MATCH arm leaves the node alone for those lines exactly as it
+            # did before this change (a legacy record must not start MOVING a
+            # value the pre-fix replay reproduced faithfully). Server-managed:
+            # refused as a caller key by `_sanitize_props` / `create_source` /
+            # MCP, listed in `_META_KEYS` so it never reaches a `:Source`, and
+            # in `record_projection._RECORD_ONLY_KEYS` so it never enters a
+            # record's props tail.
+            _ingestedAtStored=True,
             **{SOURCE_SEARCH_TEXT_FIELD: search_text},
             sessionId=session_id,
             capturedAt=now,
@@ -12095,31 +12126,42 @@ class TortoiseSDK:
         #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
         #     record stating `now` journals a value the write never wrote (#9451).
         #     `_upsert_source`'s ON CREATE arm reads the recorded value (#5024)
-        #     and its ON MATCH arm now applies it under the `$stub_completion`
-        #     gate, so for a record written BY THIS VERSION both replay engines
-        #     reproduce the node's value on both arms — pinned by
-        #     `tests/test_9451_pre_existing_stub_ingest_instant.py` (whole-bag live
-        #     vs after `rebuild_all()` AND after `rebuild()`, mutation-measured red
-        #     on the pre-#9451 tree).
+        #     and its ON MATCH arm applies it under the `$stub_completion AND
+        #     $ingestedAtStored` gate, so for a record written BY THIS VERSION
+        #     both replay engines reproduce the node's value on both arms —
+        #     pinned by `tests/test_9451_pre_existing_stub_ingest_instant.py`
+        #     (whole-bag live vs after `rebuild_all()` AND after `rebuild()`,
+        #     mutation-measured red on the pre-#9451 tree).
         #
         #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied and
         #     engine by engine (#9451 review rounds 3-4): a `SourceCreated` line
         #     written BEFORE this change states `now`, which the live write never
         #     stored on a pre-existing stub — and no record can correct that,
-        #     because the instant the mint chose was never journaled. On
-        #     `rebuild_all()` the ON CREATE arm already applied that recorded
-        #     `now` (pass 1b folds the record before the stub mint); on
-        #     `rebuild()` the stub was re-minted at the REPLAY clock and the fold
-        #     left it there, and this change makes the ON MATCH arm apply the
-        #     recorded `now` on that engine too. Either way the rebuilt node is
-        #     still not the LIVE node's value for those legacy lines: convergence
-        #     needs a MIGRATION or a fresh faithful record — NOT a plain
-        #     re-capture, because `capture_session` short-circuits an
-        #     already-captured session ("session already captured (same
-        #     session_id) — no new extraction") and journals no `SourceCreated`
-        #     for it at all. What #9451 closes is the DOOR: every capture that
-        #     REACHES this writer from this version onward journals the instant it
-        #     stored, on either arm.
+        #     because the instant the mint chose was never journaled. Those lines
+        #     carry `_stub_completion` but NOT `_ingestedAtStored`, so the ON
+        #     MATCH arm leaves the node's `ingestedAt` alone for them, exactly as
+        #     it did before this change. The consequence, engine by engine: on
+        #     `rebuild_all()` the ON CREATE arm still applies the recorded `now`
+        #     in the shape where this record is the node's CREATOR (pass 1b folds
+        #     it before pass 2 mints the stub) — so those rebuilt nodes are still
+        #     not the LIVE node's value; on `rebuild()` such a node keeps the
+        #     replay clock the re-minted stub was given, as it did before. In the
+        #     other legacy shape — the node was created by a JOURNALLED earlier
+        #     write (`create_source`'s own `SourceCreated` at T0) and a pre-#9451
+        #     capture merely completed it — the ON MATCH arm being a NO-OP is
+        #     what keeps `rebuild()`/`rebuild_all()` FAITHFUL to the live T0
+        #     (#9451 review round 3, ISSUE 2: applying the legacy record's
+        #     never-stored `now` there would have turned a faithful recovery into
+        #     a divergence, so the marker — not just `$stub_completion` — is what
+        #     the clause is gated on; pinned by
+        #     `test_a_legacy_capture_record_does_not_move_a_journalled_instant`).
+        #     Convergence for the CREATOR shape needs a MIGRATION or a fresh
+        #     faithful record — NOT a plain re-capture, because `capture_session`
+        #     short-circuits an already-captured session ("session already
+        #     captured (same session_id) — no new extraction") and journals no
+        #     `SourceCreated` for it at all. What #9451 closes is the DOOR: every
+        #     capture that REACHES this writer from this version onward journals
+        #     the instant it stored, on either arm.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -36288,6 +36330,17 @@ class TortoiseSDK:
                 "'_stub_completion' is a server-managed capture-completion "
                 "discriminator and cannot be set via props — it is set only "
                 "by the session-capture writer (#5097)."
+            )
+        # #9451: its sibling on the same record — `True` declares the record's
+        # `ingestedAt` to be the instant the write STORED, which the fold's ON
+        # MATCH arm then applies. Same class: a forged key moves a `:Source`'s
+        # `ingestedAt` on every replay. Same hard-reject; the ONE producer is
+        # the session-capture writer's own `_emit_event` call.
+        if "_ingestedAtStored" in props:
+            raise ValueError(
+                "'_ingestedAtStored' is a server-managed journal discriminator "
+                "and cannot be set via props — it is set only by the "
+                "session-capture writer (#9451)."
             )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`

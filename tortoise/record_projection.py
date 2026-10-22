@@ -987,6 +987,15 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # `cache_projection` copies back onto the node verbatim. Same class as the
     # sibling `contains_session` above.
     "_stub_completion",
+    # #9451: the sibling discriminator on the same record — "this record's
+    # `ingestedAt` is the instant the live write STORED", which selects
+    # `_upsert_source`'s ON MATCH behaviour. Same three homes as `_stub_completion`
+    # above (`projection/entities.py::_META_KEYS`, `sdk._sanitize_props` /
+    # `sdk.create_source`, MCP `_SERVER_MANAGED_PROPS`); the RECORD layer is the
+    # fourth, and without it the key would fall into the `source.props` jsonb
+    # tail that `cache_projection._props_from_row` copies back onto the node
+    # verbatim.
+    "_ingestedAtStored",
     # Creating-record embedding identity (a DESCRIPTION of the record, never a
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
