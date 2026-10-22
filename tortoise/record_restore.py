@@ -26,6 +26,11 @@ WHAT A RESTORE MUST REFUSE — the four ways it could be worthless
 2. **A rebuild that materialised nothing is not a restore either.** Refused
    separately from (1), because it is a different failure AND a different
    state: the record HAD rows, the wipe ran, and the cache holds none of them.
+   ⚠️ "Had rows" means either kind: a record that carries RELATIONS but no
+   nodes (the measured shape when the record's relation endpoints are kept out,
+   R4) whose relations cannot resolve their endpoints is the same destroyed
+   cache, and it reached exit `0` under a `✓ restored` line until the guard was
+   keyed on the record rather than on ``record_nodes``.
    ⚠️ That is reported as **UNKNOWN (`restore_unavailable`, exit 2), never as
    the exit-3 refusal class** — exit `3` means "REFUSED, nothing was written"
    and reads as "your cache is as it was", while here the cache has already
@@ -213,9 +218,54 @@ class RestoreOutcome:
     #: is 0 on a perfectly complete restore — read :attr:`unwritten_keys`, never
     #: this, to decide whether anything was left out.
     declared_keys: int = 0
-    #: ``--limit`` was supplied, so ``coverage`` is ``partial`` by construction.
+    #: ``--limit`` was supplied. ⚠️ NOT "something was left out": ``coverage``
+    #: comes from the projection's own declaration, and a bound at or above the
+    #: record's node count still declares ``complete``. Read
+    #: :attr:`unwritten_keys` and :attr:`relations_not_written` for what was
+    #: actually left out — never this flag.
     bounded: bool = False
     extra: dict = field(default_factory=dict)
+
+    @property
+    def relations_not_written(self) -> int:
+        """Record RELATIONS the rebuilt cache does not hold — ``relations-not-hot``.
+
+        The relation half of the not-hot story, and the reason a ``complete``
+        declaration is never, on its own, a claim about edges: ``coverage`` is
+        derived from the record's NODE keys (``declaration_for``), so a restore
+        that lands every node and no edge still declares ``complete``. That is
+        not a hypothetical — a relation statement MATCHes its endpoints and is
+        a no-op when the record does not carry them, which is the measured
+        shape of an armed record (#9556 R4), so an undisclosed shortfall would
+        let a green exit read as "every edge is back" (§17.3: a missing edge is
+        a residency miss, never evidence that it does not exist).
+
+        ``relations_selected`` is the right denominator when the projection
+        reports it: a bounded run selects only the relations whose endpoints it
+        keeps, so comparing against ``record_relations`` there would report a
+        shortfall the bound itself explains.
+        """
+        expected = (self.relations_selected
+                    if self.relations_selected is not None
+                    else self.record_relations)
+        return max(0, expected - self.relations_written)
+
+    @property
+    def declared_partial(self) -> tuple:
+        """The DECLARED partial states this restore ended in (§17.3).
+
+        Non-empty means the cache is not fully hot and the run says so in the
+        machine-readable contract, so a consumer keyed on ``coverage`` alone
+        cannot read it as complete: ``not-hot`` (nodes) and
+        ``relations-not-hot`` (edges) are the two states, each with its own
+        reason rather than being folded into an absence.
+        """
+        states = []
+        if self.unwritten_keys:
+            states.append("not-hot")
+        if self.relations_not_written:
+            states.append("relations-not-hot")
+        return tuple(states)
 
     @property
     def unwritten_keys(self) -> int:
@@ -246,6 +296,8 @@ class RestoreOutcome:
             "coverage": self.coverage,
             "declared_keys": self.declared_keys,
             "unwritten_keys": self.unwritten_keys,
+            "relations_not_written": self.relations_not_written,
+            "declared_partial": list(self.declared_partial),
             "bounded": self.bounded,
             **self.extra,
         }
@@ -273,6 +325,17 @@ class RestoreOutcome:
             line += (
                 f" — {self.unwritten_keys} record key(s) were NOT written, so a "
                 f"read for them is not-hot (degraded), never empty (§17.3)")
+        if self.relations_not_written:
+            # ⚠️ ``coverage`` above is a claim about NODES (``declaration_for``
+            # keys off the record's node keys), so it stays ``complete`` here.
+            # Saying so out loud is the whole point: an undisclosed relation
+            # shortfall is the #3895 shape (an export whose edges are missing
+            # while the counters look healthy).
+            line += (
+                f" — ⚠️ {self.relations_not_written} record relation(s) are NOT "
+                f"in the cache (their endpoints are not resolvable there), so "
+                f"`coverage` above covers NODES only; a read for one of those "
+                f"edges is relations-not-hot, never empty (§17.3)")
         return line
 
 
@@ -484,18 +547,29 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
     relations_written = _as_int(result.get("relations_written"),
                                 "relations_written")
 
-    if record_nodes and nodes_written == 0:
+    if (record_nodes or record_relations) and nodes_written == 0:
         # ⚠️ NOT the exit-3 class. Exit 3's documented meaning is "REFUSED,
         # nothing was written" — an operator reads that as "my cache is as it
         # was", and here it was WIPED by this run and holds none of the
         # record's rows. Post-wipe, so the state is reported as UNKNOWN (exit 2)
         # with the wipe spelled out.
+        #
+        # ⛔ The condition is about the RECORD having rows, not about it having
+        # NODE rows (#9556 review). Keying it on ``record_nodes`` alone left a
+        # relations-only scope (0 nodes, N relations — the measured shape when
+        # the record's relation endpoints are kept out by the ``search_keys``
+        # refusal, R4) unguarded on BOTH arms: this one was skipped by falsy
+        # ``record_nodes``, and the ``expected_nodes`` check below was ``0 != 0``
+        # — i.e. a run that wiped the cache and restored nothing exited 0 under
+        # a ``✓ restored`` line. That is the exact false-PASS this verb exists
+        # to refuse.
         raise RestoreUnavailable(
             f"the rebuild ran, wiped cache {cache_graph!r}, and the cache now "
-            f"holds 0 node(s) while the record holds {record_nodes} for "
-            f"{org_id}/{graph_id} — the wipe happened and nothing was put "
-            f"back. Treat the cache as LOST, not as restored and not as it "
-            f"was; fix the cause and re-run `record-restore`")
+            f"holds 0 node(s) while the record holds {record_nodes} node(s) and "
+            f"{record_relations} relation(s) for {org_id}/{graph_id} — the wipe "
+            f"happened and nothing was put back. Treat the cache as LOST, not "
+            f"as restored and not as it was; fix the cause and re-run "
+            f"`record-restore`")
 
     expected_nodes = record_nodes if limit is None else min(record_nodes,
                                                             limit)

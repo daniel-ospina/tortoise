@@ -889,3 +889,149 @@ def test_the_post_rebuild_count_is_BOUNDED_and_never_invents_a_zero():
     proj.g = _Graph([])
     with pytest.raises(RuntimeError, match="no row"):
         proj._count_projected("RETURN count(n)")
+
+
+# ── the guard is about the RECORD having rows, not about it having NODES ───
+#    (#9556 review P2: a relations-only scope wiped the cache and put nothing
+#     back, and BOTH count guards were keyed on ``record_nodes``, so the run
+#     printed ``✓ restored … 0 node(s)`` and exited 0.)
+
+
+def _view_with_relations(n_nodes: int, n_relations: int) -> cp.RecordView:
+    nodes = tuple(
+        cp.RecordNode(label="Point", key=f"p-9556-{i}",
+                      props={"id": f"p-9556-{i}", "content": f"c{i}",
+                             "status": "live"})
+        for i in range(n_nodes))
+    relations = tuple(
+        cp.RecordRelation(rel_type="RELATES_TO", src_label="Point",
+                          src_key=f"p-9556-{i % max(n_nodes, 1)}",
+                          tgt_label="Point",
+                          tgt_key=f"p-9556-{(i + 1) % max(n_nodes, 1)}", idx=i)
+        for i in range(n_relations))
+    return cp.RecordView(nodes=nodes, relations=relations)
+
+
+def test_a_relations_only_record_that_restored_NOTHING_is_UNAVAILABLE(
+        monkeypatch, capsys):
+    """RED pre-fix: ``record_nodes`` was falsy, so neither guard fired.
+
+    A record that carries relations but no nodes is the measured shape when the
+    relation endpoints are kept out of the record (R4). Its relation statements
+    MATCH endpoints that are not there, so the rebuild wipes the cache and
+    materialises nothing — and ``if record_nodes and nodes_written == 0`` was
+    skipped while ``0 != min(0, None)`` passed, i.e. exit ``0`` under a
+    ``✓ restored`` line over a destroyed cache.
+    """
+    from tortoise import __main__ as cli
+
+    projection = _RecordingProjection(result={
+        "nodes_written": 0, "relations_written": 0, "nodes_selected": 0,
+        "relations_selected": 3, "statements": 0, "record_nodes": 0,
+        "record_relations": 3, "coverage": "partial", "declared_keys": 0,
+        "source": "record"})
+    _install_fakes(monkeypatch, view=_view_with_relations(0, 3),
+                   projection=projection)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, printed.out + printed.err
+    assert "LOST" in printed.err, printed.err
+    assert "3 relation(s)" in printed.err, printed.err
+    assert "✓" not in printed.out, (
+        f"a cache that got nothing back must never print the restored line: "
+        f"{printed.out}")
+
+
+def test_relations_that_did_not_land_are_DECLARED_not_silently_complete(
+        monkeypatch, capsys):
+    """``coverage`` is a claim about NODES; the relation shortfall is its own state.
+
+    Every node lands, no edge does. ``coverage=complete`` is true of the node
+    set and useless about edges, so the run must carry the shortfall in the
+    machine-readable contract (``relations_not_written`` + ``declared_partial``)
+    — otherwise a consumer keyed on ``coverage`` reads a cache missing every
+    edge as fully restored (the #3895 shape).
+    """
+    from tortoise import __main__ as cli
+
+    projection = _RecordingProjection(result={
+        "nodes_written": 2, "relations_written": 0, "nodes_selected": 2,
+        "relations_selected": 3, "statements": 0, "record_nodes": 2,
+        "record_relations": 3, "coverage": "complete", "declared_keys": 0,
+        "source": "record"})
+    _install_fakes(monkeypatch, view=_view_with_relations(2, 3),
+                   projection=projection)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET, "--json"])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_RESTORED, printed.err
+    payload = json.loads(printed.out)
+    assert payload["nodes_written"] == 2, payload
+    assert payload["coverage"] == "complete", payload
+    assert payload["relations_not_written"] == 3, payload
+    assert payload["declared_partial"] == ["relations-not-hot"], payload
+
+
+def test_the_human_line_names_the_relation_shortfall():
+    """The operator line must say it too — the JSON is not the only reader."""
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_o",
+        record_nodes=2, record_relations=3, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        coverage=rrestore.COVERAGE_COMPLETE, nodes_selected=2,
+        relations_selected=3)
+    line = outcome.render()
+
+    assert "3 record relation(s) are NOT in the cache" in line, line
+    assert "relations-not-hot" in line, line
+    assert "`coverage` above covers NODES only" in line, line
+
+
+def test_a_LIVE_declaration_claims_only_what_the_MEASURED_counts_proved(
+        shared_proj, cache_graph, monkeypatch):
+    """RED pre-fix: the declaration was built from the PLAN, not the counts.
+
+    A rebuild whose writes did not land wrote a plan-sized ``complete``
+    residency marker into the cache it had just emptied, and the composition
+    then refused the run as LOST — leaving a graph claiming ``hot`` for keys it
+    does not hold, so a read for one reports ``empty`` instead of ``not-hot``
+    (§17.3's polarity, inverted).
+    """
+    from tortoise.residency import read_declaration
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    monkeypatch.setattr(cp, "project_records", lambda g, plan: 0)
+
+    proj.rebuild_from_record(_view(2), confirm_destructive=True)
+
+    declaration = read_declaration(cache_graph)
+    assert declaration.partial, (
+        f"a wipe that materialised nothing must not leave a complete "
+        f"declaration behind: {declaration}")
+    assert not declaration.hot_keys, (
+        f"the writing lane knows HOW MANY landed, not WHICH — so the only "
+        f"provable hot set is empty here: {declaration.hot_keys}")
+
+
+def test_a_LIVE_landed_rebuild_still_declares_complete(
+        shared_proj, cache_graph):
+    """The other direction: the proof-direction fix must not understate a real one."""
+    from tortoise.residency import read_declaration
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    proj.rebuild_from_record(_view(3), confirm_destructive=True)
+
+    declaration = read_declaration(cache_graph)
+    assert not declaration.partial, (
+        f"a rebuild that landed every record node must still declare "
+        f"complete, or every residency read becomes a miss: {declaration}")

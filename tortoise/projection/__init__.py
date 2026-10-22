@@ -16741,9 +16741,28 @@ class FalkorProjection(
         declaration = None
         if declare:
             materialized = plan.node_keys()
+            # ⛔ The declaration claims only what the MEASURED counts proved
+            # (#9556 review). It used to be built from ``plan.node_keys()`` —
+            # the PLAN — so a rebuild whose writes did not land still wrote a
+            # ``complete`` (or plan-sized ``partial``) residency marker into a
+            # cache that held nothing, and its caller then refused the run as
+            # LOST. The graph was left carrying a claim the code had just
+            # disproved: §17.3 says a key the cache does not hold must read
+            # ``not-hot``/``degraded``, and a ``complete`` marker makes it read
+            # ``empty`` (absence) instead — the polarity this marker exists to
+            # prevent.
+            #
+            # The writing lane knows HOW MANY nodes landed (``nodes_written``)
+            # but not WHICH, so the only provable set is the two ends: all of
+            # the plan when the count matches it, and NOTHING otherwise. The
+            # short direction is the safe one — an understated hot set costs a
+            # residency miss, an overstated one reports a missing node as
+            # genuinely absent.
+            proven = (materialized
+                      if nodes_written == len(set(materialized)) else ())
             declaration = declaration_for(
                 view.record_keys,
-                [(label, key) for label, key in materialized],
+                proven,
                 scope=scope,
             )
             write_declaration(self.g, declaration)

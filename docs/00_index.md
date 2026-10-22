@@ -39,7 +39,7 @@ Practical runbooks and operational procedures for deploying, maintaining, and ve
 
 | Area | Path |
 | --- | --- |
-| Hosted platform **infra runbook** — provisioning, secrets rotation (§2) + the **workstation credential posture** (what lives on the operator laptop and why it may not move, §2.1, #4030), rollback, health checks, machine topology + autostop policy (§6), the out-of-band availability watchdog with self-healing + alert dedupe (§7), the pager's own liveness — rolling heartbeat + independent dead-man check with operator knobs (§7.8a, #4573) — and the deploy-gate `SKIP_*` bypass convention + Fly secret-provenance gate (§8, #4126) (#2850) | `docs/infra-runbook.md` |
+| Hosted platform **infra runbook** — provisioning, secrets rotation (§2) + the **workstation credential posture** (what lives on the operator laptop and why it may not move, §2.1, #4030), rollback, health checks, machine topology + autostop policy (§6), the out-of-band availability watchdog with self-healing + alert dedupe (§7), the pager's own liveness — rolling heartbeat + independent dead-man check with operator knobs (§7.8a, #4573) — the deploy-gate `SKIP_*` bypass convention + Fly secret-provenance gate (§8, #4126), and **restore a lost cache graph from the record** (§9, #9556/R8: `python -m tortoise record-restore`, its exit codes, its four refusals and its declared-partial states) (#2850) | `docs/infra-runbook.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | Multi-graph migration runbook — no-forced-migration path + rollback drill (epic #2083, C8 #2117) | `docs/ops/multi-graph-migration-runbook.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |

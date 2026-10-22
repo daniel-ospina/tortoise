@@ -124,7 +124,13 @@ census of what the wipe destroyed. ⚠️ Since #9556 the report ALSO carries
 write** (so a caller can tell a landed restore from a wipe that put nothing
 back). That is not the read §0.5 forbids and it reverses nothing here: it runs
 after the projection has finished and it decides nothing about what is
-projected — it only refuses to report a plan's length as a result. The classes are the next unit's work (journal/record
+projected — it only refuses to report a plan's length as a result. ⚠️ The same
+distinction covers the two §9 reporting reads that DO happen BEFORE the wipe —
+`record_restore._target_nodes_before` (how many restorable nodes the target held,
+so a mistyped `--cache-graph` is visible) and the projection's own L2 name
+guard. Neither feeds the projection, neither decides what is projected, and
+neither lands in the report as a census of the six dropped classes; they are
+pre-flight facts about the TARGET, exactly like the wipe guard itself. The classes are the next unit's work (journal/record
 completeness, the `#4240`/`#5089` root). Shipping a `rebuild_all`-shape snapshot
 on this path would import a **cache read** into the one path the ruling requires
 to have none.

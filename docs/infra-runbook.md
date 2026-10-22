@@ -2604,9 +2604,9 @@ refused before the target graph is even opened.
 
 | code | meaning | next step |
 |---|---|---|
-| `0` | restored; `nodes_written`/`relations_written` are **measured off the cache after the rebuild** (not the plan's size) | compare them with the record's own counts — equality, not "close" |
+| `0` | restored; `nodes_written`/`relations_written` are **measured off the cache after the rebuild** (not the plan's size) | compare `nodes_written` with the record's NODE count — equality is REQUIRED (a shortfall is refused as exit `2`). `relations_written` is different: it MAY legitimately be lower, because a relation statement MATCHes its endpoints and a record that does not carry them makes it a no-op (R4). Read `relations_not_written` — a shortfall there is the declared-partial state **`relations-not-hot`**, named in `declared_partial`, and it is never a silent part of a `complete` claim: `coverage` is a statement about NODE keys only |
 | `3` | **REFUSED before any write** (empty source, the cache's wipe guard): no row of the record's state was written | read the printed reason — each has a different remedy. ⚠️ The source-side refusals fire BEFORE the target graph is opened, but the L2 refusal is asked of a **projection**, and opening one creates the graph and MERGEs its own `:Meta` bookkeeping marker — so a refused run can leave an empty graph behind. That is the projection, not a restore |
-| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, **a `--limit` below 1**, usage error, **a failure during the rebuild**, **a rebuild that left the cache holding none of the record's rows**) | fix the input; for the two post-wipe cases the cache has been **wiped** — treat it as **LOST** (and in every case as UNKNOWN), never as it was |
+| `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, **a `--limit` below 1**, usage error, **a failure during the rebuild**, **a rebuild that left the cache holding none of the record's rows** — including a record that carried relations but no nodes, whose relations cannot resolve their endpoints) | fix the input; for the two post-wipe cases the cache has been **wiped** — treat it as **LOST** (and in every case as UNKNOWN), never as it was. The residency declaration written by the run describes only what the measured counts proved (`declared_partial` includes `not-hot`), so a read after a failed restore is `not-hot`/`degraded`, never `empty`; a successful re-run rewrites it |
 
 `2`'s caveat is `record-reconcile`'s, inherited verbatim: argparse's own
 `error()` also exits `2`, so `2` means only *no verdict was produced* — not "the
@@ -2658,8 +2658,7 @@ record is unreachable".
 A restore can be correct and still leave the cache **not fully hot**. Both
 states have their own reason string, and neither is an absence (§17.3):
 
-- **`not-hot`** — a bounded restore (`--limit`) AND any run whose declaration is
-  `coverage=partial` wrote only part of the record. Read **`unwritten_keys`** to
+- **`not-hot`** — the run left part of the record's NODE set unwritten, or its declaration is `coverage=partial`. Read **`unwritten_keys`** to
   see that count: it is the not-hot set. ⛔ Do NOT read `declared_keys` for this
   — a `complete` declaration covers the whole record and enumerates NOTHING, so
   `declared_keys` is `0` on a perfectly complete restore while
@@ -2667,6 +2666,20 @@ states have their own reason string, and neither is an absence (§17.3):
   miss**: it `degraded` on read and is served from the record, and it is
   **never** reported as `empty`. To make the cache fully hot, re-run without
   `--limit`.
+- **`relations-not-hot`** — every node landed but **N of the record's relations
+  did not**, because a relation statement MATCHes both endpoints and the record
+  does not carry them (R4). Read **`relations_not_written`**; `coverage` says
+  `complete` and is telling the truth about NODES, not about edges — ⛔ do not
+  read it as "every edge is back". This is the #3895 shape (healthy counters,
+  missing edges), so it is printed, carries its own state name in
+  `declared_partial`, and an edge read for one of those relations is a
+  residency miss — never an absence. Fixing it is a change to what the record
+  carries (the `search_keys` refusal), not a re-run.
+- **`bounded` vs partial — the flag is not the state.** `--limit` sets
+  `bounded: true` on EVERY bounded run, including one whose bound is at or above
+  the record's node count; such a run is `coverage=complete` with
+  `unwritten_keys: 0`. Read the counts, not the flag. (`--limit` below `1` is
+  refused outright: it would wipe and write nothing.)
 - **`cache-unreachable`** — the cache did not answer **at all**. This is the
   fourth residency branch: a residency miss with its own reason, never an
   insufficiency and never an absence. While you see this, *no* read of the
