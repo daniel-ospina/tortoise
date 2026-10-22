@@ -61,7 +61,7 @@ jobs:
         # (#1685) — the three must move together or main and PR lint disagree
         # about what a finding is.
         run: pip install ruff==0.16.4
-      - name: Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)
+      - name: "Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)"
         id: ruff
         run: ruff check .
       - name: Comment on the merged PR (best-effort attribution)
@@ -79,6 +79,7 @@ jobs:
         with:
           script: |
             const { owner, repo } = context.repo;
+            const marker = `commit ${context.sha}`;
             let pr = null;
             try {
               // Attribution moved off `needs.dedup-check.outputs.pr_number` (that
@@ -96,9 +97,24 @@ jobs:
               core.warning('main lint failed but no PR attribution — see the merge commit check');
               return;
             }
-            await github.rest.issues.createComment({
-              issue_number: pr,
-              owner,
-              repo,
-              body: `⚠️ This PR **failed post-merge ruff lint on main** (run ${context.runId}, commit ${context.sha}). Main is now lint-red, which reddens the merge ref of **every** open PR until it is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`,
-            });
+            const body = `⚠️ This PR **failed post-merge ruff lint on main** (run ${context.runId}, ${marker}). Main is now lint-red, which reddens the merge ref of **every** open PR until it is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`;
+            try {
+              // IDEMPOTENT: the natural response to a red main is "re-run", and an
+              // unconditional comment would append one more identical warning per
+              // re-run to the merged PR.
+              const existing = await github.rest.issues.listComments({
+                owner, repo, issue_number: pr, per_page: 100,
+              });
+              const already = existing.data.some(
+                (comment) => comment.body && comment.body.includes(marker),
+              );
+              if (already) {
+                core.info(`main-lint ${marker} already recorded on #${pr} — not commenting again`);
+                return;
+              }
+              await github.rest.issues.createComment({ issue_number: pr, owner, repo, body });
+            } catch (err) {
+              // Best-effort: a 403/422 here must not bury the ruff log behind a
+              // second failing step.
+              core.warning(`main-lint comment failed (error: ${err.message})`);
+            }

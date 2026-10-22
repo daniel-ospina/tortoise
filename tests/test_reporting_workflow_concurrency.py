@@ -1388,7 +1388,7 @@ def _dev_ruff_pin() -> str:
 # code is. An allow-list, not a deny-list: `--select`/`--ignore`/`--config` narrow
 # or replace the rule surface, `--exit-zero` makes every run green, and `--fix`
 # would rewrite the tree the guard is measuring.
-_RUFF_PRESENTATION_FLAGS = ("--no-cache", "--no-fix", "--quiet", "-q")
+_RUFF_PRESENTATION_FLAGS = ("--no-cache", "--no-fix", "--quiet", "--statistics", "-q")
 _REDIRECTION = re.compile(r"^(?:\d?>&\d+|\d?>\s*/dev/null|>\s*/dev/null)$")
 
 # Keys the workflow, and the ONE job, may carry. Allow-lists rather than
@@ -1397,8 +1397,12 @@ _REDIRECTION = re.compile(r"^(?:\d?>&\d+|\d?>\s*/dev/null|>\s*/dev/null)$")
 # ruff never having run — the shape `test_merge_throughput.py` pins for the docs
 # job), and a key GitHub does not accept at workflow scope (`continue-on-error`)
 # means no run exists at all, so nothing reports red.
-_WORKFLOW_KEYS = frozenset({"name", "on", "concurrency", "permissions", "jobs", "run-name", "env"})
-_JOB_KEYS = frozenset({"runs-on", "name", "timeout-minutes", "steps", "permissions", "env"})
+_WORKFLOW_KEYS = frozenset(
+    {"name", "on", "concurrency", "permissions", "jobs", "run-name", "env", "defaults"}
+)
+_JOB_KEYS = frozenset(
+    {"runs-on", "name", "timeout-minutes", "steps", "permissions", "env", "defaults"}
+)
 
 
 def _ruff_argv_problem(command: str) -> str | None:
@@ -1412,7 +1416,18 @@ def _ruff_argv_problem(command: str) -> str | None:
     is the conventional order for the edit this workflow is most likely to get,
     and a pin that reds it is a pin that gets deleted.
     """
-    tokens = shlex.split(command, comments=True)
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError as exc:
+        return f"the command cannot be parsed as a shell word list ({exc})"
+    # A leading `VAR=value` / `env VAR=value` assignment cannot narrow the run
+    # either; strip it before looking at the program.
+    while tokens and ("=" in tokens[0] and not tokens[0].startswith("-")):
+        tokens = tokens[1:]
+    if tokens[:1] == ["env"]:
+        tokens = tokens[1:]
+        while tokens and "=" in tokens[0]:
+            tokens = tokens[1:]
     # `uv run ruff …` is this repo's documented command form (AGENTS.md → Python)
     # and `python -m ruff …` is the same binary; neither can narrow the surface,
     # and the pinned install ahead of the step still constrains the version.
@@ -1438,13 +1453,20 @@ def _ruff_argv_problem(command: str) -> str | None:
         return f"it runs `ruff {' '.join(tokens[:1]) or '(nothing)'}` rather than `ruff check`"
     tokens = tokens[1:]
     paths: list[str] = []
+    consume_value = False
     for token in tokens:
+        if consume_value:
+            consume_value = False
+            continue
         # Redirection (`2>&1`, `2>/dev/null`) cannot change what is checked or the
         # exit code, so it is not a narrowing. A pipe/`;`/`&&`/`||` is a shell
         # escape and stays a non-flag token, which fails the `.`-only comparison.
         if _REDIRECTION.search(token):
             continue
         if token.startswith("-"):
+            if token == "--output-format":
+                consume_value = True  # the space-separated CLI form
+                continue
             if token in _RUFF_PRESENTATION_FLAGS or token.startswith("--output-format="):
                 continue
             return (
@@ -1477,7 +1499,12 @@ def _ruff_install_specs(command: str) -> list[str]:
     """
     specs: list[str] = []
     for line in command.splitlines():
-        tokens = shlex.split(line, comments=True)
+        try:
+            tokens = shlex.split(line, comments=True)
+        except ValueError:
+            # An unparseable install line is not a pinned install; the caller's
+            # message says so instead of raising out of the checker.
+            continue
         # Shell SEGMENTS: `pip install ruff==0.16.4 && pip install -U ruff` is TWO
         # installs, and only splitting on the control operators finds the second
         # one (a single forward scan stops at the `&&` and reports the pin alone).
@@ -1491,11 +1518,33 @@ def _ruff_install_specs(command: str) -> list[str]:
     return specs
 
 
+_INSTALL_WRAPPERS = {"sudo", "env", "command", "time"}
+
+
 def _segment_ruff_specs(segment: list[str]) -> list[str]:
-    """The ``ruff`` requirement tokens in ONE shell segment (empty if not an install)."""
-    if not segment or segment[0] not in {"pip", "pip3", "uv", "python", "python3"}:
+    """The ``ruff`` requirement tokens in ONE shell segment (empty if not an install).
+
+    The segment is identified by what it DOES, not by its first word: `sudo pip
+    install ruff`, `env X=1 pip install ruff`, `/usr/bin/pip install ruff` and
+    `python3.12 -m pip install ruff` all install a ruff, and a first-word rule
+    read every one of them as "not an install" — so an unpinned ruff could be
+    installed AFTER the pinned one and the pin reported the pinned set.
+    `uv sync` is also accepted: it installs the `pyproject.toml` dev group, which
+    is the pin `_dev_ruff_pin` reads.
+    """
+    segment = list(segment)
+    while segment and segment[0] in _INSTALL_WRAPPERS:
+        segment = segment[1:]
+        while segment and "=" in segment[0] and not segment[0].startswith("-"):
+            segment = segment[1:]
+    if not segment:
         return []
+    head = segment[0].rsplit("/", 1)[-1]
+    if head == "uv" and segment[1:2] == ["sync"]:
+        return ["uv sync"]
     if "install" not in segment:
+        return []
+    if not any(part in {"pip", "pip3", "pipx"} or part.startswith("pip3") for part in segment):
         return []
     specs: list[str] = []
     for token in segment[segment.index("install") + 1 :]:
@@ -1517,12 +1566,61 @@ def _pinned_install_problem(commands: list[str], pin: str) -> str | None:
             "quoted spec are all accepted), so main lints with whatever resolution a "
             "bare install gives — the #1685/#2150 drift class"
         )
+    if specs == ["uv sync"]:
+        return None  # installs exactly the pyproject dev group this pin is read from
     unpinned = [spec for spec in specs if spec.strip("'\"") != f"ruff=={pin}"]
     if unpinned:
         return (
             f"the installs ahead of the guard are {specs} — pip is LAST-WRITE-WINS, so "
             f"{unpinned} replaces `ruff=={pin}` and main lints with a different ruff "
             "than PR lint and `uv sync` (#1685). Install exactly the pin, once"
+        )
+    return None
+
+
+def _condition_terms(condition: str) -> set[str]:
+    """The `&&` conjuncts of an `if:` expression, normalised and order-free.
+
+    `failure() && steps.ruff.outcome == 'failure'` and the same two conjuncts
+    swapped are the SAME condition; comparing the raw text rejected the swapped
+    form with a message about the implicit `success()`, which was false about the
+    artifact. A constant-false conjunct (`&& (1 == 2)`) still adds a term and
+    still fails the comparison.
+    """
+    stripped = condition.strip()
+    whole = _EXPRESSION.fullmatch(stripped)
+    if whole is not None:
+        stripped = whole.group(1)
+    return {
+        _normalise_condition(part)
+        for part in re.split(r"&&", stripped)
+        if part.strip()
+    }
+
+
+def _defaults_problem(defaults: object) -> str | None:
+    """Why a `defaults:` block can defuse the guard, or ``None`` for an inert one.
+
+    `defaults.run.shell` / `defaults.run.working-directory` rewrite every `run:`;
+    `shell: bash` and `working-directory: .` are the defaults and change nothing,
+    so they are accepted — the pin must not red an honest tidy-up.
+    """
+    if defaults is None:
+        return None
+    if not isinstance(defaults, dict):
+        return "it is not a mapping"
+    run = defaults.get("run") or {}
+    shell = str(run.get("shell", "bash")).strip()
+    workdir = str(run.get("working-directory", ".")).strip()
+    if shell not in {"bash", "sh"}:
+        return (
+            f"`shell: {shell}` replaces the shell every `run:` executes in, which is "
+            "how `ruff check .` becomes an echo that exits 0 forever"
+        )
+    if workdir not in {".", "./"}:
+        return (
+            f"`working-directory: {workdir}` makes `ruff check .` scan one directory "
+            "while reading exactly like the whole tree"
         )
     return None
 
@@ -1552,12 +1650,23 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
         # `branches-ignore: [main]` both keep a `push` trigger that never fires on
         # main — the #2174 defect by an edit no other mutant here tests.
         branches = push.get("branches")
-        if branches is not None and "main" not in branches:
-            return (
-                f"its `push:` trigger is limited to {branches}, so a push to main is "
-                "never linted — the guard's whole subject is the merged tree"
-            )
-        if "main" in (push.get("branches-ignore") or []):
+        if branches is not None:
+            # GitHub reads `!pattern` as NEGATION, so `branches: [main, '!main']`
+            # selects nothing — while a membership test sees "main" present.
+            negations = [entry for entry in branches if str(entry).startswith("!")]
+            if negations:
+                return (
+                    f"its `push:` trigger carries negated branch patterns {negations} "
+                    "— GitHub reads `!…` as an exclusion, so this can select nothing "
+                    "while a membership test still sees `main`"
+                )
+            if "main" not in branches:
+                return (
+                    f"its `push:` trigger is limited to {branches}, so a push to main "
+                    "is never linted — the guard's whole subject is the merged tree"
+                )
+        ignore = [str(entry) for entry in (push.get("branches-ignore") or [])]
+        if "main" in ignore:
             return (
                 "its `push:` trigger EXCLUDES `main` (`branches-ignore`), so the "
                 "merged trees it exists to guard are the ones it never sees"
@@ -1570,6 +1679,12 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
         )
     group = str(conc.get("group", ""))
     terms = [t.strip() for expr in _EXPRESSION.findall(group) for t in expr.split("||")]
+    if conc.get("cancel-in-progress") is not False:
+        return (
+            "its `concurrency:` does not declare `cancel-in-progress: false` — the "
+            "value this workflow documents as load-bearing: a half-run guard is not a "
+            "reading, and the literal `false` is what the next editor copies"
+        )
     if not (_UNSTARVEABLE_GROUP_TERMS & set(terms)):
         return (
             f"its concurrency group {group!r} carries none of "
@@ -1584,13 +1699,9 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     # `defaults.run` rewrites EVERY `run:` in scope — `defaults: {run: {shell:
     # echo}}` turns `ruff check .` into an echo that exits 0. Named before the
     # key allow-list so the message says WHY, not just "unexpected key".
-    if "defaults" in doc:
-        return (
-            "it declares workflow-level `defaults:` — `defaults.run.shell` / "
-            "`defaults.run.working-directory` rewrite every `run:` in the workflow, "
-            "so the ruff step can become an echo (exit 0 forever) or scan one "
-            "directory while reading exactly like `ruff check .`"
-        )
+    defaults_problem = _defaults_problem(doc.get("defaults"))
+    if defaults_problem is not None:
+        return f"it declares workflow-level `defaults:` and {defaults_problem}"
     # PyYAML resolves the bare `on:` key to the BOOLEAN `True` (YAML 1.1), so the
     # key set is normalised before it is compared with the allow-list.
     keys = {"on" if key is True else key for key in doc}
@@ -1612,12 +1723,15 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     job_id, job = next(iter(jobs.items()))
     if not isinstance(job, dict):
         return f"job {job_id!r} is not a mapping"
-    if "defaults" in job or "if" in job or job.get("continue-on-error"):
+    job_defaults_problem = _defaults_problem(job.get("defaults"))
+    if job_defaults_problem is not None:
+        return f"the job ({job_id!r}) declares `defaults:` and {job_defaults_problem}"
+    if "if" in job or job.get("continue-on-error"):
         return (
             f"the job ({job_id!r}) carries "
-            f"{sorted(k for k in ('defaults', 'if', 'continue-on-error') if k in job)}"
-            " — a job-level condition, `continue-on-error` or `defaults.run` skips,"
-            " silences or rewrites the guard exactly as the step-level form does"
+            f"{sorted(k for k in ('if', 'continue-on-error') if k in job)}"
+            " — a job-level condition or `continue-on-error` skips or silences the "
+            "guard exactly as the step-level form does"
         )
     if "concurrency" in job:
         return (
@@ -1636,6 +1750,19 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             f"job {job_id!r} has no `runs-on:` — GitHub rejects the workflow, so no "
             "run exists at all and nothing reports red"
         )
+    for where, value in [("the job", job.get("timeout-minutes"))] + [
+        (f"step {index}", step.get("timeout-minutes"))
+        for index, step in enumerate(job.get("steps") or [])
+        if isinstance(step, dict)
+    ]:
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 360:
+            return (
+                f"{where} declares `timeout-minutes: {value!r}` — GitHub rejects a "
+                "non-positive or non-integer timeout, so the workflow is invalid and "
+                "no run exists to report red"
+            )
     runs_on_labels = runs_on if isinstance(runs_on, list) else [runs_on]
     if not runs_on_labels or not all(
         isinstance(value, str) and value.startswith("ubuntu-") for value in runs_on_labels
@@ -1653,6 +1780,45 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "model — `needs` is the load-bearing one: an upstream skip skips the "
             "guard, and an all-skipped run concludes SUCCESS"
         )
+    # `ruff check .` on an EMPTY workspace prints "No Python files found" and exits
+    # 0 — verified — so a guard that never checked out the tree is GREEN having
+    # measured nothing. That is the silent-pass this whole pin exists for, so the
+    # checkout is part of the guard's shape, not an implementation detail.
+    ruff_index = next(
+        (
+            index
+            for index, step in enumerate(job.get("steps") or [])
+            if isinstance(step, dict)
+            and isinstance(step.get("run"), str)
+            and "ruff check" in step["run"]
+        ),
+        None,
+    )
+    if ruff_index is not None:
+        checkouts = [
+            step
+            for step in (job.get("steps") or [])[:ruff_index]
+            if isinstance(step, dict) and str(step.get("uses", "")).startswith("actions/checkout@")
+        ]
+        if not checkouts:
+            return (
+                "no `actions/checkout` step runs BEFORE the guard — `ruff check .` on "
+                "an empty workspace exits 0, so the guard would be green having "
+                "measured nothing (the silent pass this pin exists for)"
+            )
+        checkout = checkouts[0]
+        if "if" in checkout or checkout.get("continue-on-error"):
+            return (
+                "the `actions/checkout` step before the guard carries "
+                f"{sorted(k for k in ('if', 'continue-on-error') if k in checkout)} — a "
+                "skipped checkout leaves an empty tree that ruff passes"
+            )
+        if str((checkout.get("with") or {}).get("ref", "")).strip() != "${{ github.sha }}":
+            return (
+                "the `actions/checkout` step does not pin `with.ref: ${{ github.sha }}` "
+                "— the workflow's own comment claims a deterministic tree ('mid-run "
+                "main advance must not move the tree'), and it is unchecked"
+            )
     ruff_steps = [
         (idx, step)
         for idx, step in enumerate(job.get("steps") or [])
@@ -1689,10 +1855,13 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "main went lint-red (the silent-main class this guard exists for)"
             )
         notifiers = [
-            other
-            for other in (job.get("steps") or [])
+            (index, other)
+            for index, other in enumerate(job.get("steps") or [])
             if isinstance(other, dict)
-            and f"steps.{step_id}." in str(other.get("if", ""))
+            and (
+                f"steps.{step_id}." in str(other.get("if", ""))
+                or f"steps['{step_id}']" in str(other.get("if", ""))
+            )
         ]
         if not notifiers:
             return (
@@ -1700,14 +1869,34 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "that tells the merged PR its lint broke main is gone, so the guard "
                 "reports red into a run nobody is watching"
             )
-        for other in notifiers:
+        for index, _other in notifiers:
+            if index < idx:
+                return (
+                    f"the step keyed on `steps.{step_id}.outcome` sits BEFORE the ruff "
+                    "step — at that point the outcome is null, so the condition is "
+                    "never true and the notification cannot fire"
+                )
+        for _, other in notifiers:
             if "uses" not in other and "run" not in other:
                 return (
                     f"the step keyed on `steps.{step_id}.outcome` has neither `uses:` "
                     "nor `run:` — GitHub rejects the workflow, so the guard never runs"
                 )
-            expected_if = f"failure() && steps.{step_id}.outcome == 'failure'"
-            if _normalise_condition(str(other["if"])) != _normalise_condition(expected_if):
+            if not str(other.get("uses", "")).startswith("actions/github-script@"):
+                return (
+                    f"the step keyed on `steps.{step_id}.outcome` is "
+                    f"`{other.get('uses') or other.get('run')!s}` — it must be the "
+                    "github-script step that POSTS the comment; any other step "
+                    "satisfies the shape while notifying nobody"
+                )
+            if "issues.createComment" not in str((other.get("with") or {}).get("script", "")):
+                return (
+                    f"the github-script step keyed on `steps.{step_id}.outcome` never "
+                    "calls `issues.createComment` — the notification the guard exists "
+                    "for is not in it"
+                )
+            expected_terms = {"failure()", f"steps.{step_id}.outcome == 'failure'"}
+            if _condition_terms(str(other["if"])) != expected_terms:
                 return (
                     f"the step keyed on `steps.{step_id}.outcome` has "
                     f"`if: {other['if']}` — with no status function GitHub prepends an "
@@ -1732,7 +1921,9 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     # `issues: write`, `createComment` 403s on a push event (the default token is
     # read-only), and `pull-requests: read` is what the attribution lookup needs.
     # A job-level `permissions:` REPLACES the workflow level wholesale.
-    perms = job.get("permissions") or doc.get("permissions") or {}
+    # PRESENCE, not truthiness: a job-level `permissions: {}` is GitHub's idiom for
+    # "grant nothing" and REPLACES the workflow grant — `or` read it as absent.
+    perms = job["permissions"] if "permissions" in job else doc.get("permissions", {})
     if not isinstance(perms, dict):
         return "its `permissions:` block is not a mapping, so it grants nothing"
     missing = [
@@ -1752,6 +1943,93 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "run nobody sees, and the attribution lookup needs `pull-requests: read`"
         )
     return None
+
+
+def _merged_tree_guard_registration_problem(registry: dict, pmv_jobs: dict) -> str | None:
+    """Why the merged-tree guard's REGISTRATION does not hold, or ``None``.
+
+    Split out of the test that asserts it so the REJECTION is provable against
+    the regressions themselves (see the mutants below) instead of only asserted
+    about today's tree. Without that, the entry's only reader is a
+    parametrization over the entry's own keys: an EMPTY registry expands to ZERO
+    cases, pytest emits a `PytestCollectionWarning` (not a failure), and the
+    module stays green — while every live-artifact assertion that matters (the
+    per-SHA group, the exact `ruff check .`, the pinned ruff install) lives
+    inside that body. Deleting the entry would therefore re-open #2174 silently,
+    which is the "a gate that did not exist" class one level up.
+    """
+    if "main-lint.yml" not in registry:
+        return (
+            "its registry entry was REMOVED. MERGED_TREE_GUARD is the only thing "
+            "that makes main-lint.yml's per-SHA concurrency group, its exact "
+            "`ruff check .` and its pinned ruff install ASSERTED — with the entry "
+            "gone the parametrization yields no cases, so the guard can be "
+            "starved again (4 of 25 merged trees ran it) with this module green"
+        )
+    if not str(registry["main-lint.yml"]).strip():
+        return (
+            "its registry entry carries no reason. An unargued entry is a stamp: "
+            "the next edit cannot tell a reviewed decision from a leftover key"
+        )
+    if "lint" in pmv_jobs:
+        return (
+            "post-merge-validation.yml carries a `lint` job again — its constant "
+            "`concurrency.group` starves it (21 of 25 merged trees never ran it), "
+            "and re-adding it beside the working guard restores the starved path: "
+            "it looks like redundancy and is a silent gap, because a green "
+            "counterexample proves nothing when the other one is cancelled"
+        )
+    return None
+
+
+_REGISTRATION_GAPS = [
+    # The exact regression the reviewer measured as silently re-openable: drop the
+    # entry, revert main-lint.yml's group, and a parametrized-only pin stays green.
+    ("the registry entry was deleted", {}, {}),
+    ("the entry carries no reason", {"main-lint.yml": "   "}, {}),
+    (
+        "the guard was restored beside the working one",
+        MERGED_TREE_GUARD,
+        {"dedup-check": {}, "validate": {}, "lint": {}},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label,registry,pmv_jobs",
+    _REGISTRATION_GAPS,
+    ids=[label for label, _, _ in _REGISTRATION_GAPS],
+)
+def test_the_merged_tree_guard_registration_check_rejects_the_gaps(
+    label: str, registry: dict, pmv_jobs: dict
+) -> None:
+    """The registration pin is not vacuous — the gaps it exists for are rejected."""
+    problem = _merged_tree_guard_registration_problem(registry, pmv_jobs)
+    assert problem is not None, (
+        f"{label!r} is a way to lose the merged-tree guard (#2174) and the "
+        "registration check accepted it — main could go lint-red again with no "
+        "gate reporting it"
+    )
+
+
+def test_the_merged_tree_guard_is_registered() -> None:
+    """The pin itself is pinned: an emptied registry must red HERE, not vanish.
+
+    Non-parametrized ON PURPOSE. This is the assertion that survives deleting the
+    entry — the parametrized test below cannot: with an empty ``MERGED_TREE_GUARD``
+    it collects zero cases and passes vacuously. The "ONE home" property is
+    asserted here too, so it stays alive independently of the dict's contents.
+    """
+    assert set(MERGED_TREE_GUARD) == {"main-lint.yml"}, (
+        "MERGED_TREE_GUARD must name exactly {'main-lint.yml'}: got "
+        f"{sorted(MERGED_TREE_GUARD)}. Empty means the per-SHA-group pin and the "
+        "one-home pin both stopped being asserted."
+    )
+    pmv_jobs = _load(WORKFLOW_DIR / "post-merge-validation.yml").get("jobs") or {}
+    problem = _merged_tree_guard_registration_problem(MERGED_TREE_GUARD, pmv_jobs)
+    assert problem is None, (
+        "the merged-tree guard (#2174) is not correctly registered, and " + problem
+    )
 
 
 @pytest.mark.parametrize("name", sorted(MERGED_TREE_GUARD))
@@ -1843,6 +2121,36 @@ def _set_unpinned_ruff(doc: dict) -> None:
         for step in job.get("steps") or []:
             if isinstance(step.get("run"), str) and "pip install ruff==" in step["run"]:
                 step["run"] = "pip install ruff"
+
+
+def _set_output_format_space(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check --output-format github ."
+
+
+def _set_statistics(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check . --statistics"
+
+
+def _set_env_prefix(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "RUFF_CACHE_DIR=/tmp/r ruff check ."
+
+
+def _set_uv_sync(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if "pip install ruff==" in str(step.get("run")):
+            step["run"] = "uv sync"
+
+
+def _set_inert_defaults(doc: dict) -> None:
+    doc["defaults"] = {"run": {"shell": "bash"}}
+    doc["jobs"]["lint"]["defaults"] = {"run": {"working-directory": "."}}
+
+
+def _set_notifier_reordered(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["if"] = f"steps.{step_id}.outcome == 'failure' && failure()"
 
 
 def _set_uv_run(doc: dict) -> None:
@@ -1985,6 +2293,86 @@ def _set_second_pinned_other_version(doc: dict) -> None:
             step["run"] = step["run"] + "\npip install ruff==0.0.1"
 
 
+def _set_no_checkout(doc: dict) -> None:
+    steps = doc["jobs"]["lint"]["steps"]
+    doc["jobs"]["lint"]["steps"] = [
+        s for s in steps if not str(s.get("uses", "")).startswith("actions/checkout@")
+    ]
+
+
+def _set_checkout_skipped(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step["if"] = "false"
+
+
+def _set_checkout_moving_ref(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout@"):
+            step["with"] = {"ref": "main"}
+
+
+def _set_empty_job_permissions(doc: dict) -> None:
+    """`permissions: {}` is GitHub's idiom for GRANT NOTHING, not for 'unset'."""
+    doc["jobs"]["lint"]["permissions"] = {}
+
+
+def _set_notifier_before_ruff(doc: dict) -> None:
+    steps = doc["jobs"]["lint"]["steps"]
+    step_id = _ruff_step(doc)["id"]
+    index = next(
+        i
+        for i, s in enumerate(steps)
+        if isinstance(s, dict) and f"steps.{step_id}." in str(s.get("if", ""))
+    )
+    notifier = steps.pop(index)
+    ruff_index = next(i for i, s in enumerate(steps) if s.get("id") == step_id)
+    steps.insert(ruff_index, notifier)
+
+
+def _set_notifier_wrong_action(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["uses"] = "actions/upload-artifact@v4"
+            step.pop("with", None)
+
+
+def _set_notifier_without_comment(doc: dict) -> None:
+    step_id = _ruff_step(doc)["id"]
+    for step in doc["jobs"]["lint"]["steps"]:
+        if isinstance(step, dict) and f"steps.{step_id}." in str(step.get("if", "")):
+            step["with"] = {"script": "return;\n"}
+
+
+def _set_branches_negated_main(doc: dict) -> None:
+    _trigger_block(doc)["push"]["branches"] = ["main", "!main"]
+
+
+def _set_cancel_in_progress(doc: dict) -> None:
+    doc["concurrency"]["cancel-in-progress"] = True
+
+
+def _set_job_timeout_string(doc: dict) -> None:
+    doc["jobs"]["lint"]["timeout-minutes"] = "abc"
+
+
+def _set_step_timeout_zero(doc: dict) -> None:
+    _ruff_step(doc)["timeout-minutes"] = 0
+
+
+def _set_sudo_install(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if "pip install ruff==" in str(step.get("run")):
+            step["run"] = step["run"] + "\nsudo pip install ruff"
+
+
+def _set_unparseable_install(doc: dict) -> None:
+    for step in doc["jobs"]["lint"]["steps"]:
+        if "pip install ruff==" in str(step.get("run")):
+            step["run"] = 'pip install \\\n  "ruff==0.16.4'
+
+
 def _set_install_then_upgrade(doc: dict) -> None:
     for step in doc["jobs"]["lint"]["steps"]:
         if "pip install ruff==" in str(step.get("run")):
@@ -2087,6 +2475,23 @@ _STARVED_SHAPES = [
     ("no `runs-on:`", _set_no_runs_on),
     ("an unresolvable self-hosted label", _set_self_hosted_runner),
     ("permissions without `issues: write`", _set_permissions_without_issues_write),
+    # ── the tree is never checked out, or is not the pushed tree ──
+    ("no checkout step", _set_no_checkout),
+    ("a skipped checkout", _set_checkout_skipped),
+    ("a checkout of a moving ref", _set_checkout_moving_ref),
+    # ── the guard cannot see the tree, or cannot notify ──
+    ("an empty job-level `permissions:`", _set_empty_job_permissions),
+    ("a notifier placed before the guard", _set_notifier_before_ruff),
+    ("a notifier that is not github-script", _set_notifier_wrong_action),
+    ("a notifier that never comments", _set_notifier_without_comment),
+    # ── the trigger selects nothing, or the run cannot start ──
+    ("a negated `!main` branch pattern", _set_branches_negated_main),
+    ("`cancel-in-progress: true`", _set_cancel_in_progress),
+    ("a non-numeric job timeout", _set_job_timeout_string),
+    ("a zero step timeout", _set_step_timeout_zero),
+    # ── one more unpinned install, in a spelling the first-word rule missed ──
+    ("a `sudo pip install ruff` line", _set_sudo_install),
+    ("an unparseable install line", _set_unparseable_install),
 ]
 
 
@@ -2143,6 +2548,12 @@ def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
     are what this pin is about — not the presentation.
     """
     for label, mutate in (
+        ("`--output-format github` (space form)", _set_output_format_space),
+        ("`--statistics`", _set_statistics),
+        ("a leading `VAR=value`", _set_env_prefix),
+        ("`uv sync` as the install", _set_uv_sync),
+        ("`defaults.run.shell: bash`", _set_inert_defaults),
+        ("the notifier conjuncts swapped", _set_notifier_reordered),
         ("`--output-format=github` after the path", _set_output_format),
         ("`--output-format=github` BEFORE the path", _set_output_format_before_path),
         ("`--no-cache -q`", _set_no_cache_quiet),
