@@ -34,7 +34,14 @@ What this module pins, and what makes each test FAIL:
    and both hits stand alone.
 
 Runs on the docker lane on a dedicated per-test graph (FTS backend required;
-tier-2 embedded legs skip — mirrors ``tests/test_entity_key_expansion.py``).
+tier-2 embedded legs skip — mirrors ``tests/test_entity_key_expansion.py``) —
+but the skip is **per-test, not module-wide**: test 3 is hermetic (pure
+``package_evidence_pool`` over two dicts, no graph), and it is the ONLY pin for
+``_pkg_turn_key`` — half of this issue. A module-level ``pytestmark`` would have
+silently skipped that half in every URI-less leg (#9543 review, non-blocking
+note: made a decision rather than left an accident; the shape mirrors
+``tests/test_time_aware_run_2520.py``, hermetic tests unguarded, docker legs
+marked).
 """
 from __future__ import annotations
 
@@ -76,7 +83,10 @@ def _falkordb_available() -> bool:
 
 FALKORDB_AVAILABLE = _falkordb_available()
 
-pytestmark = pytest.mark.skipif(
+# Per-test, NOT module-wide: the hermetic turn-0 pin must fail closed in the
+# URI-less legs instead of skipping with the docker-lane tests (see module
+# docstring).
+requires_falkordb = pytest.mark.skipif(
     not FALKORDB_AVAILABLE,
     reason="requires TORTOISE_DB_URI (live FalkorDB FTS lane)")
 
@@ -142,6 +152,7 @@ def _seed_provenanced(sdk: TortoiseSDK) -> list[dict]:
     return [by_id[STATEMENT_ID], by_id[CHUNK_ID]]
 
 
+@requires_falkordb
 def test_product_point_hit_carries_its_provenance(sdk):
     """FAILS on the pre-fix read: the hit dict keys are the measured shape in
     #8658 — no ``quote`` / ``source_turn_id`` / ``span_start`` / ``span_end``."""
@@ -152,6 +163,7 @@ def test_product_point_hit_carries_its_provenance(sdk):
     assert point["span_end"] == SPAN_END
 
 
+@requires_falkordb
 def test_unprovenanced_hit_stays_byte_identical(sdk):
     """A legacy point (no provenance written) gains NO keys — additive and
     present-only, so the widening cannot hand every existing row four empty
@@ -189,6 +201,7 @@ def test_the_first_source_turn_is_a_turn():
         f"{stats['packages']} packages (stats={stats})")
 
 
+@requires_falkordb
 def test_the_points_own_source_chunk_now_collapses_into_one_slot(sdk):
     """The product consequence (#2683 Pass 2): with the provenance on the hit,
     the distilled point and its own source chunk become ONE package (the point

@@ -3661,6 +3661,14 @@ surfaces:
   - test_session_reinjection.py  # #2517: source-session re-injection E2E (C4, docker-lane)
   - test_entity_key_expansion.py  # #2518: entity/fact-augmented key expansion (C2, docker-lane)
   - test_evidence_assembly.py      # #2683: Slice-A evidence-package assembly hermetic rules
+  # #8658: the product read path's hits carry the four provenance keys Slice A
+  # consumes (`quote`/`source_turn_id`/`span_*`). DUAL with `sdk` (below): the
+  # hermetic test drives `retrieval.package_evidence_pool` (this surface's
+  # fallback subject is `search_engine.py`, which `SearchResult.to_dict` widens)
+  # and the docker-lane tests drive `tortoise/sdk.py` / `tortoise/retrieval.py`,
+  # which select `sdk` and REPLACE the `core` fallback — the same dual reason as
+  # test_entity_key_expansion.py / test_evidence_assembly.py above.
+  - test_8658_product_hit_provenance.py
   - test_ask_retrieval_budget.py  # #4105: ask-lane reader window — resolved/tandem caps + honest byte ceiling (hermetic)
   - test_aggregative_facet_coverage.py  # #2521: aggregative-intent + facet coverage check (C5, docker-lane)
   - test_aggregative_intent.py          # #2521: hermetic detector + coverage-math table (C5)
@@ -5033,6 +5041,7 @@ surfaces:
   - test_time_aware_sdk_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_time_aware_eval_2520.py  # #2520 (docker-lane leg, mirrors test_retrieval.py)
   - test_evidence_assembly.py      # #2683 (hermetic rules leg, mirrors test_retrieval.py)
+  - test_8658_product_hit_provenance.py  # #8658 (docker-lane leg: the product hit's provenance keys + the collapse they enable; dual-registered with core because `retrieval.py`/`sdk.py` are this surface's own and a `search_engine.py`-only change falls to core)
   - longmem_eval/test_slice_a_flood_bound.py  # #8043: the Slice A flooding bound + its receipt's reproducibility — dual-registered (eval + sdk) because `tortoise/retrieval.py` is this surface's own: a retrieval.py-only change must re-run the gate that pins the window bound
   - test_env_truthy.py  # #4097: env-truthiness contract + guard (registered in api/core/sdk/eval/ep/onboarding; the migration oracle pins `retrieval.ask_env_bool` as a migrated site)
   - test_aggregative_facet_coverage.py  # #2521 (docker-lane leg, mirrors test_retrieval.py)
