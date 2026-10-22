@@ -2360,6 +2360,33 @@ def test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_install_ci_runner_x64_tool_change_selects_core_not_tier1():
+    # #9639 review P1: tools/install-ci-runner-x64.sh owns
+    # tests/test_ci_runner_x64_install.py — the label invariant (this arch's own marker only,
+    # never `self-hosted-arm64` or a `ubuntu-<version>` pin, and `--fallback auto` READS the
+    # gate's state instead of assuming it), the headroom guards, and the 1/2/3 exit contract.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS entry matches an
+    # installer path, so before the CORE_ALSO entry an INSTALLER-ONLY change came back with
+    # `changed == []`, took the docs-only early return and fell back to tier-1 smoke — the
+    # #1349/#3332/#3616 silent-drop class: the guard never ran on the file it guards.
+    #
+    # The guard is ALSO a `carve_out` member (subprocess-only, no graph, no URI), so it is
+    # stripped from `test_files` by design — the assertion is that the carve-out POOL carries it
+    # and that `core` is selected, not that it rides in the diff selection.
+    #
+    # Mutation check: removing the CORE_ALSO entry makes the first assert fail (surfaces == []).
+    from tools.ci_selection import carve_out_files  # noqa: I001
+
+    r = _sel(["tools/install-ci-runner-x64.sh"])
+    assert r["surfaces"] == ["core"], r
+    assert r["full"] is False, r
+    assert "test_ci_runner_x64_install.py" in carve_out_files(load_manifest()), r
+    assert r["carve_out_run"] is True, r
+    # and it is not merely tier-1 smoke: the selection carries core's own members too
+    assert set(r["test_files"]) != _tier1(), r
+
+
 def test_ci_queue_health_tool_change_selects_core_not_tier1():
     # tools/ci_queue_health.py owns tests/test_ci_queue_health.py (the hermetic
     # cases pinning the FLOOD classification — a deep queue of PR runs is not a

@@ -1,3 +1,15 @@
+---
+title: "x86_64 CI runners — the fallback pool's second architecture (#5215)"
+type: operations
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+aboutSubjects: ci-runner-pool, ci-headroom-guards
+aboutObjects: tortoise, tools/install-ci-runner-x64.sh, scripts/ci_runner_gate.sh
+created: 2026-10-22
+updated: 2026-10-22
+---
+
 # x86_64 CI runners — the fallback pool's second architecture
 
 Operator runbook for the `pi-runner-x64-*` self-hosted Actions runners. They exist to add
@@ -64,12 +76,21 @@ per concurrent job**, plus the per-job docker/FalkorDB it starts. Measured at in
 | **2** | **~3** | **~5** | **chosen** — doubles local capacity, keeps a wide margin for the lanes |
 | 4 | ~6 | ~2 | refused by the installer's guard: would starve the lanes |
 
-The installer encodes this as a **capacity guard, not a live-load gate** (agent lanes are
-bursty, so a momentary load reading must never decide CI capacity): `CORES_PER_RUNNER=2` +
+The installer encodes this as a **capacity guard** on CPU — `CORES_PER_RUNNER=2` +
 `CORES_RESERVED_FOR_AGENT_LANES=2`, checked after fork headroom and disk in the harness's own
 order. On this box `--count 4` refuses with *"4 runners need 4x2 cores + 2 reserved for agent
 lanes = 10, this box has 8"*. This is a bound on **this box's CPU**, not a cap on the agent
 lanes — no lane limit is set anywhere.
+
+The CPU guard is a capacity bound; **the memory leg is not** — it reads `MemAvailable`
+(`/proc/meminfo`), so it IS a live-load reading and it can refuse on a busy box (measured
+2026-10-22: 6G available refused `--count 2`, which needs 8G). That is deliberate fail-closed —
+two runners starting into 6G would OOM-kill the lanes' FalkorDB — but state it for what it is: of
+the four legs (forks, disk, cpu, memory), memory is the one whose reading moves with load. Every
+sizing unit is env-overridable (`CI_RUNNER_{CORES_PER_RUNNER,CORES_RESERVED,DISK_PER_RUNNER_GB,
+DISK_RESERVE_GB,MEM_PER_RUNNER_GB,MEM_RESERVE_GB,FORKS_PER_RUNNER,FORK_CAP,NCPU}`) so a bound can
+be exercised on its own; a value that is present and unparseable is refused (exit 1), never
+coerced to zero.
 
 ## Recreate from scratch / after a reboot
 
@@ -83,7 +104,11 @@ tools/install-ci-runner-x64.sh --status                                         
 ```
 
 If a runner is gone (box rebuilt, disk lost, runner deleted), re-create it — this is the whole
-procedure, and it is idempotent (an already-configured dir is reused, the service re-enabled):
+procedure, and it is idempotent: an already-configured dir is reused, and the systemd unit is
+re-INSTALLED only when `/etc/systemd/system/<unit>` is absent (`svc.sh install` runs
+conditionally), then STARTED. Re-running therefore recovers a stopped service and a missing unit;
+it does not call `systemctl enable` — the enable happened at the original install, and a unit that
+was explicitly disabled by hand stays disabled until someone enables it):
 
 ```bash
 tools/install-ci-runner-x64.sh --count 2            # what was run here
@@ -97,11 +122,28 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:267` (the scale loop) · guards at `:197-228`
-  (forks `:201`, disk `:212`, cpu/memory `:219`) · sha256 pin + registration at `:273-286`
-  (verify `:277-279`, token `:281`, one argv `:284-285`, `config.sh` `:286`) · systemd
-  install/start at `:292-297` · label resolution at `:116-151` (`fallback_engaged` `:116`,
-  `resolve_labels` `:127`) · label repair at `:172` · `--print-labels` at `:251`.
+- `--count N` → `tools/install-ci-runner-x64.sh:352` (the scale loop) · guards at `:273-320`
+  (forks `:268`, disk `:288`, cpu/memory `:295`) · sha256 pin + registration at `:358-372`
+  (verify `:363-365`, token `:366`, one argv `:369-370`, `config.sh` `:371`) · systemd
+  install/start at `:381-383` · label resolution at `:162-200` (`fallback_engaged` `:166`,
+  `resolve_labels` `:177`) · label repair at `:222` · `--print-labels` at `:251`.
+- `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:138-150`): a
+  `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
+  having deregistered nothing.
+- **`--uninstall` deletes only what it can PROVE is a runner install** (`:313-340`; the proof is
+  `is_runner_install` at `:158`): `.runner`, `config.sh` or `bin/Runner.Listener` must exist in
+  the directory, and every target is validated BEFORE the first deletion. `CI_RUNNER_BASE` is
+  operator input, so "a directory exists at this path" is not evidence of a runner — the earlier
+  gate was exactly that, and `CI_RUNNER_BASE=/opt --uninstall` would have run `sudo rm -rf /opt`.
+  A refusal is exit 2 and nothing is removed.
+- **Exit codes** (`:53-64`; `--help` prints the same block): `0` ok · `1` usage · `2` guard
+  refused — headroom, arch, an undecidable fallback, or an uninstall target that is not provably
+  a runner, with nothing downloaded or registered, so re-run with a smaller `--count` · `3`
+  operation failed — download, sha256 verify, extract, token mint, `config.sh`, `svc.sh`, a tool
+  missing from PATH, or a failed remote read.
+- `--print-labels` answers BEFORE the arch and headroom guards, so the label invariant is
+  checkable on any host (including the Apple-Silicon dev box and the ARM64 pool runners); the
+  arch refusal still governs every INSTALL.
 - `--fallback auto|on|off` decides whether `ubuntu-latest` is attached (auto follows the ARM64
   pool). `--print-labels` answers "which labels would a runner get" without touching a guard,
   token or the network — that is the seam the label invariant is tested through. `--repair-labels`
@@ -140,6 +182,11 @@ Recorded on 2026-10-22 (queue: 75 tortoise + 48 agent-infra runs waiting, 5/5 AR
 
 ## Known residuals
 
+The installer's invariants are pinned by `tests/test_ci_runner_x64_install.py` (registered in
+`config/ci-surfaces.yml`'s `core` surface AND in `carve_out:`, which is the URI-unset leg it
+belongs to). It drives the script as a subprocess in a hermetic env — a temp base dir, a stub
+`gh`, no network — and every case runs on any host and any architecture; there is no skip path.
+
 1. **`ci_runner_gate.sh` relabels every runner in the repo — NOT YET FIXED.** `set_labels`
    (`scripts/ci_runner_gate.sh:162`) enumerates *all* runner ids (`runner_ids` `:150`, no pool
    filter) and PUTs the ARM64 pool's label body (`fallback_on` `:184`: `{self-hosted-arm64,
@@ -149,7 +196,7 @@ Recorded on 2026-10-22 (queue: 75 tortoise + 48 agent-infra runs waiting, 5/5 AR
    it from an ARM64 box in the API.
 
    ⛔ **The trigger is the next gate TICK, not the next transition.** The gate re-applies labels
-   when `mode != want || prev != want` (`:275`), and `current_mode` (`:190`) counts *any* runner
+   when `mode != want || prev != want` (`:274`), and `current_mode` (`:187`) counts *any* runner
    carrying `ubuntu-latest` as `local`. While these runners carry that label, the gate cannot read
    `github` — so on a day GitHub-hosted is healthy it runs `fallback_off`, which is the path that
    stamps the ARM64 label. Filed as **`daniel-ospina/agent-infra#2327`** (per-runner label sets:

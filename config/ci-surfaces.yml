@@ -4439,6 +4439,16 @@ surfaces:
   # ladder (3 fetches) per run; where the revision stays unreachable the base
   # cases SKIP, never pass. See the `durations` row.
   - test_spa_dependency_overrides.py
+  # #9639: the x86_64 runner installer (`tools/install-ci-runner-x64.sh`) — its label invariant
+  # (never claim `self-hosted-arm64` or any `ubuntu-<version>` pin, and follow the gate's fallback
+  # state rather than assuming it), its headroom guards, and its 1/2/3 exit contract are all
+  # exercised by RUNNING it. Registered in `core` so the file is CLASSIFIED at all (integrity
+  # rglobs `tests/test_*.py` and has no wildcard: a file in no surface reds `manifest-integrity`,
+  # a required check), and ALSO in `carve_out:` — it drives the script as a subprocess in a
+  # hermetic env (temp base dir, stub `gh`, no network) and imports nothing from the package, so
+  # the URI-unset leg is its natural home. No `durations` row is needed: `fast_pool()` drops every
+  # carve-out member, so registration here cannot move the durations coverage ratio.
+  - test_ci_runner_x64_install.py
   ep:
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
   # and the other exact-match surfaces. The write-door INVENTORY scans ALL of
@@ -6160,6 +6170,13 @@ carve_out:
 # registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_9209_handle_non_cypher_wipe.py
+# #9639: the x86_64 runner installer's invariants (`tools/install-ci-runner-x64.sh`) run the shell
+# script as a subprocess against a hermetic env — a temp base dir, a stub `gh`, no network — so
+# there is no graph, no URI and nothing for the docker redirect to act on. Routed here so the
+# URI-unset carve-out job runs it as designed; the stem is mirrored in
+# tests/_embedded.TEST_NO_REDIRECT_STEMS (the pin is
+# tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_ci_runner_x64_install.py
 # #6884: modules that REQUIRE the docker lane — each one module-skips at import
 # when `TORTOISE_DB_URI` is not a usable URI — in the tier-2 PR legs that means
 # present and EMPTY (`URI=""`), not absent (`if not _is_db_uri(...): pytest.skip(...)`

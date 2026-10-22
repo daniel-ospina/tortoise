@@ -874,6 +874,14 @@ def test_no_redirect_stems_registry_exact():
         # on the addition is the pin working as designed, so the stem is
         # DECLARED here rather than exempted.
         "test_document_source_ingested_at_5140",
+        # #9639: DECLARED, and the honest reason is that the exemption is INERT here — this file
+        # constructs no projection at all (it drives tools/install-ci-runner-x64.sh as a
+        # subprocess in a hermetic env), so no redirect can flip anything. It is in the set only
+        # because `carve_out:` and this tuple are ONE set in two homes
+        # (test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems), and the file is a
+        # carve-out member because the URI-unset leg is its natural home. Do not read this entry as
+        # an embedded-construction claim: there is none to make.
+        "test_ci_runner_x64_install",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "
