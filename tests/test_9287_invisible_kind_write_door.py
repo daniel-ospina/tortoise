@@ -17,9 +17,23 @@ naming the argument and the code point, rather than silently rewriting what the
 caller asked for (a silent canonical form would also move the dedup identity
 ``(pointKind, content_hash)`` behind the caller's back).
 
-Two doors carry a caller-supplied ``pointKind``, and both are gated:
+Every door that can carry a caller- or model-supplied ``pointKind`` is gated:
 ``create_point`` (positional kind AND the props passthrough, which WINS over the
-positional) and ``update_point`` (measured: it stored a padded value too).
+positional), ``update_point``, the two entity funnels ``_create_entity`` /
+``_update_entity`` (``update_entity`` is the OTHER documented update door onto a
+``:Point`` — it stored a padded value at the first head, #9591 review cycle 1),
+and the journal-first seam ``EventAPI.add_point`` → ``_emit`` (cycle 1, P1:
+``extractor.py`` feeds it UNTRUSTED model output). The v1 extractor's parser
+canonicalises a model-produced kind before the seam sees it, because the door's
+refusal would otherwise abort a whole section's extraction.
+
+⛔ WHAT THE CLOSURE IS, exactly (do not overstate it — the first cut did): no
+SDK write can mint a kind the gate cannot classify, for the whitespace/format
+categories AND the measured blank-rendering set (``_KIND_BLANK_RENDERING_CHARS``
+— the Hangul fillers, braille blank, variation selectors; Unicode files those
+under ordinary categories, cycle 2 P2). A code point with no such signal at all
+is still a different kind, and an IMPORTED row with an out-of-family spelling is
+still not demanded by the read path (the declared boundary, pinned below).
 
 The measure of a good test here is the CLOSURE: after this change, a gated run
 cannot stamp a node whose kind the gate did not demand. Rows minted by a raw
@@ -75,6 +89,15 @@ INVISIBLE_KINDS = [
     # accepted-and-demanded; #9287 moved the repair to the door
     " statement",
     "statement ",
+    # BLANK-RENDERING code points Unicode files under ordinary categories
+    # (#9591 review cycle 2, P2): no category rule reaches these, and each was
+    # measured accepted-and-gate-escaping before the explicit set existed.
+    "\u3164statement",   # HANGUL FILLER (Lo)
+    "\u115fstatement",   # HANGUL CHOSEONG FILLER (Lo)
+    "\u1160statement",   # HANGUL JUNGSEONG FILLER (Lo)
+    "\uffa0statement",   # HALFWIDTH HANGUL FILLER (Lo)
+    "\u2800statement",   # BRAILLE PATTERN BLANK (So)
+    "\ufe0fstatement",   # VARIATION SELECTOR-16 (Mn)
 ]
 
 
@@ -290,14 +313,37 @@ class TestTheModelProducerKeepsItsOwnOutputInContract:
         assert _clean_model_kind("", default="statement") == "statement"
         assert _clean_model_kind(None, default="statement") == "statement"
 
-    def test_the_v1_extractor_parser_cleans_the_model_kind(self):
-        """The producer half is wired at the parse site, not only available."""
-        import inspect
-        from tortoise import extractor
-        src = inspect.getsource(extractor)
-        assert "_clean_model_kind(" in src, (
-            "the v1 extractor no longer cleans the model's pointKind — a stray "
-            "invisible character would abort the extraction at the write door")
+    def test_the_v1_extractor_parser_cleans_the_model_kind(self, caplog):
+        """The producer half is BEHAVIOURALLY wired — a stub model, not a grep.
+
+        A source-text check ("``_clean_model_kind(`` appears in the module")
+        stays green if the cleaned value is discarded or applied to the wrong
+        field, so this drives the real parser with a stub model and asserts what
+        it returns (and that it SAYS what it changed).
+        """
+        import json
+        import logging
+
+        from tortoise.extractor import _DocumentPointStage
+
+        class _StubModel:
+            def complete(self, *, system, user):  # noqa: ARG002
+                return json.dumps({"points": [
+                    {"content": "padded", "pointKind": "\u2003statement\u2003"},
+                    {"content": "zero width", "pointKind": "state\u200bment"},
+                    {"content": "only padding", "pointKind": "\u2003"},
+                    {"content": "clean", "pointKind": "jobToBeDone"},
+                ]})
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            out = _DocumentPointStage(_StubModel()).run("t", "body", "ctx")
+        assert [p["pointKind"] for p in out] == [
+            "statement", "statement", "statement", "jobToBeDone"], out
+        # …and the repair is SURFACED, never silent: one warning per cleaned
+        # value, naming it (the door's own guarantee is a refusal, so a producer
+        # that quietly rewrites is the other way to hide the model's noise).
+        warned = [r.message for r in caplog.records if "#9287" in r.message]
+        assert len(warned) == 3, caplog.records
 
 
 
@@ -343,8 +389,11 @@ class TestTheClassIsClosed:
     """Closure, stated at its measured edge — the door, not the read path.
 
     What the fix guarantees: no SDK write can mint a ``pointKind`` the gate
-    cannot classify, so the fail-open state (consumed + stamped while the gate
-    answered ``[]``) is unreachable through the SDK.
+    cannot classify — for the whitespace/format categories AND the measured
+    blank-rendering set (see the module docstring's ⛔ for the exact statement;
+    the first cut claimed this WITHOUT that set, and ``U+3164`` disproved it,
+    #9591 review cycle 2 P2) — so the fail-open state (consumed + stamped while
+    the gate answered ``[]``) is unreachable through the SDK.
 
     What it does NOT do, deliberately: extend the read-path family to every
     Unicode space. That was #9287's option 3 and it is refused on MEASURED cost

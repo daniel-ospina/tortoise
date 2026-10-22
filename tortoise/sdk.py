@@ -463,14 +463,56 @@ def _strip_whitespace(expr: str) -> str:
 #: A kind is an IDENTIFIER, not prose: surrounding whitespace and invisible
 #: formatting marks are never part of the name, and they are unrepresentable in
 #: the gate's read-path family (each code point would cost a ``replace()`` on
-#: every scanned row — see the cost measurements above). ``Unicode`` categories
-#: rather than a hand-listed set, so the closure is COMPLETE by construction and
-#: cannot go stale the way an enumeration does: ``Zs``/``Zl``/``Zp`` are the
-#: space separators (the Unicode-space family, NBSP and ideographic space
+#: every scanned row — see the cost measurements above). ``Zs``/``Zl``/``Zp`` are
+#: the space separators (the Unicode-space family, NBSP and ideographic space
 #: included), ``Cc`` the controls (tab, newline, NEL, NUL), ``Cf`` the invisible
 #: format marks (ZWSP, ZWNJ, ZWJ, word joiner, BOM, soft hyphen), ``Cs`` the
 #: lone surrogates.
+#:
+#: ⚠️ CATEGORIES ALONE ARE NOT COMPLETE, and the first cut of this fix claimed
+#: they were (#9591 review cycle 2, P2 — measured). Unicode gives several
+#: BLANK-RENDERING characters ordinary categories, so no category rule reaches
+#: them: the Hangul fillers ``U+115F``/``U+1160``/``U+3164``/``U+FFA0`` are
+#: ``Lo`` (letters), ``U+2800`` BRAILLE PATTERN BLANK is ``So``, and the
+#: variation selectors ``U+FE00``–``U+FE0F`` are ``Mn`` (marks). Measured on the
+#: first head: ``create_point('\\u3164statement', …)`` was ACCEPTED, the gate
+#: answered ``[]`` and a gated run stamped the node with the same
+#: ``ep_alpha 1.287``/``ep_beta 1.242`` as the issue's body — i.e. the closure
+#: claim was false, not merely imprecise. They are therefore listed explicitly
+#: below, and the honest statement of the rule is: the categories PLUS a small
+#: measured blank-rendering set (an enumeration, with the test that keeps it).
 _KIND_NON_IDENTIFIER_CATEGORIES = ("Zs", "Zl", "Zp", "Cc", "Cf", "Cs")
+
+#: Blank-rendering code points Unicode files under ordinary categories (see the
+#: caveat above) — measured accepted-and-gate-escaping before this set existed.
+_KIND_BLANK_RENDERING_CHARS = frozenset({
+    "\u115f",  # HANGUL CHOSEONG FILLER (Lo)
+    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+    "\u3164",  # HANGUL FILLER (Lo)
+    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    "\u2800",  # BRAILLE PATTERN BLANK (So)
+    *(chr(cp) for cp in range(0xfe00, 0xfe10)),  # VARIATION SELECTOR-1..16 (Mn)
+})
+
+
+def _kind_non_identifier_char(kind: str, i: int) -> bool:
+    """True when ``kind[i]`` cannot be part of an identifier.
+
+    ONE predicate for both halves of this module's kind rule: the refusal
+    (``_kind_invisible_char``) and the suggested fix (``_kind_suggestion``) read
+    it, so the value a refusal offers is by construction a value the door
+    accepts — a suggestion the caller cannot use is the loop #9591's first
+    review found (``strip()`` cannot remove a ``Cf`` mark, and ``repr()``
+    escaping hands back a DIFFERENT string).
+    """
+    ch = kind[i]
+    if ch == " " and 0 < i < len(kind) - 1:
+        # A plain INTERIOR space is a legitimate separator in an
+        # open-vocabulary kind ('technical debt') and the gate strips it
+        # wherever it occurs, so it can never be an escape.
+        return False
+    return (unicodedata.category(ch) in _KIND_NON_IDENTIFIER_CATEGORIES
+            or ch in _KIND_BLANK_RENDERING_CHARS)
 
 
 def _kind_invisible_char(kind: str) -> str | None:
@@ -480,17 +522,15 @@ def _kind_invisible_char(kind: str) -> str | None:
     a legitimate separator in an open-vocabulary kind (``'technical debt'``),
     and it can never make a node escape the gate's classification — the read
     path strips it wherever it occurs, so ``'state ment'`` is already demanded
-    as the ``statement`` it is. Every OTHER code point of the categories above
-    is refused in any position, including the interior: ``'state\\u2003ment'``
-    is either a separator or padding, and guessing is how a kind silently
-    becomes a different kind.
+    as the ``statement`` it is. Every OTHER code point of the categories above,
+    and every blank-rendering code point (see the caveat on
+    ``_KIND_NON_IDENTIFIER_CATEGORIES``), is refused in any position, including
+    the interior: ``'state\\u2003ment'`` is either a separator or padding, and
+    guessing is how a kind silently becomes a different kind.
     """
-    last = len(kind) - 1
-    for i, ch in enumerate(kind):
-        if ch == " " and 0 < i < last:
-            continue
-        if unicodedata.category(ch) in _KIND_NON_IDENTIFIER_CATEGORIES:
-            return ch
+    for i in range(len(kind)):
+        if _kind_non_identifier_char(kind, i):
+            return kind[i]
     return None
 
 
@@ -502,10 +542,8 @@ def _kind_suggestion(kind: str) -> str:
     door accepts — a suggestion the caller cannot use is the loop #9287's
     review found (``strip()`` cannot remove a ``Cf`` mark).
     """
-    out = "".join(
-        ch for ch in kind
-        if ch == " " or unicodedata.category(ch) not in _KIND_NON_IDENTIFIER_CATEGORIES
-    )
+    out = "".join(ch for i, ch in enumerate(kind)
+                  if not _kind_non_identifier_char(kind, i))
     return out.strip()
 
 
