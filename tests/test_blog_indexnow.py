@@ -426,6 +426,27 @@ DOC_ROWS = (
 )
 
 
+#: The shapes the module emits, as the source parses them. A pin, not a
+#: derivation: `test_...` compares the module's ACTUAL heads against this list, so
+#: deleting a log call reds here — which matters for the four shapes
+#: (`unusable url`, `unexpected failure`, and the two `upstream unreachable`
+#: catches) that no behavioural case can reach. Without this, those could be
+#: deleted and the operator doc would keep describing a line nothing can emit.
+EXPECTED_HEADS = [
+    "skipped (state unreadable, no row)",
+    "skipped (state unreadable, supabase",
+    "skipped (state unreadable, upstream unreachable)",
+    "skipped (submitted",
+    "stamp failed (supabase",
+    "stamp failed (upstream unreachable)",
+    "submit failed (no status — timeout/network)",
+    "submit failed (status",
+    "submit failed (unusable url)",
+    "submitted (status",
+    "unexpected failure",
+]
+
+
 def test_the_operator_table_documents_every_shape_and_loses_no_row() -> None:
     """The doc table is the runbook's only discovery mechanism — keep it honest.
 
@@ -437,6 +458,10 @@ def test_the_operator_table_documents_every_shape_and_loses_no_row() -> None:
       cannot hide from it) and the numerator is the parsed `[indexnow]` shapes: the
       two must be equal, so a log line written in a form this test cannot read reds
       instead of silently escaping the pin.
+    * **no shape is deleted from the module** — the parsed heads must equal
+      ``EXPECTED_HEADS``. The count above is a BALANCE check and a balance is
+      preserved by removing a call as neatly as by adding one; four of the shapes
+      have no behavioural case at all, so this is their only pin.
     * **the promised rows still exist** — ``DOC_ROWS`` names each status/qualifier
       the table promises to explain, because one template can emit many statuses
       with different remedies. Delete a row an operator relies on and this reds.
@@ -446,27 +471,44 @@ def test_the_operator_table_documents_every_shape_and_loses_no_row() -> None:
     """
     source = INDEXNOW_MODULE.read_text(encoding="utf-8")
     calls = len(re.findall(r"console\.\w+\(", source))
-    shapes = set()
+    heads: list[str] = []
     for match in re.finditer(r"console\.\w+\(\s*`\[indexnow\] ([^`]+)`", source):
         # Everything before the first interpolation, minus the trailing separator.
         head = match.group(1).split("${", 1)[0].rstrip(": ")
         if head:
-            shapes.add(head)
-    assert len(shapes) == calls, (
-        f"{calls} console calls but {len(shapes)} parsed [indexnow] shapes — a log line "
-        "was written in a form this test cannot see, so it is not actually pinned:"
-        f" {sorted(shapes)}"
+            heads.append(head)
+    assert len(heads) == calls, (
+        f"{calls} console calls but {len(heads)} parsed [indexnow] shapes — a log line is "
+        "written in a form this test cannot read (a call inside a comment, a template "
+        f"split differently), so it is not actually pinned: {sorted(heads)}"
+    )
+    assert sorted(heads) == EXPECTED_HEADS, (
+        "the module's [indexnow] log shapes changed: "
+        f"removed={sorted(set(EXPECTED_HEADS) - set(heads))} "
+        f"added={sorted(set(heads) - set(EXPECTED_HEADS))} "
+        f"duplicated={sorted(h for h in set(heads) if heads.count(h) > 1)} "
+        f"(emits {len(heads)}, pinned {len(EXPECTED_HEADS)}). "
+        "Adding a shape means the operator doc gains a row; REMOVING one means the "
+        "runbook now describes a line nothing can emit; a duplicate means one call site "
+        "was added twice — update this pin and the doc deliberately"
     )
 
-    # Backslash-escaped pipes (`401\|403`) are markdown table syntax for one
-    # cell — unescape before comparing so the row key reads as an operator sees it.
-    doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8").replace("\\|", "|")
-    missing = sorted(s for s in shapes if s not in doc)
+    raw_doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8")
+    # Backslash-escaped pipes (`401\|403`) are markdown table syntax for one cell:
+    # compare against the RAW doc in the escaped form, so an edit that drops the
+    # backslashes (splitting the cell and silently dropping both remedy columns)
+    # reds here rather than only in CI's table lint.
+    doc = raw_doc.replace("\\|", "|")
+    missing = sorted(s for s in heads if s not in doc)
     assert missing == [], (
         "docs/blog-authoring.md's [indexnow] table omits log shapes the module emits: "
         f"{missing} — an operator cannot act on a line the runbook does not describe"
     )
-    lost = [row for row in DOC_ROWS if f"| `{row}`" not in doc]
+    lost = [
+        row
+        for row in DOC_ROWS
+        if (f"| `{row.replace('|', chr(92) + '|')}`" if "|" in row else f"| `{row}`") not in raw_doc
+    ]
     assert lost == [], (
         f"the [indexnow] table lost rows an operator acts on: {lost} — a status row is "
         "not covered by its template's row, because each status implies a different action"
