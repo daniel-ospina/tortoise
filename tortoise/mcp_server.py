@@ -3196,6 +3196,11 @@ def main():
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
 
         print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
+    # #9494: `main()`'s own import block above loads modules the module body
+    # never did (`tortoise._embedded`, `embedded_lifecycle`), so baseline again
+    # once they are in — otherwise their edits between start and the first health
+    # call would be absorbed silently, the #9494 window in miniature.
+    _code_freshness.observe(deep=True)
     try:
         mcp.run(transport="stdio")
     finally:
@@ -6021,6 +6026,10 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
 
+    # #9494: this function's import block is the HTTP startup graph — baseline
+    # it now, before the app serves, so drift is measurable from the first call.
+    _code_freshness.observe(deep=True)
+
     # The transport's endpoint INSIDE this sub-app. One value, used both to
     # build the route and to gate the #3656 admission guard -- so the guard can
     # never intercept a path the route table does not serve (its 404).
@@ -7041,14 +7050,17 @@ if not getattr(mcp, "_retired_tool_transform_registered", False):
     mcp.add_transform(_RetiredToolTransform(_RETIRED_SHIMS))
     mcp._retired_tool_transform_registered = True
 
-# #9494: baseline the WHOLE startup graph at startup. `monitoring` already
-# pulled `code_freshness` in (so the graph loaded up to that point is recorded),
-# but `tool_registry`, `mcp_auth`, `quota` and the rest load much later in this
-# module body — without this call they would only be observed by the first
-# `check()` (a health call, which on a long-lived server can be days away), and
-# an edit to them in between would read as clean. Measured: 25 of the 58
-# `tortoise.*` modules a server loads were outside the baseline before this.
-_code_freshness.observe()
+# #9494: baseline the WHOLE startup graph at startup, and hash it (`deep=True`,
+# ~36 ms for this repo's 6 MB startup graph — invisible at boot). `monitoring`
+# already pulled `code_freshness` in, but `tool_registry`, `mcp_auth`, `quota`
+# and the rest load much later in this module body — without this call they would
+# only be observed by the first `check()` (a health call, which on a long-lived
+# server can be days away), and an edit to them in between would read as clean.
+# Measured: 25 of the 58 `tortoise.*` modules a server loads were outside the
+# baseline before this. `main()` and `create_http_app` call it again after THEIR
+# import blocks, because each imports modules this body has not (e.g.
+# `tortoise._embedded`, imported only when `main()` runs).
+_code_freshness.observe(deep=True)
 
 if __name__ == "__main__":
     main()

@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -73,7 +74,32 @@ def _rewrite(path, body="VALUE = 1\nEXTRA_SYMBOL = 2\n"):
 
 
 def _older(path):
-    os.utime(path, (  _OLD, _OLD))
+    os.utime(path, (_OLD, _OLD))
+
+
+def _subprocess_tracked(code: str) -> set[str]:
+    """Run ``code`` in a FRESH interpreter and return its printed tokens.
+
+    Fresh process on purpose: in-process, a test has already imported half the
+    package, so it cannot distinguish "observed at import" from "observed by the
+    first ``check()``". The child is also required to have imported THIS
+    checkout — in an environment where ``tortoise`` resolves to a wheel or
+    another lane's tree, every membership assertion below would be about code
+    that is not this diff.
+    """
+    probe = (
+        "import tortoise, sys\n"
+        "print('TREE', tortoise.__file__)\n"
+    ) + code
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    out = subprocess.run([sys.executable, "-c", probe], cwd=str(_ROOT), env=env,
+                         capture_output=True, text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    tokens = set(out.stdout.split())
+    tree = Path(out.stdout.split("TREE", 1)[1].split()[0])
+    assert Path(tree).resolve().is_relative_to(_ROOT), (
+        f"the child imported {tree}, not this checkout ({_ROOT})")
+    return tokens
 
 
 # ── 1. the measurement ───────────────────────────────────────────────
@@ -113,7 +139,6 @@ def test_the_stale_report_names_the_fix_not_the_symbol(tmp_path, monkeypatch):
     assert report["hint"] and "Restart the MCP server" in report["hint"]
     assert module.__name__ in report["hint"]  # names WHAT drifted
     assert report["process_started_at"].endswith("Z")  # and the age it served
-    assert report["baseline_at"] is not None
 
 
 def test_a_removed_file_is_drift_too(tmp_path, monkeypatch):
@@ -171,15 +196,55 @@ def test_the_startup_graph_is_baselined_at_import_not_at_first_health_call():
         # is what the module body recorded by itself.
         "print(chr(10).join(cf._tracked_names()))\n"
     )
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    out = subprocess.run([sys.executable, "-c", code], cwd=str(_ROOT), env=env,
-                         capture_output=True, text=True, timeout=180)
-    assert out.returncode == 0, out.stderr[-2000:]
-    tracked = set(out.stdout.split())
+    tracked = _subprocess_tracked(code)
 
     assert "tortoise.sdk" in tracked
     assert "tortoise.tool_registry" in tracked
     assert "tortoise.mcp_auth" in tracked
+
+
+def test_the_boot_deep_observe_hashes_what_the_import_already_baselined():
+    """``observe(deep=True)`` must upgrade entries the shallow import-time call
+    already recorded — most importantly ``tortoise.sdk``, loaded BEFORE
+    ``monitoring`` pulls ``code_freshness`` in.
+
+    Without the upgrade the boot hash covers only the modules that arrive after
+    the import, so a byte-identical rewrite of ``sdk.py`` before the first health
+    call would read as unprovable drift for the process's whole life.
+    """
+    tracked = _subprocess_tracked(
+        "import tortoise.mcp_server\n"
+        "from tortoise import code_freshness as cf\n"
+        "missing = [n for n, e in cf._baseline.items() if e[3] is None]\n"
+        "print('UNHASHED=' + str(len(missing)))\n"
+        "print('SDK_HASHED=' + str(cf._baseline['tortoise.sdk'][3] is not None))\n"
+    )
+
+    assert "UNHASHED=0" in tracked, tracked
+    assert "SDK_HASHED=True" in tracked
+
+
+def test_the_module_import_itself_observes_its_caller():
+    """``monitoring`` imports this module at import time and MUST get a baseline
+    from that import alone.
+
+    Pinned separately from the ``mcp_server`` case above because the two calls
+    cover different entrypoints: ``monitoring.serve_health`` (and any process
+    that only imports ``monitoring``) has no later ``observe()``, so deleting the
+    module-level call would leave its baseline to the first health call — the
+    #9494 window, with a docstring claiming otherwise.
+    """
+    tracked = _subprocess_tracked(
+        "import tortoise.monitoring\n"
+        "from tortoise import code_freshness as cf\n"
+        "print(chr(10).join(cf._tracked_names()))\n"
+        "print('BASELINE_AT=' + str(cf._baseline_at is not None))\n"
+    )
+
+    assert "tortoise.monitoring" in tracked
+    assert "tortoise.code_freshness" in tracked
+    assert "tortoise.env_truthy" in tracked
+    assert "BASELINE_AT=True" in tracked
 
 
 def test_an_edit_dated_before_process_start_is_still_drift(tmp_path, monkeypatch):
@@ -198,7 +263,6 @@ def test_an_edit_dated_before_process_start_is_still_drift(tmp_path, monkeypatch
 
     path.write_text("VALUE = 1\nEXTRA_SYMBOL = 2\n")  # size changes, mtime stays old
     _older(path)
-    assert os.stat(path).st_mtime < code_freshness._STARTED_AT
 
     report = code_freshness.check()
 
@@ -216,8 +280,6 @@ def test_the_real_sdk_is_tracked_and_its_row_is_repo_relative(monkeypatch):
     payload is served to tenants, so it must be ``tortoise/sdk.py``, never the
     host's absolute path.
     """
-    import tortoise.sdk as sdk_module
-
     code_freshness.check()  # baseline the real, loaded graph
     _pretend_sdk_drifted()
 
@@ -225,8 +287,7 @@ def test_the_real_sdk_is_tracked_and_its_row_is_repo_relative(monkeypatch):
 
     assert report["stale"] is True, report
     row = next(r for r in report["changed"] if r["module"] == "tortoise.sdk")
-    assert row["file"] == "tortoise/sdk.py"
-    assert not os.path.isabs(row["file"])
+    assert row["file"] == "tortoise/sdk.py"  # repo-relative: never the host path
     assert "tortoise.sdk" in report["hint"]
 
 
@@ -268,6 +329,179 @@ def test_a_clean_process_reports_clean():
     assert report["hint"] is None
     assert report["mtime_only"] == 0
     assert report["tracked"] > 0
+
+
+def test_a_deferred_digest_is_reported_stale_but_marked_unverified(tmp_path, monkeypatch, caplog):
+    """When the process never confirmed which bytes it loaded, a stat mismatch
+    is still STALE — the failure directions are not symmetric.
+
+    A conservative false alarm costs a restart; a false pass is the #9494 lie.
+    The row says which one it is (`content_verified: False`), and the payload
+    counts them, so an operator can tell "measured" from "cannot prove".
+    """
+    module, path = _probe_module(tmp_path)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    code_freshness.observe()  # SHALLOW: no digest yet
+    _rewrite(path)
+
+    report = code_freshness.check()
+
+    assert report["stale"] is True
+    assert report["changed"][0]["content_verified"] is False
+    assert report["unverified"] == 1
+
+
+def test_observe_never_reads_source_files(tmp_path, monkeypatch):
+    """Importing this module must cost ``stat`` calls only.
+
+    The digest is deferred to the first ``check()`` precisely because the
+    observation runs on every serving entrypoint's import (this repo's startup
+    graph is ~6 MB).
+    """
+    code_freshness._reset_for_tests()
+
+    def _boom(_path):
+        raise AssertionError("observe() read a source file")
+
+    monkeypatch.setattr(code_freshness, "_digest", _boom)
+    assert code_freshness.observe() > 0
+    monkeypatch.undo()
+
+    report = code_freshness.check()  # the digest IS established here
+    assert report["stale"] is False
+    with code_freshness._lock:
+        assert code_freshness._baseline["tortoise.sdk"][3] is not None
+
+
+def test_a_persistent_drift_is_not_re_read_on_every_check(tmp_path, monkeypatch):
+    """``check()`` runs on every health probe AND on every failing tool call.
+
+    A drifted module must cost one read, then a ``stat`` — never one multi-MB
+    read per probe for the rest of the process's life.
+    """
+    module, path = _probe_module(tmp_path)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    code_freshness.check()  # establish digests for the clean graph
+    _rewrite(path)
+
+    reads = []
+    real_digest = code_freshness._digest
+    monkeypatch.setattr(code_freshness, "_digest",
+                        lambda p: reads.append(p) or real_digest(p))
+
+    assert code_freshness.check()["stale"] is True
+    assert code_freshness.check()["stale"] is True
+    assert code_freshness.check()["stale"] is True
+
+    assert reads.count(str(path)) == 1, reads
+
+
+def test_one_warning_per_drift_not_one_per_health_call(tmp_path, monkeypatch, caplog):
+    """A six-day-old stale server is probed continuously: the log must say it
+    once per drift, not once per probe."""
+    module, path = _probe_module(tmp_path)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    code_freshness.check()
+    _rewrite(path)
+
+    with caplog.at_level("WARNING", logger="tortoise.code_freshness"):
+        code_freshness.check()
+        code_freshness.check()
+        code_freshness.check()
+
+    records = [r for r in caplog.records if r.name == "tortoise.code_freshness"]
+    assert len(records) == 1, [r.getMessage() for r in records]
+    assert module.__name__ in records[0].getMessage()
+
+
+def test_baseline_at_records_the_FIRST_observation_not_the_latest(tmp_path, monkeypatch):
+    """``baseline_at`` is the process's baseline age; a later ``observe()`` that
+    picks up a lazily imported module must not move it."""
+    code_freshness.check()
+    first = code_freshness._baseline_at
+    assert first is not None
+
+    late, _path = _probe_module(tmp_path, name="tortoise._probe_late_9494")
+    monkeypatch.setitem(sys.modules, late.__name__, late)
+    code_freshness.check()
+
+    assert late.__name__ in code_freshness.tracked()  # the late module IS added
+    assert code_freshness._baseline_at == first        # but the age does not move
+
+
+def test_the_warned_set_is_bounded_and_never_gates_the_verdict(tmp_path, monkeypatch):
+    """The WARNING channel is capped; the VERDICT is not.
+
+    A process that drifts hundreds of times must not grow the set without limit —
+    and, more important, hitting the cap may only suppress the log line, never
+    the ``stale`` answer.
+    """
+    monkeypatch.setattr(code_freshness, "_WARNED_CAP", 1)
+    probes = []
+    for i in range(3):
+        module, path = _probe_module(tmp_path, name=f"tortoise._probe_cap2_{i}")
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        probes.append((module, path))
+    code_freshness.check()
+    for _module, path in probes:
+        _rewrite(path)
+
+    report = code_freshness.check()
+
+    assert report["changed_count"] == 3   # the verdict is complete
+    assert len(code_freshness._warned) == 1  # the log channel is capped
+
+
+class _SlowSet(set):
+    """A set that HESITATES inside ``__contains__``.
+
+    The real race window between "is this drift already warned about" and "mark
+    it warned" is a few bytecodes, and eight threads are staggered long before
+    they reach it by the stat/hash loop — measured: 150 trials never produced a
+    duplicate, i.e. a plain barrier test passes with the lock REMOVED. The delay
+    makes every thread sit inside the window simultaneously, so the locked
+    version still emits one record while the unlocked one emits eight.
+    """
+
+    def __contains__(self, item):
+        found = super().__contains__(item)
+        time.sleep(0.05)
+        return found
+
+
+def test_concurrent_checks_emit_one_warning(tmp_path, monkeypatch, caplog):
+    """A burst of health probes must not duplicate the STALE PROCESS line — the
+    invariant the guarded membership test exists to hold (``check()`` is served
+    by a threaded health server and by concurrent tool calls)."""
+    import threading
+
+    module, path = _probe_module(tmp_path)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    code_freshness.check()
+    _rewrite(path)
+    monkeypatch.setattr(code_freshness, "_warned", _SlowSet())
+
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def probe():
+        try:
+            barrier.wait(timeout=10)
+            code_freshness.check()
+        except Exception as exc:  # surfaced by the errors assertion
+            errors.append(exc)
+
+    with caplog.at_level("WARNING", logger="tortoise.code_freshness"):
+        threads = [threading.Thread(target=probe, daemon=True) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+    assert errors == []
+    assert not any(t.is_alive() for t in threads)  # a hung thread cannot pass
+    records = [r for r in caplog.records if r.name == "tortoise.code_freshness"]
+    assert len(records) == 1, [r.getMessage() for r in records]
 
 
 # ── 2. the health surface ────────────────────────────────────────────
@@ -382,8 +616,13 @@ def test_a_stale_process_answers_a_symbol_failure_with_the_restart(monkeypatch):
 
     assert payload["stale_server"] is True, payload
     assert _SYMBOL_ERROR in payload["error"]  # the original cause is kept
-    assert "Restart the MCP server" in payload["error"]
-    assert "tortoise.sdk" in payload["error"]
+    cause, _, hint = payload["error"].partition("\n\n")
+    assert cause == _SYMBOL_ERROR
+    # The HINT half must name the drifted module. Asserting the whole string
+    # would pass on the raw exception text alone (it contains 'tortoise.sdk'),
+    # pinning nothing about what `_safe` adds.
+    assert "Restart the MCP server" in hint
+    assert "imported tortoise.sdk at start" in hint
 
 
 def test_the_restart_sentence_stands_alone_after_an_error_message(monkeypatch):
@@ -439,9 +678,13 @@ def test_a_missing_module_is_never_staleness(monkeypatch):
     restart."""
     _pretend_sdk_drifted()
 
-    exc = ModuleNotFoundError("No module named 'sentence_transformers'",
-                              name="sentence_transformers")
+    # Names the DRIFTED module, so the generic ImportError path WOULD return a
+    # hint: only the explicit exclusion keeps this None.
+    exc = ModuleNotFoundError("No module named 'tortoise.sdk'", name="tortoise.sdk")
     assert code_freshness.staleness_hint(exc) is None
+    assert code_freshness.staleness_hint(
+        ModuleNotFoundError("No module named 'sentence_transformers'",
+                            name="sentence_transformers")) is None
 
 
 def test_an_unrelated_attribute_error_is_never_staleness(monkeypatch):
@@ -463,3 +706,6 @@ def test_staleness_hint_ignores_non_symbol_failures(monkeypatch):
 
     assert code_freshness.staleness_hint(RuntimeError(_SYMBOL_ERROR)) is None
     assert code_freshness.staleness_hint(ImportError(_SYMBOL_ERROR, name="tortoise.sdk")) is not None
+    # No usable `.name` (a hand-raised ImportError): the MESSAGE is parsed for
+    # the module, so the hint still has provenance.
+    assert code_freshness.staleness_hint(ImportError(_SYMBOL_ERROR)) is not None

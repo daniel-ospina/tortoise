@@ -1512,6 +1512,11 @@ surfaces:
   # runtime reader of the directory (see the module docstring).
   - test_9231_record_migrations_trigger.py
   - test_9256_lane_probe_attribution.py
+  # #9494: registered ONCE, in the `core` block below beside `test_monitoring.py`
+  # (its consumers' siblings), with the `durations:` row the surface entry does
+  # not cover. Two lanes appended this file here and there while both fixed the
+  # same review finding, and a same-surface duplicate reds `duplicate_entries()`
+  # (#5373) — so this line is deliberately absent.
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
