@@ -469,6 +469,28 @@ derivation the write itself uses — and the read carries **`catalog_ok`**:
 `false` means the shared catalog could not be read (the read degrades rather
 than `503`-ing), so an empty `available` must be shown as *"the catalog could
 not be read"* — never as the claim that everything is already on the graph.
+- **Provisioning can configure at birth (#9667).** `POST /v1/graphs` accepts an
+optional `packs: [{namespace, status}]` alongside `org_id`/`name`/`scopes`, so
+create-and-configure is ONE call and an unconfigured graph becomes a *choice*
+rather than the only possibility. Three behaviours to keep straight, because
+they are deliberately different: **field absent** → no pack decision, the graph
+is born UNCONFIGURED and keeps the catalog union (the decided default below);
+**`packs: []`** → born CONFIGURED with an empty set, the narrowest deliberate
+act; **a list** → exactly that set. The 201 envelope then carries the resolved
+set under `packs` (`{namespaces, revision, configured}`) so the caller never
+has to re-read, and the response is otherwise byte-identical to before. It is
+**atomic**: entries are validated before any write, and a namespace the catalog
+does not carry (or a `removed` status) fails the CREATION with a `422` and the
+graph rolled back — never a graph plus a follow-up call. It is also the
+MANAGEMENT plane, exactly like `PUT`: `packs` on a create requires the
+`owner`/`admin` role, so the create form is not a back door around the
+per-graph route. `expected_revision` does not apply (the namespace is new, so
+its revision is 0 by construction — `set_graph_packs`' documented
+"internal callers that own the graph" arm), and the write is attributed to the
+creating session user on the `:PackSelection` marker. The **key-driven**
+provisioning route (`POST /v1/organizations/{org_id}/graphs`) deliberately does
+NOT take `packs` yet: it is the app-builder flow, which #9667 leaves to the
+customer-facing territory that owns per-graph permissions.
 
 > The dashboard Settings → **Configured packs** home (`settings-packs-heading`)
 > renders this contract, with a graph selector and a modal that lists each
