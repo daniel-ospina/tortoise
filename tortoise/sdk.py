@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic as _monotonic
@@ -393,16 +394,23 @@ _CALIBRATION_GATED_LABELS = ("Point",)
 #:
 #: ⚠️ DECLARED BOUNDARY: Unicode spaces beyond NBSP (em space, ideographic
 #: space, ZWSP, BOM…) are NOT in this family. A ``pointKind`` padded with one of
-#: those still escapes the kind normalisation while EP consumes the node and
-#: stamps it — measured, and pre-existing (``origin/main`` compared the raw kind,
-#: so every spelling escaped). Reachability is NOT "hand-written only": the write
-#: door stores a bare kind verbatim with a warning, so ``create_point`` mints the
-#: shape; every such node IS demandable and clearable, so the gap is one of
-#: coverage, not of an unsatisfiable demand. Each further code point costs one
-#: ``replace()`` on every scanned row (measured: seven characters ≈ +5.7 ms at
-#: 2,000 Points; the full Unicode list timed out on an eight-node fixture), so
-#: the boundary is recorded here and filed (#9287) rather than left implicit or
-#: paid for on the hot path.
+#: those escapes the kind normalisation while EP consumes the node and stamps it
+#: — measured, and pre-existing (``origin/main`` compared the raw kind, so every
+#: spelling escaped). Each further code point costs one ``replace()`` on every
+#: scanned row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full
+#: Unicode list timed out on an eight-node fixture), so the boundary stays
+#: recorded here rather than paid for on the hot path.
+#:
+#: #9287 closed the REACHABLE half of that boundary at the WRITE DOOR instead:
+#: ``create_point``/``update_point`` now REFUSE a ``pointKind`` carrying any
+#: non-identifier character (``_refuse_invisible_kind`` below), so the SDK can
+#: no longer mint a kind this filter cannot classify. Reachability of the
+#: remaining spellings is therefore an IMPORTED / hand-written row (a raw Cypher
+#: ``SET n.pointKind = …``), which is exactly what this filter is for: such a
+#: node IS demandable and clearable, so the gap is one of coverage, not of an
+#: unsatisfiable demand. The two halves are documented together on purpose —
+#: widening this family without touching the door (or vice versa) re-opens
+#: #9287, where the demand and the door disagreed on what a kind may be.
 #: For IDS: exactly the ASCII whitespace class — measured to be the set an id
 #: equality cannot resolve. NBSP is deliberately NOT here: ``create_point``
 #: ACCEPTS an NBSP-padded id, the labelled equality resolves it and
@@ -447,6 +455,81 @@ def _strip_whitespace(expr: str) -> str:
     for ch in _KIND_WHITESPACE_CHARS:
         out = f"replace({out}, {_cypher_ws_literal(ch)}, '')"
     return out
+
+
+#: #9287: the character CATEGORIES a ``pointKind`` may not carry — the
+#: WRITE-DOOR half of the boundary ``_KIND_WHITESPACE_CHARS`` declares above.
+#:
+#: A kind is an IDENTIFIER, not prose: surrounding whitespace and invisible
+#: formatting marks are never part of the name, and they are unrepresentable in
+#: the gate's read-path family (each code point would cost a ``replace()`` on
+#: every scanned row — see the cost measurements above). ``Unicode`` categories
+#: rather than a hand-listed set, so the closure is COMPLETE by construction and
+#: cannot go stale the way an enumeration does: ``Zs``/``Zl``/``Zp`` are the
+#: space separators (the Unicode-space family, NBSP and ideographic space
+#: included), ``Cc`` the controls (tab, newline, NEL, NUL), ``Cf`` the invisible
+#: format marks (ZWSP, ZWNJ, ZWJ, word joiner, BOM, soft hyphen), ``Cs`` the
+#: lone surrogates.
+_KIND_NON_IDENTIFIER_CATEGORIES = ("Zs", "Zl", "Zp", "Cc", "Cf", "Cs")
+
+
+def _kind_invisible_char(kind: str) -> str | None:
+    """The first character of ``kind`` that cannot be part of an identifier.
+
+    ``' '`` is exempted when it is INSIDE the string: a plain interior space is
+    a legitimate separator in an open-vocabulary kind (``'technical debt'``),
+    and it can never make a node escape the gate's classification — the read
+    path strips it wherever it occurs, so ``'state ment'`` is already demanded
+    as the ``statement`` it is. Every OTHER code point of the categories above
+    is refused in any position, including the interior: ``'state\\u2003ment'``
+    is either a separator or padding, and guessing is how a kind silently
+    becomes a different kind.
+    """
+    last = len(kind) - 1
+    for i, ch in enumerate(kind):
+        if ch == " " and 0 < i < last:
+            continue
+        if unicodedata.category(ch) in _KIND_NON_IDENTIFIER_CATEGORIES:
+            return ch
+    return None
+
+
+def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
+    """#9287: refuse a kind the calibration gate cannot classify.
+
+    The gate demands a prior for every node EP consumes whose ``pointKind``
+    normalises to an evidence kind; EP itself reads NO kind. So a kind the gate
+    cannot classify is a node that is consumed and stamped while the gate stays
+    silent — measured at ``HEAD``: ``create_point('\\u2003statement\\u2003',
+    'x')`` was stored verbatim, ``_uncalibrated_ep_participants(None)`` answered
+    ``[]``, and a ``require_calibration=True`` run stamped it
+    (``ep_alpha 1.287``/``ep_beta 1.242`` — the ``Beta(1, 1)``-as-calibrated
+    class #7478 exists to prevent).
+
+    Refusing is the repair the issue asks for (option 1) and it is the door's
+    own posture for a value its post-write check cannot resolve: it NAMES the
+    argument and the offending code point, so the author fixes the spelling,
+    instead of a silent rewrite of what they asked for (``pointKind`` is part of
+    the dedup identity ``(pointKind, content_hash)``, so a silent canonical
+    form would also move the identity behind the caller's back).
+
+    Non-string kinds are NOT examined: ``create_point(42, …)`` is out of
+    contract, writable on ``origin/main``, and the gate's ``toLower(typeof(…))``
+    guard already keeps it out of the universe (#9063); refusing it here would
+    be a different change with its own blast radius.
+    """
+    if not isinstance(value, str):
+        return
+    bad = _kind_invisible_char(value)
+    if bad is None:
+        return
+    raise ValueError(
+        f"{door}: {prop} must be an identifier, but {value!r} carries "
+        f"{bad!r} (U+{ord(bad):04X}). A kind is matched by exact membership, "
+        "so this spelling is a DIFFERENT kind: the calibration gate would not "
+        "demand a prior for it while EP still consumed and stamped the node "
+        f"(#9287). Pass the kind without the {bad!r} — e.g. {value.strip()!r}."
+    )
 
 
 #: id types an id-equality can resolve. A hand-written array id is not one of
@@ -8195,6 +8278,16 @@ class TortoiseSDK:
         the cheap fix — ``extractedFrom='session:<id>'`` for an assertion the
         writer itself originates.
         """
+        # #9287: a kind is an IDENTIFIER — refuse invisible padding/format
+        # characters BEFORE `_validate_kind` would only WARN about them. The
+        # warning is what let this shape through: a padded kind is not an
+        # unrecognised spelling to register, it is one the calibration gate
+        # classifies as a DIFFERENT kind, so EP consumed and stamped a node the
+        # gate never demanded a prior for (measured; the read-path enumeration
+        # that guards imported rows is documented on
+        # `_KIND_WHITESPACE_CHARS`). First, so a caller whose value is not a
+        # kind at all hears that, not an approval complaint about it.
+        _refuse_invisible_kind("pointKind", kind, door="create_point")
         self._validate_kind(kind)
         # #5475: `pointKind` is one of the properties
         # `pack_state.graph_kind_namespaces` mines the approval set from, so the
@@ -8205,6 +8298,12 @@ class TortoiseSDK:
         # as the entity funnel (`_refuse_unapproved_kind`).
         self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # #9287: the props passthrough can carry `pointKind` itself and it WINS
+        # over the positional kind (measured: `create_point("statement", …,
+        # pointKind="\u2003statement\u2003")` stored the padded value), so the same
+        # refusal has to run over the mined spellings — the same key set the
+        # approval gate below reads, never a second hand-written list.
+        self._refuse_invisible_point_kinds(props, door="create_point")
         # The props passthrough accepts the OTHER mined key names too
         # (`objectKind`, `eventKind`, ...), and each of those is persisted on
         # the Point and mined back into the approval set — measured:
@@ -12181,6 +12280,11 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #9287: an UPDATE is a WRITE, and ``pointKind`` is writable through it
+        # (measured: ``update_point(id, pointKind='\u2003observation\u2003')``
+        # stored the padded value and the gate never demanded it) — the same
+        # invisible-kind refusal the create door applies, at ITS own door.
+        self._refuse_invisible_point_kinds(props, door="update_point")
         # ── #5475 (residual): an UPDATE is a WRITE, and it widened the set ──
         # The create-side gate is at the funnels every CREATE meets, but
         # ``pointKind`` is one of the properties ``graph_kind_namespaces``
@@ -31558,7 +31662,12 @@ class TortoiseSDK:
 
     @staticmethod
     def _validate_kind(kind: str) -> None:
-        # ponytail: open-ended kind vocabularies — any string accepted.
+        # ponytail: open-ended kind vocabularies — any VISIBLE identifier-shaped
+        # string accepted. (#9287 narrowed this from "any string": a kind
+        # carrying surrounding whitespace or an invisible format mark is refused
+        # at the door by `_refuse_invisible_kind` before this runs — it is not a
+        # spelling to register, it is a different kind the calibration gate
+        # cannot classify.)
         # Warning for unrecognized values; domain_loader.register_kind() can suppress.
         # #951: vocabulary source is the domain_loader adapter — the compiled
         # pack pointKind bucket (pack_registry canonical, plan §5.2 boundary 4).
@@ -31718,6 +31827,21 @@ class TortoiseSDK:
             # bound-but-unreachable graph RAISES rather than reading as no-packs).
             approved = _installed_namespaces_for_gate(self)
         refuse_unapproved_kinds_in_payload(record, approved, spells=spells)
+
+    def _refuse_invisible_point_kinds(self, props: dict, *, door: str) -> None:
+        """#9287: refuse a padded/invisible ``pointKind`` riding the props path.
+
+        Both mutating Point doors forward a free-form ``props`` dict, and the
+        mined key set is what they are screened with (`_refuse_unapproved_kinds_in_props`'s
+        reason, one rule over): the canonical ``pointKind`` AND its snake
+        spelling — measured at HEAD, an update through either reached the node
+        (`update_point(id, pointKind='\u2003observation\u2003')` stored it).
+        """
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        for spelling, kind_prop in _kind_spellings.items():
+            if kind_prop == "pointKind" and spelling in props:
+                _refuse_invisible_kind("pointKind", props.get(spelling),
+                                       door=door)
 
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
