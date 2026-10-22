@@ -15963,11 +15963,33 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # mints as a violation — the same class #5082 closed for `sourceKind` here.
     # `$now` is this commit's own instant, the transaction-time value §4.6 asks
     # for; `coalesce` keeps an instant a prior writer recorded.
+    # #5140 (P1 finding 7 — the FOURTH writer): `documentKind` is the `documents`
+    # METER key (`quota.DOCUMENT_METER_PREDICATE`), and this MERGE overwrote it
+    # on MATCH. `doc_id` is fully caller-computable —
+    # `doc_<sha256(f'{session_id}:{captured_at}')>` from two request-body fields
+    # (commit_schema.CommitPayload) — so a tenant could seed a metered document
+    # `:Source` at that url and then demote it with one commit, freeing a
+    # `documents` slot per call. MEASURED on the pre-fix statement: a
+    # `documentKind='report'` Source at the derived id became `'transcript'`.
+    # The genre is therefore CLAMPED in the same statement, exactly as
+    # `entities.py::_upsert_document`'s clause does: a transcript MINT,
+    # a repeat write on a transcript, and a node with no genre all still land
+    # `'transcript'`; an existing METERED document keeps the genre it had, and a
+    # pre-existing demotion is not re-applied. This is the same
+    # never-overwrite discipline the `sourceKind`/`ingestedAt` `coalesce` calls
+    # on this statement already follow (#5082, #5140 P2 finding 5) — the genre
+    # is simply not coalesced because `'transcript'` must stay writable on a
+    # node that has none.
     proj.g.query(
         "MERGE (s:Source {url:$did}) "
         "SET s.id=coalesce(s.id, $did), "
         "    s.sourceKind=coalesce(s.sourceKind, 'document'), "
-        "    s.documentKind='transcript', s.title=$title, s.summary=$summary, "
+        "    s.documentKind=CASE "
+        "        WHEN s.documentKind IS NOT NULL "
+        "             AND s.documentKind <> 'transcript' "
+        "        THEN s.documentKind "
+        "        ELSE 'transcript' END, "
+        "    s.title=$title, s.summary=$summary, "
         "    s.story_arc=$arc, s.sessionId=$sid, s.eventId=$eid, "
         "    s.sourcePath=$srcpath, s.is_episodic=true, "
         "    s.ingestedAt=coalesce(s.ingestedAt, $now), "
