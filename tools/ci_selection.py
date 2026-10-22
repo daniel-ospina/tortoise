@@ -738,6 +738,39 @@ SOURCE_PATTERNS = {
                    # #3261/#3616/#8334 silent-drop class.
                    "tools/ts/",
                    "config/pages-upload-classification.txt",
+                   # #6870 review (P1): the mono-stack guard
+                   # (`tests/test_website_static.py::
+                   # TestMonospaceStackRendersAsAMonoFace`) widened its scan to
+                   # `apps/` and to the Python modules that emit HTML, but this
+                   # surface is the guard's ONLY registration and neither root
+                   # reached it. Measured before these entries:
+                   # `select(["apps/graph-viz/src/index.css"])` -> `surfaces=[]`
+                   # (a graph-viz-only diff filters to `changed == []` and takes
+                   # the docs-only tier-1 early return, because `apps/` is in
+                   # NON_PYTHON_PREFIXES and matched no SOURCE_PATTERNS row), and
+                   # `select(["tortoise/oauth.py"])` -> `['api', 'core']` with the
+                   # guard absent. So a re-copy of the old Courier-rendering stack
+                   # into one of the 8 graph-viz canvas/JSX declarations or into
+                   # the served MCP consent page merged GREEN — the
+                   # #1349/#3332/#3616 silent-drop class, on the exact surfaces
+                   # the guard was widened to protect. `tortoise/oauth.py` is in
+                   # CORE_ALSO, so `core` stays selected alongside. Concrete
+                   # paths, not globs: `select()` matches with `startswith`.
+                   # Pinned by tests/test_website_static.py::
+                   # TestMonospaceStackRendersAsAMonoFace::
+                   # test_every_file_it_scans_selects_this_guard (derived from the
+                   # files the scan reads) and by tests/test_ci_selection.py::
+                   # test_the_monospace_guard_is_selected_on_every_root_it_scans.
+                   "apps/graph-viz/src/",
+                   "tortoise/oauth.py",
+                   # The guard's other declared emitter (`MODULES`). It carries no
+                   # mono declaration today, so nothing forces its wiring — which
+                   # is exactly why it is named here: the guard's subject list
+                   # must not be able to grow a member whose diff never runs it.
+                   # Paired with `CORE_ALSO` below because a SOURCE_PATTERNS match
+                   # REPLACES the `core` fallback, and `test_render.py` (the
+                   # renderer's own guard) is registered `core`.
+                   "tortoise/render.py",
                    # PR #9652 review (P2): `tests/test_website_static.py`'s new
                    # `TestProductRootMarkerContract` has THREE subjects, and only
                    # two of them selected this surface — `website/product.html`
@@ -1281,6 +1314,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
              # `api` match must not drop the core half.
              "tortoise/oauth.py",
+             # #6870 review (P1/P3): the mono-stack guard declares
+             # `tortoise/render.py` in its `MODULES` and scans it, so its diff
+             # must select that guard (`SOURCE_PATTERNS["onboarding"]`). A
+             # named-surface match REPLACES the `core` fallback, and
+             # `tests/test_render.py` — the renderer's own guard — is registered
+             # `core`. Without this entry a renderer-only change would select
+             # `onboarding` and silently stop running the test that guards the
+             # renderer.
+             "tortoise/render.py",
              # #5581: the source-currency derivation helper owns
              # tests/test_source_currency_5581.py, registered `core` — but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no

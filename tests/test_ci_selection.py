@@ -473,6 +473,50 @@ def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
             )
 
 
+def test_the_monospace_guard_is_selected_on_every_root_it_scans():
+    """#6870 review P1: the mono-stack guard must RUN on `apps/` and `tortoise/oauth.py`.
+
+    `tests/test_website_static.py::TestMonospaceStackRendersAsAMonoFace` widened
+    its scan to `ROOTS = ("website", "apps")` plus `MODULES = ("tortoise/oauth.py",
+    "tortoise/render.py")`, but is registered on the `onboarding` surface ONLY —
+    and neither widened root selected it (measured at the pre-entry head):
+
+    * `apps/` is in `NON_PYTHON_PREFIXES` and matched no `SOURCE_PATTERNS` row,
+      so a graph-viz-only diff filtered to `changed == []` and took the docs-only
+      early return — `surfaces=[]`, tier-1 smoke, the guard absent (the 8
+      canvas/JSX declarations it was widened to reach).
+    * `tortoise/oauth.py` matches the `api` row, so an oauth-only diff selected
+      `['api', 'core']` and NOT `onboarding` — leaving the served MCP consent
+      page, the one place the Courier defect was customer-facing, unguarded.
+
+    Same #1349/#3332/#3616 silent-drop class the sibling pins above document.
+    Asserted on the SURFACE and on the guard FILE: a bare "surfaces is not
+    empty" check passes for the graph-viz path the moment anything else claims
+    it, which is a gate that can only ever pass. Watched RED before the two
+    `SOURCE_PATTERNS["onboarding"]` entries, GREEN after.
+    """
+    guard = "test_website_static.py"
+    for changed, keeps in (("apps/graph-viz/src/index.css", ()),
+                           ("apps/graph-viz/src/components/ForceGraphView.jsx", ()),
+                           ("tortoise/oauth.py", ("api", "core")),
+                           # Declared in the guard's `MODULES`; it carries no
+                           # declaration today, which is why nothing but this
+                           # pin forces its selection wiring.
+                           ("tortoise/render.py", ("core",))):
+        assert (REPO / changed).exists(), f"guarded path is gone: {changed}"
+        r = _sel([changed])
+        assert guard in r["test_files"], (
+            f"{changed} does not select {guard} — the mono declaration it carries "
+            f"(or may carry) is unguarded on the one diff that can revert it "
+            f"(selected surfaces: {r['surfaces'] or 'none'})")
+        # A `SOURCE_PATTERNS` match REPLACES the `core` fallback, so a path whose
+        # own guard lives on `core` must also be in `CORE_ALSO`.
+        assert set(keeps) <= set(r["surfaces"]), (
+            f"{changed} selects {r['surfaces']} — wiring it into `onboarding` "
+            f"dropped {sorted(set(keeps) - set(r['surfaces']))}, whose guards "
+            f"now never run on its own diff")
+
+
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
     """#3673 indicator (2): the parity gate runs on every PR touching either copy.
 
@@ -7386,7 +7430,15 @@ def test_tortoise_oauth_change_selects_api_and_core():
     # retention or token-flow fix must change. CORE_ALSO keeps the core half.
     r = _sel(["tortoise/oauth.py"])
     assert r["full"] is False
-    assert r["surfaces"] == ["api", "core"]
+    # MEMBERSHIP, not equality: `#6870` also wires this file into `onboarding` (it
+    # serves the MCP consent page's CSS, whose mono-stack guard must run here),
+    # and other surfaces may legitimately read it later. What this pin must keep
+    # forbidding is a RE-POINTING that drops either half — equality against a
+    # fixed list would red on every added consumer while still passing a
+    # re-point that moved `api` to a different file.
+    assert {"api", "core"} <= set(r["surfaces"]), (
+        f"an oauth.py-only change selects {r['surfaces']} — it must keep reaching "
+        "BOTH the api-registered pinners and the core one (#3036)")
     selected = set(r["test_files"]) | set(r["slow_selected"])
     assert "test_3036_oauth_retention.py" in selected, "the sweep suite must run"
     assert "test_oauth_mcp.py" in selected, "api-registered pinner must run"
