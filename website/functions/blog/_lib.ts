@@ -152,6 +152,10 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
 // CommonMark backslash escapes (#4481) now live in `_shared/md-escape.ts` so the
 // body renderer and the video-marker parser share ONE rule (#8379 finding 1).
 
+// Nesting depth for inline spans (#1385) — bold → link → em with one level of
+// slack. See `inline()` for why this stays linear.
+const MAX_INLINE_DEPTH = 3;
+
 /** True when `text[index]` is preceded by an odd run of backslashes (escaped). */
 function isEscaped(text: string, index: number): boolean {
   let n = 0;
@@ -159,7 +163,7 @@ function isEscaped(text: string, index: number): boolean {
   return n % 2 === 1;
 }
 
-function inline(text: string): string {
+function inline(text: string, depth = 0): string {
   // Bounded quantifiers: catastrophic backtracking on attacker input is a CPU
   // DoS on the edge function (verified: 100K "[" → 16.8s before bounding, 100ms
   // after). Link/image content capped at 200 chars, href/src at 300.
@@ -167,8 +171,22 @@ function inline(text: string): string {
   // OR a char that cannot start one, never both, so each position has exactly
   // one parse and the bounded repetition stays linear (a class that also
   // matched `\` would make the alternation ambiguous and the run exponential).
+  //
+  // #1385 — the alternation is UNCHANGED. Nesting (`[**bold**](url)`, which used
+  // to emit the label's asterisks literally) is handled by re-parsing a span's
+  // CONTENT, not by widening the pattern: a new pattern would have to re-earn
+  // the anti-ReDoS bound above, and re-earning it is how the 16.8s regression
+  // gets reintroduced. Recursion is depth-capped (`MAX_INLINE_DEPTH`) and only
+  // ever runs on content the regex already isolated (≤200 chars), so sibling
+  // spans are disjoint and one nesting level costs O(len): the whole render is
+  // O(MAX_INLINE_DEPTH · len).
   const re =
     /(`[^`]+`)|(\*\*(?:\\.|[^\\*\n]){1,200}\*\*)|(\*(?:\\.|[^\\*\n]){1,200}\*)|(!\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\))|(\[((?:\\.|[^\\\]\n]){0,200})\]\(([^)\s]{1,300})\))/g;
+  // A span's content is inline MARKDOWN, not text — parse it so nested spans
+  // survive. At the depth cap the content degrades to escaped text, never to
+  // a half-open tag.
+  const nested = (raw: string): string =>
+    depth < MAX_INLINE_DEPTH ? inline(raw, depth + 1) : escapeHtml(unescapeMd(raw));
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;
@@ -184,12 +202,14 @@ function inline(text: string): string {
       // Code spans are verbatim in CommonMark — backslash escapes do NOT apply.
       out += `<code>${escapeHtml(m[1].slice(1, -1))}</code>`;
     } else if (m[2] !== undefined) {
-      out += `<strong>${escapeHtml(unescapeMd(m[2].slice(2, -2)))}</strong>`;
+      out += `<strong>${nested(m[2].slice(2, -2))}</strong>`;
     } else if (m[3] !== undefined) {
-      out += `<em>${escapeHtml(unescapeMd(m[3].slice(1, -1)))}</em>`;
+      out += `<em>${nested(m[3].slice(1, -1))}</em>`;
     } else if (m[4] !== undefined) {
       const src = m[6] ?? "";
       const safeSrc = validUrl(src) ? escapeHtml(src) : "";
+      // `alt` lands in an ATTRIBUTE, so it is text and never markup — it must
+      // not go through `nested()`, which would emit tags into the attribute.
       out += `<img src="${safeSrc}" alt="${escapeHtml(unescapeMd(m[5] ?? ""))}">`;
     } else if (m[7] !== undefined) {
       const href = m[9] ?? "";
@@ -203,9 +223,11 @@ function inline(text: string): string {
       // `noopener`; an off-site absolute link keeps the hard-won `_blank` +
       // `noopener`. Previously every link was treated as external (#8313).
       const external = accepted && /^https?:\/\//i.test(href.trim());
+      // The link label is inline markdown (a URL is not): `[**x**](u)` is a
+      // bold link. Labels exclude `]`, so a nested `<a>` cannot be produced.
       out += external
-        ? `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`
-        : `<a href="${safeHref}">${escapeHtml(unescapeMd(m[8] ?? ""))}</a>`;
+        ? `<a href="${safeHref}" target="_blank" rel="noopener">${nested(m[8] ?? "")}</a>`
+        : `<a href="${safeHref}">${nested(m[8] ?? "")}</a>`;
     }
     last = re.lastIndex;
   }
@@ -388,11 +410,17 @@ function isFenceLine(line: string): boolean {
 }
 
 /**
- * Whether the body publishes at least one `##` heading. The generated nav is
- * H2-only, so this decides whether a house-style marker has a replacement at
- * all — without one the marker and its list must stay ordinary content rather
+ * Whether the body publishes at least one LEVEL-2 heading. The generated nav is
+ * level-2-only, so this decides whether a house-style marker has a replacement
+ * at all — without one the marker and its list must stay ordinary content rather
  * than be deleted in exchange for nothing. Fenced code blocks are skipped via
  * the SAME predicate `renderMarkdown` uses, so this cannot disagree with it.
+ *
+ * `#{1,2}` — not `##` — because the renderer DEMOTES a single `#` to `<h2>`
+ * (#1385, the post title owns the page's only <h1>), so a body written with
+ * `#` sections also emits level-2 headings and therefore also gets a nav.
+ * Matching only `##` here would leave such a body's house-style marker
+ * unreplaced while `renderMarkdown` had a TOC to put there.
  */
 function hasPublishedH2(lines: string[]): boolean {
   let inFence = false;
@@ -401,7 +429,7 @@ function hasPublishedH2(lines: string[]): boolean {
       inFence = !inFence;
       continue;
     }
-    if (!inFence && /^##\s/.test(line)) return true;
+    if (!inFence && /^#{1,2}\s/.test(line)) return true;
   }
   return false;
 }
@@ -553,11 +581,17 @@ export function renderMarkdown(markdown: string): string {
       continue;
     }
 
-    // Heading
-    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    // Heading. `#{2,4}` missed a single `#`, which then fell through to the
+    // paragraph path and rendered its marker as literal text (#1385). The post
+    // page already emits the post TITLE as its only <h1>, so a body `#` is
+    // demoted to <h2> (the standard CMS treatment) rather than becoming a
+    // second <h1> — an SEO defect. `#` and `##` therefore share a level;
+    // `###`/`####` keep theirs, so existing posts that use `##` render exactly
+    // as before (and keep their TOC depth).
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
     if (h) {
       flushPara(paragraphBuf);
-      const level = h[1].length;
+      const level = Math.max(h[1].length, 2);
       const text = h[2];
       const id = uniqueSlug(slugifyHeading(text));
       // The TOC label is PLAIN TEXT (markdown stripped), like the slug. Inline
@@ -714,7 +748,11 @@ export interface FaqEntry {
   answer: string;
 }
 
-const FAQ_SECTION_RE = /^##\s+.*(faq|frequently asked)/i;
+// `#{1,2}`: a lone `#` is DEMOTED to a level-2 heading (#1385), so it must open
+// an FAQ section exactly like `##` — otherwise a body whose FAQ heading is `#`
+// renders a visible FAQ section while `extractFaq` returns nothing, and the page
+// ships the section without its FAQPage schema.
+const FAQ_SECTION_RE = /^#{1,2}\s+.*(faq|frequently asked)/i;
 
 /**
  * Pull the question/answer pairs out of an article's FAQ section.
@@ -767,9 +805,11 @@ export function extractFaq(markdown: string): FaqEntry[] {
       continue;
     }
 
-    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    // Same demotion as the renderer above (#1385): a body `#` is classified
+    // exactly like `##`, so an FAQ answer cannot lose a heading the reader sees.
+    const h = /^(#{1,4})\s+(.*)$/.exec(line);
     if (h) {
-      const level = h[1].length;
+      const level = Math.max(h[1].length, 2);
       if (level === 2) {
         flush();
         inFaq = FAQ_SECTION_RE.test(line);

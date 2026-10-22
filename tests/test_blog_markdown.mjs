@@ -127,6 +127,14 @@ console.log("bounded span content stays linear on adversarial input");
   const faqMs = Date.now() - t2;
   assert(faqMs < 4000, `a '['-heavy FAQ answer stays linear (${faqMs}ms; pre-fix ≈27s)`);
 
+  // Nesting (#1385) added a recursion surface: every span's content is
+  // re-parsed. Content is capped at 200 chars by the pattern and sibling spans
+  // are disjoint, so a body of nested spans must stay linear.
+  const nestedT0 = Date.now();
+  renderMarkdown("[**a**](https://tortoise.premiselabs.co) ".repeat(2000));
+  const nestedMs = Date.now() - nestedT0;
+  assert(nestedMs < 4000, `a body of nested spans stays linear (${nestedMs}ms)`);
+
   // Duplicate headings must allocate anchors in O(1) amortised per heading.
   // The scanned-from-`-1` form was O(N²): 8000 `## A` (48KB — well under
   // BODY_MAX=100KB) took 23.9s standalone, and 16000 (96KB) 131s. Post-fix on
@@ -203,6 +211,88 @@ console.log("heading anchors (#8291 — a TOC link needs a real target)");
     renderMarkdown("## **Bold** and `code`"),
     '<h2 id="bold-and-code"><strong>Bold</strong> and <code>code</code></h2>',
     "the slug comes from heading TEXT, the heading keeps its markup",
+  );
+}
+
+console.log("a body `#` heading is demoted, never leaked (#1385)");
+{
+  // `#{2,4}` did not match a lone `#`, so the line fell through to the paragraph
+  // path and published as literal `# Title` text. The post page already emits the
+  // TITLE as its only <h1>, so the body heading is demoted (standard CMS
+  // treatment) rather than emitting a second <h1>.
+  assertEq(
+    renderMarkdown("# What is agent memory?"),
+    '<h2 id="what-is-agent-memory">What is agent memory?</h2>',
+    "a single `#` renders as <h2>",
+  );
+  assert(
+    !renderMarkdown("# What is agent memory?").includes("#"),
+    "the `#` marker never leaks into the output",
+  );
+  const levels = renderMarkdown("# one\n\n## two\n\n### three\n\n#### four");
+  assert(!levels.includes("<h1"), "no body heading is ever an <h1>");
+  assert(levels.includes("<h2 id=\"one\">one</h2>") && levels.includes("<h2 id=\"two\">two</h2>"), "`#` and `##` share a level");
+  assert(levels.includes("<h3 id=\"three\">three</h3>") && levels.includes("<h4 id=\"four\">four</h4>"), "`###`/`####` keep their levels (existing posts unchanged)");
+  assertEq(
+    renderMarkdown("\\# not a heading"),
+    "<p># not a heading</p>",
+    "an escaped `\\#` stays literal text",
+  );
+  // The FAQ extractor shares the classifier, so it must demote identically —
+  // otherwise a `#` heading would be swallowed into the previous answer while
+  // the reader sees a heading.
+  const faq = extractFaq("## FAQ\n\n### Q?\n\nAnswer.\n\n# Next section\n\nNot part of the answer.");
+  assertEq(faq.length, 1, "a `#` heading closes the FAQ section, exactly like `##`");
+  assertEq(faq[0].answer, "Answer.", "the `#` heading is not folded into the FAQ answer");
+  // …and it OPENS one: `#` and `##` are the same level now, so a section headed
+  // `# FAQ` must emit the FAQPage schema too, not just render the heading.
+  const hashFaq = extractFaq("# FAQ\n\n### Q?\n\nAnswer.");
+  assertEq(hashFaq.length, 1, "a `# FAQ` heading opens an FAQ section");
+  assertEq(hashFaq[0].question, "Q?", "the question under a `# FAQ` heading is extracted");
+}
+
+console.log("inline spans nest (#1385)");
+{
+  assertEq(
+    renderMarkdown("[**Try Tortoise free.**](https://tortoise.premiselabs.co)"),
+    '<p><a href="https://tortoise.premiselabs.co" target="_blank" rel="noopener"><strong>Try Tortoise free.</strong></a></p>',
+    "a bold link label is a bold link, not literal asterisks",
+  );
+  assertEq(
+    renderMarkdown("**[the docs](https://tortoise.premiselabs.co/docs)**"),
+    '<p><strong><a href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noopener">the docs</a></strong></p>',
+    "a link inside bold nests",
+  );
+  assertEq(
+    renderMarkdown("*[docs](/docs)*"),
+    '<p><em><a href="/docs">docs</a></em></p>',
+    "a link inside italics nests, and an internal link keeps its same-tab shape",
+  );
+  assertEq(
+    renderMarkdown("[`a*b`](https://tortoise.premiselabs.co)"),
+    '<p><a href="https://tortoise.premiselabs.co" target="_blank" rel="noopener"><code>a*b</code></a></p>',
+    "a code span inside a link label nests",
+  );
+  assertEq(
+    renderMarkdown("![**a**](https://tortoise.premiselabs.co/x.png)"),
+    '<p><img src="https://tortoise.premiselabs.co/x.png" alt="**a**"></p>',
+    "an image alt is an ATTRIBUTE — never parsed as markup",
+  );
+  const nested = renderMarkdown("[**<img src=x onerror=alert(1)>**](https://tortoise.premiselabs.co)");
+  assert(!nested.includes("<img"), "raw HTML inside a nested span stays escaped");
+  assert(nested.includes("&lt;img src=x onerror=alert(1)&gt;"), "the nested span keeps the escaped text");
+  // Depth-capped: past the cap the content degrades to escaped TEXT, so the
+  // output never carries an unbalanced tag.
+  const deep = renderMarkdown("[***[x](https://tortoise.premiselabs.co)*text*](https://tortoise.premiselabs.co/inner)");
+  assertEq(
+    (deep.match(/<strong>/g) ?? []).length,
+    (deep.match(/<\/strong>/g) ?? []).length,
+    "past the nesting cap <strong> tags stay balanced",
+  );
+  assertEq(
+    (deep.match(/<em>/g) ?? []).length,
+    (deep.match(/<\/em>/g) ?? []).length,
+    "past the nesting cap <em> tags stay balanced",
   );
 }
 
@@ -626,6 +716,18 @@ console.log("house-style table of contents");
     !html.includes("<strong>Table of contents</strong>"),
     "the marker paragraph itself is not emitted",
   );
+
+  // #1385: a body `#` is DEMOTED to a level-2 heading, so it is a navigation
+  // target too. If the marker gate kept matching only `##`, a body written with
+  // `#` sections would emit level-2 headings but keep its hand-written list as
+  // ordinary content — the doc's "level-2 headings (`#` and `##`)" claim would
+  // then be false. The gate and the renderer must agree on what level 2 is.
+  const hashToc = renderMarkdown(
+    "**Table of contents**\n\n1. Alpha\n2. Beta\n\n# Alpha\n\n# Beta",
+  );
+  assert(hashToc.includes('<nav class="toc"'), "a body whose sections are `#` still gets a generated TOC");
+  assert(hashToc.includes('<a href="#alpha">Alpha</a>'), "the generated entry links to the demoted heading's anchor");
+  assert(!hashToc.includes("<h1"), "…and the demotion never emits a body <h1>");
 
   // The guard: a marker with no list under it stays ordinary prose, so a
   // sentence that happens to read "Table of contents" is not eaten.
@@ -1189,14 +1291,24 @@ console.log("docs/blog-authoring.md examples render as the page claims");
     );
   }
 
-  // The Basics table's heading row (`##`–`####` → `<h2>`–`<h4>`; the post title
-  // supplies the page's <h1>). The page previously claimed `#`–`####` →
-  // `<h1>`–`<h4>`, which the renderer falsifies (a lone `#` is not a heading)
-  // and which contradicted the page's own anchors paragraph.
-  assert(/`##`–`####` headings/.test(doc), "the Basics table documents `##`–`####`, not `#`–`####`");
+  // The Basics table's heading row. The page previously claimed `#`–`####` →
+  // `<h1>`–`<h4>`, which the renderer falsified (a lone `#` was not a heading at
+  // all and published as literal text — #1385). The contract now matches the
+  // renderer: `#`–`####` are headings, `#`/`##` are demoted to `<h2>` because the
+  // post title owns the page's only `<h1>`, and `###`/`####` keep their levels.
+  assert(/`#`–`####` headings/.test(doc), "the Basics table documents `#`–`####` headings");
+  assert(
+    /a single `#` is demoted to `<h2>`/.test(doc),
+    "the Basics table states the single-`#` demotion (#1385)",
+  );
+  assert(!/Single-`#` headings/.test(doc), "the page no longer claims a lone `#` publishes as literal text");
   assert(renderMarkdown("## Two").includes('<h2 id="two">Two</h2>'), "`##` renders an <h2>");
   assert(renderMarkdown("#### Four").includes('<h4 id="four">Four</h4>'), "`####` renders an <h4>");
-  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` is not a heading");
+  assert(
+    renderMarkdown("# One").includes('<h2 id="one">One</h2>'),
+    "a lone `#` renders as an <h2> heading (#1385)",
+  );
+  assert(!renderMarkdown("# One").includes("<h1"), "a lone `#` never becomes an <h1>");
 }
 
 console.log("");
