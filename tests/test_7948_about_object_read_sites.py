@@ -3793,8 +3793,8 @@ def _prose_of(fn: Callable[..., object]) -> str:
     `_literal_files`, `_files`, `_module_consts`, `_attr_consts`,
     `_rel_constant_names`, `_census`, `_empty_pattern_sites`, `_call_time_sites`).
     `getsource` and `getsourcelines`
-    unwrap for you, but `getsourceFILE` — the call four lines below, which locates the
-    `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
+    unwrap for you, but `inspect.getsourcefile(fn)` — the call below, after the
+    unwrap, which locates the `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
     neither the guard nor the comment (found by the `#9522` review; the first version
     of this paragraph blamed `getsource`). The assertion below names the contract for
     anything that is not a function at all, and after the unwrap the `#` block is read
@@ -3826,7 +3826,9 @@ def _prose_of(fn: Callable[..., object]) -> str:
 #: guard whose unit list or number shape is narrow is retired by a RE-SPELLING.** The
 #: round-6 review measured `30 seconds of the control's 60 seconds` and `2.6 sec of a
 #: 17 sec arm` going GREEN — the identical claim, re-spelled — so every
-#: second-and-below unit word is here, `h`/`hours`/`days` included.
+#: second-and-below unit word is here, `h`/`hours`/`days` included AND the word forms
+#: (`milliseconds`, `microseconds`, `nanoseconds`), which were still silent in the
+#: previous list (cycle-4 review: `850 milliseconds` reported nothing while `850 ms` did).
 #:
 #: The `#9522` review then measured the OPPOSITE failure in the first version of the
 #: lookbehind: `1,000 s`, `10,36 s` (decimal comma), `2,048 ms`, `1e3 s` and
@@ -3834,7 +3836,9 @@ def _prose_of(fn: Callable[..., object]) -> str:
 #: AT ALL — so a grouped or re-separated figure was undetectable, which is strictly
 #: worse than quoting a sub-token. Grouped numbers and BOTH decimal separators are
 #: therefore matched whole, `\s*` absorbs a doubled space, and an exponent form is read
-#: as one number. Unit words are case-insensitive.
+#: as one number. A GROUPED number with a fraction composes too (`1,000.5 s` matched
+#: nothing at all in the first version — cycle-4 review). Unit words are
+#: case-insensitive.
 #:
 #: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`,
 #: and `x1,000 s` must not report `000 s` — the lookbehind refuses a number that starts
@@ -3849,8 +3853,11 @@ def _prose_of(fn: Callable[..., object]) -> str:
 #: and the filed home is `#9531` with the line-vs-number coarseness.
 _DURATION = re.compile(
     r"(?<![\w.])(?<!\d,)"
-    r"(?:\d{1,3}(?:,\d{3})+|\d+(?:[.,]\d+)?(?:e[+-]?\d+)?)\s*"
-    r"(?:ms|us|µs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?)\b",
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d+)?(?:e[+-]?\d+)?\s*"
+    r"(?:"
+    r"milliseconds?|msecs?|microseconds?|nanoseconds?|"
+    r"ms|us|µs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -3876,11 +3883,44 @@ _DURATION_FRAMING = (
 #: `omitted`, `unavailable`, `unmeasured`, `unframed`, `unknown`) are in; a negation
 #: this list does not know is a one-line addition here, and the arm beside it pins the
 #: spellings rather than the intent.
-_DENIAL = re.compile(
-    r"\b(?:no|not|never|without|none|nothing|nobody)\b"
+#:
+#: It is SPLIT IN TWO, and that split is load-bearing (cycle-4 review):
+#:
+#: * `_DENIAL_STRONG` — a denial that can only be read as denying its own clause
+#:   (`not`, `never`, `without`, `n't`, `skipped`, `omitted`, `unavailable`, …). It is
+#:   searched ACROSS a parenthesis and a coordinated `and`, because
+#:   `--durations=0 (never taken)` and `--durations=0 and never taken` deny the marker
+#:   just as plainly as the un-parenthesised form, and the previous single list made
+#:   all seven of those spellings SILENT — a fail-open introduced by widening the
+#:   after-side boundary.
+#: * `_DENIAL_WEAK` — a subject-less quantifier (`no`, `none`, `nothing`, `nobody`),
+#:   which very often governs a LATER noun in a side remark (`(no flakes)`, `(no
+#:   failures)`, `and no flakes`). It honours the wider boundary, so those stay framed.
+_DENIAL_STRONG = re.compile(
+    r"\b(?:not|never|without)\b"
     r"|\b\w+n['’]t\b"
     r"|\b(?:skipped|omitted|unavailable|unmeasured|unframed|unknown)\b",
     re.IGNORECASE,
+)
+
+_DENIAL_WEAK = re.compile(r"\b(?:no|none|nothing|nobody)\b", re.IGNORECASE)
+
+#: A WEAK quantifier that is nevertheless DENYING a measurement — `and no framing was
+#: taken`, `(no measurement exists)` — is a denial, not a side remark, because its object
+#: is the measurement vocabulary. Searched across the same breaks as `_DENIAL_STRONG`
+#: (cycle-4 review: `--durations=0 and no framing was taken` was otherwise SILENT, since
+#: `no` is weak and `and` starts the side-remark window at once). `(no flakes)` and
+#: `(no failures)` stay framed — their object is not a measurement.
+_DENIAL_GOVERNING = re.compile(
+    r"\b(?:no|none|nothing|nobody)\b[^.;]{0,40}?"
+    r"\b(?:framing|measure\w*|figure|duration|timing|numbers?|wall-clock|magnitude|split)\b",
+    re.IGNORECASE,
+)
+
+#: Every denial symbol — what the BEFORE side searches, because a negation in front of
+#: a marker governs it whichever of the two lists it is in.
+_DENIAL = re.compile(
+    rf"(?:{_DENIAL_STRONG.pattern})|(?:{_DENIAL_WEAK.pattern})", re.IGNORECASE
 )
 
 #: How far a denial reaches from its marker, in characters, WITHIN one clause.
@@ -3901,6 +3941,11 @@ _CLAUSE_BREAK = re.compile(r"[,;:—–]|[.;](?=\s|$)")
 #: pass the guard. In front of the marker the same words are the governing clause, so
 #: `# (no --durations run): 10.36 s` stays RED and is pinned as such: only this
 #: after-side boundary knows about parentheses.
+#:
+#: ⚠️ And it applies ONLY to `_DENIAL_WEAK` (cycle-4 review). The boundary only ever
+#: SHORTENS the text a denial is searched in, so applying it to the strong denials made
+#: `--durations=0 (never taken)` and `--durations=0 and never taken` SILENT — a
+#: fail-open with no compensating red. A strong denial is searched across these breaks.
 _CLAUSE_BREAK_AFTER = re.compile(r"[,;:—–()]|\band\b|[.;](?=\s|$)")
 
 
@@ -3935,6 +3980,13 @@ def _denied(line: str, start: int, end: int) -> bool:
     sentence `.`) ends its reach on either side. That is what makes both measured cases
     come out right — `no other change to the control step` is behind a dash and an
     unrelated noun phrase, while `was never taken` sits in the marker's own clause.
+
+    ⚠️ **A STRONG denial after the marker is searched past a parenthesis and past a
+    coordinated `and`** (`_DENIAL_STRONG` vs `_DENIAL_WEAK`): `--durations=0 (never
+    taken)` and `--durations=0 and never taken` are denials of the marker, while
+    `(no flakes)` and `and no failures` are side remarks about something else. Applying
+    the wider boundary to both lists made the first pair SILENT (cycle-4 review), which
+    is the fail-open direction and the worse one.
     """
     before = line[max(0, start - _DENIAL_WINDOW) : start]
     breaks = list(_CLAUSE_BREAK.finditer(before))
@@ -3943,10 +3995,14 @@ def _denied(line: str, start: int, end: int) -> bool:
     if _DENIAL.search(before):
         return True
     after = line[end : end + _DENIAL_WINDOW]
-    stop = _CLAUSE_BREAK_AFTER.search(after)
-    if stop:
-        after = after[: stop.start()]
-    return bool(_DENIAL.search(after))
+    # Strong denials reach across `(`/`)`/`and`; weak quantifiers do not.
+    stop = _CLAUSE_BREAK.search(after)
+    strong_window = after[: stop.start()] if stop else after
+    if _DENIAL_STRONG.search(strong_window) or _DENIAL_GOVERNING.search(strong_window):
+        return True
+    stop_after = _CLAUSE_BREAK_AFTER.search(after)
+    weak_window = after[: stop_after.start()] if stop_after else after
+    return bool(_DENIAL_WEAK.search(weak_window))
 
 
 def _framed(line: str) -> bool:
@@ -3969,9 +4025,10 @@ def _unframed_durations(comment: str) -> list[str]:
     ⚠️ **This predicate is the fix to a FAIL-OPEN guard, not a rewording of one.**
     The first version of the arm red on the co-occurrence of a self-denial phrase
     (`no magnitude` / `no wall-clock`) AND a duration. That made it **green on the
-    merge base** — `git show origin/main:tests/_about_call_time_census.py` carried
+    pre-`#9516` main** — `fa84a473d:tests/_about_call_time_census.py:990-992` carried
     *"re-reading `_sources()` and rebuilding the same 29 `_File`s measured 10.36 s
-    of the control's 10.85 s for byte-identical output"*, which says no denial at
+    of the control's 10.85 s for byte-identical output"* (`git show origin/main:… |
+    grep -c 10.36` is `0` at this base — the figure is gone), which says no denial at
     all, so there was nothing for the guard to fire on: the arm passed on precisely
     the text this PR deletes, and would pass again if that figure were re-introduced.
     It was also fail-open on REWORDING — turning "No magnitude is pinned" into "No
@@ -4184,6 +4241,51 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "a negation in front of the marker governs it even inside a parenthesis — the "
         "after-side boundary must not shield it"
     )
+    # ⚠️ A STRONG denial AFTER the marker reaches across a parenthesis and across a
+    # coordinated `and` — the after-side boundary only ever SHORTENS the searched text,
+    # so applying it to the strong list made all of these SILENT (cycle-4 review), a
+    # fail-open with no compensating red. The weak quantifiers above stay framed.
+    for strong_denial in (
+        "# 10.36 s --durations=0 (never taken)",
+        "# 10.36 s --durations=0 (not run)",
+        "# 10.36 s --durations=0 (skipped)",
+        "# 10.36 s --durations=0 and never taken",
+        "# 10.36 s --durations=0 and wasn't taken",
+        "# 10.36 s --durations=0 and no framing was taken",
+    ):
+        assert _unframed_durations(strong_denial) == ["10.36 s"], (
+            f"{strong_denial!r} denies the framing it names, parenthesised or "
+            f"coordinated or not ({_unframed_durations(strong_denial)}) — a strong "
+            "denial is not a side remark, so the after-side boundary must not stop it"
+        )
+
+    # ── the SECOND fix this predicate claims: framing is per LINE, not whole-text.
+    # Cycle-4 review measured that no arm executed it — reverting `_framed` to a
+    # whole-`comment` test left the file green, because the only multi-line input was
+    # the `intermediate` literal, which carries no marker on any line.
+    assert _unframed_durations(
+        "# 10.36 s of the control's 10.85 s\n# the whole arm was re-run last week"
+    ) == ["10.36 s", "10.85 s"], (
+        "a marker on a DIFFERENT line must not frame this line's figure — that is the "
+        "whole-text hole the per-line window closes, and nothing else here executes it"
+    )
+    assert not _unframed_durations("# the whole arm is 14.4 s\n# nothing else"), (
+        "the same-line case must stay GREEN, or the arm above can be satisfied by "
+        "making everything red"
+    )
+    for word_form, expected in (
+        ("# the arm took 850 milliseconds", ["850 milliseconds"]),
+        ("# the arm took 850 microseconds", ["850 microseconds"]),
+        ("# the arm took 850 nanoseconds", ["850 nanoseconds"]),
+        ("# the arm took 850 msec", ["850 msec"]),
+        ("# cost 1,000.5 s of the arm", ["1,000.5 s"]),
+        ("# cost 2,048.25 ms of the arm", ["2,048.25 ms"]),
+    ):
+        assert _unframed_durations(word_form) == expected, (
+            f"{word_form!r} writes a duration the unit/number list claims to cover "
+            f"({_unframed_durations(word_form)}) — a silent re-spelling is how the "
+            "guard gets retired by an editor's keyboard"
+        )
     # ── re-spellings of the same figure: every one of these was GREEN when the number
     # had to be a plain decimal or the unit had to be `ms|s`, and a GREEN figure here
     # means the guard is retired by an editor's keyboard, not by a false claim.
