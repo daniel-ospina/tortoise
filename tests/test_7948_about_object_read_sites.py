@@ -3992,7 +3992,17 @@ _WORD_NUMERAL = (
 
 #: A percentage figure — a DIGIT or a number WORD — in every spelling the file
 #: closes. One constant serves both the word-form guard and the ratio arm's bare
-#: sweep, so a spelling cannot be closed in one and open in the other.
+#: sweep, so a spelling cannot be closed in one and open in the other — including the
+#: numeral's CASE: the guard compiles with `re.IGNORECASE`, so the sweep must pass the
+#: same flag (it did not, and every sentence-initial `Forty percent` escaped it —
+#: `#9528` review round 3, P2).
+#: ⚠️ STATED MISSES: `_WORD_NUMERAL` is the units, the teens, the tens (hyphen or
+#: space) and the `hundred` forms. It does NOT carry `zero` or the thousand scale
+#: (`one thousand`, `a million`); with `%` / `per cent` / `pct` those spellings are open
+#: in both predicates, and with the `percent` noun they are caught only by the bare noun
+#: at the top of `_MAGNITUDE_WORDS`. Deliberately not chased: a numeral vocabulary wide
+#: enough to reach them starts matching ordinary prose, and the cost of the miss is one
+#: spelling a reader can already see.
 _PERCENTAGE_FIGURE = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})\s*(?:%|per\s?cent|pct)"
 
 _MAGNITUDE_WORDS = re.compile(
@@ -4106,9 +4116,17 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
       of something that is not a measured quantity ("most of these modules are literal
       carriers", "the bulk of these modules"), a bare `bulk` with no subject, a bare
       `this`/`that` demonstrative (`# most of this file is parsed once` — the shapes the
-      subject binding exists to keep green), or a POSITIONAL share ("the second half of
+      subject binding exists to keep green), a POSITIONAL share ("the second half of
       the walk", "the left half of the suite", "the second part of the walk" — a phase,
-      not a share). What IS closed is the productive
+      not a share), or a PERCENTAGE WITH NO SUBJECT AT ALL (a bare figure whose value
+      is written and whose object is not — written without a concrete number here, so
+      this description is not itself a bare figure).
+      That last cell is the stated PRICE OF THE BINDING rather than an oversight: the
+      `percent` alternative requires `of|in <subject>`, because a bare percentage is
+      overwhelmingly an unpacked figure (a coverage or a share of something unnamed)
+      and reding it would reword honest comments with no measurement behind the demand.
+      The illustration above is deliberately figure-free: a concrete number here would
+      be a bare percentage in this very docstring, which the ratio arm reds on. What IS closed is the productive
       morphology — the ordinal SHAPES (`-teenth`, `-tieth`, `hundredth` … `trillionth`,
       each with its plural) together with the enumerated `third` … `twelfth`, each
       percentage SPELLING (the `N %` / `N%` / `N per cent` / `N pct` forms — written
@@ -4286,7 +4304,12 @@ def _magnitude_ratio_findings(prose: str) -> list[str]:
                         f"`{sha}` {framing}: the prose states {state:g} %, its own "
                         f"figures give {recomputed:.1f} %"
                     )
-    for bare in re.finditer(_BARE_PERCENTAGE, prose):
+    # ⚠️ `re.IGNORECASE`: `_MAGNITUDE_WORDS` is case-insensitive, so a DIGIT-ONLY flag
+    # here left every SENTENCE-INITIAL `Forty percent` unrecomputed — the sweep and the
+    # guard disagreeing about the numeral's case, i.e. one predicate closing a spelling
+    # the other leaves open (`#9528` review round 3, P2; 65 of 75 capitalised cells
+    # GREEN).
+    for bare in re.finditer(_BARE_PERCENTAGE, prose, re.IGNORECASE):
         if not any(row.start() <= bare.start() < row.end() for row in claims):
             findings.append(
                 f"{bare.group()!r} is stated in prose that no arm recomputes, so it "
@@ -4385,15 +4408,21 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
 
     # …and the same closure in the WORD alphabet: the sweep needed a DIGIT, so a
     # percentage spelled out could be appended to this very paragraph and stay green
-    # while its digit twin red (`#9528` review round 2, P3).
-    spelled_out = f"{prose}\nIt is sixty-four percent of the arm.\n"
-    assert any(
-        "sixty-four percent" in finding and "free to rot" in finding
-        for finding in _magnitude_ratio_findings(spelled_out)
-    ), (
-        "a percentage written with a number WORD outside every claim row passes the "
-        f"sweep, so the rot closure is digit-only: {_magnitude_ratio_findings(spelled_out)}"
-    )
+    # while its digit twin red (`#9528` review round 2, P3) — and it needed the numeral's
+    # CASE too, because `_MAGNITUDE_WORDS` is case-insensitive while `finditer` was not,
+    # so every SENTENCE-INITIAL spelling escaped (round 3, P2).
+    for spelled_out in (
+        "It is sixty-four percent of the arm.",
+        "- Forty percent of the arm is the re-parse.",
+        "- Sixty-four percent of the arm is the re-parse.",
+        "- One hundred per cent of the arm is the re-parse.",
+    ):
+        findings = _magnitude_ratio_findings(f"{prose}\n{spelled_out}\n")
+        assert any("free to rot" in finding for finding in findings), (
+            f"{spelled_out!r} writes a percentage with a number WORD outside every claim "
+            f"row and passes the sweep, so the rot closure is not the same in both "
+            f"predicates (or not case-insensitive): {findings}"
+        )
 
     base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
     assert base is not None, (
