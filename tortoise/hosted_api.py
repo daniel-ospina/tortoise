@@ -12321,6 +12321,29 @@ async def create_api_key(request: Request, response: Response, org: dict = Depen
     return resp
 
 
+# #4356 (code-review P2): the invisible class, declared ONCE.
+#
+# `Default_Ignorable_Code_Point` is a Unicode BINARY property, and neither
+# `unicodedata` nor stdlib `re` can ask it (and the `regex` package is not a
+# declared dependency of this module — importing it here to get `\p{...}`
+# would add an undeclared runtime dep to the hosted API). So the guard is the
+# category rule PLUS this set of named exceptions. It must be exactly the code
+# points the category rule would otherwise wave through while a human sees
+# nothing: the four `Lo` members of `Default_Ignorable` (the Hangul fillers —
+# its `M`-category members are already refused by the category rule) and
+# BRAILLE PATTERN BLANK (U+2800), which is in NEITHER `Cf` nor
+# `Default_Ignorable`.
+#
+# This set is pinned as an EQUALITY, not a subset, by
+# `test_the_blank_class_enumeration_is_complete` (it derives the whole class
+# from the property's ranges and the category rule), so a partial enumeration
+# cannot recur silently — see the P2 that added the four fillers.
+_NON_REVEALABLE_BLANKS = frozenset(
+    "\u115f\u1160\u3164\uffa0"   # Hangul fillers — Default_Ignorable, category Lo
+    "\u2800"                     # BRAILLE PATTERN BLANK — category So, not Default_Ignorable
+)
+
+
 def _revealable_plaintext(value) -> bool:
     """#4356: is this a secret a human — or a Copy button — can actually use?
 
@@ -12334,13 +12357,24 @@ def _revealable_plaintext(value) -> bool:
     reveal, or an agent that cannot use the key).
 
     A value is revealable when it contains at least ONE character a person can
-    see — a letter, number, punctuation or symbol. That single rule is total
-    over the invisible classes (whitespace/separators, ``Cf`` format such as
-    U+200B/U+FEFF, ``Cc`` controls, unassigned, and combining marks such as the
-    variation selectors a ``Default_Ignorable`` list would carry), plus
-    BRAILLE PATTERN BLANK (U+2800), which is in NEITHER ``Cf`` nor
-    ``Default_Ignorable`` and is listed explicitly for that reason. Only the
-    DECISION reads a copy; nothing here rewrites the secret.
+    see — a letter, number, punctuation or symbol. That rule is total over the
+    invisible classes that are NOT in the visible categories (whitespace /
+    separators, ``Cf`` format such as U+200B/U+FEFF, ``Cc`` controls, ``Cn``
+    unassigned, and ``Mn`` combining marks such as the variation selectors),
+    because none of those categories is in ``LNPS``.
+
+    ⛔ But the category rule is NOT total over the invisible class on its own,
+    and this predicate says so instead of implying otherwise:
+    ``Default_Ignorable_Code_Point`` has four members in category ``Lo`` —
+    U+115F, U+1160, U+3164, U+FFA0 (Hangul fillers) — which are visually blank
+    and would pass as "a letter". Those four are named in
+    ``_NON_REVEALABLE_BLANKS`` along with BRAILLE PATTERN BLANK (U+2800, ``So``,
+    in neither ``Cf`` nor ``Default_Ignorable``). Without them the predicate is
+    FAIL-OPEN on exactly the shape it exists to refuse — and out of step with
+    the dashboard predicate it is the server half of, which strips
+    ``\\p{Default_Ignorable_Code_Point}`` and refuses all four.
+
+    Only the DECISION reads a copy; nothing here rewrites the secret.
 
     Deliberately fail-CLOSED and deliberately not a format check: refusing a
     rotation is recoverable (the old key keeps working), destroying one is not.
@@ -12352,7 +12386,7 @@ def _revealable_plaintext(value) -> bool:
     return any(
         not ch.isspace()
         and unicodedata.category(ch)[0] in "LNPS"
-        and ch != "\u2800"
+        and ch not in _NON_REVEALABLE_BLANKS
         for ch in value
     )
 

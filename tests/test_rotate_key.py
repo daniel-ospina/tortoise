@@ -36,6 +36,7 @@ from __future__ import annotations
 import os
 import sys
 import threading
+import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -746,11 +747,68 @@ def test_silent_falsy_plaintext_never_revokes_the_displaced_key(
 
 @pytest.mark.parametrize("value", [
     "", " ", "\t\n ", "\u200b\u200b", "\ufeff", "\u2800", "\u0301",
+    # The four `Lo` members of Default_Ignorable (Hangul fillers): visually
+    # blank, category-visible, and the shape the P2 found passing as
+    # "revealable" while the dashboard predicate refuses them.
+    "\u115f", "\u1160", "\u3164", "\uffa0",
+    # …and as a whole secret, not only as the sole code point.
+    "\u3164\u3164\u3164", "\uffa0 \u1160",
 ])
 def test_the_plaintext_predicate_refuses_a_blank_or_invisible_secret(value):
     """A secret nobody can see is not a secret anybody can use. `strip()` alone
-    would pass every one of these but the first three."""
+    would pass every one of these but the first three, and the category rule
+    alone would pass every one but the first seven."""
     assert ha_mod._revealable_plaintext(value) is False
+
+
+def test_the_blank_class_enumeration_is_complete():
+    """#4356 (code-review P2): the guard's blank set must be EXACTLY the
+    invisible-but-category-visible class — not a convenient subset.
+
+    `Default_Ignorable_Code_Point` is a Unicode binary property that
+    `unicodedata` cannot answer, so the predicate enumerates its exceptions.
+    That enumeration was PARTIAL (the four `Lo` Hangul fillers were missing, so
+    a filler-only secret was waived through as revealable) — and an enumerated
+    exception list is exactly the thing that goes stale one member at a time.
+
+    This test derives the whole class instead of restating the constant: every
+    code point in the property's ranges that the CATEGORY rule would accept
+    (not whitespace, category in LNPS) is what MUST be excluded, and nothing
+    else may be. So a newly-added filler (a future Unicode version, a new `Lo`
+    member) reddens this test rather than silently re-opening the hole; and a
+    spurious entry in the constant reddens the other direction.
+
+    The ranges below are Unicode 15.0 DATA (the property's own table), not a
+    second copy of the decision — the decision is `_revealable_plaintext`.
+    """
+    default_ignorable = [
+        (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C),
+        (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+        (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F),
+        (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+        (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+        (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+    ]
+    derived = set()
+    for lo, hi in default_ignorable:
+        for cp in range(lo, hi + 1):
+            ch = chr(cp)
+            if ch.isspace() or unicodedata.category(ch)[0] not in "LNPS":
+                continue      # already refused by the category rule
+            derived.add(ch)
+    # BRAILLE PATTERN BLANK is in NEITHER Cf nor Default_Ignorable.
+    derived.add("\u2800")
+
+    assert derived == set(ha_mod._NON_REVEALABLE_BLANKS), (
+        "the guard's blank set must EQUAL the invisible-but-category-visible "
+        f"class; missing={sorted(map(hex, map(ord, derived - set(ha_mod._NON_REVEALABLE_BLANKS))))} "
+        f"spurious={sorted(map(hex, map(ord, set(ha_mod._NON_REVEALABLE_BLANKS) - derived)))} "
+        "— a partial enumeration is fail-OPEN on a blank secret"
+    )
+    # The behavioural consequence, stated for the whole derived class at once:
+    # no member, alone or repeated, may read as revealable.
+    for ch in derived:
+        assert ha_mod._revealable_plaintext(ch * 3) is False, hex(ord(ch))
 
 
 @pytest.mark.parametrize("value", ["tt_0123abcd", "tk_ff", " a ", "ключ-01"])
