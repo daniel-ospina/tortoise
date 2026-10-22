@@ -1518,8 +1518,11 @@ class TortoiseEP:
             "cannot be addressed by EP (every claim is keyed on `id` for "
             "hydration, for message caching and for the posterior write-back), "
             "so it can be neither computed nor stamped, and no SDK caller can "
-            "repair it. Refused before the refusing pass computes or stamps "
-            "any posterior (#9275) — note that a MULTI-BATCH pass "
+            "repair it. An id-less claim in the run's AFFECTED SET is refused "
+            "even when it only receives and cannot influence a named claim, "
+            "because the run answers for every claim it collects; a NULL factor "
+            "INPUT is refused only when it occupies a SENDING slot. Refused "
+            "before the refusing pass computes or stamps any posterior (#9275) — note that a MULTI-BATCH pass "
             "(``dream_window``/``dream_all``) writes per batch, and the fail-safe "
             "dream inside no-arg ``compute_confidence`` runs BEFORE its exact "
             "run, so an EARLIER batch may already have committed. The offender "
@@ -1565,7 +1568,16 @@ class TortoiseEP:
         writes source→target while `bwd` writes target→source — so only a NULL on
         an enabled SENDING end can move a named claim. A receive-only NULL is
         exempt (measured: it leaves every named posterior identical to the `-`
-        case). The n-ary arm applies the SAME per-endpoint question to the pairs
+        case). THIS FUNCTION DECIDES THE FACTOR-INPUT ARM ONLY. The AFFECTED-SET
+        arm (`_affected_claims`) is unconditional BY DESIGN and is NOT a false
+        refusal of the same kind: a claim inside the run's SCOPE is hydrated,
+        run through its factors and written back by id, so an id-less member
+        cannot be answered for even when it cannot influence anyone — `main`
+        leaves it naively unstamped and returns a run that silently omits a
+        claim it collected (measured: named posteriors flushed, the id-less node
+        left null). Refusing is the fail-closed answer; influencing a NAMED claim
+        is what the factor arm must be precise about. The n-ary arm applies the
+        SAME per-endpoint question to the pairs
         `_update_nary_factor` decomposes the factor into (`_factor_pairs`, one
         shared definition): an IMPL or directed-NAND STAR sends `input_ids[0]`
         under `fwd` and each target under `bwd`, while a mutual NAND is a CLIQUE
@@ -2450,7 +2462,12 @@ class TortoiseEP:
         # posteriors stamped) into a refused one.
         # GATED ON WHETHER THE NULL CAN SEND, not on "any flow". (Only a factor
         # that HAS a NULL input can reach this: `_null_input_sends` returns False
-        # when there is none, including for an ordinary 3+-input operator.) A factor only
+        # when there is none, including for an ordinary 3+-input operator.) This
+        # is the arm that must be precise: its offender need not be in the run's
+        # SCOPE (`_affected_claims`' hops NULL-drop it), so the question is only
+        # whether it INFLUENCES a named claim. The affected-set arm asks a
+        # different question and stays unconditional: a claim in scope is one the
+        # run must ANSWER FOR (hydrated, computed, written back by id). A factor only
         # moves a NAMED claim when the NULL endpoint is a SENDER on an enabled
         # direction (`_update_factor`'s `if fwd:` writes source→target, `if
         # bwd:` target→source; a `-` factor returns before writing anything).

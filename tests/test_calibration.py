@@ -1814,15 +1814,24 @@ def _dash_edge_fixture(sdk, direction):
 
 
 @pytest.mark.parametrize("direction", ["-", "->"])
-def test_a_receive_only_null_input_does_not_refuse_the_run(sdk, direction):
-    """#9275 (review rounds 6-7): a NULL that can only RECEIVE is not fatal.
+def test_a_receive_only_out_of_scope_null_input_does_not_refuse(sdk, direction):
+    """#9275 (rounds 6-7, scoped by round 10): the FACTOR-INPUT arm exempts a
+    NULL that can only RECEIVE — and only when the node is OUT of the run scope.
 
     `_update_factor` writes source→target under `fwd` and target→source under
     `bwd`, and returns before writing anything for a `-` factor. So the NULL here
     is never a SENDER: `-` has no flow at all, and under `->` the id-less node is
-    the direct edge's TARGET (index 1), which `fwd` writes INTO. Measured: the
-    named claim's posterior is 1.0 for both — identical, i.e. unreached — while
-    `<-` reaches it (1.04407021681169) and must still refuse.
+    the direct edge's TARGET (index 1), which `fwd` writes INTO. This fixture
+    hangs the node off a DIRECT edge, whose hop `b.id <> a.id` NULL-drops it, so
+    `None` never enters `affected` — the AFFECTED-SET arm is a different question
+    by design (`ep.py`, `_null_input_sends` docstring) and is pinned separately by
+    `test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives`.
+
+    The CONTROL is what makes this non-vacuous: the named claim's posterior must
+    be IDENTICAL to the same graph whose third participant is addressable and
+    uncalibrated — "the exempt NULL behaves exactly like a Beta(1,1) sibling",
+    which a "posterior is not None" assertion cannot distinguish (a baseline
+    stamp satisfies it either way).
     """
     proj, a, _b, ep, factor = _dash_edge_fixture(sdk, direction)
     fwd, bwd = direction_flows(direction)
@@ -1831,10 +1840,23 @@ def test_a_receive_only_null_input_does_not_refuse_the_run(sdk, direction):
 
     out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
     assert out["converged"] is True
-    posterior = proj.g.query(
-        "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha",
-        params={"i": a["id"]}).result_set
-    assert posterior[0][0] is not None
+    with_null = proj.g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha, n.posterior_beta",
+        params={"i": a["id"]}).result_set[0]
+
+    # NON-VACUOUS CONTROL: delete the id-less node (and with it the receive-only
+    # factor), reset the prior, run again. The two posteriors must be IDENTICAL —
+    # that is what "the exempt NULL behaves exactly like nothing at all" means; a
+    # "posterior is not None" assertion cannot distinguish it (a baseline stamp
+    # satisfies that either way).
+    proj.g.query("MATCH (n:Point) WHERE n.id IS NULL DETACH DELETE n")
+    sdk.set_point_baseline(a["id"], 3.0, 1.0)
+    out2 = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    assert out2["converged"] is True
+    without_null = proj.g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha, n.posterior_beta",
+        params={"i": a["id"]}).result_set[0]
+    assert with_null == without_null, (direction, with_null, without_null)
 
 
 def test_a_null_input_that_sends_still_refuses_the_run(sdk):
@@ -1912,3 +1934,47 @@ def test_nary_null_sends_only_where_the_pairs_send(op_type, inputs, direction, s
     fwd, bwd = direction_flows(direction)
     if fwd or bwd:
         assert TortoiseEP._factor_pairs(op_type, inputs, fwd and bwd)
+
+
+def test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives(sdk):
+    """#9275 (round 10): the affected-set arm is a DIFFERENT question, by design.
+
+    The factor arm asks "does this NULL INPUT influence a named claim?" and is
+    sender-gated. The affected arm asks "can the run ANSWER FOR this claim?" — a
+    member of the scope is hydrated, run through its factors and written back by
+    id, so an id-less member cannot be answered for even when it cannot influence
+    anyone. `origin/main` leaves it naively unstamped and RETURNS a run that
+    silently omits a claim it collected (measured: the named claims' posteriors
+    flushed, the id-less node left null); refusing is the fail-closed answer, and
+    the refusal says which arm fired so a caller is not told to repair an
+    influence that does not exist.
+
+    The shape is the issue's own: a SEEDED operator (the one admission arm that
+    can put an id-less claim into the scope) whose id-less input only RECEIVES
+    under `->`.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "InScopeA", status="live")
+    sdk.set_point_baseline(a["id"], 3.0, 1.0)
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
+    proj.g.query(
+        "CREATE (op:Point {id:'op-9275-inscope', is_operator:true, "
+        "pointKind:'statement', status:'live'})")
+    proj.g.query(
+        "MATCH (op:Point {id:'op-9275-inscope'}), (a:Point {id:$a}), (n:Point) "
+        "WHERE n.id IS NULL "
+        "CREATE (op)-[:IMPL {direction:'->'}]->(a) "
+        "CREATE (op)-[:IMPL {direction:'->'}]->(n)", params={"a": a["id"]})
+
+    ep = sdk._get_ep()
+    scope = None
+    with pytest.raises(UnaddressableClaimError) as exc:
+        scope = ep._affected_claims(["op-9275-inscope"], 2)
+    assert scope is None
+    message = str(exc.value)
+    assert "its affected set" in message
+    # The message distinguishes the two arms, so "repair this node" is not read as
+    # "it is influencing someone".
+    assert "AFFECTED SET" in message and "SENDING slot" in message
+    with pytest.raises(UnaddressableClaimError):
+        ep.run(["op-9275-inscope"])
