@@ -1166,11 +1166,18 @@ def _narrow_gate_walk_sites() -> tuple[
     named: set[tuple[str, str]] = set()
     empty: set[tuple[str, str]] = set()
     call_time: set[tuple[str, str]] = set()
-    # `_literal_files()` is already parsed and cached; re-reading `_sources()` and
-    # rebuilding the same 29 `_File`s is redundant work for byte-identical output —
-    # the same `_File` values over the same `_sources().items()` order, so only object
-    # identity changes. No magnitude is pinned: the rebuild is a small fraction of this
-    # arm's cost, and a wall-clock number in a comment is the claim that rots.
+    # `_literal_files()` already holds these modules PARSED, so walking
+    # `_sources().items()` and rebuilding the same `_File`s would buy nothing: the same
+    # values in the same order, so only object identity differs —
+    # `test_the_narrow_gate_walk_rebuild_buys_nothing` executes that claim through this
+    # function's own body, so it cannot rot here as prose. Nor is the saving a
+    # `_sources()` re-read: that call is `lru_cache`d, so it hands back a dict and costs
+    # nothing; what the refactor removes is the RE-PARSE of those files. No magnitude is
+    # pinned here on purpose — a wall-clock figure is a claim that rots (`#9506`), the
+    # word form of one rots just as fast (`#9501`), and a bare count is that same claim
+    # in a third alphabet, which no predicate can see. That is why the site counts AND
+    # the module count are gone rather than restated: the first module gaining or losing
+    # the literal would have made them false with every arm still green (`#9501` review).
     for file in _literal_files():
         source = file.source
         for symbol, _line in _sites_in(file):
