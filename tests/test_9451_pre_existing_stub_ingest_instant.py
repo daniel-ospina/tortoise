@@ -251,3 +251,46 @@ def test_two_captures_over_one_stub_replay_in_journal_order(prov):
         "two captures over one pre-existing stub do not replay record-by-record: "
         f"{_differs(live, _bag(sdk, url))}")
     assert live["ingestedAt"] == stub_ingested_at
+
+
+def test_a_blank_stored_instant_is_journaled_as_blank_not_as_the_capture_clock(prov):
+    """Review round 2, P2: the read-back must distinguish FALSY from NULL.
+
+    A ``:Source`` holding ``ingestedAt=''`` is falsy but NON-NULL, and the live
+    SET's ``coalesce`` KEEPS it — so a read-back written as ``... or now`` would
+    journal the capture clock for a value the write did not store, and
+    ``rebuild_all()`` would create a node carrying that clock against a live node
+    holding ``''``: the divergence class this issue closes, on one state.
+
+    FAILS ON A `or now` READ-BACK (measured: rebuilt = the capture instant,
+    live = ''), and FAILS IF a future change starts treating '' as absent on
+    either side.
+    """
+    sdk, events, _log = prov
+    session_id = "S5"
+    url, _stub_ingested_at = _mint_stub_via_create_point(sdk, session_id)
+    # The synthetic state: a legacy/foreign writer stamped a blank instant.
+    sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) SET s.ingestedAt = ''", params={"u": url})
+
+    res = sdk.capture_session(CONV, session_id=session_id)
+    assert res["ok"] is True, res
+    live = _bag(sdk, url)
+    assert live["ingestedAt"] == "", (
+        "guard: the live coalesce must KEEP a non-null blank instant — "
+        f"{live['ingestedAt']!r}")
+
+    records = [r for r in _capture_records(events)
+               if r.get("url") == url and r.get("_stub_completion") is True]
+    assert records, "the capture emitted no SourceCreated record"
+    assert records[-1]["ingestedAt"] == "", (
+        "the record states an instant the write did not store: "
+        f"record={records[-1]['ingestedAt']!r} live={live['ingestedAt']!r}")
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    rebuilt = _bag(sdk, url)
+    assert rebuilt == live, (
+        "a blank stored instant does not replay: "
+        f"{_differs(live, rebuilt)}"
+        f"\n  live    ingestedAt={live.get('ingestedAt')!r}"
+        f"\n  rebuilt ingestedAt={rebuilt.get('ingestedAt')!r}")

@@ -11851,7 +11851,14 @@ class TortoiseSDK:
         # `now` only as a fallback for a MERGE that returned no row (nothing was
         # written, so there is no stored value to state); every real write leaves
         # a non-null instant because the SET above coalesces into `$now`.
-        stored_ingested_at = (_rows[0][2] if _rows else None) or now
+        #
+        # ⛔ AN EXPLICIT NULL TEST, NOT `or` (#9451 review round 2, P2): a node
+        # holding `ingestedAt=''` is FALSY but NON-NULL, and the live SET's
+        # `coalesce` KEEPS it — so `... or now` would state an instant the write
+        # did not store and hand `rebuild_all()` a `now` the live node never had,
+        # the very divergence this issue closes, on that one state.
+        _stored = _rows[0][2] if _rows else None
+        stored_ingested_at = now if _stored is None else _stored
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
