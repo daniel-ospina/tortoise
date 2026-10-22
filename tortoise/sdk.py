@@ -24909,7 +24909,25 @@ class TortoiseSDK:
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
             evidence by the repo's own resolution (``backfill_v25`` fills
             'statement'; EP reads no kind at all), so a legacy kind-less
-            Point is gated like the statement it is. NORMALISED first — case
+            Point is gated like the statement it is. #9592: an EMPTY-after-
+            normalisation kind is in that SAME arm, because it means the same
+            thing to the consumer — no kind at all. It used to fall into the
+            string arm and fail membership, so an empty kind was a CONSUMED
+            claim with no prior while an absent kind was demanded (measured:
+            the gate answered ``[]``, ``calibrate_summary()`` said
+            uncalibrated, and a ``require_calibration=True`` run stamped the
+            node anyway) — the fail-open shape #7478 exists to prevent, and an
+            internal disagreement between the audit and the gate (#9063).
+            "Empty" means empty AFTER the normalisation below, so a
+            whitespace-only kind out of the SAME family
+            (``_KIND_WHITESPACE_CHARS``: space, tab, LF, VT, FF, CR, NBSP) is
+            covered too. The family's DECLARED BOUNDARY is unchanged and still
+            holds here: a kind padded with Unicode whitespace OUTSIDE it (em
+            space, ideographic space, ZWSP, BOM…) normalises to itself, so it
+            is still neither empty nor a member and stays ungated — the
+            pre-existing residual recorded at ``_KIND_WHITESPACE_CHARS`` and
+            filed as #9287, not a coverage claim of this arm.
+            NORMALISED first — case
             and surrounding whitespace — because the write path accepts an
             unrecognised kind VERBATIM with only a warning
             (``create_point('Statement', ...)``, ``' statement'``) and EP reads
@@ -24966,12 +24984,26 @@ class TortoiseSDK:
             return []
         proj = self._get_proj()
         kinds = ", ".join(f"'{k}'" for k in _CALIBRATION_EVIDENCE_KINDS)
+        # #9592: an EMPTY-after-normalisation kind is ABSENT, not a
+        # non-evidence kind: EP reads no kind at all, so a node whose kind is
+        # '' (or whitespace-only within the normalised family) is a consumed
+        # claim exactly like the kind-less legacy Point — the "absence is
+        # evidence" rule this predicate already carries. It is folded into the
+        # SAME membership list rather than added as an ``OR`` arm, so the
+        # widening costs one LIST ENTRY: the query text keeps ONE
+        # ``replace()`` chain and the engine evaluates the normalisation once
+        # per row (an ``OR {kind_norm} = ''`` arm interpolates the chain a
+        # SECOND time — measured +58% on the ``limit=1`` existence probe every
+        # scoped EP surface pays, 6.5 ms vs 4.1 ms at 2,000 Points). Inside the
+        # ``typeof = 'string'`` guard the normalised value is never NULL, so
+        # ``x = '' OR x IN [...]`` and ``x IN ['', ...]`` are the same
+        # predicate.
+        kind_norm = f"toLower({_strip_whitespace('n.pointKind')})"
         where = (
             f"(n.is_operator IS NULL OR n.is_operator = false) "
             f"AND (n.pointKind IS NULL "
             f"     OR (toLower(typeof(n.pointKind)) = 'string' "
-            f"         AND toLower({_strip_whitespace('n.pointKind')}) "
-            f"             IN [{kinds}])) "
+            f"         AND {kind_norm} IN ['', {kinds}])) "
             f"AND {_live_only('n.status')} "
             "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
             "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "

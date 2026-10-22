@@ -2057,13 +2057,35 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: the shared-capacity shape is accepted.
 #:
 #: #3718 (READ half — the lane's second consumer class, added with the six read
-#: conversions): the REST READ handlers submit ONE entry per request here, for
-#: their per-request SDK CONSTRUCTION only — ``GET /v1/points``
-#: (``list_points``), ``GET /v1/points/{id}`` (``get_point``),
-#: ``GET /v1/dream/health`` (``dream_health``), ``GET /v1/team``
-#: (``org_info``), ``GET /v1/sessions`` (``list_sessions``) and
-#: ``GET /v1/sessions/{id}`` (``get_session_detail``). Their graph READS do NOT
-#: come here: they ride the house ``asyncio.to_thread`` default executor
+#: conversions, then widened by the second construction batch): the REST READ
+#: handlers submit ONE entry per request here, for their per-request SDK
+#: CONSTRUCTION only — ``GET /v1/points`` (``list_points``),
+#: ``GET /v1/points/{id}`` (``get_point``), ``GET /v1/dream/health``
+#: (``dream_health``), ``GET /v1/team`` (``org_info``), ``GET /v1/sessions``
+#: (``list_sessions``), ``GET /v1/sessions/{id}`` (``get_session_detail``),
+#: ``GET /v1/search`` (``search``), ``GET /v1/topics/{t}/summary``
+#: (``topic_summary``), ``GET /v1/context`` (``session_context``) and
+#: ``GET /v1/issue-insight`` (``issue_insight``), plus the two context
+#: subscription reads (``GET /v1/context/subscriptions`` →
+#: ``list_context_subscriptions`` and ``GET /v1/context/subscriptions/{id}/deliveries``
+#: → ``list_context_deliveries``), which use the same seam.
+#:
+#: ⛔ This block is NOT the inventory of read-route graph constructions and does
+#: not claim to be — deliberately, because a list restated here goes stale on
+#: every burn-down slice (measured: three review rounds on this one diff caught
+#: a stale count, an incomplete exception list, and a false ownership claim).
+#: The inventory of read-route graph CONSTRUCTION is the declared sets in
+#: ``tests/test_read_routes_loop_responsiveness.py``:
+#: ``_OFFLOADED_ASYNC_BODIES`` (construction off the loop),
+#: ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` and
+#: ``_KNOWN_INLINE_ROUTE_RESIDUAL`` (construction still inline). Those sets
+#: classify a body's construction state; they are NOT a list of THIS pool's
+#: consumers, so do not derive the pool's read pressure from them — the sets are
+#: wrong in BOTH directions (some bodies that submit here are in none of them;
+#: some members never submit here at all). Enumerate the seam, not this list.
+#: Do not infer "no read route construction is on the loop" from this block
+#: either. Their graph READS do NOT come here: they ride the house
+#: ``asyncio.to_thread`` default executor
 #: (``dream_health``'s pass on ``_DREAM_EXECUTOR``), so a read request's
 #: occupancy of this pool is exactly one submission, not one per read. Before
 #: #3718 no dashboard OVERVIEW read touched this pool: what was already here is
@@ -2071,8 +2093,8 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: opens, the org switcher's chunked graph LISTING, and the graph-bound
 #: ``_data_sdk`` control-plane ownership read. The consequences are stated
 #: rather than hidden: (1) a WRITE burst that fills the backlog (128) can now
-#: refuse a dashboard read, and (2) the THREE of the six whose routes carry a
-#: ``#1591`` fail-soft arm — ``GET /v1/team``, ``GET /v1/sessions``,
+#: refuse a dashboard read, and (2) the THREE of the ORIGINAL six whose routes
+#: carry a ``#1591`` fail-soft arm — ``GET /v1/team``, ``GET /v1/sessions``,
 #: ``GET /v1/sessions/{id}`` — now fail CLOSED with the 503
 #: ``graph_unavailable`` body instead of that empty shape; ``GET /v1/points``,
 #: ``GET /v1/points/{id}`` and ``GET /v1/dream/health`` were already
@@ -2080,8 +2102,15 @@ CONTROL_PLANE_OAUTH_BACKLOG = 64
 #: is not a store condition (#3892: never a clean empty for a store we could
 #: not reach). That scoping of ``#1591`` is a departure from the "every
 #: failure here is fail-soft" reading, so it carries an ``OVERRIDES:`` line at
-#: each of the three construction sites and is relayed to #3718 (the burn-down
-#: tracker the next slice reads), not left implicit in a 40k-line module.
+#: each construction site and is relayed to #3718 (the burn-down tracker the
+#: next slice reads), not left implicit in a 40k-line module. The second batch
+#: carries the same departure: ``GET /v1/search`` would otherwise answer
+#: ``{"results": [], "count": 0}`` on a busy pool — the #3892 shape — so its
+#: capacity refusal is the 503 too, while a broken store still keeps
+#: its documented ``status: degraded`` arm **when the read-status/residency flag
+#: is on** (with both flags off, ``tortoise_fts_query`` re-raises and the route's
+#: own 500 arm answers, exactly as before) — a domain error from ``_data_sdk``
+#: propagates unchanged either way.
 #: Both costs are accepted for a construction that
 #: otherwise blocks the loop on every dashboard load; if read pressure ever
 #: saturates this lane, size it or give reads their own pool rather than
