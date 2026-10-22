@@ -41,6 +41,10 @@ WHAT IS BEING PINNED
   5. `COUNT` is validated for EVERY mode, so `--count 0 --uninstall` cannot report success having
      deregistered nothing — and `--uninstall` deletes only a directory it can PROVE is a runner
      install (`.runner` / `config.sh` / `bin/Runner.Listener`), never just "whatever `BASE` names".
+  5b. `--uninstall` removes the systemd unit BEFORE the directory, and a unit it cannot remove
+     stops that target dead: the directory and its registration are LEFT INTACT (exit 3), never
+     deleted out from under an enabled unit. Every removal token is minted before the FIRST
+     deletion, so a mint failure leaves every runner untouched rather than a half-uninstalled set.
   6. An unreadable bound is refused, never coerced — and `ulimit -u` = `unlimited` is a READ
      bound (infinity), not an unreadable one.
   7. The exit contract holds: 1 usage, 2 guard refused, 3 operation failed.
@@ -293,6 +297,111 @@ def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path:
     assert r.returncode == 0, r.stderr
     assert not runner.exists(), f"a configured runner directory must be removed: {r.stderr}"
     assert "rm -rf" in calls.read_text(), "the sudo stub never saw the delete — the arm is vacuous"
+
+
+# ── 5c. a unit that cannot be removed must not be deleted out from under ─────────────────────
+def _uninstall_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    """An uninstall env with `sudo`/`gh` stubs, a pinned arch, and a hermetic unit directory."""
+    bin_dir = tmp_path / "bin"
+    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\nexec "$@"')
+    _stub_tool(bin_dir, "gh", 'echo "tok"')
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir(exist_ok=True)
+    env = _env(tmp_path / "base", PATH=f"{bin_dir}:{os.environ['PATH']}", CI_RUNNER_ARCH="x86_64")
+    env.update({"CI_RUNNER_UNIT_DIR": str(unit_dir)})
+    env.update(extra)
+    return env
+
+
+def test_uninstall_never_deletes_under_an_enabled_unit_it_failed_to_remove(tmp_path: Path):
+    """The unit is removed FIRST; if that fails the directory and its registration are LEFT INTACT.
+
+    Pre-fix, the destructive step was
+    `[ -f ./svc.sh ] && sudo ./svc.sh stop >/dev/null 2>&1; sudo ./svc.sh uninstall >/dev/null 2>&1`
+    — the `-f` guard covered `stop` only, `uninstall` ran unconditionally (where, with no svc.sh, it
+    can only fail), and its exit status was discarded. `sudo rm -rf` then ran anyway and the run
+    exited 0, so an enabled unit survived pointing at a deleted WorkingDirectory while
+    `--uninstall` reported a clean removal. Measured on the pre-fix script: the directory was
+    DELETED and the run exited 0; post-fix it exits 3 and the directory survives.
+    """
+    unit = "actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service"
+
+    # arm 1: svc.sh exists but `svc.sh uninstall` fails while the unit is still installed
+    env = _uninstall_env(tmp_path)
+    (Path(env["CI_RUNNER_UNIT_DIR"]) / unit).write_text("[Unit]\nDescription=a runner\n")
+    runner = tmp_path / "base"
+    runner.mkdir()
+    (runner / ".runner").write_text("{}\n")
+    _stub_tool(runner, "svc.sh", "exit 1")   # `stop` and `uninstall` both fail
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 3, f"a failed unit removal is an OPERATION failure (3), got {r.returncode}: {r.stderr}"
+    assert "could not remove the systemd unit" in r.stderr and unit in r.stderr, r.stderr
+    assert runner.is_dir() and (runner / ".runner").exists(), (
+        "the installer deleted the directory out from under a unit it could not remove"
+    )
+    assert "rm -rf" not in (tmp_path / "sudo.log").read_text(), "sudo rm -rf ran anyway"
+
+    # arm 2: the unit is installed but the directory has no svc.sh, so it cannot be removed from here
+    env = _uninstall_env(tmp_path / "no-svc")
+    (Path(env["CI_RUNNER_UNIT_DIR"]) / unit).write_text("[Unit]\n")
+    runner = tmp_path / "no-svc" / "base"
+    runner.mkdir(parents=True)
+    (runner / ".runner").write_text("{}\n")
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 3, r.stderr
+    assert "has no svc.sh" in r.stderr and runner.is_dir(), r.stderr
+
+    # positive control: the unit IS removable, so the directory IS deleted and nothing is warned
+    env = _uninstall_env(tmp_path / "clean")
+    (Path(env["CI_RUNNER_UNIT_DIR"]) / unit).write_text("[Unit]\n")
+    runner = tmp_path / "clean" / "base"
+    runner.mkdir(parents=True)
+    (runner / ".runner").write_text("{}\n")
+    _stub_tool(runner, "svc.sh", "exit 0")
+    r = _run("--uninstall", "--count", "1", env=env)
+    assert r.returncode == 0, r.stderr
+    assert not runner.exists(), f"a removable unit's directory must be deleted: {r.stderr}"
+    assert "could not remove" not in r.stderr, r.stderr
+
+
+# ── 5d. every removal token is minted BEFORE the first deletion ──────────────────────────────
+def test_a_token_mint_failure_leaves_every_runner_untouched(tmp_path: Path):
+    """A mint that fails on runner 2 must not leave runner 1 already deregistered and deleted.
+
+    The mint used to sit inside the deleting loop, so the `die` fired after the first directory was
+    gone — a half-deleted set (which an earlier comment in the installer claimed impossible). It is
+    now a separate phase: on the pre-fix script the first directory was DELETED and the run exited
+    3; post-fix both directories survive and the refusal says so.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    count = tmp_path / "mints"
+    # succeed on the first mint, fail on the second
+    _stub_tool(
+        bin_dir, "gh",
+        f'n=$(cat {count} 2>/dev/null || echo 0); echo $((n+1)) > {count}\n'
+        f'[ "$n" -lt 1 ] && {{ echo tok; exit 0; }}; echo "gh: boom" >&2; exit 1',
+    )
+    _stub_tool(bin_dir, "sudo", f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\nexec "$@"')
+    unit_dir = tmp_path / "systemd"
+    unit_dir.mkdir()
+    env = _env(
+        tmp_path / "base", PATH=f"{bin_dir}:{os.environ['PATH']}",
+        CI_RUNNER_ARCH="x86_64", CI_RUNNER_UNIT_DIR=str(unit_dir),
+    )
+    dirs = [tmp_path / "base", tmp_path / "base-2"]
+    for d in dirs:
+        d.mkdir()
+        (d / ".runner").write_text("{}\n")
+
+    r = _run("--uninstall", "--count", "2", env=env)
+    assert r.returncode == 3, f"a token-mint failure is an OPERATION failure: {r.returncode} {r.stderr}"
+    assert "NOTHING was deregistered or deleted" in r.stderr, r.stderr
+    assert all(d.is_dir() for d in dirs), f"a half-deleted set: {[d.name for d in dirs if not d.is_dir()]}"
+    sudo_log = tmp_path / "sudo.log"
+    assert not sudo_log.exists() or "rm -rf" not in sudo_log.read_text(), (
+        "a delete ran before every token was minted"
+    )
 
 
 # ── 6. bounds: unreadable is refused, infinite is a bound ───────────────────────────────────

@@ -58,8 +58,10 @@
 #        not provably a runner install. Nothing was downloaded, registered or removed; re-run
 #        with a smaller --count, on an x86_64 host, with an explicit --fallback, or with the
 #        right CI_RUNNER_BASE.
-#     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh, a
-#        tool missing from PATH, or a failed remote read (`--status`).
+#     3  OPERATION failed — download, sha256 verify, extract, token mint, config.sh, svc.sh (a
+#        failed systemd unit removal included — its target directory is then LEFT intact rather
+#        than deleted out from under an enabled unit), a tool missing from PATH, or a failed
+#        remote read (`--status`).
 set -uo pipefail
 
 # The help text is the file's OWN header, cut at the closing `set` line rather than a frozen line
@@ -71,6 +73,11 @@ usage() { awk '/^# USAGE/{p=1} /^set -uo pipefail$/{p=0} p' "$0" | sed 's/^# \{0
 REPO="${CI_RUNNER_REPO:-daniel-ospina/tortoise}"
 BASE="${CI_RUNNER_BASE:-/opt/gh-runner-x64}"
 NAME_PREFIX="${CI_RUNNER_NAME_PREFIX:-pi-runner-x64}"
+# Where `svc.sh install` writes the unit, and the ONE path this script stats to decide whether a
+# unit exists. Overridable for the same reason `CI_RUNNER_ARCH`/`CI_RUNNER_NCPU` are: the box that
+# reads this code is not always the box being guarded, and a test cannot write /etc. It changes no
+# behaviour on a real host.
+UNIT_DIR="${CI_RUNNER_UNIT_DIR:-/etc/systemd/system}"
 RUNNER_VERSION="${CI_RUNNER_VERSION:-2.337.0}"   # match the ARM64 pool's version
 # THIS arch's own pool marker (never `self-hosted-arm64`).
 ARCH_LABEL="self-hosted-x64"
@@ -317,9 +324,16 @@ if [ "$MODE" = uninstall ]; then
   # pre-fix gate was exactly `[ -d "$d" ]`, so `CI_RUNNER_BASE=/opt --uninstall` ran
   # `sudo rm -rf /opt` and `CI_RUNNER_BASE=$HOME/work --uninstall` deleted a worktree. Proof of
   # a runner install is `.runner` (written by config.sh on success), `config.sh` itself (a
-  # download that never registered), or the listener binary. Refusing up front also means a
-  # half-deleted set is impossible: the refusal happens before the first deletion, not after.
+  # download that never registered), or the listener binary.
+  #
+  # ⛔ TWO PHASES, AND EVERYTHING THAT CAN REFUSE HAPPENS IN THE FIRST ONE. Phase 1 walks every
+  # target and proves it is a runner install; phase 2 mints a removal token for EVERY target and
+  # only then starts deregistering. The mint used to sit INSIDE the deleting loop, so a mint that
+  # failed on runner 2 `die`d after runner 1 was already deregistered and deleted — a half-deleted
+  # set, which an earlier version of this comment claimed was impossible. Now a refusal in either
+  # phase leaves EVERY directory untouched.
   uninstall_dirs=()
+  uninstall_units=()
   for i in $(seq 1 "$COUNT"); do
     d="$(runner_dir "$i")"
     [ -d "$d" ] || { say "skip: $d does not exist"; continue; }
@@ -327,17 +341,46 @@ if [ "$MODE" = uninstall ]; then
       die "$d is not a runner install (no .runner, config.sh or bin/Runner.Listener) — refusing to delete it. Remove it by hand if it is debris, or pass the right CI_RUNNER_BASE."
     fi
     uninstall_dirs+=("$d")
+    # the unit name comes from the INSTANCE NUMBER, not from the array index: instance 1 may be
+    # absent while 2 exists, and deriving it from the index would then address the wrong unit.
+    uninstall_units+=("$(unit_for "$NAME_PREFIX-$i")")
   done
   [ "${#uninstall_dirs[@]}" -gt 0 ] || { say "nothing to uninstall"; exit 0; }
-  for d in "${uninstall_dirs[@]}"; do
-    if [ "$DRY" = 1 ]; then say "dry-run: would deregister $(basename "$d") and remove its unit"; continue; fi
-    ( cd "$d" && [ -f ./svc.sh ] && sudo ./svc.sh stop >/dev/null 2>&1; sudo ./svc.sh uninstall >/dev/null 2>&1 )
-    tok="$(gh api -X POST "repos/$REPO/actions/runners/remove-token" --jq .token)" || die "could not mint a removal token" 3
+  uninstall_tokens=()
+  if [ "$DRY" != 1 ]; then
+    for d in "${uninstall_dirs[@]}"; do
+      tok="$(gh api -X POST "repos/$REPO/actions/runners/remove-token" --jq .token)" \
+        || die "could not mint a removal token for $(basename "$d") — NOTHING was deregistered or deleted; re-run once the token request succeeds" 3
+      uninstall_tokens+=("$tok")
+    done
+  fi
+  rc=0
+  for i in "${!uninstall_dirs[@]}"; do
+    d="${uninstall_dirs[$i]}"; name="$(basename "$d")"; unit="${uninstall_units[$i]}"
+    if [ "$DRY" = 1 ]; then say "dry-run: would stop and uninstall the unit $unit, deregister $name, then remove $d"; continue; fi
+    # ⛔ THE UNIT GOES FIRST, AND ITS FAILURE STOPS THE DELETE FOR THIS TARGET. The pre-fix line was
+    # `[ -f ./svc.sh ] && sudo ./svc.sh stop >/dev/null 2>&1; sudo ./svc.sh uninstall >/dev/null 2>&1`:
+    # the `-f` guard covered `stop` only, `uninstall` therefore ran even with no svc.sh (where it can
+    # only fail), its exit status was discarded, and `sudo rm -rf` ran regardless. An enabled unit
+    # then survived pointing at a deleted WorkingDirectory — systemd restarts it into nothing — while
+    # `--uninstall` and `--status` both reported a clean removal. One target that cannot be cleaned is
+    # left INTACT and reported (rc=3 — an OPERATION failure, never 2 "nothing attempted" and never 1
+    # "usage"), so a retry has something to retry.
+    if [ -f "$d/svc.sh" ]; then
+      ( cd "$d" && sudo ./svc.sh stop >/dev/null 2>&1 )
+      if ! ( cd "$d" && sudo ./svc.sh uninstall >/dev/null 2>&1 ) && [ -e "$UNIT_DIR/$unit" ]; then
+        say "WARNING: could not remove the systemd unit $unit — LEFT $d and its registration intact so this can be retried. Remove it by hand: sudo $d/svc.sh uninstall"; rc=3; continue
+      fi
+      say "removed the systemd unit $unit (if it was installed)"
+    elif [ -e "$UNIT_DIR/$unit" ]; then
+      say "WARNING: $unit is installed but $d has no svc.sh, so it cannot be uninstalled from here — LEFT the directory and its registration intact. Remove the unit by hand, then re-run"; rc=3; continue
+    fi
+    tok="${uninstall_tokens[$i]}"
     ( cd "$d" && ./config.sh remove --token "$tok" --unattended >/dev/null 2>&1 ) \
-      && say "deregistered $(basename "$d")" || say "WARNING: $(basename "$d") may still be registered — check --status"
+      && say "deregistered $name" || say "WARNING: $name may still be registered — check --status"
     sudo rm -rf "$d"
   done
-  exit 0
+  exit "$rc"
 fi
 
 tarball="actions-runner-linux-x64-$RUNNER_VERSION.tar.gz"
@@ -377,7 +420,7 @@ for i in $(seq 1 "$COUNT"); do
   # writes /etc/systemd/system/<unit>.service; it runs only when the unit is ABSENT, and it is
   # NOT `systemctl enable` — a unit removed while its dir survives is re-installed here, but a
   # merely-STOPPED service is only started below (see the runbook's reboot section).
-  if [ ! -f "/etc/systemd/system/$(unit_for "$name")" ]; then
+  if [ ! -f "$UNIT_DIR/$(unit_for "$name")" ]; then
     ( cd "$d" && sudo ./svc.sh install "$actor" ) || die "svc.sh install failed for $name" 3
   fi
   ( cd "$d" && sudo ./svc.sh start ) || die "svc.sh start failed for $name" 3
