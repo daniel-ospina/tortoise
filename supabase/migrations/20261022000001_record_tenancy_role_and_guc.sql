@@ -9,6 +9,14 @@
 --      via row-level security"* — is implemented, not merely documented: the
 --      record's application path connects as a NON-BYPASS role, so every
 --      `*_read_org` / `*_app_tenant` predicate is actually evaluated for it.
+--      That sentence is ENFORCED BY CODE, not left to this file's prose: every
+--      record connection (write AND read) is scoped by
+--      `record_projection.scope_connection()`, which reads `current_user`'s
+--      posture back — superuser, BYPASSRLS, membership in either, or ownership
+--      of a record table — and REFUSES the connection rather than writing or
+--      reading across tenants with the policies unevaluated (#9600 review
+--      cycle 2, P2). A DSN string naming `postgres` is therefore a refusal,
+--      not a silent bypass.
 --   2. THE ROLE IS `tortoise_record_app`. `NOBYPASSRLS`, `NOSUPERUSER`, not the
 --      table owner. The two other candidates are BYPASSING and are therefore
 --      excluded from the application path, not "used with care":
@@ -25,7 +33,11 @@
 --      session `SET`, not a connection-init hook. `record_projection.replay()`
 --      issues `set_config('app.current_org_id', $1, true)` as the FIRST
 --      statement on the caller's transaction, from the SAME `org_id` it is
---      about to project. Two consequences, both deliberate:
+--      about to project. THE SAME prologue is installed by the READ door
+--      (`cache_projection.read_record_view()`), because both doors share the
+--      one `TORTOISE_RECORD_DSN`; before that, the production reconciler read
+--      zero rows and reported a coherent pair as divergent (#9600 review
+--      cycle 2, P1). Two consequences, both deliberate:
 --        · the writer's `org_id` and the connection's GUC cannot disagree —
 --          there is one value, and it feeds both places;
 --        · the posture is POOLER-MODE INDEPENDENT. R1's DSN is port 5432 (the
@@ -135,6 +147,24 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.object         TO tortoise_record
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.subject        TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.point          TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.relation       TO tortoise_record_app;
+
+-- ── 2b. `public.relation`'s IDENTITY sequence needs its OWN grant ─────────
+-- A table-level INSERT privilege does NOT confer `nextval` on the sequence that
+-- backs an IDENTITY column: the sequence carries a separate ACL, and its owner
+-- is the migration applier. `public.relation.id` is
+-- `bigint GENERATED ALWAYS AS IDENTITY` (20261012000003:167), so without this
+-- grant EVERY app-role INSERT into `relation` raises `permission denied for
+-- sequence relation_id_seq` (42501) — and because the statement aborts the
+-- replay transaction, the whole edge-bearing record is lost, not just the edge
+-- (#9600 review cycle 2, P1).
+--
+-- The posture suite cannot INFER this from `has_table_privilege(..., 'INSERT')`
+-- — that reads true while the insert itself fails — so §3 asserts
+-- `has_sequence_privilege` and §7 LANDS an app-role `relation` row (with its
+-- refused cross-tenant twin) as the positive proof.
+-- `relation` is the only record table with an identity column (measured: one
+-- `GENERATED … AS IDENTITY` across the four CREATE-TABLE migrations).
+GRANT USAGE ON SEQUENCE public.relation_id_seq TO tortoise_record_app;
 
 -- ── 3. The tenant policy, one per record table ──────────────────────────────
 -- `FOR ALL` with BOTH clauses. `USING` gates what the role can see and what a

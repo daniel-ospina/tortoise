@@ -66,6 +66,11 @@ MIGRATIONS = [
     # `record_projection.RECORD_MIGRATIONS` would measure five columns short.
     # Pinned by `tests/test_7950_capstone_probe.py`.
     "20261018000001_record_point_money_value_2782.sql",
+    # The TENANCY POSTURE (#9554, epic #7879): the app role, its grants (and
+    # `relation_id_seq`'s USAGE) and the nine `*_app_tenant` policies. No column
+    # — applied so this list stays EQUAL to `RECORD_MIGRATIONS` (#9550), which
+    # keeps the measured row width the SHIPPED schema's.
+    "20261022000001_record_tenancy_role_and_guc.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

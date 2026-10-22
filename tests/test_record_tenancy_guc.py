@@ -37,6 +37,25 @@ driver:
    ``BYPASSRLS`` here turns the whole posture into decoration, which is the
    trap this issue exists to close (``service_role`` looks like a tenancy
    boundary while bypassing RLS entirely).
+7. **The CONNECTING ROLE is verified, not assumed** (#9600 review cycle 2). The
+   GUC read-back proves the tenant took effect; it says nothing about whether
+   the policies are evaluated at all. ``scope_connection`` refuses a superuser,
+   a ``BYPASSRLS`` role, a member of either, and a table OWNER — the four
+   measured bypasses — so a ``postgres``/``service_role`` DSN fails closed on
+   the first write instead of writing across tenants with the report saying
+   APPLIED. An unreadable posture is refused too: an unverifiable role is not a
+   verified one.
+8. **The READ door installs the same scope** (#9600 review cycle 2).
+   ``record-reconcile`` opens its own connection from the SAME
+   ``TORTOISE_RECORD_DSN`` and reads through ``cache_projection.read_record_view``
+   — which therefore sets the prologue (and the role gate) before its first
+   ``SELECT``. Without it, the app-role DSN made the production reconciler read
+   zero rows and report a coherent pair as DIVERGENT (exit 3).
+9. **The identity sequence is granted in its own right** (#9600 review cycle 2).
+   ``public.relation.id`` is ``GENERATED ALWAYS AS IDENTITY``, so the app role
+   needs ``USAGE`` on ``relation_id_seq``: a table ``INSERT`` grant does not
+   confer ``nextval``, and the failed insert aborts the whole replay
+   transaction. Derived from the CREATE-TABLE migrations, never restated.
 
 ⛔ WHAT THIS FILE DELIBERATELY DOES NOT DO: prove a cross-tenant read returns
 nothing. That needs a database — a fake connection cannot have a policy
@@ -52,6 +71,7 @@ from typing import Any
 
 import pytest
 
+from tortoise import cache_projection as cp
 from tortoise import record_projection as rp
 from tortoise import record_writer as rw
 
@@ -84,29 +104,53 @@ class RecordingCursor:
 
     def execute(self, sql: str, params: Any = None) -> None:
         self._conn.executed.append((sql, None if params is None else list(params)))
+        self._conn.last_sql = sql
         if sql == rp.TENANT_GUC_SQL:
             self._conn.guc_set = params[0] if params else None
 
-    def fetchone(self) -> tuple[Any]:
-        # #9600 review cycle 1 (P2): `replay()` reads the tenant GUC BACK after
-        # setting it (a `set_config(..., true)` that set nothing is silent for
-        # an UPDATE/DELETE-only plan). The recorder mirrors the value it was
-        # asked to set unless a test OVERRIDES it to model a lossy connection.
+    def fetchone(self) -> tuple[Any, ...] | None:
+        # `replay()` reads the tenant GUC BACK after setting it (a
+        # `set_config(..., true)` that set nothing is silent for an
+        # UPDATE/DELETE-only plan) and, on the SAME statement, the connecting
+        # role's posture (#9600 review cycle 2). The recorder answers both from
+        # the connection being modelled: a test OVERRIDES `guc_lost` to model a
+        # lossy connection and `role_posture` to model a bypassing one.
+        if self._conn.last_sql == rp.TENANT_SCOPE_SQL:
+            if self._conn.role_posture is _UNREADABLE:
+                return None
+            return (self._conn.guc_reports, self._conn.role_posture)
         return (self._conn.guc_reports,)
+
+    def fetchall(self) -> list[Any]:
+        # The READ door's shapes (`record-reconcile`): this recorder holds no
+        # rows, because the reader tests assert on the STATEMENTS it issued and
+        # on the scope preceding them, never on projected data.
+        return []
+
+    description: list[Any] = []
+
+
+#: Sentinel: `pg_roles` returned no row for `current_user` (the posture is
+#: unreadable, and an unverifiable role must be refused, not assumed safe).
+_UNREADABLE = object()
 
 
 class RecordingConnection:
     """Remembers every statement it was asked to execute, and nothing else."""
 
-    def __init__(self, guc_lost: bool = False) -> None:
+    def __init__(self, guc_lost: bool = False, role_posture: Any = False) -> None:
         self.executed: list[tuple[str, list[Any] | None]] = []
         self.commits = 0
         self.rollbacks = 0
         self.closed = 0
         self.guc_set: Any = None
+        self.last_sql: str | None = None
         #: `True` models a connection whose transaction-local `set_config` did
         #: nothing (autocommit, or a pooler that dropped the context).
         self.guc_lost = guc_lost
+        #: `False` = a non-bypassing role (the decision's app role); `True` = a
+        #: BYPASSRLS/superuser/owner role (the DSN trap this file pins).
+        self.role_posture = role_posture
 
     @property
     def guc_reports(self) -> Any:
@@ -128,7 +172,12 @@ class RecordingConnection:
         return [params for sql, params in self.executed if sql == rp.TENANT_GUC_SQL]
 
     def plan_statements(self) -> list[tuple[str, list[Any] | None]]:
-        """Everything that is not the prologue or its read-back."""
+        """Everything that is not the scope (prologue + its verification).
+
+        The prologue is `set_config(...)` and the verify statement READS the GUC
+        back (`current_setting(...)`) on the same round trip as the connecting
+        role's posture, so each is named rather than filtered by position.
+        """
         return [(sql, params) for sql, params in self.executed
                 if sql != rp.TENANT_GUC_SQL and "current_setting" not in sql]
 
@@ -242,6 +291,65 @@ def test_a_lost_tenant_setting_refuses_instead_of_applying_unscoped() -> None:
         "UPDATE/DELETE would affect zero rows without raising")
 
 
+def test_a_bypassing_role_is_refused_before_the_plan_is_applied() -> None:
+    """#9600 review cycle 2 (P2): the GUC is verified, and now the ROLE is too.
+
+    A `TORTOISE_RECORD_DSN` naming `postgres` (the table owner — R1's documented
+    pre-change DSN shape) or `service_role` (`BYPASSRLS`) satisfies EVERY other
+    check this PR adds: the prologue sets the GUC, the read-back returns it, and
+    the report says APPLIED — while the policies are never evaluated, so the
+    write crosses tenants. Nothing in the tree caught that before this pin; the
+    connection is now refused, before a plan statement runs.
+    """
+    conn = RecordingConnection(role_posture=True)
+
+    with pytest.raises(rp.RecordProjectionError, match="BYPASSES RLS"):
+        rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
+
+    assert conn.plan_statements() == [], (
+        "a plan statement ran on a connection whose role bypasses RLS — the "
+        "tenancy boundary was absent while the replay reported APPLIED")
+
+
+def test_an_unreadable_role_posture_is_refused_not_assumed() -> None:
+    """An unverifiable role is not a verified one: no pg_roles row ⇒ refuse.
+
+    The fail-open shape is the `None` one — a query that returned nothing read as
+    "not bypassing" would make the role check decorative on exactly the
+    connection whose role the query could not describe.
+    """
+    conn = RecordingConnection(role_posture=_UNREADABLE)
+
+    with pytest.raises(rp.RecordProjectionError, match="could not be verified"):
+        rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
+
+    assert conn.plan_statements() == []
+
+
+def test_the_role_gate_is_one_statement_covering_all_four_bypasses() -> None:
+    """One round trip, four bypasses, and none of them a role NAME.
+
+    `rolsuper` and `rolbypassrls` are the direct shapes; `pg_has_role` catches
+    membership (which re-opens the bypass while `rolbypassrls` still reads
+    false — measured, and the migration header says so); the `relowner` leg
+    catches the table OWNER, which is the `postgres` DSN the decision rejects.
+    A hardcoded `pg_has_role(current_user, 'service_role', 'USAGE')` would raise
+    on a Postgres that has no such role, so the membership leg is generic.
+    """
+    assert rp.TENANT_SCOPE_SQL.count("pg_has_role") == 2, (
+        "the membership leg OR the ownership leg is missing — one of the four "
+        "bypasses is not checked")
+    for fragment in ("rolsuper", "rolbypassrls", "relowner", "pg_roles"):
+        assert fragment in rp.TENANT_SCOPE_SQL, f"the role gate does not check {fragment}"
+
+    conn = RecordingConnection()
+    rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
+    gates = [sql for sql, _ in conn.executed if sql == rp.TENANT_SCOPE_SQL]
+    assert len(gates) == 1, f"{len(gates)} role-gate round trips for one write"
+    assert conn.executed[0][0] == rp.TENANT_GUC_SQL, (
+        "the tenant must be set before the statement that reads it back")
+
+
 def test_two_tenants_on_one_connection_each_get_their_own_prologue() -> None:
     """The failure this prevents: a connection reused across tenants.
 
@@ -307,6 +415,31 @@ def test_the_live_door_sets_the_prologue_too() -> None:
     assert conn.executed[0][0] == rp.TENANT_GUC_SQL
 
 
+def test_the_live_door_refuses_a_bypassing_connection_as_a_write_failure() -> None:
+    """The role refusal reaches the CALLER — it is not swallowed by the seam.
+
+    A refusal that the seam converted into `APPLIED`, or into a success with
+    zero statements, would be the same silent fail-open one level up: the
+    capture would count a durable write that never happened. It surfaces as
+    `RecordWriteError` (the class the live door bounds and counts) with the
+    projection's refusal as its `__cause__`, and nothing was executed or
+    committed.
+    """
+    conn = RecordingConnection(role_posture=True)
+    writer = rw.RecordWriter(dsn="postgresql://record/db",
+                             connect=lambda _dsn: conn)
+
+    with pytest.raises(rw.RecordWriteError) as excinfo:
+        writer.write(RECORDS, org_id=ORG, graph_id=GRAPH)
+
+    assert isinstance(excinfo.value.__cause__, rp.RecordProjectionError), (
+        "the seam re-wrapped the refusal without the projection's cause — the "
+        "operator cannot tell a bypassing DSN from an engine error")
+    assert "BYPASSES RLS" in str(excinfo.value.__cause__)
+    assert conn.plan_statements() == [], "a plan statement ran anyway"
+    assert conn.commits == 0
+
+
 def test_an_unarmed_write_sets_nothing_and_opens_nothing() -> None:
     """No DSN ⇒ NOT_ARMED: no connection, hence no prologue to set."""
     writer = rw.RecordWriter(dsn=None)
@@ -314,6 +447,77 @@ def test_an_unarmed_write_sets_nothing_and_opens_nothing() -> None:
     result = writer.write(RECORDS, org_id=ORG, graph_id=GRAPH)
 
     assert result.outcome is rw.RecordWriteOutcome.NOT_ARMED
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 2b. The READ door installs the SAME scope — a reader is not exempt
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_the_reader_installs_the_tenant_scope_before_it_reads() -> None:
+    """#9600 review cycle 2 (P1): the read half of the posture.
+
+    `record-reconcile` opens its OWN connection from the SAME
+    `TORTOISE_RECORD_DSN` and calls `read_record_view`. Before this pin the
+    prologue lived only on the write door, so under the app-role DSN this PR
+    mandates the production reconciler read ZERO rows from every record table
+    (a missing GUC is "no rows", never an error) and exited 3 — "divergence
+    OBSERVED" — on a coherent pair. The verb's own docstring: a wrong VERDICT is
+    worse than no verdict.
+    """
+    conn = RecordingConnection()
+
+    view = cp.read_record_view(conn, org_id=ORG, graph_id=GRAPH)
+
+    assert conn.prologues() == [[ORG]], (
+        "the reader read the record WITHOUT scoping the connection to the org "
+        "it filters on — under the app role every policy reads NULL and returns "
+        "zero rows, silently")
+    assert conn.executed[0][0] == rp.TENANT_GUC_SQL, (
+        "the scope must precede the first SELECT — a row read before the GUC is "
+        "set is a row read across tenants")
+    assert any(sql == rp.TENANT_SCOPE_SQL for sql, _ in conn.executed), (
+        "the reader did not verify the connecting role's posture")
+    # …and the scope is set ONCE, from the org_id the reader was GIVEN (one
+    # value feeds the GUC and the predicates, so they cannot disagree).
+    assert len(conn.prologues()) == 1
+    assert view.record_keys == ()
+
+
+def test_the_reader_refuses_a_bypassing_role() -> None:
+    """A read-only door needs the role gate at least as much as a writer.
+
+    A bypassing reader does not merely write across tenants — it READS every
+    tenant's rows, and the reconciler would then compare another tenant's record
+    against this tenant's cache and report a divergence nobody can act on.
+    """
+    conn = RecordingConnection(role_posture=True)
+
+    with pytest.raises(rp.RecordProjectionError, match="BYPASSES RLS"):
+        cp.read_record_view(conn, org_id=ORG, graph_id=GRAPH)
+
+
+def test_the_reconciler_verb_reads_through_that_same_reader() -> None:
+    """The scope is installed where the verb reads, not only where it writes.
+
+    Ordering pinned at the seam: `read_record_view` installs the scope BEFORE
+    its first SELECT, so there is no window in which the verb reads unscoped
+    rows. The verb's own arm is driven end-to-end in
+    `tests/test_record_reconcile_trigger.py::test_the_verbs_OWN_connection_is_tenant_scoped`.
+    """
+    conn = RecordingConnection()
+
+    cp.read_record_view(conn, org_id=ORG, graph_id=GRAPH)
+
+    scope_at = conn.executed.index((rp.TENANT_GUC_SQL, [ORG]))
+    first_select = next(
+        i for i, (sql, _) in enumerate(conn.executed)
+        if sql.startswith("SELECT * FROM public."))
+    assert scope_at < first_select, (
+        "the reader selected rows before installing the tenant scope")
+    assert conn.executed[scope_at + 1][0] == rp.TENANT_SCOPE_SQL, (
+        "the prologue was not verified (GUC read-back + role posture) before "
+        "the read")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -359,6 +563,50 @@ def test_the_migration_covers_every_record_table() -> None:
         f"the tenancy migration adds no tenant policy for {missing_policies} — "
         "those tables' RLS state is unexplained by the recorded decision"
     )
+
+
+def test_every_identity_sequence_the_record_declares_is_granted() -> None:
+    """#9600 review cycle 2 (P1): a table INSERT does not confer `nextval`.
+
+    `public.relation.id` is `bigint GENERATED ALWAYS AS IDENTITY`, so an
+    app-role INSERT into `relation` needs `USAGE` on `relation_id_seq` in its
+    OWN right — the sequence carries a separate ACL and its owner is the
+    migration applier. Without it every `INSERT INTO public.relation` raises
+    `permission denied for sequence` (42501), and because the raised statement
+    aborts the replay transaction, a capture's CONTAINS edge and every
+    direct-edge record are lost — not just the edge.
+
+    `has_table_privilege(..., 'INSERT')` reads TRUE while the insert still
+    fails, so the migration text is what decides it here, and the posture suite
+    lands a real `relation` row as the positive proof.
+
+    Derived from the CREATE-TABLE migrations, never restated: a future identity
+    column arrives with its own sequence and therefore its own red.
+    """
+    tenancy = _migration_text(TENANCY_MIGRATION.name)
+    declares: list[tuple[str, str]] = []          # (table, sequence)
+    for name in rp.RECORD_MIGRATIONS:
+        text = _migration_text(name)
+        for table, body in re.findall(
+                r"CREATE TABLE IF NOT EXISTS public\.(\w+) \((.*?)\n\);",
+                text, re.DOTALL):
+            if "AS IDENTITY" in body:
+                declares.append((table, f"{table}_id_seq"))
+
+    assert declares, (
+        "no record migration declares an identity column — this pin would be "
+        "vacuous, and the sequence grant has nothing to prove")
+    missing = [
+        f"public.{seq}" for _, seq in declares
+        if not re.search(
+            rf"GRANT\s+USAGE\s+ON\s+SEQUENCE\s+public\.{re.escape(seq)}\s+"
+            rf"TO\s+tortoise_record_app\s*;", tenancy)
+    ]
+    assert not missing, (
+        f"the tenancy migration grants the app role no USAGE on {missing} — a "
+        "table INSERT privilege does not confer nextval, so every insert into "
+        "the identity-bearing record table raises 42501 and the whole replay "
+        "transaction aborts")
 
 
 def test_every_app_policy_binds_reads_and_writes_to_the_same_guc() -> None:

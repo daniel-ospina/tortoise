@@ -1327,6 +1327,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # can drift them. Pinned by
              # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
              "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
+             # #9554 / PR #9600 review cycle 1 (P2): the TENANCY POSTURE migration —
+             # the app role, its grants (including `relation_id_seq`'s USAGE) and
+             # the nine `*_app_tenant` policies. It sorts outside the
+             # `2026101200000` prefix and `supabase/` is a NON_PYTHON_PREFIX, so a
+             # migration-only edit (dropping a `WITH CHECK`, flipping `is_local`,
+             # re-adding `BYPASSRLS`, removing the sequence grant) selected NO
+             # surface: neither the PGlite posture suite nor
+             # `tests/test_record_tenancy_guc.py` ran on the change that DEFINES
+             # the boundary. Pinned by
+             # tests/test_ci_selection.py::test_the_tenancy_migration_selects_the_posture_pins.
+             "supabase/migrations/20261022000001_record_tenancy_role_and_guc.sql",
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to

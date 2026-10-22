@@ -314,6 +314,14 @@ exactly this question and the tree cannot answer it today.
 > [`09-record-tenancy-decision.md`](09-record-tenancy-decision.md). Proven by
 > `supabase/tests/20261022000001_record_tenancy_posture.sql` (PGlite) and
 > `tests/test_record_tenancy_guc.py`.
+> ⛔ **The guarantee is enforced by code on BOTH doors, and verified rather than assumed**
+> (#9600 review cycle 2): `record_projection.scope_connection()` sets the GUC, reads it back, and
+> refuses a connection whose `current_user` is superuser, `BYPASSRLS`, a member of such a role, or
+> the **owner of a record table** — so a DSN naming `postgres` fails closed on the first write or
+> read instead of quietly bypassing every policy. The same scope is installed by the **read** door
+> (`cache_projection.read_record_view`, i.e. `tortoise record-reconcile`), which shares R1's one DSN:
+> before it, a reconciler armed with the app role read zero rows and reported a coherent pair as
+> divergent.
 > ⚠️ **This corrects R1's DSN above**: its `postgres.<ref>` user is the table owner and would
 > bypass RLS. R1 must arm
 > `postgresql://tortoise_record_app.<ref>:…@…pooler.supabase.com:5432/postgres?sslmode=require`

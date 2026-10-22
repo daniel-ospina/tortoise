@@ -633,16 +633,31 @@ def test_an_empty_record_declares_partial_not_complete():
 
 
 class _FakeCursor:
-    def __init__(self, rows_by_table):
+    def __init__(self, rows_by_table, seen: list[str] | None = None):
         self._rows = rows_by_table
         self._current: list[dict] = []
+        self._seen = seen if seen is not None else []
+        self._last = ""
+        self._tenant = None
 
     def execute(self, sql, params=None):
+        self._seen.append(sql)
+        self._last = sql
+        if sql == cp._rp.TENANT_GUC_SQL:
+            self._tenant = params[0] if params else None
         m = re.search(r"FROM public\.(\w+)", sql)
         self._current = self._rows.get(m.group(1), []) if m else []
 
     def fetchall(self):
         return list(self._current)
+
+    def fetchone(self):
+        # R6 (#9600 review cycle 2): the reader installs the tenant scope, whose
+        # single verify statement returns (tenant, bypassing). This fake models
+        # a correctly scoped, NON-bypassing connection.
+        if self._last == cp._rp.TENANT_SCOPE_SQL:
+            return (self._tenant, False)
+        return (self._tenant,)
 
     def __enter__(self):
         return self
@@ -652,11 +667,12 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, rows_by_table):
+    def __init__(self, rows_by_table, seen: list[str] | None = None):
         self._rows = rows_by_table
+        self._seen: list[str] = seen if seen is not None else []
 
     def cursor(self):
-        return _FakeCursor(self._rows)
+        return _FakeCursor(self._rows, self._seen)
 
 
 def test_read_record_view_keys_by_the_contract_key():
@@ -676,7 +692,13 @@ def test_read_record_view_keys_by_the_contract_key():
 
 
 def test_read_record_view_asks_for_the_scope_it_was_given():
-    """A reader that forgot the tenancy predicate would project every tenant."""
+    """A reader that forgot the tenancy predicate would project every tenant.
+
+    #9600 review cycle 2 (P1): the reader also has to install the SCOPE those
+    predicates are evaluated against — under the app-role DSN a missing GUC is
+    zero rows, not an error. So the first two statements are the tenant prologue
+    and its verification, and every DATA statement carries both predicates.
+    """
     seen: list[str] = []
 
     class _Cursor(_FakeCursor):
@@ -690,5 +712,11 @@ def test_read_record_view_asks_for_the_scope_it_was_given():
 
     cp.read_record_view(_Conn(), org_id="o", graph_id="g")
     assert seen, "the reader issued no query at all"
-    for sql in seen:
+    assert seen[0] == cp._rp.TENANT_GUC_SQL, (
+        "the reader selected before scoping the connection — every row it got "
+        "back came from a connection with no tenant GUC")
+    assert seen[1] == cp._rp.TENANT_SCOPE_SQL, (
+        "the reader did not verify the tenant it set (nor the role it set it "
+        "for)")
+    for sql in seen[2:]:
         assert "org_id = %s" in sql and "graph_id = %s" in sql

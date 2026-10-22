@@ -188,6 +188,14 @@ SELECT tests.assert(
   NOT has_table_privilege('tortoise_record_app', 'public.organizations', 'UPDATE'),
   'R6: the app role cannot rewrite the tenant substrate it is keyed on');
 
+-- §3b. The IDENTITY sequence is its own ACL, and `has_table_privilege` above
+-- reads TRUE while the insert still fails: `public.relation.id` is
+-- `GENERATED ALWAYS AS IDENTITY`, whose `nextval` needs USAGE on the sequence
+-- itself (#9600 review cycle 2, P1).
+SELECT tests.assert(
+  has_sequence_privilege('tortoise_record_app', 'public.relation_id_seq', 'USAGE'),
+  'R6: the app role holds USAGE on relation_id_seq — a table INSERT privilege does not confer nextval');
+
 -- ── 4. The control plane is untouched (S8, regression only) ─────────────────
 SELECT tests.assert(
   has_table_privilege('service_role', 'public.organizations', 'SELECT'),
@@ -269,6 +277,43 @@ END $$;
 SELECT tests.assert(
   (SELECT count(*) FROM public.point) = 2,
   'R6: a correctly scoped write through the app role lands (and tenant B is still hidden)');
+
+-- ── 7b. The ONE identity-column table: `public.relation` ────────────────────
+-- `relation.id` is `GENERATED ALWAYS AS IDENTITY`, so an INSERT here needs the
+-- table grant AND `USAGE` on `relation_id_seq`. A missing sequence grant
+-- raises 42501 (the same code a policy refusal uses), so the POSITIVE case is
+-- the decisive one: without the grant this block fails, and without the table
+-- grant or the policy it fails too. `idx = 7` clears `uq_relation_identity`,
+-- so a unique violation cannot masquerade as either outcome.
+DO $$
+BEGIN
+  INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, src_key,
+                               tgt_label, tgt_key, idx, confidence)
+  VALUES ('org_r6_a','g_r6_a','IMPL','Point','p_r6_a','Object','o_r6_a', 7, 0.5);
+EXCEPTION WHEN OTHERS THEN
+  RAISE EXCEPTION 'R6: an app-role INSERT into public.relation failed (%) — the '
+                  'identity sequence needs its own USAGE grant; a table INSERT '
+                  'privilege does not confer nextval', SQLERRM;
+END $$;
+SELECT tests.assert(
+  (SELECT count(*) FROM public.relation WHERE idx = 7) = 1,
+  'R6: the app-role relation row LANDED (the identity sequence is granted)');
+
+-- Its cross-tenant twin, refused by the POLICY. Distinct `idx`, and every
+-- FK target seeded in §0, so nothing but the WITH CHECK can refuse it.
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, src_key,
+                                 tgt_label, tgt_key, idx)
+    VALUES ('org_r6_b','g_r6_b','IMPL','Point','p_r6_b','Object','o_r6_b', 7);
+    RAISE EXCEPTION 'R6: the app role wrote a RELATION row under a tenant it is not scoped to';
+  EXCEPTION WHEN insufficient_privilege THEN NULL;
+  END;
+END $$;
+SELECT tests.assert(
+  (SELECT count(*) FROM public.relation) = 2,
+  'R6: the app role sees only its own relation rows (the seeded one + the one it wrote)');
 ROLLBACK;
 
 -- ── 8. The DOCUMENTED failure signature: a missing GUC reads as zero rows ──

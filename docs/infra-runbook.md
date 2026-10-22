@@ -2599,8 +2599,11 @@ this section is the **operator procedure** that goes with it.
 
 **The split.** Migration `20261022000001_record_tenancy_role_and_guc.sql` creates the role
 (`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it exactly the record tables'
-`SELECT/INSERT/UPDATE/DELETE` plus a `*_app_tenant` policy on each. It ships **no password** — a
-credential in a migration is a secret in git, re-minted on every deploy.
+`SELECT/INSERT/UPDATE/DELETE`, `USAGE` on `public.relation_id_seq` (the IDENTITY sequence — a table
+`INSERT` grant does **not** confer `nextval`, and without it every `relation` insert raises
+`permission denied for sequence relation_id_seq` and aborts the whole replay transaction), plus a
+`*_app_tenant` policy on each. It ships **no password** — a credential in a migration is a secret
+in git, re-minted on every deploy.
 
 **1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
 keeps the plaintext out of the statement and off the logs):
@@ -2613,7 +2616,7 @@ ALTER ROLE tortoise_record_app LOGIN;
 **2. Arm the DSN** (R1) with that role — for the shared pooler this is
 `<role>.<project-ref>` as the user:
 
-```
+```text
 TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
 ```
 
@@ -2638,7 +2641,10 @@ asymmetry is deliberate and pinned in
 `supabase/tests/20261022000001_record_tenancy_posture.sql`. `record_projection.replay()` now also
 **reads the GUC back** immediately after setting it and refuses the replay on a mismatch (#9600
 review cycle 1), so a connection whose transaction-local set did nothing cannot report a successful
-write: without that read-back a patch/delete-only plan would simply affect zero rows.
+write: without that read-back a patch/delete-only plan would simply affect zero rows. The **read
+door** (`cache_projection.read_record_view()`, i.e. `tortoise record-reconcile`) installs the same
+scope before its first `SELECT` (#9600 review cycle 2) — before that it read zero rows under the
+app-role DSN and reported every cache key `missing_in_record`, i.e. `exit 3` on a coherent pair.
 
 **⛔ NEVER GRANT `tortoise_record_app` MEMBERSHIP IN `service_role`, `postgres`, or any role that
 carries a permissive policy.** Policy applicability follows `has_privs_of_role`, so membership makes
@@ -2648,6 +2654,17 @@ app role saw 2 rows across 2 tenants while `rolbypassrls` still read `false`, an
 nothing). The boundary is therefore the grants **and** the absence of membership; a role that was
 flipped or granted membership must be corrected as an operator, and the migration fails closed when
 the applying role cannot re-assert the attributes.
+
+**The code checks all four bypasses on every connection, and refuses.**
+`record_projection.scope_connection()` is what both record doors (the write path and
+`tortoise record-reconcile`) call. On each connection it sets the tenant GUC transaction-locally,
+reads it back, and — on the same statement — refuses the connection when `current_user` is a
+superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table. So a DSN naming
+`postgres` or `service_role` (or `tortoise_record_app` after a mistaken `GRANT`) does not silently
+write and read across tenants with the policies unevaluated: the first write or read raises, names
+this runbook section, and the operator fixes the DSN. The same applies to
+`tortoise record-reconcile`, whose record read would otherwise return zero rows and report a
+coherent pair as **divergent**.
 
 ### Runtime Config (non-secret)
 

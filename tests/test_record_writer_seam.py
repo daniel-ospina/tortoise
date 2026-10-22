@@ -86,15 +86,20 @@ class FakeCursor:
     def __init__(self, conn: FakeConnection) -> None:
         self._conn = conn
 
-    def fetchone(self) -> tuple[Any]:
+    def fetchone(self) -> tuple[Any, ...]:
         # `replay()` reads the tenant GUC back after setting it (#9600 review
-        # cycle 1): this fake is a connection that KEEPS its transaction-local
-        # set, so the read-back mirrors what was set.
+        # cycle 1) AND, on the same statement, the connecting role's posture
+        # (#9600 review cycle 2). This fake is a connection that KEEPS its
+        # transaction-local set and runs as the decision's NON-BYPASS role, so
+        # both answers mirror what the reconnect would really see.
+        if self._conn.last_sql == rp.TENANT_SCOPE_SQL:
+            return (self._conn.guc_set, False)
         return (self._conn.guc_set,)
 
     def execute(self, sql: str, params: Any = None) -> None:
         values = list(params) if params is not None else None
         self._conn.executed.append((sql, values))
+        self._conn.last_sql = sql
         if sql == rp.TENANT_GUC_SQL:
             self._conn.guc_set = params[0] if params else None
         if not sql.startswith(rp._JOURNAL_INSERT_PREFIX):
@@ -122,6 +127,7 @@ class FakeConnection:
     def __init__(self) -> None:
         self.executed: list[tuple[str, list[Any] | None]] = []
         self.guc_set: Any = None
+        self.last_sql: str | None = None
         self.journal_positions: set[tuple[Any, Any, Any]] = set()
         self.absorbed: list[tuple[Any, Any, Any]] = []
         self.commits = 0

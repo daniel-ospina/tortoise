@@ -22,8 +22,9 @@ connect as a role that bypasses it.
 | Question | Answer | Where it is enforced |
 |---|---|---|
 | **Which role does the record connect as?** | `tortoise_record_app` — `NOBYPASSRLS`, `NOSUPERUSER`, not the table owner. Created by migration, granted `SELECT/INSERT/UPDATE/DELETE` on exactly the 9 record tables. **Not** `postgres` (R1's DSN shape today) and **not** `service_role`. | `supabase/migrations/20261022000001_record_tenancy_role_and_guc.sql` §1–3 |
-| **Is RLS the boundary, or defence-in-depth?** | **The boundary**, for every surface the application path touches (write *and* read). | the 9 `*_app_tenant` policies, `USING` **and** `WITH CHECK` |
+| **Is RLS the boundary, or defence-in-depth?** | **The boundary**, for every surface the application path touches (write *and* read). | the 9 `*_app_tenant` policies, `USING` **and** `WITH CHECK`; **and, by code**, `record_projection.scope_connection()` — which refuses a connection whose role can bypass them (superuser, `BYPASSRLS`, membership of either, or owner of a record table) |
 | **What sets the tenant?** | `set_config('app.current_org_id', $1, true)` — **transaction-local**, issued by `record_projection.replay()` as the first statement, from the same `org_id` it projects. | `record_projection.TENANT_GUC_SQL` |
+| **Who sets it on the READ path?** | The SAME helper: `cache_projection.read_record_view()` (the `tortoise record-reconcile` verb) opens its own connection from the same `TORTOISE_RECORD_DSN`, so it installs the same scope before its first `SELECT`. Without it the policies read NULL — zero rows and no error — and a coherent pair is reported divergent (#9600 review cycle 2). | `record_projection.scope_connection()`, called by both doors |
 | **Who may bypass?** | `postgres`/table owner and `service_role`, for three named purposes only: schema, backup/restore (R8/R9), and the org-erasure RPC. They are not the application path. | `purge_org_record` (`20261012000005`) is `SECURITY DEFINER` + `service_role`-only EXECUTE |
 | **Which pooler mode?** | R1's DSN is `:5432` = the shared Supavisor pooler, **session** mode. `:6543` = transaction mode. **The posture does not depend on the answer** — see §3. | `docs/infra-runbook.md` → "The record's connecting role" |
 
@@ -110,6 +111,12 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 
 - 9 record tables, each with `ENABLE ROW LEVEL SECURITY` + a `*_read_org` policy on
   `current_setting('app.current_org_id', true)` + a `service_role` `ALL` policy — unchanged.
+- **The identity sequence has its own ACL.** `public.relation.id` is
+  `bigint GENERATED ALWAYS AS IDENTITY`, so the app role needs `USAGE` on
+  `public.relation_id_seq` in addition to the table `INSERT` grant — a table privilege does not
+  confer `nextval`, and `has_table_privilege(..., 'INSERT')` reads TRUE while the insert fails
+  (#9600 review cycle 2, measured by executing the insert). Granted by the migration; proven by
+  §7b of the posture suite, which lands a real `relation` row through the app role.
 - **No production code set that GUC** before this change (`grep` over `tortoise/`, `apps/`, `tools/`,
   `services/`: zero `current_setting`/`set_config`; the only setters were `supabase/tests/*.sql`).
 - The `authenticated` **read** surface already had a cross-tenant test
@@ -117,17 +124,22 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   missing was the posture the *write path* runs under, which is what this lane added.
 
 **Sources (all read 2026-10-22):**
-`[V-SB, connect]` Connect to your database — https://supabase.com/docs/guides/database/connecting-to-postgres ·
-`[V-SB, roles]` Postgres Roles — https://supabase.com/docs/guides/database/postgres/roles ·
-`[V-SB, server]` Server SDK reference (`withPostgresClient`) — https://supabase.com/docs/reference/server ·
-`[V-PGB]` PgBouncer features — https://www.pgbouncer.org/features.html ·
-`[C-SB]` Custom LOGIN role provisioning (staff-answered) — https://github.com/orgs/supabase/discussions/51499
+
+- `[V-SB, connect]` Connect to your database —
+  <https://supabase.com/docs/guides/database/connecting-to-postgres>
+- `[V-SB, roles]` Postgres Roles —
+  <https://supabase.com/docs/guides/database/postgres/roles>
+- `[V-SB, server]` Server SDK reference (`withPostgresClient`) —
+  <https://supabase.com/docs/reference/server>
+- `[V-PGB]` PgBouncer features — <https://www.pgbouncer.org/features.html>
+- `[C-SB]` Custom LOGIN role provisioning (staff-answered) —
+  <https://github.com/orgs/supabase/discussions/51499>
 
 **Not verified by this lane — stated so it is not read as covered:**
 
 - Whether `postgres` on a hosted Supabase project holds `CREATEROLE` for the `CREATE ROLE` in the
   migration. The vendor documents `create role`/`create role … with login password` as available
-  (https://supabase.com/docs/guides/database/postgres/roles), and the self-hosted and PGlite lanes
+  (<https://supabase.com/docs/guides/database/postgres/roles>), and the self-hosted and PGlite lanes
   both apply the migration clean, but **no hosted apply was executed here**. If R2's apply refuses
   it, the remedy is one statement — create the role first — not a design change.
 - Whether Supavisor resets session state on connection release (the research brief's own open item 1).

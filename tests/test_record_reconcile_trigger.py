@@ -69,6 +69,7 @@ from typing import ClassVar
 import pytest
 
 from tortoise import cache_projection as cp
+from tortoise import record_projection as _rp
 from tortoise import record_reconcile as rr
 from tortoise.projection import DirectCacheWriteRefused
 from tortoise.reconciliation import ReconciliationUnavailable, reconcile_views
@@ -760,6 +761,94 @@ def test_the_cli_verb_reports_clean_only_when_it_compared(
 
     assert rc == rr.EXIT_CLEAN, printed.out + printed.err
     assert "0 divergent of 2 checked" in printed.out, printed.out
+
+
+# ── 6b. the verb's OWN connection carries the tenant scope ────────────────
+#
+# `_drive_the_verb` fakes `read_record_view` because its subject is the
+# COMPOSITION. The drive below leaves the shipped reader in place and fakes only
+# the driver, so the handle the verb opens from `TORTOISE_RECORD_DSN` is what is
+# under test (#9600 review cycle 2, P1):
+#
+#   After R1 arms that DSN with `tortoise_record_app` (the role #9554 makes
+#   mandatory), the policies read `app.current_org_id`. `replay()` set it; this
+#   verb did not — and a missing GUC is ZERO ROWS, never an error. So the
+#   reconciler read an empty record and reported a coherent pair as DIVERGENT
+#   (exit 3), from the one observer §17.2 relies on.
+
+
+class _ScopedCursor:
+    """Records statements and answers the tenant-scope verify statement."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self.description: list = []
+
+    def execute(self, sql, params=None):
+        self._conn.executed.append(sql)
+        self._conn.last = sql
+        if sql == _rp.TENANT_GUC_SQL:
+            self._conn.guc_set = params[0] if params else None
+
+    def fetchone(self):
+        if self._conn.last == _rp.TENANT_SCOPE_SQL:
+            return (self._conn.guc_set, False)
+        return (None,)
+
+    def fetchall(self):
+        return []
+
+
+class _ScopedConn:
+    def __init__(self) -> None:
+        self.executed: list[str] = []
+        self.last: str | None = None
+        self.guc_set = None
+        self.closed = False
+
+    def cursor(self):
+        return _ScopedCursor(self)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_the_verbs_OWN_connection_is_tenant_scoped(monkeypatch, capsys):
+    """The reconciler's read runs under the tenant scope, before any SELECT.
+
+    The cache side is unreachable on purpose (a `from_uri` that raises): the
+    assertion is about the ORDER inside the verb, and the record read happens
+    first. Exit stays 2 (UNKNOWN), which is the correct verdict when one side
+    could not be read — the point is that the record side WAS read, scoped.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.projection import FalkorProjection
+
+    conn = _ScopedConn()
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_psycopg2.connect = lambda dsn, **kw: conn       # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+
+    def _no_cache(*_a, **_kw):
+        raise RuntimeError("this test never reaches the cache side")
+
+    monkeypatch.setattr(FalkorProjection, "from_uri", staticmethod(_no_cache))
+
+    rc = cli.main(["record-reconcile", "--db", "docker://:x@localhost:6379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g", "--cache-graph", "org_o_g"])
+    printed = capsys.readouterr()
+
+    assert conn.executed[0] == _rp.TENANT_GUC_SQL, (
+        "the verb read the record WITHOUT setting app.current_org_id: under the "
+        "app-role DSN every policy returns zero rows and a coherent pair is "
+        "reported divergent\n" + printed.out + printed.err)
+    assert conn.executed[1] == _rp.TENANT_SCOPE_SQL, (
+        "the verb did not verify the scope (GUC read-back + connecting role)")
+    assert conn.guc_set == "o", (
+        "the scope must carry the --org the verb is comparing, not another one")
+    assert conn.closed, "the verb must close the record handle"
+    assert rc == rr.EXIT_UNAVAILABLE, printed.out + printed.err
 
 
 # ── 7. the verb's OPERATOR contract (#9189 review findings) ───────────────

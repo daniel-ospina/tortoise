@@ -147,6 +147,7 @@ __all__ = [
     "RECORD_MUTATIONS",
     "TENANT_GUC",
     "TENANT_GUC_SQL",
+    "TENANT_SCOPE_SQL",
     "THE_RECORD_TABLES",
     "RecordProjectionError",
     "RefusedJournalOperation",
@@ -157,6 +158,7 @@ __all__ = [
     "replay",
     "replay_plan",
     "snake",
+    "scope_connection",
     "table_columns",
     "to_dollar_placeholders",
 ]
@@ -222,6 +224,53 @@ TENANT_GUC = "app.current_org_id"
 #: without a code change. Bound as a parameter: an org id is never interpolated
 #: into SQL.
 TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
+
+#: The OTHER half of the same guarantee, on the same round trip (#9600 review
+#: cycle 2, P2): the GUC read-back says the tenant took effect, and this says the
+#: CONNECTED ROLE cannot bypass the policies that read it. Both are needed for
+#: RLS to be the boundary rather than a decoration, and neither implies the
+#: other — a `postgres`/`service_role` DSN sets the GUC perfectly, reads it back
+#: perfectly, and evaluates no policy at all.
+#:
+#: Four ways to bypass, all measured on the connection itself rather than
+#: inferred from the DSN string:
+#:
+#: 1. `rolsuper` — a superuser bypasses RLS unconditionally;
+#: 2. `rolbypassrls` — `service_role`'s attribute, and the trap the decision
+#:    document names;
+#: 3. MEMBERSHIP in any of the above. Policy applicability follows
+#:    `has_privs_of_role`, so `GRANT service_role TO tortoise_record_app` makes
+#:    `*_service_role_all USING (true)` apply to the app role while
+#:    `rolbypassrls` still reads `false` (measured on `postgres:16.15`; the
+#:    migration header and the posture suite both pin it, `NOINHERIT` does not
+#:    help). Generic over every bypassing role, so no role name has to exist for
+#:    the check to run — `pg_has_role(current_user, 'service_role', 'USAGE')`
+#:    would raise on a plain Postgres that has no such role;
+#: 4. TABLE OWNERSHIP (or membership of the owning role). Owners bypass RLS
+#:    unless `FORCE ROW LEVEL SECURITY` is set, which is exactly why the
+#:    `postgres` DSN in R1's documented pre-change shape was rejected — it is
+#:    the owner of all nine record tables.
+#:
+#: `current_setting(...)` keeps the GUC read-back in the SAME statement, so the
+#: seam still executes exactly one statement outside the plan and a caller that
+#: filters on `current_setting` keeps seeing every non-plan statement. The org
+#: id and the table names travel as bind parameters.
+TENANT_SCOPE_SQL = (
+    f"SELECT current_setting('{TENANT_GUC}', true) AS tenant, "
+    "       r.rolsuper OR r.rolbypassrls "
+    "       OR EXISTS (SELECT 1 FROM pg_roles g "
+    "                   WHERE g.oid <> r.oid "
+    "                     AND (g.rolsuper OR g.rolbypassrls) "
+    "                     AND pg_has_role(r.oid, g.oid, 'USAGE')) "
+    "       OR EXISTS (SELECT 1 FROM pg_class c "
+    "                    JOIN pg_namespace n ON n.oid = c.relnamespace "
+    "                   WHERE n.nspname = 'public' "
+    "                     AND c.relname = ANY(%s) "
+    "                     AND (c.relowner = r.oid "
+    "                          OR pg_has_role(r.oid, c.relowner, 'USAGE'))) "
+    "  FROM pg_roles r "
+    " WHERE r.rolname = current_user"
+)
 
 #: Where the schema lives when this module is INSTALLED rather than checked out.
 #: `supabase/migrations` is mapped into the wheel as the `tortoise.
@@ -1901,6 +1950,84 @@ class ReplayReport:
                 f"record mutations ({len(self.no_effects)} declared no-op)")
 
 
+def _apply_tenant_scope(cursor: Any, org_id: str) -> None:
+    """Set the tenant GUC transaction-locally, then VERIFY the whole scope.
+
+    Two properties, one place, because a caller that had to remember either
+    would eventually remember only one:
+
+    - the connection IS scoped to ``org_id`` — the read-back (#9600 review
+      cycle 1): a ``set_config(..., true)`` on an autocommit connection, a
+      renamed GUC, or a pooler that dropped the context sets nothing, and on an
+      `UPDATE`/`DELETE`-only plan that is a silent zero-row success;
+    - the connection's ROLE cannot bypass the policies that read it (#9600
+      review cycle 2): a bypassing DSN satisfies every other check and
+      evaluated no tenancy predicate at all.
+
+    Raises :class:`RecordProjectionError` on either, BEFORE a single plan
+    statement — or, on the read path, a single row — is touched. A failure here
+    is a misconfiguration to refuse, not a degraded mode to continue in.
+    """
+    cursor.execute(TENANT_GUC_SQL, (org_id,))
+    # One round trip for both halves: the GUC read-back and the role posture.
+    cursor.execute(TENANT_SCOPE_SQL, (list(THE_RECORD_TABLES),))
+    row = cursor.fetchone()
+    if not row:
+        raise RecordProjectionError(
+            "the record's scope could not be verified — the read-back returned "
+            "no row, so neither the tenant GUC nor the connecting role's "
+            "posture could be read. An unverifiable role is not a verified "
+            "one: refusing rather than assuming the connection is "
+            "non-bypassing (RLS is the record's tenancy boundary, R6 / epic "
+            "#7879, and #9600 review cycle 2)")
+    applied, bypassing = row[0], row[1]
+    if str(applied) != str(org_id):
+        raise RecordProjectionError(
+            f"the tenant GUC {TENANT_GUC!r} is {applied!r} after setting it to "
+            f"{org_id!r} — refusing to apply the plan unscoped. A "
+            "transaction-local set does nothing on a connection in autocommit "
+            "mode, and an UPDATE/DELETE gated only by RLS USING would then "
+            "affect ZERO rows without raising (#9600 review cycle 1)")
+    if bypassing is None:
+        raise RecordProjectionError(
+            "the connecting role's posture could not be read (no pg_roles row "
+            "for current_user) — refusing rather than assuming it is "
+            "non-bypassing. RLS is the record's tenancy boundary (R6, epic "
+            "#7879), and an unverifiable role is not a verified one (#9600 "
+            "review cycle 2)")
+    if bypassing is not False:
+        raise RecordProjectionError(
+            "the record's connection runs as a role that BYPASSES RLS — "
+            "superuser, BYPASSRLS, a member of such a role, or the owner of a "
+            "record table. RLS is this record's tenancy boundary (R6, epic "
+            "#7879), so every read and write on that connection would cross "
+            "tenants with the policies never evaluated. Arm "
+            "TORTOISE_RECORD_DSN with tortoise_record_app "
+            '(docs/infra-runbook.md -> "The record\'s connecting role"); '
+            "refusing rather than applying a replay that cannot be scoped "
+            "(#9600 review cycle 2)")
+
+
+def scope_connection(conn: Any, org_id: str) -> Any:
+    """The R6 tenant scope on ``conn`` — for the WRITE door and the READ door.
+
+    ``replay()`` and ``cache_projection.read_record_view()`` are the record's two
+    doors and they share ONE DSN (``TORTOISE_RECORD_DSN``). The prologue lived
+    only on the write door, so the moment R1 arms that DSN with the app role the
+    reconciler read ZERO rows from every record table — the policies treat a
+    missing GUC as "no rows", never as an error — reported every cache key
+    ``missing_in_record``, and exited ``3`` ("divergence OBSERVED") on a
+    coherent pair. A wrong verdict from the one observer §17.2 relies on is
+    worse than no verdict, so BOTH doors install the scope through this ONE
+    function (#9600 review cycle 2, P1).
+
+    Returns the cursor it used, so a caller continues on the same handle.
+    """
+    cursor = conn.cursor()
+    _apply_tenant_scope(cursor, org_id)
+    return cursor
+
+
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
            graph_id: str, start_seq: int = 1,
            position: bool = True) -> ReplayReport:
@@ -1983,29 +2110,25 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     (``current_setting(..., true)``) and a mismatch RAISES: an autocommit
     connection, a renamed GUC, or a pooler that dropped the transaction-local
     set can never be mistaken for a successful replay.
+
+    ⛔ AND THE ROLE IS VERIFIED, NOT ASSUMED (#9600 review cycle 2, P2). A
+    correct GUC on a connection that BYPASSES the policies is the one shape in
+    which every check passes and the boundary is not there: `postgres` (the
+    table owner, and R1's documented pre-change DSN shape) or `service_role`
+    reads and writes every tenant's rows while the report says APPLIED. The
+    scope (:func:`scope_connection`) therefore refuses a connection whose
+    ``current_user`` is superuser, ``BYPASSRLS``, a member of either, or the
+    owner of a record table — see :data:`TENANT_SCOPE_SQL`. Arming the record
+    with the wrong DSN now fails closed on the first write instead of silently
+    turning RLS off.
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position)
-    cursor = conn.cursor()
     # The tenant, before anything it scopes. NOT part of `plan`: the plan stays
     # the pure journal→record declaration, and this statement is the session
-    # context the plan is applied in.
-    cursor.execute(TENANT_GUC_SQL, (org_id,))
-    # #9600 review cycle 1 (P2): read it BACK. A `set_config(..., true)` that
-    # set nothing (autocommit, a renamed GUC, a pooler that dropped the
-    # transaction-local context) leaves an affected-row count of 0 on an
-    # UPDATE/DELETE and raises nothing, so the replay would report APPLIED over
-    # a record nothing wrote.
-    cursor.execute("SELECT current_setting(%s, true)", (TENANT_GUC,))
-    _applied = cursor.fetchone()
-    _applied = _applied[0] if _applied else None
-    if str(_applied) != str(org_id):
-        raise RecordProjectionError(
-            f"the tenant GUC {TENANT_GUC!r} is {_applied!r} after setting it to "
-            f"{org_id!r} — refusing to apply the plan unscoped. A "
-            "transaction-local set does nothing on a connection in autocommit "
-            "mode, and an UPDATE/DELETE gated only by RLS USING would then "
-            "affect ZERO rows without raising (#9600 review cycle 1)")
+    # context the plan is applied in — plus the role gate that decides whether
+    # the context can mean anything at all.
+    cursor = scope_connection(conn, org_id)
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
     report = ReplayReport(events=len(records), statements=0)

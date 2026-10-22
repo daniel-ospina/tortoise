@@ -612,10 +612,22 @@ def read_record_view(conn: Any, *, org_id: str, graph_id: str,
     The scope predicate is not optional: a reader that forgot it would project
     every tenant into this graph. Rows come back `dict`-shaped (a `RealDict`
     cursor, or a plain cursor's `description`).
+
+    THE TENANT SCOPE (R6) IS INSTALLED HERE, not left to the caller (#9600
+    review cycle 2, P1). `replay()` and this function share ONE DSN
+    (``TORTOISE_RECORD_DSN``), and the tenancy policies read a GUC only
+    `replay()` used to set — so under the app-role DSN this PR mandates, the
+    production reconciler read ZERO rows from every record table (a missing GUC
+    is "no rows", never an error), reported every cache key
+    ``missing_in_record``, and exited ``3`` on a coherent pair. The same
+    ``scope_connection`` the write door uses sets the GUC from the very
+    ``org_id`` this reader is about to filter on — one value, so the predicate
+    and the policies cannot disagree — and refuses a connection whose role
+    bypasses RLS, which a read-only door needs at least as much as a writer.
     """
     nodes: list[RecordNode] = []
     relations: list[RecordRelation] = []
-    cur = conn.cursor()
+    cur = _rp.scope_connection(conn, org_id)
     for label in labels:
         table = NODE_TABLES[label]
         for row in _rows(cur, f"SELECT * FROM public.{table} "
