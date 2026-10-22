@@ -299,10 +299,11 @@ class Dreamer:
                     stamped = self._trivial_stamp(proj, anchors)
                     # #9275: `key=str` — `_trivial_stamp` returns `n.id` from the
                     # engine, and a hand-written numeric id is orderable only
-                    # against its own type. (An id-LESS node never reaches here:
-                    # `_affected_claims` refuses it before any EP work, and the
-                    # trivial-stamp scan cannot admit a node that carries an
-                    # IMPL|NAND edge.)
+                    # against its own type. This early return precedes
+                    # `ep.run()` entirely, so no claim has been admitted by EP
+                    # here; what keeps `None` out of this set is the stamp's OWN
+                    # predicate (`WHERE n.id IN $ids` / `NOT n-[:IMPL|NAND]-()`
+                    # cannot match a never-named id).
                     return {"iterations": 0, "converged": True,
                             "affected_claims": sorted(stamped, key=str)}
                 return {"iterations": 0, "converged": True, "affected_claims": []}
@@ -533,8 +534,17 @@ class Dreamer:
             # chunking (BFS collection is order-independent — sets — but the
             # window slice is not).
             ranked_set = set(ranked)
+            # #9275: `key=str` — `_dirty_roots` is a set of ids the engine or
+            # the caller's graph handed us, and `_mark_dirty` mirrors whatever
+            # id the write path was given (`set_point_baseline(42, …)` is a
+            # supported, measured shape), so the set can hold more than one id
+            # TYPE. A bare `sorted()` over it is exactly the ordering crash
+            # #9275 removed from the affected-claim path — `TypeError: '<' not
+            # supported between instances of 'int' and 'str'` — and it fires
+            # HERE, on the stale-first path, before any EP work. Ordering is
+            # only for deterministic chunking; the ids' own order is irrelevant.
             window = list(ranked) + [
-                d for d in sorted(self._sdk._dirty_roots)
+                d for d in sorted(self._sdk._dirty_roots, key=str)
                 if d not in ranked_set
             ]
             # Epic 903-C6 (#1244): record the pre-pass window for the SDK
@@ -581,7 +591,10 @@ class Dreamer:
                     # the next pass (claims stay stale, re-enter ranking).
                     break
                 if len(new_ops) > remaining:
-                    new_ops = set(sorted(new_ops)[:remaining])
+                    # #9275: `key=str` — operator ids come from the engine too,
+                    # so a hand-written numeric id makes the truncation order
+                    # (nothing more) undefined under a bare sort.
+                    new_ops = set(sorted(new_ops, key=str)[:remaining])
                 seed_ids = list(new_ops)
                 for (src, tgt, _t) in factor_anchors:
                     seed_ids.append(src)

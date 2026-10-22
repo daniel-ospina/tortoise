@@ -1460,13 +1460,26 @@ class TortoiseEP:
                 if not frontier:
                     break
         # #9275: an id-less claim is UNNAMEABLE, so it is not a claim this run
-        # can compute. The operator-seeded admission above returns `DISTINCT
-        # c.id` verbatim from the engine, so a `:Point` written outside the SDK
-        # (no writer mints one — every id-binding write path refuses a missing id
-        # on its own post-write check) can put a NULL into this set. (The hop
-        # admissions do NOT: their `m.id <> n.id` / `b.id <> a.id` comparisons are
-        # NULL — row dropped — for an id-less neighbour. That asymmetry is why
-        # the same node must ALSO be refused at factor assembly, below.)
+        # can compute. The admission points above collect `c.id`/`b.id`/`m.id`
+        # verbatim from the engine, and a `:Point` written outside the SDK (no
+        # writer mints one — every id-binding write path refuses a missing id on
+        # its own post-write check) can carry none, so the engine returns a row
+        # whose id is NULL and `None` lands in this set. The reachable shape is
+        # an OPERATOR-SEEDED claim and the operator-bridge hop (`RETURN DISTINCT
+        # c.id` / `m.id`); a direct-edge endpoint cannot be it, because every
+        # direct-edge leg is narrowed by `b.id <> a.id` (and `_live_neighbors_many`
+        # by `m.id <> n.id`) — in Cypher those predicates are NULL, not TRUE, for
+        # an id-less endpoint, so such a row never arrives. Pinned by
+        # `tests/test_6211_ep_anchor.py`, whose fixture keeps an id-less
+        # direct-edge endpoint alive in `_affected_factors`.
+        #
+        # THAT SAME ASYMMETRY is why the node must ALSO be refused at factor
+        # assembly (`run()`, below): the hops NULL-drop it, so an operator the
+        # selector does NOT seed — a legacy `op_type`-only operator (the selector
+        # matches `is_operator = true` only), or one outside the selector's hops —
+        # never puts the node in `affected`, yet `_affected_factors` Batch 2
+        # collects that operator's inputs verbatim and `_update_factor` then
+        # computes a NAMED claim against a phantom `Beta(1, 1)` input.
         #
         # WHY REFUSE HERE rather than order around it. `affected` is not a
         # report: every member is loaded into the node cache, run through its
@@ -1483,12 +1496,12 @@ class TortoiseEP:
         # already written half a pass is not fail-closed, and the caller could
         # not diagnose it — the traceback names a sort, not the graph. So the one
         # place every affected claim is collected refuses, before `_load_cache`
-        # and before any posterior is computed, and names the repair.
-        # (NOT claim-write-free on every path: the #2884 evidence pre-write at
-        # the top of `run()` has already persisted a caller-supplied prior and
-        # cleared the stale posterior of a non-baseline evidence claim. The
-        # message says "no posterior is computed or stamped", which is what this
-        # guard actually buys.)
+        # and before the run's FIRST write: its caller in `run()` collects this
+        # set ahead of the #2884 evidence pre-write — which persists a
+        # caller-supplied prior and clears a non-baseline claim's posterior — so
+        # that pre-write cannot commit ahead of the refusal (measured before
+        # that ordering: a baseline-free claim went `[None, None, None, None]`
+        # → `[7.0, 2.0, None, None]` across the raise).
         if None in affected:
             raise self._unaddressable_claim_error("its affected set")
         # Final strip: FAIL-SAFE only — every admission point into `affected`
@@ -2343,6 +2356,20 @@ class TortoiseEP:
             if hasattr(self, _attr):
                 delattr(self, _attr)
 
+        # #9275: COLLECT THE AFFECTED SET BEFORE ANY WRITE. This call can refuse
+        # the run (`UnaddressableClaimError` — an affected node with no `id`),
+        # and a refusal must not leave the evidence pre-write below committed:
+        # the pre-write SETs `ep_alpha`/`ep_beta` and (for a non-baseline claim)
+        # NULLs `posterior_alpha`/`posterior_beta`, plus their journal records —
+        # so with the collection AFTER it, `evidence=` (a public parameter of
+        # `run` and of `compute_confidence`) turned "refused, nothing written"
+        # into a committed half-write. Nothing in the collection depends on the
+        # pre-write (the BFS reads edges, labels and status; the priors are not
+        # an input to it), and evidence still applies when there is no affected
+        # claim — the pre-write stays ahead of every early return below.
+        affected = self._affected_claims(operator_ids, max_hops,
+                                         include_draft=include_draft)
+
         # Apply evidence priors to graph before EP iterations.
         # ponytail: direct graph write so evidence is visible even
         # when there are no operators / affected claims.
@@ -2441,8 +2468,6 @@ class TortoiseEP:
                     self._emit("ConfidenceChanged", id=_cid,
                                posterior_alpha=None, posterior_beta=None)
 
-        affected = self._affected_claims(operator_ids, max_hops,
-                                         include_draft=include_draft)
         # #395 (delta C): stash the run set BEFORE the early returns — the
         # write-back callers (sdk.compute_confidence, dream.py) consume
         # _last_affected so the write-back set == the run set by construction,

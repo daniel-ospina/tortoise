@@ -93,29 +93,55 @@ NON_SDK_READ_BINDINGS: dict[str, str] = {
     "get_tenant_packs": "tortoise_packs_list",
 }
 
-# Tools that are `read` yet perform SYSTEM-owned RETENTION housekeeping through a
-# helper OUTSIDE the `sdk.py` derivation boundary — so `sdk_graph_mutators()` cannot
-# see the mutation and no structural guard can decide it. Declared here so the
-# decision is visible and re-decided rather than inherited by a future read-tier
-# tool that purges through another module (#4122 review). The tier stays `read`
-# because the alternatives are worse: `writes=True` would take a polling read away
-# from read keys, and `maintenance` would drop the read hint on a tool agents poll
-# in a loop (a confirmation prompt per poll).
+# ── #9576: read-classified RETENTION housekeeping through another module ─────
+#
+# `tortoise_events_poll` declares `readOnlyHint: true` and needs only
+# `graphs:read`, yet its handler path (`poll_events` -> `_maybe_purge_events`)
+# runs an interval-gated `DETACH DELETE` of expired-or-over-cap `:GraphEvent` rows
+# through
+# `event_store.purge_expired` / `purge_overflow`. That mutation lives OUTSIDE the
+# `sdk.py` derivation boundary, so `sdk_graph_mutators()` cannot see it: the
+# derivative sets are silent, `reached_writes` is EMPTY, and every arm below
+# would report a clean surface while a read-key call deletes rows (#9576).
+#
+# THE RECORDED DECISION (owner-facing answer to #9576) is that this stays `read`,
+# and it is a deliberate departure from "a read hint means nothing is deleted":
+#
+#   OVERRIDES: `readOnlyHint: true` ⇒ the call deletes nothing at all — the poll
+#   runs retention housekeeping on SYSTEM-owned `:GraphEvent` rows it owns on a
+#   timer. Both alternatives are worse for the caller: `writes=True` would take a
+#   poll away from read-only keys entirely (a subscription feed that now needs
+#   `graphs:write`), and a non-read tier would drop the hint on a tool agents poll
+#   in a loop, i.e. a confirmation prompt per poll. The rows are the store's own
+#   bookkeeping, deleted by policy and never replayed by a rebuild
+#   (`docs/retention-and-deletion.md`), and the delete is confined, timer-driven
+#   and idempotent.
+#
+# Two declarations make that decision checkable instead of a comment: the
+# CARVE-OUT (which tool, and why) and the OUT-OF-BOUNDARY MUTATOR (which
+# operation, and where the DELETE lives). The guard arms below are what make them
+# load-bearing — an UNDECLARED read tool that reaches one of these operations
+# fails, so "tidy it silently" is not available to the next lane, and neither is
+# adding a second one.
 RETENTION_CARVEOUTS: dict[str, str] = {
     "tortoise_events_poll":
-        "poll_events -> event_store.purge_expired/purge_overflow: DETACH DELETE of "
-        "expired :GraphEvent rows (interval-gated, system-owned) — #4122",
+        "poll_events -> event_store.purge_expired/purge_overflow: DETACH DELETE "
+        "of expired-or-over-cap :GraphEvent rows, then `_refresh_first_seq` SETs the "
+        "(:GraphEventMeta).first_seq watermark — both system-owned, "
+        "interval-gated — #9576/#4122",
 }
 
 # SDK operations that MUTATE storage from a module OUTSIDE the `sdk.py` derivation
 # boundary, so `sdk_graph_mutators()` cannot see them and `reached_writes` is empty
-# for any tool that reaches them. Listed so a `read`/`maintenance` entry touching
-# one must be declared in RETENTION_CARVEOUTS — without this arm the carve-out
-# ledger was liveness-checked only, and a NEW read-tier tool that purged through
-# another module would be caught by nothing (#4122 review).
+# for any tool that reaches one. Declared so a read-classified entry touching one
+# must be named in `RETENTION_CARVEOUTS` — without this arm the carve-out ledger
+# was a comment and a NEW read tool that purged through another module would be
+# caught by nothing (#9576).
 OUT_OF_BOUNDARY_MUTATORS: dict[str, str] = {
-    "poll_events": "event_store.purge_expired/purge_overflow (DETACH DELETE of expired "
-                   ":GraphEvent rows) — invisible to sdk_graph_mutators()",
+    "poll_events": "event_store.purge_expired/purge_overflow (DETACH DELETE of "
+                   "expired-or-over-cap :GraphEvent rows + the `_refresh_first_seq` "
+                   "(:GraphEventMeta).first_seq SET) — invisible to "
+                   "sdk_graph_mutators()",
 }
 
 # Registry `sdk_method` labels that do not resolve to a TortoiseSDK attribute.
@@ -963,20 +989,36 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
                 f"{e.name}: risk={e.risk!r} but its handler reaches "
                 f"write(s) {sorted(reached_writes)} (#4122: only `maintenance` may "
                 f"refresh, and only the operations READ_THROUGH_WRITE_METHODS names)")
-        # 2a-double-prime: a mutation that lives OUTSIDE the sdk.py boundary is
-        # invisible to `sdk_graph_mutators()`, so a `read`/`maintenance` entry that
-        # reaches one must be DECLARED. Without this arm RETENTION_CARVEOUTS was
-        # liveness-checked only, and a new read-tier tool purging through another
-        # module would have been caught by nothing (#4122 review).
+        # 2a-double-prime (#9576): a mutation that lives OUTSIDE the sdk.py boundary
+        # is invisible to `sdk_graph_mutators()`, so `reached_writes` above is empty
+        # and NOTHING else in this function can see the tool deleting rows — the
+        # surface reports clean (#9576's measurement). An entry on the READING side
+        # that reaches one of those operations must therefore be DECLARED, with its
+        # reason, in `RETENTION_CARVEOUTS`. Without this arm the ledger was a
+        # comment: a new read-classified tool purging through another module was
+        # caught by nothing.
+        #
+        # The predicate is the RISK TIER, not the hint (#4122 + #9576 review round
+        # 3), and it is deliberately the SAME WIDTH as the sibling arm above. Both
+        # reading tiers must be covered, and a hint-keyed predicate misses one of
+        # them: `maintenance` derives `readOnlyHint: false` (it refreshes stored
+        # state on purpose) while remaining callable by a `graphs:read` key, so
+        # `readOnlyHint is True` would let a maintenance-tier purger through
+        # silently — and `readOnlyHint is not False` would then also catch every
+        # writer, which is the other arm's job. `read | maintenance` is exactly the
+        # set of tiers a read-only key can reach (`writes` is derived only for
+        # `WRITE_RISK_TIERS`).
         out_of_boundary = (
-            handler_operations(e.name, mcp_src).operations & set(OUT_OF_BOUNDARY_MUTATORS)
+            handler_operations(e.name, mcp_src).operations
+            & set(OUT_OF_BOUNDARY_MUTATORS)
         )
-        if out_of_boundary and e.risk in ("read", MAINTENANCE_TIER) \
-                and e.name not in RETENTION_CARVEOUTS:
+        reading_tier = e.risk in ("read", MAINTENANCE_TIER)
+        if out_of_boundary and reading_tier and e.name not in RETENTION_CARVEOUTS:
             out.append(
-                f"{e.name}: risk={e.risk!r} but reaches out-of-boundary mutation "
-                f"{sorted(out_of_boundary)} — declare it in RETENTION_CARVEOUTS "
-                f"or move it off the reading tiers (#4122)")
+                f"{e.name}: risk={e.risk!r} but its handler reaches "
+                f"out-of-boundary mutation(s) {sorted(out_of_boundary)} — declare it "
+                f"in RETENTION_CARVEOUTS with the reason, or take it off the reading "
+                f"tiers (#9576)")
         if reached_writes:
             if e.http_policy:
                 if e.annotations is None or e.annotations.readOnlyHint is not False:
@@ -1233,20 +1275,72 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
-    # RETENTION_CARVEOUTS is live AND exact: a carved-out tool that no longer
-    # exists, or that has moved off the `read` tier, means the carve-out is stale
-    # and must be deleted deliberately (#4122).
-    for name in sorted(RETENTION_CARVEOUTS):
+    # RETENTION_CARVEOUTS and OUT_OF_BOUNDARY_MUTATORS are LIVE (#9576): a carved-out
+    # tool that no longer exists, has moved to a WRITING tier, or no longer reaches
+    # the operation it was carved out for is a record that stopped describing the
+    # code, and it must be deleted deliberately rather than left to read as a
+    # standing decision. (⚠️ NOT "no longer claims the read hint": a `maintenance`
+    # move drops the hint and KEEPS the carve-out — see the arm below.)
+    #
+    # ⚠️ SUBSET SEMANTICS: `entries` may be a synthetic subset (`without_dream` and
+    # `without` in `tests/test_tool_registry.py` pass "served set minus one tool"),
+    # so an absent tool proves NOTHING on its own — the file's own
+    # `NON_SDK_WRITER_BINDINGS` idiom is to skip a missing tool rather than report
+    # it. Reporting on absence would make a future probe aimed at
+    # `tortoise_events_poll` emit `delete the carve-out (#9576)` — i.e. delete the
+    # decision record — which is the opposite of this ledger's purpose. Liveness is therefore decided against
+    # the SERVED set, not against whatever subset the caller handed in: an entry that
+    # is missing here but present there is a filtered call, not a dead declaration.
+    served_names = {e.name for e in served_registry()}
+    for op in sorted(OUT_OF_BOUNDARY_MUTATORS):
+        if op not in methods:
+            out.append(
+                f"OUT_OF_BOUNDARY_MUTATORS entry {op!r} does not resolve to an SDK "
+                f"method — delete the declaration (#9576)")
+    for name, reason in sorted(RETENTION_CARVEOUTS.items()):
+        if not reason.strip():
+            out.append(
+                f"{name}: RETENTION_CARVEOUTS entry carries no reason — the recorded "
+                f"decision is the point (#9576)")
         e = by_name.get(name)
         if e is None:
+            if name in served_names:
+                continue  # synthetic subset — not a liveness signal (see above)
             out.append(
                 f"RETENTION_CARVEOUTS entry {name!r} names no served tool — "
-                f"delete the carve-out")
-        elif e.risk != "read":
+                f"delete the carve-out (#9576)")
+            continue
+        # ⚠️ The carve-out is invalidated by a WRITING tier, NOT by any non-`read`
+        # tier (review round 7): this arm and the retention arm must be satisfiable
+        # together. The retention arm demands a declaration for every READING tier
+        # (`read | maintenance`) that reaches the purge, so refusing a declaration on
+        # a `maintenance` entry made that the one state with no green — the
+        # prescribed "delete the carve-out" immediately tripped "declare it". A
+        # re-tier off `read` is NOT silently allowed by this: the ruling is pinned by
+        # `test_the_read_classification_this_issue_asked_about`, which reds on any
+        # re-tier and names #9576/#4122. The ledger's own job is only to stop a
+        # WRITER inheriting a reading-tier deletion record.
+        if bool(getattr(e, "writes", False)):
             out.append(
-                f"{name}: RETENTION_CARVEOUTS records a `read` carve-out for "
-                f"retention housekeeping, but its tier is {e.risk!r} — delete the "
-                f"carve-out entry (#4122)")
+                f"{name}: RETENTION_CARVEOUTS records a reading-tier carve-out for "
+                f"retention housekeeping, but the entry is now a WRITING tier "
+                f"risk={getattr(e, 'risk', None)!r} — delete the carve-out entry "
+                f"(#9576)")
+        # ⚠️ RECORDED BOUND (review P3, deliberate): the carve-out is keyed on the
+        # TOOL, not the `(tool, mutation)` pair, and this arm asks only for a
+        # NON-EMPTY reach — so if the poll ever reached a SECOND declared
+        # out-of-boundary mutation it would stay green and the reason's named pair
+        # would drift out of date. That is inside the disclosed scope (the arm
+        # enforces the DECLARATION, not the discovery, `docs/retention-and-deletion.md`)
+        # — re-read the reason when the reach widens, and prefer a `(tool, op)` key
+        # here if a second reach ever appears.
+        reached = (handler_operations(name).operations
+                   & set(OUT_OF_BOUNDARY_MUTATORS))
+        if not reached:
+            out.append(
+                f"{name}: RETENTION_CARVEOUTS entry no longer reaches "
+                f"{sorted(OUT_OF_BOUNDARY_MUTATORS)} — the carve-out is stale, delete "
+                f"it (#9576)")
     # DECLARED_BINDING_DIVERGENCES liveness (#4337).  The divergence arm iterates
     # the ENTRIES, so a ledger key whose registry entry was removed or renamed is
     # never visited and would persist unexamined.  This function is the home for

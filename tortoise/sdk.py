@@ -21808,6 +21808,16 @@ class TortoiseSDK:
         try:
             rows = self._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.ep_dirty = true "
+                # #9275: an id-LESS dirty :Point is excluded at the source —
+                # `_dirty_roots` is a set of ids the rest of the lifecycle
+                # MATCHes on, so a NULL id would hydrate as `None` and rejoin
+                # every downstream ordering (`dream_window`'s dirty-root sort,
+                # `_unsweepable_dirty_roots`) as a second id TYPE. It is also
+                # unreachable by construction: no pass can affect it (it can
+                # identify no factor participant) and no sweep can clear its
+                # flag, so mirroring it would only pin the mirror. Same
+                # posture as `analyze.py`'s keyless-legacy-node handling.
+                "AND n.id IS NOT NULL "
                 "AND NOT coalesce(n.status, 'live') IN $terminal "
                 "AND coalesce(n.outdated, false) = false "
                 "RETURN n.id",
@@ -21992,7 +22002,12 @@ class TortoiseSDK:
         if not candidates:
             return set()
         proj = self._get_proj()
-        ids = sorted(candidates)
+        # #9275: `key=str` — these are ids the engine returned and the caller's
+        # graph may carry a non-string one (`set_point_baseline(42, …)` is a
+        # supported, measured shape), so a bare `sorted()` is the same
+        # mixed-type ordering crash the affected-claim path no longer has. The
+        # order is only for a deterministic `$ids` batch.
+        ids = sorted(candidates, key=str)
         # The classification is :Point-only, exactly like the rest of the dirty
         # lifecycle (`_mark_dirty`'s persist, `_hydrate_dirty_roots`,
         # `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`).

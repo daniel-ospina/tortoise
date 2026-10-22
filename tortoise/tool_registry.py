@@ -748,14 +748,44 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "PointRevised reaches the store, and the response adds `changes` "
                     "(per-claim before→after deltas), only while TORTOISE_CHANGE_FEED "
                     "is enabled.",
-        # `read` WITH A RECORDED CARVE-OUT (#4122 review): the handler also runs
-        # interval-gated retention housekeeping on SYSTEM-owned rows
-        # (`purge_expired`/`purge_overflow` -> `DETACH DELETE` of expired
-        # :GraphEvent rows). It stays `read` because `writes=True` would take a
-        # poll away from read keys and `maintenance` would drop the read hint on a
-        # tool agents poll in a loop (a confirmation prompt per poll). See the
-        # `read` row of the tier axis above; reopen #4122 rather than re-tiering
-        # it silently.
+        # ⚠️ `read` IS DELIBERATE, AND IT IS A RECORDED CARVE-OUT (#9576, the
+        # #4122 defect class). The handler path also runs interval-gated retention
+        # housekeeping on SYSTEM-owned rows (`poll_events` -> `_maybe_purge_events`
+        # -> `event_store.purge_expired`/`purge_overflow`, a `DETACH DELETE` of
+        # expired-or-over-cap `:GraphEvent` rows, then `_refresh_first_seq` SETs the
+        # `(:GraphEventMeta).first_seq` watermark), so a read-only key CAN cause a
+        # DELETE and a watermark write. It stays `risk="read"` because both
+        # alternatives are worse for the caller: `risk="write"` would take a poll
+        # away from `graphs:read` keys entirely, and any non-read tier
+        # (`maintenance` included) derives `readOnlyHint: false`, i.e. a
+        # confirmation prompt in front of a tool agents poll in a loop. The rows are
+        # the store's own bookkeeping, deleted by policy and never replayed by a
+        # rebuild —
+        # `docs/retention-and-deletion.md` records the window as an OPERATIONAL
+        # property, not user content.
+        #
+        #   OVERRIDES: `risk="read"` ⇒ `readOnlyHint: true` ⇒ the call changes
+        #   nothing the caller owns — this poll purges `:GraphEvent` rows the store
+        #   owns, on a timer, idempotently. (#4122's tier axis was written for a
+        #   DERIVED-value write; this is system-owned RETENTION, and #9576 is the
+        #   ruling that it stays `read` rather than `maintenance`.)
+        #
+        # The decision is checkable, not just written down: the carve-out is
+        # declared in `tests/tool_surface_capabilities.py` -> RETENTION_CARVEOUTS
+        # (with the out-of-boundary mutation it covers), and a guard fails if this
+        # entry moves to a WRITING tier (the carve-out then no longer covers a read),
+        # if it stops reaching the purge, or if ANY other reading-tier
+        # (`read | maintenance`) tool reaches one of those DECLARED mutations
+        # without a carve-out. A new cross-module mutation is not auto-detectable
+        # (that is the #9576 gap), so it must be added to `OUT_OF_BOUNDARY_MUTATORS`
+        # alongside the code that introduces it.
+        # Re-tier it deliberately or not at all: a move to a WRITING tier must
+        # delete the carve-out with it, while a move to `maintenance` KEEPS it
+        # (that tier must still declare the deletion, and the ledger has a green
+        # state for both reading tiers). Either re-tier reds the ruling pin,
+        # `test_the_read_classification_this_issue_asked_about`, which names
+        # #9576/#4122 — see the `TestReadTierCannotHideAnOutOfBoundaryWrite`
+        # family in `tests/test_tool_registry.py`.
         risk="read",
         http_policy=True,
         sdk_method="poll_events",
