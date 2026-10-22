@@ -3884,7 +3884,7 @@ def _board_can_answer(state: dict) -> str:
         return (
             "the board's lane registry could not be read "
             f"({rec.get('registry_error') or 'cause not recorded'}) — the lane "
-            "roster is UNKNOWN, not empty. "
+            "roster is UNKNOWN, not empty — "
             f"{fleet_state.registry_remedy(str(rec.get('registry_error') or ''))}"
         )
     if rec.get("github_measured") is not True:
