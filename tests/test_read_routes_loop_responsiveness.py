@@ -92,8 +92,20 @@ the construction residual is declared in
 (``sdk_built_on_loop``) lives in the dataplane file, because that probe is
 window-scoped and so can see the construction a sync wrapper hides from any
 source scan — and, since #3718's construction burn-down, in THIS file too
-(``test_read_route_construction_is_offloaded``), so the six converted read
-bodies are pinned behaviourally as well as structurally.
+(``test_read_route_construction_is_offloaded``), so every read body converted
+**in this #3718 construction burn-down** is pinned behaviourally as well as
+structurally (``len(_CONSTRUCTION_OFFLOADED_READS)`` — the count is derived,
+not restated here). This is NOT every off-loaded read construction in the
+module: ``events_poll`` and the two context-subscription reads also submit
+their construction to the ``graph`` pool and sit in none of this file's
+declared sets. ``events_poll`` HAS a behavioural pin — construction thread
+affinity — in
+``tests/test_graph_write_loop_responsiveness.py::test_write_preamble_graph_helpers_run_off_the_loop``
+(its ``events`` endpoint). The two context-subscription reads lack a
+BEHAVIOURAL (thread-affinity) pin; their construction is still covered
+STRUCTURALLY — both are absent from every declared residual set, so
+``test_graph_io_is_offloaded`` reds if either goes back inline. See the
+`_graph_unavailable` docstring in ``tortoise/hosted_api.py``.
 
 FLAKE NOTE — the embedded-redislite fixture is not hermetic under this harness
 (#3653/#3685, the same note the write-responsiveness file carries): a
@@ -226,6 +238,19 @@ _READ_CASES = [
     ("invite-info", "invite_info",
      lambda: {"method": "GET",
               "url": f"/v1/invites/info?token={_SEEDED_INVITE_TOKEN}"}),
+    # #3718 (construction burn-down, second batch): four more DATA-plane read
+    # routes that opened their SDK on the loop. `search` and `topic_summary`
+    # already off-loaded their ROUND TRIP, so only the construction moved;
+    # `session_context` and `issue_insight` called the SDK INLINE, so those two
+    # move the round trip as well.
+    ("search", "search",
+     lambda: {"method": "GET", "url": "/v1/search?q=seed"}),
+    ("topic-summary", "topic_summary",
+     lambda: {"method": "GET", "url": "/v1/topics/release/summary"}),
+    ("session-context", "session_context",
+     lambda: {"method": "GET", "url": "/v1/context"}),
+    ("issue-insight", "issue_insight",
+     lambda: {"method": "GET", "url": "/v1/issue-insight?title=seed"}),
 ]
 
 
@@ -236,6 +261,7 @@ _READ_CASES = [
 _CONSTRUCTION_OFFLOADED_READS = frozenset({
     "points-list", "point-get", "dream-health", "team",
     "sessions-list", "session-get",
+    "search", "topic-summary", "session-context", "issue-insight",
 })
 
 #: Derived, never re-typed: the request kwargs come from ``_READ_CASES`` so a
@@ -623,28 +649,54 @@ class _BrokenSDK:
         return None
 
 
-#: The three READ routes whose docstring/comment carries a ``#1591`` FAIL-SOFT
-#: contract, and which therefore have to record the ONE new fail-CLOSED mode
-#: the #3718 construction off-load adds to them. ``list_points`` / ``get_point``
-#: / ``dream_health`` were already fail-closed on their read, so the 503 is not
-#: a contract change there (and their response has no soft shape to confuse).
+#: The READ routes for which the #3718 construction off-load adds a
+#: fail-CLOSED mode that must be pinned: a saturated/bound-missed ``graph``
+#: pool now refuses the request, where the inline construction merely delayed
+#: it. This is NOT "the routes with a soft shape" — only some members have one.
+#: The third element is that route's own soft-shape keys (a 200 carrying an
+#: EMPTY body), which is what would make a refusal indistinguishable from a
+#: real empty result; it is the EMPTY tuple for a route with no soft shape.
+#: Per-route rather than one shared key list, because the routes do not share a
+#: body shape — a list that only matched ``sessions`` would pass a
+#: ``/v1/search`` soft body vacuously.
+#:
+#: ``list_points`` / ``get_point`` / ``dream_health`` were already
+#: fail-closed on their read, so the 503 is not a contract change there (and
+#: their response has no soft shape to confuse).
 _FAIL_SOFT_CONTRACT_CASES = [
-    ("team", "/v1/team"),
-    ("sessions-list", "/v1/sessions"),
-    ("session-get", f"/v1/sessions/{_SEEDED_SESSION}"),
+    ("team", "/v1/team", ("point_count",)),
+    ("sessions-list", "/v1/sessions", ("sessions", "session")),
+    ("session-get", f"/v1/sessions/{_SEEDED_SESSION}", ("sessions", "session")),
+    # #3718 second construction batch. `search`'s soft shape IS a clean empty
+    # (``{"results": [], "count": 0}``), so its capacity refusal is the case
+    # the #3892 rule exists for: a busy pool must not answer "nothing matched".
+    ("search", "/v1/search?q=seed", ("results", "count")),
+    # ``session_context`` / ``issue_insight`` have no soft shape (their failure
+    # arm is a 500 with a generic detail), so there is no key to forbid — what
+    # these two pin is that a CAPACITY refusal is not served as the route's own
+    # 200 body either.
+    ("session-context", "/v1/context", ()),
+    ("issue-insight", "/v1/issue-insight?title=seed", ()),
+    # `topic_summary` is the same 500→503 transition as the two above (its arm
+    # is `except Exception → 500 "Topic summary failed"`) — included for the
+    # same reason: without a row, a later change could wrap its construction in
+    # a swallowing arm and answer 500/`{}` on pool capacity with the suite still
+    # green, which is the shape #3892 forbids.
+    ("topic-summary", "/v1/topics/release/summary", ()),
 ]
 
 
-@pytest.mark.parametrize("label,url", _FAIL_SOFT_CONTRACT_CASES,
+@pytest.mark.parametrize("label,url,soft_keys", _FAIL_SOFT_CONTRACT_CASES,
                          ids=[c[0] for c in _FAIL_SOFT_CONTRACT_CASES])
 def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
-        client, monkeypatch, label, url):
+        client, monkeypatch, label, url, soft_keys):
     """#3718: a graph-pool CAPACITY refusal must never become the soft shape.
 
-    Moving the per-request SDK construction onto the ``graph`` pool gives these
-    three routes a failure mode they did not have: the offload can REFUSE a
-    submission (saturated backlog) or miss its wait bound. Their ``#1591``
-    FAIL-SOFT contract is for a MISSING/BROKEN graph — a STORE condition — and
+    Moving the per-request SDK construction onto the ``graph`` pool gives each
+    route in this set a failure mode it did not have: the offload can REFUSE a
+    submission (saturated backlog) or miss its wait bound. For the ``#1591``
+    FAIL-SOFT routes (``team`` / ``sessions-list`` / ``session-get``) that
+    contract is for a MISSING/BROKEN graph — a STORE condition — and
     the empty shape is the honest answer there (``point_count: 0`` /
     ``sessions: []`` / ``session: None``). It is NOT the honest answer for our
     own capacity: serving it would report real data as absent, which is exactly
@@ -655,10 +707,28 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
     unchanged). The contract is recorded at each route's construction site; this
     is its behavioural pin.
 
+    The other FOUR members (``search`` / ``session-context`` /
+    ``issue-insight`` / ``topic-summary``) carry no ``#1591`` arm; what their
+    rows pin is narrower
+    and stated by ``soft_keys`` — a capacity refusal is never served as that
+    route's own 200 body (``search``'s clean-empty shape is the live ``#3892``
+    case here) — and an empty ``soft_keys`` means the route has no soft shape to
+    forbid, so the row asserts the 503 alone.
+
     RED on the pre-#3718 shape, and for the right reason: with the construction
     INLINE the lane's bound is never armed (the slow construction merely delays
-    the request) and each route returns 200 with its soft body. So this pins a
-    real consequence of the conversion, not a tautology.
+    the request) and each of the three ``#1591`` rows returns 200 with its soft
+    body. The other FOUR RED on the status code ALONE: ``_BrokenSDK`` defines
+    only ``_get_proj`` / ``_get_registry`` / ``close``, so the pre-change inline
+    path reaches ``sdk.tortoise_fts_query`` / ``sdk.session_context`` /
+    ``sdk.issue_insight`` / ``sdk.topic_summarize``, raises ``AttributeError`` and
+    lands in each route's generic 500 arm. So for those four the pre-change
+    observation is a 500, not
+    a soft 200 — the status CODE is the whole difference. ``search`` still owns
+    the soft-shape hazard its ``soft_keys`` row pins (a 200 clean empty is its
+    REAL post-change body, which is why that key list is not empty); the 500 is
+    only what the pre-change shape happens to show when ``_BrokenSDK`` is what
+    got constructed.
     """
     import tortoise.hosted_api as ha_mod
 
@@ -692,10 +762,11 @@ def test_graph_pool_capacity_is_fail_closed_not_a_silent_empty(
         f"STORE (#3892: no clean empty for a store we could not reach)")
     body = response.json()
     assert body.get("detail", {}).get("error_code") == "graph_unavailable", body
-    assert "sessions" not in body and "session" not in body, (
-        f"[{label}] the capacity refusal came back as the route's soft body "
-        f"({body}) — a warm pool would then be indistinguishable from an "
-        f"empty org")
+    leaked = [k for k in soft_keys if k in body]
+    assert not leaked, (
+        f"[{label}] the capacity refusal came back with the route's soft-body "
+        f"key(s) {leaked} ({body}) — a warm pool would then be "
+        f"indistinguishable from an empty result")
 
 
 @pytest.mark.parametrize("label,handler,request_kwargs", _CONSTRUCTION_CASES,
@@ -706,10 +777,11 @@ def test_read_routes_submit_one_graph_pool_submission(
 
     The pool's occupancy disclosure (``tortoise/monitoring.py``,
     ``CONTROL_PLANE_GRAPH_*`` — the #3669 "not hidden" rule) now states that
-    each of these six read requests submits here exactly ONCE, for its SDK
+    each read request in this set submits here exactly ONCE, for its SDK
     construction, and that its graph READS do not come here at all (they ride
     the house ``asyncio.to_thread`` default executor, ``dream_health``'s pass on
-    ``_DREAM_EXECUTOR``). That number is the rule's content, so it is pinned
+    ``_DREAM_EXECUTOR``). The count is ``len(_CONSTRUCTION_CASES)``, derived
+    rather than restated. That number is the rule's content, so it is pinned
     here rather than left to prose: a second submission per read changes the
     pool's read pressure, and a ZERO means the construction went back inline.
 
@@ -770,6 +842,7 @@ def test_construction_offloaded_reads_are_the_declared_ones():
     assert frozenset({
         "points-list", "point-get", "dream-health", "team",
         "sessions-list", "session-get",
+        "search", "topic-summary", "session-context", "issue-insight",
     }) == _CONSTRUCTION_OFFLOADED_READS, (
         "the construction-off-loaded read set changed shape — re-derive which "
         "read bodies are actually off the loop before trusting the AST pin "
@@ -1420,11 +1493,35 @@ _OFFLOADED_ASYNC_BODIES = frozenset({
     # so these are one-thread-hand-off conversions with no semantic change;
     # `org_info` builds directly via `_make_sdk`, so it uses the raw
     # `_graph_offload` seam. Behavioural pins:
-    # ``test_read_route_construction_is_offloaded`` (6 cases) in
-    # ``tests/test_read_routes_loop_responsiveness.py`` — each one RED on the
-    # inline shape (`sdk_built_on_loop` True, thread MainThread).
+    # ``test_read_route_construction_is_offloaded`` — the count is
+    # ``len(_CONSTRUCTION_CASES)``, derived, not restated here — each one RED on
+    # the inline shape (`sdk_built_on_loop` True, thread MainThread).
     "list_points", "get_point", "org_info", "list_sessions",
     "get_session_detail", "dream_health",
+    # #3718 (second construction batch): four more DATA-plane read routes whose
+    # SDK was built on the loop — NOT the last ones, and this block's examples
+    # are illustrations, not the inventory (see ``_KNOWN_INLINE_ROUTE_RESIDUAL``
+    # and ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION`` for that).
+    # `list_packs`
+    # (`_make_sdk(namespace=org_id)`) and `volunteer_context` (`_data_sdk(org)`)
+    # still construct inline with an already-`to_thread` round trip, and stay in
+    # ``_KNOWN_INLINE_ROUTE_RESIDUAL``; the registry-plane reads (``list_api_keys``,
+    # ``list_members``, ``list_pending_invites_for_me``, ``invite_info``) stay in
+    # ``_OFFLOADED_ASYNC_BODIES_WITH_ON_LOOP_SDK_CONSTRUCTION``. `search` (the
+    # primary read
+    # path) and `topic_summary` already off-loaded the ROUND TRIP; their
+    # construction did not. `session_context` (`GET /v1/context`, the memory
+    # digest every HOSTED agent session-start hook reads — a local/embedded hook
+    # calls `TortoiseSDK.session_context()` directly, `tortoise/__main__.py:3013`) and `issue_insight` called
+    # the SDK INLINE, so their round trip moved too. Behavioural pins:
+    # ``test_read_route_construction_is_offloaded`` — membership is
+    # ``_CONSTRUCTION_OFFLOADED_READS``, derived, so nothing here is restated by
+    # position — plus ``test_read_route_offloads_graph_io``, which REDs on the
+    # inline shape only for ``session_context`` / ``issue_insight`` (their round
+    # trip moved here) and is the ANTI-REGRESSION pin for ``search`` /
+    # ``topic_summary`` (their round trip was already off the loop, so they
+    # PASS pre-change — do not read that row as a failed conversion).
+    "search", "topic_summary", "session_context", "issue_insight",
 })
 
 #: Async bodies whose GRAPH I/O is off-loaded but whose SDK CONSTRUCTION is
@@ -1488,11 +1585,15 @@ _KNOWN_INLINE_ROUTE_RESIDUAL = frozenset({
     # what is new is that their INLINE ``_make_sdk`` / ``_data_sdk`` is now
     # visible and named here rather than passing silently. Same burn-down
     # (#3718 via #2924); the inventory is posted on #3718.
+    # `search`, `topic_summary`, `session_context` and `issue_insight` left
+    # this set in the #3718 second construction batch — their SDK construction
+    # (and, for the latter two, their round trip) is off the loop now, so they
+    # live in ``_OFFLOADED_ASYNC_BODIES`` where a regression reds instead of
+    # passing as declared debt.
     "accept_invite_by_id", "agent_token_revoke", "create_graph", "create_org",
-    "create_org_graph", "issue_insight", "list_graphs", "list_invites",
-    "list_packs", "list_trash", "rescind_invite", "search",
-    "session_context", "topic_summary", "upload_pack_manifest",
-    "volunteer_context",
+    "create_org_graph", "list_graphs", "list_invites",
+    "list_packs", "list_trash", "rescind_invite",
+    "upload_pack_manifest", "volunteer_context",
 })
 
 #: Non-route async bodies with inline sync FalkorDB I/O — the per-request auth
