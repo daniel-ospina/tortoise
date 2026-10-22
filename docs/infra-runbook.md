@@ -2706,8 +2706,8 @@ So the bar has **two parts, and BOTH are required**:
    `record_write_failures`, any reason on `record_non_journal_skips`,
    `record_position_unproven` above zero, or a new `journal_event` / `point` row
    on the record project. The bullets above say what the two expected reasons
-   mean; any reason not named there has its meaning at its counting site in the
-   code, which is the only place it is stated without drifting.
+   mean; for any other reason, its counting site in the code is the
+   authoritative statement of what it means.
 
    **If nothing appeared at all, do not conclude the record is healthy.** An
    empty reading has more than one cause and does not say which; take a capture
@@ -2716,8 +2716,11 @@ So the bar has **two parts, and BOTH are required**:
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
    `malformed_dsn` / `circuit_open`.** Those three are always a fail-and-fix:
-`no_tenant` = the request carried no tenant (or a set-but-undeclared env pair),
-`malformed_dsn` = the value is not a parseable DSN, `circuit_open` = a recent
+`no_tenant` = the request carried no tenant, **or** a tenant that was not a full
+org/graph pair, `malformed_dsn` = the value does **not start with**
+`postgresql://` / `postgres://` (`record_dsn()` does no parsing beyond that
+scheme check, so every other malformation surfaces as `circuit_open` /
+`write_failed` instead), `circuit_open` = a recent
 connect FAILED (wrong host/password, project paused, network) — i.e. the
 "set but unreachable" state this section exists to catch. All of them are logged
 (recipe 1) and counted (recipe 2), never raised — an armed write that did not
