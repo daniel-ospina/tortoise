@@ -293,10 +293,17 @@ def test_a_pass_leaves_two_canonical_shapes_on_point_and_says_so():
 
 def test_counts_reconcile_and_edges_survive():
     dump = _dump()
-    # Snapshotted BEFORE the pass: comparing `out["edges"] == dump["edges"]`
-    # afterwards is vacuous — `out` aliases the same list object, so the
+    # Snapshotted BEFORE the pass, and this is not ceremony: `apply_plan` builds
+    # `out` as `{**dump, ...}` and appends the SAME edge list object, so
+    # comparing `out["edges"] == dump["edges"]` afterwards is vacuous — the
     # assertion stays green even if `apply_plan` mutated every row in place.
+    # The node half has the same trap: every node the pass does not rename is
+    # appended BY REFERENCE (`out_nodes.append(node)`), so `after == before`
+    # over `dump["nodes"]` is reflexivity and cannot fire. Both snapshots are
+    # therefore deep copies taken before the pass (found in review of
+    # `fix/8607-legacy-id-normaliser`, "unfalsifiable assertion").
     edges_before = copy.deepcopy(dump["edges"])
+    nodes_before = copy.deepcopy(dump["nodes"])
     plan = build_plan(dump)
     out, report = apply_plan(dump, plan)
 
@@ -315,7 +322,7 @@ def test_counts_reconcile_and_edges_survive():
     assert [n["dump_id"] for n in out["nodes"]] == [n["dump_id"] for n in dump["nodes"]], (
         "dump_id is the store's internal id and is preserved — that is WHY the edges survive"
     )
-    for before, after in zip(dump["nodes"], out["nodes"], strict=True):
+    for before, after in zip(nodes_before, out["nodes"], strict=True):
         if before["labels"] != ["Point"] or is_canonical(before["props"]["id"]):
             assert after == before, f"untouched node changed: {before}"
     assert census(out).legacy == 0
@@ -788,8 +795,26 @@ def test_cli_refuses_two_artifacts_on_one_path(tmp_path, target, other):
     assert json.loads(same.read_text(encoding="utf-8"))["nodes"], "the dump survived"
 
 
+def _fs_is_case_insensitive(path: Path) -> bool:
+    """True when the filesystem behind ``path`` folds case to one file.
+
+    The repo's own probe (`tests/test_guard_measured_revision.py:150`): APFS —
+    where this repo's dev lanes run — folds ``Snapshot.json`` onto
+    ``snapshot.json``, ext4 does not. A case-fold case that *assumes* one of the
+    two behaviours is red on the other platform, which is exactly what happened
+    here: the test asserted ``not report.exists()`` before reaching the refusal
+    it exists to prove, so it failed on macOS before the rail was exercised.
+    """
+    probe = path / "CaseProbe.tmp"
+    probe.write_text("x")
+    try:
+        return (path / "caseprobe.TMP").exists()
+    finally:
+        probe.unlink()
+
+
 def test_cli_refuses_a_case_folded_alias_of_an_artifact_that_exists(tmp_path):
-    """One artifact exists, the other does not — the pair the OLD gate skipped.
+    """An EXISTING artifact against a case-folded alias of it — the pair the OLD gate skipped.
 
     The rail keyed an existing path as ``("inode", dev, ino)`` and a missing one
     as ``("path", text)``. Two tuples of different SHAPES are never equal, so for
@@ -798,19 +823,31 @@ def test_cli_refuses_a_case_folded_alias_of_an_artifact_that_exists(tmp_path):
     filesystem ``--report Snapshot.json`` IS ``--dump snapshot.json``: the report
     replaces the snapshot the run was asked to read, and the plan the revert
     needs is the thing that overwrote it.
+
+    Both filesystems run the SAME assertion — the refusal — and differ only in
+    their precondition: on a folding filesystem the two names are already one
+    file (so `samefile` is the precondition, not `not exists()`).
     """
     from tools.legacy_id_normalise import main
 
     dump_path = tmp_path / "snapshot.json"
     dump_path.write_text(json.dumps(_dump()), encoding="utf-8")
     report = tmp_path / "Snapshot.json"
-    assert not report.exists(), "case-sensitive here: the two names are two names"
+    case_insensitive = _fs_is_case_insensitive(tmp_path)
+    if case_insensitive:
+        assert report.exists() and os.path.samefile(dump_path, report), (
+            "a folding filesystem must resolve the two names to one file here"
+        )
+    else:
+        assert not report.exists(), "case-sensitive here: the two names are two names"
+    before = dump_path.read_bytes()
     with pytest.raises(SystemExit) as exc:
         main(["--dump", str(dump_path), "--report", str(report)])
     assert "are the same file" in str(exc.value.code)
     assert "--report and --dump" in str(exc.value.code)
-    assert json.loads(dump_path.read_text(encoding="utf-8"))["nodes"], "the dump survived"
-    assert not report.exists(), "nothing was written"
+    assert dump_path.read_bytes() == before, "the dump survived untouched"
+    if not case_insensitive:
+        assert not report.exists(), "nothing was written"
 
 
 def test_cli_refuses_two_not_yet_created_artifacts_named_the_same_up_to_case(tmp_path):
