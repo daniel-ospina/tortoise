@@ -10529,12 +10529,26 @@ class FalkorProjection(
             return False
 
     def _memory_pressure(self) -> tuple[int, int] | None:
-        """``(used_memory, maxmemory)`` in bytes, or ``None`` if unreadable.
+        """``(used_memory, maxmemory)`` in bytes, or ``None`` if UNREADABLE.
 
         Best-effort and fully guarded: the falkordb client exposes ``.info()``
         only on some versions and the raw redis connection only on others, so
         both paths are tried. An unreadable value must never change the error
         CLASS — only how rich its message is.
+
+        #7392 — ``(used, 0)`` is a READING and is returned AS one.
+        ``maxmemory = 0`` means the server has NO ceiling, which is a different fact from
+        "the ratio could not be read" and calls for a different message;
+        collapsing both to ``None`` is how the write-refusal message came to
+        assert a memory ceiling on an instance that reported none (measured on
+        the shared container, 2026-10-04).
+
+        What counts as a reading is BOTH halves present and usable. A reply that
+        OMITS a field, or that reports an unparseable or negative ``maxmemory``,
+        is an unread datum and is reported as ``None``: the ``or 0`` defaults and
+        a bare ``cap > 0`` test would otherwise turn "this server did not
+        answer" into the positive claims "nothing is used" and "this server has
+        no ceiling" — the over-claim #7392 is about, one level down.
         """
         info = None
         try:
@@ -10547,12 +10561,28 @@ class FalkorProjection(
             return None
         if not isinstance(info, dict):
             return None
+        if "maxmemory" not in info or "used_memory" not in info:
+            # An unanswered field is neither "no limit" nor "nothing used":
+            # either default would be minted as a measured fact downstream.
+            return None
         try:
-            used = int(info.get("used_memory", 0) or 0)
-            cap = int(info.get("maxmemory", 0) or 0)
+            # Presence is established above, so read the keys directly: the
+            # `or 0` default would turn a present-but-falsy value (`""`, None)
+            # into the same measured-looking 0 the presence check exists to
+            # refuse (reviewed, #7392). `int()` on those raises into the
+            # `except`, which is the contract the docstring states.
+            used = int(info["used_memory"])
+            cap = int(info["maxmemory"])
         except (TypeError, ValueError):
             return None
-        return (used, cap) if cap > 0 else None
+        if cap < 0 or used < 0:
+            # No conformant Redis reports a negative ceiling (`CONFIG SET
+            # maxmemory` refuses one) nor a negative usage, so either is a
+            # broken reading and not an answer — it must not become a
+            # "no ceiling"/"below the ceiling" claim either.
+            return None
+        # cap == 0 is the server answering "no limit", not a failed reading.
+        return (used, cap)
 
     def _write_refusal_message(self, exc: BaseException | None) -> str | None:
         """The DISTINCT error for a ``maxmemory`` write-refusal, else ``None``.
@@ -10561,6 +10591,26 @@ class FalkorProjection(
         corruption included — so the rebuild advice still applies there. That
         second direction is what keeps this branch honest: it NARROWS the
         remedy, it does not remove it.
+
+        #7392 — the lead sentence's STRENGTH must match what was READ. The
+        branch exists to say "full, not corrupt", and the only fact the probe
+        establishes is that the server REFUSED A COMMAND for memory reasons. A
+        ceiling is one step further, and it is claimed (with the ceiling-only
+        ``--maxmemory`` lever as its remedy) only when ``INFO memory``
+        returned one AND the reading shows it was reached (``used + drift >=
+        cap``, where ``drift`` is the MEASURED post-refusal shortfall — the
+        reading is taken after the refusal and includes buffers that the refused
+        reply releases).
+        Three shapes must not borrow that
+        claim: ``maxmemory == 0``, where the datum says there is NO ceiling and
+        the operator has to be pointed at that ABSENCE (the LOCUS of the
+        pressure is not asserted — "a per-query cap" is a limit OF the
+        instance); an unusable reading, where no ceiling was established at
+        all; and a ratio that was read but sits WIDER than that drift below the
+        ceiling, where quoting "has reached" would state a fact the reading
+        contradicts. Sending someone to raise a ceiling
+        that does not exist — or was not reached — is the defect this clause
+        closes.
         """
         if exc is None:
             return None
@@ -10569,12 +10619,114 @@ class FalkorProjection(
             return None
         pressure = self._memory_pressure()
         if pressure is None:
-            detail = ("server reports a maxmemory write-refusal "
-                      "(used_memory/maxmemory unreadable)")
+            # No ceiling established: no usable datum came back in any of the
+            # ways `_memory_pressure` refuses one (a raised or non-dict reply, a
+            # reply missing `used_memory`/`maxmemory`, unparseable values, a
+            # negative ceiling). The wording must be TRUE OF ALL of them —
+            # "INFO memory is unreadable" is false for a reply that answered
+            # without a field, and "no maxmemory was read" is false for one that
+            # reported an unusable value (both found in review, #7392).
+            lead = ("the server refused a command for MEMORY reasons (no "
+                    "usable used_memory/maxmemory reading could be obtained "
+                    "from this instance, so NO ceiling was established)")
+            # The lever is named CONDITIONALLY, after the reading, because on
+            # this branch we do not know whether one exists — prescribing it
+            # unread is exactly the defect #7392 closes. The flag itself
+            # (`--maxmemory`) is therefore NOT offered as an action here.
+            remedy = (
+                "Remedy: establish the ceiling before relieving anything — "
+                "read the instance's INFO memory. If it reports a maxmemory "
+                "limit, the next action is to raise or relieve it: a "
+                "container's REDIS_ARGS, or the provider's console on a "
+                "managed instance. If it reports 0, there is no ceiling to "
+                "raise and the pressure is NOT a maxmemory dataset ceiling — "
+                "it may come from host/kernel memory, an in-instance "
+                "per-query cap, or elsewhere.")
+        elif pressure[1] <= 0:
+            # Readable, and it says NO limit. Name the absence, not a ceiling.
+            # The value is interpolated rather than spelled "0": the predicate
+            # is `<= 0`, and a message that hardcoded the literal would
+            # misdescribe the reading it is quoting.
+            lead = ("the server refused a command for MEMORY reasons "
+                    f"(used_memory {_fmt_bytes(pressure[0])}, and maxmemory "
+                    f"is {pressure[1]} — NO maxmemory ceiling is set)")
+            # The locus is NOT asserted: the reading establishes only that
+            # `maxmemory` is not the cause, and "a per-query cap" is a limit OF
+            # the instance — so "outside the instance" would contradict its own
+            # example (reviewed, #7392).
+            remedy = (
+                "Remedy: this instance has no ceiling to raise — the pressure "
+                "is NOT a maxmemory dataset ceiling, and it may come from "
+                "host/kernel memory, an in-instance per-query cap, or "
+                "elsewhere. Do not go looking for a --maxmemory to tune: none "
+                "is set (one would be added in a container's REDIS_ARGS or in "
+                "the provider's console on a managed instance, and this "
+                "message reports it by name once it exists).")
         else:
             used, cap = pressure
-            detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
-                      f"{_fmt_bytes(cap)}")
+            # #7392 cycle 5 — the reading is taken AFTER the refusal
+            # (`_auto_health_recover` probes first, then reads `INFO memory`),
+            # and `used_memory` includes transient client buffers that are
+            # released when the refused reply is written. MEASURED on
+            # falkordb 4.20.6 at a 16 MiB `noeviction` ceiling: immediately after
+            # the server's own `used memory > 'maxmemory'` answer the reading
+            # sits 3.5-56 KiB BELOW the cap while the instance is still refusing
+            # at it. So "reached" is decided with that measured drift as a
+            # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
+            # different cause — and only a shortfall WIDER than it is treated as
+            # evidence that the ceiling is not the explanation.
+            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
+            # floor; the 1% arm is a heuristic that must not scale unbounded,
+            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
+            # print the ceiling sentence for a reading that is far from it —
+            # the over-claim direction, which is the unsafe one (its remedy is
+            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
+            # safe, because the below branch withholds nothing and asks for a
+            # re-read.
+            drift = max(64 << 10, min(cap // 100, 1 << 20))
+            if cap <= 2 * drift:
+                # #7392 cycle 7 — a tolerance larger than the ceiling's own
+                # scale makes the below branch UNREACHABLE and prints "has
+                # reached its memory ceiling" for e.g. 0 B of 4 KiB, which is
+                # the over-claim this branch exists to remove. At those sizes
+                # the absolute floor is meaningless, so scale to the cap.
+                drift = max(1, cap // 100)
+            if used + drift >= cap:
+                lead = ("the server has reached its memory ceiling (used_memory "
+                        f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
+                remedy = ("Remedy: raise / relieve the instance's maxmemory "
+                          "ceiling — the --maxmemory in a container's "
+                          "REDIS_ARGS, or the provider's console on a managed "
+                          "instance.")
+            else:
+                # A ratio was READ, and it sits well below the ceiling. The
+                # issue's proposal kept the ceiling sentence whenever the ratio
+                # was read, which assumed "read" implies "reached"; this branch
+                # is where that assumption fails, so it reports the OBSERVATION
+                # and asks for a re-read rather than forbidding the ceiling.
+                #
+                # #7392 cycle 6 — the CEILING is printed in exact bytes here,
+                # not through `_fmt_bytes`: that formatter keeps one decimal of
+                # a unit, so at 1-5 GiB (and TiB) caps the usage and the ceiling
+                # of a below-branch reading can round to the SAME string, and
+                # "10.5 MiB below its maxmemory ceiling of 1.0 GiB" printed
+                # beside "used_memory 1.0 GiB" reads as a contradiction. Naming
+                # the shortfall alone did not prevent that (294 of 401 sampled
+                # 1-5 GiB caps reproduced it).
+                shortfall = cap - used
+                lead = ("the server refused a command for MEMORY reasons, and "
+                        f"this instance NOW reports used_memory "
+                        f"{_fmt_bytes(used)} — {_fmt_bytes(shortfall)} below "
+                        f"its maxmemory ceiling ({cap} B) — so THIS reading "
+                        "does not show the ceiling being reached")
+                remedy = ("Remedy: re-read INFO memory while the refusal is "
+                          "repeating. If it reports at the ceiling, raise / "
+                          "relieve it — the --maxmemory in a container's "
+                          "REDIS_ARGS, or the provider's console on a managed "
+                          "instance. If it stays below, the pressure may be "
+                          "elsewhere — host/kernel memory, a concurrent client "
+                          "on this instance, the refused command's own buffer, "
+                          "or a per-query cap.")
         # The remedy must NOT restate the ownership policy in prose: a name
         # list here is wrong in one direction or the other, and nothing keeps
         # it in sync with the predicate that owns the rule. So the message
@@ -10597,12 +10749,24 @@ class FalkorProjection(
         # This operator message names the same two homes the note does, because
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
+        #
+        # #7392 review P1 — what that binding does NOT yet cover: the pair is
+        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
+        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
+        # asserts "it has reached its configured dataset limit (`maxmemory`)"
+        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
+        # CLASS, not just the wording), so on a ceiling-less instance the note
+        # and the `cap <= 0` branch above state opposite facts. Measured and
+        # recorded on #7357 (issuecomment-6341756094) — the note is that
+        # issue's deliverable, so it is fixed there, not here; this comment is
+        # the pointer so the next reader does not read the sentence above as
+        # proof that the two already agree.
         return (
-            "DB refused writes on open: the graph is INTACT but the server "
-            f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Remedy: raise / relieve the "
-            "instance's maxmemory ceiling — the --maxmemory in a container's "
-            "REDIS_ARGS, or the provider's console on a managed instance. "
+            "DB refused writes on open: the graph is INTACT but "
+            f"{lead}. This is NOT "
+            "corruption — do NOT rebuild. "
+            + remedy
+            + " "
             # #9532 review P2: composed from the ONE authority in
             # `tortoise/retry.py` rather than restated here. The SDK's
             # ceiling note (`explain_memory_ceiling`) is emitted for the same
