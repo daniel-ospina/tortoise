@@ -25,6 +25,17 @@ with the ``vet-warning=`` lines that report each downgrade. Both held on the
 committed log when they were added; a future drift in either direction is now a
 finding instead of a differently-worded story (#9110 review P2).
 
+**V15 is the bar's POPULATION half** (#9076). V9 checks that the threshold the run
+used is the one the artifact froze; V15 checks that the artifact's bar was frozen
+over the population this log MEASURED — a matching ``corpus_sha256``, a named pin
+(``declared_path``/``declared_sha256``, with the declared sha reconciled against
+the measured bytes when one is given), and a denominator reconciled with the scored
+arm's own ``denominator=``. A SCORED log must carry a ``MATCHED`` binding, and a
+``MATCHED`` binding must carry no refusal reason, so a refusal relabelled
+``MATCHED`` is a finding rather than a verdict; a floor the binding could not
+evaluate is printed on ``floor_unconsumed=`` and must be the reason it refused,
+because a silently dropped floor is a bar its author did not write.
+
 Printing is not enough on its own: every finding below fails the run, because a
 log that omits its denominator is exactly the artifact this epic exists to refuse.
 That includes OMITTING IT ENTIRELY: the disclosure set is REQUIRED (four arms by
@@ -843,6 +854,165 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V12] the control's share={ctl_share} is not "
                     f"{ctl_prefix}/{ctl_objects} — the share is not its own counts")
         state["control"] = ctl
+    # ── V15: the bar is bound to the population it was argued for ──────────
+    # V9 checks that the threshold the run USED is the one the artifact FROZE.
+    # That is half a bar: the artifact freezes a NUMBER and a POPULATION, and a
+    # log can satisfy V9 while measuring a corpus the bar was never argued over
+    # (#9076 — the numerator/denominator mismatch the issue refuses one level up).
+    bind = log.kv(log.one("prereg-binding "))
+    if bind:
+        statuses = ("MATCHED", "MISMATCH", "UNPINNED", "BELOW_FLOOR",
+                    "UNREADABLE")
+        if bind.get("status") not in statuses:
+            findings.append(f"[V15] the prereg-binding status is "
+                            f"{bind.get('status')!r}, not one of {statuses}")
+        # The binding must be about the corpus this log MEASURED — otherwise it
+        # is a claim about a file nobody ran (the same class as a threshold the
+        # run did not use).
+        measured_sha = log.kv(log.one("corpus=")).get("corpus_sha256", "")
+        if not measured_sha:
+            findings.append("[V15] the log prints a prereg-binding but no "
+                            "corpus sha256 to reconcile it against")
+        elif bind.get("corpus_sha256") != measured_sha:
+            findings.append(
+                f"[V15] the binding names corpus_sha256={bind.get('corpus_sha256')} "
+                f"but the run measured {measured_sha} — the binding is about a "
+                f"corpus this log did not run")
+        # The binding's denominator is the scored arm's own `objects` line, so
+        # the two must agree: a hand-edited log could otherwise inflate
+        # `objects=` to dodge the floor while the arm still prints the real
+        # denominator (#9513 review P2).
+        if bind.get("objects", "").isdigit() and scored in totals \
+                and int(bind["objects"]) != totals[scored]:
+            findings.append(
+                f"[V15] the binding checks objects={bind['objects']} but the "
+                f"scored arm {scored} measured {totals[scored]} — the floor was "
+                f"checked against a denominator this run did not produce")
+        if bind.get("status") == "MATCHED":
+            # A MATCHED binding is the only shape a scored log may carry, so it
+            # must carry NO refusal reason — otherwise a log could print a
+            # refusal beside a verdict (#9513 review P2: a declared-but-
+            # unreadable floor used to read as "no floor", i.e. MATCHED).
+            if bind.get("reason", "n/a") not in ("n/a", ""):
+                findings.append(
+                    f"[V15] the binding is MATCHED but states reason="
+                    f"{bind.get('reason')!r} — a matched bar has nothing to refuse")
+            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
+            # MATCHED means "a pin EXISTS, it agrees, and no floor is violated"
+            # (the probe's own contract), so a MATCHED line that names no pin at
+            # all is the UNPINNED case RELABELLED — a relabel, not an absent
+            # line, so every other rule here accepted it (#9513 review P2).
+            pins = (bind.get("declared_path", ""),
+                    bind.get("declared_sha256", ""))
+            if all(not p or p == "n/a" for p in pins):
+                findings.append(
+                    f"[V15] the binding is MATCHED but names no pin "
+                    f"(declared_path={pins[0]!r}, declared_sha256={pins[1]!r}) — "
+                    f"a bar matched to nothing is an unbound bar relabelled")
+            elif pins[1] not in ("", "n/a") and \
+                    pins[1].lower().removeprefix("sha256:") != measured_sha:
+                findings.append(
+                    f"[V15] the binding is MATCHED but its declared pin "
+                    f"declared_sha256={pins[1]} is not the corpus this log "
+                    f"measured ({measured_sha}) — a matched pin that names other "
+                    f"bytes is not this run's bar")
+            # `declared_path` is deliberately NOT reconciled: the log prints only
+            # the corpus BASENAME (`corpus=`), and a symlinked `--corpus` resolves
+            # to the declared file under a different name, so a name comparison
+            # would refuse a legitimate binding. The sha is the checkable half —
+            # MATCHED means "the pin agrees", and the probe compares a declared
+            # sha ALONE. The asymmetry is stated here so it is not read as an
+            # omission (#9513 review P2).
+            # The floors the binding REFUSED because it cannot evaluate them must
+            # be named on the line and be the reason it refused: a refusal that
+            # does not say which floor it dropped is not auditable, and a line that
+            # names dropped floors while claiming a clean `reason=n/a` is the same
+            # silent-drop shape one field over (#9513 review P2).
+            dropped = bind.get("floor_unconsumed", "")
+            refused_for_dropped = "floor-unconsumed" in [
+                r for r in bind.get("reason", "").split(",")]
+            if refused_for_dropped and dropped in ("", "n/a"):
+                findings.append(
+                    f"[V15] the binding refuses for floor-unconsumed but names no "
+                    f"floor it dropped (floor_unconsumed={dropped!r}) — the "
+                    f"refusal is then unauditable")
+            elif dropped not in ("", "n/a") and not refused_for_dropped:
+                findings.append(
+                    f"[V15] the binding names floors it did not evaluate "
+                    f"(floor_unconsumed={dropped}) while stating "
+                    f"reason={bind.get('reason')!r} — a dropped floor is a bar "
+                    f"its author did not write")
+            # The floor arithmetic is NOT gated on `isdigit()` (#9513 review P2):
+            # skipping the comparison whenever a number cannot be read is the
+            # permissive read `_declared_floor` was fixed to refuse in the probe,
+            # and applying it to the refusal statuses while sparing MATCHED judged
+            # the same log differently depending on the word its own line
+            # claimed. `n/a` is the ONE legal non-integer floor: the artifact
+            # states no floor at all, which is ABSENT, not unreadable.
+            if not nums[0].isdigit():
+                findings.append(
+                    f"[V15] the binding is MATCHED but its denominator "
+                    f"objects={nums[0]!r} is not a plain integer — a denominator "
+                    f"the gate cannot read is refused, not skipped")
+            if nums[1].isdigit():
+                if nums[0].isdigit() and int(nums[0]) < int(nums[1]):
+                    findings.append(
+                        f"[V15] the binding is MATCHED while objects={nums[0]} is "
+                        f"under declared_floor={nums[1]} — a below-floor run cannot "
+                        f"be bound-ready")
+            elif nums[1] not in ("n/a", ""):
+                findings.append(
+                    f"[V15] the binding is MATCHED but declares_floor={nums[1]!r} "
+                    f"is neither a plain integer nor `n/a` — present but "
+                    f"unreadable is not absent")
+        if bind.get("status") == "UNREADABLE" and \
+                "floor-unreadable" not in bind.get("reason", ""):
+            findings.append("[V15] an UNREADABLE binding does not attribute it to "
+                            "a floor that could not be read")
+        if bind.get("status") == "BELOW_FLOOR":
+            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
+            if not all(n.isdigit() for n in nums):
+                findings.append(f"[V15] a below-floor binding states no readable "
+                                f"objects=/declared_floor= ({nums})")
+            elif int(nums[0]) >= int(nums[1]):
+                findings.append(
+                    f"[V15] the binding says BELOW_FLOOR but objects={nums[0]} "
+                    f"is not under declared_floor={nums[1]}")
+        if bind.get("status") == "MISMATCH" and not (
+                set(bind.get("reason", "").split(","))
+                & {"corpus-sha256", "corpus-path", "below-floor",
+                   "floor-unconsumed"}):
+            findings.append(f"[V15] a MISMATCH states no recognised reason "
+                            f"(reason={bind.get('reason')!r}) — the refusal is "
+                            f"then unauditable")
+        # Rows that must reconcile in the other direction: a MATCHED binding is
+        # the ONLY shape a scored log may carry, and an UNPREREGISTERED log that
+        # matched still has to say why it did not score. These are the two
+        # fail-open directions — a scoring log with an unbound bar, and a
+        # refusal with no reason.
+        if result in ("GREEN", "RED") and bind.get("status") != "MATCHED":
+            findings.append(f"[V15] the log SCORED against a bar whose binding is "
+                            f"{bind.get('status')!r} — an unbound bar is not a bar "
+                            f"for this population")
+        if (result == "UNPREREGISTERED" and bind.get("status") == "MATCHED"
+                and not log.one("prereg-error=")):
+            findings.append("[V15] the binding MATCHED and no reason is stated for "
+                            "refusing to score — a bound bar must produce a verdict")
+        if result in ("GREEN", "RED") and not bind.get("objects", "").isdigit():
+            findings.append("[V15] the binding does not state the denominator "
+                            "(objects=) the bar was checked against")
+    else:
+        declared = log.one("prereg_declared=")
+        if result in ("GREEN", "RED"):
+            findings.append("[V15] the log SCORED a run but carries no "
+                            "prereg-binding line — the bar's corpus was never "
+                            "compared to the measured one")
+        elif declared and not log.one("prereg-error="):
+            findings.append("[V15] a pre-registration was supplied and the run "
+                            "refused to score, but the log states neither "
+                            "prereg-binding nor prereg-error — the refusal has "
+                            "no reason")
+    state["prereg_binding"] = bind or None
     state["result"] = result
     return findings, state
 

@@ -2773,6 +2773,26 @@ def test_session_retrofit_audit_tool_change_fails_closed_to_full():
     assert "core" in r["surfaces"]
 
 
+def test_work_claim_tool_change_fails_closed_to_full():
+    # #5052/#9487 review P1: tools/work_claim.py owns tests/test_work_claim.py — the
+    # dispatch-time claim gate, whose 55 hermetic arms pin every fail-closed refusal the
+    # tool exists for. Same #3261/#4256 silent-drop class as the collision_preflight and
+    # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so without
+    # this TOOL_CARVEOUTS entry a claim-tool-only change came back as `changed=[]`,
+    # select() took the docs-only early return (surfaces=[], tier-1 smoke only) — which
+    # BYPASSES the `if not matched: matched.add("core")` fallback — so none of the arms
+    # ran on the file most likely to weaken the gate. Registering
+    # tests/test_work_claim.py under `core` in ci-surfaces.yml does NOT cover this: it
+    # applies to edits of the TEST file, not of the tool (the ci-surfaces.yml comment said
+    # the opposite and is corrected in the same change).
+    # Mutation check: removing the TOOL_CARVEOUTS entry filters the path out (docs-only
+    # early return), failing all three asserts below.
+    r = _sel(["tools/work_claim.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
+
+
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
     # #3554: the declared :Session writer inventory SPANS surfaces —
     # tools/longmem_eval/ingest.py and ingest_v2.py select `eval`,
