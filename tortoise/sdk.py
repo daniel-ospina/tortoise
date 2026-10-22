@@ -14316,7 +14316,13 @@ class TortoiseSDK:
                 # Row shape: [internal id, logical id, labels, properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
-                # replay key (name / coalesce(title,name) / url) at emission.
+                # replay key at emission: `name` for aboutSubject/Object/Event/
+                # Point, `url` for aboutDocument and extractedFrom (D10 — a
+                # document IS a :Source). The retired pre-D10 title fallback key
+                # is NOT one: `stub_key` never returns it (a title-only target
+                # yields None), so such a descriptor cannot be emitted at all.
+                # ONE key map in this loop — the emission comment below states
+                # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
                 if target_graph_id in succ_internals:

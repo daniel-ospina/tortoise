@@ -2893,7 +2893,12 @@ def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
     `(edge_type, source_label, target_label)` triple and never inspects the
     target's kind. "Live and replay apply the SAME contract" is the #5206
     over-claim: a reader who takes it as parity concluded may relax this
-    replay guard, which is the one place the kind test actually runs.
+    replay guard, which is the only place the kind test runs on the REPLAY path
+    (`create_edge` and the auto-detect run theirs live, and a supersede
+    descriptor carries no kind of its own — delete this predicate and
+    `test_pointsuperseded_rebuild.py::
+    test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source`
+    reds). Closing the two unguarded writers is #9679.
     """
     from tortoise.projection.edges import resolve_structural_target
 
