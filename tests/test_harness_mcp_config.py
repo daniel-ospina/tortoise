@@ -1103,6 +1103,18 @@ class TestDocsPageAndSkillConfig:
         from tortoise import mcp_server as _mcp
         from tortoise.sdk import TortoiseSDK
 
+        # A PREDICATE over the parameter name, not four literals: the change the
+        # row forbids is a tool that can be pointed at a graph, and the next such
+        # parameter may be spelled `target_graph` / `ns` / `tenant` rather than
+        # `graph`. `graph_ranker` is the one benign name in the tree (a scoring
+        # weight on two read tools), so it is excluded BY NAME, not by pattern.
+        _BENIGN = {"graph_ranker"}
+
+        def _is_graph_selector(name):
+            return (name not in _BENIGN
+                    and ("graph" in name.lower()
+                         or name.lower() in {"ns", "namespace", "target", "tenant"}))
+
         def _graph_params(entry):
             found = set()
             for fn in (getattr(TortoiseSDK, entry.sdk_method, None)
@@ -1113,7 +1125,7 @@ class TestDocsPageAndSkillConfig:
                     continue
                 try:
                     found |= {p for p in inspect.signature(fn).parameters
-                              if p in {"graph", "graph_id", "graph_name", "namespace"}}
+                              if _is_graph_selector(p)}
                 except (TypeError, ValueError):
                     continue
             return found
@@ -1123,7 +1135,8 @@ class TestDocsPageAndSkillConfig:
         # The exceptions are named, with their risk, so each one is a DECISION
         # rather than a hole: two READ tools render another graph's contents, and
         # one ADMIN tool toggles that graph's recording flag. None of them moves
-        # where a connector's writes land.
+        # where a connector's writes land. The set is exact — a fourth entry
+        # fails, so a new selector is argued here rather than slipped in.
         assert {n: active[n].risk for n in graph_aware} == {
             "tortoise_entity_profile": "read",
             "tortoise_traverse": "read",
@@ -1131,10 +1144,9 @@ class TestDocsPageAndSkillConfig:
         }, (
             "the row says per-call graph selection is not available to a "
             "connector; exactly these three tools take a graph selector and none "
-            "is a write — a new one (a WRITE tool gaining one would move a "
-            "connector's writes, #9340) must be argued here, not slipped in: "
+            "is a write — a WRITE tool gaining one would move a connector's "
+            "writes (#9340), so it must be argued here, not slipped in: "
             f"{ {n: (active[n].risk, sorted(p)) for n, p in graph_aware.items()} }")
-        assert "destructive" not in {active[n].risk for n in graph_aware}
         mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
         assert mcp_src.count('graph_name = f"org_{_current_org_id.get()}"') >= 2, (
             "#236: HTTP mode must keep overwriting a caller-supplied graph_name "
@@ -1227,10 +1239,22 @@ class TestDocsPageAndSkillConfig:
         assert "entire catalog" in row_norm, (
             "the row must keep the catalog-union fallback (#2714 indicator 3), "
             "scoped to its real predicate")
+        # The predicate is BOTH halves: `POST /v1/graphs` with `packs: []` creates
+        # a graph with no records AND a revision marker, which resolves to the
+        # EMPTY set (#9667) — the opposite of the union. A row that said only "no
+        # records" would describe that shipped state wrongly.
         assert "no pack records" in row_norm, (
             "the catalog fallback applies to a graph with NO :PackInstall "
             "records; the row must state that predicate rather than "
             "'unconfigured'")
+        assert "no pack set of its own" in row_norm, (
+            "the fallback's predicate is `not rows and selection is None` — a "
+            "configured-EMPTY graph has no records and resolves to nothing "
+            "(#9667), so the row may not attribute the union to 'no records' "
+            "alone")
+        assert "if not rows and selection is None:" in pack_src, (
+            "pack_state's union arm must keep requiring BOTH no records and no "
+            "selection marker — that conjunction is the row's predicate")
         assert "seeds the five starters" in row_norm, (
             "the row points the user at Configured packs, and READING a "
             "record-less graph's set seeds the starters into it "
@@ -1287,7 +1311,7 @@ class TestDocsPageAndSkillConfig:
         #   (NOTE: `PACK_CONSEQUENCE.unconfigured` / `packCountLine` still render
         #   "the full catalog applies" for ANY `configured: false` graph, which is
         #   wrong for a starter-seeded default graph — pre-existing product copy
-        #   on main, out of this change's scope, tracked as its own issue.)
+        #   on main, out of this change's scope, tracked as #9691.)
         assert "only stops new classifications" not in disable, (
             "PACK_CONSEQUENCE.disable must not state the consequence "
             "unconditionally — the resolution contract re-admits a namespace "
@@ -1306,10 +1330,12 @@ class TestDocsPageAndSkillConfig:
         # at org creation, so a graph is listable from signup. What the user
         # cannot know before the write is WHICH graph the write landed in, and
         # reading the graph back is what answers it.
-        assert steps.index("paste it into that chat") < steps.index('section="graphs"'), (
-            "the discovery call must be asked of the agent AFTER the chat exists "
-            "and the document is pasted — before that the instruction is not "
-            "actionable in place, which defeats the point of an ordered journey")
+        for call in ('section="graphs"', "tortoise_packs_list"):
+            assert steps.index("paste it into that chat") < steps.index(call), (
+                f"the {call} call must be asked of the agent AFTER the chat "
+                "exists and the document is pasted — before that the instruction "
+                "is not actionable in place, which defeats the point of an "
+                "ordered journey")
 
     def test_4836_document_section2_names_the_live_chatgpt_carrier(self):
         """#4836 acceptance: `SKILL.md` §2's 7th-harness note must name the surface
