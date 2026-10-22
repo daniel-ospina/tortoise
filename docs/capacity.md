@@ -306,8 +306,8 @@ measured `All Node Scan | (n)` on the 23k-node / 160k-edge fixture, i.e. the id
 predicate applied per record over the whole node set, so its cost tracked the
 GRAPH. #9304 replaced it with the same `UNWIND` + label-and-id shape the
 pre-write immediately above it uses (that one binds `$params AS p`, this one
-`$ids AS cid`; both are measured `Node By Index Scan | (n:{label})`) and moved
-#7853's "a `:Point:Object` node must be journaled exactly ONCE" off the
+`$ids AS cid`; both are measured `Node By Index Scan | (n:{label})`), and it
+moved #7853's "a `:Point:Object` node must be journaled exactly ONCE" off the
 label-free form and onto a **node-keyed dedupe** of the swept rows — keyed on
 `id(n)`, not on the `id` value, per `live.EPISTEMIC_ID_KEYS`' rule that a dedupe
 key is never the coalesced value (#8879) — which is what a per-label sweep needs
