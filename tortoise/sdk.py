@@ -27977,12 +27977,21 @@ class TortoiseSDK:
                 # #3804 is that record.
                 _prov = search_provenance_enabled()
                 _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
+                # #8658: the verbatim provenance columns Slice A (#2683) and the
+                # #2684 span surface key on. Read UNCONDITIONALLY (they are
+                # plain row properties of a Point — no extra join, no policy
+                # flag: they are what a distilled claim's source anchor IS), and
+                # folded into the hit PRESENT-ONLY, so an unprovenanced hit is
+                # byte-identical. Placed AFTER ``_prov_cols`` so the #3837
+                # provenance indices above never shift.
+                _prov_q = 9 if _prov else 7   # first #8658 column index
                 rows = graph.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
-                    "       n.session_id, sess.id" + _prov_cols,
+                    "       n.session_id, sess.id" + _prov_cols
+                    + ", n.quote, n.source_turn_id, n.span_start, n.span_end",
                     params={"ids": result_ids},
                 ).result_set
                 # A Point contained by MORE THAN ONE :Session yields one row
@@ -28004,11 +28013,30 @@ class TortoiseSDK:
                         "has_answer": bool(row[3]),
                         "sessionId": (row[4] or "") if len(row) > 4 else "",
                         # #3804: the snake spelling ``create_point(
-                        # session_id=…)`` writes — read here as the second
+                        # session_id=… )`` writes — read here as the second
                         # explicit identity source, never emitted raw (the
                         # wire key stays camel ``sessionId``).
                         "session_id": (row[5] or "") if len(row) > 5 else "",
                     }
+                    # #8658: verbatim provenance — PRESENT-ONLY, exactly like
+                    # the row's other optional fields. A falsy ``at``-style
+                    # empty quote and a null ``source_turn_id`` (FalkorDB
+                    # drops null props, #2949) mean the Point carries no
+                    # verbatim anchor, so NO key is added and the hit renders
+                    # / packages exactly as it did before. ``span_start == 0``
+                    # is a real address — presence, never truthiness.
+                    _quote = (row[_prov_q] or "") if len(row) > _prov_q else ""
+                    if _quote:
+                        entity_data[pid]["quote"] = _quote
+                    _turn = (row[_prov_q + 1]
+                             if len(row) > _prov_q + 1 else None)
+                    if _turn is not None and _turn != "":
+                        entity_data[pid]["source_turn_id"] = _turn
+                    for _off, _key in ((2, "span_start"), (3, "span_end")):
+                        if len(row) > _prov_q + _off:
+                            _v = row[_prov_q + _off]
+                            if _v is not None:
+                                entity_data[pid][_key] = _v
                     if _prov:
                         # Provenance (#3837): the Source/document ref and the
                         # capture time — additive, read ONLY when the flag is
@@ -28325,6 +28353,13 @@ class TortoiseSDK:
                 source_path=cap_source_path,
                 # A5 (#2070): stored evidence mark (additive in to_dict).
                 has_answer=pt.get("has_answer", False),
+                # #8658: the Point's verbatim provenance when the fetch found
+                # it — absent keys ⇒ the dataclass defaults ⇒ ``to_dict`` emits
+                # nothing, so an unprovenanced hit is byte-identical.
+                quote=pt.get("quote", ""),
+                source_turn_id=pt.get("source_turn_id"),
+                span_start=pt.get("span_start"),
+                span_end=pt.get("span_end"),
                 # Provenance (#3837): present only when the flag fetched it;
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),

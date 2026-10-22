@@ -815,6 +815,25 @@ class SearchResult:
     # them, so an unflagged call stays byte-identical; empty ⇒ absent.
     currency: str = ""  # current | stale | unknown
     outdated_sources: list = field(default_factory=list)  # the behind links
+    # #8658: the Point's VERBATIM PROVENANCE — the anchor Slice A's
+    # ``retrieval.package_evidence_pool`` (#2683) collapses a distilled point's
+    # own source chunk/turn onto (``quote`` + ``source_turn_id``) and the
+    # address #2684 surfaces (``span_start``/``span_end``). The eval lane's
+    # ingest supplies all four (``tools/longmem_eval/ingest.py::
+    # point_props_for_hits``); the PRODUCT point fetch read none of them, so
+    # ``_is_own_source`` returned False on its first line (empty quote) and
+    # both provenance legs were INERT on real graphs.
+    #
+    # ADDITIVE and PRESENT-ONLY in ``to_dict``: each key is emitted only when
+    # the Point actually carries the datum, so an unprovenanced hit — every row
+    # written before E3/E4, and every row whose writer never had a verbatim
+    # source — stays byte-identical to pre-change output. A default that
+    # emitted four empty fields would make every legacy hit look provenanced to
+    # the package's own truthiness gates.
+    quote: str = ""
+    source_turn_id: Any = None
+    span_start: Any = None
+    span_end: Any = None
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -920,6 +939,20 @@ class SearchResult:
                 prov["fyi"] = {"reason": FYI_REASON_SOURCE_DRIFT,
                                "sources": self.outdated_sources}
             d["provenance"] = prov
+        # #8658: verbatim provenance — additive keys, each emitted ONLY when the
+        # Point carries it (present-only, so unprovenanced hits stay
+        # byte-identical). ``span_start == 0`` is a REAL address and must
+        # survive, so the gate is presence (``is not None``), never truthiness;
+        # ``source_turn_id`` arrives as ``int|None`` and the graph drops a null
+        # prop (#2949), so an absent link arrives as None or "".
+        if self.quote:
+            d["quote"] = self.quote
+        if self.source_turn_id is not None and self.source_turn_id != "":
+            d["source_turn_id"] = self.source_turn_id
+        if self.span_start is not None:
+            d["span_start"] = self.span_start
+        if self.span_end is not None:
+            d["span_end"] = self.span_end
         return d
 
 
