@@ -1738,7 +1738,15 @@ jobs:
           import json, os, sys
           sys.path.insert(0, "tools")
           import ci_selection as cs
-          inc = json.loads(os.environ["MATRIX"])["include"]
+          raw = os.environ.get("MATRIX", "").strip()
+          if not raw:
+              # The `changes` job publishes this on every event; an empty value
+              # means the derivation step failed or the output was dropped. Say
+              # so by name instead of dying inside json.loads (#9539).
+              print("❌ test-slow leg drift: changes.outputs.slow_matrix is EMPTY "
+                    "— the selector's derivation did not publish a leg set")
+              raise SystemExit(1)
+          inc = json.loads(raw)["include"]
           legs = {i["half"]: i["files"].split() for i in inc}
           if not inc or not all(legs.values()):
               print(f"❌ test-slow leg drift: empty leg set {legs}")
