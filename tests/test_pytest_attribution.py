@@ -21,9 +21,11 @@ So the tests come in two layers, both of which EXECUTE:
 2. the rail — the ``::error::`` marker is fed through the real
    ``scripts/ci_exemption.py ids`` so the claim that an unobservable leg becomes
    an ATTRIBUTABLE failure (instead of a silent gap) is measured, not asserted.
-   This layer is HOST-ONLY: the rail is agent-infra's, reached through a symlink
-   that dangles on a runner, so both of its cases skip by name where the rail is
-   absent (see ``RAIL_AVAILABLE``) — they never fail on that environment.
+   This layer is HOST-ONLY: the rail is agent-infra's, reached through the
+   machine-local `scripts` pointer (#9475 — gitignored, not tracked, absent until
+   `tools/link_agent_infra_scripts.py` materialises it), so both of its cases skip by
+   name where the rail is absent (see ``RAIL_AVAILABLE``) — they never fail on that
+   environment.
 
 No DB, no network, no Docker: every input is a file this module writes to
 ``tmp_path``.
@@ -84,24 +86,27 @@ def test_the_uncovered_workflow_is_named_not_silently_dropped() -> None:
     )
 
 
-# The RAIL this module measures against lives in agent-infra, not here: `scripts`
-# is a tracked symlink to `$AGENT_INFRA_PATH/scripts`, so `EXEMPTION_PY` resolves
-# on a developer host and DANGLES on a runner. python-ci.yml is self-contained BY
-# DECISION (fix #555: "no reusable-workflow call and no `scripts`/`agent-infra`
-# symlinks — both resolve to paths that are broken on the runner") and no CI job
-# checks out agent-infra, so the rail layer can only be EXECUTED where the rail
-# exists. Off that host the two rail cases SKIP BY NAME rather than fail on an
-# environment this repo does not own — and the skip is announced, so a green leg
-# reads "the marker contract is pinned, the rail's parse was not run", never the
-# vacuous "the rail agreed" that the marker itself exists to prevent. The marker
-# TEXT stays pinned repo-side on EVERY run, by
+# The RAIL this module measures against lives in agent-infra, not here: `scripts` is a
+# MACHINE-LOCAL pointer materialised from `$AGENT_INFRA_PATH` by
+# `tools/link_agent_infra_scripts.py` (#9475 — it is gitignored and NOT tracked, because a
+# git symlink blob cannot hold a variable), so `EXEMPTION_PY` resolves on a developer host
+# whose pointer has been materialised and is ABSENT on a runner. python-ci.yml is
+# self-contained BY DECISION (fix #555: "no reusable-workflow call and no
+# `scripts`/`agent-infra` symlinks — both resolve to paths that are broken on the runner") and
+# no CI job checks out agent-infra, so the rail layer can only be EXECUTED where the rail
+# exists. Off that host the two rail cases SKIP BY NAME rather than fail on an environment
+# this repo does not own — and the skip is announced, so a green leg reads "the marker
+# contract is pinned, the rail's parse was not run", never the vacuous "the rail agreed" that
+# the marker itself exists to prevent. The marker TEXT stays pinned repo-side on EVERY run, by
 # `test_marker_text_is_exactly_the_issue_contract`.
 RAIL_AVAILABLE = EXEMPTION_PY.exists()
 RAIL_ABSENT_REASON = (
     "agent-infra rail not checked out: `scripts/ci_exemption.py` is reached through the "
-    "tracked `scripts` symlink, which dangles off a developer host (python-ci.yml is "
-    "self-contained by decision, fix #555), so the rail's parse of the marker can only "
-    "be executed where agent-infra is present"
+    "machine-local `scripts` pointer (#9475 — gitignored, not tracked, so it is absent until "
+    "`uv run python tools/link_agent_infra_scripts.py` materialises it from "
+    "$AGENT_INFRA_PATH), which is why it is missing off a developer host (python-ci.yml is "
+    "self-contained by decision, fix #555): the rail's parse of the marker can only be "
+    "executed where agent-infra is present"
 )
 
 INCOMPLETE_MARKER = "::error::test leg INCOMPLETE — no pytest summary; failure set unobservable"
