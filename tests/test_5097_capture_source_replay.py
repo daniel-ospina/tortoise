@@ -39,13 +39,15 @@ faithful only on ``rebuild()`` is half a carrier — hence
 ``test_rebuild_all_restores_the_session_source_metadata``, which compares the
 WHOLE property bag, not a chosen subset.
 
-NOT pinned as faithful here, deliberately (recorded rather than implied):
-``ingestedAt`` on a rebuilt session Source is still the replay clock — the stub
-this write completes is created by the M2 ``_link_source`` projection write and
-``_upsert_source``'s ON MATCH arm has no ``ingestedAt`` clause. Same
-unjournaled-writer class, one writer upstream; it is the ONE key the whole-bag
-comparison excludes (``REPLAY_RESIDUAL_KEYS``) and nothing else may join it
-silently. Also outside this slice: the ``references`` (Source→Event) and
+Formerly excluded here and now PINNED: ``ingestedAt``. It used to be the replay
+clock on a rebuilt session Source (the stub is created by the M2 ``_link_source``
+projection write and ``_upsert_source``'s ON MATCH arm had no ``ingestedAt``
+clause — same unjournaled-writer class, one writer upstream). #9451 closed it:
+the record carries the instant the write STORED (``#398`` never-overwrite — the
+earlier writer's when the stub pre-existed) and the ON MATCH arm applies it under
+the ``$stub_completion`` gate, so the whole-bag comparison below includes the key
+again (``REPLAY_RESIDUAL_KEYS`` is empty, and the named constant is kept so a
+future residual cannot slip in unremarked). Also outside this slice: the ``references`` (Source→Event) and
 ``CONTAINS`` (Session→derived Point) edges, which have no journal carrier at
 all (the "no carrier for edges" class the unjournaled-mutation suite cites and
 does not close).
@@ -103,10 +105,11 @@ DERIVED_KEYS = (
     "sessionId", "capturedAt", "eventId", "sourceKind",
     "updatedAt", "title", "is_episodic",
 )
-#: The one key a rebuilt node is still allowed to differ on (see the module
-#: docstring). Kept as a named constant so a second residual cannot slip into
-#: the comparison unremarked.
-REPLAY_RESIDUAL_KEYS = ("ingestedAt",)
+#: Keys a rebuilt node is still allowed to differ on (see the module docstring).
+#: EMPTY since #9451 closed the last one (``ingestedAt``). Kept as a named
+#: constant so a future residual has to be declared here — and read in review —
+#: instead of quietly widening the comparison's blind spot.
+REPLAY_RESIDUAL_KEYS: tuple[str, ...] = ()
 SOURCE_URL = f"session:{SESSION_ID}"
 SECOND_NOW = "2099-01-01T00:00:00+00:00"
 
@@ -395,8 +398,8 @@ def test_the_carrier_does_not_clear_a_version_window_the_node_had(tmp_path):
             f"{after.get('validFrom')!r})")
         assert after.get("title") == before["title"], (
             "the carrier's explicit null title must PRESERVE the node's title")
-        # WHOLE bag, minus the ONE declared residual (`ingestedAt`, see the
-        # module docstring): a replay that advances `version` is a live != replay
+        # WHOLE bag (`ingestedAt` included since #9451 — see the module
+        # docstring): a replay that advances `version` is a live != replay
         # divergence on a declared property, not a detail.
         diverged = _bag_diff(live, after)
         assert not diverged, (

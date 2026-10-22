@@ -11766,34 +11766,31 @@ class TortoiseSDK:
             "s.summary=$sum",
             "s.topics=$topics",
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
-            # ⛔ THE CAPTURE INSTANT, UNCONDITIONALLY — NOT `coalesce(s.ingestedAt,
-            # $now)` (#9451). The coalesce kept whatever instant the node already
-            # held, which on a PRE-EXISTING stub is the clock of the writer that
-            # minted it (`_link_source` / `_mint_source_stub` via
-            # `create_point(session_id=...)`, the hosted commit path's
-            # `create_source`, the #4125 reconciler) — an instant NO record
-            # carries, because a mint journals no ingestion. That left this
-            # writer emitting a `SourceCreated` whose `ingestedAt` was the
-            # capture's `now` while the live node held the earlier one, and
+            # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
+            # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
+            # Tortoise FIRST saw this source" (`_upsert_document`'s note below,
+            # entities.py), and a writer never moves an instant another writer
+            # already recorded. The bug was never the coalesce: it was that the
+            # `SourceCreated` record further down stated `now` — a value this
+            # write does NOT store when the stub already existed. So on a
+            # PRE-EXISTING stub (minted by `_link_source`/`_mint_source_stub`
+            # via `create_point(session_id=...)`, the hosted commit path's
+            # `create_source`, the #4125 reconciler — a mint journals NO
+            # ingestion, so nothing carries its instant) the live node held the
+            # EARLIER instant while the record carried the capture's, and
             # `_upsert_source`'s ON CREATE arm reads the RECORDED value (#5024):
-            # so `rebuild_all()` folded the capture instant onto a node whose
-            # live value was the stub's — `derived == replay(journal)` (#5024 /
-            # #5097 / #8501) FALSE for the field, on exactly the arm where the
-            # stub pre-exists. A recovery then silently re-ordered session
-            # Sources relative to each other in the recency/credibility
-            # computation.
+            # `rebuild_all()` folded a value the live write never wrote, so
+            # `derived == replay(journal)` (#5024/#5097/#8501) was FALSE for the
+            # field and a recovery silently re-ordered session Sources in the
+            # recency computation.
             #
-            # Writing `$now` makes the live node hold the value the record
-            # states, so the two halves move together: `_upsert_source`'s ON
-            # MATCH arm applies the same recorded instant on the arm where the
-            # node already exists (gated on `$stub_completion`, so a non-capture
-            # record still preserves the node's value exactly as its live write
-            # does). It also makes the field consistent ACROSS the two capture
-            # lanes — on the lane where this writer's own mint CREATES the stub,
-            # `ingestedAt == capturedAt` was already required and pinned
-            # (`test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`);
-            # the pre-existing-stub lane was the only one that disagreed.
-            "s.ingestedAt=$now",
+            # The fix: the RETURN below reads back the instant this SET leaves on
+            # the node and the record carries THAT (the same "the payload carries
+            # the values the WRITE STORED" rule `validFrom`/`is_episodic` already
+            # follow), and `_upsert_source`'s ON MATCH arm applies it under the
+            # `$stub_completion` gate so the record also lands on the arm where
+            # the node already exists at fold time.
+            "s.ingestedAt=coalesce(s.ingestedAt, $now)",
         ]
         if event_id:
             set_clauses.append("s.eventId=$eid")
@@ -11842,11 +11839,19 @@ class TortoiseSDK:
         params["url"] = source_key
         _rows = proj.g.query(
             "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses)
-            + " RETURN s.validFrom, s.is_episodic",
+            # `s.ingestedAt` is the THIRD read-back, for the same reason as the
+            # other two: #9451 — the record must state the instant this write
+            # STORED, which is the earlier writer's when the stub pre-existed
+            # (`s.ingestedAt=coalesce(s.ingestedAt, $now)` keeps it), not `now`.
+            + " RETURN s.validFrom, s.is_episodic, s.ingestedAt",
             params=params,
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
         prior_is_episodic = _rows[0][1] if _rows else None
+        # `now` only as a fallback for a MERGE that returned no row (nothing was
+        # written, so there is no stored value to state); every real write leaves
+        # a non-null instant because the SET above coalesces into `$now`.
+        stored_ingested_at = (_rows[0][2] if _rows else None) or now
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
@@ -11878,7 +11883,7 @@ class TortoiseSDK:
             sourceKind="agentSession",
             contentHash=content_hash,
             title=None,
-            ingestedAt=now,
+            ingestedAt=stored_ingested_at,
             updatedAt=now,
             validFrom=prior_valid_from,
             is_episodic=prior_is_episodic,
@@ -11947,37 +11952,26 @@ class TortoiseSDK:
         #   * `updatedAt` carries the instant the write stamped, so the fold's
         #     stub-completion arm reproduces it instead of the replay clock.
         #
-        #   * `ingestedAt` is emitted and IS faithful on the capture path
-        #     (#8501 corrected this note; it used to call the field a KNOWN
-        #     RESIDUAL on a premise this change removed). The stub this write
-        #     completes is now minted BY THIS DOOR — `_mint_source_stub(...
-        #     now=now)` above — so its `ingestedAt` is the CAPTURE's instant, not
-        #     a fresh clock at a later write; this record carries that same
-        #     `now`, and `_upsert_source`'s ON CREATE arm reads the RECORDED
-        #     value (`coalesce($ingestedAt, $now)`, the #5024 rule) instead of
-        #     the replay clock. So live == rebuilt for the field, which is what
-        #     `test_the_stub_the_early_materialization_mints_survives_a_rebuild`
-        #     asserts (`s.ingestedAt` compared after a destructive
-        #     `rebuild_all()`), and
+        #   * `ingestedAt` is emitted and IS faithful on BOTH arms of the stub's
+        #     existence (#8501 corrected this note once; #9451 closed the arm it
+        #     left open). It carries `stored_ingested_at` — the instant READ BACK
+        #     from the node the SET just wrote — not `now`. On the lane where this
+        #     door's own mint CREATES the stub, the two are the same value (the
+        #     mint is `_mint_source_stub(..., now=now)`, and the SET coalesces
+        #     into `$now`), which is what
         #     `test_a_keyless_capture_stamps_its_stub_with_the_capture_instant`
-        #     pins the value on the no-Point lane, and
+        #     and
         #     `test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`
-        #     pins it on the lane that extracts.
-        #
-        #     The arm that note used to call a live RESIDUAL is CLOSED (#9451).
-        #     Whenever a `session:<id>` stub ALREADY EXISTS when this door runs
-        #     (minted by `_link_source` via `create_point(session_id=…)`, by the
-        #     hosted commit path's `create_source`, by the #4125 reconciler, or
-        #     by any pre-#8501 writer), its `ingestedAt` was the clock of THAT
-        #     writer — never journaled — while this record carries the capture's
-        #     instant. The live SET now writes `s.ingestedAt=$now`
-        #     UNCONDITIONALLY (it used to be `coalesce(s.ingestedAt, $now)`) and
-        #     `_upsert_source`'s ON MATCH arm now applies the recorded instant
-        #     under the `$stub_completion` gate, so both halves hold the value
-        #     this record states, on BOTH arms of the stub's existence — pinned
-        #     by `tests/test_9451_pre_existing_stub_ingest_instant.py` (which
-        #     compares the WHOLE property bag live vs after `rebuild_all()`, and
-        #     is mutation-measured red on the pre-#9451 tree).
+        #     pin. On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
+        #     keeps the earlier writer's instant (#398's never-overwrite contract
+        #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
+        #     record stating `now` would journal a value the write never wrote.
+        #     `_upsert_source`'s ON CREATE arm reads the recorded value (#5024)
+        #     and its ON MATCH arm now applies it under the `$stub_completion`
+        #     gate, so BOTH replay engines reproduce the node's value on both
+        #     arms — pinned by `tests/test_9451_pre_existing_stub_ingest_instant.py`
+        #     (whole-bag live vs after `rebuild_all()` AND after `rebuild()`,
+        #     mutation-measured red on the pre-#9451 tree).
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods

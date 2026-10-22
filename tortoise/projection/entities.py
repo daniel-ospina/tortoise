@@ -5609,14 +5609,16 @@ class _EntityHandlers:
             "                     THEN coalesce($updatedAt, $now) "
             "                     ELSE coalesce(s.updatedAt, $updatedAt) END, "
             # #9451: the RECORDED ingest instant, applied on the arm that has a
-            # node to land on. `_materialize_session_source` writes the capture's
-            # own instant to `s.ingestedAt` unconditionally now, and its
-            # `SourceCreated` record carries that same instant — but this clause
-            # did not exist, so a node that ALREADY existed when the record
-            # folded kept an instant no record's ON MATCH could correct (ON
-            # CREATE reads the recorded value, #5024; ON MATCH read nothing).
-            # Measured on a stub minted earlier by `create_point(session_id=…)`:
-            # live `...468430` vs rebuilt `...471988` — the recovery path silently
+            # node to land on. The capture writer keeps its `coalesce(s.ingestedAt,
+            # $now)` live SET (#398's never-overwrite contract) but now states in
+            # its `SourceCreated` payload the instant it READ BACK from the node —
+            # the earlier writer's when the stub already existed. This clause did
+            # not exist, so on the arm where the node is present when the record
+            # folds (`rebuild()`, whose per-record replay re-mints the stub from a
+            # `PointAdded` record at the REPLAY clock first) the node kept a
+            # replay-clock value while live held the recorded one. Measured on a
+            # stub minted earlier by `create_point(session_id=…)`: live
+            # `...468430` vs rebuilt `...471988` — the recovery path silently
             # re-ordering session Sources in the recency computation.
             #
             # ⛔ GATED ON `$stub_completion`, exactly like `version` above, and for
