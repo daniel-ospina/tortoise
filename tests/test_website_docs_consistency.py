@@ -1306,6 +1306,16 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     verified before listing: `select(["website/_redirects"], ...)` returned
     `surfaces=[]` with this file absent from `test_files`.
 
+    A FOURTH input was added by #9607 and is the sharpest of the four: the QUADRATURE
+    block below derives its expected factors from `tortoise/quadrature.py` itself,
+    and its own docstring says *"editing `quadrature.py` itself reds the page that
+    describes it"*. That was false in CI — `quadrature.py` matched no
+    `SOURCE_PATTERNS` entry and was not in `SHARED_MODULES`, so a quadrature-only
+    diff took the `core` fallback, and this file is registered only under
+    `onboarding` (measured on `02e18e752`: `select(["tortoise/quadrature.py"])` →
+    `full=False`, `surfaces=['core']`, this file ABSENT from `test_files`). The
+    formula pin therefore could never run on the PR that changes a formula.
+
     `tests/test_ci_selection.py::test_every_source_pattern_is_selectable` cannot
     catch this direction: it is derived FROM `SOURCE_PATTERNS`, so deleting an entry
     deletes its own only case (review finding, #3962). These paths are therefore
@@ -1317,6 +1327,7 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
             "tests/_html_links.py",
             "website/_redirects",
             "website/functions/blog/[[path]].ts",
+            "tortoise/quadrature.py",
         )
         if not _guard_reachable_for(path)
     ]
