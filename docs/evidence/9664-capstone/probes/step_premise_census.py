@@ -77,9 +77,14 @@ def census_tools() -> None:
         row(step, f"tool `{tool}` is on the MCP surface",
             f"{'PRESENT' if present else 'ABSENT'} "
             f"(registry holds {len(names)} live tools){note}")
-    skill_tools = sorted(n for n in names if "skill" in n)
-    row("6", "the surface has ANY skill-loading tool",
-        f"{skill_tools if skill_tools else 'NONE'}")
+    # The measured question is the NAME sweep, and the row says so: whether a
+    # tool could load a skill without naming it `skill` is not something a name
+    # sweep can answer, and a row that answered "ANY skill-loading tool" from it
+    # would report a capability it never read (the compound-premise defect this
+    # file's docstring forbids).
+    skill_named = sorted(n for n in names if "skill" in n)
+    row("6", "no registered tool NAME contains `skill`",
+        f"{skill_named if skill_named else 'CONFIRMED (0 of the ' + str(len(names)) + ' live names)'}")
 
 
 # ── onboarding: what closes which step, and who can observe it ─────────────
