@@ -37600,6 +37600,12 @@ class TortoiseSDK:
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
+
+        A ``Source`` target that resolves to the SAME node as ``source_url``
+        writes NO ``references`` self-loop (#5151): since D10 a document is a
+        ``:Source``, so equal keys collapse source and entity onto one node, and
+        the guard lives in the projection writer where the edge is written — the
+        ``:Source`` itself is still merged, unchanged.
         """
         proj = self._get_proj()
         # ── #5475 (residual): the SECOND writer of ``sourceKind`` ──
