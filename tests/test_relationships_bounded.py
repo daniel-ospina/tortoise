@@ -1381,22 +1381,24 @@ class _UnhashableStatus:
 
 
 class _PartialFillGraph:
-    """``graph`` stand-in that raises while assembling the SECOND point.
+    """``graph`` stand-in with TWO modes over the same two-point shape.
 
-    The fill loop assigns ``rels[pid] = entries`` point-by-point INSIDE the
-    ``try``, so a raise while assembling the second point leaves the first
-    point already filled.
+    DEFAULT (``fail_during_assembly=False``) — the #8504 regression fixture:
+    P1's peer is healthy, P2's peer carries the persisted ``(0.0, 0.0)``
+    MEASURED posterior, and the decoration must SUCCEED (no raise, both entries
+    present). #8504's own test uses this mode.
 
-    #8504 removed the original trigger — the unguarded confidence division
-    (``round(alpha / (alpha + beta), 4)``) for a persisted ``(0.0, 0.0)``
-    posterior is now guarded — so the mid-assembly failure is INJECTED
-    (``fail_during_assembly=True``) with an unhashable peer status. The
-    invariant #6971 pins (ANY failure during assembly resets the WHOLE
-    decoration) never depended on which defect supplied the failure.
+    INJECTION (``fail_during_assembly=True``) — raises while assembling the
+    SECOND point, for the #6971 reset invariant below. The fill loop assigns
+    ``rels[pid] = entries`` point-by-point INSIDE the ``try``, so a raise while
+    assembling the second point leaves the first point already filled.
 
-    The default mode keeps the ``(0.0, 0.0)`` MEASURED peer that #8504 is
-    about; that fix's own test uses it to prove the batch now decorates
-    instead of raising.
+    #8504 removed that invariant's original trigger — the unguarded confidence
+    division (``round(alpha / (alpha + beta), 4)``) for a persisted
+    ``(0.0, 0.0)`` posterior is now guarded — so the mid-assembly failure is
+    INJECTED here with an unhashable peer status. The invariant #6971 pins
+    (ANY failure during assembly resets the WHOLE decoration) never depended on
+    which defect supplied the failure.
     """
 
     class _Result:
@@ -1438,12 +1440,15 @@ class _PartialFillGraph:
 def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
     """#8504: a persisted (0.0, 0.0) MEASURED peer must not abort the batch.
 
-    ``tortoise/ep.py::_write_node`` persists exactly that pair (its #330 guard
+    ``tortoise/ep.py::_write_node`` writes that pair verbatim (its #330 guard
     fixes only the derived ``confidence``), and ``ep_measured_cypher`` calls it
-    MEASURED (``posterior_alpha IS NOT NULL``) — so the peer assembly's raw
-    ``alpha / (alpha + beta)`` raised ``ZeroDivisionError`` for a reachable
-    input class. Per #6971's handler that discarded EVERY point in the batch,
-    not just the degenerate peer.
+    MEASURED (``posterior_alpha IS NOT NULL``). The EP math itself clamps its
+    own posteriors (``_beta_from_natural`` / ``moments_to_beta``), so the pair
+    reaches the graph through a direct property write or a legacy graph — it is
+    a state the SDK can hold and re-flush, not one its arithmetic mints. Either
+    way the peer assembly's raw ``alpha / (alpha + beta)`` raised
+    ``ZeroDivisionError`` for it, and per #6971's handler that discarded EVERY
+    point in the batch, not just the degenerate peer.
     """
     out = get_relationships_bounded(_PartialFillGraph(), ["P1", "P2"])
     assert out.decoration_error == "", (
@@ -1454,8 +1459,9 @@ def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
     assert peers["A"]["confidence"] == 0.75, peers["A"]  # 3/(3+1)
     assert peers["B"]["confidence"] == 0.5, (
         "#330's uniform fallback is the house value for a degenerate pair — "
-        "the same 0.5 the sibling signal surface reports for it "
-        "(ranking._fetch_point_signals → NEUTRAL_CONFIDENCE); got "
+        "the same 0.5 StateRanker._fetch_point_signals reports for it "
+        "(ranking.py:1046 → NEUTRAL_CONFIDENCE); NOT the GraphRanker sibling, "
+        "which reads the mirrored column and has no such guard. got "
         f"{peers['B']['confidence']!r}")
     assert peers["B"]["variance"] == 0.0, (
         "_beta_variance's s <= 0 guard — which is why the 0.5 mean does not "
