@@ -900,6 +900,48 @@ def test_an_unwritable_identity_skip_is_OBSERVABLE(caplog):
     )
 
 
+def test_a_BLANK_container_identity_states_the_TRUE_cause(caplog):
+    """The `contains_session` gate adds a FOURTH refusal — BLANK — and it must say so.
+
+    `_writable_container_id` refuses a whitespace-only id (#9599), so the skip is
+    PRESENT-but-unwritable and `describe()` must name the cause. Before this arm
+    the blank value fell through `_unwritable_shape`'s surrogate fallback and
+    told the operator the id carried a lone surrogate — an encoding corruption
+    that does not exist — and the same false sentence reached `consistency`'s
+    returned `reason` (#9553 review, the #8018 "cause false for the record it
+    describes" class).
+    """
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Session", "   ", "id (MERGE key)")
+    assert "skipping Session" in caplog.text, caplog.text
+    assert "BLANK" in caplog.text, caplog.text
+    assert "surrogate" not in caplog.text, (
+        "a BLANK identity was reported as carrying a lone surrogate — a false "
+        f"cause steers the operator at a corruption that is not there: {caplog.text!r}"
+    )
+    # ⛔ AND THE CONSEQUENCE IS NOT OVERSTATED (#9553 review). `_link_session`
+    # refuses ONE derived edge after the Point is already in the graph, so a
+    # message claiming a dropped record is false there — the same "false for the
+    # record it describes" class as a false cause. It must not claim the OPPOSITE
+    # either: 8 creation-anchor sites drop the whole record without declaring it
+    # (#8702 recurrence), so the undeclared branch says only what is true everywhere.
+    assert "the record is dropped" not in caplog.text, (
+        "a nested skip claimed the whole record was dropped — only the "
+        f"CONTAINS edge is missing here: {caplog.text!r}"
+    )
+    assert "the record still folds" not in caplog.text, (
+        "an undeclared skip claimed the record survives — the flag is not yet "
+        f"set at every creation anchor (#8702 recurrence): {caplog.text!r}"
+    )
+    assert "nothing is written for it" in caplog.text, caplog.text
+
+    # The DECLARED-dropped site keeps the stronger sentence.
+    caplog.clear()
+    caplog.set_level(logging.WARNING)
+    _log_identity_skip("Point", "bad\x00id", "point id", drops_record=True)
+    assert "the record is dropped" in caplog.text, caplog.text
+
+
 def test_a_corrupt_entity_identity_skip_is_LOGGED_on_rebuild(superseded, caplog):
     """End-to-end: the record is dropped AND an operator can see it dropped.
 

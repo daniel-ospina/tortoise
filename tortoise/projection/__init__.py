@@ -68,12 +68,16 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_UNIMPLEMENTED_OP,
     SHAPE_UNKNOWN_EVENT_TYPE,
     SHAPE_UNKNOWN_OP,
+    MALFORMED_MISSING_TYPE,
+    MALFORMED_NON_DICT_POINT,
+    MALFORMED_SHADOWED,
     NonFoldedEventsError as NonFoldedEventsError,
     assert_no_non_folded,
     classify_terminalizer_miss,
     collect_non_folded,
     identity_absent,
     record_identity_skip,
+    record_malformed_envelope,
     record_non_folded,
 )
 
@@ -651,11 +655,22 @@ def _reset_vector_gap_warnings() -> None:
 # (0f9e6a2) and only survived in the legacy standalone projection.py, which
 # Phase 2 deletes. This is the ACTIVE wipe-protection: it must live in the
 # module the SDK actually imports.
-# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
-# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
+# A query is a bulk wipe when it contains a DELETE clause — with or without the
+# ``DETACH`` prefix (#8256: FalkorDB auto-detaches, so ``MATCH (n) DELETE n``
+# deletes every node exactly as ``MATCH (n) DETACH DELETE n`` does) — and has NO
+# property map ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause
+# on the deleted variable.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
 # parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
-# (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
+# (WHERE true, WHERE 1=1) don't count.
+#   ⚠️ KNOWN GAP (#9632 review, pre-existing and unfixed here): that rule is a
+#   PRESENCE test, not a RESTRICTION test. ``MATCH (n) WHERE n.id = n.id DELETE n``
+#   matches the property arm and ``MATCH (n) WHERE n:Point OR true DELETE n``
+#   matches the label-predicate arm; both delete every node on FalkorDB v4.20.6
+#   (measured 3 → 0) while the classifier says targeted. Closing it means
+#   refusing an exemption whose WHERE chunk contains a top-level ``OR`` or a
+#   self-comparison — a behaviour change on the guard itself, tracked separately
+#   rather than smuggled into #8256. ``IN [list]`` was NOT recognized before
 # #3007 (only ``IN (``), so a scoped delete whose only reference was
 # `id(n) IN [..]` / `labels(n)[0] IN [..]` was misclassified as a bulk wipe.
 _WHERE_REAL_RE = re.compile(
@@ -761,10 +776,34 @@ def _strip_call_subqueries(statement: str) -> str:
 
 
 # ── #3007: delete-target-aware scoping ──────────────────────────────────────
-# A ``DETACH DELETE`` may name several variables (``DETACH DELETE n, m``); each
-# is a separate target. The clause tail is read up to the next clause keyword so
+# A DELETE may name several variables (``DETACH DELETE n, m``); each is a
+# separate target. The clause tail is read up to the next clause keyword so
 # ``DELETE n RETURN count(*)`` yields ``n``, never ``RETURN``/``count``.
-_DELETE_CLAUSE_RE = re.compile(r"\bDETACH\s+DELETE\b(.*)$", re.IGNORECASE | re.S)
+#
+# #8256: the ``DETACH`` prefix is OPTIONAL here. FalkorDB auto-detaches, so
+# ``MATCH (n) DELETE n`` deletes every node exactly as ``DETACH DELETE`` does,
+# and a classifier that only looked for the two-word spelling let that whole
+# graph wipe through L2 on a production graph.
+#
+# The two lookarounds keep a bare spelling from inventing a clause where there
+# is none — the same clause-position convention ``_WHERE_STOP_RE`` uses:
+#   * ``(?<![\w.$:])`` — a keyword only counts at clause position, never right
+#     after ``.`` (a property ``n.delete``) or ``:`` (a label ``:DELETE``);
+#   * ``(?!\s*:)`` — a map KEY (``{delete: true}``) is followed by ``:``, a
+#     deleted variable never is.
+#
+# #8256 round 2: this matches the clause HEAD only — the target list is read
+# from the text AFTER the match, bounded by ``_CLAUSE_STOP_RE``. A pattern that
+# swallowed the tail (``(.*)$``) could match at most ONCE per statement, so a
+# statement carrying two ``DELETE`` clauses (a legal shape —
+# ``... DELETE r WITH old ... DELETE old``, shipped by
+# ``tortoise/projection/entities.py``) was classified from its FIRST clause
+# alone. Both a regression (``DELETE p ... DETACH DELETE m`` read as targeted)
+# and the hole itself (``DELETE p ... DELETE m`` was still unclassified) followed
+# from that: every clause must be read, and ``_delete_clauses`` below does.
+_DELETE_HEAD_RE = re.compile(
+    r"(?<![\w.$:])(?:DETACH\s+)?DELETE\b(?!\s*:)", re.IGNORECASE
+)
 #: Clause keywords that TERMINATE a DELETE target list (and must never be read
 #: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
 _CLAUSE_STOP_RE = re.compile(
@@ -777,26 +816,56 @@ _VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
 #: ``(n :Label1:Label2)``, ``[r:IMPL]``, ``(n:$param)``. The bracket must be a
 #: node/rel pattern delimiter immediately before the variable, so a label word
 #: elsewhere in the statement cannot satisfy it.
-_VAR_LABEL_RE = r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+#:
+#: #8256: the SECOND arm is the same signal for a label the masker BLANKED — a
+#: backtick-quoted type is a label too (``-[r:`extractedFrom`]->``, ``(n:`Point`)``),
+#: and ``_LITERAL_OR_COMMENT_RE`` replaces it with spaces. The residual shape is
+#: unambiguous, because a colon directly after a variable INSIDE a pattern
+#: bracket can only open a label: ``[r: ]``. Only what may LEGALLY FOLLOW a type
+#: is asserted — the pattern's closing delimiter, a ``{`` property map, a FURTHER
+#: type (``(n:`A`:`B`)``) or a length marker (``[r:`X`*1..2]``) — so this cannot
+#: be satisfied by a label that appears in prose (comments and string literals
+#: are already blanked, delimiters and all), and a multi-type / variable-length
+#: pattern is not misread as unscoped.
+_VAR_LABEL_RE = (
+    r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+    r"|[\(\[]\s*{var}\s*:\s*(?=[:*)\]\-\x7b]|$)"
+)
 #: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
 #: forward, so it scopes whatever the projection carries FROM that point.
 _WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
 
 
-def _delete_targets(text: str) -> tuple[list[str], int]:
-    """(deleted variable names, index of the ``DETACH DELETE`` clause, or -1).
+def _delete_clauses(text: str) -> list[tuple[list[str], int]]:
+    """EVERY ``DELETE`` clause as ``(deleted variable names, clause index)``.
 
     Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
-    string/comment cannot become a variable name (#3037).
+    string/comment cannot become a variable name (#3037). #8256: a bare
+    ``DELETE`` is a clause here too — ``DETACH`` is the prefix FalkorDB applies
+    for you, not a different statement.
+
+    #8256 round 2: a statement may carry MORE THAN ONE ``DELETE`` clause
+    (``... DELETE r WITH old ... DELETE old``), and each deletes its own
+    targets. Returning only the leftmost clause let the first one's targets
+    speak for the whole statement — ``MATCH (p:Point {id:$id}) DELETE p WITH p
+    MATCH (m) DETACH DELETE m`` read as a scoped delete and dispatched, where
+    the pre-#8256 ``DETACH``-anchored pattern refused it. Every clause is
+    therefore returned; the verdict is taken over all of them.
+
+    The clause HEAD is matched, and its target list is the text after it
+    bounded by ``_CLAUSE_STOP_RE`` — which lists ``DETACH``/``DELETE``, so one
+    clause's targets can never run into the next clause's. An empty list (a
+    ``DELETE`` with nothing after it) is a real reading, not an absence: the
+    caller treats it as unscoped, so it stays fail-closed.
     """
-    m = _DELETE_CLAUSE_RE.search(text)
-    if m is None:
-        return [], -1
-    tail = m.group(1)
-    stop = _CLAUSE_STOP_RE.search(tail)
-    if stop is not None:
-        tail = tail[: stop.start()]
-    return _VAR_NAME_RE.findall(tail), m.start()
+    clauses: list[tuple[list[str], int]] = []
+    for m in _DELETE_HEAD_RE.finditer(text):
+        tail = text[m.end() :]
+        stop = _CLAUSE_STOP_RE.search(tail)
+        if stop is not None:
+            tail = tail[: stop.start()]
+        clauses.append((_VAR_NAME_RE.findall(tail), m.start()))
+    return clauses
 
 
 #: ``WITH <ident> AS <ident>`` — a re-binding that carries a variable's
@@ -881,7 +950,9 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     Five lexical scoping signals, each anchored to the DELETED variable:
 
     (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
-         DETACH DELETE n``;
+         DETACH DELETE n`` (a BACKTICKED type counts: ``-[r:`extractedFrom`]->``
+         is a label the masker blanked, #8256 — including a MULTI-type or
+         variable-length one, ``(n:`A`:`B`)`` / ``[r:`X`*1..2]``);
     (a') a LABEL PREDICATE on it — ``WHERE n:Point``;
     (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``;
     (c)  a PROPERTY MAP on its own pattern — ``MATCH (n:Point {id:$id})``
@@ -899,32 +970,58 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     the name the pattern actually binds.
     """
     maps = _pattern_property_map_vars(text, delete_at)
-    for name in _scope_names(text, var):
+    # #8256 round 3: the label and WHERE signals are bounded at the DELETE too.
+    # Both used to be read over the WHOLE statement, so a construct AFTER the
+    # clause — ``MATCH (n) DELETE n MATCH (n:Point)`` /
+    # ``MATCH (n) DELETE n MATCH (x) WHERE n.id = $id`` — exempted a delete that
+    # had already removed every node. Nothing that can target a DELETE legally
+    # follows it: a pattern bounds rows before they are deleted, so the bound is
+    # a narrowing (fail-closed) and cannot refuse a real targeted delete.
+    bounded = text[: max(delete_at, 0)]
+    # #9632 review (P1, demonstrated on FalkorDB v4.20.6): the ALIAS signal is
+    # bounded too. ``_scope_names`` follows a ``WITH <src> AS <var>`` chain, and
+    # it was read over the WHOLE statement — so a projection placed AFTER the
+    # clause lent the deleted variable a scoped source name:
+    # ``MATCH (x:Point), (n) DELETE n RETURN x AS n`` deleted all 3 nodes on the
+    # engine while the classifier returned False (dispatched at both L2 call
+    # sites). ``RETURN`` is the one position where ``AS`` binds nothing, and the
+    # label on the SOURCE (``x:Point``) then satisfied the label arm. Same
+    # rounding as round 3: nothing that can target a DELETE legally follows it,
+    # so the bound is fail-open-closing and cannot refuse a real targeted delete
+    # (``MATCH (n:Point {id:$id}) WITH n AS m DELETE m`` stays ALLOWED).
+    for name in _scope_names(bounded, var):
         if name in maps:
             return True
         escaped = re.escape(name)
-        if re.search(_VAR_LABEL_RE.format(var=escaped), text) is not None:
+        if re.search(_VAR_LABEL_RE.format(var=escaped), bounded) is not None:
             return True
-        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", text, re.IGNORECASE) is not None:
+        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", bounded, re.IGNORECASE) is not None:
             return True
         # Only a WITH *before* the DELETE can bound the rows it deletes.
         for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
             if re.search(r"\b" + escaped + r"\b", wm.group(1)) is not None:
                 return True
-        if _where_scopes(text, name):
+        if _where_scopes(bounded, name):
             return True
     return False
 
 
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215/#8256).
 
-    Bulk = contains DETACH DELETE and carries no targeting construct on the
-    DELETED variable itself: a property map on ITS node/relationship pattern, a
-    real WHERE reference to it, or a label/LIMIT scope on it. The verdict is
-    made on structure, not on raw text — comments, string literals, backtick
-    identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
-    ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    Bulk = contains a DELETE — with or without the ``DETACH`` prefix — and
+    carries no targeting construct on the DELETED variable itself: a property
+    map on ITS node/relationship pattern, a real WHERE reference to it, or a
+    label/LIMIT scope on it. The verdict is made on structure, not on raw text —
+    comments, string literals, backtick identifiers and ``CALL { ... }``
+    subqueries are blanked first, so a stray ``{`` in any of them cannot exempt a
+    whole-graph wipe (#3037).
+
+    #8256: ``DETACH`` is NOT part of the test. FalkorDB auto-detaches, so
+    ``MATCH (n) DELETE n`` deletes every node exactly as ``MATCH (n) DETACH
+    DELETE n`` does; requiring the two-word spelling left that whole-graph wipe
+    unclassified on every L2 call site (the guarded handle's ``query`` /
+    ``call_procedure`` and the raw-query lane, where L2 is the only layer).
 
     #3007: a label-scoped / LIMIT-bounded delete (``MATCH (n:GraphEvent) WITH n
     ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
@@ -938,22 +1035,41 @@ def _is_bulk_wipe(cypher: str) -> bool:
     WITH n MATCH (m) DETACH DELETE m`` therefore read as "targeted" and, on the
     raw-query lane where L2 is the only layer, executed a whole-graph wipe on a
     production server graph with no name check and no token.
+
+    #8256 round 2: the per-target rule applies to EVERY ``DELETE`` clause, not
+    to the first one. A statement may carry several (``... DELETE r WITH old
+    ... DELETE old`` is a legal Cypher shape this repo ships), and reading only
+    the leftmost let a scoped first clause vouch for an unscoped second one.
+
+    #8256 round 3 (this review): "every clause" must mean every clause PRESENT,
+    and every signal must be read BEFORE the clause it is supposed to scope.
+    Two holes closed here: (i) a ``DELETE`` inside a ``CALL { ... }`` subquery is
+    blanked by ``_strip_call_subqueries`` and so was never read, letting a
+    scoped sibling clause vouch for it; (ii) the label and WHERE signals were
+    searched over the WHOLE statement, so a construct AFTER the DELETE
+    (``MATCH (n) DELETE n MATCH (n:Point)``) exempted a delete that had already
+    removed every node.
     """
-    # Fast path: the overwhelming majority of statements are reads. A DETACH
-    # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
-    # statement is not a wipe and the scan below is skipped entirely — the
-    # read path pays no more than it did before #3037.
+    # Fast path: the overwhelming majority of statements are reads. A DELETE
+    # clause cannot be MASKED INTO existence (masking only removes text), so a
+    # raw-text miss proves the statement is not a wipe and the scan below is
+    # skipped entirely — a read that never mentions ``delete`` pays nothing
+    # (measured 0.17 µs). #8256 widened the discriminator from ``"DETACH" and
+    # "DELETE"`` to ``"DELETE"``, so a read whose text contains the substring
+    # WITHOUT a clause — ``WHERE t.deleted_at IS NULL`` is the common one — now
+    # pays one mask + one regex scan before the clause search returns None
+    # (measured 3.98 µs). Cheap enough not to special-case; the claim below is
+    # therefore about reads that do not contain the substring, not all reads.
     up_raw = cypher.upper()
-    if "DETACH" not in up_raw or "DELETE" not in up_raw:
+    if "DELETE" not in up_raw:
         return False
-    # The DELETE keyword is read from the masked text (a CALL subquery's
-    # DELETE is still a DELETE; a DETACH DELETE that lives only in a string or
-    # a comment is not a DELETE at all); the TARGETING constructs are read from
-    # the text with CALL subqueries blanked, so a brace or WHERE clause that
-    # lives inside a read-subquery cannot exempt a wipe that sits outside it.
+    # The DELETE clause is read from the masked text (a CALL subquery's DELETE
+    # is still a DELETE; a DELETE that lives only in a string or a comment is
+    # not a DELETE at all); the TARGETING constructs are read from the text with
+    # CALL subqueries blanked, so a brace or WHERE clause that lives inside a
+    # read-subquery cannot exempt a wipe that sits outside it.
     masked = _mask_cypher_text(cypher)
-    up = masked.upper()
-    if "DETACH" not in up or "DELETE" not in up:
+    if _DELETE_HEAD_RE.search(masked) is None:
         return False
     # #3037: masking removes only TERMINATED literals/comments. A malformed
     # statement keeps its quote, and a brace after it would still look like a
@@ -969,8 +1085,26 @@ def _is_bulk_wipe(cypher: str) -> bool:
     # test is exactly the #8215 defect: a property map (or WHERE reference) on a
     # pattern that binds something OTHER than the deleted variable says nothing
     # about what the DELETE removes.
-    targets, delete_at = _delete_targets(text)
-    if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
+    # #8256 round 2: EVERY clause's every target must be scoped — a later
+    # clause is a delete too, so a wipe there is still a whole-graph wipe. An
+    # empty target list (``DELETE`` followed by a clause keyword) is unscoped,
+    # so it stays fail-closed.
+    clauses = _delete_clauses(text)
+    # #8256 round 3: ``_strip_call_subqueries`` blanks a whole ``CALL { ... }``
+    # block, so a DELETE inside one is gone from ``text`` while the existence
+    # check above still saw it in ``masked`` (it is a DELETE, just an unread
+    # one). With round 2's ``all`` semantics a scoped SIBLING clause then
+    # vouched for the subquery's wipe:
+    # ``MATCH (a:Point {id:$a}) WITH a CALL { MATCH (m) DELETE m } DELETE a``
+    # read as targeted and dispatched on a production graph. Fewer clauses read
+    # than are present means an unread clause — fail closed, which is the
+    # conservative direction the strip's own docstring already claims.
+    if len(clauses) != len(_DELETE_HEAD_RE.findall(masked)):
+        return True
+    if clauses and all(  # noqa: SIM103
+        targets and all(_var_is_scoped(text, v, delete_at) for v in targets)
+        for targets, delete_at in clauses
+    ):
         return False
     return True
 
@@ -2808,11 +2942,22 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     variable the DELETE names (``_var_is_scoped``), including through a
 #     ``WITH <src> AS <dst>`` alias, so a targeting construct on another
 #     pattern no longer makes a whole-graph wipe look scoped.
-#     REMAINDERS (still open):
-#       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
-#         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
-#         — tracked: #8256 (pre-existing; widening the classifier is its own
-#         scope decision).
+#     The REMAINDERS list that used to close this note is now EMPTY: its last
+#     entry (a bare ``DELETE`` was not classified at all) is the #8256 fix
+#     recorded directly below.
+#   * ``_is_bulk_wipe`` also UNDER-classified a BARE ``DELETE`` (FIXED by
+#     #8256): the clause pattern required the two-word ``DETACH DELETE``
+#     spelling, so ``MATCH (n) DELETE n`` — which FalkorDB auto-detaches into
+#     the same whole-graph wipe — returned False and reached a production
+#     server graph on every L2 lane. ``DETACH`` is now an OPTIONAL prefix, and
+#     the clause is read at clause position only (``(?<![\w.$:])`` /
+#     ``(?!\s*:)``, the same convention ``_WRITE_CLAUSE_RE`` below already
+#     uses), so a property named ``delete``, a ``:DELETE`` label or a
+#     ``{delete: …}`` map KEY cannot invent one. Widening the clause made one
+#     latent gap load-bearing and it is closed in the same change: a
+#     BACKTICK-quoted type is a label the masker blanks
+#     (``-[r:`extractedFrom`]->`` — session_source_migration's move helpers),
+#     so ``_VAR_LABEL_RE``'s second arm reads the residual ``[r: ]`` shape.
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -5097,13 +5242,14 @@ class _GuardedGraph:
     self.g itself, not FalkorProjection.query(). Restored in #49 Phase 2 after
     the v3.0 rewrite (0f9e6a2) dropped it from this live module.
 
-    Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
+    Intercepts a bulk DELETE — with or without the ``DETACH`` prefix (#8256), and
+    with no property map and no real WHERE on the deleted variable — and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
     This is L2 of the two-layer guard (see the module comment above): it is
     unconditional — there is deliberately NO bypass attribute. It is also the
     ONLY layer on the raw-query lane (``proj.g.query`` / ``query``), where a
-    bulk DETACH DELETE on an embedded or test-named graph is allowed through
+    bulk DELETE on an embedded or test-named graph is allowed through
     without a token. The rebuild lane additionally requires L1 —
     ``FalkorProjection._wipe_all_nodes()`` asserts the caller's explicit
     per-call opt-in BEFORE reaching here.
@@ -5635,13 +5781,14 @@ class _GuardedGraph:
         journal-backed/server projection (an unarmed EMBEDDED one keeps the
         pre-#9209 pass-through, which L2 itself exempts).
 
-        ⛔ AND L2'S OWN BOUNDARY APPLIES HERE UNCHANGED: it classifies a BULK
-        ``DETACH DELETE`` (``_is_bulk_wipe``), so a bare-DELETE procedure string
-        (``CALL db.labels() MATCH (n) DELETE n //``) is NOT refused by this verb
-        — exactly as the same bare DELETE is not refused through
-        ``proj.g.query``. That is the pre-existing scope of L2, pinned by
-        ``test_the_L2_classifier_still_requires_DETACH`` so a reader of this
-        docstring does not have to guess how wide the verb is.
+        ⛔ AND L2'S OWN BOUNDARY APPLIES HERE UNCHANGED: it classifies a bulk
+        ``DELETE`` whether or not the ``DETACH`` prefix is written
+        (``_is_bulk_wipe``), so a wipe-BEARING procedure string
+        (``CALL db.labels() MATCH (n) DELETE n //``) is refused by this verb
+        exactly as ``MATCH (n) DETACH DELETE n`` is — while a TARGETED delete
+        (``PROCEDURE ... MATCH (n:Point {id:$p}) DELETE n``) stays dispatchable.
+        #8256 made the bare spelling classifiable; before it, a bare-DELETE
+        procedure string reached the graph on every L2 call site.
         """
         statement = _call_procedure_statement(procedure, args=args, emit=emit)
         if statement is None:
@@ -6995,6 +7142,44 @@ def _writable_id(val) -> bool:
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
+def _writable_container_id(val) -> bool:
+    """`_writable_id` PLUS the blank refusal — the `contains_session` gate.
+
+    The extra clause is MEASURED, not cosmetic, and it belongs here rather
+    than only in the record projection (#9553 review P2), because a rule that
+    lives in one projection makes the same journal rebuild to two different
+    graphs.
+
+    A whitespace-only string is a broken identity on this engine (#9599): with
+    the `:Session(id)` RANGE index `_ensure_indexes` creates, FalkorDB's
+    equality filter does not match it AT ALL — `MATCH (s:Session) RETURN s.id`
+    lists `'   '`, `MATCH (s:Session {id:'   '})` returns 0, and a re-`MERGE`
+    creates a SECOND `:Session` with the same id instead of matching the first.
+    So `_link_session` used to mint a duplicate container and then fail its own
+    `MATCH … (s:Session {id:$sid})`, landing NO `contains_session` edge — while
+    the record projection (Postgres, no such quirk) WOULD have landed the row.
+    The embedded engine is worse still: it duplicates the node with no index at
+    all.
+
+    ⛔ SCOPE, so this is not over-read as a general sanitizer: the refusals are
+    `_writable_id`'s plus BLANK only. A padded-but-real id (`'  s1  '`) is a
+    legitimate identity and is NOT refused here, even though #9599 affects it
+    the same way — that loss is the engine's to fix, and ducking it in one
+    projection would not stop the engine duplicating nodes on the other paths
+    (`sdk.py`'s raw MERGEs, `_link_source`, …).
+
+    No engine in this repo can round-trip a whitespace-only id, so neither
+    projection may claim one: refusing it here is what makes the journal fold
+    and the record fold agree (`record_projection._writable_endpoint_id`
+    mirrors this predicate value-for-value, pinned by
+    `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
+    `_link_session` becomes a plain `_writable_id` caller again once #9599 is
+    fixed — this gate (`_writable_container_id`) is the stopgap, the index
+    defect is the cause.
+    """
+    return _writable_id(val) and bool(val.strip())
+
+
 def _log_identity_skip(what: str, value, label: str = "identity", *,
                        event_id: str | None = None, where: str = "",
                        absent_is_ordinary: bool = True,
@@ -7063,14 +7248,39 @@ def _log_identity_skip(what: str, value, label: str = "identity", *,
                                  where=where, drops_record=drops_record)
     # The cause comes from `IdentitySkip.describe()`, NOT a sentence written
     # here: it names the refused SHAPE (a non-str / a NUL-bearing str / a
-    # lone-surrogate-bearing str), so the "true cause" claim holds for every
-    # value `_writable_id` refuses. Asserting "NUL/lone-surrogate bearing" for
-    # a non-str id was false for a live journal shape (#8840 review P3).
+    # lone-surrogate-bearing str / a BLANK str — the last one refused by
+    # `_writable_container_id`, see `_unwritable_shape`), so the "true cause"
+    # claim holds for every value `_writable_id` refuses. Asserting
+    # "NUL/lone-surrogate bearing" for a non-str id was false for a live journal
+    # shape (#8840 review P3).
+    #
+    # ⛔ THE CONSEQUENCE IS CONDITIONAL TOO (#9553 review). Most of this reporter's
+    # call sites do not drop the record — they refuse ONE derived edge or stub
+    # AFTER the record itself was written (`_link_session` is one: the Point is in
+    # the graph and only the CONTAINS edge is missing). A sentence asserting "the
+    # record is dropped" at those sites is the #8018 class this module cites
+    # throughout, and it contradicted `consistency`'s own `reason` for the same
+    # skip.
+    #
+    # ⚠️ AND THE FLAG ITSELF IS NOT YET TRUE EVERYWHERE. Cycle 3 of the same review
+    # found 8 CREATION-ANCHOR sites that drop the whole record without passing
+    # `drops_record=True` (SubjectAdded/Subject id, ObjectRegistered, DocumentCreated,
+    # EventRecorded, SourceCreated/SourceVersioned in `projection/entities.py`). So
+    # this message states the consequence only where the caller DECLARES it, and
+    # otherwise says only what is certain about a refused identity — it must not
+    # guess "the record still folds" either, because that is false at those 8. The
+    # flag gap is recorded on #8702 (recurrence, with the 8 sites named); fixing it
+    # also repairs
+    # `recover_from_log`'s `applied`/`identity_skipped` split, which reads the same
+    # flag, so it is not this reporter's call to make.
     logger.warning(
-        "%s#7369/#8702: skipping %s — %s; the record is dropped rather "
-        "than reaching FalkorDB and aborting a replay that has already wiped "
-        "the graph%s",
+        "%s#7369/#8702: skipping %s — %s; %s%s",
         f"{where}: " if where else "", what, entry.describe(),
+        "the record is dropped rather than reaching FalkorDB and aborting a "
+        "replay that has already wiped the graph"
+        if drops_record else
+        "nothing is written for it — the caller decides whether the record "
+        "itself survives",
         f" (event_id={event_id})" if event_id else "",
     )
 
@@ -11169,15 +11379,57 @@ class FalkorProjection(
         # boundaries reject the key too, as the fail-closed backstop).
         contains_session = (
             event.get("contains_session") if isinstance(event, dict) else None)
+        # #8843 review cycle 4: read the discriminator from the RAW envelope too.
+        # `_norm` is `{**ev, **ev["point"]}`, so a NESTED `point` payload carrying
+        # its own `type`/`point` key SHADOWS a well-formed envelope — and this
+        # guard then fires on a value the envelope never had. Recording that as
+        # "the envelope is malformed" would name a cause that is FALSE for the
+        # record (the #8018 class). Same reason `contains_session` is read above,
+        # one field over.
+        raw = event if isinstance(event, dict) else {}
         ev = self._norm(event)
         t = ev.get("type")
         if not isinstance(t, str):
             # #331: malformed event (no/non-string 'type') — skip, don't crash.
             # Visible at the I/O boundary: silent skips corrupt recovery
             # accounting (recover_from_log counts "did apply raise", code-review r2).
+            # #8843: the log line is NOT the record — the skip is RECORDED into
+            # the run's collector so a replay boundary can COUNT it. Without
+            # this the record was dropped here while `recover_from_log`'s
+            # per-record `else` arm incremented `applied`, so a journal of
+            # `[healthy PointAdded, {"event_id": "ev-x", "type": null}]`
+            # reported a faithful, complete recovery over a record it had
+            # dropped. Recorded HERE, at the guard, so within the replay
+            # accounting path there is one RECORDER, not a re-derived predicate.
+            # ⛔ EVERY field below is read from `raw` (the ENVELOPE), never from
+            # `ev` (the `_norm` splice `{**ev, **ev["point"]}`)
+            # — review cycle 6. The clause's whole purpose is telling an
+            # operator WHICH journal line to repair, and `ev`'s `event_id` can be
+            # a nested payload's: a record with envelope
+            # `event_id="TRUE-ID"` and `point.event_id="FORGED-ID"` reported
+            # `(event_id='FORGED-ID')` with the real id nowhere in the message.
+            # Same reason `type`/`point` above are read from `raw`.
             logger.warning(
                 "FalkorProjection.apply: skipping malformed event with "
-                "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
+                "missing/non-string 'type' (event_id=%s)", raw.get("event_id"))
+            if isinstance(raw.get("type"), str):
+                record_malformed_envelope(
+                    "journal record", MALFORMED_SHADOWED,
+                    field="type", field_present=True, value=t,
+                    envelope_value=raw.get("type"),
+                    event_id=raw.get("event_id"),
+                    where="FalkorProjection.apply")
+            else:
+                record_malformed_envelope(
+                    "journal record", MALFORMED_MISSING_TYPE,
+                    # the ENVELOPE value, not the splice's: both `raw` and a
+                    # nested payload can carry a non-str `type`, and `t` is the
+                    # spliced one (measured `type: 123` reported as `None`;
+                    # cycle 7).
+                    field="type", field_present="type" in raw,
+                    value=raw.get("type"),
+                    event_id=raw.get("event_id"),
+                    where="FalkorProjection.apply")
             return
         if t in ("PointAdded", "OperatorAdded"):
             # #331 (review r3): ev.get — missing 'point' key handled by the
@@ -11188,7 +11440,55 @@ class FalkorProjection(
                 # (issue #325)
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with non-dict point "
-                    "(event_id=%s)", t, ev.get("event_id"))
+                    "(event_id=%s)", t, raw.get("event_id"))
+                # #8843: recorded, not only warned — see the #331 site above.
+                # `field_present` comes from the RAW record, never from the
+                # value AND never from the splice: `ev.get("point")` is `None`
+                # both for an absent key and for an explicit `point: null`, and
+                # `ev` can carry a NESTED payload's key at a site where the
+                # envelope has none (review cycle 6 — `"point" in ev` reported a
+                # present-but-wrong value for a record whose envelope had no
+                # `point` key at all).
+                # A RAW dict `point` whose nested payload shadows it into a
+                # non-dict is its own cause (review cycle 4), not "malformed
+                # point" — the envelope was fine.
+                _raw_t = raw.get("type")
+                if isinstance(raw.get("point"), dict):
+                    record_malformed_envelope(
+                        # ⛔ The ENVELOPE's own discriminator when it carries
+                        # one — never `t`, which on this branch is the `_norm`
+                        # splice and can be the PAYLOAD's `type` (review cycle
+                        # 8). Measured: envelope `type: "PointAdded"` + payload
+                        # `type: "OperatorAdded"` + `point: "collision"`
+                        # rendered "OperatorAdded: … the envelope record is
+                        # well-formed" — naming the payload's family while
+                        # asserting the envelope was fine, in the one sentence
+                        # that exists to prevent exactly that (#8018).
+                        # ⛔ And the `else` arm must NOT fall back to `t`
+                        # either (cycle 9): when the envelope has no usable
+                        # `type` of its own, `t` IS the payload's, so the same
+                        # falsehood returned through the fallback — with the
+                        # "envelope is well-formed" claim now plainly false (its
+                        # `type` is None). An unnamed family is honest; a wrong
+                        # one sends the operator to the wrong record.
+                        (_raw_t if isinstance(_raw_t, str) else "journal record"),
+                        MALFORMED_SHADOWED,
+                        field="point", field_present=True,
+                        envelope_value=_raw_t,
+                        # the COLLIDING value — `raw["point"]["point"]`, the
+                        # nested key `_norm` splices over the payload — not
+                        # `p` (that is the whole payload, embedding and all)
+                        # and not `raw.get("point")` (identical to `p`, so the
+                        # report compared a value against itself; cycle 5).
+                        value=raw["point"].get("point"),
+                        event_id=raw.get("event_id"),
+                        where="FalkorProjection.apply")
+                else:
+                    record_malformed_envelope(
+                        t, MALFORMED_NON_DICT_POINT,
+                        field="point", field_present="point" in raw, value=p,
+                        event_id=raw.get("event_id"),
+                        where="FalkorProjection.apply")
                 return
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
