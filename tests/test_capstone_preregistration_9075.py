@@ -1477,6 +1477,14 @@ _EXPECTED_AGGREGATE_MARKERS = ("needs.*.result", "failure")
 #: `python3 -c "import json,hashlib,yaml; w=yaml.safe_load(open('.github/workflows/python-ci.yml'));
 #: job='changes'; print([(s.get('uses') or s.get('name'), hashlib.sha256(json.dumps(s,sort_keys=True,
 #: ensure_ascii=False).encode()).hexdigest()) for s in w['jobs'][job]['steps']])"`
+#:
+#: Re-cut history — the digest is over the WHOLE definition, so every one of these is a deliberate
+#: re-cut, never a refresh-to-green. Append a line when you re-cut, or the next stale digest is
+#: indistinguishable from a silencing edit somebody rubber-stamped:
+#:   #9617 — `Tiered selection` + `Emit push matrix (#1472/#6135)`, from #9542 (#9539): the leg set
+#:           is now read from `tools/ci_selection.slow_leg_files()` instead of the workflow's own
+#:           matrix, and `slow_matrix` is emitted to `$GITHUB_OUTPUT`. No `$GITHUB_PATH`/
+#:           `$GITHUB_ENV` write, no exit-code swallowing — the sibling-shim check above stays quiet.
 _GATE_SENTINEL = "<the gate step — pinned by its own allow-list>"
 _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
     "changes": (
@@ -1487,9 +1495,9 @@ _EXPECTED_JOB_STEPS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Install pyyaml",
          "f3950abdebf4f38e23e27bdc3a983fe91bafd42478e7ec5e5a36d8718ff6d516"),
         ("Tiered selection",
-         "e0b31d301e99354f5257473d6dc6e225de34b957754c72fcb519961ba42a99bd"),
+         "6117c2a5b9988a212d952aa88ab48ee0104d40a72fb87969a670a7b5298c6e8b"),
         ("Emit push matrix (#1472/#6135)",
-         "b1c6723eee1b851905c2485f4f91c4978df8f36eaf159449b49914c0fee38c84"),
+         "749418a766ab2daf0a0f3d04b2003033ac3c16481dd333c6f0fa71e0a0c340b7"),
         ("Tier-2 duration split (#1473)",
          "b91b712a641bfdae0b02064ecdbee016bf40c87b4f02a06c34d28f3d3dfd29cb"),
         ("Capstone pre-registration gate — the ordering half (#9075)", _GATE_SENTINEL),

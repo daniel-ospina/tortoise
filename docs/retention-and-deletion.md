@@ -263,6 +263,52 @@ existing delete paths.
 **not** user content and **not** a deletion promise, so it is exempt from the
 "link or be a named constant" rule.
 
+**The purge rides the read surface (#9576).** There are two doors to this
+retention: the hosted sweeper (`hosted_api._sweep_events`) purges on its own
+schedule, and a LAZY, interval-gated pass runs inside `TortoiseSDK.poll_events` —
+which is what the `tortoise_events_poll` MCP tool and the REST events poll call.
+That tool is `readOnlyHint: true` and needs only `graphs:read`, so a read-only key
+can cause a `DETACH DELETE`. That is deliberate and recorded, not an oversight —
+and the sweeper is the strongest reason it is not alarming: the deletion happens on
+a schedule anyway, so a poll triggering it is not the poll *adding* a deletion.
+
+> **OVERRIDES:** `readOnlyHint: true` ⇒ the call deletes nothing — the poll
+> purges `:GraphEvent` rows the store owns, on a timer, idempotently. It also
+> overrides #4122's `maintenance` default (`read-low`/`write-high`: a confined,
+> idempotent, derived-value write is tiered `maintenance`): this deletion is
+> system-owned retention, not a refreshed derived value, and `maintenance` would
+> drop `readOnlyHint` on a tool agents poll in a loop — a confirmation prompt per
+> poll.
+
+The alternatives are worse for the caller: declaring a write would take a
+subscription feed away from `graphs:read` keys, and dropping the read hint would
+put a confirmation prompt in front of every poll of a tool agents poll in a loop.
+The delete is confined to the store's own bookkeeping (nothing here is replayed
+by a rebuild) and is idempotent, which is what keeps the departure narrow. A gated
+purge also refreshes the `(:GraphEventMeta).first_seq` watermark
+(`_refresh_first_seq`) — a second, non-deleting write on the same read path, and
+system-owned for the same reason; the recorded reason at the registry entry names
+both.
+
+The decision is checkable: the carve-out is declared in
+`tests/tool_surface_capabilities.py` → `RETENTION_CARVEOUTS` (with the
+out-of-boundary mutation it covers, `OUT_OF_BOUNDARY_MUTATORS`), the reason sits
+at the registry entry in `tortoise/tool_registry.py`, and
+`TestReadTierCannotHideAnOutOfBoundaryWrite` fails if the poll moves to a writing
+tier, if it stops reaching the purge, or if any OTHER reading-tier tool (`read`
+**or** `maintenance`) reaches one of the mutations declared there without a
+carve-out. A NEW cross-module mutation
+cannot be auto-detected (that invisibility is the whole #9576 gap), so it must be
+added to `OUT_OF_BOUNDARY_MUTATORS` with the code that introduces it — the arm
+enforces the declaration, not the discovery. One bound is deliberate and recorded:
+the carve-out is keyed on the TOOL, not the `(tool, mutation)` pair, so if the poll
+ever reached a *second* declared out-of-boundary mutation the entry would stay
+green and its reason would silently drift — re-read the reason when the reach
+widens (a `(tool, op)` key is the fix if that ever happens). Re-tier the poll deliberately or not
+at all: a move to a writing tier must delete the carve-out with it, a move to
+`maintenance` keeps it (that tier must still declare the deletion), and either
+re-tier fails the ruling pin `test_the_read_classification_this_issue_asked_about`.
+
 ## A different axis: OAuth credential hygiene
 
 `tortoise/oauth.py` `OAUTH_ACCESS_RETENTION_S` / `OAUTH_REFRESH_RETENTION_S` /

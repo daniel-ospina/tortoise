@@ -4273,8 +4273,7 @@ class _EntityHandlers:
             # very defect review cycle 4 removed from the guard: with a
             # non-metered sibling listed first the advisory went missing, so a
             # dropped demotion went back to being silent (#5140 cycle 5).
-            from tortoise.quota import (is_metered_document_kind,
-                                        stored_source_document_kinds)
+            from tortoise.quota import is_metered_document_kind, stored_source_document_kinds
             _metered_dks = [k for k in stored_source_document_kinds(self.g, did)
                             if is_metered_document_kind(k)]
             if _metered_dks:
