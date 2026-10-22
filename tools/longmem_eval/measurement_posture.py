@@ -27,6 +27,20 @@ mechanics (which outcomes exist, whether the arm was requested).
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter BEFORE the imports below — a module-level
+# 3.11+-only import would fail first and read as "this tool is broken" rather
+# than "your interpreter is too old" (D9 shape, `tests/test_entry_point_python_
+# guard.py` reds without it).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # A library module with no CLI: the refusal names the floor and the
+    # interpreter it actually got, and deliberately offers NO invocation
+    # (there is none to run — `tests/test_entry_point_python_guard.py`).
+    raise SystemExit(
+        f"tools/longmem_eval/measurement_posture.py requires Python >= 3.12 "
+        f"(got {sys.version_info[0]}.{sys.version_info[1]})")
+
 from typing import Any
 
 #: The belief layer WAS activated for the run (every question's EP pass ran).
