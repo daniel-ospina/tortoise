@@ -34,7 +34,7 @@ tree that a re-run must re-verify). A step with no measurement is `NOT COVERED` 
 | `05-dashboard-copy-tests.log` | steps 3/10's copy constants (`node --test` over the pure modules; no `node_modules` needed, 38 passed). |
 
 Measured at `git HEAD 653980445f` (2026-10-22), with the census (`02`) re-run at
-`88358d152` after its rows were made to measure the clause they print; deployed
+`b39c70d8c` after its rows were made to measure the clause they print; deployed
 `commit_sha 81f5594dce` — an
 ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it
 (`git rev-list --count 81f5594dce..2bf86487c1` → `39`; deploy lag, not a stale or

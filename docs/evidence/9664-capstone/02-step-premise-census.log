@@ -1,6 +1,6 @@
-# 02 — step-premise census (no browser, no ChatGPT, no tenant) — 2026-10-22T21:47:06Z
+# 02 — step-premise census (no browser, no ChatGPT, no tenant) — 2026-10-22T22:14:21Z
 # command: .venv/bin/python docs/evidence/9664-capstone/probes/step_premise_census.py
-# git HEAD: 88358d15243a984ce82ee796dffb74516a5b355a
+# git HEAD: b39c70d8cf5e457d40ac2308d73d9853731a44e0
 
 #9664 capstone — step-premise census
 repo=/Users/danielospina/Documents/GitHub/tortoise/.worktrees/tm-9664  base=https://api.premiselabs.co
@@ -14,7 +14,7 @@ step    premise                                                         measured
 7       tool `tortoise_list_graphs` is on the MCP surface               PRESENT (registry holds 81 live tools)
 8       tool `tortoise_create_point` is on the MCP surface              PRESENT (registry holds 81 live tools)
 9       tool `tortoise_file_decision` is on the MCP surface             PRESENT (registry holds 81 live tools)
-6       the surface has ANY skill-loading tool                          NONE
+6       no registered tool NAME contains `skill`                        CONFIRMED (0 of the 81 live names)
 1       `team-named` is auto-satisfied at org-create, never an agent act  CONFIRMED (org-create init writes the edge=True, follows the flag=True; state._NON_AGENT_STEPS=True)
 5       `connection-written` is in a completion gate                    NO (absent from self, build, compact)
 5       `connection-written` is in NO completion gate, and IS a client checkpoint (not a server observation)  CONFIRMED (gates requiring it: NONE; checkpoint-writable=True; excluded from agent steps=YES)
