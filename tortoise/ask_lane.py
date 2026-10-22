@@ -393,8 +393,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         point's own source chunks/turns) fires on real graphs. Residual: the
         two DEGRADED fallback tiers still carry none (their projections are
         deliberately lean — see the ``#3804 KNOWN LIMITATION`` note in
-        ``sdk.py``), so on a degraded read only pass 1 (cross-item near-dupe
-        statements) can collapse. Pre-#8658 measured cost of the inert leg: 12
+        ``sdk.py``). What is inert on that tier is pass 2's OWN-SOURCE-INTO-ANCHOR
+        collapse; pass 2's standalone same-session verbatim dedup (containment /
+        byte-identity, which keys on neither ``quote`` nor ``source_turn_id``) and
+        all of pass 1 still fire. Pre-#8658 measured cost of the inert leg: 12
         window slots for one flooded fact instead of 2
         (docs/runbook/8043-slice-a-t-gate.md §2, arm
         ``provenance_free_assembly``). The no-dupe byte-identity above is

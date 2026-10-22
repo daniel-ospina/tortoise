@@ -27,8 +27,9 @@ Three primary arms on the SAME C2-shaped pool (item-bound 40, the wave's
 window), plus two variant arms measured on it too —
 ``post_2978_assembly_value_marked`` (value-critical claims marked, which makes
 the value-MARK CENSUS measurable — retention is already 4/4 unmarked) and
-``provenance_free_assembly`` (provenance stripped, the product ask-lane shape —
-§SCOPE NOTE). Five arm records in the receipt, not three:
+``provenance_free_assembly`` (provenance stripped — the PRE-#8658 product
+ask-lane shape, and still the shape of a DEGRADED fallback read — §SCOPE NOTE).
+Five arm records in the receipt, not three:
 
   ``pre_2978``          the shipped ``assemble_context`` with the pre-#2978
                         admission predicate restored (``_has_claim_text``

@@ -24,7 +24,10 @@ What this module pins, and what makes each test FAIL:
    provenance emits NONE of the keys (absent, not empty). This is the additive
    present-only contract: widening the read must not hand every legacy row four
    empty fields.
-3. ``test_the_points_own_source_chunk_now_collapses_into_one_slot`` — the
+3. ``test_the_first_source_turn_is_a_turn`` — the same-source-turn leg with the
+   index ``0`` (the FIRST turn, 0-based). Hermetic, no graph. FAILS on
+   ``str(h.get("source_turn_id") or "")``, which read turn 0 as "no turn id".
+4. ``test_the_points_own_source_chunk_now_collapses_into_one_slot`` — the
    product consequence, on hits the product path itself produced: the point and
    its own raw source chunk package into ONE slot (with the chunk kept as a
    verbatim ref) instead of two. FAILS on the pre-fix read, where Pass 2 is inert
