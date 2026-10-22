@@ -4001,7 +4001,11 @@ def _refuse_document_kind_demotion(stored_kinds, props, *, surface: str,
     stated truthfully because the earlier wording claimed a mechanism the code
     did not implement. The camelCase `documentKind` is the key the meter reads,
     so refusing a demotion through it is the demotion guard itself (a promotion
-    or a metered -> metered retarget still lands). The snake_case
+    or a metered -> metered retarget still lands). One asymmetry belongs with
+    it: `documentKind=None` is a REFUSAL on `update_entity` (its write is
+    `SET n += $p`, where a null REMOVES the property) and a NO-OP on
+    `create_source` (the passthrough skips null values, so nothing is written)
+    — hence `none_demotes`. The snake_case
     `document_kind` is INERT as a node property (no reader in the tree reads
     `s.document_kind`; the meter reads `s.documentKind`), so it cannot demote by
     itself — it is refused for EVERY value, because the only thing a snake

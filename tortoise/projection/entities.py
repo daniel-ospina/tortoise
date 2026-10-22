@@ -4260,16 +4260,22 @@ class _EntityHandlers:
         # is gated on the ONLY demoting value, so the fingerprint path pays
         # nothing: `document_kind` is `'transcript'` on ~no document write.
         if ev.get("document_kind") == "transcript":
-            _stored_dk = self.g.query(
-                "MATCH (s:Source {url:$id}) RETURN s.documentKind",
-                params={"id": did}).result_set
-            if _stored_dk and _stored_dk[0][0] not in (None, "transcript"):
+            # ⛔ EVERY node the MERGE can reach, through the ONE reader — not
+            # `rows[0]` of an inline query. A first-row read here reproduced the
+            # very defect review cycle 4 removed from the guard: with a
+            # non-metered sibling listed first the advisory went missing, so a
+            # dropped demotion went back to being silent (#5140 cycle 5).
+            from tortoise.quota import (is_metered_document_kind,
+                                        stored_source_document_kinds)
+            _metered_dks = [k for k in stored_source_document_kinds(self.g, did)
+                            if is_metered_document_kind(k)]
+            if _metered_dks:
                 logger.warning(
                     "#5140: `document_kind='transcript'` on %s DROPPED — the "
                     "node is a metered document (documentKind=%r) and its "
                     "genre cannot be demoted out of the `documents` cap. "
                     "Delete the document and re-ingest it if it really is a "
-                    "transcript.", did, _stored_dk[0][0])
+                    "transcript.", did, _metered_dks[0])
         # #5422: the document's contentHash — the version anchor on the
         # extraction path. None (absent key, or a metadata-only re-emit) is
         # the preserve sentinel: the clause below must never clear an anchor
