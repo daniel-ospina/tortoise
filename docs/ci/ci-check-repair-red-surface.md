@@ -105,14 +105,17 @@ holds the **workflow** end, in two different ways:
   earlier, which is why it is banned alongside `continue-on-error` (the shape
   `tests/test_ai_review_gate_contract.py` already uses for the same reason);
 - **behaviour** — the step's own shell is EXECUTED against a stubbed interpreter, and must hand back
-  **every** non-zero class it is given (`1`, `2`, `3`) and `0` for a clean run — not just the two
-  spellings a reviewer would probe by hand. This is the half a text pin cannot do:
+  every non-zero class the tool can produce: `1` when the tool exits `1`, `2` when it exits `2`
+  (`_could_not_measure` is the single exit-2 path, and `workflow_state()` maps it to
+  `ran-not-succeeded` just like exit 1, so it is the coverage signal too — 5 of the 73 reds above),
+  and an unknown future class as well, which must default to propagate rather than green. `0` when it
+  exits `0`. This is the half a text pin cannot do:
   `declare -i rc=0` *after* the assignment, `[ "$rc" -ne 0 ] && rc=0` and `printf -v rc 0` all force
   the exit code while leaving `rc=${PIPESTATUS[0]}` and the literal `exit "$rc"` intact. So does a bare
   `rc=0` before the assignment — an assignment is itself a simple command and resets `PIPESTATUS`,
-  which is exactly why that edit must be caught rather than reasoned about. Probing only `1` is what
-  let `[ "$rc" = 2 ] && rc=0` — the natural way to green the "measurement failure" class under arm
-  (B) — read **green**, so every non-zero class is probed;
+  which is exactly why that edit must be caught rather than reasoned about. Probing exit 1 alone is
+  not enough: a `[ "$rc" = 2 ] && rc=0` greens the whole exit-2 class while every exit-1 assertion
+  still passes;
 - **the invocation** — the stub records its argv, and the step must still call
   `tools/ci_check_repair.py --apply`. Without `--apply` the tool exits `0` for the state this run
   exists to report, so an exit-code-only probe greens on a deletion;
@@ -133,7 +136,7 @@ unconditionally makes the fallback permanently idle while every classifier asser
 
 Mutation-tested, each vector one at a time: job-level and step-level `continue-on-error`, job-level and
 step-level `if:`, `rc=0` after the pipeline, `declare -i rc=0` placed **after** the assignment,
-`[ "$rc" -ne 0 ] && rc=0`, `printf -v rc 0`, `[ "$rc" = 2 ] && rc=0` (the single-class green),
+`[ "$rc" -ne 0 ] && rc=0`, `printf -v rc 0`, `[ "$rc" = 2 ] && rc=0` (the exit-2 class),
 `--apply` dropped from the step, and `workflow_covered()` returning `0` — all red; a renamed step
 stays green. Placement matters in both directions: `declare -i rc=0` **before** the pipeline is
 harmless (the later `rc=${PIPESTATUS[0]}` overwrites it) and correctly stays green — only the

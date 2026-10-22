@@ -463,9 +463,13 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
       * STRUCTURE — no key may green the run without the step succeeding
         (`if:` at JOB or step level, `continue-on-error` at either), because a
         skipped or tolerated job/step concludes `success`;
-      * BEHAVIOUR — the step must hand GitHub the TOOL's exit code. Asserted by
-        RUNNING the step script against a stubbed interpreter, not by matching
-        its text.
+      * BEHAVIOUR — the step must hand GitHub the TOOL's exit code, for EVERY
+        non-zero class the tool can produce (1 = needs a local fallback, 2 =
+        could not measure) and for an unknown future one. Asserted by RUNNING the
+        step script against a stubbed interpreter, not by matching its text: a
+        text pin cannot see `rc=0`, and a probe of exit 1 alone cannot see
+        `[ "$rc" = 2 ] && rc=0`, which greens the exit-2 class the record counts
+        as 5 of its 73 reds.
 
     The launcher half is pinned by
     `test_the_launcher_acts_on_a_failed_window_and_stays_idle_on_a_green_one`
@@ -501,14 +505,33 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
             f"succeeding — the #8254 fail-open, silently (#9365)")
 
     # Behaviour: the exit code the step hands GitHub, whatever the shell spelling.
+    #
+    # EVERY non-zero class, not just exit 1. `tools/ci_check_repair.py` has two —
+    # 1 (a PR needs a user credential) and 2 (`_could_not_measure`, the single
+    # exit-2 path) — and `workflow_state()` maps both to `ran-not-succeeded`, so
+    # both ARE the coverage signal; the record measures 5 of its 73 reds as exit 2.
+    # Probing exit 1 alone let `[ "$rc" = 2 ] && rc=0` green that entire class
+    # while this test stayed green: the window then reads `covered`, the local
+    # fallback goes idle, and nobody produces the required checks (#9365 review).
+    #
+    # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
+    # class must default to propagate, never to green. If a future arm greens one,
+    # the coverage signal has to move in the same commit — that is what this
+    # assertion says, and it is why it is not a plain (1, 2) enumeration.
     script = step["run"]
     # EVERY non-zero class, not the two spellings a reviewer would probe by hand.
-    # The tool's own contract is 1 = "a PR still needs a repair this credential
-    # cannot perform" and 2 = "could not measure" (`tools/ci_check_repair.py`
-    # CLI contract), and the record measures BOTH on main (68 exit-1, 5 exit-2).
-    # Probing only `1` left `[ "$rc" = 2 ] && rc=0` — the natural way to green
-    # the "measurement failure" class under #9365 arm (B) — reading GREEN, which
-    # is the fail-open this whole test exists to refuse (#9365 re-review).
+    # `tools/ci_check_repair.py` has two — 1 (a PR needs a user credential) and 2
+    # (`_could_not_measure`, the single exit-2 path) — and `workflow_state()` maps
+    # both to `ran-not-succeeded`, so both ARE the coverage signal; the record
+    # measures 5 of its 73 reds as exit 2. Probing exit 1 alone let
+    # `[ "$rc" = 2 ] && rc=0` green that entire class while this test stayed
+    # green (#9365 re-review).
+    #
+    # 3 is not a class the tool emits today, and it is probed ON PURPOSE: a NEW
+    # class must default to propagate, never to green. If a future arm greens one,
+    # the coverage signal has to move in the same commit.
+    #
+    # A FRESH tmp_path per call: the stub journals its argv into it.
     for tool_rc in (1, 2, 3):
         r, argv, summary_body = _run_repair_step(script, tmp_path / f"rc{tool_rc}", tool_rc)
         assert not r.stderr, (
@@ -517,9 +540,10 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
             "would exit 1 and the `must exit 1` arm below would pass without "
             "rc ever being propagated (#9365 review)")
         assert r.returncode == tool_rc, (
-            f"a repair exiting {tool_rc} must exit {tool_rc} — a non-zero class "
-            "IS the local fallback's handoff signal (#9365); the step exited "
-            f"{r.returncode}. stdout={r.stdout!r} stderr={r.stderr!r}")
+            "the step must hand GitHub the tool's own exit code — every non-zero "
+            f"class is the local fallback's handoff signal (#9365), so {tool_rc} must "
+            f"not be greened; the step exited {r.returncode}. "
+            f"stdout={r.stdout!r} stderr={r.stderr!r}")
         # ARGV: the step must still invoke the repair ARMED. Dropping `--apply`
         # makes the tool exit 0 for a `needs_user_actor` PR, i.e. it greens the
         # run while every exit-code assertion above still holds.
