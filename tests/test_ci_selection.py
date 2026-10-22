@@ -5182,6 +5182,78 @@ def test_the_selector_offers_no_unwired_slow_matrix_flag():
         "the surviving entry point must still publish the slow matrix")
 
 
+def test_9017_block_states_the_derived_split_not_the_2_leg_era():
+    """#9539 review: the `#9017` block is a DATED 2-leg measurement — say so.
+
+    Its per-file table is still a valid measurement (run 39165691659) but the
+    SPLIT narrative wrapped around it is not: #9539 replaced the committed pair
+    with legs DERIVED from that same map (`slow_files - carve_out` LPT-packed
+    into `slow_shards` = 5). In the present tense, "the LPT pack of that map into
+    two legs of 18.945m / 18.933m" and "2.11x the heavier leg" both contradict
+    the lane the reader is about to configure — including the number the per-leg
+    `matrix.watchdog_minutes` follow-up would size the 40m literal against (the
+    heavier DERIVED leg is 7.58m, 5.3x, not 18.95m at the 2.0x floor). This is
+    exactly the rotation the durations header asks for, and the same failure this
+    block's own history records ("they rot on every re-cut, and this comment has
+    now been wrong twice for that reason").
+    """
+    text = (REPO / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
+    assert "into two legs of 18.945m" not in text, (
+        "the `#9017` block still states the 2-leg split as current fact — #9539 "
+        "derives 5 legs from the same map")
+    assert "2.11x the heavier leg" not in text, (
+        "the `#9017` block still quotes the 2-leg-era watchdog headroom as "
+        "current (the heavier derived leg is 7.58m, i.e. 5.3x)")
+    marker = next(ln for ln in text.splitlines() if "THE SPLIT" in ln)
+    assert "HISTORICAL" in marker, (
+        "the 2-leg-era split must be marked as history, the way the aggregate's "
+        f"pre-#9539 table is; got {marker!r}")
+    # …and the CURRENT shape must be stated in that block: the derived leg count,
+    # the heavier leg's weight, and the headroom figure the literal is sized from.
+    split_block = text[text.index(marker):]
+    split_block = split_block[:split_block.index("# #2008 review")]
+    for want, why in (("slow_shards", "the derived leg count it now uses"),
+                      ("7.58m", "the heavier DERIVED leg's weight"),
+                      ("5.3x", "the 40m literal's headroom over that leg")):
+        assert want in split_block, (
+            f"the `#9017` block must state {why} ({want!r}) — it is the only "
+            f"place a reader sizing the 40m watchdog looks")
+
+
+def test_parse_matrix_halves_matches_no_literal_block_on_the_current_workflow():
+    """#9539 review: the legacy regex matches NOTHING now — the docstring said
+    the `test-slow` job's block was still there to match.
+
+    #6135 left `test` derived; #9539 left `test-slow` derived too, so no literal
+    `- half:` / `files: >-` block remains in python-ci.yml and
+    `parse_matrix_halves()` returns {}. That stays fail-CLOSED rather than hollow:
+    the normal path never reaches the fallback (`workflow_matrix_issues()` is
+    empty), the drift case reports the drifted job by name there, and the `{}`
+    arm of `workflow_halves_issues()` reports "workflow parse failure" instead of
+    returning `[]` and passing. A RE-INTRODUCED legacy block still parses, so the
+    #1266 tie checks against it are still live.
+    """
+    m = load_manifest()
+    assert cs.parse_matrix_halves(cs.WORKFLOW.read_text(encoding="utf-8")) == {}, (
+        "python-ci.yml carries a literal legacy matrix block again — the parse "
+        "and `parse_matrix_halves`'s docstring disagree (#9539)")
+    assert cs.workflow_matrix_issues(cs.WORKFLOW, m) == [], (
+        "the empty parse must not be reached on the normal path: a drift here "
+        "means `workflow_matrix_issues` should have named it")
+    issues = cs.workflow_halves_issues(m, {})
+    assert issues and "parse failure" in issues[0], (
+        f"an empty parse must fail CLOSED, not pass — got {issues!r}")
+    doc = cs.parse_matrix_halves.__doc__ or ""
+    assert "the only block this regex can still match" not in doc, (
+        "the docstring still claims a literal block is left to match")
+    legacy = ("- half: a\n          files: >-\n            test_a test_b\n"
+              "- half: b\n          files: >-\n            test_c\n")
+    assert cs.parse_matrix_halves(legacy) == {
+        "a": ["test_a", "test_b"], "b": ["test_c"]}, (
+        "a re-introduced legacy block must still be parsed — that is the only "
+        "reason this fallback exists")
+
+
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
 #: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
 #: runner case (no agent-infra checkout), and it is the ONLY case that may skip.

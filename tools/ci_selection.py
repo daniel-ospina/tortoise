@@ -3394,17 +3394,26 @@ def parse_matrix_halves(workflow_text: str) -> dict[str, list[str]]:
     """#1266: extract LEGACY literal `- half:` / `files: >-` matrix rows from
     python-ci.yml — the pre-#6135 `test`-job shape.
 
-    #6135: the `test` job carries no literal rows any more (its matrix is
-    `fromJSON(...fast_matrix)`), so the only block this regex can still match
-    is the `test-slow` job's. Both callers reach it only on the integrity
-    gate's FAILURE fallback — `ci_selection.py --integrity`, and the same
-    composition in `ci_timing.integrity_problems()` (used by
-    `--refresh-durations`) — i.e. once `workflow_matrix_issues()` has ALREADY
-    reported the workflow drifted off the derived shape; the normal path feeds
-    the derived shards from `push_legs()` instead. The halves are folded
-    scalars with bare file names (no .py) — the run step maps them to
-    `tests/<name>.py` and `bench/*`. Returns {} when the parse fails so callers
-    fail closed on "workflow changed shape" instead of silently passing.
+    #6135 left the `test` job with no literal rows (its matrix is
+    `fromJSON(...fast_matrix)`) and #9539 removed the last ones (`test-slow` is
+    `fromJSON(needs.changes.outputs.slow_matrix)` too), so on the current tree
+    this regex matches NOTHING and the parse is `{}`. That is harmless on the
+    normal path, and not merely by luck: both callers reach it only on the
+    integrity gate's FAILURE fallback — `ci_selection.py --integrity`, and the
+    same composition in `ci_timing.integrity_problems()` (used by
+    `--refresh-durations`) — i.e. only once `workflow_matrix_issues()` has
+    ALREADY reported the workflow drifted off the derived shape. The normal path
+    feeds the derived shards from `push_legs()` instead, and
+    `workflow_matrix_issues()`'s own message ("the `test-slow` job matrix is not
+    the derived slow_matrix output …") is what names WHICH job drifted. What
+    this fallback still adds is the #1266 tie checks against a RE-INTRODUCED
+    literal block in the legacy shape (`- half: [ab]` + `files: >-`); for any
+    other drift it matches nothing and the `{}` arm of `workflow_halves_issues()`
+    fails closed with "no matrix halves found in python-ci.yml (workflow parse
+    failure)" rather than passing silently. The halves are folded scalars with
+    bare file names (no .py) — the run step maps them to `tests/<name>.py` and
+    `bench/*`. Returns {} when the parse fails so callers fail closed on
+    "workflow changed shape" instead of silently passing.
     """
     halves: dict[str, list[str]] = {}
     for m in re.finditer(r"- half: ([ab])\n\s+files: >-\n\s+([^\n]+)\n", workflow_text):

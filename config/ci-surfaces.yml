@@ -5622,27 +5622,34 @@ tier1:
 # (6.1x); the largest the OTHER way is `test_index_cli` 29.2 -> 25.0 — the row was
 # near-right, and it was the LOCAL re-measurement that was wrong.
 #
-# THE SPLIT is the LPT pack of that map into two legs of 18.945m / 18.933m — and
-# the honest framing of what that buys, stated against BOTH baselines because they
-# answer different questions:
+# THE SPLIT — HISTORICAL as of #9539: the 2-leg era's pack of that map, recorded
+# because it is the measurement the leg count was argued from, NOT the shape the
+# lane runs now. #9539 replaced the committed pair with legs DERIVED from this same
+# map (`slow_files - carve_out` LPT-packed into `slow_shards` = 5, 13 files each:
+# 7.56m / 7.58m / 7.58m / 7.58m / 7.58m, so a leg's wall is 7.58m + ~2m setup =
+# 9.58m against the 10m target). What the 2-leg pack bought, stated against BOTH
+# baselines because they answer different questions:
 #   vs the legs this PR actually REPLACES (main's, i.e. #9035's cut):
 #       17.06m / 20.82m  ->  18.95m / 18.93m   critical leg -1.88m, -9.0%
 #   vs the legs that stood BEFORE #9035 (the pre#9017 pair):
 #       17.98m / 19.90m  ->  18.95m / 18.93m   critical leg -0.96m, -4.8%
 #   and #9035's cut had itself made that leg 0.92m WORSE than the pair it replaced.
-# The ceiling is arithmetic and is the real answer to "why not 25%": a perfectly
-# balanced split of the 37.88m pool is 18.94m, and the pre#9017 split was already
-# within 0.97m of it. Re-balancing cannot cut the
-# critical path much further; only removing WORK from the pool can — which is why
-# the two tooling fixes in this change (a memoized AST parse in
-# `tools/surface_manifest.py`, two pre-filtered whole-tree scans in
-# `tests/test_markers.py`) are the part with the durable effect, and why the
-# re-cut is the part that measures whether the map is right.
+# The ceiling those numbers show is arithmetic and is the real answer to "why not
+# 25%": a perfectly balanced split of the 37.88m pool is 18.94m, and the pre#9017
+# split was already within 0.97m of it. Re-balancing the two legs cannot cut the
+# critical path much further — only removing WORK from the pool can, which is why
+# #9017's two tooling fixes (a memoized AST parse in `tools/surface_manifest.py`,
+# two pre-filtered whole-tree scans in `tests/test_markers.py`) are the part with
+# the durable effect, and why the re-cut is the part that measures whether the map
+# is right. Matching that arithmetic is also why #9539's lever is the LEG COUNT
+# rather than a better cut of two: `slow_shards: 5` takes the critical leg from
+# 18.95m to 7.58m.
 # `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
-# headroom from the map (2.11x the heavier leg, against the 2.0x floor) and the
-# workflow's drift guard pins the union to `slow_files - carve_out`. NOTHING was
-# deleted, moved off the pre-merge gate, or re-marked: all 65 files still run on
-# a PR, with the same nodeids.
+# headroom from the DERIVED legs — 5.3x the heavier one (7.58m, #9539) against the
+# 2.0x `WATCHDOG_HEADROOM` floor; in the 2-leg era above it read 2.11x at 18.95m —
+# and the workflow's drift guard pins the union of the EXPANDED legs to
+# `slow_files - carve_out`. NOTHING was deleted, moved off the pre-merge gate, or
+# re-marked: all 65 files still run on a PR, with the same nodeids.
 # #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
 # and section scans plus three source-file reads, no DB, so a docs-only PR must run it
 # here.
