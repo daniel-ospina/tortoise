@@ -565,8 +565,11 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
         state["reconciliation"] = {
             "registry_measured": bool(registry_measured),
             # The cause TEXT `load_registry` records, so a test can model the two
-            # shapes #9392 must tell apart (#9392).
-            "registry_error": str(registry_error),
+            # shapes #9392 must tell apart (#9392). Passed through UNCHANGED: a
+            # `str()` coercion here made a non-string cause inexpressible, so the
+            # `_board_registry_error` guard that collapses it to "no cause
+            # recorded" could be reverted with every test still green.
+            "registry_error": "" if registry_error is None else registry_error,
             "github_measured": bool(github_measured),
             # #8175: was the OPEN-ISSUE window wide enough to prove a negative?
             "open_issues_truncated": bool(open_issues_truncated),
@@ -7795,6 +7798,24 @@ class HolderGateTests(unittest.TestCase):
         self.assertIn("was not recorded", remedy)
         self.assertNotIn("EXISTS but could not be read", remedy)
         self.assertNotIn("NEVER PROVISIONED", remedy)
+
+    def test_a_non_string_recorded_cause_takes_the_same_arm_everywhere(self):
+        """One value, one answer — including when the value is not a cause.
+
+        `_board_registry_error` collapses anything that is not a non-blank string
+        to "no cause recorded", so a board carrying e.g. a dict must reach the
+        SAME arm as a board carrying nothing. Without this pin the fixture
+        coerced the value with `str()`, no test could construct a non-string
+        cause, and the one-binding fix could be reverted silently (#9392
+        review P3).
+        """
+        surface = self._roster_surface({"weird": 1})
+        self.assertIsNone(surface.registry_error, (
+            "a non-string cause is not a cause, and the exit-2 line and the note "
+            "must agree that none was recorded"))
+        remedy = self.cp._incomplete_remedy([surface])
+        self.assertIn("was not recorded", remedy)
+        self.assertNotIn("EXISTS but could not be read", remedy)
 
     def test_a_mixed_run_keeps_the_roster_cause_and_the_other_remedy(self):
         """Partitioned, not replaced: a run whose roster AND a list are

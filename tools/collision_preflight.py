@@ -374,10 +374,14 @@ Exit codes
                         the REST rescue, which reads one page at GitHub's
                         maximum and has no setting to widen — the report says
                         which kind it measured), or the
-                        FLEET BOARD could not answer the claim gate —
-                        unreadable, unrebuildable,
-                        or an ambiguous attribution (remedy: rebuild the board,
-                        `uv run python tools/fleet_state.py build`). A surface
+                        FLEET BOARD could not answer the claim gate — its LANE
+                        ROSTER is ABSENT (remedy: PROVISION it with one row per
+                        live lane, a CELL step; `fleet_state.py build` builds
+                        the board FROM that file, so a rebuild fails on the SAME
+                        read), or the board/roster is present but unreadable and
+                        unrebuildable, or the attribution is ambiguous (remedy
+                        for those two: rebuild the board, `uv run python
+                        tools/fleet_state.py build`). A surface
                         that can never
                         produce a blocking hit is EXEMPT and its failure is only
                         REPORTED: it has no ability to prevent a duplicate, so its
@@ -6175,8 +6179,8 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
     # "rebuild the fleet board" is the dead end this issue files, and `gh auth`
     # is fine in the same run (every other surface answered). The marker is this
     # module's OWN note text (`_board_can_answer`), not a foreign signature, and
-    # the cause is classified by `fleet_state.registry_remedy` from the raw error
-    # that note embeds — the same helper `fleet_state.py build` and the surface
+    # the cause is carried on the surface (`Surface.registry_error`) and classified
+    # by `fleet_state.registry_remedy` — the same helper `fleet_state.py build` and the surface
     # note take their sentence from, so a lane gets ONE answer from all three.
     roster = [s for s in incomplete if _LANE_ROSTER_NOTE in (s.note or "")]
     if roster:

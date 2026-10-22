@@ -1003,7 +1003,9 @@ def registry_remedy(error: str, path: Path | str | None = None) -> str:
     if str(error or "").strip():
         return (
             f"the roster EXISTS but could not be read ({Path(target).name} at "
-            f"{target}) — fix the file itself (permissions/encoding); "
+            f"{target}) — fix the file itself (a wrong path such as a directory "
+            "where the file belongs, permissions/encoding, a full or read-only "
+            "disk, or too many open files); "
             "`fleet_state.py build` cannot repair it, because the board is built "
             "FROM this file and fails on the same read"
         )

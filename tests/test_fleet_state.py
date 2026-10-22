@@ -687,7 +687,8 @@ def test_live_sources_degrade_to_empty_on_null_json(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=None,
-                 by_sid=None, prs=(), prs_measured=True, prs_error=""):
+                 by_sid=None, prs=(), prs_measured=True, prs_error="",
+                 issues=(), issues_measured=None, issues_error=""):
     monkeypatch.setattr(fs, "load_registry", lambda: list(registry))
     monkeypatch.setattr(
         fs, "cmux_workspaces",
@@ -700,8 +701,14 @@ def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=N
     monkeypatch.setattr(fs, "worktrees", lambda _root: {})
     monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
         prs, measured=prs_measured, error=prs_error))
+    # #9392 review P2: the open-ISSUE read is its own measurement. It used to be
+    # hard-wired to `prs_measured`, which made "PR read failed, issue read
+    # succeeded" — the case `open_issues_read` must get right — inexpressible, so
+    # no test could go red for the `None`-when-unmeasured guard.
     monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: fs.GitHubRows(
-        [], measured=prs_measured, error=prs_error))
+        list(issues),
+        measured=prs_measured if issues_measured is None else issues_measured,
+        error=issues_error))
     return fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0, do_pane=False)
 
 
@@ -1932,6 +1939,41 @@ def test_an_open_issue_read_at_the_cap_is_stamped_as_truncated(monkeypatch) -> N
     assert rec["open_issues_truncated"] is True
     assert rec["open_issues_read"] == fs.OPEN_ISSUES_LIMIT
     assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
+
+
+def test_an_open_issue_read_that_failed_publishes_no_count(monkeypatch) -> None:
+    """ABSENT IS NOT ZERO for the open-issue read too (#9392 review P2).
+
+    `gh_json` returns NO rows on failure, so `len(issues_read)` beside a failed
+    read publishes "0 open issues" — and `cmd_build --json` prints the object
+    BEFORE its own refusal, so a reader can act on the invented zero. The guard
+    exists in `build_state`; this pins it, because a guard nothing can make red
+    is not a gate.
+    """
+    st = _fleet_build(monkeypatch, registry=[], live={}, measured=True,
+                      issues=[{"number": 1}, {"number": 2}, {"number": 3}],
+                      issues_measured=False,
+                      issues_error="gh: Could not resolve host: api.github.com")
+    rec = st["reconciliation"]
+    assert rec["open_issues_read"] is None, (
+        "a failed issue read must publish NO count, not the empty list's length"
+    )
+
+
+def test_a_measured_issue_read_publishes_its_count_even_when_the_pr_read_failed(
+        monkeypatch) -> None:
+    """The distinguishing case: the ISSUE read succeeded while the PR read did
+    not. Gating the count on `github_measured` (the AND) would discard a real
+    measurement — the wrong fix this pins against (#9392 review P2)."""
+    st = _fleet_build(monkeypatch, registry=[], live={}, measured=True,
+                      prs_measured=False, prs_error="gh: HTTP 502",
+                      issues=[{"number": 1}, {"number": 2}, {"number": 3}],
+                      issues_measured=True)
+    rec = st["reconciliation"]
+    assert rec["github_measured"] is False, "the PR read failed"
+    assert rec["open_issues_read"] == 3, (
+        "the issue read DID happen, so its count is a measurement and must be published"
+    )
 
 
 def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
