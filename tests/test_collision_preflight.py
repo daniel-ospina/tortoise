@@ -6289,6 +6289,23 @@ class CollisionPreflightTest(unittest.TestCase):
             ),
             "the no-cause arm says the rebuild cannot create or repair the roster",
         )
+        # ⛔ AND ITS NEGATIVE HALF, exactly as arm 2 has one (review, cycle 6 P2).
+        # The command form is needed too: "rebuild the board" alone missed the
+        # injection "run uv run python tools/fleet_state.py build", and the
+        # tools/-prefixed target is the right one because the bare
+        # `fleet_state.py build` legitimately appears INSIDE this arm's own
+        # negation. Without this, the arm could regain the dead end #9392
+        # files — the rebuild that fails on the same read — and stay GREEN.
+        self.assertNotIn(
+            "rebuild the board",
+            flat[nocause:board],
+            "the no-cause arm must not prescribe the rebuild that fails on the same read",
+        )
+        self.assertNotIn(
+            "tools/fleet_state.py build",
+            flat[nocause:board],
+            "the no-cause arm must not carry the runnable rebuild command",
+        )
         # ⛔ THE COMMAND IS PART OF THE REMEDY (review, cycle 4 P3). Pinning only
         # "rebuild the board" let the arm lose `… fleet_state.py build` and stay
         # green — the instruction minus the thing that makes it runnable.
