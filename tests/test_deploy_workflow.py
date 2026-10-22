@@ -2357,22 +2357,37 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             "non-zero counter has no way to tell the documented baseline from a "
             "real arming failure"
         )
-    # ... and the bar must require PRESENCE, not only a clean reason breakdown.
-    # `write_live_record` returns BEFORE counting anything when unarmed
-    # (`tortoise/record_writer.py`: `if not armed: return None`), so an unarmed
-    # deployment yields `record_write_failures: {}`,
+    # ... and the bar must require PRESENCE, and must not attribute an all-empty
+    # reading to a SINGLE cause. `write_live_record` returns BEFORE counting
+    # anything when unarmed (`tortoise/record_writer.py`: `if not armed: return
+    # None`), so an unarmed deployment yields `record_write_failures: {}`,
     # `record_non_journal_skips: {}` and an empty `fly logs` grep — the "no
-    # unexpected failure" half is then VACUOUSLY satisfied. Without this the
-    # recipe greens the exact state the section exists to catch.
-    assert "NOT_ARMED" in section and "FAIL" in section, (
-        "the pass bar does not state that an all-empty reading is `NOT_ARMED` "
-        "and a FAIL — an unarmed deployment counts nothing at all, so a bar "
-        "written only as 'no growth' is vacuously green on the silent-inert "
-        "deployment this section exists to detect"
+    # unexpected failure" half is then VACUOUSLY satisfied. But an ARMED
+    # deployment can be all-empty too: a durable write that failed or
+    # `circuit_open`-ed writes no row, an armed append with an unproven position
+    # writes no layer-1 row, and a capture that emitted no record writes nothing
+    # at all. Each of those is a different fault, so the bar may not read the
+    # empty result as `NOT_ARMED` alone (#9585 review).
+    for presence in ("no_journal", "record_position_unproven", "journal_event"):
+        assert presence in section, (
+            f"the presence requirement omits {presence!r} — an ARMED deployment "
+            "whose write FAILED, whose position was unproven, or which journaled "
+            "a row is then indistinguishable from an unarmed one"
+        )
+    assert "seam_unimportable" in section, (
+        "the bar does not say `seam_unimportable` is counted with NO DSN "
+        "present — an operator would read it as proof the seam was reached"
     )
-    assert re.search(r"seam was REACHED", section), (
-        "the pass bar has no presence requirement — name the reading that must "
-        "EXIST after a capture before the reason breakdown means anything"
+    assert re.search(r"every reading above\s+\*\*?is empty or zero|is empty or zero", section), (
+        "the bar never says an all-empty reading is not a pass — an unarmed "
+        "deployment counts nothing at all, so a bar written only as 'no growth' "
+        "is vacuously green on the silent-inert deployment this exists to detect"
+    )
+    assert re.search(r"unarmed.{0,400}?produced no record", section, re.S), (
+        "the bar attributes an all-empty reading to `NOT_ARMED` ALONE — the other "
+        "reachable cause is an ARMED deployment whose capture emitted no record, "
+        "and an operator sent to check the GitHub secret has no reading that "
+        "tells the two apart"
     )
 
 

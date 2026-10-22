@@ -2699,14 +2699,31 @@ armed deployment:
 So the bar has **two parts, and BOTH are required**:
 
 1. **The seam was REACHED.** After one capture, at least one expected reading
-   must be *present*: `record_non_journal_skips{reason="no_durable_journal"}`
-   ≥ 1, or new `journal_event` / `point` rows on the record project. **Both
-   empty — or all-zero — means the write seam was never entered: the deployment
-   is still `NOT_ARMED`, and that is a FAIL, not a pass.** `write_live_record`
-   returns *before counting anything* when unarmed, so an absent reading and a
-   healthy zero are **byte-identical** on both recipes above — which is why
-   presence, not only the reason breakdown, is part of the bar. The usual causes
-   are a missing/blank GitHub secret, or a Fly value the deploy did not stage.
+   must be *present* — **any** of:
+   - `record_non_journal_skips{reason="no_durable_journal"}` ≥ 1 (the M2 capture
+     lane declining, by design — see the bullets above);
+   - `record_write_failures` non-empty for **any** of `malformed_dsn` /
+     `no_tenant` / `circuit_open` / `write_failed` / `no_journal` — each is
+     counted only *after* the DSN resolved, so any of them proves the seam
+     exists and ran;
+   - `record_position_unproven` > 0 (`tortoise/monitoring.py`) — an armed
+     durable append that could not prove its position;
+   - new `journal_event` / `point` rows on the record project.
+
+   `write_live_record` returns *before counting anything* when unarmed, so an
+   absent reading and a healthy zero are **byte-identical** on both recipes
+   above — which is why presence, not only the reason breakdown, is part of the
+   bar. ⛔ **`seam_unimportable` is NOT presence evidence** — it is counted with
+   no DSN present, so it proves nothing about arming. **If every reading above
+   is empty or zero, the capture wrote nothing — and that has two very different
+   causes:** the seam is **unarmed** (missing or blank GitHub secret, or a Fly
+   value the deploy did not stage), **or** the deployment is **armed and this
+   capture produced no record to write** (extraction disabled / no provider —
+   the state the Reproducibility checklist names). Do not read the empty result
+   as `NOT_ARMED` alone: tell them apart by taking a capture known to journal (a
+   per-graph SDK write under `TORTOISE_EVENT_LOG_BASE_DIR`) or by enabling
+   extraction, then re-reading. An all-empty reading is a **FAIL** either way —
+   but with an armed DSN it is not an arming failure.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
    `malformed_dsn` / `circuit_open`.** Those three are always a fail-and-fix:
