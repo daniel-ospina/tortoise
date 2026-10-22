@@ -144,8 +144,10 @@ posteriors instead of the unmeasured `Beta(1,1)` 0.50 of #2598. It
 **requires `--ingest-mode v2`** and is refused loudly otherwise
 (`parser.error` on the CLI, `ValueError` in `run_evaluation`) — a
 deterministic graph writes no operators to activate. `run_protocol`
-injects it into every `run`-kind step (3, 5, 7, 8, 9 — never the step-4
-full-context cell). The run records the posture
+injects it into every `run`-kind step (3, 5, 7, 8, 9 — never the
+`full-context` cell: that is the option-5 `full-context` subcommand, which
+rides on the step-3 pilot and on the step-5 500-Q run, and it is a
+retrieval-only ceiling measurement with no ingest of its own). The run records the posture
 (`methodology.measurement_posture`: `ingest_mode`, `beliefs_activated`,
 `belief_layer` ∈ `inert`/`partial`/`activated`/`unknown`, plus the
 `points_with_ep` / `points_unmeasured` cells the state is derived from),

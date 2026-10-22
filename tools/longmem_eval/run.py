@@ -3125,8 +3125,11 @@ def _marker_activated(value: Any) -> bool:
 def _cache_marker_write(proj: Any, *, namespace: str, qid: str, fp: str,
                         snapshot: str, activated: bool = False) -> None:
     """Write/refresh the namespace's cache marker node AFTER a clean ingest
-    completes (the ONLY writer; callers hold the run marker, so no
-    concurrent writer races the MERGE). Carries lme_question_id so the
+    completes (the only INGEST-path writer — ``_cache_marker_activate`` is
+    the second path, refreshing ONLY ``belief_activated`` on a cache HIT, so
+    "the marker is written only after an ingest" holds for the fingerprint
+    and the snapshot, never for the arm's flag; callers hold the run marker,
+    so no concurrent writer races the MERGE). Carries lme_question_id so the
     fresh-run targeted wipe removes it together with stale content.
 
     #8486: ``activated`` records that the BELIEF LAYER ran against this
