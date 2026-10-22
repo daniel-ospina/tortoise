@@ -56,10 +56,14 @@ paragraph:
   monkeypatch the set, or drop the set check altogether → ONLY
   `test_the_lane_name_branch_narrows_without_a_window` reds. That is deliberate:
   `_RAW_QUERY_CLOSED_DEPTH` closes the whole replay window on its own, so the
-  lane-name branch is NOT load-bearing there — its live use is a `replay`
-  declaration with no window at all (a second, importable site:
-  `event_store.reestablish_watermark`'s default), which is what that test pins,
-  and `test_a_second_replay_declaration_site_carries_the_closure` pins the site
+  lane-name branch is NOT load-bearing there. It has NO production caller left in
+  this tree either: both `replay` declaration sites (`_replay_write_scope()` and
+  `event_store.reestablish_watermark`'s default) go through
+  `_handle_only_write_scope`, which sets the depth. The branch is therefore
+  DEFENCE-IN-DEPTH for a future bare `_cache_write_authorized(_REPLAY_WRITE_LANE)`
+  with no window, and that test pins its SEMANTICS (the literal, a template, a
+  monkeypatched member) rather than a live path;
+  `test_a_second_replay_declaration_site_carries_the_closure` pins the second site
   structurally;
 * `_lane_of` → identity → the declaration pin and the lane-name test red;
 * dropping a member from `_HANDLE_ONLY_WRITE_LANES` → the declaration pin reds
@@ -293,18 +297,22 @@ def test_the_narrowing_is_declared_and_named_by_the_scope():
 
 
 def test_the_lane_name_branch_narrows_without_a_window(armed_sdk, monkeypatch):
-    """The lane-name branch has its OWN live use, and this is its pin.
+    """The lane-name branch is pinned by SEMANTICS, not by a live caller.
 
     `_RAW_QUERY_CLOSED_DEPTH` closes the whole replay window by itself, so the
     set is deliberately NOT load-bearing there (a mutation that drops it leaves
-    the window tests green — stated in the module docstring). Its live use is a
-    `replay` declaration with NO window: `event_store.reestablish_watermark`
-    declares the lane through an importable helper, any caller can do the same,
-    and templated lanes are `f"{PREFIX}: {detail}"`. So the three things the set
-    promises are measured here AT THE DOOR: the pinned literal, a TEMPLATE of it
-    (which is what `_lane_of` exists for), and a member reached only through a
-    monkeypatched set (which is what proves the guard reads the SET and the
-    LANE, not one hard-coded string).
+    the window tests green — stated in the module docstring). And after `#9391`
+    it has no production caller left: both `replay` declaration sites
+    (`_replay_write_scope()` and `event_store.reestablish_watermark`'s default)
+    go through `_handle_only_write_scope`, which sets the depth, so the
+    lane-name branch is never the reason a real write is refused. It is
+    DEFENCE-IN-DEPTH for a future bare
+    `_cache_write_authorized(_REPLAY_WRITE_LANE)` with no window — the shape
+    this file's engine windows would otherwise have to trust. So the three
+    things the set promises are measured here AT THE DOOR: the pinned literal, a
+    TEMPLATE of it (which is what `_lane_of` exists for), and a member reached
+    only through a monkeypatched set (which is what proves the guard reads the
+    SET and the LANE, not one hard-coded string).
     """
     import tortoise.projection as projection
 

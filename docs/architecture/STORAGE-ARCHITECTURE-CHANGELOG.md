@@ -1547,4 +1547,6 @@ delegation hop (`_DELEGATED_OPENERS`) instead of recording only the new name.
 Pin: `tests/test_9391_replay_window_raw_query_width.py` (nine legs: the refused raw
 lane inside and outside the window, three real nests, the still-permitted handle at
 an ARMED door, reads unblocked, the lane-name branch with no window, the
-declaration constants, the second declaration site, and no permit past its `with`).
+declaration constants, the second declaration site, the rebuild engines still
+projecting INSIDE the window through an armed handle, and no permit past its
+`with`).
