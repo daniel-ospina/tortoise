@@ -35,5 +35,5 @@ New how-to guides and operational procedures should be added to `docs/how-to/`.
 | **Blog E2E Residue Cleanup** | [`docs/runbook/4220-blog-e2e-residue-cleanup.md`](../runbook/4220-blog-e2e-residue-cleanup.md) | Dry-run, guards, and verification for cleaning up E2E test rows in production. |
 | **Demand Capture Ops Checks** | [`docs/runbook/3514-demand-capture-ops.md`](../runbook/3514-demand-capture-ops.md) | Live Telegram send verification and monthly demand review procedure. |
 | **Ask Pre-Ship Gate Runbook** | [`docs/runbook/1987-ask-abstention-check.md`](../runbook/1987-ask-abstention-check.md) | Pre-ship abstention check and routing/cost verification for the ask lane. |
-| **Writing a Blog Post Body** | [`docs/blog-authoring.md`](../blog-authoring.md) | Supported Markdown subset, `[[toc]]` / `[[video: …]]` markers, and linking rules. |
+| **Writing a Blog Post Body** | [`docs/blog-authoring.md`](../blog-authoring.md) | Supported Markdown subset, `[[toc]]` / `[[video: …]]` markers, linking rules, and the IndexNow publish notification + backfill runbook (#9680). |
 | **Retrieval Latency Benchmark Runbook** | [`benchmarks/README.md`](../../benchmarks/README.md) | Running and interpreting retrieval latency benchmarks. |
