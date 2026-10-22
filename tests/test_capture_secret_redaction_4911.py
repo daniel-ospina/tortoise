@@ -1348,6 +1348,12 @@ _MINT_MODULES: tuple[str, ...] = (
     "tortoise/oauth.py",       # oat_, ort_, ct_, cs_
     "tortoise/hosted_api.py",  # st_, AND tt_/tk_ — the tenant API key
     "tortoise/sdk.py",         # tt_/tk_ — the SDK mints the same key
+    # #9599: the session id's ONE mint home. It moved here from three inline
+    # copies (sdk.py x2 + hosted_api.py), and this scan FAILED the moment it
+    # did — the declared non-secret ``session_`` prefix suddenly had no mint
+    # site in any scanned module. That is the pin working: a mint that leaves
+    # the scanned set is a blind spot, so the module follows the mint.
+    "tortoise/ids.py",         # session_
 )
 
 #: The prefixes the product mints as CREDENTIALS — each must have a rule.

@@ -417,26 +417,28 @@ def identity_absent(value) -> bool:
 def _unwritable_shape(value) -> str:
     """Name WHY the store refuses this PRESENT value (the true cause).
 
-    ``_writable_id`` refuses four shapes: a non-``str``, a ``str`` carrying a
-    NUL, a ``str`` carrying a lone surrogate, and — since #9599 — a BLANK one
-    (``"   "``/``"\t"``, i.e. ``.strip()`` empty). A message that asserted
+    ``_writable_id`` refuses three shapes: a non-``str``, a ``str`` carrying a
+    NUL, and a ``str`` carrying a lone surrogate. A message that asserted
     "NUL/lone-surrogate bearing" for all of them was FALSE for the non-``str``
     class — a live journal shape (``#331`` review r4 kept ``isinstance(..., str)``
     precisely because non-str ids occur) — so the shape is named here, in ONE
     home, and both the log line and ``reason`` read it (#8840 review P3).
 
-    ⛔ The BLANK arm is not optional bookkeeping: it is the shape a LEGACY
-    journal carries, written before the capture doors refused a blank id
-    (#9599), so it is reachable on exactly the replay this module reports on.
-    Falling through to "lone surrogate" would name a cause that is false for
-    the record — the #8018/#8702 defect this function exists to close.
+    ⛔ A BLANK is named here too (#9599), even though ``_writable_id`` ADMITS
+    one on purpose. The two are not in conflict: this function is MESSAGE-ONLY
+    (its sole call site is ``IdentitySkip.describe``), and the session arms that
+    DO refuse a blank — ``_fold_session_recorded`` and ``_link_session`` —
+    report through ``_log_identity_skip``. Without this arm they logged a blank
+    id as "carries a lone surrogate", a cause that is false for the record it
+    describes (the #8018/#8702 class). Widening ``_writable_id`` itself is what
+    was measured harmful and reverted (#9599): it gates entity NAMES.
     """
     if not isinstance(value, str):
         return f"it is a {type(value).__name__}, not a str"
-    if not value.strip():
-        return "it is blank (whitespace only)"
     if "\x00" in value:
         return "it carries a NUL"
+    if not value.strip():
+        return "it is blank (it names nothing)"
     return "it carries a lone surrogate"
 
 

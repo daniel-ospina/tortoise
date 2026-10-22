@@ -18,10 +18,21 @@ padded-but-REAL case — ``"  s1  "`` — stays a legitimate identity on purpose
 What this module pins is the half that IS ours: the rule *"a blank is not an
 identity"* has ONE home (``tortoise.ids.session_id_refusal``), TWO enforcement
 points (the SDK capture doors and the hosted ``/v1/sessions`` boundary — the
-``capture_consent`` idiom: one predicate, two gates), and ONE fold backstop
-(``projection._writable_id``, the single identity predicate the journal fold
-consults), so a record that reaches the graph by ANY path cannot create a
+``capture_consent`` idiom: one predicate, two gates), and ONE replay gate
+(``projection.entities._fold_session_recorded`` and
+``projection.entities._link_session`` — the two folds that merge the session
+key), so a record that reaches the graph by ANY path — live, or replayed from a
+journal written before the doors existed, on EITHER carrier — cannot create a
 ``:Session`` whose id names nothing.
+
+⛔ ``projection._writable_id`` is NOT where this rule lives, deliberately. It is
+the fold's shared identity predicate, and widening it to ``val.strip()`` looks
+like the same rule but reaches the entity NAMES folded through it: measured,
+that silently dropped a blank-named entity at ``create_subject``/``create_object``
+(a ``200 {}`` for a write that happened nowhere) and turned a client-supplied
+blank entity name in ``/v1/sessions/commit`` into a deterministic 500 advising an
+impossible retry. The blank-NAME class needs the Layer-1 / ingest shape gates
+(#9647's sibling), not this predicate.
 
 Every graph assertion here reads a LABEL SCAN, never an equality match — an
 equality match on a blank/padded key returns zero rows even when the node
@@ -208,15 +219,17 @@ def test_the_skip_report_names_a_blank_identity_as_blank():
     """The fold's own diagnostic must not call a blank id a `lone surrogate`.
 
     ``projection._unwritable_shape`` is the ONE home for "why the store refuses
-    this PRESENT value" (#8840); a false cause there is the #8018/#8702 defect,
-    and a legacy journal written before the doors refused is exactly where the
-    blank shape is reachable.
+    this PRESENT value" (#8840), and a false cause there is the #8018/#8702
+    defect. Its blank arm is MESSAGE-ONLY and does not contradict
+    ``_writable_id`` admitting a blank: the two session folds refuse the blank
+    and report through this diagnosis, so without the arm the operator is told
+    a blank session id "carries a lone surrogate".
     """
     from tortoise.projection.nonfolded import _unwritable_shape
 
     for blank in BLANK_IDS:
         assert "blank" in _unwritable_shape(blank), _unwritable_shape(blank)
-    # The pre-existing shapes still read true.
+    # ...and this is not a catch-all: the pre-existing shapes still read true.
     assert _unwritable_shape(5) == "it is a int, not a str"
     assert "NUL" in _unwritable_shape("a\x00b")
     assert "surrogate" in _unwritable_shape("a\ud800b")
@@ -232,8 +245,13 @@ def test_the_sdk_doors_refuse_a_blank_session_id(sdk, door, blank):
            else client.commit_session(CONV, session_id=blank))
 
     assert res["ok"] is False, res
-    errors = res.get("errors") or []
-    assert any("non-blank" in str(e) for e in errors), errors
+    errors = [str(e) for e in (res.get("errors") or [])]
+    # ⛔ The EXACT constant, not a substring: `commit_session` has a SECOND,
+    # pre-existing Layer-1 gate whose text also contains "non-blank", so a
+    # substring assertion stays green when only the DOOR arm is reverted (a
+    # cycle-3 review finding) — and that revert costs a full LLM extraction
+    # before Layer-1 refuses.
+    assert ids_mod.SESSION_ID_BLANK_REFUSAL in errors, errors
     # It refuses BEFORE doing the work: nothing was written, nothing journaled.
     assert _session_ids(client) == [], (
         f"a blank session id must write no :Session at all, got "
@@ -261,34 +279,107 @@ def test_the_hosted_boundary_refuses_a_blank_session_id(client):
     assert "non-blank" in r.text
 
 
-# ── the fold backstop: the ONE identity predicate ────────────────────────
+def test_the_hosted_boundary_validator_reds_without_the_network():
+    """The same gate, asserted at the MODEL — environment-independent.
+
+    The HTTP test above goes through the capture pipeline when the validator is
+    absent, and a slow pipeline turns the assertion into an INCONCLUSIVE skip
+    (a cycle-3 review finding: a gate whose verdict depends on how fast the
+    regression is is not a gate). This one reds the instant the validator goes.
+    """
+    from pydantic import ValidationError
+
+    from tortoise.hosted_api import SessionRequest
+
+    with pytest.raises(ValidationError) as exc:
+        SessionRequest(conversation=CONV, session_id="   ")
+    assert "non-blank" in str(exc.value)
+    # ...and the shapes that must still be accepted:
+    for ok_value in (None, "", "  s1  ", "s1"):
+        SessionRequest(conversation=CONV, session_id=ok_value)
+
+
+def test_a_consent_declined_commit_still_reports_a_minted_id(sdk, monkeypatch):
+    """Receipt parity: the mint stays ABOVE the consent gate (#9599 review P3).
+
+    Moving the mint below the gate turns this field into `None` — a silent
+    change to a public receipt — and nothing else in the suite would notice.
+    """
+    client, _ = sdk
+    monkeypatch.delenv("TORTOISE_CAPTURE", raising=False)
+    res = client.commit_session(CONV)
+    assert res["ok"] is False, res
+    assert str(res.get("session_id", "")).startswith("session_"), res
+    assert "consent" in str(res.get("error", "")).lower(), res
+
+
+# ── the replay half: a journal written before the doors refused ────
 
 @pytest.mark.parametrize("blank", BLANK_IDS)
-def test_writable_id_refuses_a_blank_identity(blank):
-    from tortoise.projection import _writable_id
+def test_the_fold_writes_no_session_for_a_blank_session_recorded(sdk, blank):
+    """Replay must not resurrect a `:Session` keyed on nothing (#9599).
 
-    assert _writable_id(blank) is False, (
-        f"_writable_id admitted {blank!r}: an identity that names nothing is "
-        f"not an identity (#9599)")
+    The doors stop NEW blank ids; this is the other half — a journal already
+    on disk from before they did. ``_fold_session_recorded`` is the journal
+    carrier for the container, so it is the arm a rebuild replays; folding a
+    blank id against an indexed key writes a container the engine cannot serve
+    back to an equality seek (invisible, and every later capture duplicates it).
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    folded = proj._fold_session_recorded(
+        {"type": "SessionRecorded", "id": blank, "turn_count": 1})
+    assert folded == 0, folded
+    assert _session_ids(client) == [], _session_ids(client)
 
 
-@pytest.mark.parametrize("padded", PADDED_REAL)
-def test_writable_id_still_admits_a_padded_real_identity(padded):
-    from tortoise.projection import _writable_id
+def test_the_fold_still_replays_a_padded_real_session_id(sdk):
+    """The narrow rule must not eat a legitimate id (#9553's position)."""
+    client, _ = sdk
+    proj = client._get_proj()
+    proj._fold_session_recorded(
+        {"type": "SessionRecorded", "id": "  s1  ", "turn_count": 1})
+    assert _session_ids(client) == ["  s1  "], _session_ids(client)
 
-    assert _writable_id(padded) is True
 
+# ── the OTHER replay carrier: `PointAdded.contains_session` ─────────
 
-def test_the_fold_writes_no_session_for_a_blank_contains_session(sdk):
-    """Backstop: a journaled ``contains_session="   "`` writes no container.
+@pytest.mark.parametrize("blank", BLANK_IDS)
+def test_the_fold_writes_no_session_for_a_blank_contains_session(sdk, blank):
+    """A journaled blank ``contains_session`` writes no container (#9599).
 
-    This is the replay half — a journal written before the doors refused must
-    not resurrect a ``:Session`` keyed on nothing when it is rebuilt.
+    ``_link_session`` MERGEs the session for a ``PointAdded`` that names one —
+    the arm a pre-#3664 (or pre-fix) journal replays. Ungated it writes the
+    blank container AND silently drops the CONTAINS edge, which is exactly the
+    symptom #9599 measured, so both carriers are gated.
     """
     client, _ = sdk
     proj = client._get_proj()
     created = client.create_point(
-        kind="observation", content="the fold backstop probe")
+        kind="observation", content="the CONTAINS carrier probe")
     pid = created.get("id") or created["point"]["id"]
-    proj._link_session("   ", pid)
+    proj._link_session(blank, pid)
     assert _session_ids(client) == [], _session_ids(client)
+    assert proj.g.query(
+        "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r)"
+    ).result_set[0][0] == 0
+
+
+def test_the_contains_carrier_still_links_a_padded_real_session(sdk):
+    """A padded real id is a legitimate identity (#9553) — it must still land.
+
+    ⛔ The CONTAINS edge is NOT asserted here, and that is the measured engine
+    half of #9599, not an omission: the MERGE's own ``MATCH (s:Session
+    {id:$sid})`` cannot see a padded key (the index stores the trimmed term, the
+    seek does not trim), so the container is written and the edge is dropped.
+    Refusing padded ids is an OWNER question (#9553 records them as legitimate);
+    refusing a BLANK one is not — the difference between a container that
+    exists-but-cannot-be-addressed and an id that names nothing at all.
+    """
+    client, _ = sdk
+    proj = client._get_proj()
+    created = client.create_point(
+        kind="observation", content="the padded CONTAINS carrier probe")
+    pid = created.get("id") or created["point"]["id"]
+    proj._link_session("  s1  ", pid)
+    assert _session_ids(client) == ["  s1  "], _session_ids(client)

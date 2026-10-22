@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from tortoise.entity_identity import all_name_holder_ids
 from tortoise.ids import content_hash as _content_hash
 from tortoise.ids import entity_name_id as _entity_name_id
+from tortoise.ids import session_id_refusal as _session_id_refusal
 from tortoise.live import (
     decay_clause,  # #2490: rebuild folds decay terminal posteriors
     epistemic_disjunction,  # #5380: the target-position widening
@@ -2670,12 +2671,28 @@ class _EntityHandlers:
         journal-only rebuild must not restore the Session as though nothing
         was ever redacted. Overwrite semantics, like ``turn_count``.
         """
-        from tortoise.projection import _annotator_value_ok, _writable_id
+        from tortoise.projection import (
+            _annotator_value_ok,
+            _log_identity_skip,
+            _writable_id,
+        )
 
         if not isinstance(ev, dict):
             return 0
         sid = ev.get("id")
         if not _writable_id(sid) or not sid:
+            return 0
+        # #9599: a BLANK id is not an identity, and this is the REPLAY half of
+        # the refusal the capture doors now make. `_writable_id` deliberately
+        # still admits a blank (#9599) because it is shared with entity NAMES,
+        # whose fold must not be widened; the session key gets the narrower
+        # rule here, where it is unambiguously a session id. Without it a
+        # journal written before the doors refused resurrects a
+        # `:Session {id:'   '}` on rebuild — an indexed key the engine cannot
+        # serve back to an equality seek, so the container is invisible and
+        # every later capture mints a duplicate on it.
+        if _session_id_refusal(sid) is not None:
+            _log_identity_skip("Session", sid, "id (MERGE key)")
             return 0
         sets: list[str] = []
         params: dict = {"sid": sid}
@@ -2809,8 +2826,19 @@ class _EntityHandlers:
         # #7369: `session_id` is the Session MERGE key (`MERGE (s:Session
         # {id:$sid})`), reached from `PointAdded.contains_session` off the raw
         # journal envelope — an unwritable one aborts after the wipe.
+        from tortoise.ids import session_id_refusal
         from tortoise.projection import _log_identity_skip, _writable_id
         if not _writable_id(session_id):
+            _log_identity_skip("Session", session_id, "id (MERGE key)")
+            return
+        # #9599: the OTHER carrier of the blank session id. `_writable_id`
+        # admits a blank on purpose (it is shared with entity NAMES), so the
+        # narrower session rule is applied here, next to the merge key it
+        # guards. This is the `contains_session` arm — a pre-fix journal's
+        # PointAdded still names the session, and replaying it would write the
+        # same invisible container AND silently drop the CONTAINS edge (the
+        # measured #9599 symptom), which is why both carriers are gated.
+        if session_id_refusal(session_id) is not None:
             _log_identity_skip("Session", session_id, "id (MERGE key)")
             return
         # #7951 R2-P2: mirror `_link_source`'s pre-delete gate. A `CONTAINS`

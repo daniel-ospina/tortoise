@@ -6976,7 +6976,7 @@ def _writable_at_parse(val, _depth: int = 0) -> bool:
 
 
 def _writable_id(val) -> bool:
-    """True when ``val`` is a NON-BLANK str FalkorDB can take as a parameter.
+    """True when ``val`` is a NON-EMPTY str FalkorDB can take as a parameter.
 
     The ``id`` rides as a Cypher parameter exactly like a dim value, so it
     needs the SAME NUL/lone-surrogate gate — otherwise a corrupt journal line
@@ -6992,28 +6992,21 @@ def _writable_id(val) -> bool:
     keeps the rule in ONE home rather than repeating ``... and val`` at every
     call site.
 
-    ⛔ A WHITESPACE-ONLY value is the SAME case, one spelling further (#9599).
-    ``"   "`` is truthy, so the empty-string refusal above let it through — and
-    on an INDEXED string key the engine cannot serve a blank value back to an
-    equality seek (it indexes the term, the seek does not normalise), so
-    ``MERGE (s:Session {id:$sid})`` on a blank id minted a DUPLICATE container
-    and every ``MATCH …, MATCH … MERGE (a)-[:REL]->(b)`` binding it landed
-    nothing. Measured. A blank is not an identity; the rule was always "an
-    identity names something", and this makes the predicate say what its own
-    docstring already meant.
-
-    ⚠️ It is DELIBERATELY not extended to PADDED-but-real ids (``"  s1  "``):
-    #9553 records those as legitimate identities. They remain engine-hostile
-    (#9599's owner question) and are NOT ducked here, because quietly
-    refusing — or silently trimming — a legitimate id in one fold would not
-    stop the engine duplicating it on any other path.
+    ⛔ A WHITESPACE-ONLY value is deliberately STILL writable here (#9599).
+    Widening this predicate to ``bool(val.strip())`` looks like the same rule,
+    but this function is shared with the fold's LIVE path
+    (``_upsert_subject``/``_upsert_object``): it silently drops a blank-named
+    entity at ``create_subject``/``create_object`` — a ``200 {}`` for a write
+    that never happened, with a metered write op billed for it — and it turns a
+    client-supplied blank entity name in ``/v1/sessions/commit`` into a
+    deterministic 500 that advises an impossible retry. Both were MEASURED when
+    this PR first tried it. The blank SESSION key is therefore refused at the
+    two folds that merge it (``entities._fold_session_recorded`` and
+    ``entities._link_session``, both via ``tortoise.ids.session_id_refusal``)
+    and at the two capture doors; the blank-NAME class needs the Layer-1 /
+    ingest shape gates, not this predicate.
     """
-    return (
-        isinstance(val, str)
-        and bool(val)
-        and bool(val.strip())
-        and _annotator_value_ok(val)
-    )
+    return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
 def _log_identity_skip(what: str, value, label: str = "identity", *,
