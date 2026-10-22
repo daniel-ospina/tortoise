@@ -1155,6 +1155,7 @@ def integrity_problems(manifest_text: str) -> list[str]:
                 + cs.slow_file_issues(manifest)
                 + red
                 + cs.carve_shard_issues(manifest)
+                + cs.slow_shard_issues(manifest)
                 + cs.watchdog_headroom_issues(manifest))
     wf_issues = cs.workflow_matrix_issues(cs.WORKFLOW, manifest)
     problems += wf_issues

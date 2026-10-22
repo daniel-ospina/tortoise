@@ -36,6 +36,10 @@ RECORD_MIGRATIONS = [
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # The erasure RPC — a FUNCTION, so it contributes no column (#9550: listed
+    # because `RECORD_MIGRATIONS` is the record's migration REGISTRY, and this
+    # probe's list is pinned to it in EQUALITY, not containment).
+    "20261012000005_record_org_purge_rpc.sql",
     "20261014000001_record_subject_props_no_derived.sql",
     # Kept in step with `e2e_postgres_bootstrap.py` (whose list actually applies
     # them) even though nothing here reads this constant today: a dead copy that

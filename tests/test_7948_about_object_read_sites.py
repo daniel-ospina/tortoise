@@ -240,22 +240,84 @@ WHAT THIS PINS
    inputs are the TABLE's twenty-two doors, not the 99-tool registry, so adding a tool
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
-   `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` — the `#9506` arms,
-   and the only ones here about this instrument's OWN prose rather than §13's. The
+   `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
+   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` — the four
+   `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
+   than §13's. The third is the `#9522` capture arm: it replays the removed figure
+   through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
+   above the `def`), then holds the LIVE function by containment (its docstring's first
+   line is in the capture) and by width (strictly more lines than the `#`-line
+   projection), plus the `#`-line floor that the capture widening would otherwise have
+   retired. The
    gate-walk comment in `_about_call_time_census.py` carried a duration a re-verifier
-   cannot settle — `measured 10.36 s of the control's 10.85 s` on the merge base, and
+   cannot settle — `measured 10.36 s of the control's 10.85 s` at
+   `fa84a473d:990-992`, the last main commit to carry it (NOT the merge base: measured
+   at this PR's base, `git show origin/main:tests/_about_call_time_census.py | grep -c
+   10.36` is `0`, `#9516` already removed the figure), and
    `~2.6 s of ~17 s` on an intermediate head of the branch — neither with the framing
    that produced it (whole arm? control step? `--durations=0`? which box?), the
    defect class three earlier rounds removed from that file. The rule is stated once
    as `_unframed_durations()`: a duration is a claim, and it is allowed only when the
    comment also carries the framing that produced it. ⚠️ The first version of the
    guard keyed on the self-denial PHRASE instead (`no (magnitude|wall-clock)` AND a
-   duration), which was **green on the merge base** — the text the PR exists to
-   replace names no denial — and would go green again on any rewording of the denial,
-   so it retired itself on the next prose edit. The predicate no longer reads the
-   denial at all, and the second arm is its non-vacuity: the merge-base string and
-   the intermediate string RED, a duration carrying its framing stays GREEN, and a
-   duration with only "one box" for company (hardware is not framing) REDs.
+   duration), which was **green on the pre-`#9516` main** — `fa84a473d:990-992`, the
+   text the PR exists to replace, names no denial — and would go green again on any
+   rewording of the denial, so it retired itself on the next prose edit. The predicate
+   now reads the CLAIM, and the only denial it reads is a negation of the framing
+   marker ITSELF: a STRONG denial (`not`, `never`, `without`, `n't`, `skipped`, …) AFTER
+   the marker is searched to the end of the sentence (a `,` `;` or `—` does not stop it),
+   while BEFORE the marker it is read only inside the marker's own clause
+   (`_CLAUSE_BREAK` ends its reach and `_DENIAL_WINDOW` caps it) — so
+   `# never taken; 10.36 s with --durations=0` is FRAMED while its mirror reds, and that
+   before-side cut is what keeps `# no gating change: 14.4 s whole arm, --durations=0`
+   framed. A WEAK quantifier (`no`, `none`) is read only to the next clause break, and a
+   weak quantifier that PREDICATES a measurement noun (`no framing was taken`) counts as
+   strong. ⚠️ That is a copy-level
+   heuristic, and its boundaries are stated rather than implied: it does not decide WHICH
+   marker a denial governs, so `# the control step was 14.4 s, not the whole arm` reds a
+   settleable figure, `i.e.`/`e.g.` read as sentence ends, and a denial more than
+   `_DENIAL_WINDOW` characters after its marker is framed — all filed as `#9531` with the
+   measurements. The second arm is the non-vacuity: the pre-`#9516`
+   string and the intermediate string RED, a duration carrying its framing stays GREEN,
+   and a duration with only "one box" for company (hardware is not framing) REDs.
+   ⚠️ **Three later corrections, each found by putting the removed string somewhere
+   else and watching the arm stay green.** (1) The capture kept only `#`-leading
+   lines, so the same figure in the function DOCSTRING, in a TRAILING comment, or in
+   the `#` block above the `def` went unnoticed — it now reads the function's whole
+   source plus that CONTIGUOUS block. (2) Framing was matched over the whole text, so
+   a comment that merely NAMED `--durations` while denying it passed; the window is
+   now the number's own line, and a marker whose OWN sentence denies it — before it
+   (`not measured with …`) or after it (`… was never taken`) — is not framing.
+   (3) The duration unit was `ms|s`, so `30 seconds` and `2.6 sec` — the same claim
+   re-spelled — was GREEN; every second-and-below unit word is in (`h`/`hours`
+   included), comma-grouped and double-spaced figures are read whole (`1,000 s`
+   reports as `1,000 s`), and `sha256s` is still refused.
+   ⚠️ **What those corrections do NOT close, measured by the `#9522` review (`#9531`).**
+   Framing is matched on the number's LINE, not per NUMBER, so a bare MENTION of a
+   marker on that line frames the figure — `… measured 10.36 s …, unlike the whole arm`
+   is GREEN — and a `#` block separated from the `def` by one blank line is not
+   captured at all. Both are filed as `#9531`, with the measurements, because binding
+   framing per number reds on legitimate prose (a figure whose framing wraps) and
+   folding blank lines in would absorb a PEER function's comment block. A third
+   re-spelling is silent for the same structural reason: a compound `min:sec` figure
+   (`2m36s`) never matches, because the `36s` start is preceded by `m`, so the
+   lookbehind refuses it — the same class, recorded with `#9531`.
+   The THIRD arm in this class,
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written`, is the one
+   that EXECUTES the capture: it writes the removed figure into the DOCSTRING, a
+   TRAILING comment and the `#` block above the `def` of synthetic functions and
+   requires the capture to read all three, and then falsifies the live function's own
+   floor (`#`-line projection non-empty) and its `getsource` coverage (the docstring
+   first line present, and strictly more lines than the projection plus a `def`), so
+   neither the floor nor the capture can be a tautology. The FOURTH is the citation
+   arm: the prose that names where the pre-`#9516` figure came from is read back as
+   PROSE (module docstring + that arm's docstring), and it must not name a TREE as
+   that carrier — both forms now listed in `_STALE_GATE_WALK_ANCHORS` shipped in this
+   file and were false at the head that shipped them — it must name the
+   commit `fa84a473d:990-992`, and — where this checkout can reach the objects,
+   skipped rather than shallow-ified otherwise — that blob must carry the figure while
+   `origin/main`'s does not.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -282,6 +344,8 @@ import ast
 import functools
 import inspect
 import re
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -3379,16 +3443,144 @@ def test_a_module_constant_is_attributed_to_its_consumer():
 
 
 def _gate_walk_comment() -> str:
-    """The `#` lines of `_narrow_gate_walk_sites` — the comment `#9506` is about."""
+    """Every PROSE line `_narrow_gate_walk_sites` carries — the text `#9506` is about.
+
+    ⚠️ **This used to keep only lines that start with `#`, and that made the arm blind
+    to the exact string the PR removes** — measured by the round-6 review, which put
+    `measured 10.36 s of the control's 10.85 s` in three other positions inside the
+    same function and got GREEN on both arms each time: the function DOCSTRING (which
+    `inspect.getsource` returns and the `#` filter dropped), a TRAILING comment on a
+    code line (`for file in _literal_files():  # measured 10.36 s …`), and a `#`
+    comment above the `def` (which `getsource` does not return at all). A guard that
+    reads one of the four places a duration can be written is a guard with three
+    documented ways past it.
+
+    So the capture is: the function's WHOLE source (docstring, inline code and
+    trailing comments) plus the CONTIGUOUS `#` block immediately above the `def`.
+    Within that span nothing is projected away, so a duration is dropped only by being
+    absent — and the two boundaries are stated rather than implied (`#9531`): a `#`
+    block separated from the `def` by a blank line is NOT captured (folding it in would
+    absorb a peer function's prose), and neither is prose elsewhere in the file (a
+    module docstring, a sibling's comment). Both were measured by the `#9522` review.
+    """
     census = _call_time_census()
-    source = inspect.getsource(census._narrow_gate_walk_sites)
+    return _prose_of(census._narrow_gate_walk_sites)
+
+
+def _gate_walk_comment_lines(fn: Callable[..., object]) -> str:
+    """The `#` lines `fn` carries — the PRE-`#9522` capture, kept as the arm's FLOOR.
+
+    ⚠️ **The widened capture retired the arm's own anti-vacuity floor, and this puts it
+    back** (measured by the `#9522` review).
+    `test_the_gate_walk_comment_pins_no_wall_clock_figure` opens with `assert comment`
+    — "the function still carries the mechanism comment" — and that was falsifiable
+    only while the capture was `#`-only. Once `_prose_of` returns the function's whole
+    source, the assertion can NEVER fail: measured by deleting all five `#` lines from
+    `_narrow_gate_walk_sites` and watching the arm stay GREEN, i.e. the guard would pass
+    on a function whose mechanism prose was gone, which is the state `#9506` exists to
+    prevent. So the floor reads THIS projection: the duration scan may see everything,
+    but "the comment is still there" is a question only the `#` lines answer.
+
+    ⚠️ Its STRENGTH is "any `#` line survives", stated here rather than implied
+    (measured by the cycle-2 review): replacing the mechanism prose with
+    `# TODO: revisit this later` satisfies the floor while the mechanism claim is gone.
+    Pinning a phrase would red on a legitimate re-wording of a true comment — the
+    re-word-to-get-past-the-guard failure this file keeps re-learning — so the boundary
+    is named here and the phrase-level check is deliberately not attempted.
+    """
     return "\n".join(
-        line.strip() for line in source.splitlines() if line.lstrip().startswith("#")
+        line.strip()
+        for line in inspect.getsource(inspect.unwrap(fn)).splitlines()
+        if line.lstrip().startswith("#")
     )
 
 
-#: A duration, as a comment pins one (`10.36 s`, `~2.6 s`, `850 ms`).
-_DURATION = re.compile(r"\d+(?:\.\d+)?\s?(?:ms|s)\b")
+def _prose_of(fn: Callable[..., object]) -> str:
+    """Every prose line `fn` carries, plus the contiguous `#` block above its `def`.
+
+    ⚠️ **Factored out of `_gate_walk_comment` so the four POSITIONS a duration can be
+    written in are executable, not prose** (`#9522`). A guard over a comment is only
+    as good as its capture, and the capture was green on three of the four positions —
+    measured by splicing the removed figure into each one and watching both arms pass.
+    Taking a CALLABLE makes the capture testable on synthetic functions that write the
+    figure in each position, which is what
+    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` does.
+
+    `inspect.unwrap` is not decoration: TEN of `_narrow_gate_walk_sites`'s siblings in
+    `_about_call_time_census.py` are `@lru_cache`d (measured: `_universe`, `_sources`,
+    `_literal_files`, `_files`, `_module_consts`, `_attr_consts`,
+    `_rel_constant_names`, `_census`, `_empty_pattern_sites`, `_call_time_sites`).
+    `getsource` and `getsourcelines`
+    unwrap for you, but `inspect.getsourcefile(fn)` — the call below, after the
+    unwrap, which locates the `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
+    neither the guard nor the comment (found by the `#9522` review; the first version
+    of this paragraph blamed `getsource`). The assertion below names the contract for
+    anything that is not a function at all. ⚠️ `getsourcelines` scans BACK OVER
+    DECORATORS, so for the functions this paragraph is about its line number is the
+    first DECORATOR line, not the `def` (measured by the cycle-5 review) — the `#` block
+    is therefore read from above the decorator, which is the right place and not the
+    place the sentence used to claim.
+    """
+    fn = inspect.unwrap(fn)
+    assert inspect.isfunction(fn) or inspect.ismethod(fn), (
+        f"`_prose_of` needs a plain function to read source from, got "
+        f"{type(fn).__name__} — a `functools.cache` / `lru_cache` wrapper hides the "
+        "source, so unwrap it (or pass the inner function)"
+    )
+    source = inspect.getsource(fn)
+    path = inspect.getsourcefile(fn)
+    first = inspect.getsourcelines(fn)[1]
+    above: list[str] = []
+    if path:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        index = first - 2  # the line before the `def`
+        while index >= 0 and lines[index].lstrip().startswith("#"):
+            above.append(lines[index].strip())
+            index -= 1
+    return "\n".join([*reversed(above), source])
+
+
+#: A duration, as a comment pins one (`10.36 s`, `~2.6 s`, `850 ms`, `30 seconds`,
+#: `1,000 s`, `1.5 h`).
+#:
+#: ⚠️ **Three reviews changed this regex, and every change is about the same thing: a
+#: guard whose unit list or number shape is narrow is retired by a RE-SPELLING.** The
+#: round-6 review measured `30 seconds of the control's 60 seconds` and `2.6 sec of a
+#: 17 sec arm` going GREEN — the identical claim, re-spelled — so every
+#: second-and-below unit word is here, `h`/`hours`/`days` included AND the word forms
+#: (`milliseconds`, `microseconds`, `nanoseconds`), which were still silent in the
+#: previous list (cycle-4 review: `850 milliseconds` reported nothing while `850 ms` did).
+#:
+#: The `#9522` review then measured the OPPOSITE failure in the first version of the
+#: lookbehind: `1,000 s`, `10,36 s` (decimal comma), `2,048 ms`, `1e3 s` and
+#: `10.36  s` (double space) all went GREEN — not half-matched (`000 s`), not matched
+#: AT ALL — so a grouped or re-separated figure was undetectable, which is strictly
+#: worse than quoting a sub-token. Grouped numbers and BOTH decimal separators are
+#: therefore matched whole, `\s*` absorbs a doubled space, and an exponent form is read
+#: as one number. A GROUPED number with a fraction composes too (`1,000.5 s` matched
+#: nothing at all in the first version — cycle-4 review). Unit words are
+#: case-insensitive.
+#:
+#: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`,
+#: and `x1,000 s` must not report `000 s` — the lookbehind refuses a number that starts
+#: mid-identifier, mid-digit-run or right after a SEPARATOR. The second lookbehind is
+#: `\d,` and nothing broader, because a comma between two figures is a normal way to
+#: write them (`# arms were 10.36s,10.85s` must report BOTH; `(?<![\w.,])` dropped every
+#: figure after such a comma — measured by the cycle-3 review).
+#:
+#: Residual, recorded rather than silently accepted (`#9531`): a compound `min:sec`
+#: figure (`2m36s`) goes SILENT — the `36s` start is preceded by `m`, so the same
+#: lookbehind that refuses `sha256s` refuses it. That is the re-spelling class again,
+#: and the filed home is `#9531` with the line-vs-number coarseness.
+_DURATION = re.compile(
+    r"(?<![\w.])(?<!\d,)"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d+)?(?:e[+-]?\d+)?\s*"
+    r"(?:"
+    r"milliseconds?|msecs?|usecs?|microseconds?|µsecs?|μsecs?|nsecs?|nanoseconds?|"
+    r"ms|us|µs|μs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 #: What makes a pinned duration SETTLEABLE — the framing that produced it.
 #: Each entry names the measurement a re-verifier must reproduce to check the
@@ -3402,34 +3594,242 @@ _DURATION_FRAMING = (
 )
 
 
+#: A word that DENIES a framing marker when it governs it (`no --durations run`,
+#: `not measured with --durations`, `--durations=0 was never taken`).
+#:
+#: ⚠️ **A blacklist of SPELLINGS, not a parse** — the boundary is stated, not implied
+#: (measured by the `#9522` re-review: `--durations=0 wasn't taken` was GREEN while
+#: `was never taken` was RED, a one-apostrophe dodge). Contractions (`n't`), and the
+#: verbs a comment actually uses to say a measurement was not taken (`skipped`,
+#: `omitted`, `unavailable`, `unmeasured`, `unframed`, `unknown`) are in; a negation
+#: this list does not know is a one-line addition here, and the arm beside it pins the
+#: spellings rather than the intent.
+#:
+#: It is SPLIT IN TWO, and that split is load-bearing (cycle-4 review):
+#:
+#: * `_DENIAL_STRONG` — a denial that can only be read as denying its own clause
+#:   (`not`, `never`, `without`, `n't`, `skipped`, `omitted`, `unavailable`, …). It is
+#:   searched ACROSS a parenthesis and a coordinated `and`, because
+#:   `--durations=0 (never taken)` and `--durations=0 and never taken` deny the marker
+#:   just as plainly as the un-parenthesised form, and the previous single list made
+#:   all seven of those spellings SILENT — a fail-open introduced by widening the
+#:   after-side boundary.
+#: * `_DENIAL_WEAK` — a subject-less quantifier (`no`, `none`, `nothing`, `nobody`),
+#:   which very often governs a LATER noun in a side remark (`(no flakes)`, `(no
+#:   failures)`, `and no flakes`). It honours the wider boundary, so those stay framed.
+_DENIAL_STRONG = re.compile(
+    r"\b(?:not|never|without)\b"
+    r"|\b\w+n['’]t\b"
+    r"|\b(?:skipped|omitted|unavailable|unmeasured|unframed|unknown)\b",
+    re.IGNORECASE,
+)
+
+_DENIAL_WEAK = re.compile(r"\b(?:no|none|nothing|nobody)\b", re.IGNORECASE)
+
+#: A WEAK quantifier that is nevertheless DENYING a measurement — `and no framing was
+#: taken`, `(no measurement exists)` — is a denial, not a side remark, because its object
+#: is the measurement vocabulary. Searched across the same breaks as `_DENIAL_STRONG`
+#: (cycle-4 review: `--durations=0 and no framing was taken` was otherwise SILENT, since
+#: `no` is weak and `and` starts the side-remark window at once). `(no flakes)` and
+#: `(no failures)` stay framed — their object is not a measurement.
+_DENIAL_GOVERNING = re.compile(
+    r"\b(?:no|none|nothing|nobody)\b[^.;]{0,40}?"
+    r"\b(?:framing|measure\w*|figure|duration|timing|numbers?|wall-clock|magnitude|split)\b"
+    # ...and it must PREDICATE that noun (`no framing WAS TAKEN`, `no measurement
+    # EXISTS`). Without the lookahead, a parenthetical that denies a DIFFERENT quantity
+    # reds a framed figure — `# 14.4 s whole arm (no spread figure)` and
+    # `(no per-file timing)` were both RED at the previous head (cycle-5 review), which is
+    # the true-comment-gets-reworded failure this file keeps re-learning.
+    r"(?=\s*(?:was|is|were|are|exists?|available|taken|run|measured|pinned|stated|recorded))",
+    re.IGNORECASE,
+)
+
+#: Every denial symbol — what the BEFORE side searches, because a negation in front of
+#: a marker governs it whichever of the two lists it is in.
+_DENIAL = re.compile(
+    rf"(?:{_DENIAL_STRONG.pattern})|(?:{_DENIAL_WEAK.pattern})", re.IGNORECASE
+)
+
+#: How far a denial reaches from its marker, in characters, WITHIN one clause.
+_DENIAL_WINDOW = 40
+
+#: A clause boundary — a separator that ends the reach of a denial, so
+#: `--durations=0 — no other change to the control step` does not deny `--durations`.
+#: A DECIMAL POINT (`10.36 s`) is not a boundary: `.` counts only when a space or the
+#: line end follows it.
+_CLAUSE_BREAK = re.compile(r"[,;:—–]|[.;](?=\s|$)")
+
+#: A boundary for a denial that FOLLOWS its marker — a superset of `_CLAUSE_BREAK`.
+#:
+#: ⚠️ **Asymmetric on purpose, and each half is measured.** A parenthesis or a bare
+#: `and` after the marker is a SIDE REMARK, so `# whole arm 14.4 s (no flakes)` and
+#: `# 14.4 s whole arm and no flakes` must stay framed — both were RED with
+#: `_CLAUSE_BREAK` alone (cycle-3 review), i.e. a true comment was being reworded to
+#: pass the guard. In front of the marker the same words are the governing clause, so
+#: `# (no --durations run): 10.36 s` stays RED and is pinned as such: only this
+#: after-side boundary knows about parentheses.
+#:
+#: ⚠️ And it applies ONLY to `_DENIAL_WEAK` (cycle-4 review). The boundary only ever
+#: SHORTENS the text a denial is searched in, so applying it to the strong denials made
+#: `--durations=0 (never taken)` and `--durations=0 and never taken` SILENT — a
+#: fail-open with no compensating red. A strong denial is searched across these breaks.
+_CLAUSE_BREAK_AFTER = re.compile(r"[,;:—–()]|\band\b|[.;](?=\s|$)")
+
+#: A real sentence end — where the search for a STRONG denial stops, because a strong
+#: denial after the marker is about the marker however it is CLAUSE-punctuated.
+#:
+#: ⚠️ `;` is NOT here (cycle-6 review): it is a clause separator, and including it made
+#: `--durations=0; never taken` SILENT — a one-character substitution for the hole the
+#: veto exists to close, with no arm able to tell the two behaviours apart. `.` keeps its
+#: `(?=\s|$)` guard so a decimal (`10.36 s`) is not a sentence end. Residual, stated:
+#: an ABBREVIATION dot (`i.e. never taken`, `e.g.`) still reads as a sentence end, so a
+#: strong denial after one is framed — it is in `#9531` with the other residuals.
+_SENTENCE_END = re.compile(r"[.](?=\s|$)")
+
+
+def _marker_spans(line: str) -> list[tuple[int, int]]:
+    """Every framing-marker occurrence on `line`, as `(start, end)` spans."""
+    lowered = line.lower()
+    spans: list[tuple[int, int]] = []
+    for marker in _DURATION_FRAMING:
+        start = lowered.find(marker)
+        while start >= 0:
+            spans.append((start, start + len(marker)))
+            start = lowered.find(marker, start + 1)
+    return spans
+
+
+def _denied(line: str, start: int, end: int) -> bool:
+    """Is the marker at `[start, end)` denied by its OWN clause?
+
+    ⚠️ **Per OCCURRENCE, in both directions, because the first version was wrong both
+    ways** — both measured by the `#9522` review:
+
+    * FAIL-CLOSED (red on legitimate prose): the veto was one line-level search, so any
+      negation anywhere on the line killed the line's framing —
+      `# 14.4 s whole arm, --durations=0 — no other change to the control step` RED,
+      with two of its three markers un-negated.
+    * FAIL-OPEN (green on denied prose): the regex only searched `negation … marker`, so
+      `# … measured 10.36 s of the control's 10.85 s — --durations=0 was never taken`
+      was GREEN — one word-order swap from the hole the veto exists to close.
+
+    So a denial counts only within `_DENIAL_WINDOW` characters of the marker and only
+    inside the marker's own clause: `_CLAUSE_BREAK` (`,` `;` `:` `—` `–` and a real
+    sentence `.`) ends its reach on either side. That is what makes both measured cases
+    come out right — `no other change to the control step` is behind a dash and an
+    unrelated noun phrase, while `was never taken` sits in the marker's own clause.
+
+    ⚠️ **A STRONG denial after the marker is searched past a parenthesis and past a
+    coordinated `and`** (`_DENIAL_STRONG` vs `_DENIAL_WEAK`): `--durations=0 (never
+    taken)` and `--durations=0 and never taken` are denials of the marker, while
+    `(no flakes)` and `and no failures` are side remarks about something else. Applying
+    the wider boundary to both lists made the first pair SILENT (cycle-4 review), which
+    is the fail-open direction and the worse one.
+    """
+    before = line[max(0, start - _DENIAL_WINDOW) : start]
+    breaks = list(_CLAUSE_BREAK.finditer(before))
+    if breaks:
+        before = before[breaks[-1].end() :]
+    if _DENIAL.search(before):
+        return True
+    after = line[end : end + _DENIAL_WINDOW]
+    # ⚠️ THREE windows, because the three lists are denied by different shapes:
+    #   * `_DENIAL_STRONG` is searched to the end of the SENTENCE — `--durations=0 — never
+    #     taken` and `--durations=0, never taken` deny the marker as plainly as the
+    #     parenthesised form, and cutting at `,`/`—` made both SILENT (cycle-5 review);
+    #   * `_DENIAL_GOVERNING` reads the SAME sentence window (its own predicate lookahead
+    #     is what keeps `(no spread figure)` green), and `_DENIAL_WEAK` is searched only to
+    #     the next clause break, so `— no other change to the control step` (a weak
+    #     quantifier over a different noun) stays a side remark;
+    #   * `_DENIAL_WEAK` is searched inside the narrower after-side boundary again, so
+    #     `(no flakes)` and `and no failures` stay framed.
+    sentence = _SENTENCE_END.search(after)
+    strong_window = after[: sentence.start()] if sentence else after
+    if _DENIAL_STRONG.search(strong_window):
+        return True
+    # The GOVERNING list also reads the sentence window: its own lookahead is what keeps
+    # `(no spread figure)` green (no predicate follows the noun), so it does not need the
+    # clause cut — and with the cut, `— no measurement was ever taken` went SILENT.
+    if _DENIAL_GOVERNING.search(strong_window):
+        return True
+    stop_after = _CLAUSE_BREAK_AFTER.search(after)
+    weak_window = after[: stop_after.start()] if stop_after else after
+    return bool(_DENIAL_WEAK.search(weak_window))
+
+
+def _framed(line: str) -> bool:
+    """Does `line` frame its durations — does it carry one marker that is NOT denied?
+
+    Per marker OCCURRENCE, so one denied marker cannot sink a line whose other markers
+    are not denied. Cost, stated: a denial that is not separated from a marker by a
+    clause boundary still reaches it — `# no framing was taken, 10.36 s --durations=0`
+    is ambiguous prose and comes out FRAMED (the comma cuts the denial off), which is
+    the fail-open direction and is filed with the line-vs-number coarseness as `#9531`.
+    """
+    return any(
+        not _denied(line, start, end) for start, end in _marker_spans(line)
+    )
+
+
 def _unframed_durations(comment: str) -> list[str]:
     """Durations `comment` pins WITHOUT the framing that produced them (`#9506`).
 
     ⚠️ **This predicate is the fix to a FAIL-OPEN guard, not a rewording of one.**
     The first version of the arm red on the co-occurrence of a self-denial phrase
     (`no magnitude` / `no wall-clock`) AND a duration. That made it **green on the
-    merge base** — `git show origin/main:tests/_about_call_time_census.py` carried
+    pre-`#9516` main** — `fa84a473d:tests/_about_call_time_census.py:990-992` carried
     *"re-reading `_sources()` and rebuilding the same 29 `_File`s measured 10.36 s
-    of the control's 10.85 s for byte-identical output"*, which says no denial at
+    of the control's 10.85 s for byte-identical output"* (`git show origin/main:… |
+    grep -c 10.36` is `0` at this base — the figure is gone), which says no denial at
     all, so there was nothing for the guard to fire on: the arm passed on precisely
     the text this PR deletes, and would pass again if that figure were re-introduced.
     It was also fail-open on REWORDING — turning "No magnitude is pinned" into "No
     timing figure is named" silently retired it.
 
     So the rule now reads the CLAIM rather than a phrase about it: a duration is a
-    fact asserted about a measurement, and it is acceptable only when the comment
-    also states the framing that produced it. This reds on the merge-base text and
-    on the intermediate `~2.6 s of ~17 s` sentence alike, and no rewording can
-    retire it because it never reads the denial.
+    fact asserted about a measurement, and it is acceptable only when the text also
+    states the framing that produced it. This reds on the pre-`#9516` main text and on
+    the intermediate `~2.6 s of ~17 s` sentence alike, and no REWORDING of the claim
+    itself retires it, because it never reads a denial PHRASE — the only denial it
+    reads is a negation of the framing marker, scoped to that marker's own clause and
+    checked on BOTH sides of it (`_denied`). ⚠️ The denial VOCABULARY is open, and that
+    boundary is stated rather than implied (measured by the `#9522` re-review):
+    `--durations=0 was never taken` reds, and so do the contraction (`wasn't taken`),
+    `was skipped`, `was omitted` and `is unavailable` spellings. What stays framed is
+    only what the SENTENCE END puts out of reach: `never done here` after a `.`, or
+    `--durations=0. wasn't really used`, is framed — and dropping that `.`
+    (`--durations=0 wasn't really used`, a single sentence) reds the same words. The
+    list is a blacklist of spellings, not a parse, so a new denial phrasing is a
+    one-line addition, not a rewording dodge.
+    Two costs are stated rather than found later: `_CLAUSE_BREAK` ends a denial's reach
+    at a sentence `.`, so `# 10.36 s --durations=0. Never taken.` is FRAMED (the denial
+    is a new sentence), and a denial separated from its marker by a comma does not
+    reach it (see `_framed`).
 
-    Coarse in one documented direction: the framing marker is matched over the whole
-    comment, not per number, so a comment that carries its framing may also mention
-    a second figure. That is the harmless direction — it can only stay GREEN where
-    the framing IS stated, which is the state the reviewer asked to keep allowed.
+    ⚠️ **The framing is matched on the NUMBER'S OWN LINE, and that is the second fix.**
+    Matching it over the whole text (the first version) passed a comment that merely
+    NAMED `--durations` somewhere — `… 10.36 s of the control's 10.85 s — not measured
+    with --durations=0, so no framing was ever taken` was GREEN, and the docstring's
+    claim that it "can only stay GREEN where the framing IS stated" was false. A
+    framed number and a framed comment are different things, so the window is the line.
+    Cost, stated: a duration whose framing wraps onto the NEXT line reds, and the fix
+    is to put them on one line — the direction that keeps a claim settleable.
+
+    ⚠️ **Residual coarseness, restored and now HONEST (`#9531`).** The window is the
+    line, not the number, so a bare MENTION of a marker on a duration's line frames
+    it — `… measured 10.36 s …, unlike the whole arm` is GREEN, and a second figure on
+    a framed line (`# the whole arm is 14.4 s; a stale 99 s …`) rides on the first
+    one's framing. The earlier version of this docstring claimed that direction "can
+    only stay GREEN where the framing IS stated", which the `#9522` review measured to
+    be FALSE; a per-number binder reds on legitimate prose (a figure whose framing
+    wraps, `# 14.4 s, --durations=0`), so the bypass is filed as `#9531` instead of
+    being described as harmless.
     """
-    found = _DURATION.findall(comment)
-    if any(marker in comment for marker in _DURATION_FRAMING):
-        return []
+    found: list[str] = []
+    for line in comment.splitlines():
+        if _framed(line):
+            continue
+        found.extend(match.group(0).strip() for match in _DURATION.finditer(line))
     return found
 
 
@@ -3440,7 +3840,9 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     refactor's comment read *"No magnitude is stated on purpose: the redundant
     rebuild is a fraction of this arm (a re-verifier measured ~2.6 s of ~17 s on one
     box)"* — an assertion that no magnitude is stated, immediately followed by one,
-    on the exact axis the change exists to fix — and its merge-base predecessor read
+    on the exact axis the change exists to fix — and its predecessor at
+    `fa84a473d:990-992`, the last main commit to carry it (NOT the merge base, which
+    greps `0` for `10.36`), read
     *"measured 10.36 s of the control's 10.85 s"*, a ratio that reproduces under no
     framing the reviewer constructed (the redundant rebuild is ~2.6 s of a ~17 s
     arm; the arm's dominant cost is the 242-module ungated walk, not the control).
@@ -3455,7 +3857,13 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     pre-fix code guards nothing (the defect the round-5 review found here).
     """
     comment = _gate_walk_comment()
-    assert comment, (
+    # ⚠️ The FLOOR reads the `#`-only projection, NOT the capture. While the capture was
+    # `#`-only, `assert comment` was falsifiable in the direction this arm exists for —
+    # delete the mechanism comment and the arm reds. The `#9522` capture widening made it
+    # unfalsifiable (a function's source is never empty), measured by deleting all five
+    # `#` lines from `_narrow_gate_walk_sites` and watching this arm stay GREEN. Its
+    # strength is "a `#` line survives, of any content" — see `_gate_walk_comment_lines`.
+    assert _gate_walk_comment_lines(_call_time_census()._narrow_gate_walk_sites), (
         "`_narrow_gate_walk_sites` carries no `#` comment any more, so this arm "
         "asserts nothing — the mechanism it states was the whole point of the change"
     )
@@ -3469,37 +3877,254 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
 
 
 def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
-    """Non-vacuity for `_unframed_durations`, on the MERGE BASE — not an
+    """Non-vacuity for `_unframed_durations`, on the PRE-`#9516` MAIN — not an
     intermediate commit of this branch (`#9506`).
 
     ⚠️ **The round-5 review found the first guard green on `origin/main`.** It red
     only on `says_none AND duration`, and the base text says no denial, so the arm
     passed on the very text this PR exists to delete. This arm feeds the same
-    three states through the same predicate the guard uses — the base string, the
-    intermediate string, and a framed duration — so "the guard reds on what it
+    three states through the same predicate the guard uses — the pre-`#9516` string,
+    the intermediate string, and a framed duration — so "the guard reds on what it
     replaced" is executed rather than asserted in a docstring, the shape this file
     already uses elsewhere ("mutation applied, all arms re-run").
+
+    ⚠️ The ANCHOR is named by COMMIT, not by `origin/main` (measured by the `#9522`
+    re-review): `git show origin/main:tests/_about_call_time_census.py | grep -c 10.36`
+    returns `0` at this PR's base — `#9516` already removed the figure — so the earlier
+    wording pointed a re-verifier at a tree that no longer says what this arm claims.
+    The string below is `fa84a473d:tests/_about_call_time_census.py:990-992`, the last
+    main commit to carry it.
     """
-    merge_base = (
+    pre_9516_main = (
         "# `_literal_files()` is already parsed and cached; re-reading `_sources()` "
         "and\n# rebuilding the same 29 `_File`s measured 10.36 s of the control's "
         "10.85 s for\n# byte-identical output."
     )
+    # Verbatim from `git show aded3145d:tests/_about_call_time_census.py` lines 990-995.
+    # ⚠️ The `#9522` review measured the PREVIOUS content of this literal to be an
+    # INVENTED string carrying this very citation: no commit of that file has ever
+    # contained `8.14 s` or `25.34 s` (`git log --all -S` returns only the lanes that
+    # wrote this comment), while the real lines 990-995 are the `~2.6 s of ~17 s` block
+    # below. So the fix whose commit message calls out "an ABRIDGED PARAPHRASE labelled
+    # 'the intermediate string'" had replaced it with a fabricated QUOTATION — a
+    # quotation that is not the thing it quotes, the defect this file keeps re-learning.
+    # The blob's six lines (990-995), DE-INDENTED — that is the only transformation;
+    # nothing is re-wrapped. Pinned by line count and prefix below, because the cycle-1
+    # review measured that the abridged 4-line paraphrase this replaced returns the same
+    # `['2.6 s', '17 s']` and would pass a wording-only assertion (the "claim not
+    # executed" shape this file keeps re-learning).
     intermediate = (
-        "# ... only object identity changes. No magnitude is stated on purpose: the\n"
-        "# redundant rebuild is a fraction of this arm (a re-verifier measured "
-        "~2.6 s of\n# ~17 s on one box), and a wall-clock number pinned into a "
-        "comment is the\n# claim that rots."
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and\n"
+        "# rebuilding the same 29 `_File`s is redundant work for byte-identical output —\n"
+        "# the same `_File` values over the same `_sources().items()` order, so only object\n"
+        "# identity changes. No magnitude is stated on purpose: the redundant rebuild is a\n"
+        "# fraction of this arm (a re-verifier measured ~2.6 s of ~17 s on one box), and a\n"
+        "# wall-clock number pinned into a comment is the claim that rots."
     )
-    assert _unframed_durations(merge_base) == ["10.36 s", "10.85 s"], (
-        "the predicate must red on the MERGE BASE text (`measured 10.36 s of the "
+    # `~` is decorative — the span reported is the number and its unit, not the tilde.
+    assert _unframed_durations(intermediate) == ["2.6 s", "17 s"], (
+        "the predicate must red on the VERBATIM intermediate `~2.6 s of ~17 s` block "
+        "from `aded3145d` — it is the state the earlier round called \"pre-fix\", and "
+        f"the quoted literal must be that blob's text, not a paraphrase ({_unframed_durations(intermediate)})"
+    )
+    assert len(intermediate.splitlines()) == 6 and intermediate.startswith(
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and"
+    ), (
+        "the quoted intermediate must be the blob's SIX lines, de-indented — an abridged "
+        "or re-wrapped paraphrase returns the same durations and so cannot be caught by "
+        f"the duration assertion ABOVE (got {len(intermediate.splitlines())} lines)"
+    )
+    assert _unframed_durations(pre_9516_main) == ["10.36 s", "10.85 s"], (
+        "the predicate must red on the PRE-`#9516` main text (`measured 10.36 s of the "
         "control's 10.85 s`) — that is the figure this PR removes, so an arm that "
         "passes on it is vacuous: it would let the identical figure be re-introduced"
     )
-    assert _unframed_durations(intermediate), (
-        "the predicate must red on the intermediate `~2.6 s of ~17 s` sentence, "
-        "which is the state the earlier round called \"pre-fix\" — it is a commit on "
-        "this branch, never on main"
+    # ── the denial is PER OCCURRENCE and BOTH SIDES; both failures measured by the
+    # `#9522` review, one in each direction. A denial AFTER the marker used to be GREEN
+    # (`--durations=0 was never taken` — the hole the veto exists to close, one word
+    # order away); a denial somewhere else on the line used to red legitimate prose
+    # (`… whole arm, --durations=0 — no other change to the control step`).
+    assert _unframed_durations(
+        "# measured 10.36 s of the control's 10.85 s — `--durations=0` was never taken"
+    ) == ["10.36 s", "10.85 s"], (
+        "a denial written AFTER the marker must red as surely as one written before "
+        "it — the marker is named only to say it was never taken"
+    )
+    # ⚠️ The denial VOCABULARY, pinned as spellings: the cycle-2 review measured that a
+    # contraction (`wasn't taken`) or a verb the list did not know (`was skipped`,
+    # `is unavailable`) went SILENT while `was never taken` red — a one-apostrophe dodge.
+    for denied in (
+        "# 10.36 s --durations=0 wasn't taken",
+        "# 10.36 s --durations=0 was skipped",
+        "# 10.36 s --durations=0 was omitted",
+        "# 10.36 s --durations=0 is unavailable",
+        "# 10.36 s --durations=0 unmeasured",
+    ):
+        assert _unframed_durations(denied) == ["10.36 s"], (
+            f"{denied!r} denies the framing it names, so it must red "
+            f"({_unframed_durations(denied)}) — a denial spelling the list does not "
+            "know is a silent way past the guard, so each spelling is an arm here"
+        )
+    assert not _unframed_durations(
+        "# 14.4 s whole arm, --durations=0 — no other change to the control step"
+    ), (
+        "an unrelated negation on an otherwise framed line must NOT red it — the veto "
+        "is per marker occurrence, or a true comment gets reworded to pass the guard"
+    )
+    assert not _unframed_durations(
+        "# no gating change: 14.4 s whole arm, --durations=0"
+    ), (
+        "a denial in front of an unrelated clause must not veto framing stated after "
+        "it on the same line"
+    )
+    # ⚠️ A parenthesis or a bare `and` AFTER the marker is a SIDE REMARK, not a denial
+    # of it — both were RED with `_CLAUSE_BREAK` alone (cycle-3 review), i.e. a true
+    # comment would have been reworded to pass the guard. The parenthetical BEFORE the
+    # marker is the opposite case and must stay RED, which is why the after-boundary is
+    # a superset rather than one list.
+    for side_remark in (
+        "# whole arm 14.4 s (no flakes)",
+        "# 14.4 s in-suite (no failures)",
+        "# 14.4 s whole arm --durations=0 (no failures)",
+        "# 14.4 s whole arm and no flakes",
+        # a parenthetical that denies a DIFFERENT quantity: the measurement noun alone
+        # was enough to red these at the previous head (cycle-5 review), so the governing
+        # list now requires a PREDICATE after the noun
+        "# 14.4 s whole arm (no spread figure)",
+        "# 14.4 s whole arm (no per-file timing)",
+        "# whole arm 14.4 s and no figure for the per-file split",
+    ):
+        assert not _unframed_durations(side_remark), (
+            f"{side_remark!r} frames its figure and adds an unrelated parenthetical or "
+            f"coordinated negation ({_unframed_durations(side_remark)}) — a true "
+            "comment reding here is how a guard teaches an editor to reword it"
+        )
+    assert _unframed_durations("# (no --durations run): 10.36 s") == ["10.36 s"], (
+        "a negation in front of the marker governs it even inside a parenthesis — the "
+        "after-side boundary must not shield it"
+    )
+    # ⚠️ A STRONG denial AFTER the marker reaches across a parenthesis and across a
+    # coordinated `and` — the after-side boundary only ever SHORTENS the searched text,
+    # so applying it to the strong list made all of these SILENT (cycle-4 review), a
+    # fail-open with no compensating red. The weak quantifiers above stay framed.
+    for strong_denial in (
+        "# 10.36 s --durations=0 (never taken)",
+        "# 10.36 s --durations=0 (not run)",
+        "# 10.36 s --durations=0 (skipped)",
+        "# 10.36 s --durations=0 and never taken",
+        "# 10.36 s --durations=0 and wasn't taken",
+        "# 10.36 s --durations=0 and no framing was taken",
+        # a strong denial is about the marker however it is punctuated: the sentence-end
+        # window is what makes `, never taken` and `— never taken` red, and cutting at the
+        # separator made both SILENT (cycle-5 review)
+        "# 10.36 s --durations=0 — never taken",
+        "# 10.36 s --durations=0, never taken",
+        "# 10.36 s --durations=0 — no measurement was ever taken",
+        # `;` is a CLAUSE separator: including it in the sentence-end window made this
+        # silent, a one-character substitution for the hole the veto exists to close
+        "# 10.36 s --durations=0; never taken",
+        "# measured 10.36 s with --durations=0; the run was never taken",
+    ):
+        assert _unframed_durations(strong_denial) == ["10.36 s"], (
+            f"{strong_denial!r} denies the framing it names, parenthesised or "
+            f"coordinated or not ({_unframed_durations(strong_denial)}) — a strong "
+            "denial is not a side remark, so the after-side boundary must not stop it"
+        )
+    # ⚠️ The SENTENCE-END boundary the docstring STATES, executed. The `#9522` review
+    # measured a prose defect here: the docstring said `--durations=0 wasn't really
+    # used` "split across a `.`" is FRAMED while printing that example with no period,
+    # where `_DENIAL_STRONG` reads `wasn't` and the line REDS. Prose and predicate
+    # disagreed in the same sentence and no arm could tell, so the FRAMED example is now
+    # read out of the docstring itself and both sides of the boundary are run.
+    docstring_prose = " ".join((_unframed_durations.__doc__ or "").split())
+    assert "`--durations=0. wasn't really used`" in docstring_prose, (
+        "the docstring no longer states the boundary this arm executes — the FRAMED "
+        "example must carry the `.`, because the unpunctuated form is a single "
+        "sentence and reds"
+    )
+    for new_sentence in (
+        # the `.` ends the marker's sentence, so a strong denial beyond it does not
+        # reach the marker: this is the GREEN side the docstring states
+        "# 10.36 s --durations=0. wasn't really used",
+        "# 10.36 s --durations=0. never done here",
+    ):
+        assert not _unframed_durations(new_sentence), (
+            f"{new_sentence!r} states its denial in a NEW sentence, so the marker's "
+            f"own sentence frames the figure ({_unframed_durations(new_sentence)}) — "
+            "that `.` is the only reason the docstring's example is framed"
+        )
+    for one_sentence in (
+        "# 10.36 s --durations=0 wasn't really used",
+        "# 10.36 s --durations=0 never done here",
+    ):
+        assert _unframed_durations(one_sentence) == ["10.36 s"], (
+            f"{one_sentence!r} is the SAME words with the `.` dropped, so the denial "
+            f"sits in the marker's own sentence and must red "
+            f"({_unframed_durations(one_sentence)}) — otherwise the boundary the "
+            "docstring states is not the one the predicate implements"
+        )
+
+    # ── the SECOND fix this predicate claims: framing is per LINE, not whole-text.
+    # Cycle-4 review measured that no arm executed it — reverting `_framed` to a
+    # whole-`comment` test left the file green, because the only multi-line input was
+    # the `intermediate` literal, which carries no marker on any line.
+    assert _unframed_durations(
+        "# 10.36 s of the control's 10.85 s\n# the whole arm was re-run last week"
+    ) == ["10.36 s", "10.85 s"], (
+        "a marker on a DIFFERENT line must not frame this line's figure — that is the "
+        "whole-text hole the per-line window closes, and nothing else here executes it"
+    )
+    assert not _unframed_durations("# the whole arm is 14.4 s\n# nothing else"), (
+        "the same-line case must stay GREEN, or the arm above can be satisfied by "
+        "making everything red"
+    )
+    for word_form, expected in (
+        ("# the arm took 850 milliseconds", ["850 milliseconds"]),
+        ("# the arm took 850 microseconds", ["850 microseconds"]),
+        ("# the arm took 850 nanoseconds", ["850 nanoseconds"]),
+        ("# the arm took 850 msec", ["850 msec"]),
+        ("# the arm took 900 usec", ["900 usec"]),
+        ("# the arm took 900 usecs", ["900 usecs"]),
+        ("# the arm took 900 usecs of the arm", ["900 usecs"]),
+        ("# the arm took 900 µsec", ["900 µsec"]),
+        ("# the arm took 900 nsecs", ["900 nsecs"]),
+        ("# cost 1,000.5 s of the arm", ["1,000.5 s"]),
+        ("# cost 2,048.25 ms of the arm", ["2,048.25 ms"]),
+    ):
+        assert _unframed_durations(word_form) == expected, (
+            f"{word_form!r} writes a duration the unit/number list claims to cover "
+            f"({_unframed_durations(word_form)}) — a silent re-spelling is how the "
+            "guard gets retired by an editor's keyboard"
+        )
+    # ── re-spellings of the same figure: every one of these was GREEN when the number
+    # had to be a plain decimal or the unit had to be `ms|s`, and a GREEN figure here
+    # means the guard is retired by an editor's keyboard, not by a false claim.
+    for respelled, expected in (
+        ("# measured 1,000 s of the control's 2,000 s", ["1,000 s", "2,000 s"]),
+        ("# measured 10,36 s of the control's 10,85 s", ["10,36 s", "10,85 s"]),
+        ("# measured 1e3 s of the 2e3 s arm", ["1e3 s", "2e3 s"]),
+        ("# measured 10.36  s of the control's 10.85  s", ["10.36  s", "10.85  s"]),
+        ("# cost 1.5 h of the arm's 2 h", ["1.5 h", "2 h"]),
+        ("# cost 900 us of the arm", ["900 us"]),
+    ):
+        assert _unframed_durations(respelled) == expected, (
+            f"{respelled!r} must report the durations it writes, verbatim "
+            f"({_unframed_durations(respelled)}) — a re-spelt figure that goes SILENT "
+            "is worse than one quoted imperfectly: nothing ever reds again"
+        )
+    assert not _unframed_durations("# sha256s and 1,000 of them, no duration here"), (
+        "the lookbehind must still refuse a token that is not a duration — `sha256s` "
+        "and a bare count must not be reported as one"
+    )
+    assert _unframed_durations("# x1,000 s of whatever") == [], (
+        "`x1,000` is not a duration: the number must be refused from its first digit "
+        "and never reported from a fragment after the group separator — measured by "
+        "the cycle-2 review as `['000 s']`, a span that is not what was written"
+    )
+    assert _unframed_durations("# arms were 10.36s,10.85s") == ["10.36s", "10.85s"], (
+        "a comma BETWEEN two figures is not a reason to refuse the second one "
+        f"({_unframed_durations('# arms were 10.36s,10.85s')}) — measured by the "
+        "cycle-3 review, where the group-separator lookbehind silently dropped it"
     )
     assert not _unframed_durations(
         "# the arm measured 14.4 s whole arm, --durations=0, one box"
@@ -3513,6 +4138,227 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "use — this is the arm the guard asserts, restated so a divergence between "
         "the predicate and its non-vacuity arm cannot go unnoticed"
     )
+
+
+def _figure_in_the_docstring() -> None:
+    """A duration in the position `getsource` RETURNS and the `#` filter DROPPED:
+
+    measured 10.36 s of the control's 10.85 s.
+    """
+
+
+def _figure_as_a_trailing_comment() -> None:  # measured 10.36 s of the control's 10.85 s
+    """A duration on a code line's TRAILING comment — also dropped by the filter."""
+
+
+# measured 10.36 s of the control's 10.85 s
+# (contiguous, so the backward scan has to reach past the `def`)
+def _figure_in_the_block_above_the_def() -> None:
+    """A duration in the `#` block ABOVE the `def` — `getsource` never returns it."""
+    # the mechanism line the floor looks for (a `#`-leading line IN the source)
+
+
+def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
+    """The capture is not a `#`-only projection (`#9522`).
+
+    ⚠️ **A guard over a comment is only as good as its capture, and the capture was
+    blind to three of the four places a duration can be written.** `#9516` merged the
+    comment change and left the arm reading `line.lstrip().startswith("#")`, which
+    drops the function DOCSTRING and TRAILING comments (`inspect.getsource` returns
+    both) and never sees the `#` block above the `def` (`getsource` does not return
+    it at all). Measured by splicing `measured 10.36 s of the control's 10.85 s` —
+    the exact string the `#9506` change deletes — into each position on `69390341f`:
+    all three stayed GREEN, so the guard had three documented ways past it.
+
+    The three synthetic functions below put the figure in each position THROUGH the
+    same `_prose_of` the guard uses, so "the capture reads every position" is executed
+    rather than asserted in a docstring. This arm reds on `69390341f` and greens here;
+    it is the missing half of the `#9522` fix, which changed the capture without an
+    arm that could tell the two captures apart.
+    """
+    for fn in (
+        _figure_in_the_docstring,
+        _figure_as_a_trailing_comment,
+        _figure_in_the_block_above_the_def,
+    ):
+        assert _unframed_durations(_prose_of(fn)) == ["10.36 s", "10.85 s"], (
+            f"`{fn.__name__}` writes the `#9506` figure in a position the capture "
+            "projects away, so the guard stays GREEN on the very text it exists to "
+            "delete — the capture must be the function's whole source plus the `#` "
+            "block above the `def`"
+        )
+
+    census = _call_time_census()
+    # ⚠️ `inspect.unwrap` and the plain-function contract were both UNEXECUTED — the live
+    # function is undecorated, so neither could run (cycle-5 review). A `@lru_cache`d
+    # sibling is the natural probe, and it fails on the ASSERT first (`got
+    # _lru_cache_wrapper` is not a function); only if that assert is weakened too does
+    # `inspect.getsourcefile` raise its own `TypeError` (cycle-6 review corrected this
+    # comment, which named the TypeError for a mutation that actually trips the assert).
+    unwrapped = _prose_of(census._census)
+    assert inspect.getdoc(census._census).splitlines()[0].strip() in unwrapped, (
+        "a `@lru_cache`d sibling's capture does not contain its docstring, so the "
+        "`inspect.unwrap` is not doing its job — `getsourcefile` would raise on the wrapper"
+    )
+    with pytest.raises(AssertionError, match="needs a plain function"):
+        _prose_of(len)  # type: ignore[arg-type]
+    # ⚠️ The FLOOR that the capture widening retired, executed rather than described:
+    # `_gate_walk_comment_lines` is the `#`-only projection the arms used to read, so a
+    # function with NO `#` line must come back EMPTY. Without this arm the floor in
+    # `test_the_gate_walk_comment_pins_no_wall_clock_figure` can only be checked by
+    # hand — measured by the `#9522` review deleting all five `#` lines from
+    # `_narrow_gate_walk_sites` and watching that arm stay GREEN.
+    assert _gate_walk_comment_lines(_figure_in_the_docstring) == "", (
+        "the `#`-line floor reports a `#` line for a function that carries none, so it "
+        "cannot tell a comment-less function from a commented one — it would pass on "
+        "the exact state `#9506` exists to prevent"
+    )
+    assert _gate_walk_comment_lines(_figure_in_the_block_above_the_def) == (
+        "# the mechanism line the floor looks for (a `#`-leading line IN the source)"
+    ), (
+        "the floor must still SEE a `#` line where one exists, and ONLY the ones "
+        "`getsource` returns (the block above the `def` is not in it) — otherwise the "
+        "floor is a constant and the arm above it is vacuous for the wrong reason"
+    )
+    stripped = _gate_walk_comment_lines(census._narrow_gate_walk_sites)
+    assert stripped, (
+        "the live function carries no `#` line, so the mechanism comment is gone and "
+        "the pin arm would be asserting nothing"
+    )
+    # And the capture must be MORE than that projection — otherwise the docstring and
+    # trailing-comment positions are invisible on the LIVE function too.
+    #
+    # ⚠️ **The previous version of this check could never fail** (measured by the
+    # `#9522` review): it asked whether ANY captured line differs from the projection's
+    # lines, and a capture is `inspect.getsource` at minimum, whose first line is the
+    # `def` — so the answer was `True` for every implementation of `_prose_of`, INCLUDING
+    # a deliberately BLIND one (`#` lines + the `def` line, docstring and trailing
+    # comments still invisible). The two checks below are the falsifiable pair: the
+    # DOCSTRING is derived from the function object (no literal to reword), and the
+    # capture must strictly exceed the `#`-only projection plus that one `def` line —
+    # the smallest blind shape there is.
+    doc_lines = (inspect.getdoc(census._narrow_gate_walk_sites) or "").splitlines()
+    live = _prose_of(census._narrow_gate_walk_sites)
+    assert doc_lines, (
+        "`_narrow_gate_walk_sites` carries no docstring any more, so the DOCSTRING "
+        "position cannot be checked on the live function — the arm would be asserting "
+        "the capture covers a position that no longer exists"
+    )
+    assert doc_lines[0].strip() in live, (
+        "the live capture does not contain the function's own DOCSTRING first line "
+        f"({doc_lines[0].strip()!r}), so `getsource`'s docstring position is projected "
+        "away and a figure written there is invisible to the duration scan"
+    )
+    assert len(live.splitlines()) > len(stripped.splitlines()) + 1, (
+        f"the live capture is {len(live.splitlines())} line(s) for a "
+        f"{len(stripped.splitlines())}-line `#` projection — that is the projection "
+        "plus at most a `def` line, i.e. the smallest BLIND capture, so the docstring "
+        "and trailing-comment positions are invisible to the duration scan"
+    )
+
+
+#: The last `main` commit whose `tests/_about_call_time_census.py` blob carries the
+#: pre-`#9516` figure `measured 10.36 s of the control's 10.85 s`.
+#:
+#: ⚠️ **Named by COMMIT, not by "the merge base" or by `origin/main`** (`#9522`
+#: re-review). Measured at this PR's base: `git show origin/main:tests/
+#: _about_call_time_census.py | grep -c 10.36` is `0` — `#9516` already removed the
+#: figure — so naming the base as its carrier points a re-verifier at a tree that
+#: does not say what the arms below claim it says. That is the citation-rot class
+#: `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` pins.
+_GATE_WALK_FIGURE_CARRIER = "fa84a473d"
+
+#: Sentences that name a TREE (the merge base) as the carrier of that figure. Both
+#: forms shipped in this file's own prose and both were false at the head that
+#: shipped them; the carrier is a COMMIT.
+_STALE_GATE_WALK_ANCHORS = ("on the merge base", "merge-base predecessor")
+
+
+def _git_blob(rev: str, path: str) -> str | None:
+    """`git show <rev>:<path>`, or None where THIS checkout cannot reach it.
+
+    ⛔ No `git fetch` fallback, deliberately: `test_the_gate_walk_anchors_…`'s
+    sibling in `tests/test_9397_about_edge_properties.py` MEASURED that
+    `git fetch --depth=N` on a full clone REWRITES it shallow (6106 commits of
+    `origin/main` cut to 120), a destructive side effect on the checkout under test
+    from an arm that runs in `core`. An unreachable rev is reported as unverified by
+    the caller instead.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{rev}:{path}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover — no git binary
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure():
+    """The prose anchors name a tree that still has the text (`#9522`).
+
+    ⚠️ **This file's own claim labels rotted into the same false anchor twice.** §23
+    item 23 said the pre-`#9516` figure was `measured 10.36 s of the control's 10.85
+    s` "on the merge base", and the docstring of
+    `test_the_gate_walk_comment_pins_no_wall_clock_figure` called it "its merge-base
+    predecessor" — while 12 lines apart §23 names `fa84a473d:990-992` as the last main
+    commit to carry it. Both anchors cannot be true: `git show
+    origin/main:tests/_about_call_time_census.py | grep -c 10.36` is `0` at this base.
+    The sibling arm `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` was
+    already corrected for exactly this ("the ANCHOR is named by COMMIT, not by
+    `origin/main`"); these two sentences were the ones it left behind, so a re-verifier
+    following them landed on a tree that contradicts the arm.
+
+    Three assertions, because a prose pin that can be satisfied by DELETION is not a
+    pin: (1) no carrier sentence names a tree, (2) the commit anchor IS named, and
+    (3) the named commit really carries the figure while `origin/main` does not — the
+    measurement the prose states, executed where this checkout can reach the objects.
+
+    Non-vacuity: on the pre-fix text of this file, assertion (1) reds on BOTH strings
+    (measured by re-inserting each into the module docstring). The `git` half cannot
+    red for that edit — it is the anchor's VERIFICATION, not the defect — and it
+    SKIPS (with a message saying so) where `fa84a473d` is unreachable, e.g. a shallow
+    clone, rather than being silently green.
+    """
+    prose = "\n".join(
+        (
+            __doc__ or "",
+            inspect.getdoc(test_the_gate_walk_comment_pins_no_wall_clock_figure) or "",
+        )
+    )
+    for stale in _STALE_GATE_WALK_ANCHORS:
+        assert stale not in prose, (
+            f"this file's prose names a TREE (`{stale}`) as the carrier of the "
+            "pre-`#9516` figure, and the tree does not carry it — measured at this "
+            "PR's base: `git show origin/main:tests/_about_call_time_census.py | "
+            f"grep -c 10.36` is `0`. Name the commit ({_GATE_WALK_FIGURE_CARRIER}:990-992)"
+        )
+    assert _GATE_WALK_FIGURE_CARRIER in prose, (
+        "no sentence here names the COMMIT that carries the pre-`#9516` figure any "
+        "more — the anchor was deleted rather than corrected, so the arms below and "
+        "§23 no longer tell a re-verifier where the quoted text came from"
+    )
+    carrier = _git_blob(_GATE_WALK_FIGURE_CARRIER, "tests/_about_call_time_census.py")
+    if carrier is None:
+        pytest.skip(
+            f"{_GATE_WALK_FIGURE_CARRIER} is not reachable in this checkout, so the "
+            "commit anchor above is UNVERIFIED here (a shallow clone cannot reach it "
+            "and is not rewritten to try) — the prose pin still ran"
+        )
+    assert "measured 10.36 s of the control's 10.85 s" in carrier, (
+        f"{_GATE_WALK_FIGURE_CARRIER}:tests/_about_call_time_census.py does not carry "
+        "the figure the arms below quote from it, so the anchor names a commit that "
+        "does not say what they claim"
+    )
+    base = _git_blob("origin/main", "tests/_about_call_time_census.py")
+    if base is not None:
+        assert "10.36" not in base, (
+            "`origin/main`'s census blob carries the pre-`#9516` figure again, so the "
+            "measurement this file states (`grep -c 10.36` is `0` at the base) is "
+            "stale and the anchor sentence above should be re-derived"
+        )
 
 
 def _pin_universe_to_disk(census, on_disk: set[Path]) -> None:

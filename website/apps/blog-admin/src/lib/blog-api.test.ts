@@ -82,6 +82,7 @@ beforeEach(() => {
 const FAKE_ROW = {
   id: 'p-1', slug: 'post', title: 'Post', body: 'body',
   excerpt: null, cover_image_url: null, tags: [], author: null,
+  author_image_url: null,
   status: 'draft', meta_title: null, meta_description: null,
   published_at: null, published_by: null, created_by: null,
   reviewed_by: null, reviewed_at: null, review_note: null,
@@ -194,7 +195,8 @@ function makeState(overrides: Partial<Parameters<typeof createSaveHandler>[0]> =
   return {
     form: {
       title: 'Post', slug: 'post', excerpt: '', cover_image_url: '',
-      tags: 'a, b', meta_title: '', meta_description: '', hold_for_review: false,
+      tags: 'a, b', author: 'Daniel Ospina', author_image_url: '',
+      meta_title: '', meta_description: '', hold_for_review: false,
     },
     editorBody: 'body v1',
     userId: 'user-1',
@@ -252,7 +254,6 @@ describe('save handler (stale-closure guard)', () => {
 });
 
 // ── (d) tags capped at 10 ──────────────────────────────────────────────────
-
 describe('tag cap (max 10)', () => {
   it('parseTags splits and trims commas', () => {
     expect(parseTags(' a,  b ,, c ')).toEqual(['a', 'b', 'c']);
@@ -286,7 +287,7 @@ describe('queue + terminal-status guards', () => {
   it('requestChangesPost refuses archived rows', async () => {
     const archived = {
       id: 'a1', status: 'archived', slug: 'x', title: 'x', body: '',
-      tags: [], author: null, excerpt: null, cover_image_url: null,
+      tags: [], author: null, author_image_url: null, excerpt: null, cover_image_url: null,
       meta_title: null, meta_description: null, published_at: null,
       published_by: null, created_by: null, reviewed_by: null,
       reviewed_at: null, review_note: null, hold_for_review: false,

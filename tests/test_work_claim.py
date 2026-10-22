@@ -716,9 +716,65 @@ def test_check_refuses_a_box_local_target_instead_of_printing_ok(monkeypatch, ca
     assert "ok:" not in err.out, "a box-local target must not be announced as ok on stdout"
     assert "BOX-LOCAL" in err.err
 
-    # ...and the acknowledgement flag still lets a single-box trial proceed.
+    # ...and the acknowledgement flag still lets a single-box trial proceed. ⛔ This arm alone
+    # was VACUOUS (see the test below): `FakeStore` has no `require_shared`, so nothing was
+    # refused and rc 0 came back whether or not the flag reached the store.
     rc = wc.main(["check", "--allow-box-local"], store=FakeStore())
     assert rc == wc.EXIT_OK
+
+
+def test_the_allow_box_local_flag_actually_reaches_the_store_main_builds(monkeypatch, capsys):
+    """⛔ The arm above pinned `check --allow-box-local` against an INJECTED `FakeStore`,
+    which defines no `require_shared` — so `check`'s `getattr(store, "require_shared", None)`
+    returned `None`, no refusal was produced, and rc 0 came back whether or not the flag was
+    threaded into the store `main` constructs. Mutation proof: deleting
+    `allow_box_local=getattr(args, "allow_box_local", False)` from BOTH `SDKClaimStore(...)`
+    calls in `main` left the whole suite green while, in production, the documented single-box
+    remedy (module USAGE, evidence README §6) became impossible: acquire/status/release/check
+    all rc 2 while telling the operator to pass the flag they already passed (review of #9487
+    P2).
+
+    So this arm builds the store THROUGH `main` (store=None) and asserts the flag reaches the
+    constructor on BOTH call sites — `check`'s own construction and the read/write verbs'.
+    """
+    captured: list[dict] = []
+
+    class BoxLocalFakeStore(FakeStore):
+        """A store whose shared-ness DEPENDS on the flag — the capability the vacuous arm
+        lacked. It refuses exactly like `SDKClaimStore.require_shared` does."""
+
+        def __init__(self, **kwargs) -> None:
+            super().__init__()
+            captured.append(kwargs)
+            self._allow_box_local = bool(kwargs.get("allow_box_local"))
+
+        def require_shared(self):
+            if self._allow_box_local:
+                return None
+            return (
+                "the claim store target is BOX-LOCAL (127.0.0.1) — pass --allow-box-local to "
+                "acknowledge a single-box trial"
+            )
+
+    monkeypatch.setattr(
+        wc, "_require_store_configured", lambda *a, **k: "docker://:pw@shared.host:6379/g"
+    )
+    monkeypatch.setattr(wc, "SDKClaimStore", BoxLocalFakeStore)
+
+    # `check` builds its own store: without the flag the box-local refusal IS the verdict…
+    assert wc.main(["check"], store=None) == wc.EXIT_UNANSWERABLE
+    assert captured[-1].get("allow_box_local") is False, captured[-1]
+    # …and with it, the same store is accepted — which can only happen if the flag was passed.
+    assert wc.main(["check", "--allow-box-local"], store=None) == wc.EXIT_OK
+    assert captured[-1].get("allow_box_local") is True, captured[-1]
+    capsys.readouterr()
+
+    # The read/write verbs have their OWN construction site; it must carry the flag too.
+    argv = ["--json", "acquire", "--repo", "daniel-ospina/tortoise", "--issue", "5052"]
+    assert wc.main([*argv, "--session", "cell-t1"], store=None) == wc.EXIT_UNANSWERABLE
+    assert captured[-1].get("allow_box_local") is False, captured[-1]
+    assert wc.main([*argv, "--session", "cell-t1", "--allow-box-local"], store=None) == wc.EXIT_OK
+    assert captured[-1].get("allow_box_local") is True, captured[-1]
 
 
 def test_check_json_carries_the_target_and_the_verdict(monkeypatch, capsys):
@@ -1031,8 +1087,17 @@ def test_json_outcome_carries_the_decision_a_controller_logs():
 # #9487). Each leg deletes its own node in `finally`, so the per-run key leaves no residue.
 
 
-def _probe_key() -> str:
-    return f"issue-{uuid.uuid4().hex[:12]}"
+def _probe_key(body: str | None = None) -> str:
+    # CANONICAL at the MINT (review round 4). `acquire` canonicalises `record.key` IN PLACE
+    # (`record.key = canonical_key(record.key)`), and `canonical_key` collapses an all-digit
+    # body (`issue-012345678901` → `issue-12345678901`) — which a 12-hex body hits in ~1 run in
+    # 280 (the figure `canonical_key`'s own comment states; an earlier version of this comment
+    # said 2.8k, off by 10× — review of PR #9537). Returning the minted spelling left the legs
+    # below comparing it against the CANONICAL spelling the store holds, so `[…].count(key) == 1`
+    # redded for a reason that had nothing to do with the code under test: the exact class this
+    # file's comment above already records. The `body` seam makes that deterministic to pin
+    # without drawing a UUID.
+    return wc.canonical_key(f"issue-{body if body is not None else uuid.uuid4().hex[:12]}")
 
 
 
@@ -1061,7 +1126,7 @@ def test_live_sdk_store_acquire_status_release():
         claimed_at=NOW,
     )
     try:
-        acquired = wc.acquire(store, record)
+        acquired = wc.acquire(store, record, now=NOW)
         assert acquired.rc == 0, acquired.reason
 
         # ⛔ `create_point` DOES mint a second node for an existing id (measured); the store's
@@ -1077,23 +1142,34 @@ def test_live_sdk_store_acquire_status_release():
         count = store._rows("MATCH (n:Point {id:$id}) RETURN count(n) AS c", id=cid)[0][0]
         assert count == 1, f"the claim store holds {count} nodes for one id"
 
-        # the second box must be refused, naming the holder
+        # the second box must be refused, naming the holder. ⛔ `now=NOW` is NOT decoration:
+        # the stored `lease_until` is `NOW + 3600`, and passing no clock made `acquire` compare
+        # it against `time.time()` — so this leg was a DATE BOMB that would flip to "expired",
+        # take the reclaim path, return rc 0 and red the suite on 2027-01-15T09:00Z, for a
+        # reason unrelated to any change (review of #9487 P2). An explicit clock makes the
+        # whole leg deterministic at any wall time.
         held = wc.acquire(
             store,
             wc.ClaimRecord(
                 repo=repo, key=key, owner="pytest:2", lease_until=NOW + 3600, claimed_at=NOW
             ),
+            now=NOW,
         )
         assert held.rc == 1, held.reason
         assert held.owner == "pytest:1"
 
-        # the listing answers, per unit of work, from the real graph
+        # the listing answers, per unit of work, from the real graph — and it answers for a
+        # DIFFERENT SPELLING of the same repo (review of #9487 P2: an exact `n.repo = $repo`
+        # match made `status --repo` report `0 claim record(s)` over a store that held the
+        # claim, which is indistinguishable from "nobody holds anything").
         rows = store.query_repo(repo)
         assert [r["key"] for r in rows].count(key) == 1, rows
+        shouted = store.query_repo(repo.upper())
+        assert [r["key"] for r in shouted].count(key) == 1, shouted
         listed = wc.status(store, repo, None)
         assert listed.rc == 0 and listed.status == "listed"
 
-        released = wc.release(store, repo, key, owner="pytest:1")
+        released = wc.release(store, repo, key, owner="pytest:1", now=NOW + 5)
         assert released.rc == 0, released.reason
 
         # ⛔ the hand-off must CLOSE. A fence with no way past a released record bricked the
@@ -1104,6 +1180,7 @@ def test_live_sdk_store_acquire_status_release():
             wc.ClaimRecord(
                 repo=repo, key=key, owner="pytest:2", lease_until=NOW + 3600, claimed_at=NOW
             ),
+            now=NOW + 10,
         )
         assert again.rc == 0, again.reason
         assert again.epoch == 2  # fenced: the released epoch-1 record is superseded
@@ -1201,15 +1278,24 @@ def test_ttl_zero_is_a_usage_error_not_an_instantly_expired_claim():
 
 
 def test_the_documented_case_counts_match_what_this_file_collects():
-    """The count of this file's cases is stated in three artefacts (the evidence README's
-    inventory row and reproduction command, and the `durations` comment in
-    `config/ci-surfaces.yml`) — plus the two carve-out comments that cite it — and every one
-    of them was carried forward by hand: the PR shipped 40 / 46 / 49 at once against a file
-    that collects 52 in-memory arms + 3 live legs, in documents whose whole purpose is to be
-    reproduced (review of #9487).
+    """The count of this file's cases is stated in several artefacts: the evidence README's
+    inventory row and its two reproduction commands, the `durations` comment in
+    `config/ci-surfaces.yml`, and the two carve-out comments that cite it — and every one of
+    them was carried forward by hand: the PR shipped 40 / 46 / 49 at once (and a `52` here)
+    against a file whose real count is COMPUTED below, in documents whose whole purpose is to
+    be reproduced (review of #9487).
 
-    So the numbers are COMPUTED here from this module's own test functions: adding a test
-    without re-deriving the docs fails this pin instead of shipping another stale count."""
+    So the numbers are COMPUTED here from this module's own test functions, and EVERY artefact
+    above is asserted against them — including both carve-out comments, which the first
+    version of this pin claimed to cover and did not (review of #9487 P2). Adding a test
+    without re-deriving the docs fails this pin instead of shipping another stale count; the
+    docstrings deliberately carry no literal case count so they cannot rot.
+
+    The §6 pin also checks the ENV each command needs (review of #9487 P2, corrected in the
+    review of PR #9537): the reproduction used to set `TORTOISE_DB_URI` via `test_lane.py uri`
+    and then promise "the live legs skip" — unreachable from that command, since a set URI makes
+    the legs RUN. Both forms are pinned now: the hermetic one must UNSET the URI (`env -u`) and
+    carry `TORTOISE_TEST_CARVE_OUT=1`, and the full one must state the `total`."""
     import inspect
 
     module = sys.modules[__name__]
@@ -1240,9 +1326,433 @@ def test_the_documented_case_counts_match_what_this_file_collects():
     # §3 — the inventory row
     row = re.findall(r"(\d+) fake-store tests \+ (\d+) live tests, (\d+)\s+collected", readme)
     assert row == [(str(hermetic), str(live_cases), str(total))], row
-    # §6 — the reproduction's EXPECTED output, which a reader compares their own run against
+    # §6 — the reproduction's EXPECTED output, which a reader compares their own run against.
+    # Two commands, two claims: the hermetic one must UNSET the store and set the carve-out, the
+    # full one runs every leg. The env prefix is asserted, not just the count (review of #9487
+    # P2) — and the NEGATIVE is asserted too (review of PR #9537): the carve-out only relaxes
+    # the session URI GATE, it does not clear `TORTOISE_DB_URI`, and the live legs skip on URI
+    # absence ALONE. So a hermetic command that merely inherits an exported URI reproduces
+    # "90 passed", not "87 passed, 3 skipped" — the pin asserted the flag and stayed green on
+    # exactly the state where the documented output cannot occur. The SKIP clause is asserted
+    # as well: without it a line narrowed by `-k "not live"` satisfies the pin while no longer
+    # proving the skip.
     expected = [ln for ln in readme.splitlines() if "test_work_claim.py -q" in ln]
     assert expected, "the reproduction command is gone"
-    assert any(f"# {hermetic} passed at this head" in ln for ln in expected), expected
+    hermetic_lines = [ln for ln in expected if f"# {hermetic} passed at this head" in ln]
+    assert hermetic_lines, expected
+    assert any(
+        "env -u TORTOISE_DB_URI" in ln
+        and "TORTOISE_TEST_CARVE_OUT=1" in ln
+        and f"{live_cases} skipped" in ln
+        for ln in hermetic_lines
+    ), expected
+    assert not any("TORTOISE_DB_URI=" in ln for ln in expected), (
+        "a §6 command EXPORTS a store URI — no URI may be set on either reproduction line, or "
+        "the '3 skipped' line is unreachable and the live legs run on the SHARED container"
+    )
+    assert any(f"# {total} passed" in ln for ln in expected), expected
     # the timings row's own description of this file
     assert f"{total} tests: {hermetic} in-memory double + {live_cases} live-SDK" in surfaces
+    # The TWO CARVE-OUT COMMENTS claim this count as their reason to buy the full matrix. The
+    # first version of this pin named them and asserted neither, so all three stale figures
+    # survived a round in which the file grew by eighteen arms (review of #9487 P2). Asserted
+    # here — in BOTH files that carry the claim — so the claim and the pin cannot disagree again.
+    selection_src = (REPO_ROOT / "tools" / "ci_selection.py").read_text()
+    ci_pin_src = (REPO_ROOT / "tests" / "test_ci_selection.py").read_text()
+    assert f"{hermetic} hermetic arms" in selection_src, (
+        "the TOOL_CARVEOUTS comment in tools/ci_selection.py states a stale arm count"
+    )
+    assert f"{hermetic} hermetic arms" in ci_pin_src, (
+        "the ci_selection pin's own comment states a stale arm count"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# The SHIPPED Cypher, spied on. The store seam IS the statement (there is no ORM to sit
+# between the record and the graph), so the properties that no fake can model — what the
+# `SET` does to a prop a PREVIOUS holder wrote, and what a fence that matches 0 rows MEANS —
+# are pinned by capturing the statement the store emits and the params it binds.
+# --------------------------------------------------------------------------------------
+def _spy_store(rows: list):
+    """An `SDKClaimStore` wired to a projection that records every (cypher, params) pair.
+
+    `rows` is consumed one result_set per query; running out yields `[[1]]` (a harmless
+    "one row moved"). `_db_uri` is a SHARED host, so no verb refuses it and no probe is made.
+    """
+
+    class _Result:
+        def __init__(self, result_set):
+            self.result_set = result_set
+
+    class _Graph:
+        def __init__(self, queued):
+            self.queued = list(queued)
+            self.calls: list[tuple[str, dict]] = []
+
+        def query(self, cypher, params=None):
+            self.calls.append((cypher, params or {}))
+            return _Result(self.queued.pop(0) if self.queued else [[1]])
+
+    class _Proj:
+        def __init__(self, graph):
+            self.g = graph
+
+    class _SDK:
+        _db_uri = "docker://:@shared.host:6379/g"
+
+        def __init__(self, graph):
+            self._graph = graph
+
+        def _get_proj(self):
+            return _Proj(self._graph)
+
+    graph = _Graph(rows)
+    return wc.SDKClaimStore(sdk=_SDK(graph)), graph
+
+
+def test_a_capacity_field_the_new_record_does_not_carry_is_removed_not_left_stale():
+    """Review of #9487 P1. `props()` OMITS an unsupplied capacity field on purpose (a
+    fabricated `0` reads as a measured idle box), but `SET n += $props` can only ADD keys —
+    so a reclaim or release over a node the previous holder wrote KEPT that holder's
+    `ncpu`/`lpc`/`lanes` while the content line this same statement writes says
+    `ncpu=absent`. The prop half then asserted a peer's measurement as this claim's capacity,
+    and the record is the fleet's capacity map. `REMOVE` is what makes the abstention hold
+    for both readers (verified on a live FalkorDB: `MATCH … REMOVE … SET n += $props` is
+    accepted and the props are gone)."""
+    store, graph = _spy_store([[[1]]])
+    record = _record(epoch=3)
+    assert (record.ncpu, record.lpc, record.lanes) == (None, None, None)
+    store.replace_if_epoch("cid", record, expected_epoch=2)
+    cypher, params = graph.calls[0]
+    assert "REMOVE n.ncpu, n.lpc, n.lanes" in cypher, cypher
+    assert not ({"ncpu", "lpc", "lanes"} & set(params["props"])), params["props"]
+    # the removal happens in the SAME statement as the write, so no reader sees a half-record
+    assert cypher.index("REMOVE") < cypher.index("SET n +="), cypher
+
+
+def test_a_capacity_field_the_new_record_carries_is_kept_and_only_the_absent_ones_are_removed():
+    """The other half: a supplied measurement must survive the transition, and must not be
+    REMOVEd by a blanket rule."""
+    store, graph = _spy_store([[[1]]])
+    store.replace_if_epoch("cid", _record(epoch=3, ncpu=8), expected_epoch=2)
+    cypher, params = graph.calls[0]
+    removed = cypher.split("REMOVE ", 1)[1].split(" SET", 1)[0]
+    assert removed == "n.lpc, n.lanes", cypher
+    assert params["props"]["ncpu"] == 8, params["props"]
+
+
+def test_a_fence_that_matches_nothing_because_the_epoch_prop_is_absent_refuses_rc2():
+    """Review of #9487 P2. 0 rows is normally "a peer moved it" (rc 1, retryable). But a node
+    whose `claim_epoch` prop is ABSENT, or still equal to the epoch we fenced on, cannot be
+    explained by a peer's write — our own `WHERE` would have matched. Reporting it as a lost
+    race told the caller to retry a command that can never succeed (rc 1, and `--force` goes
+    through the same fence). It is a store this tool refuses to interpret."""
+    store, _graph = _spy_store([[[0]], [[None]]])
+    with pytest.raises(wc.StoreUnanswerable) as excinfo:
+        store.replace_if_epoch("cid", _record(), expected_epoch=4)
+    assert "fence cannot" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_fence_that_matches_nothing_because_a_peer_moved_the_epoch_is_still_a_lost_race():
+    """The distinction must not swallow the REAL race: a node now at a higher epoch is the
+    peer write the fence exists to detect, and it stays rc 1."""
+    store, _graph = _spy_store([[[0]], [[9]]])
+    assert store.replace_if_epoch("cid", _record(), expected_epoch=4) is None
+
+
+def test_a_fence_that_matches_nothing_because_the_node_is_gone_is_a_lost_race():
+    """A released-then-deleted (or missing) node is a genuine move, not an inconsistent
+    store: no row, no refusal."""
+    store, _graph = _spy_store([[[0]], []])
+    assert store.replace_if_epoch("cid", _record(), expected_epoch=4) is None
+
+
+def test_a_listing_row_the_tool_cannot_read_refuses_instead_of_crashing_into_rc1():
+    """Review of #9487 P2. The `query_repo` walk sat outside every handler, so a row of
+    unexpected arity (a foreign/legacy `pointKind=work-claim` node) raised ValueError, which
+    escaped `main()` as a traceback — exit 1, the rc this contract defines as EXIT_HELD. A
+    `status --repo` crash then read as "busy" and an `acquire` crash as "held by a live
+    claim": an undocumented rc no caller can tell from a real answer."""
+    store, _graph = _spy_store([[["only-two", "columns"]]])
+    with pytest.raises(wc.StoreUnanswerable) as excinfo:
+        store.query_repo("daniel-ospina/tortoise")
+    assert "listing row" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_refusal_redacts_a_dsn_the_driver_quoted():
+    """Review of #9487 P2. `store.target()` was the ONLY site that redacted, so the ERROR path
+    — `_rows` wraps the driver exception, and a connection error routinely quotes the DSN it
+    was handed — printed the password. Redaction now happens at the exception boundary, so no
+    interpolation of `str(exc)` has to remember."""
+    exc = wc.StoreUnanswerable("could not connect to docker://:p@ssw0rd@shared.host:6379/g")
+    assert "p@ssw0rd" not in str(exc), str(exc)
+    assert "docker://***@shared.host:6379/g" in str(exc), str(exc)
+
+
+def test_the_json_output_cannot_carry_a_password_a_store_put_in_its_error(capsys):
+    """The boundary half: even a store whose error text carries the DSN cannot get the
+    password onto stdout, which is the stream a controller captures."""
+
+    class LeakyStore(FakeStore):
+        def read(self, cid):
+            raise wc.StoreUnanswerable("connect failed: docker://:s3cret@shared.host:6379/g")
+
+    rc = wc.main(
+        ["status", "--repo", "daniel-ospina/tortoise", "--issue", "5052", "--json"],
+        store=LeakyStore(),
+    )
+    out = capsys.readouterr().out
+    assert rc == wc.EXIT_UNANSWERABLE, rc
+    assert "s3cret" not in out, out
+    assert "docker://***@shared.host" in out, out
+
+
+def test_force_without_a_reason_is_a_usage_error_even_when_the_store_is_unset(monkeypatch):
+    """Review of #9487 P2. The `--force`/`--reason` shape used to be validated AFTER the
+    store was opened, so with an unset/unreachable/box-local store it returned rc 2 ("the
+    store could not answer", RETRYABLE) instead of rc 3 (malformed invocation, never retry).
+    A controller would retry a command that can never succeed. Invocation shape is decided
+    before any store work."""
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    rc = wc.main(["release", "--repo", "o/r", "--issue", "5052", "--force", "--session", "cell-t1"])
+    assert rc == wc.EXIT_USAGE == 3, rc
+
+
+# ── the repo half of the claim identity (review of #9487 P2) ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "tortoise",  # a bare name: no owner half
+        "TORTOISE",  # ...and a case variant of it
+        "daniel-ospina/",  # empty name half
+        "/tortoise",  # empty owner half
+        "daniel-ospina/tortoise/extra",  # two slashes: not a repo
+        " ",  # nothing at all
+    ],
+)
+def test_a_repo_that_is_not_owner_name_is_a_usage_error_not_an_empty_board(repo):
+    """⛔ `--repo` is HALF THE CLAIM IDENTITY and used to be taken verbatim (`required=True`,
+    nothing else). A bare name or a case variant then computed a DIFFERENT `claim_id` for the
+    same unit of work, so two boxes both won their `MERGE` and both reported `acquired` — the
+    duplicate dispatch this tool exists to prevent — and `status --repo` answered
+    `0 claim record(s)` at rc 0 over a store that held the claim, indistinguishable from
+    "nobody holds anything" (review of #9487 P2). The key half already refuses rather than let
+    two units collide; the repo half now does the same, as EXIT_USAGE (3) — never the
+    retryable rc 2."""
+    store = FakeStore()
+    rc = wc.main(["status", "--repo", repo], store=store)
+    assert rc == wc.EXIT_USAGE == 3, (repo, rc)
+    assert rc != wc.EXIT_OK, f"{repo!r} was accepted and answered an empty ledger at rc 0"
+
+
+def test_the_repo_case_variant_is_the_same_claim_through_the_cli(capsys):
+    """End to end over the CLI: acquire under `Daniel-Ospina/TORTOISE`, read it back under the
+    canonical `daniel-ospina/tortoise`. Before the fix these were two ids — the second box
+    acquired the same unit of work at rc 0 and the listing saw neither — so both the `held`
+    assertion and the `1 claim record(s)` assertion red on the pre-fix code."""
+    store = FakeStore()
+    assert (
+        wc.main(
+            ["acquire", "--repo", "Daniel-Ospina/TORTOISE", "--issue", "5052", "--session", "cell-t1"],
+            store=store,
+        )
+        == wc.EXIT_OK
+    )
+    # a second box, canonical spelling: it must be REFUSED as held (one id, not two)
+    rc = wc.main(
+        ["--json", "acquire", "--repo", "daniel-ospina/tortoise", "--issue", "5052", "--session", "cell-t2"],
+        store=store,
+    )
+    out = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == wc.EXIT_HELD == 1, (rc, out)
+    assert out["status"] == "held"
+    # the repo-wide listing sees exactly ONE record, not zero and not two
+    rc = wc.main(["status", "--repo", "daniel-ospina/tortoise", "--json"], store=store)
+    listed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert rc == wc.EXIT_OK, (rc, listed)
+    assert listed["reason"].startswith("1 claim record(s)"), listed
+    # ...and `release` by the holder (canonical spelling) closes it
+    assert (
+        wc.main(
+            ["release", "--repo", "daniel-ospina/tortoise", "--issue", "5052", "--session", "cell-t1"],
+            store=store,
+        )
+        == wc.EXIT_OK
+    )
+
+
+def test_claim_id_is_one_id_per_unit_of_work_whatever_the_spelling():
+    """The CAS is only a CAS if every box derives the SAME id. `claim_id` digested the repo as
+    typed, so this was a spelling contest, not a fence — pinned here at the pure-function
+    level so the invariant cannot be quietly dropped from the CLI path later.
+
+    The KEY half gets the identical treatment (review of PR #9537): it was digested as typed
+    too, so a case variant or a trailing space was a second id for the same unit of work."""
+    canonical = wc.claim_id("daniel-ospina/tortoise", "issue-5052")
+    assert wc.claim_id("Daniel-Ospina/TORTOISE", "issue-5052") == canonical
+    assert wc.claim_id("  daniel-ospina/tortoise  ", "issue-5052") == canonical
+    # ...and the key half no longer is either
+    assert wc.claim_id("daniel-ospina/tortoise", "ISSUE-5052") == canonical
+    assert wc.claim_id("daniel-ospina/tortoise", "issue-5052 ") == canonical
+    assert wc.claim_id("daniel-ospina/tortoise", " Issue-5052\t") == canonical
+    # ...including the one spelling class that is objectively decidable: a DECIMAL body.
+    # `issue-7` vs `issue-0007` was two ids — and two grants — for issue 7 (review round 3).
+    assert wc.claim_id("daniel-ospina/tortoise", "issue-0007") == wc.claim_id(
+        "daniel-ospina/tortoise", "issue-7"
+    )
+    assert wc.claim_id("daniel-ospina/tortoise", "PR-0005052") == wc.claim_id(
+        "daniel-ospina/tortoise", "pr-5052"
+    )
+    # ...while a NON-decimal body stays opaque: the live legs mint `issue-<12 hex>` per run and
+    # that uniqueness is what stops two concurrent runs fencing each other (#5084).
+    assert wc.canonical_key("issue-0a3f5c9d1b2e") == "issue-0a3f5c9d1b2e"
+    # ...and the live legs' per-run key is CANONICAL AT THE MINT, so the all-digit-body collapse
+    # cannot make the stored spelling differ from the one a leg compares against (round 4).
+    assert _probe_key("012345678901") == "issue-12345678901"
+    # the digest is still a real digest: a DIFFERENT unit is a different id
+    assert wc.claim_id("daniel-ospina/tortoise", "issue-5053") != canonical
+    assert wc.claim_id("daniel-ospina/tortoise", "pr-5052") != canonical
+    assert wc.claim_id("daniel-ospina/agent-infra", "issue-5052") != canonical
+    assert re.fullmatch(r"[0-9a-f]{20}-[0-9a-f]{12}", canonical), canonical
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "",  # nothing at all
+        "5052",  # no kind prefix
+        "branch-1",  # a kind this tool does not key on
+        "issue-",  # empty body
+        "-5052",  # empty kind
+        "issue-50 52",  # a space INSIDE the key: two spellings of one unit
+        "issue-50/52",  # a slash would make the key a path
+        "issue-" + "9" * wc.MAX_KEY_LEN,  # longer than the stored-key ceiling
+    ],
+)
+def test_a_key_that_is_not_issue_or_pr_shaped_is_a_usage_error_not_a_second_claim(key):
+    """The key is half of the claim identity, so a malformed one must REFUSE rather than mint
+    its own id (review of PR #9537). Before the fix every one of these produced a perfectly
+    valid, perfectly distinct `claim_id` — the same unit of work under an unvalidated spelling,
+    which is the double grant the repo half of this PR removes."""
+    with pytest.raises(ValueError):
+        wc.canonical_key(key)
+    with pytest.raises(ValueError):
+        wc.claim_id("daniel-ospina/tortoise", key)
+
+
+def test_the_key_half_is_the_same_claim_through_the_library_entry_points():
+    """Review of PR #9537. `main()` canonicalised the key (`normalise_key`), but `acquire`,
+    `release` and `status` are PUBLIC entry points — a store split or a peer script calls them
+    directly — and they digested `record.key` / `key` as typed. Measured pre-fix: keys
+    `issue-5052`, `ISSUE-5052`, `issue-5052 ` and `""` produced FOUR ids and FOUR
+    `rc 0 / acquired` outcomes for one unit of work. Every assertion below reds on the pre-fix
+    code, and the first one reds as a SECOND GRANT rather than as an exception."""
+    store = FakeStore()
+    first = wc.acquire(store, _record(owner="cell-1:100", key="ISSUE-5052"), now=NOW)
+    assert first.rc == wc.EXIT_OK == 0, first
+    assert first.status == "acquired", first
+    # a different SPELLING of the same key is the same claim: refused as held, not re-granted
+    second = wc.acquire(store, _record(owner="cell-4:200", key=" issue-5052 "), now=NOW)
+    assert second.rc == wc.EXIT_HELD == 1, second
+    assert second.status == "held", second
+    assert second.owner == "cell-1:100", second
+    # ...and so is a ZERO-PADDED DECIMAL spelling of the same key (review round 3): pre-fix
+    # this was a second id, so it re-granted the unit and split the board in two.
+    padded = wc.acquire(store, _record(owner="cell-5:300", key="issue-0005052"), now=NOW)
+    assert padded.rc == wc.EXIT_HELD == 1, padded
+    assert padded.owner == "cell-1:100", padded
+    # exactly one row exists, addressed by the canonical id
+    assert list(store.points) == [wc.claim_id("daniel-ospina/tortoise", "issue-5052")]
+    # `status` under a variant spelling reads that row (pre-fix: `free` — the answer a
+    # controller dispatches on)
+    seen = wc.status(store, "daniel-ospina/tortoise", "Issue-5052", now=NOW)
+    assert seen.rc == wc.EXIT_OK == 0, seen
+    assert seen.status == "held", seen
+    assert seen.owner == "cell-1:100", seen
+    # ...and `release` under a variant spelling releases IT (pre-fix: "nothing to release"
+    # at rc 0 while the claim lived on)
+    closed = wc.release(
+        store, "daniel-ospina/tortoise", "ISSUE-5052", owner="cell-1:100", now=NOW + 10
+    )
+    assert closed.rc == wc.EXIT_OK == 0, closed
+    assert closed.status == "released", closed
+    after = wc.status(store, "daniel-ospina/tortoise", "issue-5052", now=NOW + 10)
+    assert after.status == "expired", after
+
+
+def test_a_malformed_key_is_refused_before_the_store_is_touched():
+    """A key that is not `<issue|pr>-<body>` is the caller's contract, so it raises from the
+    entry points rather than being written: `acquire` canonicalises before it reads or writes,
+    so the store sees nothing at all."""
+    store = FakeStore()
+    with pytest.raises(ValueError):
+        wc.acquire(store, _record(key=""), now=NOW)
+    with pytest.raises(ValueError):
+        wc.release(store, "daniel-ospina/tortoise", "5052", owner="box-a:111", now=NOW)
+    with pytest.raises(ValueError):
+        wc.status(store, "daniel-ospina/tortoise", "branch-1", now=NOW)
+    assert store.points == {}, store.points
+    assert store.writes == 0, store.writes
+
+
+def test_a_fence_that_matches_nothing_on_an_unreadable_epoch_refuses_rc2():
+    """Review of #9487 P2. The fence's follow-up read does `int(seen)` on a value the STORE
+    chose the type of. A list-valued or textual `claim_epoch` from a foreign writer raised
+    ValueError, which escaped `main()` as exit 1 — the rc this contract defines as
+    EXIT_HELD, i.e. "held by a live claim", on the one branch whose whole job is refusing to
+    guess. An unreadable epoch is a refusal (rc 2), never a race."""
+    store, _graph = _spy_store([[[0]], [["not-a-number"]]])
+    with pytest.raises(wc.StoreUnanswerable) as excinfo:
+        store.replace_if_epoch("cid", _record(), expected_epoch=4)
+    assert "unreadable claim_epoch" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_content_value_that_is_not_a_string_refuses_on_the_read_path():
+    """The single-key read path had the same gap the listing guard closes: `read()` returned
+    whatever the store held, and `_tokens` then iterated it — a non-string `content` raised
+    outside every handler and exited 1 = EXIT_HELD instead of refusing (review of #9487 P2)."""
+    store, _graph = _spy_store([[[123]]])
+    with pytest.raises(wc.StoreUnanswerable) as excinfo:
+        store.read("cid")
+    assert "int content" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_listing_content_value_that_is_not_a_string_refuses():
+    """The listing guard checked arity and the epoch but not `content`, so a foreign node
+    whose `content` is an int reached `_parse` and crashed the same way."""
+    store, _graph = _spy_store([[[["cid", 123, 1]]]])
+    with pytest.raises(wc.StoreUnanswerable) as excinfo:
+        store.query_repo("daniel-ospina/tortoise")
+    assert "listing row" in str(excinfo.value), str(excinfo.value)
+
+
+def test_a_long_driver_message_cannot_leak_a_password_past_the_truncation():
+    """Review of #9487 P2. `_redact_uri` needs the `@` that ends the userinfo, so redacting
+    AFTER the 200-char cut leaked the password's head whenever the DSN ended past the cut
+    (`docker://:S3cr3t-Pa55word-Tha`). Redaction now happens BEFORE truncation."""
+    password = "S3cr3t-Pa55word-That-Is-Far-Too-Long-To-Survive-Truncation"
+
+    class ExplodingGraph:
+        def query(self, cypher, params=None):
+            raise RuntimeError(
+                "x" * 150 + f" connect failed: docker://:{password}@shared.host:6379/g"
+            )
+
+    class ExplodingProj:
+        g = ExplodingGraph()
+
+    class ExplodingSDK:
+        _db_uri = "docker://:@shared.host:6379/g"
+
+        def _get_proj(self):
+            return ExplodingProj()
+
+    store = wc.SDKClaimStore(sdk=ExplodingSDK())
+    with pytest.raises(wc.StoreUnanswerable) as excinfo:
+        store.read("cid")
+    message = str(excinfo.value)
+    assert "S3cr3t" not in message, message
+    assert "Pa55word" not in message, message
