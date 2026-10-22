@@ -82,13 +82,15 @@ response_fields:
 - response: tortoise_search
   field: span_start
   emitted_when: '#8658 / #5007 — the start character offset of the quote in its source text. A POINTER, not a payload.
-    A half span is not an address: `create_point` refuses one (`commit_schema.validate_span`), and the read path emits
-    the pair or neither. 0 is a real offset'
+    The pair-or-neither invariant is a WRITE-DOOR rule, not a read guarantee: the SDK write doors refuse a half span
+    (`commit_schema.validate_span` via `create_point` / `update_point` / `update_entity`), but this read emits each
+    offset INDEPENDENTLY, so a node written outside those doors (raw Cypher tooling / repair) can return one side.
+    0 is a real offset'
   unchanged_when_off: n/a — not flag-gated; absent on every spanless hit, so those responses stay byte-identical
 - response: tortoise_search
   field: span_end
-  emitted_when: '#8658 / #5007 — the end character offset of the quote in its source text (see span_start; emitted
-    together with it)'
+  emitted_when: '#8658 / #5007 — the end character offset of the quote in its source text; see span_start (same
+    write-door identity, same independent read-side emission)'
   unchanged_when_off: n/a — not flag-gated; absent on every spanless hit, so those responses stay byte-identical
 - response: tortoise_search
   field: valid_from_precision

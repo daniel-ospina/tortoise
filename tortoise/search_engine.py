@@ -840,18 +840,23 @@ class SearchResult:
     # emitted four empty fields would make every legacy hit look provenanced to
     # the package's own truthiness gates.
     #
-    # ⚠️ This is a DEFAULT-ON additive response field, and that is a departure
+    # ⚠️ This is a DEFAULT-ON additive response field, and that IS a departure
     # from the #3986 carve-out recorded on ``search_provenance_enabled`` above
-    # ("a default-off response field is not a surface change"). It is taken
-    # deliberately, and it is NOT a surface expansion: the four values are the
-    # point's OWN stored verbatim anchor — already on the node, already emitted
-    # to any caller of the eval lane, and already named by
-    # ``package_evidence_pool``'s own docstring as the key it collapses on. A
-    # default-off gate would keep the read path's own documented contract inert
-    # by default, which is the defect #8658 exists to remove. ⛔ It IS recorded,
-    # in the one place that records response fields: four `response_fields` rows
-    # on `tortoise_search` in ``config/surface-manifest.yml``, rendered into the
-    # "Recorded response fields" table in ``docs/product/mcp-sdk-surface.md``.
+    # ("a default-off response field is not a surface change") — the shape that
+    # does not gate as an addition is by definition the one that is OFF by
+    # default and leaves the response unchanged when off
+    # (``CONTRIBUTING.md``). ⛔ So the response shape DOES change here, and that
+    # is stated plainly rather than argued away: what is NOT novel is the
+    # INFORMATION — the four values are the point's OWN stored verbatim anchor,
+    # already on the node, already emitted to any caller of the eval lane, and
+    # already named by ``package_evidence_pool``'s docstring as the key it
+    # collapses on — but a default-on key is still a response addition, so it
+    # is RECORDED as one. A default-off gate was rejected because it would keep
+    # the read path's own documented contract inert by default, which is the
+    # defect #8658 exists to remove. ⛔ It IS recorded, in the one place that
+    # records response fields: four `response_fields` rows on `tortoise_search`
+    # in ``config/surface-manifest.yml``, rendered into the "Recorded response
+    # fields" table in ``docs/product/mcp-sdk-surface.md``.
     # (An earlier draft of this comment claimed no such surface existed — it
     # does: the block, its `check` validation, and its `render` are all in
     # ``tools/surface_manifest.py``, and ``CONTRIBUTING.md``"s "it must still be
