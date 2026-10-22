@@ -142,8 +142,9 @@ who checks out the repository, and the lychee half above can only see it through
 the FILESYSTEM — which lies about this repo in exactly the two ways that make
 the finding unrecordable and therefore permanently red on somebody else's PR:
 
-  * ``skills/`` and ``scripts/`` are SYMLINKS into ``agent-infra``. The symlink
-    blob IS in the tracked tree (mode 120000), but its TARGET lives outside it,
+  * ``skills/`` is a SYMLINK into ``agent-infra`` (``scripts/`` was too, until #9475
+    untracked it in favour of a machine-local pointer). The symlink blob IS in the
+    tracked tree (mode 120000), but its TARGET lives outside it,
     so the symlinked directory's CONTENTS are present in no checkout CI builds:
     a relative link through one RESOLVES here (the target exists on the author's
     disk) and 404s in CI. Measured
@@ -654,8 +655,9 @@ def _link_targets(text: str) -> list[str]:
 def _tracked_tree(repo_root: Path) -> tuple[set[str], set[str]]:
     """The TRACKED files, plus every ancestor directory they imply.
 
-    The tracked set, never the working tree: `skills/` and `scripts/` are
-    tracked symlinks whose targets live outside the tree, so `Path.exists()`
+    The tracked set, never the working tree: `skills/` is a tracked symlink whose
+    target lives outside the tree (`scripts/` was, before #9475 made it a
+    machine-local gitignored pointer), so `Path.exists()`
     answers yes for a target that is absent from the tree CI builds — the #7876
     misreport, and the reason a filesystem-based detector could not record it.
     The directory set makes a link
