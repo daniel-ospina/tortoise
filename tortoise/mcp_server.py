@@ -27,6 +27,9 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           _supersede_window_end, _now_iso,
                           _ledger_record as _ledger_record_page)
 from tortoise import monitoring
+# #9494: the loaded-module snapshot — used by `_safe` so a symbol failure on a
+# STALE process is answered with the measurement instead of a symbol name.
+from tortoise import code_freshness as _code_freshness
 # #8622: the epistemic label vocabulary is the WRITER's constant (sdk.py's
 # ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
 # imported, never re-listed, so the preview cannot drift from the write.
@@ -1908,6 +1911,16 @@ def _safe(fn, *args, **kwargs):
             # REVIEW-FIX P2: message scrubbed (#43).
             return _SafeError({"error": _scrub_error(str(e)),
                                **({"batch_id": e.batch_id} if e.batch_id else {})})
+        # #9494: a symbol-shaped failure (`cannot import name '_ledger_record'
+        # from 'tortoise.sdk'`) names the CODE, which sends the reader into
+        # `sdk.py` — where the symbol is defined and correct. When the drift is
+        # MEASURED, answer with it plus the fix (restart the server); when it is
+        # not, this branch changes nothing and the ImportError keeps reading as
+        # the real code defect it is.
+        hint = _code_freshness.staleness_hint(e)
+        if hint is not None:
+            return _SafeError({"error": f"{_scrub_error(str(e))}\n\n{hint}",
+                               "stale_server": True})
         msg = _scrub_error(str(e))
         return _SafeError({"error": msg})
 

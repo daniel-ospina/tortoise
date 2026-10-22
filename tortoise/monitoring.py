@@ -24,6 +24,12 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
 from .env_truthy import is_truthy  # #4097: the declared truthy contract
+# #9494: the loaded-module snapshot. Imported HERE (not lazily) because the
+# observation must be taken when the process is still young — this module is
+# imported by every serving entrypoint (mcp_server, hosted_api, serve_health),
+# so the baseline covers the graph they serve. It imports nothing from tortoise,
+# so it cannot participate in an import cycle.
+from . import code_freshness as _code_freshness
 
 logger = logging.getLogger(__name__)
 
@@ -4668,6 +4674,16 @@ def metrics(sdk=None, setup_timeout=None) -> dict:
         # fleet actually serves. Only genuine DROPS are counted; a bound miss
         # that left the work RUNNING is not one.
         "offload_refusals": control_plane_offload_refusal_counts(),
+        # #9494: is the process serving the graph it IMPORTED, or the repo? A
+        # long-lived server keeps the module graph it read at start, and the
+        # only symptom of that was a symbol ImportError on an arbitrary later
+        # call (`cannot import name '_ledger_record'`, measured: four servers,
+        # the oldest 2d4h older than the symbol). `server_code.stale` is the
+        # measurement the health surface was missing; it does NOT alter
+        # `status`, which stays a liveness verdict about the graph being
+        # served — a stale process is still serving, and degrading here would
+        # turn an observability gap into a load-balancer outage.
+        "server_code": _code_freshness.check(),
         "uptime": round(time.monotonic() - _start, 2),
     }
 
