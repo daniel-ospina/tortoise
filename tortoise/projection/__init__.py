@@ -10529,12 +10529,20 @@ class FalkorProjection(
             return False
 
     def _memory_pressure(self) -> tuple[int, int] | None:
-        """``(used_memory, maxmemory)`` in bytes, or ``None`` if unreadable.
+        """``(used_memory, maxmemory)`` in bytes, or ``None`` if UNREADABLE.
 
         Best-effort and fully guarded: the falkordb client exposes ``.info()``
         only on some versions and the raw redis connection only on others, so
         both paths are tried. An unreadable value must never change the error
         CLASS — only how rich its message is.
+
+        #7392 — ``(used, 0)`` is a READING and is returned AS one. ``maxmemory
+        = 0`` means the server has NO ceiling, which is a different fact from
+        "the ratio could not be read" and calls for a different message;
+        collapsing both to ``None`` is how the write-refusal message came to
+        assert a memory ceiling on an instance that reported none (measured on
+        the shared container, 2026-10-04). Only a reply that could not be
+        obtained or parsed is ``None``; an absent ceiling is not a failed READ.
         """
         info = None
         try:
@@ -10552,7 +10560,8 @@ class FalkorProjection(
             cap = int(info.get("maxmemory", 0) or 0)
         except (TypeError, ValueError):
             return None
-        return (used, cap) if cap > 0 else None
+        # cap == 0 is the server answering "no limit", not a failed reading.
+        return (used, cap)
 
     def _write_refusal_message(self, exc: BaseException | None) -> str | None:
         """The DISTINCT error for a ``maxmemory`` write-refusal, else ``None``.
@@ -10561,6 +10570,18 @@ class FalkorProjection(
         corruption included — so the rebuild advice still applies there. That
         second direction is what keeps this branch honest: it NARROWS the
         remedy, it does not remove it.
+
+        #7392 — the lead sentence's STRENGTH must match what was READ. The
+        branch exists to say "full, not corrupt", and the only fact the probe
+        establishes is that the server REFUSED A WRITE for memory reasons. A
+        ceiling is one step further, and it is claimed (with the ceiling-only
+        ``--maxmemory`` lever as its remedy) only when ``INFO memory`` actually
+        returned one. Two other shapes reach here and must not borrow that
+        claim: ``maxmemory == 0``, where the datum says there is NO ceiling and
+        the operator has to be pointed outside the instance (host/kernel
+        memory, a per-query cap), and an unreadable ``INFO memory``, where no
+        ceiling was established at all. Sending someone to raise a ceiling
+        that does not exist is the defect this clause closes.
         """
         if exc is None:
             return None
@@ -10569,12 +10590,38 @@ class FalkorProjection(
             return None
         pressure = self._memory_pressure()
         if pressure is None:
-            detail = ("server reports a maxmemory write-refusal "
-                      "(used_memory/maxmemory unreadable)")
+            # No ceiling established: the reading failed. Do not assert one.
+            lead = ("the server refused a write for MEMORY reasons (INFO "
+                    "memory is unreadable, so NO ceiling was established)")
+            remedy = (
+                "Remedy: read the instance's INFO memory before relieving "
+                "anything — if maxmemory is 0 there is no ceiling to raise "
+                "and the pressure is outside the instance (host/kernel "
+                "memory, or a per-query cap); if it is set, raise / relieve "
+                "it — the --maxmemory in a container's REDIS_ARGS, or the "
+                "provider's console on a managed instance.")
+        elif pressure[1] <= 0:
+            # Readable, and it says NO limit. Name the absence, not a ceiling.
+            # The value is interpolated rather than spelled "0": the predicate
+            # is `<= 0`, and a message that hardcoded the literal would
+            # misdescribe the reading it is quoting.
+            lead = ("the server refused a write for MEMORY reasons "
+                    f"(used_memory {_fmt_bytes(pressure[0])}, and maxmemory "
+                    f"is {pressure[1]} — NO maxmemory ceiling is set)")
+            remedy = (
+                "Remedy: this instance has no ceiling to raise, so the "
+                "pressure is OUTSIDE it — host/kernel memory, or a per-query "
+                "cap. Do not go looking for a --maxmemory to tune: none is "
+                "set (one would be added in a container's REDIS_ARGS or in "
+                "the provider's console on a managed instance, and this "
+                "message reports it by name once it exists).")
         else:
             used, cap = pressure
-            detail = (f"used_memory {_fmt_bytes(used)} of maxmemory "
-                      f"{_fmt_bytes(cap)}")
+            lead = (f"the server has reached its memory ceiling (used_memory "
+                    f"{_fmt_bytes(used)} of maxmemory {_fmt_bytes(cap)})")
+            remedy = ("Remedy: raise / relieve the instance's maxmemory "
+                      "ceiling — the --maxmemory in a container's REDIS_ARGS, "
+                      "or the provider's console on a managed instance.")
         # The remedy must NOT restate the ownership policy in prose: a name
         # list here is wrong in one direction or the other, and nothing keeps
         # it in sync with the predicate that owns the rule. So the message
@@ -10598,11 +10645,11 @@ class FalkorProjection(
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
         return (
-            "DB refused writes on open: the graph is INTACT but the server "
-            f"has reached its memory ceiling ({detail}). This is NOT "
-            "corruption — do NOT rebuild. Remedy: raise / relieve the "
-            "instance's maxmemory ceiling — the --maxmemory in a container's "
-            "REDIS_ARGS, or the provider's console on a managed instance. "
+            "DB refused writes on open: the graph is INTACT but "
+            f"{lead}. This is NOT "
+            "corruption — do NOT rebuild. "
+            + remedy
+            + " "
             # #9532 review P2: composed from the ONE authority in
             # `tortoise/retry.py` rather than restated here. The SDK's
             # ceiling note (`explain_memory_ceiling`) is emitted for the same

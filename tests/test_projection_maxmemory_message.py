@@ -20,6 +20,12 @@ Revert-verified: delete the `_write_refusal_message` branch in
 goes RED (the rebuild advice reappears); make `_write_refusal_message` return
 a message for every exception and
 `test_genuine_corruption_still_advises_rebuild` goes RED.
+
+#7392 pins a THIRD direction, on the STRENGTH of the lead sentence: a refusal
+whose ceiling was never READ must not claim one. The
+`test_no_ceiling_established_*` and `test_unset_maxmemory_*` cases go RED if
+the ceiling sentence (or the ceiling-only `--maxmemory` lever) is emitted on
+the `_memory_pressure() is None` and `maxmemory == 0` branches.
 """
 
 from __future__ import annotations
@@ -187,6 +193,119 @@ def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
     msg = str(err.value)
     assert "maxmemory" in msg, msg
     assert "python -m tortoise rebuild" not in msg, msg
+
+
+# ── #7392 — the message must not claim a ceiling it did not establish ──────
+
+#: The lead sentence that is only TRUE once a ceiling was read from the server.
+_CEILING_CLAIM = "has reached its memory ceiling"
+#: The remedy that only makes sense when that ceiling exists.
+_CEILING_LEVER = "raise / relieve the instance's maxmemory ceiling"
+
+
+def _assert_no_ceiling_claim(msg: str) -> None:
+    """Assert the message does not assert a ceiling, or prescribe raising one.
+
+    The non-corruption guarantees (#2981: intact, no rebuild, no graph
+    deletion) are asserted alongside so a fix cannot buy the absence of the
+    false claim by deleting the whole branch — the same two-directional
+    posture the module docstring describes.
+    """
+    assert _CEILING_CLAIM not in msg, (
+        "the ceiling sentence is only true once INFO memory returned one: " + msg)
+    assert _CEILING_LEVER not in msg, (
+        "the --maxmemory lever is the remedy for a ceiling that does not "
+        "exist on this branch: " + msg)
+    assert "INTACT" in msg, msg
+    assert "do NOT rebuild" in msg, msg
+    assert "python -m tortoise rebuild" not in msg, msg
+    assert "Do NOT hand-pick names from GRAPH.LIST" in msg, msg
+
+
+def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatch):
+    """#7392 — an UNREADABLE ratio is not evidence of a ceiling.
+
+    NON-VACUOUS: pre-fix this branch emitted "the server has reached its
+    memory ceiling (server reports a maxmemory write-refusal (used_memory/
+    maxmemory unreadable))" plus the `--maxmemory` lever — so both absence
+    assertions above fail on it.
+
+    What it must say instead is what was OBSERVED: the server refused a write
+    for memory reasons. That keeps the operator away from `rebuild` (the
+    #2981 job) without inventing a ceiling to tune.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: None  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    assert "refused a write for memory reasons" in lowered, msg
+    # …and it says WHICH reading failed, so the operator can re-take it.
+    assert "unreadable" in lowered, msg
+    assert "info memory" in lowered, msg
+
+
+def test_unset_maxmemory_names_the_absence_and_the_outside_cause(monkeypatch):
+    """#7392 — `maxmemory == 0` means NO ceiling, measured on this box.
+
+    Measured 2026-10-04: the shared container reports `maxmemory = 0`. A write
+    refused there is a host-level / per-query OOM, and sending the operator to
+    "raise the container's --maxmemory" is not a remedy for it. The message
+    must name the absence and point OUTSIDE the instance instead.
+
+    NON-VACUOUS: `_memory_pressure()` returned `None` for this case pre-fix,
+    so the message made the same false ceiling claim as the unreadable branch.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (512 * 1024 * 1024, 0)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    assert "no maxmemory ceiling is set" in lowered, msg
+    # The measured used_memory is still reported — the reading was readable.
+    assert "512.0 MiB" in msg, msg
+    # The cause is named as OUTSIDE the instance, not a ceiling to raise.
+    assert "host" in lowered, msg
+
+
+def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
+    """#7392 — "no ceiling" and "could not read" are DIFFERENT answers.
+
+    `_memory_pressure()` collapsed both to `None`, which is how the message
+    came to claim a ceiling in the one case where the datum positively said
+    there is none (`maxmemory = 0`). Pin the distinction on the REAL method,
+    through both of its readings — an overriding test double would let the
+    method keep collapsing them unnoticed.
+    """
+
+    class _Conn:
+        def __init__(self, reply):
+            self._reply = reply
+
+        def info(self, section):
+            assert section == "memory"
+            if isinstance(self._reply, Exception):
+                raise self._reply
+            return self._reply
+
+    def _proj_with(reply):
+        proj = object.__new__(FalkorProjection)
+        proj.db = type("DB", (), {"connection": _Conn(reply)})()
+        return proj
+
+    # An unset ceiling is a READING, not a failure to read.
+    assert _proj_with({"used_memory": 1024, "maxmemory": 0})._memory_pressure() == (1024, 0)
+    # A ceiling that exists is reported with its ratio.
+    assert _proj_with({"used_memory": 1024, "maxmemory": 2048})._memory_pressure() == (1024, 2048)
+    # Only a FAILED read is `None`.
+    assert _proj_with(RuntimeError("no INFO on this server"))._memory_pressure() is None
+    assert _proj_with("not-a-dict")._memory_pressure() is None
 
 
 def test_genuine_corruption_still_advises_rebuild(monkeypatch):
