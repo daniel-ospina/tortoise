@@ -188,7 +188,14 @@ closed at both layers:
   own envelope — the capture's `(:Session)-[:CONTAINS]->(:Point)` link, carried
   as `contains_session` on `PointAdded`/`OperatorAdded` — now lands a `relation`
   row (`record_projection._ENVELOPE_RELATIONS`), ordered after the Point's
-  `node_identity` because both endpoints are composite FKs into it.
+  `node_identity` because both endpoints are composite FKs into it. The endpoint
+  gate is `projection._writable_container_id` (the fold's own), mirrored
+  value-for-value by `record_projection._writable_endpoint_id`: a blank / NUL /
+  lone-surrogate id drops the row on BOTH routes, so the two rebuilds cannot
+  disagree about it. The blank case is measured, not stylistic — an indexed
+  graph cannot match a whitespace-only key (FalkorDB equality filter, **#9599**),
+  so the fold would mint a duplicate `:Session` and land no edge while Postgres
+  would have held the row.
   The three remaining R5 classes are still **not** materialized and are named
   where the producer lives: point-property edges (`extractedFrom`, `about*`,
   `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural

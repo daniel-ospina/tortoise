@@ -1570,6 +1570,51 @@ _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
 )
 
 
+def _writable_endpoint_id(value: Any) -> bool:
+    """True when the FOLD would key a node on `value` — `_writable_container_id`.
+
+    ⛔ The fold is the authority. `_upsert_point_edges` gates a
+    `contains_session` on truthiness (`isinstance(contains_session, str) and
+    contains_session`) and then hands it to `_link_session`, whose gate is
+    `projection._writable_container_id` — `_writable_id` (rejects a non-str, the
+    empty string, a NUL and a lone surrogate) PLUS the BLANK refusal. This
+    predicate must stay value-for-value equal to it; a stricter rule here would
+    make the record POORER than the graph and a looser one would make it
+    RICHER, and both are rebuild-lane divergences.
+
+    The BLANK refusal is measured, not stylistic, and it is why an earlier draft
+    of this module could not simply call `_writable_id` (#9553 review P2): on an
+    indexed graph (`_ensure_indexes` creates `CREATE INDEX FOR (s:Session) ON
+    (s.id)`) FalkorDB's equality filter does not match a whitespace-only string
+    (#9599) — `MATCH (s:Session) RETURN s.id` lists `'   '` while `MATCH
+    (s:Session {id:'   '})` returns 0 — so `_link_session` re-MERGEs a DUPLICATE
+    `:Session` and then lands NO edge, while Postgres (no such quirk) would
+    happily hold the row. Streaming the row anyway would rebuild a relation the
+    graph never wrote, so the refusal lives in `_writable_container_id` and BOTH
+    folds use it.
+
+    Restated rather than imported because this module is loaded STANDALONE —
+    the PGlite harness `spec_from_file_location`s it, so a package-relative
+    import raises there. The two are pinned EQUAL over a value table by
+    `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`,
+    so a drift in either one is a red.
+
+    The NUL / lone-surrogate refusals are not cosmetic on THIS side either:
+    Postgres refuses a NUL in `text` and the driver cannot encode a lone
+    surrogate, so admitting either would turn a fold SKIP into a failed
+    replay.
+    """
+    if not isinstance(value, str) or not value or not value.strip():
+        return False
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False  # lone surrogate
+    return True
+
+
 def _envelope_relation_statements(
     org_id: str,
     graph_id: str,
@@ -1596,21 +1641,31 @@ def _envelope_relation_statements(
     minting a node from an edge directive would materialize a `session` row no
     record created, which is the divergence class #9078 review refused.
 
-    A falsy / non-string key (a blank id, or a caller-supplied non-str) emits
-    nothing: that is `_upsert_point_edges`' own `isinstance(…, str) and …`
-    rule, and a blank one is the `_link_session` skip (`_writable_id`) rather
-    than a Session keyed `''`.
+    An endpoint id is admitted by `_writable_endpoint_id` — the fold's own
+    rule (`projection._writable_container_id`), NOT a stricter one. A
+    non-string, an EMPTY or BLANK string, a NUL or a lone surrogate emits
+    nothing; the blank case is the one that LOOKS like a divergence and is not
+    (see that predicate's docstring: an indexed graph cannot match a
+    whitespace-only key, so the fold lands no edge for it either).
+
+    A SAME-ID pair (`contains_session == the Point's id`) is NOT refused. The
+    fold's `_link_session` MATCHes `(s:Session {id:$sid})` and
+    `(t:Point {id:$tid})` as two separate BOUND variables, so with `sid == tid`
+    the differing labels still bind two distinct nodes and the MERGE writes the
+    edge. `relation` holds it just as well — `node_identity` (and the composite
+    FK behind both endpoint columns) is keyed on `(label, key)`, so
+    `(Session, x)` and `(Point, x)` are two identities, not one. An earlier
+    draft refused this pair on the false premise that "one node cannot be both
+    ends"; the producer cannot emit it today (`_capture_turn_id` suffixes the
+    session id) but the record's job is to mirror the fold, not to encode
+    today's producer.
     """
     statements: list[Statement] = []
     for rel_type_of, env_key, rel_type, src_label, tgt_label in _ENVELOPE_RELATIONS:
         if rel_type_of != record_type or tgt_label != "Point":
             continue
         source = record.get(env_key)
-        if not isinstance(source, str) or not source.strip():
-            continue
-        if source == target_key:
-            # `MERGE (s)-[:CONTAINS]->(t)` cannot bind one node as both ends,
-            # so the fold writes no such edge; the record must not invent one.
+        if not _writable_endpoint_id(source):
             continue
         statements.extend(_relation_upsert_statement(
             org_id, graph_id, RelationUpsert(),

@@ -6847,6 +6847,43 @@ def _writable_id(val) -> bool:
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
+def _writable_container_id(val) -> bool:
+    """`_writable_id` PLUS the blank refusal — the `contains_session` gate.
+
+    The extra clause is MEASURED, not cosmetic, and it belongs here rather
+    than only in the record projection (#9553 review P2), because a rule that
+    lives in one projection makes the same journal rebuild to two different
+    graphs.
+
+    A whitespace-only string is a broken identity on this engine (#9599): with
+    the `:Session(id)` RANGE index `_ensure_indexes` creates, FalkorDB's
+    equality filter does not match it AT ALL — `MATCH (s:Session) RETURN s.id`
+    lists `'   '`, `MATCH (s:Session {id:'   '})` returns 0, and a re-`MERGE`
+    creates a SECOND `:Session` with the same id instead of matching the first.
+    So `_link_session` used to mint a duplicate container and then fail its own
+    `MATCH … (s:Session {id:$sid})`, landing NO `contains_session` edge — while
+    the record projection (Postgres, no such quirk) WOULD have landed the row.
+    The embedded engine is worse still: it duplicates the node with no index at
+    all.
+
+    ⛔ SCOPE, so this is not over-read as a general sanitizer: the refusals are
+    `_writable_id`'s plus BLANK only. A padded-but-real id (`'  s1  '`) is a
+    legitimate identity and is NOT refused here, even though #9599 affects it
+    the same way — that loss is the engine's to fix, and ducking it in one
+    projection would not stop the engine duplicating nodes on the other paths
+    (`sdk.py`'s raw MERGEs, `_link_source`, …).
+
+    No engine in this repo can round-trip a whitespace-only id, so neither
+    projection may claim one: refusing it here is what makes the journal fold
+    and the record fold agree (`record_projection._writable_endpoint_id`
+    mirrors this predicate value-for-value, pinned by
+    `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
+    `_writable_id` becomes a plain `_writable_id` again once #9599 is fixed —
+    the gate is the stopgap, the index defect is the cause.
+    """
+    return _writable_id(val) and bool(val.strip())
+
+
 def _log_identity_skip(what: str, value, label: str = "identity", *,
                        event_id: str | None = None, where: str = "",
                        absent_is_ordinary: bool = True,

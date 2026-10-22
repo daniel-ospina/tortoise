@@ -263,7 +263,13 @@ on 2026-10-21 with the §17.1 write-door fix, not this one, so it is recorded on
 `_RECORD_ONLY_KEYS`) and emitted no `relation` row for it. ✅ **Closed by #9553 (R5 class 2):** the envelope
 directive now lands a `relation` row (`_ENVELOPE_RELATIONS`, ordered after the Point's `node_identity`
 because both endpoints are composite FKs into it), and `supabase/tests/pglite/validate.mjs` replays a
-live-ordered pair to assert the row. An
+live-ordered pair to assert the row. The endpoint gate is SHARED rather than invented at the record
+layer: a blank / NUL / lone-surrogate `contains_session` is dropped by **both** folds
+(`projection._writable_container_id` ← `_link_session`, mirrored by
+`record_projection._writable_endpoint_id`), and the blank case is measured — an indexed graph cannot
+match a whitespace-only key (**#9599**), so the fold would mint a duplicate `:Session` and land no
+edge while Postgres held the row. That harness now runs in CI on a projection-only change too (`ci.yml`'s
+`pglite` gate → `schema-drill`), not only on a migration one. An
 **operator's** `IMPL`/`NAND`/`INPUT` edges are still missing: `OperatorAdded` is a `point`-row upsert whose inputs sit in
 `point.props` and no journaled edge record carries them, so they never reach `relation` at all.
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
