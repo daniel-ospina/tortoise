@@ -3293,6 +3293,10 @@ def _journal_safe_params(params, cypher=None):
 #     come from the RECORD rather than a log but are the same sanctioned rebuild
 #     of derived state — `recover_from_log`, `backup.restore`, `_cmd_reconcile`),
 #     whose records came FROM the journal and must not journal again.
+#     HANDLE-ONLY since `#9391` (`_HANDLE_ONLY_WRITE_LANES`): it authorizes the
+#     fold and the write handle, NOT the public raw-query lane — before that,
+#     the raw lane's scope-conditioned refusal made a rebuild's whole window a
+#     permitted writer there (measured), with no engine and no test naming it.
 #   * `_graph_metadata_write_scope(...)` — the GRAPH-METADATA lane: a write
 #     that is NOT a projection of any journal record and never becomes one,
 #     because it is graph-wide bookkeeping rather than a fact about the corpus,
@@ -3804,9 +3808,61 @@ def _live_write_scope(reason: str = "live-door"):
     return _cache_write_authorized(reason)
 
 
+#: The reason `_replay_write_scope()` declares. Pinned as a literal for the same
+#: reason as `_PREWIPE_RESTORE_LANE`: a test reads it back AT the write handle,
+#: and `_HANDLE_ONLY_WRITE_LANES` below matches on it, so a scope that renames
+#: itself would silently stop being narrowed.
+_REPLAY_WRITE_LANE = "replay"
+
+#: Lanes whose permit is HANDLE-ONLY (`#9391`): they authorize the write handle
+#: `proj.g` — and every guarded client handle below it — but NOT the PUBLIC
+#: RAW-QUERY lane (`FalkorProjection.query`).
+#:
+#: The distinction is the whole reason this set exists. Every sanctioned lane
+#: writes the cache THROUGH the projection's handle; the raw-query lane is the
+#: one door that exists to write it WITHOUT the projection (`#7951`'s stated
+#: purpose for it). So a lane that opens the handle has said nothing about that
+#: door, and before `#9391` the replay window opened it by accident: the raw
+#: lane's refusal was scope-CONDITIONED on the SAME ContextVar
+#: (`_CACHE_WRITE_AUTHORIZED`), so a rebuild's whole window ALSO authorized a
+#: mutating `FalkorProjection.query` — MEASURED, permitted and landed — while no
+#: engine called it and no test named the width. That is the hidden-door class
+#: §17.1 closes: one accidental `self.query(...)` inside a rebuild was a second
+#: writer nothing would have noticed.
+#:
+#: Deliberately a NAMED lane set rather than an unconditional refusal at the raw
+#: lane: the other lanes' width is `#9079`'s sanctioning decision to own, and
+#: narrowing them here would change behaviour this issue never measured. Adding
+#: a member is a deliberate act and `tests/test_9391_replay_window_raw_query_width.py`
+#: pins the membership member-exactly.
+_HANDLE_ONLY_WRITE_LANES: frozenset[str] = frozenset({_REPLAY_WRITE_LANE})
+
+
+def _raw_query_lane_permit() -> str | None:
+    """The open permit IF it covers the PUBLIC RAW-QUERY lane, else ``None``.
+
+    The ONE reader `FalkorProjection.query`'s guard consults, so the narrowing
+    is a property of the LANE and not of any engine's body: the fold, the write
+    handle and the client doors keep reading `_CACHE_WRITE_AUTHORIZED` directly
+    (a sanctioned projection writes through them), while this lane asks a
+    stricter question — "did a lane deliberately open THE RAW LANE too?".
+    """
+    reason = _CACHE_WRITE_AUTHORIZED.get()
+    if reason is None or reason in _HANDLE_ONLY_WRITE_LANES:
+        return None
+    return reason
+
+
 def _replay_write_scope():
-    """The replay engines' scope: the record came FROM the journal."""
-    return _cache_write_authorized("replay")
+    """The replay engines' scope: the record came FROM the journal.
+
+    ⚠️ HANDLE-ONLY (`#9391`). It authorizes the fold, `proj.g` and every guarded
+    client handle below it — everything a rebuild writes through — and NOT the
+    public raw-query lane (`_HANDLE_ONLY_WRITE_LANES`). A rebuild never needs
+    that lane: it projects derived state through the projection, and the lane
+    exists precisely to bypass it.
+    """
+    return _cache_write_authorized(_REPLAY_WRITE_LANE)
 
 
 # ── §17.1'S CLIENT-LEVEL DOOR (#9079, escapes 2 and 3) ────────────────────
@@ -16319,11 +16375,15 @@ class FalkorProjection(
         not a journal log; the lane's meaning is *rebuild of derived state*, not
         *byte-for-byte journal replay*, and the two engines' bodies are shared
         machinery, so one declaration covers both. ⚠️ The scope's WIDTH is the
-        reason it is stated rather than assumed: ``FalkorProjection.query``'s
-        ``#7951`` refusal is scope-CONDITIONED (it fires only while
-        ``_CACHE_WRITE_AUTHORIZED`` is ``None``), so the window also AUTHORIZES
-        that lane — latent here (this engine never calls ``self.query``), and
-        narrowable in one place if the rebuild engines get their own lane.
+        reason it is stated rather than assumed: it authorizes the fold, this
+        engine's handles and every guarded client handle below them — and it does
+        NOT authorize the public raw-query lane (``FalkorProjection.query``). It
+        used to: that lane's ``#7951`` refusal was scope-CONDITIONED on the same
+        ``_CACHE_WRITE_AUTHORIZED`` var, so the whole window permitted a mutating
+        ``self.query(...)`` as well (``#9391``, measured — the statement landed).
+        The lane is now ``_HANDLE_ONLY_WRITE_LANES``-narrowed, so the window is a
+        permit for what a rebuild actually writes through and nothing else;
+        pinned by ``tests/test_9391_replay_window_raw_query_width.py``.
         """
         with _replay_write_scope():
             return self._project_record_view(
@@ -16406,7 +16466,16 @@ class FalkorProjection(
         # forbids. Reads pass unchanged; the classifier is the same
         # conservative `_statement_writes` the parameter gate uses, so an
         # unreadable statement fails CLOSED.
-        if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None \
+        #
+        # ⛔ AND THE PERMIT IS NOT "ANY LANE IS OPEN" (#9391). Reading
+        # `_CACHE_WRITE_AUTHORIZED` directly here made the replay window a
+        # writer on this lane: a rebuild opens `_replay_write_scope()` around
+        # its WHOLE body, so for that window `FalkorProjection.query` was
+        # permitted (MEASURED: the CREATE landed), no engine called it, and no
+        # test named the width. `_raw_query_lane_permit()` is the narrowed
+        # reader: a lane must be OFF `_HANDLE_ONLY_WRITE_LANES` to reach here,
+        # and `replay` — the lane every rebuild declares — is ON it.
+        if self._journal_backed and _raw_query_lane_permit() is None \
                 and _statement_writes(cypher):
             raise DirectCacheWriteRefused(
                 "Refusing a mutating statement on the raw-query lane: "
@@ -16414,8 +16483,10 @@ class FalkorProjection(
                 "projection is the derived cache of a journal "
                 "(docs/architecture/STORAGE-ARCHITECTURE.md §17.1). Write "
                 "through the journal instead (`TortoiseSDK._apply_and_journal` "
-                "or the SDK's public write API); replay engines run inside "
-                "`_replay_write_scope()`. statement="
+                "or the SDK's public write API). A replay engine's "
+                "`_replay_write_scope()` does NOT open this lane (#9391): it "
+                "authorizes the fold and `proj.g`, not the door that bypasses "
+                "the projection. statement="
                 + " ".join((cypher or "").split())[:160]
             )
         # L2 guard (#99): refuse bulk graph-wipe on non-test graphs. There is
