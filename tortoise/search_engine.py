@@ -1037,6 +1037,15 @@ def _trace_entry(leg: str, *, ran: bool, degraded: bool,
 #: leg failure and answer from the TF-IDF fallback.
 BELOW_RELEVANCE_FLOOR = "below_relevance_floor"
 
+#: #5412 — leg-trace reason recorded when the caller supplied NO query vector
+#: at all. The dense leg was never asked a question, so it neither ran nor
+#: failed (``ran=False``, ``degraded=False``). Its own term is required:
+#: without an entry the declaration could only infer ``leg_absent`` (a leg
+#: blamed for not existing) or ``leg_trace_unavailable``, and
+#: ``require_hybrid_read``'s refusal named that wrong cause. It must never
+#: read as a healthy run — a keyword-only read is not a hybrid read (#2952).
+NO_QUERY_VECTOR = "no_query_vector"
+
 
 # ── #4999: the vector leg's MECHANISM (index vs scan) ───────────────────────
 # Both the HNSW-index path and the brute-force full scan recorded an
@@ -1197,6 +1206,10 @@ def declared_degraded_read(leg_trace: list[dict] | None) -> dict | None:
     leg did not run (``ran=False``) or ran degraded (``degraded=True`` — e.g.
     ``no_embedder``, ``encode_failed``, ``breaker_open``, ``query_failed``,
     ``index_missing``, ``no_embeddings``, ``timeout``), else ``None``.
+    A leg the read never asked — ``no_query_vector``, recorded
+    ``ran=False``/``degraded=False`` (#5412) — is also declared: it
+    contributed no semantic rows, and the ``reason`` names that instead of
+    the misleading ``leg_absent``.
 
     Shape: ``{"degraded_read": True, "hybrid": False,
     "vector_leg_unavailable": <bool — False for a keyword-only fallback whose
@@ -1918,6 +1931,8 @@ def run_vector_query(
     raising — the exception-only catch never fires for the real empty case):
     {0-row result set with zero embedded points → ``no_embeddings``},
     {0-row result set with embedded points present → ``empty_results``},
+    {the caller supplied NO query vector → ``no_query_vector``, with
+    ``ran=False``/``degraded=False`` — the leg was never asked (#5412)},
     {an embedding the distance expression cannot read — a non-numeric value, or
     a width the query vector cannot pair with (a plain ``List`` of the RIGHT
     width is normalised by ``vector_write.stored_embedding_vector_expr``, #8316)
@@ -2039,6 +2054,11 @@ def run_vector_query(
         leg_trace.append(entry)
 
     if not query_vec:
+        # #5412: this is an EXIT BRANCH, so it records one. Nothing ran and
+        # nothing failed — the caller asked the dense leg nothing — and the
+        # entry says exactly that (``ran=False``/``degraded=False``) instead of
+        # leaving a gap the declaration had to read as ``leg_absent``.
+        _record(ran=False, degraded=False, reason=NO_QUERY_VECTOR, count=0)
         return []
     # #4028 — the retrieval relevance floor. Expressed in COSINE terms
     # (embeddings.VECTOR_RELEVANCE_FLOOR); each return branch below converts
