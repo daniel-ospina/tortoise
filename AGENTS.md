@@ -5,6 +5,15 @@
 > ⛔ **Prerequisite:** `AGENT_INFRA_PATH` must be set in your shell profile (e.g., `~/.zshrc`).
 > The auto-sync extension, pre-commit version gate, and bootstrap CLI all require it.
 > Run `echo $AGENT_INFRA_PATH` to verify. See [agent-infra README](https://github.com/premise-labs/agent-infra#prerequisites) for setup.
+>
+> Then materialise this repo's `scripts/` pointer — it is **gitignored, not tracked**, because a git
+> symlink blob cannot hold `$AGENT_INFRA_PATH` and a committed absolute path dangles off the
+> committer's machine (#9475):
+>
+> ```bash
+> uv run python tools/link_agent_infra_scripts.py           # create/repair scripts/ -> $AGENT_INFRA_PATH/scripts
+> uv run python tools/link_agent_infra_scripts.py --check   # assert it (exit 0 = resolves, 1 = missing/dangling/wrong target, 2 = no agent-infra checkout)
+> ```
 
 ---
 
@@ -474,7 +483,7 @@ for three sends to one pane that were recorded as `OK` and never consumed.
 | `tortoise/` | Python SDK, EP engine, MCP server, connectors |
 | `tests/` | Test suite (pytest) |
 | `graph-scripts/` | Historical graph operations (pricing decisions, migrations, audit) |
-| `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts (symlink) |
+| `scripts/` → `$AGENT_INFRA_PATH/scripts` | Agent-infra shared scripts — **machine-local symlink, gitignored, not tracked** (#9475). Materialise it with `uv run python tools/link_agent_infra_scripts.py`; assert it with `--check`. A fresh clone has no `scripts/` until that runs (or `agent-infra init`/`update` does), because a git symlink blob cannot hold `$AGENT_INFRA_PATH` |
 | `tools/` | In-repo tooling — e.g. `collision_preflight.py` (pre-dispatch in-flight-work check, #3061) and `who_is_on.py` / `who-is-on.sh` (the "who is on #N?" verb + stranded-work inventory, #4256) |
 | `config/` | YAML configs (routing, pipelines) |
 | `docs/` | Architecture, ontology, legal, strategy docs |

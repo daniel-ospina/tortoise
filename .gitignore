@@ -24,6 +24,13 @@ data/migrations/
 # untracked; it is ignored, not tracked, so a fresh clone installs from the lockfile.)
 website/apps/dashboard/node_modules/
 website/apps/blog-admin/node_modules/
+
+# #9475: the repo-root `scripts` pointer is MACHINE-LOCAL, ignored, never tracked. A git symlink
+# blob cannot hold `$AGENT_INFRA_PATH`, so the committed one pinned the committer's absolute path
+# and dangled on every other machine — every documented `scripts/<tool>.sh` died with "No such
+# file or directory". Materialise it per machine with `tools/link_agent_infra_scripts.py` (what
+# `agent-infra init`/`update` also does); `--check` asserts it.
+/scripts
 # #4311: the pinned TypeScript toolchain for `website/functions/**` (tsconfig +
 # lockfile live here because a file under website/ is staged for public upload).
 tools/ts/node_modules/
