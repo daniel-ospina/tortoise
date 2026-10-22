@@ -1541,3 +1541,52 @@ def test_an_id_that_is_not_a_string_is_ordered_not_crashed(sdk):
         "MATCH (n:Point {id:42}) RETURN n.posterior_alpha").result_set
     assert posterior[0][0] is not None, (
         "the numeric-id claim was ordered but never computed")
+
+
+def test_the_id_less_refusal_commits_no_evidence_pre_write(sdk):
+    """#9275 review (P2): the refusal is before the run's FIRST write.
+
+    ``run()``'s evidence pre-write SETs ``ep_alpha``/``ep_beta`` and (for a
+    ``baseline_set``-unset claim) NULLs the posteriors, plus journals the clear.
+    With the affected-claim collection AFTER it, a refusal left those committed —
+    so ``evidence=`` (a public parameter of ``compute_confidence`` and of
+    ``TortoiseEP.run``) turned "refused, nothing written" into a real
+    half-write, and the diagnostic said otherwise. The collection now runs
+    first: the refusal is the run's first event, and the graph is untouched.
+
+    The witness is deliberately OUTSIDE the affected set — the pre-write
+    applies to any id the caller supplies ("direct graph write so evidence is
+    visible even when there are no operators / affected claims"), which is what
+    makes the pre-write's commitment observable at all.
+    """
+    anchor = sdk.create_point("statement", "Anchor", status="live")
+    claim = sdk.create_point("statement", "Claim", status="live")
+    witness = sdk.create_point("statement", "Witness", status="live")
+    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+
+    proj = sdk._get_proj()
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
+                 "content:'no id'})")
+    proj.g.query(
+        "MATCH (o:Point {id:$o}), (c:Point) WHERE c.id IS NULL "
+        "CREATE (o)-[:IMPL {id:'e-9275-prewrite'}]->(c)",
+        params={"o": op["id"]})
+
+    read = ("MATCH (n:Point {id:$id}) "
+            "RETURN n.ep_alpha, n.ep_beta, n.posterior_alpha, n.posterior_beta")
+    before = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    # The witness is baseline-free, so the pre-write WOULD overwrite it — which
+    # is what makes this assertion test the ordering rather than the CASE.
+    assert before[0] != 7.0
+
+    with pytest.raises(UnaddressableClaimError):
+        sdk.compute_confidence(factors=[op["id"]],
+                               evidence={witness["id"]: (7.0, 2.0)},
+                               require_calibration=False)
+
+    after = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    assert after == before, (
+        "the refusal committed the evidence pre-write — 'nothing is "
+        f"half-written' would be false (before={before}, after={after})")

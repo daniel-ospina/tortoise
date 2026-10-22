@@ -1460,11 +1460,18 @@ class TortoiseEP:
                 if not frontier:
                     break
         # #9275: an id-less claim is UNNAMEABLE, so it is not a claim this run
-        # can compute. Every admission point above collects `c.id`/`b.id`/`m.id`
+        # can compute. The admission points above collect `c.id`/`b.id`/`m.id`
         # verbatim from the engine, and a `:Point` written outside the SDK (no
         # writer mints one — every id-binding write path refuses a missing id on
         # its own post-write check) can carry none, so the engine returns a row
-        # whose id is NULL and `None` lands in this set.
+        # whose id is NULL and `None` lands in this set. The reachable shape is
+        # an OPERATOR-SEEDED claim and the operator-bridge hop (`RETURN DISTINCT
+        # c.id` / `m.id`); a direct-edge endpoint cannot be it, because every
+        # direct-edge leg is narrowed by `b.id <> a.id` (and `_live_neighbors_many`
+        # by `m.id <> n.id`) — in Cypher those predicates are NULL, not TRUE, for
+        # an id-less endpoint, so such a row never arrives. Pinned by
+        # `tests/test_6211_ep_anchor.py`, whose fixture keeps an id-less
+        # direct-edge endpoint alive in `_affected_factors`.
         #
         # WHY REFUSE HERE rather than order around it. `affected` is not a
         # report: every member is loaded into the node cache, run through its
@@ -1481,17 +1488,19 @@ class TortoiseEP:
         # already written half a pass is not fail-closed, and the caller could
         # not diagnose it — the traceback names a sort, not the graph. So the one
         # place every affected claim is collected refuses, before `_load_cache`
-        # and before any posterior is stamped, and names the repair.
+        # and before the run's first write (its caller in `run()` collects this
+        # set ahead of the evidence pre-write), and names the repair.
         if None in affected:
             _idless = sum(1 for _c in affected if _c is None)
             raise UnaddressableClaimError(
                 f"EP cannot run: {_idless} node(s) in this run's affected set "
                 "carry no `id`. An id-less :Point wired as an operator's claim "
-                "(or as a direct-edge endpoint) cannot be addressed by EP — "
+                "cannot be addressed by EP — "
                 "every claim is keyed on `id` for hydration, for message "
                 "caching and for the posterior write-back — so it can be "
                 "neither computed nor stamped, and no SDK caller can repair it. "
-                "Refused BEFORE any posterior was stamped, so nothing is "
+                "Refused before the run's FIRST write — `run()` collects this "
+                "set ahead of the evidence pre-write — so nothing is "
                 "half-written (#9275). Find and repair the node(s):\n"
                 "  MATCH (n:Point) WHERE n.id IS NULL "
                 "RETURN n.pointKind, left(coalesce(n.content, ''), 80)\n"
@@ -2326,6 +2335,20 @@ class TortoiseEP:
             if hasattr(self, _attr):
                 delattr(self, _attr)
 
+        # #9275: COLLECT THE AFFECTED SET BEFORE ANY WRITE. This call can refuse
+        # the run (`UnaddressableClaimError` — an affected node with no `id`),
+        # and a refusal must not leave the evidence pre-write below committed:
+        # the pre-write SETs `ep_alpha`/`ep_beta` and (for a non-baseline claim)
+        # NULLs `posterior_alpha`/`posterior_beta`, plus their journal records —
+        # so with the collection AFTER it, `evidence=` (a public parameter of
+        # `run` and of `compute_confidence`) turned "refused, nothing written"
+        # into a committed half-write. Nothing in the collection depends on the
+        # pre-write (the BFS reads edges, labels and status; the priors are not
+        # an input to it), and evidence still applies when there is no affected
+        # claim — the pre-write stays ahead of every early return below.
+        affected = self._affected_claims(operator_ids, max_hops,
+                                         include_draft=include_draft)
+
         # Apply evidence priors to graph before EP iterations.
         # ponytail: direct graph write so evidence is visible even
         # when there are no operators / affected claims.
@@ -2424,8 +2447,6 @@ class TortoiseEP:
                     self._emit("ConfidenceChanged", id=_cid,
                                posterior_alpha=None, posterior_beta=None)
 
-        affected = self._affected_claims(operator_ids, max_hops,
-                                         include_draft=include_draft)
         # #395 (delta C): stash the run set BEFORE the early returns — the
         # write-back callers (sdk.compute_confidence, dream.py) consume
         # _last_affected so the write-back set == the run set by construction,
