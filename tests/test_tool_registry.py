@@ -934,6 +934,46 @@ class TestCapabilityModel:
         assert write_classification_violations([unguarded], _PROBE_SRC)
         assert not write_classification_violations([guarded], _PROBE_SRC)
 
+    def test_T1_self_guarding_writer_on_a_reading_tier_fails(self):
+        """T1 (2a-prime, #4122 review): the SELF-GUARD must not excuse the TIER.
+
+        The `http_policy is False` exemption is about the SURFACE (the tool is not
+        reachable over HTTP), and the arm below it accepts a self-guarding
+        HTTP-excluded writer.  Neither says anything about the `risk` RUNG, so a
+        later lane could demote `dream` / `backfill_v25` / `index_files` /
+        `ingest_corpus` to `read` (or `maintenance`) and every other arm would stay
+        green: the handler self-guards, so 2a passes; the annotation is `read`, so
+        2b passes.  The tier therefore needs its OWN arm, and this is the
+        falsifiability test for it — a DELETED arm leaves every other test green.
+
+        `tortoise_probe_guarded_excluded` is exactly that shape: it self-guards
+        (the T1 test above asserts the entry is otherwise clean) AND its handler
+        reaches `create_point`, a `sdk_graph_mutators()` member.
+        """
+        from tool_surface_capabilities import write_classification_violations
+
+        from tortoise.tool_registry import MAINTENANCE_TIER, _ro, _rw
+        # Same handler as the clean entry above — the self-guard is real.
+        for tier, ann in (("read", _ro()), (MAINTENANCE_TIER, _rw())):
+            demoted = _probe("tortoise_probe_guarded_excluded", "create_point",
+                             annotations=ann, http_policy=False, risk=tier)
+            violations = write_classification_violations([demoted], _PROBE_SRC)
+            assert any("but its handler reaches write(s)" in v for v in violations), (
+                f"a self-guarding HTTP-excluded entry demoted to risk={tier!r} whose "
+                f"handler reaches a graph mutation was NOT reported — the 2a-prime "
+                f"arm is gone or unreachable: {violations}")
+            # …and nothing ELSE is wrong with it (this pins the arm, not a pile-up).
+            assert violations == [v for v in violations
+                                  if "but its handler reaches write(s)" in v]
+        # The writing tiers are what the same handler is SUPPOSED to carry.
+        for tier in ("destructive", "write"):
+            kept = _probe("tortoise_probe_guarded_excluded", "create_point",
+                          annotations=_rw(), http_policy=False, risk=tier)
+            assert not [v for v in write_classification_violations([kept], _PROBE_SRC)
+                        if "but its handler reaches write(s)" in v], (
+                f"risk={tier!r} is a writing tier — the reading-tier arm must not "
+                f"fire on it")
+
     def test_T2_http_tool_reaching_privileged_capability_fails(self):
         """T2: filesystem and control-plane legs."""
         from tool_surface_capabilities import privileged_exposure_violations

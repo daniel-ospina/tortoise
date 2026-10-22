@@ -25,6 +25,7 @@ a tautology that would keep passing if the property were deleted).
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -608,3 +609,67 @@ class TestThisGuardSuiteIsActuallySelected:
             "split is duration-blind for this file (#3400)"
         )
         assert isinstance(durations[self.THIS], (int, float))
+
+    def test_the_durations_weight_is_the_flat_default_until_a_sweep_measures_it(self):
+        """#4122 review (LOW): a file ADDED BY A PR carries the FLAT default.
+
+        The row shipped with a local dev-box reading (8.7 s) and a note that did NOT
+        LEAD with `# unmeasured`. Both halves were wrong against this manifest's own
+        rule: the header says a weight is a SHARD-LAYOUT input, so a dev-box number
+        must not decide which files share a shard (the #2818/#3419 convention, pinned
+        by name for `test_pack_value_declarations_2818.py`), and a note that does not
+        LEAD with the marker is PRESERVED verbatim by
+        `tools/ci_timing.py::render_refreshed_manifest` — so after merge the row would
+        keep asserting "ADDED BY THIS PR … no CI sample exists yet" indefinitely, the
+        stale-provenance rot the header's own rule exists to prevent.
+
+        Two arms, because the marker alone cannot tell a CI measurement from a
+        hand-set local reading:
+
+        * the row LEADS with `# unmeasured` → it is in the unmeasured state, so its
+          weight must be the flat `DEFAULT_FAST_WEIGHT`;
+        * it does not → it claims to be a MEASUREMENT, so it may not also claim "no CI
+          sample exists yet" or cite a LOCAL reading. That contradiction is exactly
+          the pre-fix row (8.7 s, no marker, "ADDED BY THIS PR … no CI junit sample
+          exists yet"), and it is the only shape a pin can red without failing
+          forever on a legitimate post-merge measurement (the refresh CLEARS a
+          marker-leading tail and rewrites the value, so a measured row passes both
+          arms).
+        """
+        from tools.ci_selection import DEFAULT_FAST_WEIGHT
+
+        weight = self._manifest()["durations"][self.THIS]
+        tail = self._row_tail()
+        assert self._LEADS_WITH_UNMEASURED.match(tail) or weight > 0, (
+            f"{self.THIS} carries a non-positive weight {weight}s — a sweep has "
+            f"collected the file, so its value must be a real measurement")
+        if self._LEADS_WITH_UNMEASURED.match(tail):
+            assert weight == DEFAULT_FAST_WEIGHT, (
+                f"{self.THIS} is marked unmeasured but carries {weight}s — an "
+                f"unmeasured row carries the flat {DEFAULT_FAST_WEIGHT}s default; a "
+                f"local timing is not an input to the shard layout (#3400/#4348)"
+            )
+            return
+        for claim in ("NO CI", "no CI", "ADDED BY THIS PR", "LOCAL reading",
+                      "local reading", "dev-box"):
+            assert claim not in tail, (
+                f"{self.THIS} carries no leading `# unmeasured` marker, so its row "
+                f"claims to be a MEASUREMENT — but its note still says {claim!r}. "
+                f"That note is preserved VERBATIM by `render_refreshed_manifest`, "
+                f"so it would assert a false provenance forever (#4122 review: the "
+                f"row must LEAD with `# unmeasured` while no sweep has collected it, "
+                f"with any local reading kept as provenance for the flat default)"
+            )
+
+    #: `tools/ci_timing.py::render_refreshed_manifest` clears the marker by its
+    #: LEADING TOKEN, so this pin reads it the same way rather than by substring.
+    _LEADS_WITH_UNMEASURED = re.compile(r"[ \t]*#\s*unmeasured\b")
+    _DURATIONS_ROW = re.compile(r"\s{2}(?P<key>[^\s:#]+):\s*[\d.]+\s*(?P<tail>#.*)?$")
+
+    def _row_tail(self) -> str:
+        """The `durations:` row's trailing comment, or "" when the row has none."""
+        for line in self.MANIFEST.read_text(encoding="utf-8").splitlines():
+            m = self._DURATIONS_ROW.match(line)
+            if m is not None and m.group("key") == self.THIS:
+                return m.group("tail") or ""
+        return ""
