@@ -1587,9 +1587,24 @@ def test_id_less_factor_input_refuses_even_when_the_operator_is_not_seeded(sdk):
     proj.g.query("MATCH (o:Point {id:'op-9275'}), (n:Point) WHERE n.id IS NULL "
                  "CREATE (o)-[:IMPL {idx:2}]->(n)")
 
+    # The witness is OUTSIDE the affected set, so ONLY the evidence pre-write can
+    # touch it — which is how the ordering (guard before the first write) is
+    # observable on THIS path too. It is baseline-free, so the pre-write would
+    # overwrite it.
+    witness = sdk.create_point("statement", "Witness", status="live")
+    read = ("MATCH (n:Point {id:$id}) "
+            "RETURN n.ep_alpha, n.ep_beta, n.posterior_alpha, n.posterior_beta")
+    before = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    assert before[0] != 7.0
+
     with pytest.raises(UnaddressableClaimError) as exc:
-        sdk.compute_confidence(require_calibration=False)
+        sdk.compute_confidence(require_calibration=False,
+                               evidence={witness["id"]: (7.0, 2.0)})
     assert "factor's inputs" in str(exc.value)
+    after = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
+    assert after == before, (
+        "the factor-input refusal committed the evidence pre-write — "
+        f"(before={before}, after={after})")
 
     # Nothing was computed: both named posteriors are still null.
     stamped = dict(proj.g.query(
@@ -1679,3 +1694,40 @@ def test_the_id_less_refusal_commits_no_evidence_pre_write(sdk):
     assert after == before, (
         "the refusal committed the evidence pre-write — 'nothing is "
         f"half-written' would be false (before={before}, after={after})")
+
+
+def test_an_id_less_operator_is_inert_but_not_fatal(sdk):
+    """#9275 (review round 3): only a NULL *input* is fatal — an operator no-ops.
+
+    An id-less ``:Point`` carrying ``is_operator`` mints a factor whose
+    ``input_ids`` is EMPTY: Batch 2 collects inputs ``WHERE o.id IN $ids``, and a
+    NULL operator matches nothing. ``_update_factor`` returns immediately below
+    two participating inputs, so such a node cannot move any belief — refusing on
+    it would turn a graph that computes on ``origin/main`` into a refused one
+    (measured there: ``iterations 9``, converged, both posteriors stamped). The
+    refusal is therefore keyed on the INPUT arm only.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "A", status="live")
+    b = sdk.create_point("statement", "B", status="live")
+    for p in (a, b):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    # The id-less OPERATOR shape: is_operator true, no id, wired to both claims.
+    proj.g.query("CREATE (o:Point {pointKind:'operator', is_operator:true, "
+                 "op_type:'IMPL', status:'live'})")
+    proj.g.query("MATCH (o:Point), (a:Point {id:$a}) "
+                 "WHERE o.id IS NULL AND o.is_operator = true "
+                 "CREATE (o)-[:IMPL {idx:0}]->(a)", params={"a": a["id"]})
+    proj.g.query("MATCH (o:Point), (b:Point {id:$b}) "
+                 "WHERE o.id IS NULL AND o.is_operator = true "
+                 "CREATE (o)-[:IMPL {idx:1}]->(b)", params={"b": b["id"]})
+
+    out = sdk.compute_confidence(require_calibration=False)
+    assert out["converged"] is True
+    stamped = dict(proj.g.query(
+        "MATCH (n:Point) WHERE n.id IS NOT NULL "
+        "RETURN n.id, n.posterior_alpha").result_set)
+    assert stamped[a["id"]] is not None
+    assert stamped[b["id"]] is not None
+

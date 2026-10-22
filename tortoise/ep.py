@@ -2370,6 +2370,35 @@ class TortoiseEP:
         affected = self._affected_claims(operator_ids, max_hops,
                                          include_draft=include_draft)
 
+        # #9275: ASSEMBLE + GUARD THE FACTORS AHEAD OF THE SAME WRITE. The
+        # factor list is the SECOND collection point that can see an id-less
+        # claim (Batch 2 collects an operator's inputs verbatim, and the hop
+        # admissions NULL-drop such a node, so an operator the selector does not
+        # seed still consumes it — see `_affected_claims`' note), and a refusal
+        # there must not commit the evidence pre-write below for the same reason
+        # the affected set is collected first: `evidence=` is a public parameter,
+        # so a refusal that persisted a prior and NULLed a posterior would tell
+        # the caller "nothing was written" after writing. Nothing here reads the
+        # priors (Batch 1/2/3 read labels, edges, status and `id`), and the
+        # pre-write still precedes every early return below, so caller evidence
+        # still applies to a run with no affected claim or no factors.
+        factors = self._affected_factors(
+            affected, include_draft=include_draft,
+            skipped=self._last_skipped_factors)
+        # The `f[2]` arm is the one that can corrupt a NAMED claim's posterior:
+        # an input that names no node is read as `Beta(1, 1)` and votes. The
+        # operator-id arm is deliberately NOT here — an id-less OPERATOR yields a
+        # factor whose `input_ids` is empty (`WHERE o.id IN $ids` with a NULL
+        # operator matches nothing) and `_update_factor` no-ops below two
+        # inputs, so such a node cannot change any belief; refusing on it would
+        # turn a graph `main` computes (measured: iterations 9, converged, both
+        # posteriors stamped) into a refused one.
+        if any(any(_i is None for _i in f[2]) for f in factors):
+            # A refused pass publishes no run set (the #7739 rule: a pass that
+            # never ran must not leave a selection report behind).
+            self._last_affected = set()
+            raise self._unaddressable_claim_error("a factor's inputs")
+
         # Apply evidence priors to graph before EP iterations.
         # ponytail: direct graph write so evidence is visible even
         # when there are no operators / affected claims.
@@ -2484,33 +2513,10 @@ class TortoiseEP:
                 )
             return 0, True
 
-        factors = self._affected_factors(
-            affected, include_draft=include_draft,
-            skipped=self._last_skipped_factors)
+        # #9275: `factors` (and its id-less refusal) was assembled ABOVE, ahead
+        # of the evidence pre-write — do not recompute it here.
         if not factors:
             return 0, True
-
-        # #9275: an id-less claim can reach EP as a FACTOR INPUT without ever
-        # being admitted into `affected`. `_affected_factors` Batch 2 collects
-        # an operator's inputs VERBATIM (`RETURN o.id, c.id, ...`), and Batch 3
-        # does the same for direct-edge endpoints, while the BFS hops compare
-        # `m.id <> n.id` / `b.id <> a.id` — which is NULL (row dropped) for an
-        # id-less neighbour under three-valued logic. So the id-less node is
-        # invisible to the `affected` guard above in exactly the case where the
-        # operator is NOT seeded: a legacy `op_type`-only operator (the selector
-        # matches `is_operator = true` only) or one outside the selector's hops.
-        #
-        # MEASURED (this shape, before this guard): seeded by two plain claims,
-        # `_update_factor` received `[seed, sibling, None]` and `[seed, None]`,
-        # `_last_affected` held the TWO NAMED ids only, and `compute_confidence()`
-        # returned `converged: True` with posteriors pulled off a phantom
-        # `Beta(1, 1)` input (3.209/1.109 vs the 3.405/1.081 control) — the silent
-        # mis-key that rejecting the issue's option 3 was supposed to prevent.
-        if any(f[0] is None or any(_i is None for _i in f[2]) for f in factors):
-            # A refused pass publishes no run set (the #7739 rule: a pass that
-            # never ran must not leave a selection report behind).
-            self._last_affected = set()
-            raise self._unaddressable_claim_error("a factor's inputs")
 
         # Load once from graph, then run entirely in memory.
         # Only flush final results at the end — eliminates per-iteration I/O.

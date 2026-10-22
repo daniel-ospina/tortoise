@@ -301,9 +301,13 @@ class Dreamer:
                     # engine, and a hand-written numeric id is orderable only
                     # against its own type. This early return precedes
                     # `ep.run()` entirely, so no claim has been admitted by EP
-                    # here; what keeps `None` out of this set is the stamp's OWN
-                    # predicate (`WHERE n.id IN $ids` / `NOT n-[:IMPL|NAND]-()`
-                    # cannot match a never-named id).
+                    # here. What keeps `None` out of THIS set is the stamp's
+                    # `claim_ids` form — `WHERE n.id IN $ids` cannot match a
+                    # never-named id. The graph-wide form (`claim_ids=None`, used
+                    # only by `dream_all`) is NOT covered: it matches an id-less
+                    # isolated Point and stamps it (`scanned_count` counts it),
+                    # which is the recorded residual on #9275, not something this
+                    # early return can produce.
                     return {"iterations": 0, "converged": True,
                             "affected_claims": sorted(stamped, key=str)}
                 return {"iterations": 0, "converged": True, "affected_claims": []}
@@ -593,7 +597,14 @@ class Dreamer:
                 if len(new_ops) > remaining:
                     # #9275: `key=str` — operator ids come from the engine too,
                     # so a hand-written numeric id makes the truncation order
-                    # (nothing more) undefined under a bare sort.
+                    # (nothing more) undefined under a bare sort. DEFENSIVE, and
+                    # UNPINNED BY DESIGN: with `op_cap=eff_budget` in the same
+                    # selection and `WINDOW_CLAIM_BATCH = 2000`, reaching this
+                    # arm needs > 2000 window claims AND a batch-2 selection
+                    # larger than the remaining budget, which no test builds
+                    # cheaply. It is kept because a bare sort here is the same
+                    # crash class for one keyword, and it is recorded as
+                    # unpinned rather than claimed as tested.
                     new_ops = set(sorted(new_ops, key=str)[:remaining])
                 seed_ids = list(new_ops)
                 for (src, tgt, _t) in factor_anchors:
