@@ -715,8 +715,12 @@ def reestablish_watermark(proj, carried_last_seq: int | None, *,
     # every scope uses, so an undeclared caller still fails closed on `None`;
     # the lane is opened here because an inner scope shadows an outer one, so a
     # `with` at the call site could never be the declaration.
-    from .projection import _cache_write_authorized
-    with _cache_write_authorized(restore_reason or "replay"):
+    # ⛔ The replay lane's name is IMPORTED, not re-spelled (`#9391`): since that
+    # lane became HANDLE-ONLY, the reason string is the KEY the raw-query lane's
+    # narrowing matches on, so a second literal here would be a second definition
+    # of the lane — rename one and this default silently stops being narrowed.
+    from .projection import _REPLAY_WRITE_LANE, _cache_write_authorized
+    with _cache_write_authorized(restore_reason or _REPLAY_WRITE_LANE):
         rows = proj.g.query(
             "MERGE (m:GraphEventMeta) "
             "ON CREATE SET m.last_seq = $last, m.first_seq = $first "

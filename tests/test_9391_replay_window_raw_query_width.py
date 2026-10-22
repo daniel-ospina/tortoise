@@ -1,59 +1,59 @@
-"""#9391 — the replay window is HANDLE-ONLY: it does not open the raw-query lane.
+"""#9391 — the replay window is HANDLE-ONLY, for the WHOLE window: it does not
+open the raw-query lane, and a lane nested inside it cannot re-open it.
 
-`FalkorProjection.query`'s `#7951` refusal is **scope-CONDITIONED** — it fires
-only while `_CACHE_WRITE_AUTHORIZED` is `None`:
-
-```python
-if self._journal_backed and _CACHE_WRITE_AUTHORIZED.get() is None \\
-        and _statement_writes(cypher):
-    raise DirectCacheWriteRefused(...)
-```
-
-and `_replay_write_scope()` sets exactly that ContextVar. Measured on the
-pre-fix tree (`main@26aff163c`, re-measured here):
+`FalkorProjection.query`'s `#7951` refusal used to be **scope-CONDITIONED** on
+`_CACHE_WRITE_AUTHORIZED`, and `_replay_write_scope()` sets exactly that
+ContextVar around a rebuild engine's body — so the public raw-query lane, the one
+door that exists to write the cache WITHOUT the projection, was a permitted
+writer for the duration of a rebuild:
 
     outside window: None            -> a mutating statement is REFUSED
-    inside window : replay          -> the SAME statement was PERMITTED, and landed
+    inside window : "replay"        -> the SAME statement was PERMITTED, and landed
 
-So for the whole replay window of `rebuild_all`, `rebuild`, `rebuild_from_record`
-and the event-store rebuild, the public raw-query lane — the one door that exists
-to write the cache WITHOUT the projection — was a permitted writer. Latent, not
-live (no engine calls `self.query`), which is exactly the hidden-door class
-§17.1 exists to close: one accidental `self.query(...)` was a second writer that
-no test in the tree would have noticed.
+Latent, not live (no engine calls `self.query`), which is exactly the
+hidden-door class §17.1 closes: one accidental `self.query(...)` inside a
+rebuild was a second writer no test would have noticed.
 
-⛔ WHAT THIS SUITE NOW CLAIMS, and how it is measured. The narrowing is a
-property of the LANE, not of any engine's body: `_HANDLE_ONLY_WRITE_LANES` names
-the reasons that authorize the write handle (`proj.g`) and every guarded client
-handle below it but NOT `FalkorProjection.query`, and `_raw_query_lane_permit()`
-is the one reader the raw-lane guard consults. Each test measures the REAL door:
+⛔ THE FIRST SHAPE OF THIS FIX WAS WINDOW-ONLY, AND THAT WAS NOT ENOUGH — the
+measured finding of this file's own review round. Keying the closure on the
+reason in flight only closes the UN-NESTED part of a rebuild: `rebuild_all` opens
+`_replay_write_scope()` around its whole body and then opens
+`_prewipe_restore_write_scope` / `_prewipe_synthetic_write_scope` per leg, and
+`rebuild_from_record` calls `_ensure_indexes()`, which opens
+`_graph_metadata_write_scope("schema-ddl")`. Because the reason lives in one
+`ContextVar` and an inner scope SHADOWS the outer (the `#9210` contract), each of
+those nests re-opened the raw lane. MEASURED on that shape: the mutating `CREATE`
+landed under all three nests. The fix therefore carries the closure BESIDE the
+lane reason (`_handle_only_write_scope` → `_RAW_QUERY_CLOSED_DEPTH`), so it
+travels with the scope stack; T2 below is the pin for that, and it is the test
+the window-only shape failed.
 
-* T1 reads the refusal (pre-fix: the statement landed — RED);
-* T2 flips the REAL switch (`_HANDLE_GUARD_ENFORCES`) and proves the handle the
-  rebuild engines actually write through is still authorized inside the window —
-  the narrowing must not be bought by closing the lane the recovery path needs;
-* T3 proves the narrowing is WRITE-only (a read is not a write);
-* T4 pins the lane set to its single member and pins the member to the reason
-  `_replay_write_scope()` really emits, so the set cannot drift from the scope;
-* T5 runs the engine end to end with the handle ARMED, so "the rebuild still
-  works" is measured rather than inferred;
-* T6 proves the permit does not outlive its `with` (a narrowing that leaked would
-  be a widening).
+⛔ THE INSTRUMENT IS THE REAL DOOR, not a copy of its predicate. Every test issues
+a real statement through `FalkorProjection.query` (the raw lane) or `proj.g.query`
+(the write handle) on a journal-armed projection and reads whether it LANDED, and
+the handle tests flip the REAL switch (`_HANDLE_GUARD_ENFORCES`) so "inside the
+window the handle still works" is measured against a REFUSING door rather than a
+measuring one.
 
-MUTATION (measured, each reddens this file): drop `"replay"` from
-`_HANDLE_ONLY_WRITE_LANES` → T1 and T4 red (the lane is permitted again); make
-`FalkorProjection.query` refuse unconditionally regardless of the lane → T3
-still passes but the *other* lanes' raw-lane behaviour is unchanged, so this file
-deliberately does NOT claim their width; delete the `_replay_write_scope()`
-wrapper from `rebuild_from_record` → T5 red (the armed handle refuses the fold).
+MUTATION (measured: each of these reddens the named tests): drop `"replay"` from
+`_HANDLE_ONLY_WRITE_LANES` → T1, T2, T4 red; make `_handle_only_write_scope` set
+the lane reason without the depth (the window-only shape this file's review
+rejected) → T2 red and T1 still green; delete the `_replay_write_scope()` wrapper
+from `rebuild_from_record` → T5 red (the armed handle refuses the fold). Two
+mutations are NOT reddening by design and are stated so they are not mistaken for
+gaps: making the raw lane refuse unconditionally would leave T3 green (a read is
+still a read) while changing six other lanes' width, and adding a TEMPLATED lane
+to the set is only a no-op if the match were exact-string — which is why T4 pins
+`_lane_of` as the matcher.
 
-WHAT IS *NOT* CLAIMED. This file does not narrow, and does not measure, any lane
-OTHER than `replay`: the pre-wipe restore/synthetic, apply-first,
-derived-recompute, graph-metadata, onboarding and live scopes still open the
-raw-query lane, and that width is left where `#9079`'s sanctioning decision owns
-it. It also does not claim `FalkorProjection.query` is closed for good — only
-that no lane in `_HANDLE_ONLY_WRITE_LANES` opens it, and the set is pinned
-member-exactly so adding one is a deliberate act.
+WHAT IS *NOT* CLAIMED. This file narrows and measures the `replay` lane only.
+Every lane NOT in `_HANDLE_ONLY_WRITE_LANES` still yields a raw-query permit —
+amongst others the pre-wipe restore/synthetic, apply-first, derived-recompute,
+graph-metadata, onboarding, live-door, `webhook.delivery-store`, structural-edge
+and test-fixture lanes — so the complete statement is "every lane outside the set
+still opens that lane", and that width is `#9079`'s sanctioning decision (a
+wholesale refusal there is a measured P0: it silently degraded a hosted writer
+family). The set is pinned member-exactly so adding a lane is a deliberate act.
 """
 from __future__ import annotations
 
@@ -62,8 +62,13 @@ import pytest
 from tortoise.projection import (
     _CACHE_WRITE_AUTHORIZED,
     _HANDLE_ONLY_WRITE_LANES,
+    _RAW_QUERY_CLOSED_DEPTH,
     _REPLAY_WRITE_LANE,
     DirectCacheWriteRefused,
+    _graph_metadata_write_scope,
+    _lane_of,
+    _prewipe_restore_write_scope,
+    _prewipe_synthetic_write_scope,
     _raw_query_lane_permit,
     _replay_write_scope,
 )
@@ -153,6 +158,44 @@ def test_the_replay_window_does_not_open_the_raw_query_lane(armed_sdk):
         "through, not for the door that bypasses the projection (§17.1, #9391)")
 
 
+def test_a_lane_nested_inside_the_window_cannot_reopen_the_raw_lane(armed_sdk):
+    """The measured finding of this file's first review round: the closure must
+    travel with the SCOPE STACK, not with the reason in flight.
+
+    Each nest below is a real engine's shape, not a synthetic composition:
+    `rebuild_all` opens the restore and synthetic lanes per leg INSIDE its
+    replay window, and `rebuild_from_record` opens the schema-DDL lane for its
+    indexes. On the window-only shape every one of them re-opened the raw lane
+    (the `CREATE` landed) — so this test is what distinguishes the fix from its
+    first, insufficient version.
+    """
+    proj = armed_sdk._get_proj()
+
+    nests = [
+        ("nest-restore", _prewipe_restore_write_scope("#9391 probe")),
+        ("nest-synthetic", _prewipe_synthetic_write_scope("#9391 probe")),
+        ("nest-schema-ddl", _graph_metadata_write_scope("schema-ddl")),
+    ]
+    for point_id, nest in nests:
+        with _replay_write_scope(), nest:
+            # The nested lane really is in flight — otherwise the test would
+            # be measuring the outer window twice.
+            assert _CACHE_WRITE_AUTHORIZED.get() != _REPLAY_WRITE_LANE, (
+                f"{point_id}: the nested lane did not open, so this case "
+                "would not exercise the shadowing it exists for")
+            assert _raw_query_lane_permit() is None, (
+                f"{point_id}: a lane nested inside the replay window "
+                "yields a raw-query permit — the narrowing is window-only "
+                "and the door #9391 closes is still open inside rebuild_all")
+            with pytest.raises(DirectCacheWriteRefused):
+                proj.query(_MUTATING % point_id)
+
+    for point_id, _nest in nests:
+        assert _point_count(proj, f"raw-lane-{point_id}") == 0, (
+            f"raw-lane-{point_id} landed: a nested lane re-opened the raw-query "
+            "lane inside the replay window")
+
+
 def test_the_replay_window_still_opens_the_write_handle(armed_sdk, monkeypatch):
     """The narrowing must not be bought by closing `proj.g`.
 
@@ -171,10 +214,17 @@ def test_the_replay_window_still_opens_the_write_handle(armed_sdk, monkeypatch):
 
     with _replay_write_scope():
         proj.g.query(_MUTATING % "handle-inside")
+        # ... including under a nested lane, which is where the restore legs and
+        # the schema DDL actually write.
+        with _prewipe_restore_write_scope("#9391 probe"):
+            proj.g.query(_MUTATING % "handle-nested")
 
     assert _point_count(proj, "raw-lane-handle-inside") == 1, (
         "the replay window stopped authorizing the write handle — the rebuild "
         "engines would be refused on their own folds")
+    assert _point_count(proj, "raw-lane-handle-nested") == 1, (
+        "a nested lane stopped authorizing the write handle — the restore legs "
+        "would be refused")
 
 
 def test_reads_still_pass_on_the_raw_lane_inside_the_window(armed_sdk):
@@ -192,16 +242,22 @@ def test_reads_still_pass_on_the_raw_lane_inside_the_window(armed_sdk):
 def test_the_narrowing_is_declared_and_named_by_the_scope():
     """The set the guard reads and the reason the scope emits cannot drift.
 
-    A hand-maintained set of lane names is only trustworthy if the names are the
-    ones the scopes really set; `_REPLAY_WRITE_LANE` is that literal, and the
-    membership assertion makes ADDING a lane a deliberate, reviewable act rather
-    than a side effect of a new scope.
+    A hand-maintained set of LANE names is only trustworthy if the names are the
+    ones the scopes really set, and if the matcher can express a TEMPLATED lane
+    (`pre-wipe-restore: <leg>` and four siblings are `f"{PREFIX}: {detail}"`, so
+    an exact-string set would make adding one a silent no-op). Both are pinned
+    here.
     """
     assert _REPLAY_WRITE_LANE == "replay"
     expected = frozenset({_REPLAY_WRITE_LANE})
     assert expected == _HANDLE_ONLY_WRITE_LANES, (
         "the handle-only lane set changed: "
         f"{sorted(_HANDLE_ONLY_WRITE_LANES)}")
+
+    # The matcher is the LANE, not the reason — a templated member must bite.
+    assert _lane_of(_REPLAY_WRITE_LANE) == _REPLAY_WRITE_LANE
+    assert _lane_of(f"{_REPLAY_WRITE_LANE}: some detail") == _REPLAY_WRITE_LANE
+    assert _lane_of(_REPLAY_WRITE_LANE) in _HANDLE_ONLY_WRITE_LANES
 
     with _replay_write_scope():
         assert _CACHE_WRITE_AUTHORIZED.get() == _REPLAY_WRITE_LANE, (
@@ -219,7 +275,8 @@ def test_the_rebuild_engines_still_project_inside_the_replay_window(
     "The raw lane is refused" is only half a fix if the narrowing also refused
     the fold: this runs `rebuild_from_record` (the record→cache load §2.0
     depends on) end to end against a REFUSING handle and requires the node to
-    materialise.
+    materialise. It is also the engine that nests `graph-metadata:schema-ddl`
+    inside the window, so it exercises the nested case with real code.
     """
     import tortoise.projection as projection
 
@@ -235,13 +292,16 @@ def test_the_rebuild_engines_still_project_inside_the_replay_window(
 
 def test_the_narrowed_permit_does_not_outlive_its_with(armed_sdk):
     """A permit that stuck would be a widening, and it would authorize the NEXT
-    writer. After the window: the raw lane is refused again, and the ContextVar
-    is back to `None`."""
+    writer. After the window: the raw lane is refused again, and both the
+    ContextVar and the closure depth are back to their defaults."""
     proj = armed_sdk._get_proj()
-    with _replay_write_scope():
+    with _replay_write_scope(), _prewipe_restore_write_scope("#9391 probe"):
         pass
 
     assert _CACHE_WRITE_AUTHORIZED.get() is None
+    assert _RAW_QUERY_CLOSED_DEPTH.get() == 0, (
+        "the raw-lane closure leaked past its `with` — a closure that sticks is "
+        "a widening for every later writer in this context")
     assert _raw_query_lane_permit() is None
     with pytest.raises(DirectCacheWriteRefused):
         proj.query(_MUTATING % "after")

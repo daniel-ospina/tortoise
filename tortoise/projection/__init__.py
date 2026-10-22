@@ -3293,10 +3293,16 @@ def _journal_safe_params(params, cypher=None):
 #     come from the RECORD rather than a log but are the same sanctioned rebuild
 #     of derived state — `recover_from_log`, `backup.restore`, `_cmd_reconcile`),
 #     whose records came FROM the journal and must not journal again.
-#     HANDLE-ONLY since `#9391` (`_HANDLE_ONLY_WRITE_LANES`): it authorizes the
+#     HANDLE-ONLY since `#9391` (`_handle_only_write_scope`): it authorizes the
 #     fold and the write handle, NOT the public raw-query lane — before that,
-#     the raw lane's scope-conditioned refusal made a rebuild's whole window a
-#     permitted writer there (measured), with no engine and no test naming it.
+#     the raw lane's scope-conditioned refusal made a rebuild a permitted writer
+#     there (measured), with no engine and no test naming it. The closure travels
+#     with the SCOPE STACK, so a lane nested inside a window (the pre-wipe restore
+#     and synthetic legs, `_ensure_indexes`'s schema DDL) cannot re-open it.
+#     How much of each engine is inside the window is per engine: `rebuild`,
+#     `rebuild_all` and `rebuild_from_record` open it around the whole body; the
+#     journal/backup/CLI engines (`recover_from_log`, `backup.restore`,
+#     `_cmd_reconcile`) open it per RECORD around the fold.
 #   * `_graph_metadata_write_scope(...)` — the GRAPH-METADATA lane: a write
 #     that is NOT a projection of any journal record and never becomes one,
 #     because it is graph-wide bookkeeping rather than a fact about the corpus,
@@ -3814,9 +3820,9 @@ def _live_write_scope(reason: str = "live-door"):
 #: itself would silently stop being narrowed.
 _REPLAY_WRITE_LANE = "replay"
 
-#: Lanes whose permit is HANDLE-ONLY (`#9391`): they authorize the write handle
-#: `proj.g` — and every guarded client handle below it — but NOT the PUBLIC
-#: RAW-QUERY lane (`FalkorProjection.query`).
+#: LANE names whose permit is HANDLE-ONLY (`#9391`): they authorize the write
+#: handle `proj.g` — and every guarded client handle below it — but NOT the
+#: PUBLIC RAW-QUERY lane (`FalkorProjection.query`).
 #:
 #: The distinction is the whole reason this set exists. Every sanctioned lane
 #: writes the cache THROUGH the projection's handle; the raw-query lane is the
@@ -3824,33 +3830,105 @@ _REPLAY_WRITE_LANE = "replay"
 #: purpose for it). So a lane that opens the handle has said nothing about that
 #: door, and before `#9391` the replay window opened it by accident: the raw
 #: lane's refusal was scope-CONDITIONED on the SAME ContextVar
-#: (`_CACHE_WRITE_AUTHORIZED`), so a rebuild's whole window ALSO authorized a
-#: mutating `FalkorProjection.query` — MEASURED, permitted and landed — while no
-#: engine called it and no test named the width. That is the hidden-door class
-#: §17.1 closes: one accidental `self.query(...)` inside a rebuild was a second
-#: writer nothing would have noticed.
+#: (`_CACHE_WRITE_AUTHORIZED`), so a rebuild's window ALSO authorized a mutating
+#: `FalkorProjection.query` — MEASURED, permitted and landed — while no engine
+#: called it and no test named the width. That is the hidden-door class §17.1
+#: closes: one accidental `self.query(...)` inside a rebuild was a second writer
+#: nothing would have noticed.
 #:
-#: Deliberately a NAMED lane set rather than an unconditional refusal at the raw
-#: lane: the other lanes' width is `#9079`'s sanctioning decision to own, and
-#: narrowing them here would change behaviour this issue never measured. Adding
-#: a member is a deliberate act and `tests/test_9391_replay_window_raw_query_width.py`
-#: pins the membership member-exactly.
+#: ⛔ MEMBERS ARE **LANE** NAMES, not reason strings, and the match is on the
+#: lane (`_lane_of`). Five of the declared lanes build their reason as
+#: `f"{PREFIX}: {detail}"` (`pre-wipe-restore: <leg>`, `apply-first: <door>`, …),
+#: so an exact-string set would make adding one a SILENT NO-OP — and a no-op
+#: member is the worst kind of entry here, because it reads as a narrowing.
+#:
+#: Deliberately a NAMED set rather than an unconditional refusal at the raw lane:
+#: the other lanes' width is `#9079`'s sanctioning decision to own, and narrowing
+#: them here would change behaviour this issue never measured (there is a
+#: recorded P0 from doing it wholesale — `tests/test_7951_enforce_atomic_write.py`).
+#: Adding a member is a deliberate act and
+#: `tests/test_9391_replay_window_raw_query_width.py` pins the membership
+#: member-exactly.
 _HANDLE_ONLY_WRITE_LANES: frozenset[str] = frozenset({_REPLAY_WRITE_LANE})
+
+#: How many HANDLE-ONLY permits are open around the current write — a DEPTH, not
+#: a boolean, because `#9391`'s property is about the WHOLE WINDOW and not about
+#: the reason in flight at the moment a statement is issued.
+#:
+#: Why a depth is needed at all: the lane reasons live in ONE `ContextVar` and an
+#: inner scope SHADOWS the outer one (that shadowing is the `#9210` contract — a
+#: restore leg must not be authorized as a replay). Read alone, that made the
+#: narrowing window-only: `rebuild_all` opens `_replay_write_scope()` around its
+#: whole body and then opens `_prewipe_restore_write_scope` per restore leg and
+#: `_prewipe_synthetic_write_scope` per synthetic pass, and `rebuild_from_record`
+#: calls `_ensure_indexes()`, which opens `_graph_metadata_write_scope("schema-ddl")`
+#: — MEASURED on the pre-review shape: with any of those three nested inside the
+#: replay window, a mutating `FalkorProjection.query` was PERMITTED and landed
+#: again. So the narrowing has to travel with the SCOPE STACK: this depth is set
+#: by `_replay_write_scope()` and is inherited by every nested lane, which is
+#: exactly the direction the outer declaration should have.
+_RAW_QUERY_CLOSED_DEPTH: ContextVar[int] = ContextVar(
+    "tortoise_cache_raw_query_closed", default=0)
+
+
+def _lane_of(reason: str) -> str:
+    """The LANE a declaration reason belongs to: the prefix before the detail.
+
+    `"pre-wipe-restore: :Batch markers (#990)"` → `"pre-wipe-restore"`;
+    `"replay"` → `"replay"`. The same split the pins use when they match a lane
+    by prefix (`reason.startswith(f"{PREFIX}: ")`), applied in one place so a
+    templated lane can be narrowed without a second spelling of its name.
+    """
+    return reason.split(":", 1)[0].strip()
 
 
 def _raw_query_lane_permit() -> str | None:
     """The open permit IF it covers the PUBLIC RAW-QUERY lane, else ``None``.
 
     The ONE reader `FalkorProjection.query`'s guard consults, so the narrowing
-    is a property of the LANE and not of any engine's body: the fold, the write
-    handle and the client doors keep reading `_CACHE_WRITE_AUTHORIZED` directly
-    (a sanctioned projection writes through them), while this lane asks a
-    stricter question — "did a lane deliberately open THE RAW LANE too?".
+    is a property of the LANE (and of the scopes surrounding it) rather than of
+    any engine's body: the fold, the write handle and the client doors keep
+    reading `_CACHE_WRITE_AUTHORIZED` directly — a sanctioned projection writes
+    through them — while this lane asks the stricter question *"did a lane
+    deliberately open THE RAW LANE too?"*.
+
+    Three ways to answer NO, and the middle one is the one a naive reading
+    misses: no lane open; a HANDLE-ONLY permit anywhere on the enclosing scope
+    stack (so a nested lane inside a rebuild cannot re-open the door by
+    shadowing the reason); or the innermost lane itself named in
+    `_HANDLE_ONLY_WRITE_LANES`.
+
+    ⛔ NOT CLAIMED: every OTHER lane still yields a permit here. That width is
+    `#9079`'s sanctioning decision — narrowing it needs the hosted writer family
+    that a wholesale refusal broke (measured P0) to be declared first.
     """
     reason = _CACHE_WRITE_AUTHORIZED.get()
-    if reason is None or reason in _HANDLE_ONLY_WRITE_LANES:
+    if reason is None:
+        return None
+    if _RAW_QUERY_CLOSED_DEPTH.get() > 0:
+        return None
+    if _lane_of(reason) in _HANDLE_ONLY_WRITE_LANES:
         return None
     return reason
+
+
+@contextlib.contextmanager
+def _handle_only_write_scope(reason: str):
+    """A permit for the write HANDLE only — held for the WHOLE nested window.
+
+    The lane reason is the ordinary `_cache_write_authorized` one (so every
+    existing read-back pin is unchanged, and an inner lane still shadows it for
+    the purposes it was built for), and the raw-query closure is carried
+    BESIDE it in `_RAW_QUERY_CLOSED_DEPTH`, which nested scopes inherit and
+    cannot clear. Entry/reset are paired in a `finally`, like every other scope
+    here, so a raising engine cannot leave the closure armed.
+    """
+    token = _RAW_QUERY_CLOSED_DEPTH.set(_RAW_QUERY_CLOSED_DEPTH.get() + 1)
+    try:
+        with _cache_write_authorized(reason):
+            yield
+    finally:
+        _RAW_QUERY_CLOSED_DEPTH.reset(token)
 
 
 def _replay_write_scope():
@@ -3858,11 +3936,12 @@ def _replay_write_scope():
 
     ⚠️ HANDLE-ONLY (`#9391`). It authorizes the fold, `proj.g` and every guarded
     client handle below it — everything a rebuild writes through — and NOT the
-    public raw-query lane (`_HANDLE_ONLY_WRITE_LANES`). A rebuild never needs
-    that lane: it projects derived state through the projection, and the lane
-    exists precisely to bypass it.
+    public raw-query lane, for the WHOLE window including any lane nested inside
+    it (`_handle_only_write_scope`). A rebuild never needs that lane: it projects
+    derived state through the projection, and the lane exists precisely to bypass
+    it.
     """
-    return _cache_write_authorized(_REPLAY_WRITE_LANE)
+    return _handle_only_write_scope(_REPLAY_WRITE_LANE)
 
 
 # ── §17.1'S CLIENT-LEVEL DOOR (#9079, escapes 2 and 3) ────────────────────
