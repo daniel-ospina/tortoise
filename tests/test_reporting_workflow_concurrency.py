@@ -1489,9 +1489,96 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
     return None
 
 
+def _merged_tree_guard_registration_problem(registry: dict, pmv_jobs: dict) -> str | None:
+    """Why the merged-tree guard's REGISTRATION does not hold, or ``None``.
+
+    Split out of the test that asserts it so the REJECTION is provable against
+    the regressions themselves (see the mutants below) instead of only asserted
+    about today's tree. Without that, the entry's only reader is a
+    parametrization over the entry's own keys: an EMPTY registry expands to ZERO
+    cases, pytest emits a `PytestCollectionWarning` (not a failure), and the
+    module stays green — while every live-artifact assertion that matters (the
+    per-SHA group, the exact `ruff check .`, the pinned ruff install) lives
+    inside that body. Deleting the entry would therefore re-open #2174 silently,
+    which is the "a gate that did not exist" class one level up.
+    """
+    if "main-lint.yml" not in registry:
+        return (
+            "its registry entry was REMOVED. MERGED_TREE_GUARD is the only thing "
+            "that makes main-lint.yml's per-SHA concurrency group, its exact "
+            "`ruff check .` and its pinned ruff install ASSERTED — with the entry "
+            "gone the parametrization yields no cases, so the guard can be "
+            "starved again (4 of 25 merged trees ran it) with this module green"
+        )
+    if not str(registry["main-lint.yml"]).strip():
+        return (
+            "its registry entry carries no reason. An unargued entry is a stamp: "
+            "the next edit cannot tell a reviewed decision from a leftover key"
+        )
+    if "lint" in pmv_jobs:
+        return (
+            "post-merge-validation.yml carries a `lint` job again — its constant "
+            "`concurrency.group` starves it (21 of 25 merged trees never ran it), "
+            "and re-adding it beside the working guard restores the starved path: "
+            "it looks like redundancy and is a silent gap, because a green "
+            "counterexample proves nothing when the other one is cancelled"
+        )
+    return None
+
+
+_REGISTRATION_GAPS = [
+    # The exact regression the reviewer measured as silently re-openable: drop the
+    # entry, revert main-lint.yml's group, and a parametrized-only pin stays green.
+    ("the registry entry was deleted", {}, {}),
+    ("the entry carries no reason", {"main-lint.yml": "   "}, {}),
+    (
+        "the guard was restored beside the working one",
+        MERGED_TREE_GUARD,
+        {"dedup-check": {}, "validate": {}, "lint": {}},
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "label,registry,pmv_jobs",
+    _REGISTRATION_GAPS,
+    ids=[label for label, _, _ in _REGISTRATION_GAPS],
+)
+def test_the_merged_tree_guard_registration_check_rejects_the_gaps(
+    label: str, registry: dict, pmv_jobs: dict
+) -> None:
+    """The registration pin is not vacuous — the gaps it exists for are rejected."""
+    problem = _merged_tree_guard_registration_problem(registry, pmv_jobs)
+    assert problem is not None, (
+        f"{label!r} is a way to lose the merged-tree guard (#2174) and the "
+        "registration check accepted it — main could go lint-red again with no "
+        "gate reporting it"
+    )
+
+
+def test_the_merged_tree_guard_is_registered() -> None:
+    """The pin itself is pinned: an emptied registry must red HERE, not vanish.
+
+    Non-parametrized ON PURPOSE. This is the assertion that survives deleting the
+    entry — the parametrized test below cannot: with an empty ``MERGED_TREE_GUARD``
+    it collects zero cases and passes vacuously. The "ONE home" property is
+    asserted here too, so it stays alive independently of the dict's contents.
+    """
+    assert set(MERGED_TREE_GUARD) == {"main-lint.yml"}, (
+        "MERGED_TREE_GUARD must name exactly {'main-lint.yml'}: got "
+        f"{sorted(MERGED_TREE_GUARD)}. Empty means the per-SHA-group pin and the "
+        "one-home pin both stopped being asserted."
+    )
+    pmv_jobs = _load(WORKFLOW_DIR / "post-merge-validation.yml").get("jobs") or {}
+    problem = _merged_tree_guard_registration_problem(MERGED_TREE_GUARD, pmv_jobs)
+    assert problem is None, (
+        "the merged-tree guard (#2174) is not correctly registered, and " + problem
+    )
+
+
 @pytest.mark.parametrize("name", sorted(MERGED_TREE_GUARD))
 def test_the_merged_tree_guard_runs_on_every_merged_tree(name: str) -> None:
-    """The live artifact satisfies the pin, and the pin is not vacuous."""
+    """The live artifact satisfies the pin (registration itself: see above)."""
     assert MERGED_TREE_GUARD[name].strip(), "an allow-list entry is a reviewed decision"
     path = WORKFLOW_DIR / name
     assert path.exists(), f"MERGED_TREE_GUARD names a missing workflow: {name}"
@@ -1505,16 +1592,9 @@ def test_the_merged_tree_guard_runs_on_every_merged_tree(name: str) -> None:
         f"{name} is the guard that keeps a lint-red main from reddening every PR's "
         f"merge ref (#2174), and {problem}"
     )
-    # ONE home. Re-adding the job to the shared-group workflow restores the
-    # starved path *beside* the working one: it looks like redundancy and is a
-    # silent gap (a green counterexample proves nothing when the other one is
-    # cancelled) — and it is the exact regression this file is closing.
-    pmv_jobs = _load(WORKFLOW_DIR / "post-merge-validation.yml").get("jobs") or {}
-    assert "lint" not in pmv_jobs, (
-        "post-merge-validation.yml carries a `lint` job again — its constant "
-        "`concurrency.group` starves it (21 of 25 merged trees never ran it) and "
-        "the merged-tree guard now lives in " + name
-    )
+    # The "ONE home" assertion this block used to carry now lives in
+    # ``test_the_merged_tree_guard_is_registered`` — it has to outlive the dict, or
+    # emptying MERGED_TREE_GUARD unasserts it along with everything else.
 
 
 def test_the_pr_and_main_lint_pins_agree() -> None:
