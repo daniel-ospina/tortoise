@@ -3132,6 +3132,43 @@ def test_install_ci_runner_x64_tool_change_selects_core_not_tier1():
     assert set(r["test_files"]) != _tier1(), r
 
 
+def test_runner_autoscale_guard_change_selects_core_not_tier1():
+    # tools/runner_autoscale.py owns tests/test_runner_autoscale.py (the measured
+    # ceiling, the five-way classification, the fail-closed measurement arms and
+    # the mutation family that proves each gate load-bearing).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry, so without the CORE_ALSO row a
+    # tool-only change came back with `changed == []`, took the docs-only early
+    # return and the guard's own pins never ran on the file they guard — the
+    # #1349/#3332/#3616 silent-drop class. Mutation check: removing the CORE_ALSO
+    # entry selects no surface, so assert 1 below fails.
+    r = _sel(["tools/runner_autoscale.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_runner_autoscale.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_runner_autoscale_installer_change_selects_core_not_tier1():
+    # tools/install-runner-autoscale-schedule.sh owns
+    # tests/test_install_runner_autoscale_schedule.py (the refusals with nothing
+    # written, the rendered systemd/cron/launchd artifacts, the install-time
+    # measurement probe, and the drift check). It ALARMS the guard, so an
+    # installer-only diff that selects nothing is the worst case of this class:
+    # the wiring could be broken while every tool test still passes.
+    #
+    # Measured before the fix (PR #9685 review round 9, P1-2):
+    # `_sel(["tools/install-runner-autoscale-schedule.sh"])` -> surfaces=[],
+    # full=False, test_install_runner_autoscale_schedule.py absent.
+    #
+    # CORE_ALSO (not TOOL_CARVEOUTS): the suite is hermetic and `core`-registered,
+    # so selecting `core` runs it at the lowest CI cost. Mutation check: removing
+    # the CORE_ALSO entry selects no surface, so assert 1 below fails.
+    r = _sel(["tools/install-runner-autoscale-schedule.sh"])
+    assert "core" in r["surfaces"], r
+    assert "test_install_runner_autoscale_schedule.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_ci_queue_health_tool_change_selects_core_not_tier1():
     # tools/ci_queue_health.py owns tests/test_ci_queue_health.py (the hermetic
     # cases pinning the FLOOD classification — a deep queue of PR runs is not a

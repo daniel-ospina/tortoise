@@ -31,10 +31,14 @@ THE CEILING IS A PREDICATE, NOT A NUMBER
   core_ceiling — the owner's table, from CORES (never a flat 3–5):
       >= 8 cores -> 3      4..7 cores -> 2      1..3 cores -> 1
   headroom_by_memory = max(0, (mem_available_mb - MEM_RESERVE_MB) // MEM_PER_RUNNER_MB)
-  and `runners_live` is how many LISTENERS are actually alive on this box (a measured process
-  count, not an install count): `MemAvailable` has already paid for their memory, so the memory
+  and `runners_live` is how many LISTENERS are actually alive on THIS BOX (a measured process
+  count — `len(_listener_dirs())` — not an install count, and not narrowed to the installs
+  `discover()` happens to name): `MemAvailable` has already paid for their memory, so the memory
   arm must be additive over them — otherwise the ceiling would shrink as runners come up, and a
-  healthy box at its target would read "over ceiling".
+  healthy box at its target would read "over ceiling". The same measured count is the fill
+  operand, so a listener the install inventory does not name (`/opt/actions-runner`, or a `--root`
+  that is not the install root) still counts instead of letting the box be filled past its
+  ceiling.
 
   Measured per-shard cost (3 live shards, whole `Runner.Worker` tree, 2026-10-22):
   1431 / 1378 / 870 MB + a 2-container FalkorDB sidecar pair at 55–140 MB ⇒ 1–1.5 GB, so
@@ -71,10 +75,12 @@ WHAT IT DOES, IN ORDER (every step idempotent; safe to run every few minutes)
                restarted, relabelled or removed.
   6. FILL      while live < target: add ONE runner, printing `mem_available_mb` before and after,
                and stop if the next addition would leave < MEM_RESERVE_MB. A NEW install is
-               created by the provisioner (`tools/install-ci-runner-x64.sh`, the one registration
-               path — it downloads and sha256-checks the runner); this file never downloads a
-               binary, and it REFUSES to add when no provisioner is present rather than
-               improvising one.
+               created by the FLEET's installer, `install-ci-runner-x64.sh` (the one registration
+               path — it downloads and sha256-checks the runner), resolved from the candidates
+               `provision()` lists. ⛔ That installer is NOT in this tree today (it lands with
+               #9639): on a box without it this step REFUSES (exit 3, `no provisioner`) rather
+               than improvising a second registration path. Measurement, repair (restart /
+               re-register), `--want`, `--status` and `--dry-run` are unaffected by its absence.
   7. REFUSE    beyond the ceiling nothing is added and the reading is printed. `--want N` is the
                explicit-request form of the same guard; `--status` is the read-only form.
 
@@ -97,7 +103,8 @@ USAGE
 
   Seams (all optional; the suite drives every one, and each defaults fail-closed):
     RUNNER_AUTOSCALE_RUNNER_ROOT   default /opt   (installs are `<root>/gh-runner*`)
-    RUNNER_AUTOSCALE_MEMINFO       meminfo-shaped file (default /proc/meminfo)
+    RUNNER_AUTOSCALE_MEMINFO       meminfo-shaped file (default /proc/meminfo, else `vm_stat`)
+    RUNNER_AUTOSCALE_VMSTAT        `vm_stat` binary for the Darwin memory reading
     RUNNER_AUTOSCALE_NPROC         cores override (test seam; 0/garbage is REFUSED, never 0)
     RUNNER_AUTOSCALE_MACHINE       `uname -m` override for the label gate (test seam)
     RUNNER_AUTOSCALE_ALIVE_DIRS    newline-separated install dirs with a live listener (test seam
@@ -196,13 +203,36 @@ def cores(nproc: str | None = None) -> int:
 
 
 def mem_available_mb(meminfo: str | None = None) -> int:
-    """MemAvailable in MiB, from /proc/meminfo (or a file with the same shape).
+    """MemAvailable in MiB — from a meminfo-shaped file, /proc/meminfo, or `vm_stat` (Darwin).
 
     ⛔ MemAvailable, not MemFree: MemFree excludes reclaimable page cache, so a healthy 15 GB box
     with a warm cache reads ~0.5 GB "free" and would refuse every addition forever.
     ⛔ A missing/garbled value raises — an absent reading is never 0 MB and never "plenty".
+    ⛔ BOTH platforms have a real reading. macOS has no /proc, so the launchd leg the installer
+    arms would otherwise fire, measure nothing and exit 2 UNMEASURABLE forever — the "installed
+    but inert" class this repo keeps rediscovering, one platform over from the one fixed in
+    round 2. `vm_stat` carries its own page size, so one command is the whole reading.
     """
-    path = Path(meminfo or os.environ.get("RUNNER_AUTOSCALE_MEMINFO") or "/proc/meminfo")
+    seam = meminfo or os.environ.get("RUNNER_AUTOSCALE_MEMINFO")
+    if seam:
+        return _meminfo_available_mb(Path(seam))
+    proc_meminfo = _proc_meminfo_path()
+    if proc_meminfo.exists():
+        return _meminfo_available_mb(proc_meminfo)
+    if sys.platform == "darwin":
+        return _darwin_available_mb()
+    raise Unmeasurable(
+        f"no memory reading on this platform ({sys.platform}): /proc/meminfo is absent and only "
+        "the linux/darwin arms exist — set RUNNER_AUTOSCALE_MEMINFO to a meminfo-shaped file"
+    )
+
+
+def _proc_meminfo_path() -> Path:
+    """The Linux reading's path. A function so a test can point it at a non-existent file."""
+    return Path("/proc/meminfo")
+
+
+def _meminfo_available_mb(path: Path) -> int:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -211,6 +241,37 @@ def mem_available_mb(meminfo: str | None = None) -> int:
     if not m:
         raise Unmeasurable(f"no MemAvailable line in {path}")
     return int(m.group(1)) // 1024
+
+
+def _darwin_available_mb() -> int:
+    """MemAvailable in MiB from `vm_stat` — free + inactive + speculative pages.
+
+    That is the macOS counterpart of MemAvailable: those three classes are what the kernel can
+    hand out without paging anything out (wired and active are not). The page size comes from the
+    SAME output's header, so a second binary cannot disagree with the page counts. Anything
+    unparseable RAISES — a half-read `vm_stat` is not a number, and never "plenty of memory".
+    """
+    binary = os.environ.get("RUNNER_AUTOSCALE_VMSTAT") or "vm_stat"
+    try:
+        proc = subprocess.run([binary], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Unmeasurable(f"vm_stat could not run ({binary}: {exc})") from exc
+    if proc.returncode != 0:
+        raise Unmeasurable(f"vm_stat exited {proc.returncode}: {(proc.stderr or '').strip()[:200]}")
+    text = proc.stdout or ""
+    size = re.search(r"page size of (\d+) bytes", text)
+    if not size:
+        raise Unmeasurable("vm_stat carried no page size — cannot convert its page counts")
+    page = int(size.group(1))
+    if page <= 0:
+        raise Unmeasurable(f"vm_stat reported a non-positive page size ({page})")
+    pages = 0
+    for label in ("Pages free", "Pages inactive", "Pages speculative"):
+        m = re.search(rf"^{label}:\s+(\d+)", text, re.MULTILINE)
+        if not m:
+            raise Unmeasurable(f"vm_stat carried no '{label}' line")
+        pages += int(m.group(1))
+    return (pages * page) // (1024 * 1024)
 
 
 def core_ceiling(ncpu: int) -> int:
@@ -330,18 +391,25 @@ def _listener_dirs() -> set[str]:
     return dirs
 
 
-def discover(root: str | Path) -> list[LocalRunner]:
+def discover(root: str | Path, alive: set[str] | None = None) -> list[LocalRunner]:
     """Every runner install under `root/gh-runner*`, sorted by directory name.
 
     A sibling directory with no `.runner` is SKIPPED (a download that never registered is a fact
     about the box, not a reason to abort the pass). A `.runner` that exists and cannot be parsed
     RAISES: silently dropping it would make the box think it has one fewer runner than it has,
     and it would then register a duplicate under a new name.
+
+    ⛔ `alive` is the caller's MEASURED listener set, not a second reading taken here: this
+    function answers "which installs does the inventory name", and the live count the guard acts
+    on is `len(_listener_dirs())` over the whole BOX. Passing the measurement in keeps one pass on
+    one reading, and keeps an install directory that does not match `gh-runner*` out of the count
+    only when it genuinely has no listener.
     """
     base = Path(root)
     if not base.is_dir():
         return []
-    alive = _listener_dirs()
+    if alive is None:
+        alive = _listener_dirs()
     found: list[LocalRunner] = []
     for entry in sorted(base.glob("gh-runner*")):
         if not entry.is_dir() or not (entry / ".runner").exists():
@@ -425,11 +493,15 @@ def resolve_labels(pool: dict[str, PoolEntry], machine: str) -> str:
     """The label set a re-registered runner gets — arch marker, plus the fallback label only if
     the fallback is engaged right now.
 
-    This mirrors `tools/install-ci-runner-x64.sh::resolve_labels` (the one registration path)
-    instead of inventing a second rule, and it is `auto`: the gate's state is the source of
-    truth, so a runner never acquires a permanent claim on the pool. An unknown architecture
-    RAISES — `self-hosted`/`Linux`/`<ARCH>` are host-derived and may not be set, so there is no
-    safe default to fall back to.
+    This mirrors the label rule of `install-ci-runner-x64.sh::resolve_labels` (the one
+    registration path) instead of inventing a second rule, and it is `auto`: the gate's state is
+    the source of truth, so a runner never acquires a permanent claim on the pool. ⛔ That
+    installer is not in this tree yet (it lands with #9639), so this is a restatement of a rule no
+    reader can open here — which is why it re-derives NOTHING it cannot check: the arch marker is
+    this box's own `uname -m`, and the fallback label comes from `ci_runner_gate.sh`'s condition
+    read off the live pool (see `fallback_engaged`). An unknown architecture RAISES —
+    `self-hosted`/`Linux`/`<ARCH>` are host-derived and may not be set, so there is no safe
+    default to fall back to.
     """
     arch = ARCH_LABEL.get(machine.lower())
     if not arch:
@@ -600,13 +672,17 @@ def _next_free_slot(root: str) -> int:
 
 
 def provision(target_count: int) -> str:
-    """Create/extend the install so that runners 1..target_count exist — via the ONE installer.
+    """Create/extend the install so that runners 1..target_count exist — via the FLEET's installer.
 
     ⛔ This file never downloads a runner binary and never builds a `config.sh` argv for a NEW
-    install: download + sha256 verification + the headroom/arch guards are
-    `tools/install-ci-runner-x64.sh`'s job (it is the only registration path). Absent, this
-    REFUSES — improvising a provisioner here is how a second, divergent registration path is
-    born (#9639 exists precisely because there was one).
+    install: download + sha256 verification + the headroom/arch guards are the provisioner's job
+    (`install-ci-runner-x64.sh`, the one registration path). ⛔ THE PROVISIONER IS NOT IN THIS
+    TREE: it lives on #9639's branch (`fix/ci-x64-runner-pool`) and is resolved at run time from
+    the candidates below — a sibling of this file, `$PWD/tools/`, or `~/.pi/agent/scripts/`.
+    Absent, this REFUSES (exit 3, `no provisioner`) rather than improvising a second, divergent
+    registration path — `--want`, `--status`, `--dry-run`, every measurement and every
+    restart/re-register repair still work without it. Set `RUNNER_AUTOSCALE_PROVISIONER` to the
+    installer's real path on a box that has one.
     """
     raw = os.environ.get("RUNNER_AUTOSCALE_PROVISIONER")
     # The installer is resolved, never assumed: the RUNNING copy of this tool lives in
@@ -625,9 +701,11 @@ def provision(target_count: int) -> str:
     provisioner = next((c for c in candidates if c and Path(c).exists()), None)
     if not provisioner:
         raise ActionFailed(
-            "no provisioner: tools/install-ci-runner-x64.sh is absent, so a NEW runner cannot be "
-            "created on this box (this script never downloads a runner binary). Repair/orphan "
-            "paths still work; set RUNNER_AUTOSCALE_PROVISIONER to the installer."
+            "no provisioner: install-ci-runner-x64.sh is absent (it lands with #9639, and is not "
+            "in this tree), so a NEW runner cannot be created on this box (this script never "
+            "downloads a runner binary). Measurement, --want/--status/--dry-run and the "
+            "restart/re-register repairs still work; set RUNNER_AUTOSCALE_PROVISIONER to the "
+            "installer's path to enable FILL."
         )
     rc, out = _run(
         ["bash", provisioner, "--count", str(target_count), "--fallback", "auto"], timeout=1800
@@ -668,7 +746,15 @@ def converge(
     }
     ncpu = cores(nproc)
     mem_mb = mem_available_mb(meminfo)
-    local = discover(root)
+    # ⛔ ONE MEASUREMENT, TAKEN HERE, OVER THE WHOLE BOX. `discover()` answers "which installs
+    # does the inventory name" — it cannot answer "how many listeners are alive", because it only
+    # looks under `<root>/gh-runner*`. Counting through it dropped every listener of another
+    # shape (`/opt/actions-runner`, the upstream default; any box where `--root` is not the
+    # install root) out of BOTH operands, so `running=0 live=0` on a box that already held
+    # listeners let the fill loop add the FULL core ceiling on top of them and then report
+    # `converged` (round 9, finding 4) — the fail-open direction this guard exists to close.
+    alive_dirs = _listener_dirs()
+    local = discover(root, alive=alive_dirs)
     pool = read_pool(repo)
     machine = machine or os.environ.get("RUNNER_AUTOSCALE_MACHINE") or os.uname().machine
     wait_s = int(
@@ -715,7 +801,7 @@ def converge(
             }
         )
 
-    running = sum(1 for c in classified if c["alive"])
+    running = len(alive_dirs)
     ceil, bound, reading = ceiling(ncpu, mem_mb, running)
     record.update(
         ncpu=ncpu,
@@ -821,15 +907,22 @@ def converge(
     def _found() -> list[LocalRunner]:
         return discover(root)
 
-    def _live(found: list[LocalRunner]) -> int:
-        return sum(1 for r in found if r.alive)
+    def _live() -> int:
+        """How many LISTENERS are alive on this box — measured, and never narrowed to `discover()`.
+
+        ⛔ The same population as the `running` operand above, on purpose: `ceiling` is a BOX
+        total, so the fill decision must compare like with like. Deriving it from `discover()`
+        silently dropped a listener whose install directory does not match `gh-runner*` — the
+        box then looked under-filled and was filled past its ceiling (round 9, finding 4).
+        """
+        return len(_listener_dirs())
 
     # ⛔ RE-MEASURE AFTER THE REPAIR LOOP, from the PROCESS LIST — never from `classified` (whose
     # `alive` flags predate the repairs) and never by assuming a repair started a listener. Both
     # mistakes were live: the stale recompute reset the count and the fill loop then added one
     # runner too many, and the increment assumed a listener a restart had not actually produced.
     try:
-        live = _live(_found())
+        live = _live()
     except Unmeasurable as exc:
         record["unverified"] = True
         record["unverified_cause"] = "mid-pass-measurement"
@@ -887,6 +980,7 @@ def converge(
         try:
             after = mem_available_mb(meminfo)
             measured = _found()
+            live_now = _live()
         except Unmeasurable as exc:
             record["actions"].append(f"{note} (post-step measurement FAILED: {exc})")
             record["unverified"] = True
@@ -896,7 +990,7 @@ def converge(
                 "already happened; nothing further was done"
             )
             break
-        previous_live, live = live, _live(measured)
+        previous_live, live = live, live_now
         record["actions"].append(
             f"{note} (mem_available_mb {before} -> {after}; installs {len(measured)}, "
             f"live listeners {live})"

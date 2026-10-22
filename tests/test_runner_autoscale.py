@@ -109,8 +109,16 @@ PROVISIONER_FAKE = textwrap.dedent("""\
                     printf '%s\\n' "$dir" >> "$RUNNER_AUTOSCALE_ALIVE_DIRS"
                 fi
                 if [ -n "${PROVISIONER_SHRINK_TO:-}" ]; then
-                    sed -i "s/^MemAvailable:.*/MemAvailable:   ${PROVISIONER_SHRINK_TO} kB/" \\
-                        "$RUNNER_AUTOSCALE_MEMINFO"
+                    # ⛔ PORTABLE, NOT `sed -i`. That form is GNU-only: BSD sed (macOS, the box the
+                    # schedule runs on) rejects it with "unescaped newline inside substitute
+                    # pattern", and because this fake has no `set -e` the shrink then silently did
+                    # not happen — the post-step memory guard looked dead and TWO test items failed
+                    # on macOS while Linux CI stayed green (round 9, finding P2-1). awk + mv is
+                    # portable to both.
+                    awk -v mb="${PROVISIONER_SHRINK_TO}" \
+                        '/^MemAvailable:/ { print "MemAvailable:   " mb " kB"; next } { print }' \
+                        "$RUNNER_AUTOSCALE_MEMINFO" > "$RUNNER_AUTOSCALE_MEMINFO.tmp" \
+                        && mv "$RUNNER_AUTOSCALE_MEMINFO.tmp" "$RUNNER_AUTOSCALE_MEMINFO"
                 fi
             fi
             i=$(( i + 1 ))
@@ -313,6 +321,17 @@ class Env:
         rec["_stdout"] = proc.stdout
         return rec
 
+    def listeners(self) -> int:
+        """The BOX's measured live-listener count, read from the measurement itself.
+
+        ⛔ Never from the record: a mutant's own counter is exactly what a load-bearing gate must
+        not trust (round 5's `foreign-listener-not-counted` predicate read the mutant's `live` and
+        therefore could not see the over-fill it caused).
+        """
+        if not self.alive_file.exists():
+            return 0
+        return len([ln for ln in self.alive_file.read_text().splitlines() if ln.strip()])
+
     def provisioned(self) -> list[str]:
         if not self.provisioner_log.exists():
             return []
@@ -366,6 +385,44 @@ def test_memory_arm_binds_and_reports_the_reading():
 
 
 # ── 1. measurement gates: unreadable is fail-closed ─────────────────────────────────────────
+def _vm_stat(path: Path, body: str) -> Path:
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_darwin_memory_is_a_measurement_not_a_refusal(tmp_path, monkeypatch):
+    """macOS has no /proc/meminfo, so the launchd leg measured NOTHING and exited 2 forever.
+
+    The installer arms a LaunchAgent on Darwin; a tool with only a Linux memory arm makes that
+    schedule fire every 600 s into `UNMEASURABLE`, i.e. an inert enforcer on the platform the
+    installer advertises. `vm_stat` is the macOS counterpart (free + inactive + speculative), and
+    it carries its own page size — so one command is the whole reading, and a half-read one
+    RAISES rather than reporting "plenty".
+    """
+    fake = _vm_stat(
+        tmp_path / "vm_stat",
+        "#!/usr/bin/env bash\n"
+        "cat <<'EOF'\n"
+        "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"
+        "Pages free:                               100000.\n"
+        "Pages active:                             200000.\n"
+        "Pages inactive:                            50000.\n"
+        "Pages speculative:                         25000.\n"
+        "EOF\n",
+    )
+    monkeypatch.setenv("RUNNER_AUTOSCALE_VMSTAT", str(fake))
+    monkeypatch.delenv("RUNNER_AUTOSCALE_MEMINFO", raising=False)
+    # 100000 + 50000 + 25000 pages × 16 KiB = 2734 MiB
+    assert RA._darwin_available_mb() == 2734
+
+    # An unparseable reading is NOT a number and never "plenty".
+    broken = _vm_stat(tmp_path / "vm_stat-broken", "#!/usr/bin/env bash\necho 'nonsense'\n")
+    monkeypatch.setenv("RUNNER_AUTOSCALE_VMSTAT", str(broken))
+    with pytest.raises(RA.Unmeasurable):
+        RA._darwin_available_mb()
+
+
 def test_unreadable_memory_is_fail_closed_and_changes_nothing(env):
     """No MemAvailable line ⇒ exit 2, nothing added. An absent reading is never "plenty"."""
     e = env(omit_memavailable=True)
@@ -637,6 +694,30 @@ def test_another_repos_listener_still_counts_against_the_boxes_ceiling(env):
     assert rec["live"] <= rec["ceiling"], f"over-filled the box: {rec['live']} > {rec['ceiling']}"
 
 
+def test_a_listener_outside_the_install_glob_still_counts(env):
+    """`running`/`live` are the MEASURED listener count over the BOX, not over `discover()`.
+
+    `discover()` only names `<root>/gh-runner*`, so deriving the fill operand from it read
+    `running=0 live=0` on a box whose listeners live elsewhere (`/opt/actions-runner`, the upstream
+    default, or a `--root` that is not the install root) and filled the FULL core ceiling on top
+    of them — then reported `converged`, because the same narrow count was used afterwards
+    (round 9, finding 4).
+    """
+    e = env(pool=[], installs=[])
+    strays = []
+    for i in range(3):  # three listeners the install inventory cannot name
+        d = e.tmp / "opt2" / ("actions-runner" if i == 0 else f"actions-runner-{i + 1}")
+        d.mkdir(parents=True)
+        strays.append(str(d))
+    e.alive_file.write_text("\n".join(strays) + "\n", encoding="utf-8")
+    rec = e.record()
+    assert rec["ceiling"] == 3, rec
+    assert rec["live"] == 3, f"the measured listener count was thrown away: {rec}"
+    assert e.provisioned() == [], (
+        f"filled a box that already held three listeners: {e.provisioned()}"
+    )
+
+
 def test_a_repair_never_inherits_the_previous_runners_labels(env):
     """Each repair derives its OWN label set — and never an other-arch marker.
 
@@ -682,7 +763,10 @@ def test_an_unreadable_process_list_is_fail_closed(env):
     rec = e.record()
     assert rec["_rc"] == 2, rec
     assert rec["verdict"] == "unmeasurable", rec
-    assert "process list unreadable" in rec["_error"] if "_error" in rec else True
+    # ⛔ `error`, not `_error`: `Env.record()` adds only `_rc`/`_stdout`/`_stderr`, so the old
+    # `assert ... in rec["_error"] if "_error" in rec else True` was `assert True` — the message
+    # this test is named for was never checked (round 9, finding 5).
+    assert "process list unreadable" in rec["error"], rec
     assert e.provisioned() == [], "an unreadable process list must not add a runner"
 
 
@@ -1020,8 +1104,11 @@ MUTATIONS = {
         wrong=lambda r: "self-hosted-arm64" in r.get("_config", ""),
     ),
     "foreign-listener-not-counted": dict(
-        old="        live = _live(_found())",
-        new="        live = sum(1 for r in _found() if r.alive and _repo_slug(r.repo) == _repo_slug(repo))",
+        old="        live = _live()",
+        new=(
+            "        live = sum(1 for r in _found() "
+            "if r.alive and _repo_slug(r.repo) == _repo_slug(repo))"
+        ),
         # a box AT its ceiling where one of the three listeners is another repo's: the mutant
         # cannot see it, asks for an extra install, and ends with FOUR listeners on 8 cores.
         kwargs=dict(
@@ -1034,7 +1121,11 @@ MUTATIONS = {
             foreign=["fx"],
         ),
         args=(),
-        wrong=lambda r: r.get("live", 0) > r.get("ceiling", 0),
+        # ⛔ MEASURED FROM THE BOX, never from the mutant's own counter: the mutant reports
+        # `live=3` (r1, r2, its own new install) and `ceiling=3`, so a `live > ceiling` predicate
+        # read the report and could not see the over-fill it had just caused — the mutation
+        # survived while the box held four listeners (round 5, found again in round 9).
+        wrong=lambda r: r.get("_listeners", 0) > r.get("ceiling", 0),
     ),
     "slot-index-from-install-count": dict(
         # the old model: assume the provisioner added exactly one, instead of re-measuring. On a
@@ -1091,8 +1182,20 @@ MUTATIONS = {
         ),
     ),
     "ps-failure-read-as-zero-listeners": dict(
-        old="    if proc.returncode != 0:",
-        new="    if False:",
+        # anchored on the LISTENER path's own raise: the bare `if proc.returncode != 0:` also
+        # appears in the Darwin memory arm and the worker check, and the mutator replaces the
+        # first match — which silently retargeted this gate (the mutant then behaved correctly
+        # and "survived").
+        old=(
+            "    if proc.returncode != 0:\n"
+            "        raise Unmeasurable(\n"
+            '            f"process list unreadable (ps exited'
+        ),
+        new=(
+            "    if False:\n"
+            "        raise Unmeasurable(\n"
+            '            f"process list unreadable (ps exited'
+        ),
         kwargs=dict(
             pool=[
                 ("r1", "online", False, ""),
@@ -1172,6 +1275,7 @@ def test_each_gate_is_load_bearing(tmp_path, name):
     rec_mut = e_mut.record(*spec["args"], module=mutant)
     rec_mut["_provisioned"] = e_mut.provisioned()
     rec_mut["_config"] = e_mut.config()
+    rec_mut["_listeners"] = e_mut.listeners()
     # ⛔ A MUTANT THAT CRASHED PROVES NOTHING. An anchor edit once left a mutated module raising
     # UnboundLocalError, whose empty record satisfied the predicate by accident (round 6, finding
     # 2). Every mutant must produce a RECORD (a verdict), not just "not the right one".
@@ -1183,6 +1287,7 @@ def test_each_gate_is_load_bearing(tmp_path, name):
     rec_real = e_real.record(*spec["args"])
     rec_real["_provisioned"] = e_real.provisioned()
     rec_real["_config"] = e_real.config()
+    rec_real["_listeners"] = e_real.listeners()
     assert not spec["wrong"](rec_real), f"the unmutated tool also failed the property: {rec_real}"
 
 
