@@ -1754,6 +1754,34 @@ def ci_ordering_half_violations(workflow: dict) -> list[str]:
         violations.append(
             f"a `container:` on the `{gate_name}` job replaces the image the aggregate runs in"
         )
+    # The sink's STEPS are a scope of their own, and the one the aggregate's own `env:` refusal
+    # above cannot see: `env:` is a per-step key too, and the aggregate's `run:` is non-interactive
+    # bash, which sources `$BASH_ENV` before the script. So a step-level hook exits 0 with a red leg
+    # and the required check certifies the merge — the exact outcome this block exists to prevent.
+    # Same ALLOW-list shape as the gate step above (`_SAFE_STEP_KEYS`), not an enumeration of the
+    # silencing keys: `continue-on-error:`, `shell:`, `working-directory:` and `env:` each do it.
+    for aggregate_step in gate_job.get("steps") or []:
+        step_label = str(aggregate_step.get("name") or aggregate_step.get("uses") or "<unnamed>")
+        # `if:` is judged by `_ALWAYS_RUN` instead (as on the gate step): the allow-list forbids the
+        # key, so folding it in would make that check unreachable and would red `if: always()`,
+        # which does not drop enforcement.
+        aggregate_extra = sorted(
+            str(k) for k in set(aggregate_step) - _SAFE_STEP_KEYS - {"if"}
+        )
+        if aggregate_extra:
+            violations.append(
+                f"the `{gate_name}` step `{step_label}` may carry only "
+                f"{sorted(_SAFE_STEP_KEYS)}; found {aggregate_extra} — `env:` here is the same "
+                "hook the job-level `env:` above is refused for, one scope down: a `BASH_ENV`/"
+                "`PYTHONPATH`/`LD_PRELOAD`/`PATH` entry makes the aggregate exit 0 and the "
+                "required check certifies a red leg"
+            )
+        if aggregate_step.get("if", "always()") not in _ALWAYS_RUN:
+            violations.append(
+                f"the `{gate_name}` step `{step_label}` must be unconditional; got "
+                f"if: {aggregate_step.get('if')!r} — a skipped aggregate step leaves the only "
+                "required check green"
+            )
     aggregate = " ".join(_code(s) for s in gate_job.get("steps") or [])
     missing = [marker for marker in _EXPECTED_AGGREGATE_MARKERS if marker not in aggregate]
     if missing:
@@ -1812,6 +1840,10 @@ _EXPECTED_MESSAGE = {
     # The SINK: the aggregate is the only required context, so it must be able to report a red leg.
     "an aggregate `defaults.run.shell`": "defaults.run.shell",
     "an aggregate `env:` hook": "BASH_ENV",
+    # The sink's STEPS are a separate scope: the job-level `env:` refusal above cannot see these.
+    "a step-level `env:` hook on the aggregate": "BASH_ENV",
+    "a step-level `continue-on-error: true` on the aggregate": "continue-on-error",
+    "a step-level `if: false` on the aggregate": "unconditional",
     "an aggregate stripped of the failure sweep": "no longer carry",
     "a silenced gate step hidden behind a decoy": "exactly ONE step",
 }
@@ -1911,6 +1943,15 @@ def _mutations():
             "defaults", {"run": {"shell": "bash -c 'true'"}}),
         "an aggregate `env:` hook": lambda w: w["jobs"]["python-ci-gate"].__setitem__(
             "env", {"BASH_ENV": ".ci/hook.sh"}),
+        # …and the same hook one scope DOWN, on the aggregate's own step. The aggregate's `run:` is
+        # non-interactive bash, so `$BASH_ENV` is sourced before the script: a step-level `env:`
+        # that `exit 0`s leaves the only REQUIRED check green while the ordering half is red.
+        "a step-level `env:` hook on the aggregate": lambda w: w["jobs"]["python-ci-gate"][
+            "steps"][0].__setitem__("env", {"BASH_ENV": ".ci/hook.sh"}),
+        "a step-level `continue-on-error: true` on the aggregate": lambda w: w["jobs"][
+            "python-ci-gate"]["steps"][0].__setitem__("continue-on-error", True),
+        "a step-level `if: false` on the aggregate": lambda w: w["jobs"]["python-ci-gate"][
+            "steps"][0].__setitem__("if", "false"),
         "an aggregate stripped of the failure sweep": lambda w: w["jobs"]["python-ci-gate"][
             "steps"].__setitem__(0, {"name": "Aggregate matrix result", "run": "echo ok"}),
         # Same name, same first `run:` token, different script — the case a name+token signature
