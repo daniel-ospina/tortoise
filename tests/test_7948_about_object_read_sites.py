@@ -241,7 +241,8 @@ WHAT THIS PINS
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
-   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` — the three
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
+   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` — the four
    `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
    than §13's. The third is the `#9522` capture arm: it replays the removed figure
    through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
@@ -250,7 +251,10 @@ WHAT THIS PINS
    projection), plus the `#`-line floor that the capture widening would otherwise have
    retired. The
    gate-walk comment in `_about_call_time_census.py` carried a duration a re-verifier
-   cannot settle — `measured 10.36 s of the control's 10.85 s` on the merge base, and
+   cannot settle — `measured 10.36 s of the control's 10.85 s` at
+   `fa84a473d:990-992`, the last main commit to carry it (NOT the merge base: measured
+   at this PR's base, `git show origin/main:tests/_about_call_time_census.py | grep -c
+   10.36` is `0`, `#9516` already removed the figure), and
    `~2.6 s of ~17 s` on an intermediate head of the branch — neither with the framing
    that produced it (whole arm? control step? `--durations=0`? which box?), the
    defect class three earlier rounds removed from that file. The rule is stated once
@@ -306,7 +310,14 @@ WHAT THIS PINS
    requires the capture to read all three, and then falsifies the live function's own
    floor (`#`-line projection non-empty) and its `getsource` coverage (the docstring
    first line present, and strictly more lines than the projection plus a `def`), so
-   neither the floor nor the capture can be a tautology.
+   neither the floor nor the capture can be a tautology. The FOURTH is the citation
+   arm: the prose that names where the pre-`#9516` figure came from is read back as
+   PROSE (module docstring + that arm's docstring), and it must not name a TREE as
+   that carrier — both forms now listed in `_STALE_GATE_WALK_ANCHORS` shipped in this
+   file and were false at the head that shipped them — it must name the
+   commit `fa84a473d:990-992`, and — where this checkout can reach the objects,
+   skipped rather than shallow-ified otherwise — that blob must carry the figure while
+   `origin/main`'s does not.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -333,6 +344,7 @@ import ast
 import functools
 import inspect
 import re
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
@@ -3826,7 +3838,9 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     refactor's comment read *"No magnitude is stated on purpose: the redundant
     rebuild is a fraction of this arm (a re-verifier measured ~2.6 s of ~17 s on one
     box)"* — an assertion that no magnitude is stated, immediately followed by one,
-    on the exact axis the change exists to fix — and its merge-base predecessor read
+    on the exact axis the change exists to fix — and its predecessor at
+    `fa84a473d:990-992`, the last main commit to carry it (NOT the merge base, which
+    greps `0` for `10.36`), read
     *"measured 10.36 s of the control's 10.85 s"*, a ratio that reproduces under no
     framing the reviewer constructed (the redundant rebuild is ~2.6 s of a ~17 s
     arm; the arm's dominant cost is the 242-module ungated walk, not the control).
@@ -4206,6 +4220,110 @@ def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
         "plus at most a `def` line, i.e. the smallest BLIND capture, so the docstring "
         "and trailing-comment positions are invisible to the duration scan"
     )
+
+
+#: The last `main` commit whose `tests/_about_call_time_census.py` blob carries the
+#: pre-`#9516` figure `measured 10.36 s of the control's 10.85 s`.
+#:
+#: ⚠️ **Named by COMMIT, not by "the merge base" or by `origin/main`** (`#9522`
+#: re-review). Measured at this PR's base: `git show origin/main:tests/
+#: _about_call_time_census.py | grep -c 10.36` is `0` — `#9516` already removed the
+#: figure — so naming the base as its carrier points a re-verifier at a tree that
+#: does not say what the arms below claim it says. That is the citation-rot class
+#: `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` pins.
+_GATE_WALK_FIGURE_CARRIER = "fa84a473d"
+
+#: Sentences that name a TREE (the merge base) as the carrier of that figure. Both
+#: forms shipped in this file's own prose and both were false at the head that
+#: shipped them; the carrier is a COMMIT.
+_STALE_GATE_WALK_ANCHORS = ("on the merge base", "merge-base predecessor")
+
+
+def _git_blob(rev: str, path: str) -> str | None:
+    """`git show <rev>:<path>`, or None where THIS checkout cannot reach it.
+
+    ⛔ No `git fetch` fallback, deliberately: `test_the_gate_walk_anchors_…`'s
+    sibling in `tests/test_9397_about_edge_properties.py` MEASURED that
+    `git fetch --depth=N` on a full clone REWRITES it shallow (6106 commits of
+    `origin/main` cut to 120), a destructive side effect on the checkout under test
+    from an arm that runs in `core`. An unreachable rev is reported as unverified by
+    the caller instead.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{rev}:{path}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover — no git binary
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure():
+    """The prose anchors name a tree that still has the text (`#9522`).
+
+    ⚠️ **This file's own claim labels rotted into the same false anchor twice.** §23
+    item 23 said the pre-`#9516` figure was `measured 10.36 s of the control's 10.85
+    s` "on the merge base", and the docstring of
+    `test_the_gate_walk_comment_pins_no_wall_clock_figure` called it "its merge-base
+    predecessor" — while 12 lines apart §23 names `fa84a473d:990-992` as the last main
+    commit to carry it. Both anchors cannot be true: `git show
+    origin/main:tests/_about_call_time_census.py | grep -c 10.36` is `0` at this base.
+    The sibling arm `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` was
+    already corrected for exactly this ("the ANCHOR is named by COMMIT, not by
+    `origin/main`"); these two sentences were the ones it left behind, so a re-verifier
+    following them landed on a tree that contradicts the arm.
+
+    Three assertions, because a prose pin that can be satisfied by DELETION is not a
+    pin: (1) no carrier sentence names a tree, (2) the commit anchor IS named, and
+    (3) the named commit really carries the figure while `origin/main` does not — the
+    measurement the prose states, executed where this checkout can reach the objects.
+
+    Non-vacuity: on the pre-fix text of this file, assertion (1) reds on BOTH strings
+    (measured by re-inserting each into the module docstring). The `git` half cannot
+    red for that edit — it is the anchor's VERIFICATION, not the defect — and it
+    SKIPS (with a message saying so) where `fa84a473d` is unreachable, e.g. a shallow
+    clone, rather than being silently green.
+    """
+    prose = "\n".join(
+        (
+            __doc__ or "",
+            inspect.getdoc(test_the_gate_walk_comment_pins_no_wall_clock_figure) or "",
+        )
+    )
+    for stale in _STALE_GATE_WALK_ANCHORS:
+        assert stale not in prose, (
+            f"this file's prose names a TREE (`{stale}`) as the carrier of the "
+            "pre-`#9516` figure, and the tree does not carry it — measured at this "
+            "PR's base: `git show origin/main:tests/_about_call_time_census.py | "
+            f"grep -c 10.36` is `0`. Name the commit ({_GATE_WALK_FIGURE_CARRIER}:990-992)"
+        )
+    assert _GATE_WALK_FIGURE_CARRIER in prose, (
+        "no sentence here names the COMMIT that carries the pre-`#9516` figure any "
+        "more — the anchor was deleted rather than corrected, so the arms below and "
+        "§23 no longer tell a re-verifier where the quoted text came from"
+    )
+    carrier = _git_blob(_GATE_WALK_FIGURE_CARRIER, "tests/_about_call_time_census.py")
+    if carrier is None:
+        pytest.skip(
+            f"{_GATE_WALK_FIGURE_CARRIER} is not reachable in this checkout, so the "
+            "commit anchor above is UNVERIFIED here (a shallow clone cannot reach it "
+            "and is not rewritten to try) — the prose pin still ran"
+        )
+    assert "measured 10.36 s of the control's 10.85 s" in carrier, (
+        f"{_GATE_WALK_FIGURE_CARRIER}:tests/_about_call_time_census.py does not carry "
+        "the figure the arms below quote from it, so the anchor names a commit that "
+        "does not say what they claim"
+    )
+    base = _git_blob("origin/main", "tests/_about_call_time_census.py")
+    if base is not None:
+        assert "10.36" not in base, (
+            "`origin/main`'s census blob carries the pre-`#9516` figure again, so the "
+            "measurement this file states (`grep -c 10.36` is `0` at the base) is "
+            "stale and the anchor sentence above should be re-derived"
+        )
 
 
 def _pin_universe_to_disk(census, on_disk: set[Path]) -> None:
