@@ -1680,6 +1680,14 @@ surfaces:
   # #9396 review's blocking finding.
   - test_document_source_ingested_at_5140.py
   - test_8702_identity_skip_accounting.py
+  # #8843: the sibling suite for the OTHER record-drop channel — a malformed
+  # ENVELOPE (`apply()`'s #331/#325 guards) that the replay loop counted as
+  # `applied`. Same shape as the #8702 row above: it builds its own throwaway
+  # embedded graph (no docker lane) and pins `tortoise/consistency.py`'s
+  # `recover_from_log` accounting, which `core` falls back to. Registered at all
+  # because an unlisted file is a `manifest-integrity` red (#1262) AND runs in
+  # no leg.
+  - test_8843_malformed_envelope_accounting.py
   # #8738 review P2: the doc-affiliation frontmatter on the three changelog
   # companions this change adds AND on every `docs/architecture/*.md`. The
   # external `check-doc-affiliation.cjs` is not wired into CI, so a dropped
@@ -6418,6 +6426,7 @@ durations:
   test_5048_retract_instant_recorded.py: 2.0  # #5048: same #3400 flat default as the row above and for the same reason — the file is new, so no CI junit measurement exists for it yet (a file that never ran cannot appear in an artifact). Refresh from the first post-merge run that includes it. Its registration is load-bearing for the durations half as well as the surface half: an unregistered new test file reds `integrity_problems`, which is how this row was found (#4348 trap — do not drop it without re-deriving the 90% floor at that head).
   test_7174_param_boundary_numeric_guard.py: 2.0  # #7174: same #3400 flat default as the row above — a new file has no CI junit measurement. MEASURED this turn: WITHOUT this row the durations coverage falls below the 90% floor and `tools/ci_selection.py --integrity` reds; the surface entry alone does not cover it. Refresh from the first post-merge run that includes it.
   test_8702_identity_skip_accounting.py: 5.0  # #8702 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. Without the row the file packs at the flat 2.0s default and the durations coverage floor stops being met, which is how this row was found (#4348 trap — do not drop it without re-deriving the floor at that head). Local embedded-carve-out reading (7 tests, ONE module-scoped projection): call 0.05 + 0.04 + <0.01 x4 + 0.02, setup 3.32, teardown 1.58; the file's records carry their own vectors, so it does NOT pay the once-per-leg cold embedder load the #3400 method attributes to no file (measured here before that change: +125 s on the first replay). Refresh from the first post-merge run that includes it.
+  test_8843_malformed_envelope_accounting.py: 3.0  # #8843 (#3400 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so this is the branch's LOCAL reading under the `# unmeasured` convention, not a CI measurement. MEASURED at the PR head on the embedded carve-out lane with `--junitxml`: sum of testcase/@time over all 22 collected cases = 2.92 s (max single case 2.31 s, the module-scoped projection's construction), whole-file wall ~3.1 s quiet. Re-derive the count at every revision rather than carrying it forward: this row was written at 8 cases and the review rounds took it to 22. The WEIGHT is rounded UP to 3.0 on the neighbouring rows' rule (never correct a weight downward without a CI junit reading, so a loaded leg cannot under-pack). Its records carry their own vectors — the same reason the #8702 row states — so it does NOT pay the once-per-leg cold embedder load. Without the row the file packs at the flat 2.0s default and the durations coverage floor stops being met (#4348 trap — do not drop it without re-deriving the floor at that head). Refresh from the first post-merge run that includes it.
 
   # #7927 (#3400 policy, found by review): a file ADDED BY A PR can never appear
   # in a junit artifact, so it packs at the flat 2.0s default — and its weight is

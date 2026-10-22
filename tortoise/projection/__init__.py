@@ -68,12 +68,16 @@ from tortoise.projection.nonfolded import (  # #3585 — R8/R9 fail-closed set
     SHAPE_UNIMPLEMENTED_OP,
     SHAPE_UNKNOWN_EVENT_TYPE,
     SHAPE_UNKNOWN_OP,
+    MALFORMED_MISSING_TYPE,
+    MALFORMED_NON_DICT_POINT,
+    MALFORMED_SHADOWED,
     NonFoldedEventsError as NonFoldedEventsError,
     assert_no_non_folded,
     classify_terminalizer_miss,
     collect_non_folded,
     identity_absent,
     record_identity_skip,
+    record_malformed_envelope,
     record_non_folded,
 )
 
@@ -11005,15 +11009,57 @@ class FalkorProjection(
         # boundaries reject the key too, as the fail-closed backstop).
         contains_session = (
             event.get("contains_session") if isinstance(event, dict) else None)
+        # #8843 review cycle 4: read the discriminator from the RAW envelope too.
+        # `_norm` is `{**ev, **ev["point"]}`, so a NESTED `point` payload carrying
+        # its own `type`/`point` key SHADOWS a well-formed envelope — and this
+        # guard then fires on a value the envelope never had. Recording that as
+        # "the envelope is malformed" would name a cause that is FALSE for the
+        # record (the #8018 class). Same reason `contains_session` is read above,
+        # one field over.
+        raw = event if isinstance(event, dict) else {}
         ev = self._norm(event)
         t = ev.get("type")
         if not isinstance(t, str):
             # #331: malformed event (no/non-string 'type') — skip, don't crash.
             # Visible at the I/O boundary: silent skips corrupt recovery
             # accounting (recover_from_log counts "did apply raise", code-review r2).
+            # #8843: the log line is NOT the record — the skip is RECORDED into
+            # the run's collector so a replay boundary can COUNT it. Without
+            # this the record was dropped here while `recover_from_log`'s
+            # per-record `else` arm incremented `applied`, so a journal of
+            # `[healthy PointAdded, {"event_id": "ev-x", "type": null}]`
+            # reported a faithful, complete recovery over a record it had
+            # dropped. Recorded HERE, at the guard, so within the replay
+            # accounting path there is one RECORDER, not a re-derived predicate.
+            # ⛔ EVERY field below is read from `raw` (the ENVELOPE), never from
+            # `ev` (the `_norm` splice `{**ev, **ev["point"]}`)
+            # — review cycle 6. The clause's whole purpose is telling an
+            # operator WHICH journal line to repair, and `ev`'s `event_id` can be
+            # a nested payload's: a record with envelope
+            # `event_id="TRUE-ID"` and `point.event_id="FORGED-ID"` reported
+            # `(event_id='FORGED-ID')` with the real id nowhere in the message.
+            # Same reason `type`/`point` above are read from `raw`.
             logger.warning(
                 "FalkorProjection.apply: skipping malformed event with "
-                "missing/non-string 'type' (event_id=%s)", ev.get("event_id"))
+                "missing/non-string 'type' (event_id=%s)", raw.get("event_id"))
+            if isinstance(raw.get("type"), str):
+                record_malformed_envelope(
+                    "journal record", MALFORMED_SHADOWED,
+                    field="type", field_present=True, value=t,
+                    envelope_value=raw.get("type"),
+                    event_id=raw.get("event_id"),
+                    where="FalkorProjection.apply")
+            else:
+                record_malformed_envelope(
+                    "journal record", MALFORMED_MISSING_TYPE,
+                    # the ENVELOPE value, not the splice's: both `raw` and a
+                    # nested payload can carry a non-str `type`, and `t` is the
+                    # spliced one (measured `type: 123` reported as `None`;
+                    # cycle 7).
+                    field="type", field_present="type" in raw,
+                    value=raw.get("type"),
+                    event_id=raw.get("event_id"),
+                    where="FalkorProjection.apply")
             return
         if t in ("PointAdded", "OperatorAdded"):
             # #331 (review r3): ev.get — missing 'point' key handled by the
@@ -11024,7 +11070,55 @@ class FalkorProjection(
                 # (issue #325)
                 logger.warning(
                     "FalkorProjection.apply: skipping %s with non-dict point "
-                    "(event_id=%s)", t, ev.get("event_id"))
+                    "(event_id=%s)", t, raw.get("event_id"))
+                # #8843: recorded, not only warned — see the #331 site above.
+                # `field_present` comes from the RAW record, never from the
+                # value AND never from the splice: `ev.get("point")` is `None`
+                # both for an absent key and for an explicit `point: null`, and
+                # `ev` can carry a NESTED payload's key at a site where the
+                # envelope has none (review cycle 6 — `"point" in ev` reported a
+                # present-but-wrong value for a record whose envelope had no
+                # `point` key at all).
+                # A RAW dict `point` whose nested payload shadows it into a
+                # non-dict is its own cause (review cycle 4), not "malformed
+                # point" — the envelope was fine.
+                _raw_t = raw.get("type")
+                if isinstance(raw.get("point"), dict):
+                    record_malformed_envelope(
+                        # ⛔ The ENVELOPE's own discriminator when it carries
+                        # one — never `t`, which on this branch is the `_norm`
+                        # splice and can be the PAYLOAD's `type` (review cycle
+                        # 8). Measured: envelope `type: "PointAdded"` + payload
+                        # `type: "OperatorAdded"` + `point: "collision"`
+                        # rendered "OperatorAdded: … the envelope record is
+                        # well-formed" — naming the payload's family while
+                        # asserting the envelope was fine, in the one sentence
+                        # that exists to prevent exactly that (#8018).
+                        # ⛔ And the `else` arm must NOT fall back to `t`
+                        # either (cycle 9): when the envelope has no usable
+                        # `type` of its own, `t` IS the payload's, so the same
+                        # falsehood returned through the fallback — with the
+                        # "envelope is well-formed" claim now plainly false (its
+                        # `type` is None). An unnamed family is honest; a wrong
+                        # one sends the operator to the wrong record.
+                        (_raw_t if isinstance(_raw_t, str) else "journal record"),
+                        MALFORMED_SHADOWED,
+                        field="point", field_present=True,
+                        envelope_value=_raw_t,
+                        # the COLLIDING value — `raw["point"]["point"]`, the
+                        # nested key `_norm` splices over the payload — not
+                        # `p` (that is the whole payload, embedding and all)
+                        # and not `raw.get("point")` (identical to `p`, so the
+                        # report compared a value against itself; cycle 5).
+                        value=raw["point"].get("point"),
+                        event_id=raw.get("event_id"),
+                        where="FalkorProjection.apply")
+                else:
+                    record_malformed_envelope(
+                        t, MALFORMED_NON_DICT_POINT,
+                        field="point", field_present="point" in raw, value=p,
+                        event_id=raw.get("event_id"),
+                        where="FalkorProjection.apply")
                 return
             # #331 (review r2): parity with _apply_one — no id → nothing to
             # index by; skip rather than KeyError in _upsert.
