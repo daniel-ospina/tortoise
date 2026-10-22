@@ -34,6 +34,9 @@ cheap to pin:
    — so the fan-out has to be bounded OUTSIDE a per-unit key: the group itself
    must be low-cardinality, or a job-level ``if:`` must spend no runner, or the
    check must be one run per head. :data:`PER_UNIT_GROUP_OK` names the bound.
+   A workflow whose across-unit fan-out is deliberately UNBOUNDED is not that
+   shape and does not belong in that list: it lives in
+   :data:`PER_ISSUE_GROUP_OK` under a contract that says so (#9577 review).
    ⛔ A cheap ``classify`` leg is a **COST** bound, never a fan-out bound:
    #9115's workflow had one in place *during* the #9577 flood (38 of 133 queued
    runs, 0 of 28 PRs mergeable), so it cannot be the reason a per-unit key is
@@ -53,7 +56,11 @@ What this module pins
   workflow grows an unbounded queue;
 * a per-unit group on a per-event workflow must declare what bounds its
   FAN-OUT (:data:`PER_UNIT_GROUP_OK`) — the #9115 shape, which a
-  block-exists rule cannot see;
+  block-exists rule cannot see — and a per-ISSUE key whose across-issue
+  fan-out is deliberately unbounded must be in :data:`PER_ISSUE_GROUP_OK`,
+  a DIFFERENT contract whose two halves (the unit really is the issue; the
+  residue names its tracking home) are both asserted, so the excuse cannot be
+  copied onto a key it is not true of;
 * every workflow with a ``push`` trigger is either path-scoped or listed in
   :data:`UNFILTERED_PUSH_OK` with its reason (a merged-tree validation
   genuinely has no path filter to take), and an excused entry must actually
@@ -171,20 +178,16 @@ ZERO_COST_PR_EVENT = {
 # every comment is a different unit. So the per-unit shape is only safe when
 # something else bounds the fan-out, and each entry here must name that bound.
 #
+# ⛔ The bound must be SOMEWHERE ELSE. "the key is per unit, so it bounds each
+# unit" is not a bound, it is the definition of the shape — and it is exactly
+# the reasoning that let #9115's flood pass this module. A workflow whose fan-out
+# is unbounded ACROSS units by design does not belong here at all; it belongs in
+# :data:`PER_ISSUE_GROUP_OK`, whose contract states the residue out loud.
+#
 # ⛔ A new per-event workflow that copies the shape WITHOUT a bound fails
 # `test_per_event_per_unit_groups_declare_their_bound` — the rule the
 # block-exists test structurally cannot express.
 PER_UNIT_GROUP_OK = {
-    "finding-provenance.yml": (
-        "fan-out per issue is bounded by the KEY: every comment on one issue "
-        "lands in the same group, so a comment burst supersedes that issue's own "
-        "in-flight run instead of adding a runner (#9577). ACROSS issues the "
-        "fan-out is only bounded by the number of issues in flight — that residue "
-        "is the accepted trade, and batching/coalescing with a catch-up sweep is "
-        "the remaining work on #9115. NOTE the CLASSIFIER SPLIT is a COST bound, "
-        "never a fan-out bound: it was already in place during the #9577 flood "
-        "(38 of 133 queued runs, 0 of 28 PRs mergeable)."
-    ),
     "ai-review-gate.yml": (
         "a REQUIRED check: one run per PR head, superseded on each push. A "
         "constant group would let one PR's review cancel another's and leave "
@@ -196,6 +199,45 @@ PER_UNIT_GROUP_OK = {
         "so the only fan-out is external `opened` events — one per unit."
     ),
 }
+
+# Per-event workflows keyed PER ISSUE whose across-issue fan-out is deliberately
+# UNBOUNDED and accepted, with the residue tracked.
+#
+# This is a DIFFERENT contract from :data:`PER_UNIT_GROUP_OK`, and keeping them
+# apart is the point (#9577 review): that list means "something else bounds the
+# fan-out", which a per-issue key does NOT do — N issues in flight still permit
+# N concurrent runs. Merged into one dict, a future per-unit workflow could quote
+# a per-issue reason verbatim to excuse a key that bounds nothing anywhere, and
+# the guard's only remaining check ("the entry carries prose") cannot tell.
+#
+# So an entry here is a recorded LOSS, and both halves of it are asserted by
+# `test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue`:
+#   * the unit IS the issue — `issue.number` in the group, never `comment.id` —
+#     so a comment burst on one issue collapses to one run rather than one per
+#     comment (#9577: 100 comments an hour, 38 of 133 queued runs, 0 of 28 PRs
+#     mergeable);
+#   * the reason names the TRACKING HOME (`#NNNN`) for the unbounded residue, so
+#     the residue is a live item and not narration.
+PER_ISSUE_GROUP_OK = {
+    "finding-provenance.yml": (
+        "the key bounds ONE issue's stream: every comment on one issue shares a "
+        "group, so a burst supersedes that issue's own in-flight run instead of "
+        "adding a runner. ACROSS issues there is NO bound — N issues in flight "
+        "permit N concurrent runs — and that residue is the accepted trade, "
+        "tracked as #9115 (batching / coalescing with a catch-up sweep). What a "
+        "cancel loses, stated: the superseded run posts no verdict and there is "
+        "no `comment_id` dispatch input to recover that comment; the lane "
+        "re-posts (its own new group member), and the issue BODY gate is "
+        "re-runnable with `workflow_dispatch -f issue_number=` (#9577). NOTE the "
+        "CLASSIFIER SPLIT is a COST bound, never a fan-out bound: it was already "
+        "in place during the #9577 flood (38 of 133 queued runs, 0 of 28 PRs "
+        "mergeable)."
+    ),
+}
+
+# A tracking reference: `#9115`, `#9577`. Used by the per-issue list, which
+# records an ACCEPTED LOSS and must therefore name where the residue is handled.
+_TRACKING_REF = re.compile(r"#\d+")
 
 # Per-event workflows that spend runner slots on REPORTING/BOOKKEEPING rather
 # than gating a merge. They must declare a `concurrency:` group — a flood in any
@@ -291,6 +333,11 @@ def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
     that rule — and it still ran 12+ at once. A per-event workflow may keep a
     per-unit key only when something ELSE bounds its fan-out, and
     :data:`PER_UNIT_GROUP_OK` must say what.
+
+    A workflow whose across-unit fan-out is DELIBERATELY unbounded (the unit is
+    the issue and the residue is accepted) is excused by the other list instead,
+    :data:`PER_ISSUE_GROUP_OK`, whose two premises are asserted by
+    `test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue`.
     """
     doc = _load(path)
     triggers = _PER_EVENT_TRIGGERS & set(_triggers(doc))
@@ -301,19 +348,72 @@ def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
     per_unit = [tok for tok in _PER_UNIT_TOKENS if tok in group]
     if not per_unit:
         return  # a constant / low-cardinality group bounds the fan-out itself
-    assert path.name in PER_UNIT_GROUP_OK, (
+    # Two allow-lists, two contracts. The lookup is explicit (`or`, not a merged
+    # dict) so the failure message names the list the entry must satisfy; the
+    # lists are asserted disjoint in
+    # `test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue`, so
+    # a name in both cannot silently resolve to whichever is checked first.
+    reason = PER_UNIT_GROUP_OK.get(path.name) or PER_ISSUE_GROUP_OK.get(path.name)
+    assert reason is not None, (
         f"{path.name} takes per-event triggers ({sorted(triggers)}) and keys its "
         f"concurrency group PER UNIT ({per_unit}) — that bounds repeats of one "
         "unit but NOT the fan-out: N units still run at once. That is the #9115 "
         "flood shape exactly (the offending workflow already had a per-unit key). "
         "Bound the fan-out (a constant/low-cardinality group, a required check "
         "that is one run per head, or a job-level `if:` that spends no runner), "
-        "or add it to "
-        "PER_UNIT_GROUP_OK with that bound named."
+        "or add it to PER_UNIT_GROUP_OK with that bound named — or, when the "
+        "across-unit fan-out is acknowledged as unbounded and the loss is "
+        "accepted, to PER_ISSUE_GROUP_OK, which asserts that the unit really is "
+        "the issue and that the residue names its tracking home."
     )
-    assert PER_UNIT_GROUP_OK[path.name].strip(), (
-        f"PER_UNIT_GROUP_OK needs a reason for {path.name} — it is a reviewed decision"
+    assert reason.strip(), (
+        f"{path.name} needs a reason — an allow-list entry is a reviewed "
+        "decision, not an omission with a comment-shaped hole next to it"
     )
+
+
+def test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue() -> None:
+    """:data:`PER_ISSUE_GROUP_OK` is a CONTRACT, not prose (#9577 review).
+
+    The entry that lives here is excused from "bound the FAN-OUT" on a promise:
+    *the unit is the issue*, and the unbounded across-issue residue is *tracked*.
+    Both halves are checkable, so both are checked — otherwise a FUTURE per-unit
+    workflow can copy this wording verbatim and pass a rule whose stated premise
+    it denies, which is the shape that let #9115's flood pass this module.
+    """
+    overlap = sorted(set(PER_UNIT_GROUP_OK) & set(PER_ISSUE_GROUP_OK))
+    assert not overlap, (
+        f"{overlap} appear in BOTH allow-lists. The guard resolves one of them, "
+        "so the other becomes documentary — and the two say different things "
+        "(fan-out bounded SOMEWHERE ELSE vs across-unit fan-out unbounded and "
+        "accepted). Keep the one that is true."
+    )
+    # Non-vacuity: an empty per-issue list is a bucket that no longer judges
+    # anything, and every assertion below would pass while checking nothing.
+    assert PER_ISSUE_GROUP_OK, "PER_ISSUE_GROUP_OK is empty — drop it or populate it"
+    for name, reason in PER_ISSUE_GROUP_OK.items():
+        path = WORKFLOW_DIR / name
+        assert path.exists(), f"PER_ISSUE_GROUP_OK names a missing workflow: {name}"
+        group = str((_load(path).get("concurrency") or {}).get("group", ""))
+        assert "issue.number" in group, (
+            f"{name} is excused as PER-ISSUE but its group is {group!r}. The "
+            "excuse's whole premise is that the UNIT IS THE ISSUE — keyed on any "
+            "other unit this is the per-event shape #9115 measured, not an "
+            "accepted residue. Key on `github.event.issue.number`, or move the "
+            "entry to PER_UNIT_GROUP_OK and name the bound its fan-out actually "
+            "has."
+        )
+        assert "comment.id" not in group, (
+            f"{name} is excused as PER-ISSUE and its group {group!r} still carries "
+            "`comment.id` — a per-comment key is the #9577 defect itself, and "
+            "no allow-list entry may excuse it"
+        )
+        assert _TRACKING_REF.search(reason), (
+            f"PER_ISSUE_GROUP_OK[{name!r}] does not name the tracking home for "
+            "its unbounded across-issue residue (expected a `#NNNN`). This list "
+            "records an ACCEPTED LOSS; an untracked residue is narration, and a "
+            "future entry could copy it without the loss landing anywhere."
+        )
 
 
 def test_the_reporting_set_is_real_and_complete() -> None:
