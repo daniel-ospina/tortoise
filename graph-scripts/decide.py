@@ -92,6 +92,257 @@ def _load_input(args) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# #6671 — IDEMPOTENT OPERATOR WIRING
+#
+# `create_point` below is written with `dedup=True` (content hash), so the
+# POINTS converge across runs. `create_operator` is NOT idempotent — it mints a
+# fresh operator Point on every call — and this script used to key its
+# `created_ops` cache per run only, so a second run re-created the whole edge
+# set. Because `mitigate_operator` is idempotent PER OPERATOR, the two runs'
+# mitigations landed on different copies: run-1 edges damped, run-2 edges at
+# full weight, both read by EP. Measured on #6671 with a 2-edge decision:
+# 4 operators after two runs, option confidence 0.5736 → 0.5184 (14 → 19 EP
+# iterations). There is NO edge-delete API, so that pollution is irreversible.
+#
+# The identity used here is the graph's own operator shape, not a second model:
+# `create_operator` wires `(source)-[:INPUT {idx:0}]->(op)` and
+# `(op)-[IMPL|NAND {idx:n>0}]->(target)`. `label` is part of the identity — two
+# edges with different Layer-3 predicates over the same triple are two claims.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Operator op_types whose bridge edge is the op_type itself (SDK
+#: create_operator: part/whole ops are mirrored as `hasPart`). Used to keep the
+#: lookup from comparing an op_type against an edge label it never writes.
+_SELF_LABELLED_OPS = frozenset({"IMPL", "NAND"})
+
+
+def _find_operators(proj, op_type: str, source_id: str, target_id: str,
+                    label: str | None, *, any_label: bool = False) -> list[str]:
+    """Existing operator ids on this (source, op_type, target, label) bridge.
+
+    Returns ALL matches, not just the first: a graph already polluted by an
+    earlier run of this script has duplicate copies of every edge, and a
+    relevance edge must damp every copy it finds — damping one leaves the other
+    at full weight, which is the asymmetry #6671 measured.
+
+    ``any_label=True`` drops the label arm of the identity. That is the
+    RELEVANCE-edge posture: a mitigation says "this criterion matters less for
+    that option", so it damps every bridge the caller names by
+    (source, op_type, target) — including a labeled one the same decision filed
+    without repeating the label — instead of minting a parallel unlabeled
+    operator to damp.
+    """
+    if op_type not in _SELF_LABELLED_OPS:
+        # Part/whole ops (composedOf, contains, …) mirror `hasPart`; rather than
+        # guess a second edge-label map here, do not claim reuse for them — a
+        # duplicate is worse than an extra operator, but a WRONG reuse (two
+        # different operators treated as one) is worse than both.
+        return []
+    label_arm = "" if any_label else \
+        "AND coalesce(op.label, '') = coalesce($label, '') "
+    rows = proj.g.query(
+        "MATCH (s:Point {id:$sid})-[ri:INPUT]->(op:Point {is_operator:true})"
+        "-[ro]->(t:Point {id:$tid}) "
+        "WHERE op.op_type = $op AND ri.idx = 0 AND ro.idx > 0 "
+        + label_arm +
+        "RETURN op.id, op.status",
+        params={"sid": source_id, "tid": target_id, "op": op_type,
+                "label": label},
+    ).result_set
+    return [row[0] for row in rows]
+
+
+def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
+                                target_id: str, label: str | None,
+                                cache: dict[tuple[str, str, str, str], str],
+                                *, any_label: bool = False
+                                ) -> tuple[str, bool]:
+    """Write the edge idempotently — returns ``(operator_id, reused)``."""
+    key = (source_id, op_type, target_id, "" if any_label else (label or ""))
+    if key in cache:
+        return cache[key], True
+    existing = _find_operators(proj, op_type, source_id, target_id, label,
+                               any_label=any_label)
+    if existing:
+        cache[key] = existing[0]
+        return existing[0], True
+    op = sdk.create_operator(op_type, source_id, [target_id], label=label)
+    cache[key] = op["id"]
+    return op["id"], False
+
+
+def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
+    """File a decision definition to the graph and rank its options by EP.
+
+    Idempotent in its WRITES (#6671): filing the same decision twice reuses the
+    existing points (content-hash dedup) and the existing operators, so the
+    ranking no longer depends on how many times the script was run.
+
+    Returns a dict with ``operators`` (one row per edge, with ``reused``),
+    ``confidences`` (option id → EP mean), ``iterations`` and ``converged``.
+    """
+    ctx = data.get("context", "decide")
+    options = data.get("options", {})
+    criteria = data.get("criteria", {})
+    findings = data.get("findings", {})
+    edges = data.get("edges", [])
+    truth_edges = data.get("truth_edges", [])
+    relevance_edges = data.get("relevance_edges", [])
+    proj = sdk._get_proj()
+
+    # Track all operator IDs for --context-free mode (a factor list must not
+    # carry the same operator twice — EP would count one bridge as two).
+    all_operator_ids: list[str] = []
+    operator_rows: list[dict] = []
+
+    # ── Create all points ──
+    all_points: dict[str, str] = {}
+    for pid, content in {**options, **criteria, **findings}.items():
+        kind = (
+            "option" if pid.startswith(("opt:", "option:")) else
+            "criterion" if pid.startswith(("crit:", "criterion:")) else
+            "evidence"
+        )
+        try:
+            # #1643 (D3): `context=` was removed from create_point in #49 —
+            # passing it raised TypeError, every point soft-failed, and
+            # operator resolution fell back to stub nodes (#334 class).
+            # dedup=True keeps the write idempotent by content hash.
+            p = sdk.create_point(kind, content, dedup=True)
+            all_points[pid] = p["id"]
+            print(f"  ✓ {pid} → {p['id']}")
+        except Exception as e:
+            print(f"  ⚠ {pid}: {e}")
+
+    def _resolve(name: str) -> str:
+        """Resolve a key or point ID to a graph point ID."""
+        if name in all_points:
+            return all_points[name]
+        return name
+
+    # Reuse map keyed on the RESOLVED ids (so `--edges` names and raw ids that
+    # denote the same points converge on one operator).
+    created_ops: dict[tuple[str, str, str, str], str] = {}
+
+    def _wire(src_key: str, op_type: str, tgt_key: str, label: str | None,
+              tick: str, *, any_label: bool = False) -> str | None:
+        src, tgt = _resolve(src_key), _resolve(tgt_key)
+        try:
+            op_id, reused = _resolve_or_create_operator(
+                sdk, proj, op_type, src, tgt, label, created_ops,
+                any_label=any_label)
+        except Exception as e:
+            print(f"  ⚠ {src_key} --{op_type}--> {tgt_key}: {e}")
+            return None
+        if op_id not in all_operator_ids:
+            all_operator_ids.append(op_id)
+        operator_rows.append({
+            "source": src_key, "op_type": op_type, "target": tgt_key,
+            "label": label, "id": op_id, "reused": reused,
+        })
+        suffix = f" (reused {op_id})" if reused else ""
+        print(f"  {tick} {src_key} --{op_type}--> {tgt_key}{suffix}")
+        return op_id
+
+    # ── Regular edges (IMPL/NAND from criteria/findings → options) ──
+    for edge in edges:
+        if isinstance(edge, list):
+            src, op_type, tgt = edge[0], edge[1], edge[2]
+            label = edge[3] if len(edge) > 3 else None
+        elif isinstance(edge, dict):
+            src = edge["source"]
+            op_type = edge["op_type"]
+            tgt = edge["target"]
+            label = edge.get("label")
+        else:
+            print(f"  ⚠ Unknown edge format: {edge}")
+            continue
+        _wire(src, op_type, tgt, label, "✓")
+
+    # ── Truth edges: NAND the target finding POINT (it's FALSE) ──
+    for te in truth_edges:
+        _wire(te["source"], te.get("op_type", "NAND"), te["target"],
+              te.get("label"), "⚡ truth:")
+
+    # ── Relevance edges: mitigate the OPERATOR (TRUE but matters LESS) ──
+    for re in relevance_edges:
+        src = re["source"]
+        op_type = re.get("op_type", "NAND")
+        tgt = re["target"]
+        reason = re.get("reason", "Overstated relevance")
+        strength = re.get("strength", 0.30)
+        # Clamp to the sanctioned [0.10, 0.50] band (single source:
+        # tortoise/weights.py module docstring, #2315).
+        strength = max(0.10, min(0.50, strength))
+        label = re.get("label")
+        # any_label: a relevance edge damps the bridge the caller names; it is
+        # not a claim of its own, so it never mints a parallel operator just
+        # because the decision did not repeat the Layer-3 label here.
+        op_id = _wire(src, op_type, tgt, label, "⚖ relevance:",
+                      any_label=True)
+        if op_id is None:
+            continue
+        try:
+            # Damp EVERY operator on this bridge (normally one). A graph
+            # polluted by an earlier non-idempotent run carries duplicate
+            # copies; mitigating only the first would leave the others at full
+            # weight — the exact asymmetry #6671 measured.
+            targets = _find_operators(proj, op_type, _resolve(src),
+                                      _resolve(tgt), label,
+                                      any_label=True) or [op_id]
+            for target_id in targets:
+                sdk.mitigate_operator(target_id, reason, strength)
+            print(f"     (mitigated {strength:.2f} on {len(targets)} "
+                  f"operator(s): {reason})")
+        except Exception as e:
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
+
+    # ── Compute confidence per option ──
+    result: dict = {"context": ctx, "operators": operator_rows,
+                    "confidences": {}, "iterations": 0, "converged": None}
+    try:
+        if context_free and all_operator_ids:
+            print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
+            ep = sdk.compute_confidence(factors=all_operator_ids)
+        else:
+            ep = sdk.compute_confidence()
+        print(f"\n✓ EP computed: {ep['iterations']} iterations, "
+              f"converged={ep['converged']}")
+        confs = ep.get("confidences", {})
+
+        opt_conf: dict[str, float] = {}
+        for pid, cid in all_points.items():
+            if pid.startswith(("opt:", "option:")):
+                mean = confs.get(cid, {}).get("mean")
+                if isinstance(mean, (int, float)):
+                    opt_conf[pid] = float(mean)
+
+        if opt_conf:
+            print("\n=== OPTION CONFIDENCE (higher = more supported) ===")
+            ranked = sorted(opt_conf.items(), key=lambda kv: kv[1], reverse=True)
+            name_width = max(len(pid) for pid in opt_conf)
+            for pid, c in ranked:
+                bar = "█" * int(c * 20) + "░" * (20 - int(c * 20))
+                print(f"  {pid:<{name_width}}  {c:.4f}  {bar}")
+        result.update(confidences=opt_conf, iterations=ep["iterations"],
+                      converged=ep["converged"])
+    except Exception as e:
+        print(f"\n⚠ compute_confidence: {e}")
+
+    # ── Verify structure ──
+    try:
+        struct = sdk.check_structure()
+        ctx_issues = [i for i in struct
+                      if ctx in str(i.get("id", "")) or ctx in str(i.get("message", ""))]
+        print(f"\n✓ Structure check: {len(struct)} issues total, "
+              f"{len(ctx_issues)} in context '{ctx}'")
+        result["structure_issues"] = len(ctx_issues)
+    except Exception as e:
+        print(f"⚠ check_structure: {e}")
+    return result
+
+
 def main():
     p = argparse.ArgumentParser(
         prog="decide.py",
@@ -128,14 +379,7 @@ def main():
     data = _load_input(args)
 
     ctx = data.get("context", "decide")
-    options = data.get("options", {})
-    criteria = data.get("criteria", {})
-    findings = data.get("findings", {})
-    edges = data.get("edges", [])
-    truth_edges = data.get("truth_edges", [])
-    relevance_edges = data.get("relevance_edges", [])
-
-    if not options:
+    if not data.get("options"):
         print("Error: at least one option required", file=sys.stderr)
         sys.exit(1)
 
@@ -155,135 +399,8 @@ def main():
     sdk = TortoiseSDK()
     sdk._proj = FalkorProjection.from_uri(uri)
 
-    # Track all operator IDs for --context-free mode
-    all_operator_ids: list[str] = []
-
     try:
-        # ── Create all points ──
-        all_points: dict[str, str] = {}
-        for pid, content in {**options, **criteria, **findings}.items():
-            kind = (
-                "option" if pid.startswith(("opt:", "option:")) else
-                "criterion" if pid.startswith(("crit:", "criterion:")) else
-                "evidence"
-            )
-            try:
-                # #1643 (D3): `context=` was removed from create_point in #49 —
-                # passing it raised TypeError, every point soft-failed, and
-                # operator resolution fell back to stub nodes (#334 class).
-                # dedup=True keeps the write idempotent by content hash.
-                p = sdk.create_point(kind, content, dedup=True)
-                all_points[pid] = p["id"]
-                print(f"  ✓ {pid} → {p['id']}")
-            except Exception as e:
-                print(f"  ⚠ {pid}: {e}")
-
-        def _resolve(name: str) -> str:
-            """Resolve a key or point ID to a graph point ID."""
-            if name in all_points:
-                return all_points[name]
-            return name
-
-        # ── Regular edges (IMPL/NAND from criteria/findings → options) ──
-        # Track created operators so relevance_edges can reuse them instead of
-        # creating duplicates (same src/op_type/tgt in both sections).
-        created_ops: dict[tuple[str, str, str], str] = {}
-        for edge in edges:
-            if isinstance(edge, list):
-                src, op_type, tgt = edge[0], edge[1], edge[2]
-                label = edge[3] if len(edge) > 3 else None
-            elif isinstance(edge, dict):
-                src = edge["source"]
-                op_type = edge["op_type"]
-                tgt = edge["target"]
-                label = edge.get("label")
-            else:
-                print(f"  ⚠ Unknown edge format: {edge}")
-                continue
-
-            try:
-                op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)],
-                                         label=label)
-                created_ops[(src, op_type, tgt)] = op["id"]
-                all_operator_ids.append(op["id"])
-                print(f"  ✓ {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ {src} --{op_type}--> {tgt}: {e}")
-
-        # ── Truth edges: NAND the target finding POINT (it's FALSE) ──
-        for te in truth_edges:
-            src = te["source"]
-            op_type = te.get("op_type", "NAND")
-            tgt = te["target"]
-            try:
-                top = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
-                all_operator_ids.append(top["id"])
-                print(f"  ⚡ truth: {src} --{op_type}--> {tgt}")
-            except Exception as e:
-                print(f"  ⚠ truth {src} --{op_type}--> {tgt}: {e}")
-
-        # ── Relevance edges: mitigate the OPERATOR (TRUE but matters LESS) ──
-        for re in relevance_edges:
-            src = re["source"]
-            op_type = re.get("op_type", "NAND")
-            tgt = re["target"]
-            reason = re.get("reason", "Overstated relevance")
-            strength = re.get("strength", 0.30)
-            # Clamp to the sanctioned [0.10, 0.50] band (single source:
-            # tortoise/weights.py module docstring, #2315).
-            strength = max(0.10, min(0.50, strength))
-            try:
-                # Reuse the operator if this edge was already created in `edges`
-                # (prevents duplicate operators feeding EP twice).
-                op_id = created_ops.get((src, op_type, tgt))
-                if op_id is None:
-                    op = sdk.create_operator(op_type, _resolve(src), [_resolve(tgt)])
-                    op_id = op["id"]
-                    all_operator_ids.append(op_id)
-                sdk.mitigate_operator(op_id, reason, strength)
-                print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
-                      f"(mitigated {strength:.2f}: {reason})")
-            except Exception as e:
-                print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {e}")
-
-        # ── Compute confidence per option ──
-        try:
-            if args.context_free and all_operator_ids:
-                print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
-                result = sdk.compute_confidence(factors=all_operator_ids)
-            else:
-                result = sdk.compute_confidence()
-            print(f"\n✓ EP computed: {result['iterations']} iterations, "
-                  f"converged={result['converged']}")
-            confs = result.get("confidences", {})
-
-            opt_conf: dict[str, float] = {}
-            for pid, cid in all_points.items():
-                if pid.startswith(("opt:", "option:")):
-                    mean = confs.get(cid, {}).get("mean")
-                    if isinstance(mean, (int, float)):
-                        opt_conf[pid] = float(mean)
-
-            if opt_conf:
-                print("\n=== OPTION CONFIDENCE (higher = more supported) ===")
-                ranked = sorted(opt_conf.items(), key=lambda kv: kv[1], reverse=True)
-                name_width = max(len(pid) for pid in opt_conf)
-                for pid, c in ranked:
-                    bar = "█" * int(c * 20) + "░" * (20 - int(c * 20))
-                    print(f"  {pid:<{name_width}}  {c:.4f}  {bar}")
-        except Exception as e:
-            print(f"\n⚠ compute_confidence: {e}")
-
-        # ── Verify structure ──
-        try:
-            result = sdk.check_structure()
-            ctx_issues = [i for i in result
-                          if ctx in str(i.get("id", "")) or ctx in str(i.get("message", ""))]
-            print(f"\n✓ Structure check: {len(result)} issues total, "
-                  f"{len(ctx_issues)} in context '{ctx}'")
-        except Exception as e:
-            print(f"⚠ check_structure: {e}")
-
+        file_decision(sdk, data, context_free=args.context_free)
     finally:
         if sdk._proj:
             sdk._proj.close()

@@ -520,3 +520,142 @@ class TestIssue400EPFixes:
         _op_id, op_type, _inputs, weight = nand_factors[0]
         assert op_type == "NAND"
         assert weight == 3.0, f"Expected NAND weight 3.0, got {weight}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# #6671 — a re-run must not change the answer.
+#
+# `create_point` is written with dedup=True (content hash), so the points
+# converge across runs; `create_operator` is NOT idempotent. decide.py kept its
+# `created_ops` map per-run only, so every re-run re-created the full edge set.
+# Because `mitigate_operator` is idempotent PER OPERATOR, the re-run's
+# mitigations landed on the second copy: run-1 edges damped, run-2 edges at full
+# weight, both read by EP. Measured on #6671: 2-edge decision, two runs →
+# 4 operators, option confidence 0.5736 → 0.5184.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_decide_script():
+    """Import graph-scripts/decide.py as a module (it is a script, not a package)."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "graph-scripts" / "decide.py"
+    spec = importlib.util.spec_from_file_location("decide_script_6671", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _operator_census(sdk) -> dict[str, int]:
+    """Operator + mitigation counts in the fixture's graph, by op_type."""
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (op:Point) WHERE op.is_operator = true "
+        "RETURN op.op_type, count(op)").result_set
+    census = {row[0]: int(row[1]) for row in rows}
+    mit = proj.g.query(
+        "MATCH (op:Point)-[r:mitigated_by]->(m) RETURN count(r)").result_set
+    census["_mitigations"] = int(mit[0][0]) if mit else 0
+    return census
+
+
+class TestIssue6671DecideRerunIsIdempotent:
+    """#6671: filing the SAME decision twice must not add operators, split the
+    mitigations across copies, or move the EP ranking."""
+
+    def _decision(self, *, label=None):
+        edge = ["crit:1", "IMPL", "opt:a"]
+        if label is not None:
+            edge = [*edge, label]
+        return {
+            "context": "issue-6671",
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {"finding:1": "Finding 1"},
+            "edges": [edge, ["finding:1", "NAND", "opt:b"]],
+            "truth_edges": [{"source": "finding:1", "op_type": "NAND",
+                             "target": "opt:a"}],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+    def test_rerun_does_not_duplicate_operators(self, sdk):
+        decide = _load_decide_script()
+        data = self._decision()
+
+        decide.file_decision(sdk, data)
+        first = _operator_census(sdk)
+        # 2 edges + 1 truth edge, all distinct triples: one IMPL, two NAND.
+        assert first.get("IMPL") == 1, first
+        assert first.get("NAND") == 2, first
+
+        decide.file_decision(sdk, data)
+        second = _operator_census(sdk)
+
+        assert second == first, (
+            "a re-run grew the edge set — EP now counts every relation twice "
+            f"(before={first}, after={second})")
+
+    def test_rerun_leaves_rankings_unchanged(self, sdk):
+        decide = _load_decide_script()
+        data = self._decision()
+
+        run1 = decide.file_decision(sdk, data)
+        run2 = decide.file_decision(sdk, data)
+
+        # EP is an iterative solve, so two passes over the SAME graph are not
+        # bit-identical (measured drift here: ~1e-8). The defect this pins is
+        # six orders of magnitude larger — a second filing of the same decision
+        # moved opt:a 0.5736 → 0.5184 (#6671), because the duplicated
+        # operators split the mitigations.
+        assert run2["confidences"] == pytest.approx(
+            run1["confidences"], abs=1e-6), (
+            "the ranking depends on how many times the script was run: "
+            f"run1={run1['confidences']} run2={run2['confidences']}")
+
+    def test_rerun_keeps_one_mitigation_on_the_live_bridge(self, sdk):
+        """The mitigation must damp the ONE operator, not split across copies."""
+        decide = _load_decide_script()
+        data = self._decision()
+
+        decide.file_decision(sdk, data)
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census["_mitigations"] == 1, (
+            "mitigations split across duplicate operators (#6671): " + str(census))
+
+    def test_distinct_labels_are_distinct_operators(self, sdk):
+        """Operator identity includes the Layer-3 label: two edges on the same
+        triple with different labels are two claims, and must not be collapsed."""
+        decide = _load_decide_script()
+
+        decide.file_decision(sdk, self._decision(label="supports"))
+        decide.file_decision(sdk, self._decision(label="refutes"))
+        decide.file_decision(sdk, self._decision(label="supports"))
+
+        census = _operator_census(sdk)
+        assert census.get("IMPL") == 2, (
+            "labeled edges collapsed onto one operator, or duplicated on re-run: "
+            + str(census))
+
+
+class TestIssue6671CriterionKindRegistered:
+    """#6671 defect 2: `criterion` is a DECIDE_PART_KINDS member but was never
+    registered, so every criterion write warned 'Unrecognized pointKind'."""
+
+    def test_criterion_is_a_registered_point_kind(self):
+        from tortoise.domain_loader import known_kinds
+
+        assert "criterion" in known_kinds("pointKind"), (
+            "criterion is in sdk.DECIDE_PART_KINDS but not registered — the "
+            "decide flow writes a kind the vocabulary does not know")
+
+    def test_criterion_write_emits_no_unknown_kind_warning(self, sdk, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+            sdk.create_point("criterion", f"Developer adoption {uuid.uuid4().hex[:6]}")
+        assert "Unrecognized pointKind" not in caplog.text, caplog.text

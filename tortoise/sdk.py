@@ -163,6 +163,12 @@ register_kind("diary")
 register_kind("checkpoint-item")
 register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
+# #6671: `criterion` is a DECIDE_PART_KINDS member (the decide rubric's
+# criteria axis: options/criteria/findings) and was the ONE decide-part kind
+# missing from this block — so every criterion write from the decide flow
+# (graph-scripts/decide.py, tortoise_file_decision) warned "Unrecognized
+# pointKind" while the SDK itself already treated it as a decision part.
+register_kind("criterion")
 
 # Valid status values for Point nodes (used by update_point status validation)
 # #432: claim lifecycle vocabulary — draft → live → retracted → superseded
