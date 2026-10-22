@@ -2137,6 +2137,9 @@ class CollisionPreflightTest(unittest.TestCase):
             ("test/9397-x", 9397),
             # the branch names THIS issue → no contradiction
             ("fix/3061-mine", None),
+            # …ANYWHERE in the name, even after a foreign claim: the order the
+            # two are found must not decide the verdict (fail-closed).
+            ("feat/9397-x/fix/3061-y", None),
             # not a claim shape → a version/date is not an issue reference
             ("chore/bump-2024-10", None),
             ("release-1.2.3", None),

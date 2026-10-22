@@ -1287,14 +1287,21 @@ def _branch_names_other_issue(branch: str, issue: int) -> int | None:
     by its branch slug), so the two surfaces agree instead of the path silently
     out-voting the branch.
     """
+    claimed_other: int | None = None
     for match in _LANE_BRANCH_CLAIM.finditer(branch or ""):
-        claimed = int(match.group(1))
-        if claimed == issue:
-            return None
         if _inside_hex_digest(branch, match.start(1), match.end(1)):
             continue
-        return claimed
-    return None
+        claimed = int(match.group(1))
+        # ⛔ EVERY MATCH IS READ BEFORE ANY ANSWER, because the ORDER of the two
+        # findings decides the verdict and returning on the first one is
+        # fail-OPEN: a name carrying BOTH (`feat/9397-x/fix/3061-y` — a
+        # dependency in the slug) claims THIS issue as well, so it must keep
+        # blocking no matter which segment comes first.
+        if claimed == issue:
+            return None
+        if claimed_other is None:
+            claimed_other = claimed
+    return claimed_other
 
 
 def _pr_terminal_state(pr: dict) -> str | None:
