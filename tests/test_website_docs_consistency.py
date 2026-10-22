@@ -1304,11 +1304,22 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     link against), and `tortoise/quadrature.py` (whose EP factors
     `test_docs_states_the_formulas_quadrature_actually_computes` derives the
     /docs expectation FROM). Before each was listed, a PR editing only that one
-    selected no surface and this file never ran — that is the property this ratchet
-    pins, and those four are the inputs a `SOURCE_PATTERNS` entry can make
-    selectable WITHOUT collateral loss (the two legal drafts at the end of this
-    docstring have the same select-no-surface shape and are NOT here, because that
-    route costs three tier-1 files there). `tortoise/sdk.py` is a fifth rule input
+    either selected no surface (`website/_redirects`, `website/functions/blog/
+    [[path]].ts`: `surfaces=[]`) or fell through to the `core` fallback
+    (`tests/_html_links.py`, `tortoise/quadrature.py`: `surfaces=['core']`) — and
+    in every case this file never ran, which is the property this ratchet pins.
+    Coverage breadth is NOT part of that property, and listing an input can cost
+    it: the two `website/` inputs go from the 57-file tier-1 set to the 125-file
+    `onboarding` surface, trading three curated-smoke files (`test_config.py`,
+    `test_guard.py`, `test_reaper_orphan.py` — the same three the legal-drafts
+    note below counts), while a `tests/`- or
+    `tortoise/`-prefixed input REPLACES its `core` fallback (633 files) with that
+    125-file surface — measured at this head, and narrower on purpose (a single
+    matrix consumer, per the `tests/_html_links.py` comment in
+    `tools/ci_selection.py`); `CORE_ALSO` is the lever if that breadth is ever
+    wanted back. The two legal drafts at the end of this docstring are NOT here
+    because that route costs the same three tier-1 files there. `tortoise/sdk.py` is a
+    fifth rule input
     of the same shape
     (the status vocabulary, the capture cap, the `_extract_session_v2` call sites
     are all parsed out of it), but it is a `SHARED_MODULES` member, so a PR
