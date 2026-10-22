@@ -349,7 +349,16 @@ def log_result(outcome: RestoreOutcome,
     """
     line = outcome.render()
     log = logger or logging.getLogger(LOG_NAME)
-    if outcome.coverage and outcome.coverage != COVERAGE_COMPLETE:
+    # ⛔ ``declared_partial`` matters as much as the coverage string: the
+    # ``relations-not-hot`` state is DEFINED by ``coverage`` staying ``complete``
+    # (every node landed, edges did not), so a selector that read coverage alone
+    # logged exactly the state this field exists to surface at INFO — while a
+    # ``--limit`` node-partial logged at WARNING. One rule for both partial
+    # states, and the rule is the docstring's: a partial restore is a warning
+    # because the cache answers not-hot for keys the operator may believe are
+    # back.
+    if outcome.declared_partial or (outcome.coverage
+                                    and outcome.coverage != COVERAGE_COMPLETE):
         log.warning(line)
     else:
         log.info(line)

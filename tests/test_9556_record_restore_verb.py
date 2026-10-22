@@ -699,6 +699,17 @@ def _projection_bound_to(shared_proj, graph):
     graph handle/name are rebound, so ``_project_record_view`` (token → L2 →
     wipe → indexes → records → declaration) runs unmodified on a graph this
     test owns.
+
+    ⛔ The copy's ``db`` is a NON-CLOSING proxy (#9604 review). The CLI path
+    closes the projection it was handed (``_cmd_record_restore``'s ``finally``),
+    and ``FalkorProjection.close`` routes to ``db._t_close()`` — which on the
+    embedded/redislite lane TEARS THE SERVER DOWN, not merely a pool
+    disconnect. A shallow ``__dict__`` copy shares the session fixture's db, so
+    the ``[cli]`` parameter closed the shared fixture mid-file: the test's own
+    final assertion died on a removed socket and every later ``_LIVE_`` pin
+    errored for a reason unrelated to what it pins (6 failed / 29 passed on
+    ``TORTOISE_TEST_CARVE_OUT=1``). Closing the copy must close nothing the
+    session owns.
     """
     from tortoise.projection import FalkorProjection
 
@@ -706,7 +717,30 @@ def _projection_bound_to(shared_proj, graph):
     proj.__dict__.update(shared_proj.__dict__)
     proj.g = graph
     proj._graph_name = graph.name
+    proj.db = _NonClosingDB(shared_proj.db)
+    proj._closed = False
     return proj
+
+
+class _NonClosingDB:
+    """Forwards everything to a real db, and closes NOTHING.
+
+    Exists only so a projection a test hands to a caller that closes it (the
+    ``record-restore`` CLI) cannot tear down the session-scoped fixture that
+    every other live pin in the file depends on.
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def close(self) -> None:
+        return None
+
+    def _t_close(self) -> None:
+        return None
 
 
 @pytest.mark.parametrize("mode", ["module", "cli"])
@@ -904,7 +938,7 @@ def _view_with_relations(n_nodes: int, n_relations: int) -> cp.RecordView:
                              "status": "live"})
         for i in range(n_nodes))
     relations = tuple(
-        cp.RecordRelation(rel_type="RELATES_TO", src_label="Point",
+        cp.RecordRelation(rel_type="related", src_label="Point",
                           src_key=f"p-9556-{i % max(n_nodes, 1)}",
                           tgt_label="Point",
                           tgt_key=f"p-9556-{(i + 1) % max(n_nodes, 1)}", idx=i)
@@ -1035,3 +1069,99 @@ def test_a_LIVE_landed_rebuild_still_declares_complete(
     assert not declaration.partial, (
         f"a rebuild that landed every record node must still declare "
         f"complete, or every residency read becomes a miss: {declaration}")
+
+
+# ── the RELATION count is measured too, and the measurement is pinned ──────
+#    (#9604 review round 2: `relations_written` was only ever exercised through
+#     fake result dicts, so reverting the post-write relation count to
+#     `len(relations)` — or to 0 — left every pin green.)
+
+
+def test_a_LIVE_restore_lands_an_edge_and_reports_no_relation_shortfall(
+        shared_proj, cache_graph):
+    """The positive control: an edge whose endpoints ARE in the record lands.
+
+    Asserts the EDGE in the cache (not just the counter) and the absence of a
+    declared shortfall — the half that a count stuck at 0 would fabricate.
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    view = _view_with_relations(2, 1)
+
+    outcome = rrestore.restore_from_record_view(
+        view, org_id="o", graph_id="g", cache_graph=cache_graph.name,
+        project=proj)
+
+    edges = cache_graph.query(
+        "MATCH (:Point)-[r:related]->(:Point) RETURN count(r)"
+    ).result_set[0][0]
+    assert edges == 1, f"the record's edge must be in the cache: got {edges}"
+    assert outcome.relations_written == 1, outcome.render()
+    assert outcome.relations_not_written == 0, outcome.render()
+    assert outcome.declared_partial == (), outcome.render()
+
+
+def test_a_LIVE_restore_reports_an_edge_whose_endpoint_is_NOT_in_the_record(
+        shared_proj, cache_graph):
+    """The negative control: a relation whose endpoint the record lacks is a no-op.
+
+    ``relation_statement`` is a ``MATCH … MERGE``, so an endpoint the projection
+    cannot resolve writes nothing and raises nothing — the #3895 shape. The run
+    still exits 0 (the node contract holds), but the shortfall must be MEASURED
+    and DECLARED, never swallowed (RED pre-fix: ``relations_written`` was
+    reported but never compared, and nothing carried ``relations-not-hot``).
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    nodes = _view_with_relations(2, 0).nodes
+    orphan = cp.RecordRelation(rel_type="related", src_label="Point",
+                               src_key="p-9556-0", tgt_label="Point",
+                               tgt_key="p-9556-ABSENT", idx=0)
+    view = cp.RecordView(nodes=nodes, relations=(orphan,))
+
+    outcome = rrestore.restore_from_record_view(
+        view, org_id="o", graph_id="g", cache_graph=cache_graph.name,
+        project=proj)
+
+    edges = cache_graph.query(
+        "MATCH (:Point)-[r:related]->(:Point) RETURN count(r)"
+    ).result_set[0][0]
+    assert edges == 0, f"the orphan edge must not be in the cache: got {edges}"
+    assert outcome.nodes_written == 2, outcome.render()
+    assert outcome.relations_written == 0, outcome.render()
+    assert outcome.relations_not_written == 1, outcome.render()
+    assert outcome.declared_partial == ("relations-not-hot",), outcome.render()
+    assert "relations-not-hot" in outcome.render(), outcome.render()
+
+
+def test_a_LIVE_failed_rebuild_leaves_a_truthful_declaration(
+        shared_proj, cache_graph, monkeypatch):
+    """A raise BETWEEN the wipe and the declaration must not leave the old claim.
+
+    ``rebuild_from_record`` writes its residency marker from the measured counts
+    AFTER ``project_records``. If the projection (or the count itself) raises in
+    that window there is no marker to overwrite — and ``read_declaration`` then
+    answers ``complete`` for a marker that does not exist, so a read for a key
+    the wiped cache does not hold reports ``empty`` instead of ``not-hot``
+    (§17.3 inverted, the same class as the plan-built marker).
+    """
+    from tortoise.residency import read_declaration
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+
+    def _boom(g, plan):
+        raise RuntimeError("driver died mid-materialisation")
+
+    monkeypatch.setattr(cp, "project_records", _boom)
+
+    with pytest.raises(RuntimeError, match="driver died"):
+        proj.rebuild_from_record(_view(2), confirm_destructive=True)
+
+    remaining = cache_graph.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    assert remaining == 0, "the fixture must really have wiped the cache"
+
+    declaration = read_declaration(cache_graph)
+    assert declaration.partial, (
+        f"a wiped graph with no proven write must not read as complete: "
+        f"{declaration}")
+    assert not declaration.hot_keys, declaration.hot_keys

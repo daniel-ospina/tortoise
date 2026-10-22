@@ -16675,10 +16675,8 @@ class FalkorProjection(
         """
         from tortoise.cache_projection import (
             NODE_TABLES,
-            declaration_for,
             project_records,
             record_plan,
-            write_declaration,
         )
 
         nodes = tuple(view.nodes)
@@ -16710,33 +16708,48 @@ class FalkorProjection(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_from_record")
-        self._ensure_indexes()
-        statements = project_records(self.g, plan)
+        # ⛔ Everything from here to the declaration write is POST-WIPE, and a
+        # raise in this window used to leave the graph with NO residency marker
+        # at all (#9604 review). ``residency.read_declaration`` answers
+        # ``complete`` for an ABSENT marker (the documented fail-safe: a missing
+        # declaration is the normal state), so "wiped and then died" read as
+        # "the whole record is hot" — the same §17.3 inversion the
+        # plan-built-marker fix closed, reached through absence instead of
+        # through a stale plan. The marker is therefore made TRUE before the
+        # exception leaves this method: nothing was proven written, so nothing
+        # is claimed hot.
+        try:
+            self._ensure_indexes()
+            statements = project_records(self.g, plan)
 
-        # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
-        # ``len(nodes)`` is the size of the INPUT, computed above — before the
-        # wipe and before ``project_records`` ran — so returning it as
-        # "written" made EVERY caller's count check a tautology: a rebuild that
-        # wiped and materialised nothing still reported
-        # ``nodes_written == len(nodes)``, i.e. a destroyed cache behind an
-        # exit-0-shaped success. That is the false-PASS class, so the counts are
-        # read back off the graph the same way the sibling replay lane does
-        # (``_rebuild_all_replay`` → ``node_count``/``edge_count`` after the
-        # fold). The wipe is unconditional and whole-graph, so everything the
-        # graph holds now was written by THIS run.
-        #
-        # ⚠️ ``relations_written`` can legitimately be lower than the number of
-        # record relations SELECTED: a relation statement MATCHes its endpoints,
-        # so one whose endpoint the projection does not resolve is a no-op (see
-        # this method's module-facing notes). ``relations_selected`` reports the
-        # plan's own size beside it, so the two are told apart rather than
-        # conflated.
-        nodes_written = self._count_projected(
-            "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
-            "RETURN count(n)",
-            {"labels": sorted(NODE_TABLES)})
-        relations_written = self._count_projected(
-            "MATCH ()-[r]->() RETURN count(r)", None)
+            # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
+            # ``len(nodes)`` is the size of the INPUT, computed above — before the
+            # wipe and before ``project_records`` ran — so returning it as
+            # "written" made EVERY caller's count check a tautology: a rebuild that
+            # wiped and materialised nothing still reported
+            # ``nodes_written == len(nodes)``, i.e. a destroyed cache behind an
+            # exit-0-shaped success. That is the false-PASS class, so the counts are
+            # read back off the graph the same way the sibling replay lane does
+            # (``_rebuild_all_replay`` → ``node_count``/``edge_count`` after the
+            # fold). The wipe is unconditional and whole-graph, so everything the
+            # graph holds now was written by THIS run.
+            #
+            # ⚠️ ``relations_written`` can legitimately be lower than the number of
+            # record relations SELECTED: a relation statement MATCHes its endpoints,
+            # so one whose endpoint the projection does not resolve is a no-op (see
+            # this method's module-facing notes). ``relations_selected`` reports the
+            # plan's own size beside it, so the two are told apart rather than
+            # conflated.
+            nodes_written = self._count_projected(
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
+                "RETURN count(n)",
+                {"labels": sorted(NODE_TABLES)})
+            relations_written = self._count_projected(
+                "MATCH ()-[r]->() RETURN count(r)", None)
+        except BaseException:
+            if declare:
+                self._declare_materialized(view, (), scope=scope)
+            raise
 
         declaration = None
         if declare:
@@ -16760,12 +16773,7 @@ class FalkorProjection(
             # genuinely absent.
             proven = (materialized
                       if nodes_written == len(set(materialized)) else ())
-            declaration = declaration_for(
-                view.record_keys,
-                proven,
-                scope=scope,
-            )
-            write_declaration(self.g, declaration)
+            declaration = self._declare_materialized(view, proven, scope=scope)
 
         return {
             "nodes_written": nodes_written,
@@ -16781,6 +16789,23 @@ class FalkorProjection(
             "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
             "source": "record",
         }
+
+    def _declare_materialized(self, view, proven, *, scope: str = ""):
+        """Write the residency marker for what this run PROVED it materialised.
+
+        One writer for both arms of :meth:`_project_record_view` — the landed
+        one (:meth:`_count_projected` matched the plan) and the failed one
+        (nothing is provable, so nothing is claimed hot). ``residency
+        .read_declaration`` treats an ABSENT marker as ``complete``, so a
+        post-wipe failure that wrote no marker would report a destroyed cache as
+        fully hot; this is how the failure arm makes the graph's own truth match
+        the run's.
+        """
+        from tortoise.cache_projection import declaration_for, write_declaration
+
+        declaration = declaration_for(view.record_keys, proven, scope=scope)
+        write_declaration(self.g, declaration)
+        return declaration
 
     def _count_projected(self, cypher: str,
                          params: dict | None = None) -> int:

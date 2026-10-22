@@ -11336,9 +11336,12 @@ def main(argv: list[str] | None = None) -> int:
                           "wrong guess opens an EMPTY graph and the run would "
                           "report a restore into a graph nobody reads")
     rr2.add_argument("--limit", type=int, default=None,
-                     help="Write at most N nodes (a bounded run declares "
-                          "coverage=partial, whose unwritten keys read as "
-                          "not-hot on the read path — never empty)")
+                     help="Write at most N nodes (N >= 1). A bounded run is "
+                          "`bounded`, NOT necessarily partial: a bound at or "
+                          "above the record's node count still declares "
+                          "coverage=complete. Read `unwritten_keys` / "
+                          "`relations_not_written` (reported as "
+                          "`declared_partial`), not the flag or the bound")
     rr2.add_argument("--allow-empty", action="store_true",
                      help="DANGER: proceed when the record holds NO rows for "
                           "this scope. Without it an empty source is REFUSED "

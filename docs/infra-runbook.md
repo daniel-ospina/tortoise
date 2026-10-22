@@ -2604,7 +2604,7 @@ refused before the target graph is even opened.
 
 | code | meaning | next step |
 |---|---|---|
-| `0` | restored; `nodes_written`/`relations_written` are **measured off the cache after the rebuild** (not the plan's size) | compare `nodes_written` with the record's NODE count — equality is REQUIRED (a shortfall is refused as exit `2`). `relations_written` is different: it MAY legitimately be lower, because a relation statement MATCHes its endpoints and a record that does not carry them makes it a no-op (R4). Read `relations_not_written` — a shortfall there is the declared-partial state **`relations-not-hot`**, named in `declared_partial`, and it is never a silent part of a `complete` claim: `coverage` is a statement about NODE keys only |
+| `0` | restored; `nodes_written`/`relations_written` are **measured off the cache after the rebuild** (not the plan's size) | compare `nodes_written` with what this run was supposed to write — the record's NODE count on an unbounded run, `min(record_nodes, --limit)` on a bounded one. Equality is REQUIRED (a shortfall beyond that is refused as exit `2`), so a `--limit 500` run over a 5,000-node record exits `0` at 500 and is not a fault. `relations_written` is different: it MAY legitimately be lower, because a relation statement MATCHes its endpoints and a record that does not carry them makes it a no-op (R4). Read `relations_not_written` — a shortfall there is the declared-partial state **`relations-not-hot`**, named in `declared_partial`, and it is never a silent part of a `complete` claim: `coverage` is a statement about NODE keys only |
 | `3` | **REFUSED before any write** (empty source, the cache's wipe guard): no row of the record's state was written | read the printed reason — each has a different remedy. ⚠️ The source-side refusals fire BEFORE the target graph is opened, but the L2 refusal is asked of a **projection**, and opening one creates the graph and MERGEs its own `:Meta` bookkeeping marker — so a refused run can leave an empty graph behind. That is the projection, not a restore |
 | `2` | **no verdict** (no/invalid DSN, `psycopg2` absent, unreadable record or cache, **a `--limit` below 1**, usage error, **a failure during the rebuild**, **a rebuild that left the cache holding none of the record's rows** — including a record that carried relations but no nodes, whose relations cannot resolve their endpoints) | fix the input; for the two post-wipe cases the cache has been **wiped** — treat it as **LOST** (and in every case as UNKNOWN), never as it was. The residency declaration written by the run describes only what the measured counts proved (`declared_partial` includes `not-hot`), so a read after a failed restore is `not-hot`/`degraded`, never `empty`; a successful re-run rewrites it |
 
@@ -2680,6 +2680,13 @@ states have their own reason string, and neither is an absence (§17.3):
   the record's node count; such a run is `coverage=complete` with
   `unwritten_keys: 0`. Read the counts, not the flag. (`--limit` below `1` is
   refused outright: it would wipe and write nothing.)
+- **`--allow-empty` over an empty record** — the one state where the declaration
+  says `partial` and nothing is short: no record keys exist, so the declaration
+  claims none hot (`declared_partial` is empty, `unwritten_keys` is 0) and the
+  run made exactly the write the operator stated. A read after it is `not-hot`,
+  never `empty` — an empty record is not evidence that the cache should be
+  empty. It is logged at WARNING because `partial` is the declaration's honest
+  answer for "covers no key", not because anything went wrong.
 - **`cache-unreachable`** — the cache did not answer **at all**. This is the
   fourth residency branch: a residency miss with its own reason, never an
   insufficiency and never an absence. While you see this, *no* read of the
@@ -2705,16 +2712,21 @@ part of this section, and its status is stated rather than implied:
 
 | drill step | status |
 |---|---|
-| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (29 pins / 30 collected cases, live cache graph included) |
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (37 pins / 38 collected cases, live cache graph included) |
 | a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
 #9567), flush the `test_`-named drill graph, run this verb, then compare
 `nodes_written`/`relations_written` (both **measured off the cache**) **and** a
-per-label count against the pre-flush baseline captured in the same run —
-equality, not "close". Record the counts in the run's artifact; do not put them
-in this section, where they would rot.
+per-label count against the **RECORD's** counts — not against the flushed
+baseline: a record-sourced rebuild legitimately holds fewer nodes than the
+baseline (the six cache-only classes are dropped by design, §0.5 of
+`docs/epics/2026-10-10-7879-postgres-record/06-cache-projection.md`) and fewer
+relations (the `relations-not-hot` state above), so "equality with the baseline"
+would report a correct restore as a failure. The baseline is context for the
+log; the record is the reference. Record the counts in the run's artifact; do
+not put them in this section, where they would rot.
 
 ### What this does not do (so it cannot be cited for it later)
 
