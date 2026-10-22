@@ -527,6 +527,239 @@ def record_identity_skip(what: str, value, label: str = "identity", *,
     return entry
 
 
+# ── Malformed ENVELOPES: the OTHER record-drop channel (#8843) ─────────────
+#
+# #8702 gave a dropped record a record-drop signal, but only for identity
+# refusals. ``apply()`` ALSO drops records that carry no identity at all — the
+# ``#331`` guard (a missing/non-string ``type``) and the ``#325`` guard (a
+# non-dict ``point`` on a creation record). Both ``return`` normally, so
+# ``recover_from_log``'s per-record ``else`` arm incremented ``applied`` and the
+# only trace was a ``logger.warning``. MEASURED at 521a3fc78: a journal of
+# ``[healthy PointAdded, {"event_id": "ev-x", "type": None}]`` reported
+# ``replayed 2 events`` (``applied == 2``) over a graph holding ``db_points == 1``,
+# with no bucket naming the dropped record. ⛔ Note what is and is not wrong there:
+# ``log_points`` is 2 and ``applied`` is 2, so the arithmetic
+# ``reads = applied + identity_skipped + torn + refused`` (documented at that
+# head) BALANCED — the falsehood was one level down, in ``applied`` itself, which
+# counted a dropped record as a replay and so made the sum agree with a
+# recovery that had not happened. That is the false PASS this channel closes:
+# a reconciliation is only as honest as its largest term.
+#
+# ⛔ WHY THIS IS NOT ``identity_skipped``. Folding it there would conflate two
+# causes that send an operator to different places: an identity skip means the
+# record was well-formed and its key was unwritable; a malformed envelope means
+# there IS no record to key. The bucket is therefore its own, and the shape is
+# named in :meth:`MalformedEnvelope.describe` — the #8018 class this module
+# already guards against.
+#
+# ⛔ WHY THE GUARD ITSELF RECORDS. On the replay-ACCOUNTING path the predicate
+# has one home — ``apply()``'s two guards — and the replay loop must not
+# re-derive it: a second reader of "what is a malformed envelope" drifts from
+# the first (the repo's "ONE list" rule). ⚠️ Scope, stated exactly rather than
+# as "ONLY there" (review cycle 3 on "only here", completed cycle 4): the same
+# two ``isinstance`` guards also live in ``_apply_one`` — the in-memory fold
+# behind ``fold()`` / ``InMemoryProjection`` / ``rebuild()`` — and in
+# ``consistency._fold_journal``, the reference view ``check_consistency``
+# compares the graph against. NEITHER records, because neither has an accounting
+# channel. So the invariant is "one RECORDER per accounting path", not "one
+# guard in the package": a new engine that needs this counted reads
+# ``collect_malformed_envelopes`` and records from its own guard, and never
+# calls a re-derived test. A fold reached deep inside a run records here without
+# a signature change at every call site — the same context-var shape #8702's
+# identity collector uses.
+
+#: The record's normalised discriminator is unusable: ``type`` is missing, or it
+#: is present and not a ``str`` (the ``#331`` guard). WHICH of the two is the
+#: record's own fact and must not be guessed — see ``field_present``.
+MALFORMED_MISSING_TYPE = "missing/non-string type"
+#: A creation record's ``point`` payload is missing or is not a dict (the
+#: ``#325`` guard).
+MALFORMED_NON_DICT_POINT = "non-dict point"
+#: The ENVELOPE was well-formed and a NESTED payload shadowed it (review cycle
+#: 4). ``apply()`` classifies on ``_norm(event)``, which is
+#: ``{**ev, **ev["point"]}`` — so a ``point`` payload carrying its own ``type``
+#: key replaces a perfectly good envelope ``type``, and the record is dropped for
+#: a discriminator the envelope never had. Reporting that as "the envelope is
+#: malformed" names a cause that is FALSE for the record (the #8018 class, which
+#: is the whole reason this channel exists), so it gets its own cause and its own
+#: sentence. The SAME shadowing the module already reads around for
+#: ``contains_session`` (:meth:`FalkorProjection.apply`), one field over.
+MALFORMED_SHADOWED = "shadowed by a nested payload"
+
+
+#: How much of a refused VALUE the report may render. A malformed ``point``
+#: payload is a record's whole point, embedding included — an unbounded ``repr``
+#: turned one operator-facing ``reason`` into 7,226 characters across three
+#: exemplars (review cycle 5). Long enough to recognise the value, short enough
+#: to read.
+_VALUE_REPR_LIMIT = 120
+
+
+def _short(value) -> str:
+    """``repr(value)``, bounded — a report must stay readable to be a report."""
+    text = repr(value)
+    if len(text) <= _VALUE_REPR_LIMIT:
+        return text
+    return f"{text[:_VALUE_REPR_LIMIT]}… ({len(text)} chars)"
+
+
+@dataclass(frozen=True)
+class MalformedEnvelope:
+    """One record ``apply()`` DROPPED because it could not be read.
+
+    (Not "because its discriminator is unreadable": TWO of the four causes —
+    a non-dict ``point`` on a ``PointAdded``/``OperatorAdded``, and a nested
+    ``point`` shadowing the payload — leave the discriminator perfectly
+    readable. The payload is what is bad, and the class docstring must not
+    repeat the false aggregate sentence the reason clause used to carry;
+    review cycle 7.)
+
+    Distinct from :class:`IdentitySkip` by CAUSE, not by severity: a record
+    with no usable ``type`` (or a creation record whose ``point`` is not a
+    dict) carries no identity to attribute, so nothing here can be mistaken for
+    "the key could not be written".
+
+    ``what`` is the record family as the guard saw it and is RENDERED, so the
+    reason clause says WHICH family was dropped (the sibling
+    :meth:`IdentitySkip.describe` does the same). ``cause`` is one of the
+    ``MALFORMED_*`` constants.
+
+    ⛔ ``field_present`` is the FACT the guard read from the record, and it is
+    NOT inferred from ``value`` (review cycle 1). ``ev.get("type")`` returns
+    ``None`` both for an ABSENT key and for a present ``type: null``, so a
+    report that branched on the value alone said "carries no 'type' at all"
+    about a record whose ``type`` key was right there — the #8018 class, at the
+    very site this channel exists to keep honest. The same shape applies to
+    ``point``: a missing key and a ``point: "…"`` are different records with
+    different repairs.
+
+    ⛔ ``envelope_value`` exists so :data:`MALFORMED_SHADOWED` can name BOTH
+    values. Without it the report can only say "not a str", which is true but
+    leaves the operator editing the wrong line.
+
+    ⛔ ``value`` is rendered through :func:`_short`, never with a bare ``repr``
+    (review cycle 5). A malformed ``point`` payload is a record's whole point
+    — id, content, and a 384-float embedding — so an unbounded ``repr`` made the
+    operator-facing ``reason`` **7,226 characters** from three exemplars, and
+    the collector then held a reference to every such payload for the whole run.
+    A report has to be readable to be a report.
+    """
+
+    what: str
+    cause: str
+    field: str = "type"
+    field_present: bool = True
+    value: object = None
+    envelope_value: object = None
+    event_id: str | None = None
+    where: str = ""
+
+    def describe(self) -> str:
+        """The cause, in the record's own terms (never "missing" for a present field).
+
+        The FIELD NOUN comes from ``self.field``, not from ``cause``: both call
+        sites name it (``"type"`` / ``"point"``) and a report that derived the
+        noun from the cause instead would silently describe the wrong field for
+        any other pairing — text that looks authoritative while being about
+        something else (review cycle 2).
+        """
+        if self.cause == MALFORMED_SHADOWED:
+            if self.field == "point":
+                # ⛔ Its OWN sentence, not the type template (review cycle 5).
+                # There is no "envelope point value" to compare against: the
+                # collision is a nested KEY inside the payload, so the template
+                # printed the whole payload dict as the envelope's value and
+                # compared two things that are not the same quantity.
+                # ⛔ "the envelope record is well-formed" is asserted ONLY when
+                # the envelope really carries a usable discriminator (review
+                # cycle 9): with no `type` of its own the record is dropped for
+                # a payload collision AND an absent discriminator, and claiming
+                # the envelope is fine is then simply false.
+                if isinstance(self.envelope_value, str):
+                    _tail = "the envelope record is well-formed"
+                else:
+                    _tail = ("the envelope record is ALSO dropped for having "
+                             "no usable 'type' of its own "
+                             f"({_short(self.envelope_value)})")
+                return (f"{self.what}: the 'point' payload carries a nested "
+                        f"'point' key ({_short(self.value)}), and `_norm` "
+                        f"splices it over the payload — so the fold reads "
+                        f"that as the payload itself; {_tail}")
+            return (f"{self.what}: the NESTED payload's '{self.field}' "
+                    f"({_short(self.value)}) shadows the envelope's "
+                    f"({_short(self.envelope_value)}), so the fold reads no "
+                    f"usable discriminator — the envelope itself is "
+                    f"well-formed")
+        if self.cause == MALFORMED_MISSING_TYPE:
+            if not self.field_present:
+                return f"{self.what} carries no '{self.field}' key at all"
+            return (f"{self.what}'s '{self.field}' is {_short(self.value)} — a "
+                    f"{type(self.value).__name__}, not a str — so the "
+                    f"fold has no discriminator to select on")
+        if not self.field_present:
+            return f"{self.what} has no '{self.field}' key at all"
+        return (f"{self.what}'s '{self.field}' payload is {_short(self.value)} "
+                f"— a {type(self.value).__name__}, not a dict — so there is "
+                f"nothing to fold")
+
+    def __str__(self) -> str:  # pragma: no cover - formatting only
+        where = f"{self.where}: " if self.where else ""
+        loc = f" (event_id={self.event_id!r})" if self.event_id else ""
+        return f"{where}{self.describe()}{loc}"
+
+
+_MALFORMED_ENVELOPES: ContextVar[list | None] = ContextVar(
+    "tortoise_malformed_envelope_set", default=None)
+
+
+@contextmanager
+def collect_malformed_envelopes():
+    """Open a malformed-envelope run. Yields the (mutable) list to inspect.
+
+    Nested runs are independent, exactly like :func:`collect_identity_skips`.
+    """
+    entries: list[MalformedEnvelope] = []
+    token = _MALFORMED_ENVELOPES.set(entries)
+    try:
+        yield entries
+    finally:
+        _MALFORMED_ENVELOPES.reset(token)
+
+
+def record_malformed_envelope(what: str, cause: str, *,
+                              field: str = "type",
+                              field_present: bool = True,
+                              value=None,
+                              envelope_value=None,
+                              event_id: str | None = None,
+                              where: str = "") -> MalformedEnvelope:
+    """Record one malformed-envelope drop into the active run (if any).
+
+    Same contract as :func:`record_identity_skip`: the LOG LINE is not the
+    record, and outside a run this is a no-op, so a one-record ``apply()`` keeps
+    its existing warning as the only signal.
+
+    ``field_present`` MUST come from the RAW ENVELOPE — ``"type" in raw`` —
+    never inferred from ``value`` (see :class:`MalformedEnvelope`) and never
+    read off the ``_norm`` splice: inside ``apply()``, ``ev`` is
+    ``{**event, **event["point"]}``, so ``"type" in ev`` is TRUE for a record
+    whose envelope carries no ``type`` at all. That is precisely the
+    present-vs-absent bug this flag exists to prevent, and an earlier draft of
+    this very docstring recommended it (review cycle 8) — a new recorder written
+    from the wrong advice reintroduces the regression, and no end-to-end pin can
+    see a DIFFERENT call site.
+    """
+    entry = MalformedEnvelope(what=str(what), cause=str(cause),
+                              field=str(field),
+                              field_present=bool(field_present),
+                              value=value, envelope_value=envelope_value,
+                              event_id=event_id, where=where)
+    entries = _MALFORMED_ENVELOPES.get()
+    if entries is not None:
+        entries.append(entry)
+    return entry
+
+
 def assert_no_non_folded(entries, *, engine: str = "rebuild") -> None:
     """Fail closed: raise :class:`NonFoldedEventsError` if the run refused any.
 
