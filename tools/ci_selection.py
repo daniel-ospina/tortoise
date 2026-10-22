@@ -1058,12 +1058,12 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the
              # very PR that edits a formula would STOP running the whole core pool
-             # it selects today (`select(["tortoise/quadrature.py"])` collapses to
-             # the `onboarding` set alone), i.e. the fix for one silent drop would
-             # create another. The pool's size is deliberately NOT stated here: it
-             # grows with the suite, and a bare count rots (measured 633 core-only
-             # files at `1ff23919c`; read `len(_sel(["tortoise/foo.py"])["test_files"])`
-             # for today's).
+             # it selects today (`select(["tortoise/quadrature.py"], ...)` collapses
+             # to the `onboarding` set alone), i.e. the fix for one silent drop would
+             # create another. The pool's size is a DATED ANCHOR, not a live count
+             # (633 at `1ff23919c`; read today's with
+             # `len(select(["tortoise/foo.py"], "pull_request", load_manifest())["test_files"])`)
+             # — it grows with the suite, and a bare count rots.
              #   ⚠️ Deliberately NOT the whole fix: `tests/test_ep_quadrature.py`
              # is registered under `ep`, so a quadrature-only diff still drops it —
              # and so do the three other `ep`-registered suites that import the

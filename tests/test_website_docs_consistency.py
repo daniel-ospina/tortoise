@@ -1297,16 +1297,19 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     """Close the same REVERSE ratchet one level up: the guard's OWN inputs.
 
     `test_every_in_scope_page_is_selectable_by_ci` covers the pages in the derived
-    scope, but three inputs change that scope or the rule WITHOUT being a page: the
+    scope, but four inputs change that scope or the rule WITHOUT being a page: the
     shared extractor `tests/_html_links.py` (the rule itself), `website/_redirects`
-    (which pages `_canonical_redirect_targets` drops from scope), and
+    (which pages `_canonical_redirect_targets` drops from scope),
     `website/functions/blog/[[path]].ts` (what `_function_serves` resolves the blog
-    link against). A PR editing only one of those selects no surface, so this file
-    never runs and the guard silently stops covering what it was written for —
-    verified before listing: `select(["website/_redirects"], ...)` returned
+    link against), and `tortoise/quadrature.py` (whose EP factors
+    `test_docs_states_the_formulas_quadrature_actually_computes` derives the
+    /docs expectation FROM). A PR editing only one of those selects no surface, so
+    this file never runs and the guard silently stops covering what it was written
+    for — verified before listing: `select(["website/_redirects"], ...)` returned
     `surfaces=[]` with this file absent from `test_files`.
 
-    A FOURTH input was added by #9607 and is the sharpest of the four:
+    The fourth is the sharpest, and it was the one still broken at #9607 (the other
+    three were already covered when they were added):
     `test_docs_states_the_formulas_quadrature_actually_computes` derives its
     expected factors from `tortoise/quadrature.py` itself, and its own docstring
     says *"editing `quadrature.py` itself reds the page that describes it"*. That

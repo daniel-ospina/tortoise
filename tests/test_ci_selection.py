@@ -1822,7 +1822,9 @@ def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
     # reachability assert alone stays green while the core pool disappears
     # (measured at `89f780805`: 682 files with the entry, 125 without — the
     # `onboarding` set alone). No generic ratchet covers it — nothing else iterates
-    # `CORE_ALSO`, and every other entry carries its own explicit arm like this.
+    # `CORE_ALSO`, and MOST other entries carry their own explicit arm like this
+    # (not all: `tortoise/projection/edges.py` is unpinned and drops 681 -> 147
+    # silently — same class as #9621, filed as #9646).
     #
     # Each assert names a file registered ONLY in the surface its half adds
     # (`load_manifest()`: `test_website_docs_consistency.py` is `onboarding`,
@@ -1830,11 +1832,11 @@ def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
     # masked by the other one.
     #
     # The descriptive `test_files` assert comes BEFORE the bare `surfaces` assert
-    # in both pairs, and that ordering is load-bearing: a failing assert
-    # short-circuits the rest of the test, so with the surface check first the
-    # only thing a developer saw was a bare `['core']` with no explanation — the
-    # message naming the missing guard was unreachable. Each surface assert also
-    # carries its own message now, so a lost half is named whichever assert fires.
+    # in both pairs. That ordering WAS load-bearing and is kept so the more
+    # descriptive message fires first: a failing assert short-circuits the rest of
+    # the test, so with the surface check leading, the only thing a developer saw
+    # was a bare `['core']` with no explanation. Both surface asserts now carry
+    # their own message too, so a lost half is named whichever assert fires.
     #
     # Mutation check, both measured: removing "tortoise/quadrature.py" from
     # `CORE_ALSO` fails the `test_record_schema_placement.py` assert (682 files ->
