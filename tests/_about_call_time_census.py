@@ -94,10 +94,13 @@ _BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
 #: be generous.
 #: The price is measured, not assumed, and the RELATION is what is pinned rather
 #: than any count: the unanchored form is a strict SUPERSET of the anchored one, so
-#: nothing admitted before is dropped, for a BYTE-IDENTICAL derivation — because
-#: Python subscripts and comparisons (`sim[i, j]`, `df[t]`, `r["created_at"]`)
-#: match too, and the rest of `_files()` comes from the other three halves of the
-#: gate. Three arms measure that:
+#: nothing admitted before is dropped, for a BYTE-IDENTICAL derivation. The price
+#: is a parse of some module that holds no Cypher at all, because a Python
+#: SUBSCRIPT whose key is a bare name (`if df[t] > 0`) matches too — the comma and
+#: quote exclusions in this pattern keep `sim[i, j]` and `r["created_at"]` out of
+#: it, so those are NOT instances of the price and are not cited as such — and the
+#: rest of `_files()` comes from the other three halves of the gate. Three arms
+#: measure that:
 #: `test_the_module_filter_is_a_strict_superset_of_the_anchored_form` (no module
 #: dropped, and the widening really does admit modules the anchored form refused),
 #: `test_the_module_filter_admits_a_split_traversal` (the derived keys / site rows,
