@@ -1306,10 +1306,11 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     verified before listing: `select(["website/_redirects"], ...)` returned
     `surfaces=[]` with this file absent from `test_files`.
 
-    A FOURTH input was added by #9607 and is the sharpest of the four: the QUADRATURE
-    block below derives its expected factors from `tortoise/quadrature.py` itself,
-    and its own docstring says *"editing `quadrature.py` itself reds the page that
-    describes it"*. That was false in CI — `quadrature.py` matched no
+    A FOURTH input was added by #9607 and is the sharpest of the four:
+    `test_docs_states_the_formulas_quadrature_actually_computes` derives its
+    expected factors from `tortoise/quadrature.py` itself, and its own docstring
+    says *"editing `quadrature.py` itself reds the page that describes it"*. That
+    was false in CI — `quadrature.py` matched no
     `SOURCE_PATTERNS` entry and was not in `SHARED_MODULES`, so a quadrature-only
     diff took the `core` fallback, and this file is registered only under
     `onboarding` (measured on `02e18e752`: `select(["tortoise/quadrature.py"])` →

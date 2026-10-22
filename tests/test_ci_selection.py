@@ -1820,8 +1820,8 @@ def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
     # `CORE_ALSO` entry keeps the `core` pool that a named-surface match REPLACES
     # (#2938). Dropping the `CORE_ALSO` half is SILENT: the guard still runs, so a
     # reachability assert alone stays green while the core pool disappears
-    # (measured `_sel(["tortoise/quadrature.py"])` -> 681 files with the entry,
-    # 628 without). No generic ratchet covers it — nothing else iterates
+    # (measured at `89f780805`: 682 files with the entry, 125 without — the
+    # `onboarding` set alone). No generic ratchet covers it — nothing else iterates
     # `CORE_ALSO`, and every other entry carries its own explicit arm like this.
     #
     # Each assert names a file registered ONLY in the surface its half adds
