@@ -3468,10 +3468,15 @@ surfaces:
   - test_monitoring.py
   # #9494: the staleness measurement (`tortoise/code_freshness.py`) and its two
   # consumers — `tortoise/monitoring.py` (the `server_code` health field) and
-  # `tortoise/mcp_server.py` (`_safe`'s measured-stale branch). None of those
-  # three files matches a SOURCE_PATTERN, so a diff touching only them selects
-  # `core` — unregistered, the file that carries this fix runs in NO leg at all
-  # (and `ci_selection.py --integrity` reds on the unclassified file).
+  # `tortoise/mcp_server.py` (`_safe`'s measured-stale branch). Classification is
+  # not uniform across the three, and the difference is what the entry is for:
+  # `code_freshness.py` and `monitoring.py` match no SOURCE_PATTERN and fall to
+  # `core`, so a diff touching only them selects `core` — unregistered, the file
+  # that carries this fix runs in NO leg at all (and `ci_selection.py --integrity`
+  # reds on the unclassified file). `mcp_server.py` is a `SHARED_MODULES` member
+  # and goes FULL (verified: select(["tortoise/mcp_server.py"]) -> every surface),
+  # so it would still have run — the entry is what makes this file selectable on
+  # the `core`-only diffs.
   - test_code_freshness_9494.py
   # #4491: dual-registered with `api` (see that surface's entry). It pins
   # tortoise/monitoring.py — which resolves to `core`, NOT `api` — so a

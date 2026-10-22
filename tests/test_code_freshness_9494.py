@@ -233,10 +233,18 @@ def test_the_module_import_itself_observes_its_caller():
     that only imports ``monitoring``) has no later ``observe()``, so deleting the
     module-level call would leave its baseline to the first health call — the
     #9494 window, with a docstring claiming otherwise.
+
+    The probe must NOT import ``code_freshness`` itself: that import would run the
+    module-level ``observe()`` on the probe's own line, with everything the import
+    already loaded, so every assertion below would hold even if ``monitoring`` had
+    dropped its import — the mutation this test exists for would survive. Reading
+    the module out of ``sys.modules`` instead makes a missing (or lazy) import in
+    ``monitoring`` fail loudly here (``KeyError``) rather than one health call late.
     """
     tracked = _subprocess_tracked(
-        "import tortoise.monitoring\n"
-        "from tortoise import code_freshness as cf\n"
+        "import tortoise.monitoring, sys\n"
+        "cf = sys.modules['tortoise.code_freshness']"
+        "  # KeyError unless monitoring imported it at module level\n"
         "print(chr(10).join(cf._tracked_names()))\n"
         "print('BASELINE_AT=' + str(cf._baseline_at is not None))\n"
     )
