@@ -29,8 +29,10 @@
 //   - Rate limit: 120 req/min + 2,000 req/day per key (in-memory counter —
 //     per-isolate; unit-tested at lowered thresholds).
 //   - IndexNow (#9680): the PATCH that moves a post to published submits its
-//     canonical URL once, in the background, fail-soft. It reaches Bing / Yandex
-//     / Seznam / Naver / Amazon — NOT Google, which does not consume IndexNow.
+//     canonical URL at most once per 24 h, in the background, fail-soft. Nothing
+//     is submitted when the stamp cannot be read, and the POST (create) path
+//     never notifies. It reaches Bing / Yandex / Seznam / Naver / Amazon — NOT
+//     Google, which does not consume IndexNow.
 //
 // Author identity (#1383 — part of the same v1 contract, additive):
 //   - `author?: string` (≤100 chars) is the byline NAME. Omitted →

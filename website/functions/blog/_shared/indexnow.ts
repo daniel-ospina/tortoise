@@ -66,9 +66,38 @@ export const INDEXNOW_ENDPOINT = "https://api.indexnow.org/indexnow";
 export const INDEXNOW_TIMEOUT_MS = 5_000;
 
 /**
+ * Bound on the two Supabase round-trips (state read, stamp write).
+ *
+ * They need one for the same reason the POST does, but with a sharper
+ * consequence: the state READ is awaited BEFORE the submission, so a stalled
+ * response means nothing is notified at all — and because the task is then
+ * abandoned at the runtime's grace boundary rather than the fetch rejecting, the
+ * `catch` never runs and NO `[indexnow]` line is written. An operator following
+ * the runbook ("filter the logs for [indexnow]") would find nothing, which is
+ * the silent failure the module header calls the one that matters. A bounded
+ * fetch converts the stall into the paths that already log. Matches the 3 s
+ * bound `cloudflare-purge.ts` uses for the same kind of write-path side call.
+ */
+export const INDEXNOW_STATE_TIMEOUT_MS = 3_000;
+
+/**
  * Minimum gap between two submissions of the same URL — 24 hours, not a calendar
  * day: a calendar day would still allow two submissions a minute apart across
  * midnight, and the requirement is "a submission, not a flood".
+ *
+ * ⚠️ WHAT IT DOES NOT COVER, stated so the claim in the docs is exactly true. The
+ * stamp lives on the POST ROW, and it is read before the submission and written
+ * after it, so the window is neither atomic nor keyed by URL:
+ *   • two publish transitions of the same post that OVERLAP (both read the old
+ *     stamp while the first submission is in flight) can each submit once;
+ *   • a slug that is unpublished, deleted and re-created is a NEW row, so its
+ *     first publish submits even if the previous row submitted minutes earlier.
+ * Both need a human or an agent to act twice on one post inside seconds, so the
+ * outcome is bounded at two submissions for a single publish event — but it is
+ * not zero, and the conditional-PATCH reservation that WOULD make it atomic puts
+ * the window rule into a PostgREST predicate, where the test harness can only
+ * observe it by re-implementing the predicate in its stub. That trade is not
+ * worth it for this case; the limit is documented instead of hidden.
  */
 export const INDEXNOW_WINDOW_MS = 86_400_000;
 
@@ -191,7 +220,7 @@ async function readSubmittedAt(env: Env, id: string, url: string): Promise<strin
   try {
     const res = await fetch(
       `${env.SUPABASE_URL}/rest/v1/blog_posts?select=indexnow_submitted_at&id=eq.${encodeURIComponent(id)}&limit=1`,
-      { headers: serviceHeaders(env) },
+      { headers: serviceHeaders(env), signal: AbortSignal.timeout(INDEXNOW_STATE_TIMEOUT_MS) },
     );
     if (!res.ok) {
       // 400 here is the "column not in the schema" shape — the deploy ran
@@ -210,13 +239,26 @@ async function readSubmittedAt(env: Env, id: string, url: string): Promise<strin
   }
 }
 
-/** Record the attempt. A failed stamp costs at most one extra submission later. */
+/**
+ * Record the attempt. A failed stamp costs at most one extra submission later.
+ *
+ * ⚠️ This is an UPDATE of the row, so the table's unconditional `BEFORE UPDATE`
+ * trigger (`blog_posts_set_updated_at`) rewrites `updated_at` as a side effect.
+ * `updated_at` is USER-FACING — the article's JSON-LD `dateModified`, the
+ * sitemap's `<lastmod>` — and today that is harmless because the stamp always
+ * co-occurs with a publish that just bumped it. It stops being harmless for any
+ * future caller that stamps OUTSIDE a publish (a backfill, a "resubmit on a
+ * material edit"), which would silently move a live article's published
+ * modification date. Recorded in the migration's column comment too; fixing it
+ * belongs in the trigger (skip when only internal columns changed), not here.
+ */
 async function stampSubmittedAt(env: Env, id: string, nowMs: number, url: string): Promise<void> {
   try {
     const res = await fetch(`${env.SUPABASE_URL}/rest/v1/blog_posts?id=eq.${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: serviceHeaders(env),
       body: JSON.stringify({ indexnow_submitted_at: new Date(nowMs).toISOString() }),
+      signal: AbortSignal.timeout(INDEXNOW_STATE_TIMEOUT_MS),
     });
     if (!res.ok) console.warn(`[indexnow] stamp failed (supabase ${res.status}): ${url}`);
   } catch {

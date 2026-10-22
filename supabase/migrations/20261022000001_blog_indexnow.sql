@@ -28,8 +28,21 @@
 -- `docs/blog-authoring.md`. A bulk path in the publish handler is exactly the
 -- flood this column exists to prevent.
 --
--- Grants: this project grants at TABLE level (see 20260827000001_blog_cms.sql),
--- so a new column is covered by the existing grant on public.blog_posts.
+-- Grants: nothing to add. This project relies on Supabase's ALTER DEFAULT
+-- PRIVILEGES, which grant table-level privileges on public tables to anon /
+-- authenticated / service_role, and a TABLE-level grant covers columns added
+-- later — see 20261001000002_api_key_mint_serialization.sql, which states the same
+-- note. (No migration in this directory issues an explicit GRANT ON blog_posts.)
+-- A future lane must not read this as "add column-level GRANTs to be safe": that
+-- would NARROW what the table grant already covers.
+--
+-- ⚠️ `updated_at` SIDE EFFECT. `blog_posts_set_updated_at` is an unconditional
+-- BEFORE UPDATE trigger, so writing this column also rewrites the row's
+-- updated_at — which is user-facing (the article's JSON-LD dateModified and the
+-- sitemap's lastmod). Harmless while every write co-occurs with a publish that
+-- bumps it anyway; a future writer that stamps OUTSIDE a publish would move a
+-- live article's modification date. Fixing that belongs in the trigger (skip
+-- when only internal columns changed), not in this migration.
 -- Applied migrations are immutable history; this is additive.
 -- ============================================================================
 
@@ -40,5 +53,8 @@ COMMENT ON COLUMN public.blog_posts.indexnow_submitted_at IS
   'Last IndexNow submission ATTEMPT for this post''s canonical URL (#9680). '
   'NULL = never submitted. Set after the attempt regardless of the endpoint''s '
   'answer, because submission is fail-soft and is not retried in the request '
-  'path. Enforces at most one submission per URL per 24h; IndexNow itself has '
-  'no server-side idempotency. Does NOT reach Google.';
+  'path. Enforces AT MOST one submission per row per 24h — not atomically and '
+  'not per URL: two overlapping publish transitions, or a deleted-and-recreated '
+  'slug, can submit again. IndexNow itself has no server-side idempotency. '
+  'NOT part of the editorial record: writing it fires blog_posts_set_updated_at, '
+  'so it bumps updated_at (dateModified / sitemap lastmod). Does NOT reach Google.';

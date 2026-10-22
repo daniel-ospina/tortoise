@@ -202,18 +202,40 @@ Google".
 (`PATCH /blog/api/posts/:slug` with `status: "published"`). It submits **one** URL — the article's
 canonical URL — in the background, so the publish never waits for it.
 
-**What never fires it:** writing a draft, editing an article that is already published, unpublishing,
-and re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
-attempt). Bulk submission is deliberately *not* part of the publish path.
+**Never fired:**
+
+- writing a draft;
+- **creating a post directly as `published`** — `POST /blog/api/posts` with `status: "published"` is a
+  publish transition, but the notification belongs to the PATCH transition. Publish a draft with
+  PATCH if you want the submission;
+- editing an article that is already published;
+- unpublishing;
+- re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
+  attempt);
+- bulk submission — deliberately **not** part of the publish path (see the backfill below).
 
 **When it fails.** The publish still succeeds — the article is live either way — and there is no
-retry. The failure is logged instead: filter the Pages/Cloudflare logs for `[indexnow]` and you will
-see the status code and the URL (`submitted (status 200|202)`, `submit failed (status 403)`, or
-`submit failed (no status — timeout/network)`). 202 is a success: it means "received, key validation
-pending" and is the normal answer to a key's first submission.
+retry. The failure is logged instead. Filter the Pages/Cloudflare logs for `[indexnow]`;
+every shape and what it means:
+
+| Log line | Meaning | What to do |
+|---|---|---|
+| `submitted (status 200)` | accepted | nothing |
+| `submitted (status 202)` | received, the endpoint is verifying the key — the normal answer to a key's **first** submission | nothing |
+| `submit failed (status 403)` | the key file was not found at the host root | check the `curl` below; the file did not deploy |
+| `submit failed (status 422)` | a URL does not belong to the host, or the key does not match the protocol's schema | check `host`/`urlList` in the payload |
+| `submit failed (status 5xx)` / `(no status — timeout/network)` | the endpoint or the network | nothing urgent; the next publish of a *different* article is unaffected |
+| `skipped (submitted <ts>)` | inside the 24-hour window | nothing |
+| `skipped (state unreadable, …)` | `blog_posts.indexnow_submitted_at` could not be read, which is what a deploy that ran **ahead of its migration** looks like | apply the migration, then re-publish (or backfill by hand) — until then **nothing is submitted** and the publish still succeeds |
 
 ⚠️ **A publish from the admin console is not submitted.** The console writes the status change
 directly to Supabase and never reaches the agent API that fires the notification.
+
+⚠️ **Known limit of the 24-hour window.** The stamp is per post *row* and is read before the
+submission and written after it. Two publish transitions of the same post that overlap (both read the
+old stamp while the first submission is in flight), or an unpublish → delete → re-create of the same
+slug, can therefore each submit once. It takes a deliberate double action within seconds, so the
+exposure is one extra submission — not a flood — but it is not zero.
 
 ### The key file
 
@@ -223,8 +245,8 @@ committed at `website/<key>.txt` (that directory is the deploy root) and its onl
 After a deploy, this must answer 200 with the key alone:
 
 ```bash
-curl -sS -D- https://tortoise.premiselabs.co/$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' \
-  website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2).txt
+KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2)
+curl -sS -D- "https://tortoise.premiselabs.co/$KEY.txt"
 ```
 
 ### Backfilling the articles published before this existed
@@ -234,7 +256,7 @@ verified live. The publish handler has no bulk path on purpose: a loop there is 
 waiting for a retry.
 
 ```bash
-KEY=<the key from website/functions/blog/_shared/indexnow.ts>
+KEY=$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2)
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://api.indexnow.org/indexnow \
   -H 'Content-Type: application/json; charset=utf-8' \
   -d "{\"host\":\"tortoise.premiselabs.co\",\"key\":\"$KEY\",

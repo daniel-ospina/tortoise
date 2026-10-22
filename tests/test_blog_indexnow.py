@@ -38,6 +38,7 @@ check is the ``curl`` line in the IndexNow section of ``docs/blog-authoring.md``
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import shutil
@@ -59,24 +60,39 @@ SITE = "https://tortoise.premiselabs.co"
 AGENT = "blog-indexnow-test"
 ENDPOINT = "https://api.indexnow.org/indexnow"
 
-# Drives the REAL handler for a SEQUENCE of PATCHes against one row.
+# Drives the REAL handler for a SEQUENCE of PATCHes against one row (or ONE
+# POST create, for the `post` case).
 # The `fetch` stub is a dumb store + a recorded vendor endpoint:
 #   * `/rest/v1/blog_agent_keys`      → the calling identity
 #   * `GET  ?select=indexnow_submitted_at` → what the store holds (or a 400 when
 #     `stateUnreadable`, which is the shape of "the migration is not applied")
 #   * `GET  blog_posts`               → the row
+#   * `POST blog_posts`               → the created row (the create path)
 #   * `PATCH` carrying indexnow_submitted_at → persist the stamp
 #   * `PATCH` (status/title)          → apply the body, answer the row
-#   * `api.indexnow.org`              → record the submission, answer with
-#                                       `indexnowStatus` or throw when
+#   * `api.indexnow.org`              → record the submission (`signal` included,
+#                                       so a removed timeout is visible), answer
+#                                       with `indexnowStatus` or throw when
 #                                       `indexnowThrows`
 # `waitUntil` promises are collected and awaited between steps: the handler
 # deliberately answers BEFORE the submission settles, so a test that dropped them
-# would observe zero submissions and prove nothing.
+# would observe zero submissions and prove nothing. The count at the moment each
+# handler call RESOLVES is recorded too (`atResolve`) — that is what distinguishes
+# `waitUntil(p)` from `await p`, which is otherwise invisible to a test whose stub
+# answers instantly.
+#
+# The driver also returns `windowMs` and the results of `shouldSubmit` on fixed
+# probes, so the window's VALUE and its untaken branches are pinned rather than
+# merely exercised once by luck.
 _DRIVER = """
 const posts = await import(process.argv[2]);
 const indexnow = await import(process.argv[3]);
 const cases = JSON.parse(process.argv[4]);
+const probes = JSON.parse(process.argv[5] || '[]').map((p) => ({
+  lastSubmittedAt: p.lastSubmittedAt === undefined ? undefined : p.lastSubmittedAt,
+  nowMs: p.nowMs,
+}));
+const probeResults = probes.map((p) => indexnow.shouldSubmit(p));
 const out = [];
 for (const c of cases) {
   const slug = c.slug || 'indexnow-slug';
@@ -97,7 +113,11 @@ for (const c of cases) {
     const u = String(url);
     const method = String((init && init.method) || 'GET').toUpperCase();
     if (u.startsWith('https://api.indexnow.org')) {
-      submissions.push({ url: u, body: JSON.parse(String(init.body)) });
+      submissions.push({
+        url: u,
+        body: JSON.parse(String(init.body)),
+        hasSignal: !!(init && init.signal),
+      });
       if (c.indexnowThrows) throw new Error('socket hang up');
       return new Response('', { status: c.indexnowStatus || 200 });
     }
@@ -112,6 +132,11 @@ for (const c of cases) {
         return Response.json([{ indexnow_submitted_at: row.indexnow_submitted_at }]);
       }
       if (method === 'GET') return Response.json([{ ...row }]);
+      if (method === 'POST') {
+        const body = JSON.parse(String(init.body));
+        Object.assign(row, body);
+        return Response.json([{ id: row.id, slug: row.slug || slug }]);
+      }
       if (method === 'PATCH') {
         const body = JSON.parse(String(init.body));
         if (Object.prototype.hasOwnProperty.call(body, 'indexnow_submitted_at')) {
@@ -125,7 +150,26 @@ for (const c of cases) {
     return Response.json({ success: true });
   };
   const statuses = [];
-  for (const step of c.steps) {
+  const atResolve = [];
+  const flush = async () => { await Promise.all(pending.splice(0)); };
+  if (c.post) {
+    const req = new Request('https://tortoise.premiselabs.co/blog/api/posts', {
+      method: 'POST',
+      headers: { 'X-Agent-Key': 'test-agent-key', 'Content-Type': 'application/json' },
+      body: JSON.stringify(c.post),
+    });
+    const res = await posts.onRequestPost({
+      request: req,
+      env: { SUPABASE_URL: 'https://db.test', SUPABASE_SERVICE_ROLE_KEY: 'svc' },
+      params: { path: [] },
+      waitUntil: (p) => { pending.push(p); },
+    });
+    statuses.push(res.status);
+    await res.text();
+    atResolve.push(submissions.length);
+    await flush();
+  }
+  for (const step of c.steps || []) {
     const req = new Request('https://tortoise.premiselabs.co/blog/api/posts/' + slug, {
       method: 'PATCH',
       headers: { 'X-Agent-Key': 'test-agent-key', 'Content-Type': 'application/json' },
@@ -138,13 +182,15 @@ for (const c of cases) {
       waitUntil: (p) => { pending.push(p); },
     });
     statuses.push(res.status);
-    await Promise.all(pending.splice(0));
+    await res.text();
+    atResolve.push(submissions.length);
+    await flush();
   }
   console.log = realLog;
   console.warn = realWarn;
-  out.push({ statuses, submissions, logs, key: indexnow.INDEXNOW_KEY });
+  out.push({ statuses, atResolve, submissions, logs, key: indexnow.INDEXNOW_KEY, stamp: row.indexnow_submitted_at });
 }
-console.log(JSON.stringify(out));
+console.log(JSON.stringify({ cases: out, windowMs: indexnow.INDEXNOW_WINDOW_MS, probeResults }));
 """
 
 CASES: dict[str, dict] = {
@@ -169,6 +215,15 @@ CASES: dict[str, dict] = {
         "status": "draft",
         "steps": [{"status": "published"}, {"title": "tweak"}, {"status": "draft"}, {"status": "published"}],
     },
+    # A FAILED attempt still burns the window: 500 on the publish, then
+    # unpublish → re-publish is ONE submission, not two. This is the case that
+    # reds if the stamp is written only on a SUCCESSFUL submission (which is the
+    # change that turns a vendor outage into a flood of re-attempts).
+    "failed_submit_then_republish": {
+        "status": "draft",
+        "indexnowStatus": 500,
+        "steps": [{"status": "published"}, {"status": "draft"}, {"status": "published"}],
+    },
     # ── V4 ────────────────────────────────────────────────────────────────
     "endpoint_500": {"status": "draft", "indexnowStatus": 500, "steps": [{"status": "published"}]},
     "endpoint_unreachable": {"status": "draft", "indexnowThrows": True, "steps": [{"status": "published"}]},
@@ -176,11 +231,64 @@ CASES: dict[str, dict] = {
     "endpoint_202": {"status": "draft", "indexnowStatus": 202, "steps": [{"status": "published"}]},
     # ── dedupe state unreadable (migration not applied) ───────────────────
     "state_unreadable": {"status": "draft", "stateUnreadable": True, "steps": [{"status": "published"}]},
+    # ── the create path (deliberately NOT instrumented) ───────────────────
+    # `POST /blog/api/posts` with status=published publishes immediately, and it
+    # does NOT notify: #9680 names the PATCH transition as the trigger. Pinned so
+    # the disclosed gap cannot silently become an instrumented path (or silently
+    # stay one) without a test changing alongside it.
+    "direct_publish_create": {
+        "post": {"title": "Created published", "body": "body text", "slug": "indexnow-slug", "status": "published"},
+    },
 }
+
+# Fixed `shouldSubmit` probes: driven through the REAL exported function, so the
+# window's VALUE and its untaken branches are pinned rather than merely exercised
+# once by luck. Each of these reds a different mutant that the sequence cases
+# cannot see: `shouldSubmit` that always says yes (the window is gone — the V3
+# sequence reds too, but this names it), `shouldSubmit` that always says NO (never
+# re-submit an expired stamp: every sequence case stays green, which is why this
+# probe set exists), a window shortened to seconds, and the unparseable-stamp
+# branch flipped.
+NOW_ISO = "2027-01-15T00:00:00.000Z"
+NOW_MS = int(datetime.datetime.fromisoformat(NOW_ISO.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def _hours_before(hours: float) -> str:
+    return (
+        datetime.datetime.fromtimestamp(NOW_MS / 1000, datetime.UTC)
+        - datetime.timedelta(hours=hours)
+    ).isoformat().replace("+00:00", "Z")
+
+
+#: `lastSubmittedAt` is one of: None (never), an ISO string, or NOT_SUBMITTED_STATE
+#: — the `undefined` / "could not read the column" state, which JSON cannot carry.
+NOT_SUBMITTED_STATE = object()
+
+
+PROBES: list[tuple[str, str | object | None, bool]] = [
+    # (label, lastSubmittedAt, expected verdict)
+    ("never-submitted", None, True),
+    ("unreadable-state", NOT_SUBMITTED_STATE, False),
+    ("inside-window-1h", _hours_before(1), False),
+    ("inside-window-23h", _hours_before(23), False),
+    ("outside-window-25h", _hours_before(25), True),
+    ("outside-window-7d", _hours_before(24 * 7), True),
+    ("unparseable-stamp", "not-a-date", True),
+]
+
+
+def _probe_payload() -> list[dict]:
+    return [
+        {"nowMs": NOW_MS, "undefinedState": True}
+        if last is NOT_SUBMITTED_STATE
+        else {"nowMs": NOW_MS, "lastSubmittedAt": last}
+        for _, last, _expected in PROBES
+    ]
 
 
 @pytest.fixture(scope="module")
-def results() -> dict[str, dict]:
+def payload() -> dict:
+    """One node process for every case (each start costs ~2 s under the loader)."""
     # #4916: a missing node FAILs here rather than skipping — V2/V3 are the only
     # evidence that the publish path submits exactly once, and a skipped guard
     # looks like a passing one. A present-but-too-old node is a host gap and skips.
@@ -199,6 +307,7 @@ def results() -> dict[str, dict]:
                 str(POSTS_FUNCTION),
                 str(INDEXNOW_MODULE),
                 json.dumps([CASES[k] for k in order]),
+                json.dumps(_probe_payload()),
             ],
             capture_output=True,
             text=True,
@@ -206,8 +315,16 @@ def results() -> dict[str, dict]:
         )
     assert proc.returncode == 0, f"node failed:\n{proc.stderr}"
     out = json.loads(proc.stdout)
-    assert len(out) == len(order), f"driver returned {len(out)} results for {len(order)} cases"
-    return dict(zip(order, out, strict=True))
+    assert len(out["cases"]) == len(order), (
+        f"driver returned {len(out['cases'])} results for {len(order)} cases"
+    )
+    return {"cases": dict(zip(order, out["cases"], strict=True)),
+            "windowMs": out["windowMs"], "probeResults": out["probeResults"]}
+
+
+@pytest.fixture(scope="module")
+def results(payload) -> dict[str, dict]:
+    return payload["cases"]
 
 
 def _submitted_urls(res: dict) -> list[str]:
@@ -388,4 +505,121 @@ def test_unreadable_dedupe_state_skips_the_submission_and_says_so(results) -> No
     )
     assert _logs_matching(res, "state unreadable"), (
         f"the skip must be logged: {res['logs']}"
+    )
+
+
+# ── The window's VALUE and its untaken branches ────────────────────────────
+def test_the_window_is_a_day_and_expires(payload) -> None:
+    """24 h exactly, and an expired stamp re-submits.
+
+    Every other case sits inside one millisecond, so ANY positive window (or a
+    ``shouldSubmit`` that always says no) satisfies them — measured: shortening
+    ``INDEXNOW_WINDOW_MS`` to one second, or making ``shouldSubmit`` return false
+    once a stamp exists, both left the rest of this suite green. That mutant
+    permanently disables the capability the issue exists for, which is the
+    "tracker says shipped, nothing works" shape (#7751) this file was written
+    against. These probes are driven through the REAL exported function with a
+    fixed ``nowMs``, so they cannot go wall-clock dependent.
+    """
+    assert payload["windowMs"] == 86_400_000, (
+        f"the de-duplication window is {payload['windowMs']} ms; #9680 item 3 asks "
+        "for at most one submission per URL per day"
+    )
+    mismatches = [
+        (label, expected, actual)
+        for (label, _last, expected), actual in zip(PROBES, payload["probeResults"], strict=True)
+        if expected != actual
+    ]
+    assert mismatches == [], f"shouldSubmit disagreed with the rule, (label, want, got): {mismatches}"
+
+    # Name the two branches the sequence cases cannot reach, so a failure says
+    # WHICH rule broke rather than "a probe disagreed".
+    by_label = {label: actual for (label, _l, _e), actual in zip(PROBES, payload["probeResults"], strict=True)}
+    assert by_label["outside-window-25h"] is True, (
+        "a stamp older than the window must submit again — otherwise a post edited "
+        "and re-published a week later is never announced, silently"
+    )
+    assert by_label["inside-window-23h"] is False, "a stamp 23 h old must NOT submit"
+    assert by_label["unparseable-stamp"] is True, (
+        "a garbage stamp must cost ONE submission, not disable the capability forever"
+    )
+    assert by_label["unreadable-state"] is False, "an unreadable stamp must not submit"
+
+
+# ── The publish never waits on the vendor ─────────────────────────────────
+def test_the_publish_resolves_before_the_submission_starts(results) -> None:
+    """``waitUntil(p)``, not ``await p`` — the difference is invisible otherwise.
+
+    The stub answers instantly, so replacing ``waitUntil(notifyPublished(...))``
+    with ``await notifyPublished(...)`` leaves every other assertion in this file
+    unchanged — while in production every publish would block on a vendor call for
+    up to ``INDEXNOW_TIMEOUT_MS``. The driver snapshots the submission count at the
+    moment each handler call RESOLVES, so the awaited form is observable here (it
+    would report 1) and the backgrounded form reports 0.
+    """
+    for name, res in results.items():
+        if not res["atResolve"]:
+            continue
+        assert res["atResolve"][0] == 0, (
+            f"{name}: the vendor call had already run when the response resolved — "
+            "the submission is inside the request path, so a hung endpoint would "
+            f"block the publish (atResolve={res['atResolve']})"
+        )
+    # ... and it did run afterwards, for the case that submits.
+    assert results["publish_transition"]["submissions"], (
+        "nothing was submitted at all — the count above would be a vacuous zero"
+    )
+
+
+def test_the_vendor_call_is_bounded(results) -> None:
+    """A 5 s bound on the outbound call, so a hung endpoint cannot hold the task.
+
+    Falsifiable: delete the ``signal`` from ``submitUrl``'s fetch and this reds.
+    The ``indexnowThrows`` case simulates a rejection, not an abort — without this
+    assertion nothing in the suite can see the timeout go away.
+    """
+    for name in ("publish_transition", "endpoint_unreachable"):
+        res = results[name]
+        assert res["submissions"], f"{name}: expected an attempt to observe: {res}"
+        for submission in res["submissions"]:
+            assert submission["hasSignal"] is True, (
+                f"{name}: the IndexNow fetch carries no AbortSignal — a hung endpoint "
+                "would hold the background task for as long as the runtime allows"
+            )
+
+
+# ── The stamp records the ATTEMPT, not the outcome ────────────────────────
+def test_a_failed_submission_still_burns_the_window(results) -> None:
+    """Vendor down → re-publish the same day is ONE attempt, not one per publish.
+
+    The stamp is written whatever the endpoint answered, precisely so a vendor
+    outage cannot turn every re-publish into another attempt. Falsifiable: write
+    the stamp only on success and this case submits twice.
+    """
+    res = results["failed_submit_then_republish"]
+    assert res["statuses"] == [200, 200, 200], res["statuses"]
+    assert len(res["submissions"]) == 1, (
+        "publish (endpoint 500) → unpublish → re-publish must attempt ONCE — the "
+        f"failed attempt is stamped too; got {len(res['submissions'])}: "
+        f"{_submitted_urls(res)}"
+    )
+    assert res["stamp"], "the attempt must be recorded even when it failed"
+
+
+# ── The create path is NOT instrumented (a disclosed gap, pinned) ─────────
+def test_a_direct_publish_create_does_not_notify(results) -> None:
+    """``POST`` with ``status: "published"`` publishes but submits nothing.
+
+    #9680 names the PATCH transition as the trigger, so this is deliberate — and
+    it is disclosed in ``docs/blog-authoring.md`` rather than left implicit. The
+    case exists so the gap cannot change in EITHER direction without a test
+    changing with it: instrument the create path and this reds; drop the doc line
+    and the doc test reds.
+    """
+    res = results["direct_publish_create"]
+    assert res["statuses"] == [201], f"the create itself must still succeed: {res['statuses']}"
+    assert res["submissions"] == [], (
+        f"the create path must not notify (#9680 names the PATCH transition) — got "
+        f"{_submitted_urls(res)}. If this is now intended, wire it deliberately and "
+        "update this test and the doc together"
     )
