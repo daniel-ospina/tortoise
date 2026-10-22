@@ -460,6 +460,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # test_markers declaration) — the pin reding on the addition is the pin
     # working as designed.
     "test_9350_capture_provenance_journalled",
+    # #9451: the capture's ingest instant on a PRE-EXISTING `session:<id>` stub.
+    # The fixture builds `TortoiseSDK(<tmpfile>)` by db path and drives BOTH
+    # replay engines against that embedded store, so a URI-set lane would discard
+    # the path, connect the construction to the server, and the embedded replay
+    # this file exists to prove would never happen. Registered in all three homes
+    # (config/ci-surfaces.yml `carve_out:`, TEST_NO_REDIRECT_STEMS, and the
+    # test_markers declaration) — the pin reding on the addition is the pin
+    # working as designed.
+    "test_9451_pre_existing_stub_ingest_instant",
     "test_redis_guard",
     "test_resume_gate_parity",
     "test_smoke_embedded",
