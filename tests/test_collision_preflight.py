@@ -2137,6 +2137,28 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertNotEqual(rc, 0, f"branch={branch!r}\n{out}")
                 self.assertIn("VERDICT: COLLISION", out)
 
+    def test_foreign_claim_branch_that_also_MENTIONS_this_issue_still_blocks(self):
+        # ⛔ THIS PINS THE `not branch_hit` CONJUNCT, which nothing else did
+        # (found in #9540 review cycle 3). A branch can name a foreign issue in
+        # the CLAIM position and still mention this one in its slug —
+        # `fix/9397-depends-on-3061`. The loose `number_present(branch, …)` arm is
+        # what makes that a hit today, and `_branch_names_other_issue` alone
+        # would answer 9397. So if a later reader decides the conjunct is
+        # redundant (it LOOKS redundant: the helper already refuses a branch that
+        # names this issue) and deletes it, this worktree is demoted and the lane
+        # that names 3061 goes free — a FALSE CLEAN, the dangerous direction.
+        branch = f"fix/9397-depends-on-{ISSUE}"
+        name = f"wt-{ISSUE}-mention"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
     def test_a_branch_number_that_is_not_the_issue_does_not_cancel_the_path(self):
         # `fix/3061cafe-mine` NAMES this issue (`number_present` matches 3061 —
         # the digits LEAD a hex-looking run, #3611), so the branch itself is the
@@ -2170,6 +2192,11 @@ class CollisionPreflightTest(unittest.TestCase):
                 self.assertTrue(line, f"no row for {label!r}\n{out}")
                 self.assertIn("its PATH contains", line)
                 self.assertIn("non-blocking", line)
+                # a weak hit CANNOT contribute to the verdict — pin that too, or
+                # flipping the strength to "strong" would keep these subtests
+                # green (review cycle 3, secondary finding).
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
 
     def test_branch_names_other_issue_reads_only_the_claim_shape(self):
         # Unit pin on the helper, so a later refactor of the worktree scan cannot
