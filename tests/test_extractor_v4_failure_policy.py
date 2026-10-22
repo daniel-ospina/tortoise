@@ -68,6 +68,18 @@ BASE_PIN = "c79ba1cf2"
 _PIN_TOKEN = re.compile(r"`([0-9a-f]{7,40})`")
 #: `file.py:NNNN` — the citation form the header's rule governs.
 _CODE_CITATION = re.compile(r"`?[A-Za-z0-9_./-]+\.py:\d+`?")
+#: `§4.N` followed on the SAME line by a failure direction — a pointer that
+#: attributes a policy to a section BY NUMBER. §4.4 is the only section that
+#: declares one (G3's §4.3 row says *"declared in §4.4"*, and §4.4's heading is
+#: `Per-step FAILURE POLICY`), so a pointer to another number sends a reader to a
+#: section that holds an ordering argument and no rule at all. Bounded to one
+#: line and stopped at `)`/`|` so a wrapping paragraph cannot manufacture a hit.
+_POLICY_POINTER = re.compile(r"§\s*(4\.\d+)[^)\n|]{0,80}(fail-open|fail-closed)")
+#: The section that DECLARES per-step failure policy (the pointer must name it).
+FAILURE_POLICY_SECTION = "4.4"
+#: §4.3's relocation subsection (`#5333`), bounded by the next `###` heading.
+G5_DESTRUCTIVE_HEADING = "#### G5's destructive half"
+G5_DESTRUCTIVE_END = "### S3 — RESOLVE"
 
 
 def _document() -> str:
@@ -255,4 +267,68 @@ def test_the_state_of_code_citation_names_its_revision_pin():
         f"pin (`{BASE_PIN}`), where §4.4's HEAD numbers are wrong — name the pin "
         "(`at `7d348d351``) in the passage or add the citation to the header's "
         "`7d348d351` list (#8600):\n  - " + "\n  - ".join(unpinned)
+    )
+
+
+# ── a failure policy must be POINTED AT where it is declared (#5333 review) ──
+
+
+def _g5_destructive_half() -> str:
+    """§4.3's relocation subsection, bounded by the next `###` heading."""
+    text = _document()
+    assert G5_DESTRUCTIVE_HEADING in text, (
+        f"{G5_DESTRUCTIVE_HEADING!r} is gone from {DOC.name} — the measured "
+        "state of G5's destructive half no longer has a home (#5333)."
+    )
+    start = text.index(G5_DESTRUCTIVE_HEADING)
+    end = text.index(G5_DESTRUCTIVE_END, start)
+    return text[start:end]
+
+
+def test_a_section_cited_for_failure_policy_is_the_one_that_declares_it():
+    """§4.2 declares NO failure policy, so `(§4.2 fail-open)` is a dead pointer.
+
+    §4.2 is *"The ordering — cost per unit of SAFE rejection, NOT 'cheapest
+    first'"*. Between its heading and `### S3` it states no fail-open/fail-closed
+    rule at all; the failure-policy home is named twice — `### 4.4 Per-step
+    FAILURE POLICY (G3)` and G3's §4.3 row (*"declared in §4.4"*). A reader who
+    follows a `§4.2` pointer lands on the ordering argument and finds no rule; a
+    reader who knows the document concludes the passage invented its own home.
+    Measured on the pre-fix text, this reds on `(§4.2 fail-open)`.
+    """
+    assert _policy_section(), "§4.4 must exist for this guard to mean anything"
+    offenders = [
+        match.group(0)
+        for match in _POLICY_POINTER.finditer(_document())
+        if match.group(1) != FAILURE_POLICY_SECTION
+    ]
+    assert not offenders, (
+        "these passages attribute a fail-open/fail-closed policy to a section "
+        f"that declares none — name §{FAILURE_POLICY_SECTION} (the per-step "
+        "FAILURE POLICY says §4.4 is where a policy is declared, #8495):\n  - "
+        + "\n  - ".join(offenders)
+    )
+
+
+def test_the_relocation_rule_points_at_the_failure_policy_home():
+    """The unclassifiable-row rule (`stays REPORT`) is a POLICY decision.
+
+    A row that cannot be positively classified is never relocated: fail-closed
+    in the delete direction, which is exactly the form §4.4 declares for S3
+    (`HOLD`, never asserted `new`). The passage must say so against §4.4 and
+    must keep saying it is a PROPOSAL — §4.4 declares policy for the six
+    pipeline steps, and a relocation pass is not one of them.
+    """
+    section = _g5_destructive_half()
+    assert "never relocated" in section, (
+        "the fail-closed-on-the-unclassifiable-row rule is gone from §4.3's "
+        "relocation subsection — re-point this guard (#5333)."
+    )
+    assert "§4.4" in section, (
+        "the relocation rule no longer names §4.4, the section that declares "
+        "per-step failure policy; a pointer to any other number is dead."
+    )
+    assert "proposal" in section.lower(), (
+        "the relocation rule must stay marked as a PROPOSAL — §4.4 declares the "
+        "six pipeline steps' policy, and a relocation pass is not one of them."
     )
