@@ -395,11 +395,20 @@ class EpBreakdown:
 # (``createdAt``) are additive and OFF by default: the search point fetch reads
 # those columns only when this flag is set, so a default call is byte-identical
 # (the #3986 freeze carve-out — a default-off response field is not a surface
-# change. NO RECORDING SURFACE EXISTS for it: ``config/surface-manifest.yml`` has
-# no ``response_fields`` key and ``tools/surface_manifest.py`` derives none, so
-# this carve-out is ASSERTED here, not recorded in the manifest. Recording it
-# would need both a manifest key and its derivation path — a change to the
-# artifact and to the ``cut``/``check`` pair that owns it).
+# change).
+#
+# ⛔ AND IT IS RECORDED — the recording surface DOES exist, and this note used
+# to assert the opposite ("``config/surface-manifest.yml`` has no
+# ``response_fields`` key and ``tools/surface_manifest.py`` derives none");
+# both clauses were FALSE, and ``CONTRIBUTING.md``"s "And it must still be
+# recorded … an unrecorded field has no approval behind it" is the rule they
+# were invoked to escape. The block exists (``response_fields:`` in the
+# manifest), ``tools/surface_manifest.py`` carries it across a re-cut
+# (``_carried_response_fields``), validates it (non-empty, every entry anchored
+# to a row) and renders it into ``docs/product/mcp-sdk-surface.md``. This
+# carve-out's two fields ride it as the ``provenance.source`` /
+# ``provenance.captured_at`` rows — so the carve-out is RECORDED, not merely
+# asserted here. (The four default-ON #8658 keys below have their own rows.)
 SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
 
 
