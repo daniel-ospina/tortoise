@@ -2392,16 +2392,23 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             f"the presence list omits {reading!r} — an armed deployment whose only "
             "signal is that reading is then indistinguishable from an inert one"
         )
-    # ... and it must stay CLOSED. A liveness/health probe answers on an app whose
-    # record seam is completely inert (`/health` is the section's own example of a
-    # route that "does not carry the counter"), so admitting ANY route to this list
-    # makes presence trivially satisfiable and re-opens the silent-inert pass the
-    # section exists to close. Pin the PROPERTY (no route/probe reading), not one
-    # example token.
+    # The closure pin's PROPERTY: presence must be evidence of a WRITE ATTEMPT that
+    # could reach the record. A `capture_session` capture declines at
+    # `write_live_record`'s `if not durable` branch — before tenant resolution, the
+    # breaker, or any socket — so it grows `no_durable_journal` on a deployment
+    # armed against nothing. The bar must therefore say the proving capture is a
+    # JOURNALING one, and no route/probe reading may qualify.
     assert not re.search(r"/health|GET /|probe", presence.group(1)), (
         "the presence list admits a health/liveness probe — that answers on an "
         "app whose record seam is completely inert, so presence becomes "
         "trivially satisfiable and the bar greens the state it exists to catch"
+    )
+    assert re.search(r"The capture that proves presence must be a\s+JOURNALING one", section), (
+        "the bar does not require the proving capture to be a JOURNALING one — a "
+        "`capture_session` capture grows `no_durable_journal` at "
+        "`write_live_record`'s `if not durable` branch, before any tenant "
+        "resolution or socket, so it satisfies presence on a deployment that "
+        "never reaches Postgres"
     )
     # The BEFORE-and-after baseline: "growth" has no referent without it.
     assert re.search(r"read both counters BEFORE the\s+capture and again after", section), (

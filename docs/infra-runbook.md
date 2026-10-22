@@ -2641,9 +2641,12 @@ the counter either.
 
 **Two reads that DO exist on this deployment.**
 
-1. **The failure log line** — every non-write is logged at WARN with its reason
+1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth:
+   `write_failed`), and this needs no auth. ⚠️ **Two readings are NOT in this
+   grep**: the `no_durable_journal` decline is logged at **DEBUG** (it is the
+   healthy M2 path, not a failure), and the `no_journal` / `seam_unimportable`
+   reasons are emitted by the SDK (`tortoise/sdk.py`), not by `record_writer.py`:
 
    ```bash
    fly logs -a tortoise-y4mjjq | grep "the record write did not happen"
@@ -2707,15 +2710,22 @@ So the bar has **two parts, and BOTH are required**:
    the process's life is not this capture's reading). After the capture, require
    at least one reading **before** you interpret anything: any reason on
    `record_write_failures`, any reason on `record_non_journal_skips`,
-   `record_position_unproven` above zero, or a new `journal_event` / `point` row
-   on the record project. The bullets above say what the two expected reasons
-   mean; for any other reason, its counting site in the code is the
-   authoritative statement of what it means.
+   a non-zero delta on `record_position_unproven`, or a new `journal_event` / `point` row
+   on the record project. ⚠️ **The capture that proves presence must be a
+   JOURNALING one** (a per-graph SDK write whose journal lives under
+   `TORTOISE_EVENT_LOG_BASE_DIR=/data/events`). A `capture_session` capture cannot
+   prove it: its records take the M2 lane, where `write_live_record` returns at
+   its `if not durable` branch — **before any tenant resolution, before the
+   breaker, before a socket is opened** — so it grows
+   `record_non_journal_skips{no_durable_journal}` even when the DSN is armed
+   against nothing, and would satisfy this item on a deployment that can never
+   reach Postgres. The bullets above say what the two expected reasons mean; for
+   any other reason, its counting site in the code is the authoritative statement
+   of what it means.
 
    **If nothing appeared at all, do not conclude the record is healthy.** An
-   empty reading has more than one cause and does not say which; take a capture
-   known to journal (a per-graph SDK write under `TORTOISE_EVENT_LOG_BASE_DIR`)
-   and read again before drawing a conclusion.
+   empty reading has more than one cause and does not say which; take the
+   journaling capture above and read again before drawing a conclusion.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
    `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
