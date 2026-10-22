@@ -2357,51 +2357,43 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
             "non-zero counter has no way to tell the documented baseline from a "
             "real arming failure"
         )
-    # ... and the bar must require PRESENCE, and must not attribute an all-empty
-    # reading to a SINGLE cause. `write_live_record` returns BEFORE counting
-    # anything when unarmed (`tortoise/record_writer.py`: `if not armed: return
-    # None`), so an unarmed deployment yields `record_write_failures: {}`,
+    # ... and the bar must require PRESENCE, and must not let an empty reading
+    # pass. `write_live_record` returns BEFORE counting anything when unarmed
+    # (`tortoise/record_writer.py`: `if not armed: return None`), so an unarmed
+    # deployment yields `record_write_failures: {}`,
     # `record_non_journal_skips: {}` and an empty `fly logs` grep — the "no
-    # unexpected failure" half is then VACUOUSLY satisfied. But an ARMED
-    # deployment can be all-empty too (a durable write that failed, an armed
-    # journal-less write, a capture with no record to write), so the bar may not
-    # read the empty result as `NOT_ARMED` alone.
+    # unexpected failure" half is then VACUOUSLY satisfied.
     #
-    # Each assertion below pins a CLAUSE (a sentence and its meaning), never a
-    # bare token: `record_position_unproven` and `journal_event` already appear
-    # elsewhere in the section (the recipe-2 counter list and the SQL block), so
-    # a membership test on them is satisfied without the bar saying anything
-    # (#9585 review: three of the six assertions written this way were vacuous).
+    # These pin CLAUSES (a sentence), never a bare token: `record_position_unproven`
+    # and `journal_event` already appear elsewhere in the section (the recipe-2
+    # counter list, the SQL block), so membership tests on them are satisfied
+    # without the bar saying anything (#9585 reviews; three assertions were
+    # vacuous that way). Each is mutation-proven against a meaning inversion.
     assert re.search(r"An all-empty reading is NOT a pass", section), (
         "the bar never says an all-empty reading is not a pass — an unarmed "
         "deployment counts nothing at all, so a bar written only as 'no growth' "
         "is vacuously green on the silent-inert deployment this exists to detect"
     )
-    assert re.search(r"at least one reading must be present", section), (
+    assert re.search(r"require at least one\s+reading \*\*before\*\* you interpret", section), (
         "the bar states no presence requirement — name the reading that must "
         "EXIST after a capture before the reason breakdown means anything"
     )
-    assert re.search(r"If nothing appeared at all", section), (
-        "the bar has no arm for the case where the reading is empty — that case "
-        "is the whole point of the section"
+    assert re.search(r"If nothing appeared at all, do not conclude the record is healthy", section), (
+        "the bar has no arm for an empty reading — an operator landing there is "
+        "told nothing, and that state is the whole point of the section"
     )
-    # The reason vocabulary must be given MEANINGS that agree with the code, not
-    # just listed: `no_journal` is armed-but-journal-less and `seam_unimportable`
-    # means the seam never ran (so it is NOT evidence it was reached).
-    assert re.search(
-        r"`no_journal` — the record is \*\*armed\*\* on a deployment with \*\*no JSONL",
-        section,
-    ), (
-        "the bar does not say `no_journal` means an ARMED deployment with no "
-        "journal — an operator would read it as a landed write"
-    )
-    assert re.search(
-        r"`seam_unimportable` —[^`]*`?tortoise\.record_writer`? could not be imported",
-        section,
-    ), (
-        "the bar does not say `seam_unimportable` means the seam NEVER RAN — "
-        "without that meaning the exclusion is a bare assertion and its "
-        "inversion reads the same (it can be counted WITH a DSN present)"
+    # A later review found the section asserting a COMMON basis for the
+    # write-failure reasons ("each is counted only after the DSN resolved, so any
+    # of them proves the seam exists and ran"). It is false: `no_journal` is
+    # counted on the journal-less lane, where `write_live_record` is never
+    # entered, and `malformed_dsn` is counted when the DSN fails the scheme
+    # check. The over-specified taxonomy was DELETED rather than re-worded, so
+    # the claim is pinned OUT — the same shape as the `must stay **0**` pin above.
+    assert "proves the seam exists and ran" not in section, (
+        "the section re-asserts a common basis for the write-failure reasons; "
+        "`no_journal` (journal-less lane, seam never entered) and "
+        "`malformed_dsn` (counted when the DSN fails the scheme check) both "
+        "contradict it"
     )
 
 

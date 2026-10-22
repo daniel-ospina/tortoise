@@ -2701,32 +2701,18 @@ So the bar has **two parts, and BOTH are required**:
 1. **Something must have APPEARED.** ⛔ **An all-empty reading is NOT a pass.**
    When the seam is unarmed, `write_live_record` returns *before counting
    anything* — nothing on either counter, nothing in the WARN log — which is
-   **byte-identical** to a healthy zero. So at least one reading must be present
-   after a capture: any reason on `record_write_failures`, any reason on
-   `record_non_journal_skips`, `record_position_unproven` above zero, or a new
-   `journal_event` / `point` row on the record project.
+   **byte-identical** to a healthy zero. So after a capture, require at least one
+   reading **before** you interpret anything: any reason on
+   `record_write_failures`, any reason on `record_non_journal_skips`,
+   `record_position_unproven` above zero, or a new `journal_event` / `point` row
+   on the record project. The bullets above say what the two expected reasons
+   mean; any reason not named there has its meaning at its counting site in the
+   code, which is the only place it is stated without drifting.
 
-   **Which** reading appeared decides what it means, and the reasons are not
-   interchangeable:
-   - `no_durable_journal` — the M2 capture lane declining by design (above); the
-     row-producing path is a durable journal lane.
-   - `no_journal` — the record is **armed** on a deployment with **no JSONL
-     journal**, so the write has no source and no replay can heal it
-     (`tortoise/sdk.py`, `monitoring.py`). Armed, but the seam is never entered.
-   - `write_failed` / `circuit_open` / `no_tenant` — an armed write that did not
-     land (the #9264 baseline, an unreachable project, a missing tenant).
-   - `malformed_dsn` — a DSN that could **not** be parsed, so this one is
-     evidence of a *configured but broken* value, not of a working seam.
-   - `seam_unimportable` — `tortoise.record_writer` could not be imported, so the
-     seam **never ran**. **Not** evidence that it was reached.
-
-   **If nothing appeared at all**, the empty result does **not** tell you why:
-   it is equally the unarmed deployment (missing/blank GitHub secret, or a Fly
-   value the deploy did not stage), an unimportable seam, or a capture that had
-   no record to write (extraction disabled / no provider — the state the
-   Reproducibility checklist names). Do not read it as an arming failure by
-   default: take a capture known to journal (a per-graph SDK write under
-   `TORTOISE_EVENT_LOG_BASE_DIR`) or enable extraction, then read again.
+   **If nothing appeared at all, do not conclude the record is healthy.** An
+   empty reading has more than one cause and does not say which; take a capture
+   known to journal (a per-graph SDK write under `TORTOISE_EVENT_LOG_BASE_DIR`)
+   and read again before drawing a conclusion.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
    `malformed_dsn` / `circuit_open`.** Those three are always a fail-and-fix:
