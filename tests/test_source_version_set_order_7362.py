@@ -314,6 +314,42 @@ def _node(proj, url: str):
     return list(rows[0]) if rows else None
 
 
+#: The document writer's IDENTITY anchor — deliberately NOT the text of a
+#: clause body.
+#:
+#: Both tests below once selected this statement by the ``documentKind`` item's
+#: text (``"s.documentKind=coalesce($dk"``), so when #5140 rewrote that item
+#: into a ``CASE`` the selector matched nothing and BOTH standing #8870 guards
+#: lost their subject — ``assert statements`` went red with no order change to
+#: blame (#9536 review P1). A selector keyed to a clause the file does not
+#: otherwise care about makes every unrelated edit to that clause a false
+#: failure; the selector is therefore keyed to what makes this statement
+#: ``_upsert_document``'s and nothing else's: a ``:Source`` MERGE on the
+#: document key (``url:$id``) that also adopts ``$id`` as the node's ``id``.
+#: Neither anchor is the subject of an order rule here, so a future edit to a
+#: genre/title/version clause cannot silently empty it.
+_DOC_WRITER_MERGE = "MERGE (s:Source {url:$id})"
+_DOC_WRITER_ID_PIN = "s.id=coalesce(s.id, $id)"
+
+
+def _document_writer_statements(recorder) -> list[str]:
+    """The document-writer upsert(s) the driver emitted — never empty.
+
+    The ``assert`` is the non-vacuity guard for every order assertion below, so
+    it says what to do when it fires: RE-ANCHOR the selector, never drop it.
+    """
+    statements = [q for q in recorder.queries
+                  if _DOC_WRITER_MERGE in q and _DOC_WRITER_ID_PIN in q]
+    assert statements, (
+        "the document writer emitted no upsert statement — the identity "
+        "selector above no longer matches `_upsert_document`. Re-anchor it "
+        "and keep this assertion: it is the ONLY non-vacuity guard for the "
+        "#8870 read-after-write rule on this writer, and without it a "
+        "selector that matches nothing would turn both tests green."
+    )
+    return statements
+
+
 def _drive_document(proj) -> None:
     """The document writer (``_upsert_document``) through a real content change."""
     proj._upsert_document({"id": DOC_URL, "title": "v0",
@@ -416,8 +452,15 @@ def test_the_document_version_is_computed_before_the_hash_is_written(proj):
     """
     with _capture(proj) as recorder:
         _drive_document(proj)
-    statements = [q for q in recorder.queries if "s.documentKind=coalesce($dk" in q]
-    assert statements, "the document writer emitted no upsert statement"
+    statements = _document_writer_statements(recorder)
+    # Non-vacuity, second half: the items the RULE is about must be in the
+    # statement the rule is applied to. A renamed/removed pair would otherwise
+    # pass here with zero violations and guard nothing.
+    for statement in statements:
+        assert "s.version=CASE" in statement and "s.contentHash=CASE" in statement, (
+            "the version/hash pair this pin exists to order is not in the "
+            "statement — re-anchor the assertions, do not delete them:\n" + statement
+        )
     for statement in statements:
         assert _order_violations(statement) == [], (
             "the document writer reads `s.contentHash` after writing it:\n"
@@ -493,8 +536,13 @@ def test_the_document_search_text_is_not_computed_from_the_title_it_writes(proj)
     """
     with _capture(proj) as recorder:
         _drive_document(proj)
-    statements = [q for q in recorder.queries if "s.documentKind=coalesce($dk" in q]
-    assert statements, "the document writer emitted no upsert statement"
+    statements = _document_writer_statements(recorder)
+    for statement in statements:
+        assert "s._searchText=" in statement and "s.title=" in statement, (
+            "the `_searchText`/`title` pair this pin exists to order is not in "
+            "the statement — re-anchor the assertions, do not delete them:\n"
+            + statement
+        )
     for statement in statements:
         assert _same_clause_violations(statement) == [], (
             "a same-clause read-after-write survives in the document writer — on "
