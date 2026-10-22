@@ -2681,18 +2681,20 @@ journal lives under `TORTOISE_EVENT_LOG_BASE_DIR=/data/events` (`fly.toml`). So 
 `0` here means *"this capture took the non-durable lane"*, not *"the record is
 broken"*; the seam reads above are what decide.
 
-**The pass bar is NOT "the counter is 0".** Two readings are expected on a healthy
-armed deployment:
+**The pass bar is NOT "the counter is 0".** These readings are expected on an
+armed deployment, and none of them is a failure of *arming*:
 
 - `record_non_journal_skips{reason="no_durable_journal"}` **grows** — that is the
   M2 capture lane declining, by design (above).
-- `record_write_failures{reason="write_failed"}` **grows by the open #9264
-  disagreement**: a `session` record whose `capture_redactions` is an integer into
+- `record_write_failures{reason="write_failed"}` **may grow by the one named
+  #9264 refusal**: a `session` record whose `capture_redactions` is an integer into
   a `jsonb` column is refused with `DatatypeMismatch` and **counted**
-  (`08-hosted-prerequisites.md` §A8, `#9264` OPEN). While #9264 is open this is the
-  documented baseline, not an arming failure — and per that epic's ordering (R1
-  arms, R2 lands the schema) a non-zero `write_failed` is even *expected* before R2
-  lands.
+  (`08-hosted-prerequisites.md` §A8). That disagreement is **FIXED in the tree**
+  (#9264, closed by `20261022000001_record_session_capture_redactions_integer.sql`,
+  which narrows the column to `integer` and deletes the tolerance pin) — but the
+  migration reaches the project only when **R2** lands it (`supabase-deploy.yml`,
+  `workflow_dispatch`), so this is a **migration-ordering** baseline, not an open
+  bug: expected while R2 is unapplied, and a **real arming failure** once it is.
 - `record_position_unproven` **may be non-zero** — a DURABLE journal whose append
   could not prove the record's position writes no layer-1 row (a replay heals
   it). It is the one key that says *"layer 1 is behind the journal by N
@@ -2730,7 +2732,8 @@ So the bar has **two parts, and BOTH are required**:
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
    `malformed_dsn` / `circuit_open`.** ⚠️ **That `write_failed` exemption is
    BOUNDED**: it covers only the #9264 `DatatypeMismatch` refusals that recipe 1
-   actually shows, and a new `journal_event` / `point` row must still appear.
+   actually shows, and only until the R2 migration above is applied — afterwards
+   **every** `write_failed` is unexpected — and a new `journal_event` / `point` row must still appear.
    The R1-without-R2 state writes nothing and counts only `write_failed`, so it
    satisfies item 1's *any reason* clause and the exemption above — **a
    deployment that writes no row at all is not passing this bar, whatever the
@@ -2762,8 +2765,10 @@ file every tenant's rows under one graph (#9192) — a well-formed row under the
 wrong organisation, which nothing downstream can detect.
 
 **Related, and out of scope here:** landing the record's *schema* on the project
-is R2 (`supabase-deploy.yml`, `workflow_dispatch` only); the two known
-schema↔producer disagreements are R4 (#9264, open); and **no module of ours backs
+is R2 (`supabase-deploy.yml`, `workflow_dispatch` only); the two
+schema↔producer disagreements are R4 — #9264's is **fixed in the tree**
+(`20261022000001`, live on the project once R2 applies it) and the one remaining
+tolerance is `point.search_keys` — and **no module of ours backs
 the record up** — that is R9's owner decision, not a claim this section makes.
 
 ### Runtime Config (non-secret)

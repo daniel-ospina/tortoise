@@ -2131,6 +2131,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # `test_record_schema_placement.py` pins the record schema against the
         # placement table.
         "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
+        # #9264: the FORWARD migration that NARROWS
+        # `public.session.capture_redactions` from `jsonb` to `integer`. Same gap
+        # as the two entries above: it sorts outside the `2026101200000`
+        # CORE_ALSO prefix, so without its own entry a change to this file alone
+        # selects NO surface and neither reader runs on it.
+        "supabase/migrations/20261022000001_record_session_capture_redactions_integer.sql",
         "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
     ):
         r = _sel([changed])
