@@ -22,11 +22,11 @@
 #   to these runners ONLY IF that pool is carrying it right now. The gate's state is the
 #   source of truth; this script never decides when the pool serves CI.
 #
-#   ⚠️ And the reverse holds too: a runner that carries `ubuntu-latest` unconditionally makes
-#   the gate's `current_mode` read `local` forever (it counts runners carrying that label),
-#   so the gate could never return CI to GitHub-hosted and would instead `fallback_off` —
-#   which stamps the ARM64 pool label onto these x86 runners. That is why the label is
-#   gate-following rather than permanent; see `--repair-labels`.
+#   ⚠️ And the reverse holds too: a runner carrying `ubuntu-latest` unconditionally makes
+#   `current_mode` read `local`, so on a healthy GitHub-hosted day the gate runs `fallback_off`.
+#   Since `agent-infra#2327` (PR #2338) that is harmless here: each body is derived from the
+#   runner's OWN host label (`labels_for`), so it strips `ubuntu-latest` and keeps `self-hosted-x64`
+#   — never stamping `self-hosted-arm64`. The label stays gate-following; see `--repair-labels`.
 #
 # ⛔ ARCH LABELS ARE NOT INTERCHANGEABLE. A runner is registered with `self-hosted-x64`
 #   (its own distinct pool marker, mirroring `self-hosted-arm64`) — NEVER with
@@ -399,7 +399,15 @@ if [ "$MODE" = uninstall ]; then
     else
       say "WARNING: could not deregister $name — LEFT $d and its registration intact so this can be retried; it may still be listed in the repo, check --status"; rc=3; continue
     fi
-    sudo rm -rf "$d"
+    if ! sudo rm -rf "$d"; then
+      # ⛔ THE DELETE IS THE LAST DESTRUCTIVE STEP AND ITS STATUS IS THE ONE THAT USED TO BE
+      # DISCARDED. `set -e` is off and `rc` was untouched, so a `sudo rm` that failed reported
+      # `deregistered` + exit 0 while the directory survived — the same fail-open shape the unit
+      # and deregistration branches above were fixed for. The registration IS gone now, so a re-run
+      # finds the directory, fails to deregister it, and exits 3: say so here, while the cause is
+      # still the removal and not a phantom registration.
+      say "WARNING: could not remove $d — it IS deregistered but still on disk; remove it by hand (a re-run would find nothing to deregister and fail)"; rc=3
+    fi
   done
   exit "$rc"
 fi

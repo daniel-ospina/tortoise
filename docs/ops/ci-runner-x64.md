@@ -32,8 +32,8 @@ and this box registers `self-hosted, Linux, X64, self-hosted-x64, ubuntu-latest`
 - `ARM64`/`X64` are **ornaments** — no job matches on them, and none can (a `runs-on` naming
   either would have to name `self-hosted` too, which the repo forbids: that label removes the
   GitHub-hosted half of the race and re-opens #4732's "a skipped check reads as a pass").
-- `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:184`
-  (`fallback_on`) attaches it, `:185` (`fallback_off`) detaches it.
+- `ubuntu-latest` is a **custom label** on the pool. `scripts/ci_runner_gate.sh:289`
+  (`fallback_on`) attaches it, `:290` (`fallback_off`) detaches it.
 - The ARM64-ness is an accident of the first runner's hardware (OrbStack VMs on an
   Apple-Silicon Mac — `mirror-images.yml:92` records `orbctl run -m pi-runner uname -m` →
   `aarch64`). No workflow depends on an arm64 binary, container image, or wheel: the only
@@ -122,17 +122,17 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:422` (the scale loop) · the two mode blocks the
+- `--count N` → `tools/install-ci-runner-x64.sh:430` (the scale loop) · the two mode blocks the
   paragraphs below cite: `install` `:278` (arch refusal dies at `:283`) and `uninstall` `:331` ·
   guards at `:278-327` (forks `:286`, disk `:306`, cpu/memory `:313`) · sha256 pin + registration
-  at `:433-441` (verify `:433`, token `:436`, one argv `:439-440`, `config.sh` `:441`) · systemd
-  install/start at `:451-453` · label resolution at `:169-207` (`fallback_engaged` `:173`,
+  at `:441-449` (verify `:441`, token `:444`, one argv `:447-448`, `config.sh` `:449`) · systemd
+  install/start at `:459-461` · label resolution at `:169-207` (`fallback_engaged` `:173`,
   `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:262`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:330-405`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
+  gone** (`:330-413`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
   `bin/Runner.Listener` must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is

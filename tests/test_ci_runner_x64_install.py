@@ -378,6 +378,34 @@ def test_uninstall_refuses_to_sudo_rm_a_directory_that_is_not_a_runner(tmp_path:
     (unit_dir / unit).unlink()
 
 
+# ── 5c0. a FAILED delete is an operation failure, not a clean removal ──────────────────────
+def test_a_failed_delete_reports_an_operation_failure_not_a_clean_removal(tmp_path: Path):
+    """`sudo rm -rf` is the last destructive step and its status used to be discarded.
+
+    `set -e` is off on this script and `rc` was untouched, so a `sudo rm` that failed printed
+    `deregistered <name>`, left the directory on disk, and exited 0 — the same fail-open shape the
+    unit branch (5c) and the deregistration branch (5b) were fixed for. The registration IS gone at
+    that point, so a re-run cannot deregister it either: the operator has to be told the directory
+    survived, and told by the exit code as well as the prose.
+    """
+    env = _uninstall_env(tmp_path)
+    # a `sudo` stub that fails ONLY the delete, exec'ing everything else
+    _stub_tool(
+        tmp_path / "bin", "sudo",
+        f'printf "%s\\n" "$*" >> {tmp_path / "sudo.log"}\n'
+        'case "$*" in *"rm -rf"*) exit 1 ;; esac\nexec "$@"',
+    )
+    runner = _deregisterable(tmp_path / "base")
+    r = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(runner)})
+    assert r.returncode == 3, (
+        "a delete that failed must not be reported as a clean removal: "
+        f"{r.returncode} {r.stderr}"
+    )
+    assert "deregistered" in r.stderr, f"the deregistration did succeed: {r.stderr}"
+    assert "could not remove" in r.stderr and "by hand" in r.stderr, r.stderr
+    assert runner.is_dir() and (runner / ".runner").exists(), r.stderr
+
+
 # ── 5c. a unit that cannot be removed must not be deleted out from under ─────────────────────
 def test_uninstall_never_deletes_under_an_enabled_unit_it_failed_to_remove(tmp_path: Path):
     """The unit is removed FIRST; if that fails the directory and its registration are LEFT INTACT.
