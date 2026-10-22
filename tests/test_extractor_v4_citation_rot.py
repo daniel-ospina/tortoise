@@ -835,7 +835,21 @@ _CHANGE_NARRATION = re.compile(
     # A version the passage says it has been true since — change history, not the
     # rule it settled on. Measured across the three design documents before
     # adding: 0 hits at HEAD.
-    r"|\bsince v[0-9]+\.[0-9]+\b",
+    r"|\bsince v[0-9]+\.[0-9]+\b"
+    # … and the passage narrating its OWN provenance or its OWN wording: the
+    # `⚠️ **Provenance of that correction:** …` preamble `#9523` left in
+    # `STORAGE-ARCHITECTURE.md` §17.5, and the self-reference beside it
+    # (*"the sentence above records three *groups*"*). Both shapes stood in the
+    # design documents while this guard reported them clean, because no arm
+    # described either — the same false PASS the dated-stamp and numbered-pass
+    # arms above closed for their own spellings. Removing the WORD a `#NNN`-shaped
+    # arm happens to match (`#9562` took out `corrected` and left the narration)
+    # is not the same as pinning the class, so the class is pinned here.
+    # Measured across the three design documents before adding: 0 hits at HEAD,
+    # and both fire on the pre-`#9562` text they were written against.
+    r"|\bProvenance of (?:that|this) (?:correction|change)\b"
+    r"|\b(?:the|this) (?:sentence|passage|paragraph|line) above "
+    r"(?:records|states|says|carries|claims)\b",
     re.IGNORECASE,
 )
 
@@ -1004,6 +1018,13 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         "(\u26a0\ufe0f spec-only \u2014 no producer yet, tracked in issue #7884) |",
         "`aboutSubject` has no producer here: the ONTOLOGY registers Session as an "
         "`aboutObject` source only.",
+        # The passage narrating its own provenance and its own wording — verbatim
+        # from `STORAGE-ARCHITECTURE.md` §17.5, where both stood while the guard
+        # reported the design documents clean (#8542).
+        "**\u26a0\ufe0f Provenance of that correction:** it is a **re-derivation of this "
+        "document's own sentence against `tortoise/ids.py` / `sdk._ULID_RE`",
+        "…the sentence above records three *groups*, and reading it as \"two "
+        "formats, one violation\" undercounted the off-contract population.",
     ]
     must_not_flag = [
         "The gate is FAIL-CLOSED at the boundary.",
@@ -1021,6 +1042,11 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         # A near-miss for the numbered-pass arm: an ordinal that counts WALKS,
         # not re-derivations of the passage.
         "A second walk added beside an excluded one cannot inherit its exclusion.",
+        # Near-misses for those two arms: `provenance` said of a real edge rather
+        # than of the passage's own correction, and a noun `above` something with
+        # no report verb after it.
+        "Supersession records `outcomeOf`; the provenance of that edge is the write itself.",
+        "The passage above the placement table restates §1.4's rule.",
         # Near-misses for the three history arms: a design statement that a row is
         # restored by the next census (no claim about the passage's past), and an
         # ordinary past tense with no self-reference.
@@ -1052,3 +1078,93 @@ def test_the_class_check_is_neither_dead_nor_noisy():
         assert flagged(line), f"the class check no longer fires on: {line!r}"
     for line in must_not_flag:
         assert not flagged(line), f"the class check is a false positive on: {line!r}"
+
+
+CHANGELOG = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE-CHANGELOG.md"
+
+
+def _changelog_entry(needle: str) -> str:
+    """The one `## …` entry of a design document's changelog whose HEADING has `needle`."""
+    blocks = re.split(r"(?m)^(?=## )", CHANGELOG.read_text(encoding="utf-8"))
+    matches = [b for b in blocks if b.startswith("## ") and needle in b.splitlines()[0]]
+    assert len(matches) == 1, (
+        f"expected exactly one changelog entry headed {needle!r}, found {len(matches)}"
+    )
+    return matches[0]
+
+
+_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*)[.\s]")
+
+
+def _section_body(path: Path, number: str) -> str:
+    """The body of `§number` in `path`: its heading up to the next same-or-higher heading."""
+    text = path.read_text(encoding="utf-8")
+    for match in _SECTION_HEADING.finditer(text):
+        if match.group(2) != number:
+            continue
+        level = len(match.group(1))
+        rest = text[match.end():]
+        for nxt in re.finditer(r"(?m)^(#{1,6}) ", rest):
+            if len(nxt.group(1)) <= level:
+                return rest[:nxt.start()]
+        return rest
+    raise AssertionError(f"{path.name} carries no §{number}")
+
+
+def test_the_changelog_entry_names_the_section_the_stamp_actually_left():
+    """The record's pointer has to land where the change was — §17.5, not §1.
+
+    The removed `corrected 2026-10-21` stamp and its *"Provenance of that
+    correction"* preamble lived in `STORAGE-ARCHITECTURE.md` §17.5 (the
+    field-level placement table), the section `#9523` corrected and this change
+    edited. The entry once said *"§1"*, and in `STORAGE-ARCHITECTURE.md` §1 is
+    `## 1. The problem` — the quota/volume measurement, with no id classification
+    in it at all.
+
+    Non-vacuity, measured on BOTH revisions — and the two red differently:
+
+    * At `5f136d15b` (this PR's first commit, where the entry first appeared with
+      `§1` in **both** its heading and its first sentence) the section-content
+      assertion reds — `§1` is `## 1. The problem`, which carries none of the
+      populations the classification quotes (`8,700` / `1,000` / `~30 EV-*`) —
+      and the qualifier assertion reds too, because the entry named no document
+      for its other §-reference. The heading/body **equality passes** there:
+      both pointers were wrong in the same direction, which is exactly why the
+      section-content assertion below is the load-bearing one.
+    * At `origin/main` (the true pre-fix head) the test reds earlier still: no
+      changelog entry is headed *"narration stamp left"* at all, so
+      `_changelog_entry` finds 0.
+
+    The convention this leans on is the document's own: a bare `§N` in
+    `STORAGE-ARCHITECTURE-CHANGELOG.md` is a STORAGE section, and a section in
+    another document is named with that document (e.g. `ONTOLOGY.md` §1/§4.4/§6).
+    So a reader who follows the pointer reads exactly what is asserted here.
+    """
+    entry = _changelog_entry("narration stamp left")
+    heading_says = re.search(r"narration stamp left §([0-9][0-9.]*)", entry)
+    body_says = re.search(r"corrected the id classification in §([0-9][0-9.]*)", entry)
+    assert heading_says and body_says, (
+        "the entry no longer states which section the stamp left, in both its "
+        f"heading and its first sentence:\n{entry}"
+    )
+    assert heading_says.group(1) == body_says.group(1), (
+        f"the entry's heading says §{heading_says.group(1)} while its body says "
+        f"§{body_says.group(1)} — one of the two pointers is wrong"
+    )
+    section = heading_says.group(1)
+    # All THREE populations, not just the first: the classification quotes three
+    # id groups, so a section that carries one of them and not the others is not
+    # the section the entry promises. Asserting only `8,700` would stay green on a
+    # pointer to a section that quotes one group — the claim would outrun the check
+    # it is stated as.
+    populations = ("8,700", "1,000", "~30 `EV-*`")
+    body = _section_body(STORAGE, section)
+    assert all(token in body for token in populations), (
+        f"the entry says the stamp left §{section}, but that section carries no id "
+        f"classification — the populations it quotes ({' / '.join(populations)}) live "
+        "in §17.5, so a reader re-verifying the record lands in the wrong place"
+    )
+    assert "placement doc's §1.4" in entry, (
+        "the entry's other §-reference must name its document: a bare `§N` in this "
+        "changelog reads as a STORAGE section"
+    )
