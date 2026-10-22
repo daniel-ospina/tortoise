@@ -2079,6 +2079,201 @@ class CollisionPreflightTest(unittest.TestCase):
         # 1 main worktree + 1 hit + 8 fillers = 10, all enumerated.
         self.assertIn("10 worktree(s) enumerated (untruncated)", out)
 
+    # ── #9540: a PATH SUBSTRING is a spelling, not a claim ──────────────────
+
+    def test_worktree_path_substring_with_a_foreign_branch_is_not_a_claim(self):
+        # #9540, measured on the real fleet: `/tmp/wt-3718` held lane work for
+        # #9397 (`fix/9397-about-edge-properties`) and matched #3718 only
+        # because the DIRECTORY NAME contains it. The gate has no dismissal
+        # switch by design (#8175), so a stale directory name froze the highest
+        # value un-gated product defect permanently. The branch is the field a
+        # lane deliberately named; the path is a leftover.
+        self.add_worktree(f"wt-{ISSUE}-stale-name",
+                          branch="fix/9397-about-edge-properties")
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("VERDICT: CLEAN", out)
+        self.assertNotIn("do NOT dispatch", out)
+        # Reported, never silent: the reader must see WHAT was demoted and why.
+        self.assertIn(f"wt-{ISSUE}-stale-name", out)
+        self.assertIn(f"its PATH contains {ISSUE} but its BRANCH claims #9397", out)
+        self.assertIn("[local worktrees]", out)
+
+    def test_worktree_path_substring_still_blocks_when_the_branch_names_this_issue(self):
+        # CONTROL for the test above: the demotion must fire ONLY when the branch
+        # names something else. A branch that names THIS issue is the claim, and
+        # the path merely agrees with it.
+        #
+        # ⛔ ROW-SCOPED (review cycle 4): `add_worktree(branch=...)` ALSO creates a
+        # local branch `fix/3061-lane`, and the branch surface blocks it — so a
+        # whole-output assertion was satisfied by the BRANCH row even if the
+        # WORKTREE row had been demoted. The label is unique per row, so this
+        # asserts the row under test.
+        branch = f"fix/{ISSUE}-lane"
+        name = f"wt-{ISSUE}-stale-name"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_worktree_path_substring_still_blocks_for_a_non_claim_branch_name(self):
+        # ⛔ THE NARROWNESS IS THE SAFETY PROPERTY. Only the shape a lane uses to
+        # CLAIM an issue (`fix/<n>-<slug>` / `feat/<n>-<slug>`) can contradict
+        # the path. A number that is not a claim — a date, a version, a metric —
+        # must not cancel it, or a reused worktree whose branch says
+        # `chore/bump-2024-10` would read a live lane as free.
+        #
+        # ⛔ EVERY CASE IS ASSERTED ON ITS OWN LINE, because worktrees ACCUMULATE
+        # in this fixture repo: a cumulative `assertNotEqual(rc, 0)` passed off an
+        # EARLIER subtest's blocking hit, so the widening it was supposed to catch
+        # was invisible (found in #9540's review cycle 2). The label line is
+        # unique per case, so this pins the CURRENT one.
+        for i, branch in enumerate((f"chore/bump-2024-10", f"release-1.2.3",
+                                    "perf/1200-rps-cache", "ci/1800-timeout",
+                                    "chore/5000-graph-cleanup",
+                                    f"feat/{ISSUE}0-lookalike",
+                                    "feat/2048-batch")):
+            with self.subTest(branch=branch):
+                name = f"wt-{ISSUE}-nonclaim-{i}"
+                self.add_worktree(name, branch=branch)
+                rc, out = self.run_tool()
+                label = f"{name} [refs/heads/{branch}]"
+                line = next((l for l in out.splitlines() if label in l), "")
+                self.assertTrue(line, f"no row for {label!r}\n{out}")
+                self.assertIn(f"matched issue-number ({ISSUE})", line)
+                self.assertNotIn("its PATH contains", line)
+                self.assertNotEqual(rc, 0, f"branch={branch!r}\n{out}")
+                self.assertIn("VERDICT: COLLISION", out)
+
+    def test_foreign_claim_branch_that_also_MENTIONS_this_issue_still_blocks(self):
+        # ⛔ THIS PINS THE `not branch_hit` CONJUNCT, which nothing else did
+        # (found in #9540 review cycle 3). A branch can name a foreign issue in
+        # the CLAIM position and still mention this one in its slug —
+        # `fix/9397-depends-on-3061`. The loose `number_present(branch, …)` arm is
+        # what makes that a hit today, and `_branch_names_other_issue` alone
+        # would answer 9397. So if a later reader decides the conjunct is
+        # redundant (it LOOKS redundant: the helper already refuses a branch that
+        # names this issue) and deletes it, this worktree is demoted and the lane
+        # that names 3061 goes free — a FALSE CLEAN, the dangerous direction.
+        branch = f"fix/9397-depends-on-{ISSUE}"
+        name = f"wt-{ISSUE}-mention"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_generated_branch_with_a_claim_shaped_tail_still_blocks(self):
+        # ⛔ THE GENERATED EXCLUSION APPLIES TO BOTH HALVES (review cycle 4).
+        # `branch_matchable` gated the HIT test only, so a bot-minted name with a
+        # claim-shaped tail (`mergify/merge-queue/fix/9397-x`) had
+        # `branch_hit = False` by construction and the helper read its raw name
+        # and answered 9397 — demoting the path hit while the docstring promised
+        # the PATH still blocks. `scan_branch_surface` skips the same ref, so
+        # nothing else would have blocked this worktree.
+        branch = "mergify/merge-queue/fix/9397-x"
+        name = f"wt-{ISSUE}-generated-tail"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_a_branch_number_that_is_not_the_issue_does_not_cancel_the_path(self):
+        # `fix/3061cafe-mine` NAMES this issue (`number_present` matches 3061 —
+        # the digits LEAD a hex-looking run, #3611), so the branch itself is the
+        # claim and the path hit stands. Same line-scoped assertion as above.
+        branch = f"fix/{ISSUE}cafe-mine"
+        name = f"wt-{ISSUE}-lead-hex"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
+    def test_worktree_path_substring_demotes_for_any_other_issue_claim(self):
+        # The demotion is a POSITIVE rule, not a special case for one example:
+        # any `fix/<n>-<slug>` naming a DIFFERENT issue contradicts the path, even
+        # a LOOKALIKE number (`fix/30611-…` claims 30611, not 3061). Pinned
+        # per-line, plus `rc == 0`, so the strength cannot be flipped silently.
+        for i, branch in enumerate((f"fix/9397-about-edge-properties",
+                                    f"fix/{ISSUE}1-lookalike")):
+            with self.subTest(branch=branch):
+                name = f"wt-{ISSUE}-claim-{i}"
+                self.add_worktree(name, branch=branch)
+                rc, out = self.run_tool()
+                label = f"{name} [refs/heads/{branch}]"
+                line = next((l for l in out.splitlines() if label in l), "")
+                self.assertTrue(line, f"no row for {label!r}\n{out}")
+                self.assertIn("its PATH contains", line)
+                self.assertIn("non-blocking", line)
+                # a weak hit CANNOT contribute to the verdict — pin that too, or
+                # flipping the strength to "strong" would keep these subtests
+                # green (review cycle 3, secondary finding).
+                self.assertEqual(rc, 0, out)
+                self.assertIn("VERDICT: CLEAN", out)
+
+    def test_branch_names_other_issue_reads_only_the_claim_shape(self):
+        # Unit pin on the helper, so a later refactor of the worktree scan cannot
+        # widen it unnoticed. Each case is a decision, not a spelling test.
+        mod = _tool_module()
+        cases = [
+            ("fix/9397-about-edge-properties", 9397),
+            ("refs/heads/fix/9397-about-edge-properties", 9397),
+            # `feat/` is NOT a claim namespace (#9540 review cycle 4:
+            # `feat/2048-batch` — a batch size, not an issue). Excluding it costs
+            # a residual over-block, the safe direction.
+            ("feat/9397-x", None),
+            ("feat/2048-batch", None),
+            # `test/` `docs/` `chore/` also carry `<n>-<slug>` names here, but in
+            # those namespaces the number can be a metric or a size, and
+            # EXCLUDING them costs only a residual over-block — the safe
+            # direction — while including them costs a false CLEAN.
+            ("test/9397-x", None),
+            ("docs/9397-x", None),
+            # the branch names THIS issue → no contradiction
+            ("fix/3061-mine", None),
+            # …ANYWHERE in the name, even after a foreign claim: the order the
+            # two are found must not decide the verdict (fail-closed).
+            ("feat/9397-x/fix/3061-y", None),
+            # not a claim shape → a version/date is not an issue reference
+            ("chore/bump-2024-10", None),
+            ("release-1.2.3", None),
+            # `3061cafe` is not the claim SHAPE (`<n>-<slug>`), so it cannot
+            # contradict a path — and it names THIS issue anyway, so the path
+            # keeps blocking either way (the fail-closed outcome).
+            ("fix/3061cafe-mine", None),
+            # generated worktree checkout, detached: nothing to contradict
+            ("mergify/merge-queue/6160bad001", None),
+            ("(detached)", None),
+            ("", None),
+            # this issue inside a hex digest is NOT a reference (#3611/#4935), so
+            # the branch's foreign claim is the only claim present → demotes the
+            # PATH hit, deliberately and documented in the helper's docstring.
+            ("fix/9397-abc3061def", 9397),
+        ]
+        for branch, expected in cases:
+            with self.subTest(branch=branch):
+                self.assertEqual(
+                    mod._branch_names_other_issue(branch, ISSUE), expected
+                )
+
     # ── #6622: a RECORD of work is not a WORKER ─────────────────────────────
 
     def test_unconfigured_remote_namespace_is_a_fetch_cache_not_a_holder(self):
