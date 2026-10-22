@@ -456,6 +456,35 @@ def test_uninstall_never_deletes_under_an_enabled_unit_it_failed_to_remove(tmp_p
     assert "could not remove" not in r.stderr, r.stderr
 
 
+# ── 5c1. a unit that outlives its directory is never reported as "nothing to uninstall" ──────
+def test_an_installed_unit_with_no_runner_directory_is_reported_not_called_clean(tmp_path: Path):
+    """`--uninstall` must not exit 0 on an instance whose directory is gone but whose unit is not.
+
+    Phase 1 skipped every instance whose DIRECTORY was absent before the unit was ever considered,
+    and the block then printed `nothing to uninstall` and exited 0 — while an enabled unit kept
+    restarting into a `WorkingDirectory` that no longer exists. The unit name needs no directory
+    (`unit_for` derives it from the instance NUMBER), so the unit is knowable there. Without
+    `$d/svc.sh` it cannot be uninstalled from this script, so it is REPORTED and the run exits 3:
+    a caller must never read "ok" for a box that still runs a runner service. Measured on the
+    pre-fix script: `skip: … does not exist` / `nothing to uninstall` / EXIT=0, unit still on disk.
+    """
+    env = _uninstall_env(tmp_path)
+    unit = "actions.runner.daniel-ospina-tortoise.pi-runner-x64-1.service"
+    (Path(env["CI_RUNNER_UNIT_DIR"]) / unit).write_text("[Unit]\n")
+    absent = tmp_path / "nowhere"          # the directory a hand `rm -rf` (or the old gate) removed
+    r = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(absent)})
+    assert r.returncode == 3, (
+        f"an installed unit with no runner directory is an OPERATION failure: {r.returncode} {r.stderr}"
+    )
+    assert "nothing to uninstall" not in r.stderr, r.stderr
+    assert unit in r.stderr and "systemctl disable --now" in r.stderr, r.stderr
+
+    # …and with no unit either, the same invocation is still the clean no-op it claims to be
+    clean = _uninstall_env(tmp_path / "clean")
+    r = _run("--uninstall", "--count", "1", env={**clean, "CI_RUNNER_BASE": str(absent)})
+    assert r.returncode == 0 and "nothing to uninstall" in r.stderr, r.stderr
+
+
 # ── 5d. every removal token is minted BEFORE the first deletion ──────────────────────────────
 def test_a_token_mint_failure_leaves_every_runner_untouched(tmp_path: Path):
     """A mint that fails on runner 2 must not leave runner 1 already deregistered and deleted.
@@ -568,6 +597,18 @@ def test_unreadable_bounds_are_refused_and_unlimited_forks_is_a_reading(tmp_path
     )
     assert r.returncode == 1, r.stderr
     assert "CORES_PER_RUNNER must be a non-negative integer" in r.stderr, r.stderr
+
+    # ⛔ THE OTHER HOST READING IS A GUARD REFUSAL, NOT A USAGE ERROR — the same class as `FORK_CAP`
+    # above, and the runbook says so. `CI_RUNNER_NCPU` is a seam for reading the core count, so an
+    # unparseable value is refused rather than coerced to 0 (which would refuse every install on a
+    # bound nobody read). Pinned here because the runbook's exit-code split (1 for the seven sizing
+    # units, 2 for the two host readings) is only true while both readings behave that way.
+    r = _run(
+        "--count", "1", "--dry-run",
+        env=_env(tmp_path, CI_RUNNER_ARCH="x86_64", CI_RUNNER_NCPU="two"),
+    )
+    assert r.returncode == 2, f"an unreadable core count must be refused as a guard: {r.returncode} {r.stderr}"
+    assert "cannot read the core count" in r.stderr, r.stderr
 
 
 # ── 7. the published exit contract ──────────────────────────────────────────────────────────

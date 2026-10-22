@@ -345,18 +345,39 @@ if [ "$MODE" = uninstall ]; then
   # phase leaves EVERY directory untouched.
   uninstall_dirs=()
   uninstall_units=()
+  orphan_units=()
+  rc=0
   for i in $(seq 1 "$COUNT"); do
     d="$(runner_dir "$i")"
-    [ -d "$d" ] || { say "skip: $d does not exist"; continue; }
+    unit="$(unit_for "$NAME_PREFIX-$i")"
+    if [ ! -d "$d" ]; then
+      # ⛔ A UNIT OUTLIVES ITS DIRECTORY, AND ITS NAME NEEDS NO DIRECTORY. The unit of this instance
+      # is derived from its NUMBER, so it is readable here; skipping the whole instance on a missing
+      # directory is how `--uninstall` printed `nothing to uninstall` and exited 0 while an ENABLED
+      # unit kept restarting into a WorkingDirectory that no longer existed — the state this block
+      # exists to prevent. With no `$d/svc.sh` it cannot be uninstalled from here, so it is REPORTED
+      # and the run exits 3: a caller must never read "ok" for a box that still runs the service.
+      [ -e "$UNIT_DIR/$unit" ] && orphan_units+=("$unit")
+      say "skip: $d does not exist"
+      continue
+    fi
     if ! is_runner_install "$d"; then
       die "$d is not a runner install (no .runner, config.sh or bin/Runner.Listener) — refusing to delete it. Remove it by hand if it is debris, or pass the right CI_RUNNER_BASE."
     fi
     uninstall_dirs+=("$d")
     # the unit name comes from the INSTANCE NUMBER, not from the array index: instance 1 may be
     # absent while 2 exists, and deriving it from the index would then address the wrong unit.
-    uninstall_units+=("$(unit_for "$NAME_PREFIX-$i")")
+    uninstall_units+=("$unit")
   done
-  [ "${#uninstall_dirs[@]}" -gt 0 ] || { say "nothing to uninstall"; exit 0; }
+  if [ "${#orphan_units[@]}" -gt 0 ]; then
+    for u in "${orphan_units[@]}"; do
+      say "WARNING: $u is still installed but its runner directory is gone, so there is no svc.sh here to uninstall it with — remove it by hand: sudo systemctl disable --now $u && sudo rm -f $UNIT_DIR/$u"; rc=3
+    done
+  fi
+  if [ "${#uninstall_dirs[@]}" -eq 0 ]; then
+    [ "${#orphan_units[@]}" -eq 0 ] && say "nothing to uninstall"
+    exit "$rc"
+  fi
   uninstall_tokens=()
   if [ "$DRY" != 1 ]; then
     for d in "${uninstall_dirs[@]}"; do
@@ -365,7 +386,6 @@ if [ "$MODE" = uninstall ]; then
       uninstall_tokens+=("$tok")
     done
   fi
-  rc=0
   for i in "${!uninstall_dirs[@]}"; do
     d="${uninstall_dirs[$i]}"; name="$(basename "$d")"; unit="${uninstall_units[$i]}"
     if [ "$DRY" = 1 ]; then say "dry-run: would stop and uninstall the unit $unit, deregister $name, then remove $d"; continue; fi

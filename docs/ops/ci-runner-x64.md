@@ -88,9 +88,11 @@ The CPU guard is a capacity bound; **the memory leg is not** — it reads `MemAv
 two runners starting into 6G would OOM-kill the lanes' FalkorDB — but state it for what it is: of
 the four legs (forks, disk, cpu, memory), memory is the one whose reading moves with load. Every
 sizing unit is env-overridable (`CI_RUNNER_{CORES_PER_RUNNER,CORES_RESERVED,DISK_PER_RUNNER_GB,
-DISK_RESERVE_GB,MEM_PER_RUNNER_GB,MEM_RESERVE_GB,FORKS_PER_RUNNER,FORK_CAP,NCPU}`) so a bound can
-be exercised on its own; a value that is present and unparseable is refused (exit 1), never
-coerced to zero.
+DISK_RESERVE_GB,MEM_PER_RUNNER_GB,MEM_RESERVE_GB,FORKS_PER_RUNNER}`) so a bound can
+be exercised on its own; such a value that is present and unparseable is refused as a usage
+error (exit 1), never coerced to zero. The two HOST readings (`CI_RUNNER_FORK_CAP`,
+`CI_RUNNER_NCPU` — pins for `ulimit -u` and the core count) are read, not sized, and an
+unparseable one is a GUARD refusal (exit 2), the same class as an unreadable headroom bound.
 
 ## Recreate from scratch / after a reboot
 
@@ -122,17 +124,17 @@ within twenty seconds. That is a **state read, not a default**: with GitHub-host
 same command registers `self-hosted-x64` only, and the gate attaches the fallback label when it
 falls back.
 
-- `--count N` → `tools/install-ci-runner-x64.sh:430` (the scale loop) · the two mode blocks the
+- `--count N` → `tools/install-ci-runner-x64.sh:450` (the scale loop) · the two mode blocks the
   paragraphs below cite: `install` `:278` (arch refusal dies at `:283`) and `uninstall` `:331` ·
   guards at `:278-327` (forks `:286`, disk `:306`, cpu/memory `:313`) · sha256 pin + registration
-  at `:441-449` (verify `:441`, token `:444`, one argv `:447-448`, `config.sh` `:449`) · systemd
-  install/start at `:459-461` · label resolution at `:169-207` (`fallback_engaged` `:173`,
+  at `:461-469` (verify `:461`, token `:464`, one argv `:467-468`, `config.sh` `:469`) · systemd
+  install/start at `:479-481` · label resolution at `:169-207` (`fallback_engaged` `:173`,
   `resolve_labels` `:184`) · label repair at `:229` · `--print-labels` at `:262`.
 - `--count` is validated ONCE, before the mode dispatch, for EVERY mode (`:145-149`): a
   `--count 0 --uninstall` is a usage error (exit 1), not a silent no-op that reports success
   having deregistered nothing.
 - **`--uninstall` deletes only what it can PROVE is a runner install, and only after its unit is
-  gone** (`:330-413`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
+  gone** (`:330-433`; the proof is `is_runner_install` at `:165`): `.runner`, `config.sh` or
   `bin/Runner.Listener` must exist in the directory, every target is validated BEFORE the first
   deletion, and every removal token is minted BEFORE the first deletion — so a refusal in any of
   those phases leaves every directory untouched, never a half-uninstalled set. `CI_RUNNER_BASE` is
