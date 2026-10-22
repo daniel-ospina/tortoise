@@ -63,9 +63,9 @@ from tortoise.projection import (
     _CACHE_WRITE_AUTHORIZED,
     _HANDLE_ONLY_WRITE_LANES,
     _REPLAY_WRITE_LANE,
+    DirectCacheWriteRefused,
     _raw_query_lane_permit,
     _replay_write_scope,
-    DirectCacheWriteRefused,
 )
 
 # ── fixtures ──────────────────────────────────────────────────────────────
@@ -198,8 +198,10 @@ def test_the_narrowing_is_declared_and_named_by_the_scope():
     than a side effect of a new scope.
     """
     assert _REPLAY_WRITE_LANE == "replay"
-    assert _HANDLE_ONLY_WRITE_LANES == frozenset({_REPLAY_WRITE_LANE}), (
-        "the handle-only lane set changed: " f"{sorted(_HANDLE_ONLY_WRITE_LANES)}")
+    expected = frozenset({_REPLAY_WRITE_LANE})
+    assert expected == _HANDLE_ONLY_WRITE_LANES, (
+        "the handle-only lane set changed: "
+        f"{sorted(_HANDLE_ONLY_WRITE_LANES)}")
 
     with _replay_write_scope():
         assert _CACHE_WRITE_AUTHORIZED.get() == _REPLAY_WRITE_LANE, (
