@@ -69,10 +69,12 @@ POLICY_ROW = re.compile(r"^\|\s*\*\*(S\d+(?:\.\d+)?)")
 PIN_HEADER_MARKER = "Code citations — revision pin"
 BASE_PIN = "c79ba1cf2"
 _PIN_TOKEN = re.compile(r"`([0-9a-f]{7,40})`")
-#: The pin's evidence says how many cited files are OUT OF RANGE at the base pin
-#: (`five of the cited files are shorter at `c79ba1cf2``). The count and the
-#: enumeration beside it must agree — see
-#: `test_the_pin_evidence_counts_exactly_the_files_it_names` (#9654 review P2).
+#: The pin's evidence states how many cited files are OUT OF RANGE at the base
+#: pin. The count must match the enumeration beside it, and every passage that
+#: states the claim must state the SAME list — see
+#: `test_the_pin_evidence_counts_exactly_the_files_it_names` (#9654 review P2/P3).
+#: ⚠️ Do not restate the number or the list here: an unguarded copy of it is the
+#: defect that guard exists for.
 _SHORTER_COUNT_CLAIM = re.compile(
     r"(?P<count>[a-z]+)\s+of\s+(?:the|these)\s+(?:cited\s+)?files\s+are\s+shorter",
     re.I)
@@ -327,21 +329,23 @@ def test_the_pin_evidence_counts_exactly_the_files_it_names():
     BOTH statements of the pin's evidence — the header's fourth-pin clause and
     the subsection's own pin line — say how many cited files are shorter at
     `c79ba1cf2`. The pre-fix header said "three" and named no file at all, and
-    the pin test's own docstring said "three" while naming four (`sdk.py`,
-    `assembly.py`, `projection/entities.py`, `projection/__init__.py`) and
+    the pin test's own docstring said "three" while naming four files and
     omitting `commit_ops.py`, which the subsection cites at `:51`, `:59` and
     `:1408` and whose vocabulary the whole passage rests on: a lane refreshing
     the pin would re-check the named files and leave it silently unverified.
 
-    This guards INTERNAL CONSISTENCY, not the measured truth (five was measured
-    at both refs when the pin was added) — the count a reader can check against
-    the list beside it is the cheapest falsifier, and a new citation has to
-    update both together, which is the point.
+    This guards INTERNAL CONSISTENCY, not the measured truth (the count was
+    measured at both refs when the pin was added) — the number a reader can
+    check against the list beside it is the cheapest falsifier, and a new
+    citation has to update both together, which is the point.
 
-    The claim is written down in THREE places, and the changelog is the one a
-    lane auditing the pin opens first: round 2 found it still saying "three"
-    after the header, the subsection and this docstring were corrected. It is
-    read here for exactly that reason.
+    The claim is written down in TWO files and three passages — the architecture
+    doc's header clause, its §4.3 pin line, and the changelog that records the
+    correction — and the changelog is the one a lane auditing the pin opens
+    first: round 2 found it still saying "three" after the other two had been
+    corrected. The pin test's own docstring deliberately does NOT restate the
+    count or the list any more: a copy no guard reads is exactly how that
+    happened, so it names the doc's two passages as the authoritative pair.
     """
     sources = (("the architecture doc", _document()),
                ("its changelog", _changelog()))
@@ -356,11 +360,12 @@ def test_the_pin_evidence_counts_exactly_the_files_it_names():
         )
         claims.extend((name, text, match) for match in found)
     assert len(claims) >= 3, (
-        "the pin's evidence is stated in the header, the subsection AND the "
+        "the pin's evidence is stated in the header, the §4.3 pin line AND the "
         f"changelog; found {len(claims)} occurrence(s) — re-point this guard "
         "(#5333)"
     )
-    for name, text, claim in claims:
+    enumerated = []
+    for index, (name, text, claim) in enumerate(claims):
         expected = _COUNT_WORDS[claim.group("count").lower()]
         tail = text[claim.end():claim.end() + 400]
         stop = tail.find(")")
@@ -371,6 +376,24 @@ def test_the_pin_evidence_counts_exactly_the_files_it_names():
             "out-of-range file and update the count — a lane refreshing the pin "
             "re-checks exactly the names given here (#5333)."
         )
+        # Keyed by PASSAGE, not by source: the architecture doc states the claim
+        # twice (header + §4.3 pin line), and keying on the source label let the
+        # second overwrite the first, so a divergent HEADER evaporated (#9654
+        # round-3 verification).
+        enumerated.append((f"{name}, passage {index + 1}", expected,
+                           frozenset(names)))
+    # Round 3: a per-passage check alone let a DIVERGENT copy pass as long as it
+    # was internally consistent (changelog "four" + four names, doc "five" +
+    # five names) — which is the round-2 defect one edit away. The copies must
+    # agree with EACH OTHER, not just with themselves.
+    distinct = {(count, names) for _, count, names in enumerated}
+    assert len(distinct) == 1, (
+        "the pin's evidence disagrees between the passages that state it: "
+        + "; ".join(f"{where} — {count} {sorted(names)}"
+                    for where, count, names in enumerated)
+        + " — one list, one count, in the header, the §4.3 pin line and the "
+        "changelog (#5333)."
+    )
 
 
 def _g5_destructive_half() -> str:
@@ -471,10 +494,14 @@ def test_the_relocation_subsection_citations_name_their_revision_pin():
 
     The header pins every `file.py:NNNN` to `c79ba1cf2` *except where a passage
     names a later pin*. The subsection's citations are HEAD numbers: at the base
-    pin five of the cited files (`sdk.py`, `assembly.py`, `projection/entities.py`,
-    `projection/__init__.py`, `commit_ops.py`) are shorter than the cited line and
-    `tortoise/definite_description_backfill.py` does not exist at all — so an
-    unpinned passage is not a *stale* citation, it is no citation.
+    pin most of the cited files do not reach the cited line at all, and
+    `tortoise/definite_description_backfill.py` does not exist there — so an
+    unpinned passage is not a *stale* citation, it is no citation. ⚠️ The count
+    and the file list live in the header's `653980445` clause and in §4.3's pin
+    line, and nowhere else: they are guarded there
+    (`test_the_pin_evidence_counts_exactly_the_files_it_names`), so this
+    docstring deliberately does not restate them — an unguarded copy is how the
+    round-2 defect happened (#5333).
     The passage pins the measurement ONCE for the whole subsection (that is its
     shape: a measurement-scope pin, not a per-line one), and the header must
     list that pin among its exceptions so an adopter can find it.
