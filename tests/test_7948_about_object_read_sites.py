@@ -242,9 +242,12 @@ WHAT THIS PINS
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
    `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
-   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` — the four
-   `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
-   than §13's. The third is the `#9522` capture arm: it replays the removed figure
+   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` +
+   `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` +
+   `test_the_narrow_gate_walk_rebuild_buys_nothing` — the six
+   `#9506`/`#9522`/`#9501` arms, and the only ones here about this instrument's OWN
+   prose rather than §13's. The third is the `#9522` capture arm: it replays the
+   removed figure
    through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
    above the `def`), then holds the LIVE function by containment (its docstring's first
    line is in the capture) and by width (strictly more lines than the `#`-line
@@ -318,6 +321,32 @@ WHAT THIS PINS
    commit `fa84a473d:990-992`, and — where this checkout can reach the objects,
    skipped rather than shallow-ified otherwise — that blob must carry the figure while
    `origin/main`'s does not.
+   ⚠️ **The FIFTH arm is the same rule in the OTHER ALPHABET (`#9501`).** `#9516`
+   removed the FIGURES and left the MAGNITUDE in words — *"No magnitude is pinned: the
+   rebuild is a small fraction of this arm's cost, and a wall-clock number in a comment
+   is the claim that rots"* — which `_unframed_durations` cannot see, because it matches
+   `\\d+\\s?(ms|s)`. So the sentence survived the guard written to delete exactly that
+   claim, and it did not reproduce: measured at this head (`81f5594dc`, fresh process,
+   `_literal_files()` warm, two runs) the rebuild is 2.5–3.0 s of
+   `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over half the arm**, not a small
+   fraction of it. `_unsettleable_magnitudes()` states that rule once for the word form
+   (a magnitude — digit or word — is allowed only with the framing that produced it),
+   and `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` applies it to the
+   live comment, with its non-vacuity in the arm above. ⚠️ It reads the comment
+   FLATTENED (`_flatten_comment`), because the sentence it exists to red on is wrapped
+   INSIDE the phrase (`…a small fraction of this` / `# arm's cost…`), and a line-by-line
+   match was GREEN on the file's real comment while RED only on a re-wrapped copy of it.
+   `_unframed_durations` is deliberately NOT flattened: its framing window is the
+   number's own LINE (`_framed`), and the wrap residual there is filed as `#9531`.
+   ⚠️ **The SIXTH arm is the third alphabet, and the one no predicate can see.** The
+   comment had also come to pin three site counts two lines below "No magnitude is
+   pinned here on purpose": true, deterministic, and measured by NOTHING, since bare
+   digits carry no `ms|s` for `_unframed_durations` and are not words for
+   `_unsettleable_magnitudes`. The digits are gone rather than restated, and the claim
+   they stood for is EXECUTED by `test_the_narrow_gate_walk_rebuild_buys_nothing`: it
+   substitutes a rebuild of the same `_File`s for `_literal_files()` and runs the REAL
+   `_narrow_gate_walk_sites` body, so "same values, same order, same derivations" is
+   measured through the walk the comment sits in rather than written down beside it.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -3833,6 +3862,153 @@ def _unframed_durations(comment: str) -> list[str]:
     return found
 
 
+def _flatten_comment(comment: str) -> str:
+    """`comment` as ONE line, so a line break cannot hide a phrase (`#9501`).
+
+    ⚠️ **The defect this exists for: a guard blind to where the prose WRAPS.** A
+    comment is judged as the text a reader reads, and that text is wrapped to the
+    repo's line length, so a break landing INSIDE a phrase splits it into two lines
+    that no single alternation matches and no backtracking recovers.
+
+    Measured, and it was the whole hole: the sentence this file exists to red on —
+    *"the rebuild is a small fraction of this arm's cost"* — is wrapped at this repo's
+    width as `…a small fraction of this` / `# arm's cost…`. The first version of
+    `_unsettleable_magnitudes` was therefore **GREEN on the comment `origin/main`
+    actually carries**, and RED only on the re-wrapped copy the arm fed it: one moved
+    line break was the entire difference between RED and GREEN, so the arm was vacuous
+    with respect to the defect it was written for (`#9501` review).
+
+    ⚠️ The word-form predicate flattens; `_unframed_durations` deliberately does NOT.
+    Its framing window is the number's own LINE by design (`_framed`), and flattening
+    there would let a marker on ANY line frame every figure in the comment — the
+    whole-text hole `#9522` closed. So a duration broken before its unit stays silent,
+    and that residual is filed with the line-vs-number coarseness as `#9531` rather
+    than bought back by widening the framing window.
+    """
+    return " ".join(line.strip().lstrip("#").strip() for line in comment.splitlines())
+
+
+#: The quantities a proportion claim is ABOUT — the arm, its cost, its time, its work.
+#: Every alternative below BINDS to one of these, because the claim class is "a share of
+#: the work", not "any phrase containing `most of`": `# most of these modules are
+#: literal carriers` asserts no magnitude at all, and a merge-gating arm that reds on it
+#: reports "state the framing that produced it" for a sentence holding no figure — a
+#: false positive, not a policy (`#9501` review). Alternative 3's un-scoped `most | half
+#: of` was exactly that, and it is why this is shared rather than repeated per branch.
+_MAGNITUDE_SUBJECT = (
+    r"(?:#\s*)?(?:the\s+|this\s+)?(?:\w+'s\s+)?"
+    r"(?:arm|cost|time|wall[- ]?clock|run|suite|total|work|budget|walk)\b"
+)
+
+#: A magnitude asserted in WORDS — the form `_unframed_durations` cannot see, because
+#: it matches digits. Each alternative names a proportion without naming a number: the
+#: same unsettleable claim in a different alphabet.
+#: ⚠️ The ADJECTIVE is OPTIONAL on purpose. The sentence this chain produced read *"the
+#: redundant rebuild is a fraction of this arm"*, and the first version of this pattern
+#: required `small|large|…` before the noun — so it was GREEN on the exact spelling the
+#: defect took (`#9501` review). What makes the phrase a claim is the quantity it binds
+#: to, never the adverb in front of it.
+_MAGNITUDE_WORDS = re.compile(
+    rf"\b(?P<proportion>"
+    rf"(?:(?:small|large|tiny|negligible|modest|minor|major|significant|"
+    rf"substantial|smallish)\s+)?"
+    rf"(?:third|thirds|half|halves|quarter|quarters|\w+(?:th|ths)|fraction|"
+    rf"share|portion|part|proportion|percentage|percent|ratio|majority|"
+    rf"minority|sliver|chunk))\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
+    rf"|\b(?P<percent>(?:\d+(?:\.\d+)?\s*%|\d+\s*(?:per\s?cent|pct)))"
+    rf"\s+(?:of|in)\s+{_MAGNITUDE_SUBJECT}"
+    rf"|\b(?P<bulk>(?:the\s+)?(?:bulk|lion's\s+share))\b"
+    rf"|\b(?P<share>(?:most|half)\s+(?:of\s+)?{_MAGNITUDE_SUBJECT})",
+    re.IGNORECASE,
+)
+
+
+def _unsettleable_magnitudes(comment: str) -> list[str]:
+    """Magnitude claims in `comment` that no number makes settleable (`#9501`).
+
+    ⚠️ **This is the digit guard's rule in the other alphabet, and it is the hole
+    `#9516` left.** That change removed the *figures* from the gate-walk comment but
+    kept the magnitude in WORDS: *"No magnitude is pinned: the rebuild is a small
+    fraction of this arm's cost, and a wall-clock number in a comment is the claim that
+    rots."* A predicate that matches `\\d+\\s?(ms|s)` cannot see it, so the sentence
+    survived the guard written to delete exactly that claim — and it is **false at the
+    natural reading.** Measured at this head (fresh process, `_literal_files()` warm,
+    two runs) with `_literal_files()` replaced by a rebuild over `_sources().items()`:
+    the rebuild costs 2.5–3.0 s of `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over
+    half** the arm, not a small fraction of it. (The first measurement, at
+    `69390341f`, read 1.70 s / 1.81 s of 3.35 s / 3.14 s: the same ratio, a slower
+    box.) It reaches ~17 % only if "this arm" is read as the whole gate walk, with the
+    ungated pass folded in — which is not the arm the comment sits in. A ratio whose
+    truth depends on an unstated reading of "this arm" is the same unsettleable claim
+    as `10.36 s of 10.85 s`, written so the duration guard misses it.
+
+    One rule, stated once and applied to both forms: a magnitude — digit or word — is a
+    fact asserted about a measurement, and it is allowed only when the comment also
+    states the framing that produced it. A framed figure therefore admits the word form
+    too; an unframed one admits neither. It does not read the DENIAL (the round-5
+    lesson).
+
+    ⚠️ Coarse in BOTH directions, and both are documented rather than discovered:
+
+    * GREEN where the phrase is an OPEN-CLASS quantity noun no alternative knows
+      ("the rebuild eats a hair of the arm", "a good deal of the arm's cost") or a
+      proportion bound to something that is not a measured quantity ("most of these
+      modules are literal carriers"). What IS closed is the productive morphology —
+      ordinal (``fifths``, ``tenths``, ``hundredths``, ``thirds``) and each percentage
+      SPELLING (``80%``, ``80 per cent``, ``80 pct``) — because those are the spellings
+      a rewording reaches for first, and this guard has already been retired by a
+      rewording three times. That is why the live comment carries no proportion at all
+      rather than a phrasing a list must chase.
+    * RED on a real magnitude REGARDLESS of the adjective in front of it ("a fraction of
+      this arm" as much as "a small fraction of this arm"), and on `half the arm` as
+      much as `half of the arm` — the two spellings an adjective-gated, `of`-gated list
+      was green on, one of which is the exact sentence this chain produced.
+
+    ⚠️ And it reads the comment FLATTENED (`_flatten_comment`), because the sentence it
+    exists to red on is wrapped INSIDE the phrase: `origin/main` breaks it as `…a small
+    fraction of this` / `# arm's cost…`. Matching line by line made this predicate green
+    on the real defect and red only on a re-wrapped copy of it — the arm asserted its own
+    fixture rather than the file (`#9501` review).
+    """
+    comment = _flatten_comment(comment)
+    if any(marker in comment for marker in _DURATION_FRAMING):
+        return []
+    return [
+        match.group(match.lastgroup) for match in _MAGNITUDE_WORDS.finditer(comment)
+    ]
+
+
+def test_the_gate_walk_comment_asserts_no_unmeasured_magnitude():
+    """A magnitude in WORDS is still a claim, and this one did not reproduce (`#9501`).
+
+    ⚠️ **The gap `#9516` left, executed rather than argued.** Its guard holds the
+    comment to its DURATIONS; the comment it produced pins a *proportion* in words
+    instead — "the rebuild is a small fraction of this arm's cost" — which measured at
+    this head is over half the arm (2.5–3.0 s of the walk's own 3.9–4.4 s; the numbers
+    and their framing are in `_unsettleable_magnitudes`' docstring). So the guard moved
+    the figure out of the sentence and the sentence kept the claim, which is the defect
+    class this issue chain exists to end: a magnitude stated in prose with nothing
+    measuring it. The rule is the same one the duration arm states, applied to the other
+    alphabet.
+
+    Non-vacuity is its own leg in the arm below: the sentence `#9516` left behind REDs,
+    a magnitude word carrying its framing stays GREEN, and the live comment is GREEN
+    under the same predicate.
+    """
+    comment = _gate_walk_comment()
+    assert comment, (
+        "`_narrow_gate_walk_sites` carries no prose any more, so this arm asserts "
+        "nothing — the mechanism it states was the whole point of the change"
+    )
+    assert not _unsettleable_magnitudes(comment), (
+        "the gate-walk comment pins a magnitude in WORDS, which no number makes "
+        f"settleable ({_unsettleable_magnitudes(comment)}) — state the figure with "
+        "the framing that produced it (whole arm / control step / `--durations=0` / "
+        "in-suite), or state only the mechanism. A proportion without a number is "
+        "not a weaker claim than a duration without framing, it is the same claim."
+    )
+
+
 def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     """A pinned duration must carry the framing that produced it (`#9506`).
 
@@ -3877,8 +4053,8 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
 
 
 def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
-    """Non-vacuity for `_unframed_durations`, on the PRE-`#9516` MAIN — not an
-    intermediate commit of this branch (`#9506`).
+    """Non-vacuity for `_unframed_durations` AND `_unsettleable_magnitudes`, on the
+    PRE-`#9516` MAIN — not an intermediate commit of this branch (`#9506`, `#9501`).
 
     ⚠️ **The round-5 review found the first guard green on `origin/main`.** It red
     only on `says_none AND duration`, and the base text says no denial, so the arm
@@ -3894,6 +4070,13 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
     wording pointed a re-verifier at a tree that no longer says what this arm claims.
     The string below is `fa84a473d:tests/_about_call_time_census.py:990-992`, the last
     main commit to carry it.
+
+    ⚠️ **The word-form legs at the end of this arm are the same non-vacuity for the
+    other ALPHABET (`#9501`), and they carry their own premise.** Each feeding string is
+    first shown to be INVISIBLE to `_unframed_durations` (no digit, no unit), because a
+    word-form leg whose input the digit guard already reds would prove nothing about the
+    word form. The live comment is checked under that predicate too, so the two live arms
+    cannot diverge from their non-vacuity arm unnoticed.
     """
     pre_9516_main = (
         "# `_literal_files()` is already parsed and cached; re-reading `_sources()` "
@@ -4137,6 +4320,197 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "the live comment must be green under the same predicate the two arms above "
         "use — this is the arm the guard asserts, restated so a divergence between "
         "the predicate and its non-vacuity arm cannot go unnoticed"
+    )
+
+    # ── the SECOND predicate's non-vacuity (`#9501`): the same rule in the OTHER
+    # ALPHABET. `_unframed_durations` matches digits, so every string below is invisible
+    # to it — and that premise is ASSERTED, not assumed, before each word-form leg leans
+    # on it, because a word-form leg whose input the digit guard already reds proves
+    # nothing about the word form.
+    #
+    # This is the sentence `#9516` left behind, VERBATIM as `origin/main` wraps it
+    # (`git show origin/main:tests/_about_call_time_census.py`), WRAP INCLUDED: it breaks
+    # between `this` and `arm's`, so a predicate that matches per line is GREEN on the
+    # real defect while RED only on a re-wrapped copy of it.
+    survived = (
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and\n"
+        "# rebuilding the same 29 `_File`s is redundant work for byte-identical output —\n"
+        "# the same `_File` values over the same `_sources().items()` order, so only object\n"
+        "# identity changes. No magnitude is pinned: the rebuild is a small fraction of this\n"
+        "# arm's cost, and a wall-clock number in a comment is the claim that rots."
+    )
+    assert not _unframed_durations(survived), (
+        "the premise of this leg: the digit guard is BLIND to the sentence `#9516` left "
+        "behind — if it were not, the word-form arm would be redundant"
+    )
+    assert _unsettleable_magnitudes(survived) == ["small fraction"], (
+        "the word-form predicate must red on the sentence `#9516` left behind, as it is "
+        "WRAPPED on `origin/main` (`the rebuild is a small fraction of this` / `# arm's "
+        "cost`) — a predicate that only matches this phrase on one long line passes on "
+        "the comment the file actually carries, which is the fail-open shape `#9501` is"
+    )
+    # ⚠️ This leg carries the lesson from the first version of the arm: its fixture bound
+    # the proportion to `it`, which is NOT in `_MAGNITUDE_SUBJECT`, so the predicate
+    # matched nothing and the assertion passed with the framing exemption deleted
+    # outright — green for a reason other than the one its message claims. The phrase is
+    # bound to THE ARM here, so the framing marker is the only thing clearing it, and the
+    # unframed twin below is executed to prove exactly that.
+    framed_magnitude = (
+        "# the arm measured 14.4 s whole arm, --durations=0: a small fraction of the arm"
+    )
+    assert not _unsettleable_magnitudes(framed_magnitude), (
+        "a magnitude word that carries the framing of its figure must stay allowed — "
+        "otherwise this is a style rule against adverbs rather than a rule about "
+        "settleable claims"
+    )
+    assert _unsettleable_magnitudes(
+        "# the arm measured 14.4 s: a small fraction of the arm"
+    ) == ["small fraction"], (
+        "the leg above must be green BECAUSE OF THE FRAMING, not because the phrase is "
+        "outside the predicate's reach — this is the identical sentence with the two "
+        "framing markers (`whole arm`, `--durations=0`) removed, and it must red"
+    )
+
+    # ⚠️ Two spellings the FIRST version of the predicate was GREEN on, and the first of
+    # them is the sentence this chain produced verbatim. The adjective was mandatory
+    # (`small fraction`) and alternative 3 required the literal `of`, so dropping one
+    # word — or stating the refuted magnitude in the author's own measured phrasing
+    # (`over half the arm`) — retired the guard. Executed here rather than argued,
+    # because "the list covers its class" is the claim that was false.
+    for spelling in (
+        "# the redundant rebuild is a fraction of this arm, and a wall-clock number is "
+        "the claim that rots.",
+        "# the rebuild is over half the arm, so reusing the parsed files is the fix.",
+    ):
+        assert not _unframed_durations(spelling), (
+            "the premise of this leg: neither spelling carries a duration, so the digit "
+            "guard is blind to it and only the word-form predicate can red"
+        )
+        assert _unsettleable_magnitudes(spelling), (
+            f"the word-form predicate must red on {spelling!r} — `a fraction of this "
+            "arm` is the exact sentence this chain produced and `half the arm` is the "
+            "measured truth it was refuted with; a pattern that needs an adjective, or "
+            "needs the literal `of`, is green on the defect one word away"
+        )
+
+    # …and the other direction, so this is a rule about CLAIMS rather than about
+    # adverbs: prose about WHICH modules are walked asserts no magnitude, and reding on
+    # it would fail a merge gate over a sentence holding no figure (with "state the
+    # framing that produced it" as the remediation).
+    for prose in (
+        "# most of these modules are literal carriers, so the index reads them first.",
+        "# most of the 29 files take the second branch; the rest fall through.",
+    ):
+        assert not _unsettleable_magnitudes(prose), (
+            f"{prose!r} asserts no magnitude, so the predicate must stay GREEN on it — "
+            "an unscoped `most | half of` alternative reds here and the diagnosis it "
+            "prints describes a figure the sentence does not carry"
+        )
+
+    # ⚠️ The PRODUCTIVE proportion spellings are closed, not only the adjectives in front
+    # of them. Making the adjective optional fixed `a fraction of this arm`; the
+    # vocabulary was still a hand-list, so `two thirds of the arm` escaped — the same
+    # one-synonym-away fail-open, one vocabulary over. The ordinals (any word ending in
+    # `th`/`ths`, plus the irregular `third`) and percentages are matched as SHAPES
+    # because they are productive: no list of names can enumerate fifths, tenths,
+    # hundredths, and those are the spellings a rewording reaches for. ⚠️ This does NOT
+    # make the list closed — an open-class quantity noun ("a hair of the arm", "a good
+    # deal of the arm's cost") still passes, and it is documented rather than claimed
+    # otherwise: what is closed is the morphology, not the vocabulary.
+    for spelling in (
+        "# two thirds of the arm is the re-parse.",
+        "# the majority of the arm's cost is the AST parse.",
+        "# the rebuild is a sliver of this walk's work.",
+        "# two fifths of the arm is the re-parse.",
+        "# nine tenths of this arm's cost is the ungated walk.",
+        "# 80% of the walk's work is the AST parse.",
+        "# 40 per cent of the arm is the re-parse.",
+        "# 40 pct of the walk's work is the AST parse.",
+    ):
+        assert _unsettleable_magnitudes(spelling), (
+            f"{spelling!r} states a proportion of a measured quantity and must red — a "
+            "list that knows only `fraction|share|portion|part` is one synonym away "
+            "from the fail-open that retired the previous version of this guard"
+        )
+    assert not _unsettleable_magnitudes(_gate_walk_comment()), (
+        "the live comment must be green under the WORD-form predicate too — the same "
+        "divergence guard the duration leg above applies, for the predicate the other "
+        "live arm asserts"
+    )
+
+
+def test_the_narrow_gate_walk_rebuild_buys_nothing():
+    """The gate-walk comment's MECHANISM, executed — no figure left to rot (`#9501`).
+
+    ⚠️ **The comment pinned three site counts while denying it pinned anything.** The
+    sentence read "No magnitude is pinned here on purpose" next to `20 named / 15
+    empty-pattern / 9 call-time either way`, and no arm measured those three numbers:
+    the first module added to or removed from the module set — or the first derivation
+    change — made the sentence false with every arm still green. Same rot as the
+    wall-clock figure (`#9506`), in a third alphabet: bare digits carry no `ms|s`, so
+    `_unframed_durations` cannot see them, and they are not magnitude WORDS, so
+    `_unsettleable_magnitudes` cannot either.
+
+    The counts are DETERMINISTIC, so the fix is to execute the claim they stood for
+    rather than to restate them: walking `_sources().items()` and rebuilding the same
+    `_File`s yields the same values in the same order, so only object identity differs.
+    That is measured here by substituting the rebuild for `_literal_files()` and running
+    the REAL `_narrow_gate_walk_sites` body — the derivation is not copied into this arm,
+    so it cannot drift from the walk the comment describes (the blindness channel
+    `test_the_ungated_walk_reuses_the_gated_derivations` exists to catch).
+
+    Falsifiable in one half: the substitute must actually have run, or this compares a
+    walk to itself. The identity half is a HARNESS PREMISE, not a measurement — the
+    `_File`s are built in this body, so identity with the cached ones is impossible by
+    construction and that assertion cannot fail while the harness is what it says it is.
+    It is kept, and labelled as the premise the `rebuilt == reused` reading depends on,
+    rather than presented as a second falsifiable direction (`#9501` review).
+    """
+    census = _call_time_census()
+    reused = census._narrow_gate_walk_sites()
+    original = census._literal_files
+    made: list[tuple] = []
+
+    def _rebuild_from_sources():
+        # The alternative the comment rules out, spelled the way `_literal_files()`
+        # spells the reuse: same `EDGE` filter, same `_sources().items()` order.
+        files = tuple(
+            census._File(path, str(path.relative_to(census.ROOT)), source)
+            for path, source in census._sources().items()
+            if census.EDGE in source
+        )
+        made.append(files)
+        return files
+
+    try:
+        census._literal_files = _rebuild_from_sources
+        rebuilt = census._narrow_gate_walk_sites()
+    finally:
+        census._literal_files = original
+
+    assert made, (
+        "`_narrow_gate_walk_sites` no longer reads `_literal_files()`, so the rebuild "
+        "substituted above never ran and the comparison below is a walk against itself"
+    )
+    reuse_objects = original()
+    assert [file.rel for file in made[-1]] == [file.rel for file in reuse_objects], (
+        "the rebuild visits a different module set or order than `_literal_files()` "
+        f"({len(made[-1])} vs {len(reuse_objects)} modules) — the comment's claim is "
+        "that it is the SAME values over the SAME order, so this premise no longer holds"
+    )
+    # HARNESS PREMISE, not a measurement: these `_File`s are built in this body, so they
+    # cannot be the cached objects. Kept as the premise that makes `rebuilt == reused`
+    # mean "same values, different objects" — if an edit ever made the substitute hand
+    # back the cached files, this arm would silently measure a walk against itself.
+    assert not any(a is b for a in made[-1] for b in reuse_objects), (
+        "the substitute handed back the REUSED `_File` objects, so the premise this arm "
+        "is read under no longer holds — `rebuilt == reused` would then mean nothing"
+    )
+    assert rebuilt == reused, (
+        "walking `_sources().items()` and rebuilding the same `_File`s does NOT yield "
+        f"the same derivations ({[len(part) for part in rebuilt]} vs "
+        f"{[len(part) for part in reused]}) — the gate-walk comment's mechanism claim "
+        "is false at this head and the comment must be restated"
     )
 
 
