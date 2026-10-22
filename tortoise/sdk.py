@@ -19116,7 +19116,16 @@ class TortoiseSDK:
                         # defect with two spellings, not two violations.
                         if kind is not None and _value == kind:
                             continue
-                        self._check_kind(_value, i, violations)
+                        # `isinstance(str)` gate (#9591 review cycle 6, P2):
+                        # the DOOR does not examine a non-string kind —
+                        # `_refuse_invisible_kind` returns early for one by
+                        # explicit decision — so a Phase-1 refusal here made
+                        # the validator stricter than the writer and turned a
+                        # previously-successful `ingest` into a whole-bundle
+                        # error (the "reads further than the door" class
+                        # `_item_prop_at_depth`'s docstring names).
+                        if isinstance(_value, str):
+                            self._check_kind(_value, i, violations)
         for i, conn in enumerate(bundle.get("connections") or []):
             self._check_item_shape("connections", i, conn, violations)
             self._check_connection(i, conn, violations)
@@ -33298,10 +33307,35 @@ class TortoiseSDK:
         # `update_entity` (the gate reads the props, the probe below reads the
         # node).
         from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        # `isinstance(str)` FIRST (#9591 review cycle 6, P1): `_kind_invisible_char`
+        # requires a string and `unicodedata.normalize` raises TypeError
+        # otherwise, so an unguarded call made `update_entity(id,
+        # point_kind=None)` — the documented property-REMOVAL write, and an
+        # int/None kind is accepted by the doors themselves (they return early
+        # for non-str, `_refuse_invisible_kind`) — raise a raw TypeError from a
+        # gate that has nothing to say about it, on EVERY label.
         _padded_point_kind = any(
-            _kind_invisible_char(props.get(_spelling)) is not None
+            isinstance(props.get(_spelling), str)
+            and _kind_invisible_char(props.get(_spelling)) is not None
             for _spelling, _kind_prop in _kind_spellings.items()
             if _kind_prop == "pointKind" and _spelling in props)
+        if _padded_point_kind:
+            # ⛔ LABEL-AGNOSTIC, and BEFORE the loop (review cycle 6, P2). Probing
+            # inside the `Point` arm left a hole: a node carrying BOTH `:Point`
+            # and another canonical label, addressed by the OTHER label's key
+            # (e.g. `(:Point:Source {url: …})` with no `id`), missed the Point
+            # arm's `{id: $id}` probe and was written by the Source arm — with
+            # the padded kind, on a node the calibration gate scans by `:Point`.
+            # One probe over every key this surface can address a Point by
+            # covers both arms, and it runs ONLY when the props actually carry
+            # an invisible kind, so no ordinary update pays for it.
+            _pt_hits = proj.g.query(
+                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
+                "OR n.url = $id RETURN count(n)",
+                params={"id": id_val}).result_set
+            if _pt_hits and _pt_hits[0][0]:
+                self._refuse_invisible_point_kinds(
+                    props, door="update_entity")
         for label, prop in _CANONICAL_ENTITY_ID_PROPS:
             # #4649: a canonical label's identity is an OR-SET, not one key.
             # `_CANONICAL_ENTITY_ID_PROPS` is the PRIMARY key; a label may also
@@ -33387,19 +33421,6 @@ class TortoiseSDK:
                 else:
                     point_props = props
                 for match_prop in id_keys:
-                    if _padded_point_kind:
-                        # The refusal fires BEFORE the write below, and only on
-                        # a hit — a miss writes nothing, so nothing needs
-                        # refusing. `RETURN count(n)` is the same MATCH the
-                        # write uses (same label, same key), so the gate can
-                        # never clear an id the write would reach.
-                        _hits = proj.g.query(
-                            f"MATCH (n:{label} {{{match_prop}:$id}}) "
-                            "RETURN count(n)",
-                            params={"id": id_val}).result_set
-                        if _hits and _hits[0][0]:
-                            self._refuse_invisible_point_kinds(
-                                props, door="update_entity")
                     res = proj.g.query(
                         f"MATCH (n:{label} {{{match_prop}:$id}}) SET n += $p "
                         "RETURN count(n)",

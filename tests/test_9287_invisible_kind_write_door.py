@@ -243,6 +243,29 @@ class TestUpdateEntityRefuses:
         sdk.update_entity(obj["id"], point_kind="statement\u200b")
         assert obj["id"]
 
+    @pytest.mark.parametrize("value", [None, 42, ["statement"]])
+    def test_a_NON_STRING_point_kind_is_inert_on_both_sides(self, sdk, value):
+        """#9591 review cycle 6 (P1/P2): the gate reads strings, nothing else.
+
+        The doors do not examine a non-string kind by explicit decision
+        (``_refuse_invisible_kind`` returns early for one), so the update gate
+        must not either: an unguarded ``_kind_invisible_char`` call raised a raw
+        ``TypeError`` from ``unicodedata.normalize`` on ``point_kind=None`` —
+        the documented property-REMOVAL write — on EVERY label. And Phase 1 must
+        not refuse what Phase 2 writes, or a bundle the writer accepts becomes a
+        whole-bundle ``BundleValidationError``.
+        """
+        obj = sdk.create_object("Thing")
+        sdk.update_entity(obj["id"], point_kind=value)
+        assert obj["id"]
+        # …and Phase 1 agrees with the writer on the props spelling.
+        violations = sdk._validate_bundle({"points": [
+            {"kind": "statement", "content": "non-string prop",
+             "point_kind": value},
+        ]})
+        assert not [v for v in violations
+                    if "pointKind must be an identifier" in v["message"]], violations
+
 
 class TestTheJournalSeamRefuses:
     """#9591 review P1: ``EventAPI`` persists ``pointKind`` verbatim.
