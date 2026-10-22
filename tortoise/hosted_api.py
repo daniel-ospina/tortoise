@@ -8490,9 +8490,11 @@ async def _capture_session_probe_off_loop(org: dict, session_id: str):
     ``asyncio.to_thread`` and the dream pools throughout).
 
     Leg 72 of the same profile — the SDK open in the extraction-estimate quota
-    block a few lines below (``count_org_usage``) — is deliberately NOT folded
-    in: the required #4282 collision pre-flight returned COLLISION, so that leg
-    is skipped in this unit and declared residual by the #4625 guard.
+    block a few lines below (``count_org_usage``) — was declared a residual in
+    this unit because the required #4282 collision pre-flight returned
+    COLLISION at the time. It is now CLOSED: that block reuses the ``sdk``
+    returned here (rather than re-resolving tenancy) and reads the count
+    through ``_graph_offload``, so this wrapper's SDK is consumed by both legs.
     """
     sdk = await _data_sdk_offloaded(org)
 
@@ -13847,9 +13849,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if (not session_existed or retry_failed_capture) and not store_only:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_org_usage
-        sdk_org = _data_sdk(org)
+        # #4625 leg 72: this read is a SYNC full-graph FalkorDB count, and the
+        # SDK it needs was itself resolved with `_data_sdk(org)` — tenancy
+        # resolution plus, for a graph-bound key, `_assert_graph_owned`'s
+        # ownership query. Both used to run INLINE here, so every non-replay
+        # capture THAT EXTRACTS parked the single event loop on a cold or large
+        # graph (the #3718/#2988 class this file already off-loads everywhere
+        # else). The store-only lanes (keyless #3892, extraction disabled
+        # #4258) never reach this block — `store_only` skips the estimate — so
+        # they were never exposed to this leg.
+        # `sdk` is the SDK the #4625 leg-62 probe opened OFF-LOOP above —
+        # equivalent to what `_data_sdk(org)` builds for this org (same graph,
+        # same actor/record-tenant binds already applied), NOT a cached one:
+        # `_data_sdk` is not memoised (`_make_sdk` mints a fresh
+        # `TortoiseSDK` per call), so using this one removes a redundant
+        # construction and a redundant tenancy resolution rather than
+        # preserving an identity invariant. The read rides `_graph_offload`,
+        # and the `org_info` twin (`:9883-9885`) already off-loads this same
+        # count.
+        #
+        # The bound covers the WAIT, not the scan: a miss abandons the await and
+        # the worker keeps holding a graph-pool slot until the count returns
+        # (CPython #87185 — `wait_for` cancels the await, not the thread). That
+        # is strictly better than today's unbounded loop block, and it is the
+        # house posture for every graph read here, but it is a trade-off worth
+        # naming: `count_org_usage("points")` is a full-node scan, so on a very
+        # large graph several abandoned counts can occupy the graph pool that
+        # every read route shares. A miss surfaces as the house 503
+        # `graph_unavailable` — never a silently uncovered quota gate and never
+        # a hung request.
         try:
-            count = count_org_usage(org["org_id"], "points", sdk=sdk_org)
+            count = await _graph_offload(
+                lambda: count_org_usage(org["org_id"], "points", sdk=sdk),
+                op="count_org_usage")
         except QuotaCheckError as e:
             raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
         max_points = org.get("max_points")
