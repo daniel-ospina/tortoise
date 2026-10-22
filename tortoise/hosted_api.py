@@ -13386,12 +13386,14 @@ class SessionRequest(BaseModel):
     # container's CONTAINS edge landed nothing, measured). The rule is
     # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
     # #4005 — the validator lives on ``CommitPayload``; there is no
-    # ``CommitRecord`` class); this is the same predicate at the boundary — one
-    # home (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and
-    # the hosted door cannot drift apart. ``None``/absent still mints (the caller
-    # named no session), and a PADDED-but-real id passes: refusing or trimming it
-    # is an OPEN OWNER QUESTION on #9599 (comment 6342343424), not this gate's
-    # decision — this PR lands only the blank half.
+    # ``CommitRecord`` class, and citing one sent a review to re-derive a third
+    # spelling); this is the same predicate at the boundary — one home
+    # (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and the
+    # hosted door cannot drift apart. ``None``/absent still mints (the caller
+    # named no session), and a PADDED-but-real id stays legitimate (#9599's own
+    # body — NOT #9553, which is R5/edge families and records no such position).
+    # Refusing or trimming it is #9599's open owner question (comment
+    # 6342343424): this PR lands only the blank half.
     @field_validator("session_id")
     @classmethod
     def _non_blank_session_id(cls, v):

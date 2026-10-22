@@ -114,6 +114,22 @@ def _promoted(pid, content, event_id):
             "projection_version": 2, "point": point}
 
 
+def _session_recorded(sid, event_id):
+    """A ``SessionRecorded`` record — the CREATION anchor for a `:Session`.
+
+    The container's journal carrier (#3664): ``_fold_session_recorded`` MERGEs
+    the ``:Session`` it names, so a refused id there drops the whole record
+    (nothing else in the record is written).
+    """
+    record = {"event_id": event_id, "ts": "2026-01-01T00:00:00+00:00",
+              "type": "SessionRecorded", "initiated_by": "sdk",
+              "projection_version": 2,
+              "created_at": "2026-01-01T00:00:00+00:00"}
+    if sid is not None:
+        record["id"] = sid
+    return record
+
+
 def _journal(tmp_path, *records) -> pathlib.Path:
     """Write ONE adjacent JSONL log (the shape recover_from_log requires)."""
     events_dir = tmp_path / "events"
@@ -465,6 +481,37 @@ def test_a_present_but_falsy_point_id_is_not_reported_as_absent(tmp_path, proj):
     assert "carries NO point id" not in result["reason"], (
         f"a PRESENT id is reported as absent: {result['reason']!r}")
     assert "PRESENT but not writable" in result["reason"], result["reason"]
+
+
+def test_a_blank_session_id_is_a_DROPPED_record_not_a_nested_skip(tmp_path, proj):
+    """#9599 review P1: the blank-`:Session` gate drops the RECORD — say so.
+
+    ``_fold_session_recorded`` returns 0 before writing anything when the
+    journaled id is blank, so the record is NOT in the graph. The skip it
+    records must therefore carry ``drops_record=True``. Without it,
+    ``recover_from_log`` counted the record as ``applied`` and reported it in
+    the NESTED clause — *"the record IS in this graph, only the refused
+    edge/stub is missing"* — about a `:Session` container that does not exist:
+    the #8018 class (a report naming a cause that is false for the record it
+    describes) reintroduced at the newest creation anchor.
+
+    Value that makes it fail: the accounting, not the fold. The fold already
+    writes no container, so ``db_points`` cannot catch this — only the
+    ``identity_skipped`` / reason clause can.
+    """
+    events_dir = _journal(tmp_path,
+                          _point_added("p-ok", "a healthy claim", "ev-ok"),
+                          _session_recorded("   ", "ev-blank-session"))
+    _empty(proj)
+    result = recover_from_log(str(events_dir), proj)
+    sessions = proj.query("MATCH (s:Session) RETURN s.id").result_set
+
+    assert sessions == [], sessions
+    assert result["identity_skipped"] == 1, result
+    assert "1 dropped" in result["reason"], result["reason"]
+    assert "Session" in result["reason"], result["reason"]
+    assert "INSIDE a record that still replayed" not in result["reason"], (
+        f"a DROPPED :Session is reported as present: {result['reason']!r}")
 
 
 def test_a_nested_skip_does_not_claim_a_record_drop_on_the_entry():

@@ -2701,13 +2701,14 @@ class _EntityHandlers:
         # seek, so the container is invisible and every later capture mints a
         # duplicate on it. An ABSENT id is ordinary here: `_log_identity_skip`
         # stays silent for it (no identity was named at all).
-        # ⛔ `drops_record=True`: this `return` IS the record's death — the
-        # container is not written at all — so the replay accounting must count
-        # it as dropped. Without the flag `consistency` reads this arm as a
-        # NESTED skip on a record that folded, reports the record as APPLIED
-        # and says nothing about the missing `:Session` (#8702/#8840). The
-        # sibling `_link_session` arm deliberately does NOT pass it: an edge is
-        # lost there, not a record.
+        # ⛔ `drops_record=True` (#8840/#8702): this `return` IS the record's
+        # death — the container is not written at all — so the replay accounting
+        # must count it as a DROPPED record, not as an identity refused INSIDE a
+        # record that still replayed (that clause states the record IS in the
+        # graph, which is false here, and it hides a missing `:Session` from the
+        # operator). Same convention as the Point creation anchors
+        # (`FalkorProjection.apply`). The sibling `_link_session` arm
+        # deliberately does NOT pass it: an edge is lost there, not a record.
         if not _writable_container_id(sid):
             _log_identity_skip("Session", sid, "id (MERGE key)",
                                event_id=ev.get("event_id"),
@@ -2855,7 +2856,7 @@ class _EntityHandlers:
         # gates are pinned equal, so a whitespace-only `contains_session` is
         # dropped by BOTH routes instead of by one. ⛔ ONE owner, both carriers
         # (#9599 review): this is the `contains_session` arm, and
-        # `_fold_session_recorded` below applies the SAME predicate to its
+        # `_fold_session_recorded` above applies the SAME predicate to its
         # `SessionRecorded` id — a pre-fix journal can name the blank session
         # through either one. An earlier revision of this branch stacked a
         # THIRD predicate (`tortoise.ids.session_id_refusal`) here in front of

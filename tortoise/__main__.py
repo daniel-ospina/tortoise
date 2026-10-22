@@ -5034,6 +5034,9 @@ def _spool_transcript(args) -> dict:
         spool_dir,
         write_spool_entry,
     )
+    # One spelling for "does this value name a session": the spool's wire
+    # normaliser delegates to the same helper, so the local entry key and the
+    # wire cannot disagree (#9599).
     from tortoise.ids import session_id_or_absent
     from tortoise.session_attribution import derive_machine_id, sanitize_attribution_field
 
@@ -5118,14 +5121,13 @@ def _spool_transcript(args) -> dict:
     # colliding (the server upserts on `session_id`). Capped: 240 + "-" + 12 = 253
     # ≤ the server's `max_length` (256); a longer id is a 422 → a permanent
     # discard of the whole capture.
-    #
     # ⛔ #9599: a blank `--session-id "   "` is TRUTHY, so `or` never replaced it
-    # and the entry was stored under an id that names nothing. The wire then has
-    # to normalise it to `None`, the server MINTS per filing, and a re-filing of
-    # the same entry lands as a SECOND session — the duplicate-container class
-    # this issue is about, moved server-side. A blank is ABSENT (the same split
-    # the capture doors apply), so it takes the path-anchored fallback and the
-    # entry keeps ONE stable id across snapshots.
+    # and the entry was stored under an id that names nothing. The WIRE is safe
+    # (the spool normalises a blank to None and the server mints), but the LOCAL
+    # entry would be keyed on nothing — so two blank-id captures collide on one
+    # spool key while the server files them as separate sessions. A blank is
+    # therefore ABSENT, exactly as an absent one is, and takes the path-anchored
+    # id: the entry keeps ONE stable key across snapshots.
     session_id = (session_id_or_absent(getattr(args, "session_id", None))
                   or _local_session_id(transcript_path))
 
@@ -6958,12 +6960,14 @@ def _cmd_sessions_import(args) -> int:
                                       sort_keys=True)).encode("utf-8")
     else:
         key_material = read_path.read_bytes()
-    # #9599: a blank `--session-id` names no session (the same ABSENT/PRESENT
-    # split the capture doors apply). Left truthy it was POSTed verbatim, the
-    # now-validated boundary answered 422, and `classify_failure(422)` is
-    # PERMANENT — so the import hard-failed with no spool entry, where the
-    # sibling drain leg files the same capture under a minted id. Absent takes
-    # the stable content-addressed fallback.
+    # #9599: a PRESENT-but-BLANK `--session-id` names no session, and this leg
+    # must agree with its three siblings (the SDK doors, the spool's wire
+    # normaliser, the TS hook): those all treat a blank as "named no session"
+    # and let one be minted. Here `args.session_id or …` kept a blank (it is
+    # truthy), which the server now answers with 422 — and this leg classifies a
+    # 422 as PERMANENT, so the import was neither spooled nor filed: a capture
+    # silently lost, plus a raw FastAPI body shown instead of the refusal text.
+    # Absent takes the stable content-addressed fallback below.
     session_id = session_id_or_absent(args.session_id) or (
         "imp_" + hashlib.sha256(key_material).hexdigest()[:12])
 

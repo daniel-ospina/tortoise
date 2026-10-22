@@ -1105,9 +1105,14 @@ def _normalise_session_id(value: object) -> str | None:
 
     Delegates to ``tortoise.ids.session_id_or_absent`` — the SAME rule the doors
     apply (``session_id_refusal``), without importing their refusal TEXT: the
-    spool needs the value, not the message. A padded-but-real id passes through
-    unchanged; refusing or trimming it is an open OWNER QUESTION on #9599
-    (comment 6342343424), not the spool's to decide.
+    spool needs the value, not the message. It exists because the spool WIRE and
+    the writers must agree about what "a session id" is.
+
+    A padded-but-real id passes through unchanged — #9599's body records those
+    as legitimate identities. ⚠️ #9553 is NOT the source of that position: it is
+    R5, edge families, and records nothing about padded ids. Refusing or
+    trimming a padded id is #9599's open owner question (comment 6342343424),
+    not the spool's to decide.
 
     ⛔ WHY THIS IS A BACKSTOP AND NOT THE FIX. ``None`` makes the server MINT a
     fresh id on every filing, and the drain never reads the id back out of the

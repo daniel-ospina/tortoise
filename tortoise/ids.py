@@ -120,15 +120,18 @@ def session_id_refusal(session_id: object) -> str | None:
     class exists, and citing one sent a review to re-derive a third spelling), and
     this is the same sentence at the doors.
 
-    PADDED-but-REAL (``"  s1  "``) is NOT a refusal here, and NO recorded
-    decision says it should be: refusing or trimming it would re-identify an id
-    a caller chose, which is a product-surface decision, so it is an OPEN OWNER
-    QUESTION parked on #9599 (comment 6342343424) — the three candidate answers
-    are written out there. This lane lands only the BLANK half and leaves the
-    padded half exactly as it was. (An earlier revision of this line attributed
-    the padded position to #9553; #9553 is "materialise the point-property edge
-    families" and states no position on padded ids at all — a review finding,
-    corrected here rather than re-pointed at a neighbour.)
+    PADDED-but-REAL (``"  s1  "``) is NOT a refusal here. #9599's own body
+    records those as legitimate identities, in the sentence that explains why a
+    one-projection refusal cannot fix them ("those are legitimate identities, and
+    ducking them in one projection would not stop the engine duplicating nodes on
+    the other paths"). Refusing or TRIMMING one would therefore REOPEN that
+    recorded position, so it is an OPEN OWNER QUESTION on #9599 (comment
+    6342343424, with the three candidate answers and their measured
+    consequences), not this lane's decision: this PR lands the BLANK half only.
+    ⚠️ Do not cite #9553 for that position — #9553 is R5 (materialising
+    point-property edge families) and states no position on padded ids at all;
+    the position is quoted in #9599's body, and citing the wrong home is how a
+    later lane "tidies" it into a refusal.
     """
     if session_id is None or (isinstance(session_id, str) and session_id == ""):
         return None

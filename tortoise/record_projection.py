@@ -730,7 +730,17 @@ RECORD_MUTATIONS: dict[str, Mutation] = {
     "SessionRecorded": Mutation(
         NodeSnapshot(Node("session", "Session", "id"), path=None, key_from="id"),
         note="four records per capture, merged onto one row — see the "
-             "first-writer-wins / last-writer-wins split below",
+             "first-writer-wins / last-writer-wins split below. #9599: a BLANK "
+             "session id is NOT refused here, deliberately — the RECORD keeps "
+             "what the client sent (it is the faithful carrier, and a Postgres "
+             "key is addressable), while the GRAPH fold refuses it because the "
+             "engine cannot serve a blank indexed key back to an equality "
+             "seek. #9599's own body names this asymmetry as the expected "
+             "state ('the journal fold then minted a duplicate :Session … "
+             "while the Postgres record projection (no such quirk) held the "
+             "row'). Pinned by tests/test_9599_blank_session_id.py — do not "
+             "'fix' one side to match the other without deciding which "
+             "projection is authoritative.",
     ),
     "SessionDeleted": Mutation(
         NodeDelete(
@@ -1783,18 +1793,6 @@ def mutations_for(
             else:
                 props = {k: v for k, v in snapshot.items() if k not in _RECORD_ONLY_KEYS}
                 props[effect.key_from] = key
-        # #9599: the SESSION container's own NODE carrier — the counterpart of
-        # the `contains_session` relation gate above. `SessionRecorded` keys a
-        # `session` row on `id`, and the graph fold refuses a whitespace-only
-        # key there (`projection._writable_container_id`). Projecting the row
-        # anyway would make a record-sourced rebuild RICHER than a
-        # journal-sourced one by exactly the container the fold dropped — the
-        # divergence `_writable_container_id`'s docstring exists to prevent.
-        # The predicate is restated (not imported) for the standalone-load
-        # reason given there, and pinned equal by
-        # `tests/test_9599_blank_session_id.py`.
-        if node.table == "session" and not _writable_endpoint_id(key):
-            return []
         col_values, tail = _split_properties(node.table, props, columns=columns,
                                             refused=refused, drop=effect.drop)
         if node.key_column not in col_values:
