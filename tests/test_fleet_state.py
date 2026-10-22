@@ -1674,6 +1674,42 @@ def test_an_unmeasured_workspace_read_publishes_no_count(monkeypatch) -> None:
 
 
 
+def test_an_unmeasured_registry_read_publishes_no_count(monkeypatch) -> None:
+    """⛔ ABSENT IS NOT ZERO, for the ROSTER count too (review P2, #9392).
+
+    `load_registry` returns `RegistryRows(error=…)` with NO rows on any `OSError`,
+    so `len()` beside `registry_measured: false` is an artefact of the failure —
+    and `fleet_state.py build --json` prints that object BEFORE its refusal. The
+    sibling field below already answers with `None`; publishing `0` here is the
+    "roster rows: 0" false-CLEAN direction this PR exists to close, one key over
+    from where it was closed.
+    """
+    monkeypatch.setattr(fs, "load_registry",
+                        lambda: fs.RegistryRows(measured=False,
+                                                error=_ABSENT_ROSTER))
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {"WS-A": {"cwd": "/tmp/wa"}}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    rec = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                         sample_s=0.0, do_pane=False)["reconciliation"]
+    assert rec["registry_measured"] is False
+    assert rec["registry_rows"] is None, (
+        "an unmeasured roster read must not publish a row count")
+    # …while the MEASURED workspace count beside it IS still published, so the fix
+    # is one field and not a blanket refusal to say anything.
+    assert rec["workspaces_count"] == 1
+
+
+
 def test_cmd_build_refuses_to_cache_an_unread_board(tmp_path, monkeypatch, capsys) -> None:
     """#7957 H5: a failed read is never CACHED. Writing it would replace the last good
     state with an empty fleet and free every lane into capacity on the next read."""

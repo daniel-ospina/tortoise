@@ -2789,7 +2789,11 @@ def build_state(
             # WHAT WAS READ (never facts when the read failed — `0` beside
             # `registry_measured: false` is an artefact of the failure, not an
             # empty fleet), so a reader can say "roster rows: 1" out loud.
-            "registry_rows": len(registry),
+            # `None` — not `0` — is that rule applied to this field: `load_registry`
+            # returns no rows on ANY `OSError`, so `len()` beside a failed read is
+            # the artefact the sentence above forbids, and the workspace count
+            # below already answers the same way (review P2, #9392).
+            "registry_rows": len(registry) if registry_measured else None,
             # ⛔ AND SO IS THE WORKSPACE COUNT (review P1): EVERY failure path of
             # `cmux_workspaces` returns an EMPTY map with `measured=False`, so
             # `len()` there is an artefact of the failed read, never a
