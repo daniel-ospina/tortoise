@@ -1176,9 +1176,9 @@ def _narrow_gate_walk_sites() -> tuple[
     # RE-PARSE of those files. No magnitude is pinned here on purpose — a wall-clock
     # figure is a claim that rots (`#9506`), the word form of one rots just as fast
     # (`#9501`), and a bare count is that same claim in a third alphabet, which no
-    # predicate can see. That is why the site counts AND the module count are gone
-    # rather than restated: the first module gaining or losing the literal would have
-    # made them false with every arm still green (`#9501` review).
+    # predicate can see. That is why no count is restated here: the first module gaining
+    # or losing the literal would have made one false with every arm still green
+    # (`#9501` review).
     for file in _literal_files():
         source = file.source
         for symbol, _line in _sites_in(file):
