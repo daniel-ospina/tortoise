@@ -11,7 +11,24 @@ write advertised itself as a pure read.
 This is the REST half of the falsehood #9575 fixed on the MCP half: #9575's lint reads
 ``TOOL_REGISTRY``, and ``hosted_api.py`` is outside the surface-manifest gate entirely,
 so nothing covered the served schema at all. This test widens that lint from the tool
-registry to **served OpenAPI operation descriptions**.
+registry to the **served OpenAPI operation descriptions of BOTH FastAPI apps this repo
+serves**.
+
+"Both" is load-bearing, not defensive: ``tortoise/hosted_api.py`` builds one app, and the
+self-host daemon builds a SECOND (``tortoise/selfhost.py`` ``app``), mounting
+``tortoise/selfhost_api.router`` (prefix ``/v1``) on it. ``hosted_api.py`` never
+``include_router``s that one, so a gate that iterates ``hosted_api.app.routes`` alone
+leaves every self-hosted GET unread — which is EXACTLY the #8076 shape recorded on the
+sibling inventory gate (``tests/test_rest_surface_inventory.py``: its docstring claimed
+both modules from the start while its parser covered one, so a new self-hosted route
+expanded the public API undeclared and every check stayed green). Read the two apps by
+their OBJECTS (``_served_apps``), so a route added to either is in scope without anyone
+remembering this file.
+
+Coverage boundary, stated because a promise is not an enumeration: the two apps are
+what this test enumerates. A THIRD served app would be out of scope until it is added
+to ``_served_apps`` — pinned by
+``test_the_gate_reads_every_app_it_names``, so the boundary cannot silently narrow.
 
 The predicate is a DERIVATION, not a ledger of offenders: a GET operation whose handler
 names a declared read-through writer may not claim read-only. The declared set is
@@ -23,10 +40,16 @@ claim lives in the docstring, the reach lives in the body), via ``ast``, so a me
 prose does not manufacture an offender.
 
 Not gated here: GET operations that claim read-only and reach nothing declared. Five
-serve such a claim today (`/v1/internal/{abuse/state,activation/cohort,
-oauth/clients/count,retention/cohort}`, `/v1/graphs/trash/{graph_id}/points`); deciding
-each is a pure read is a different (and larger) question than this issue asked, so they
-are measured, not adjudicated.
+serve such a claim today, all on ``hosted_api`` (`/v1/internal/{abuse/state,
+activation/cohort,oauth/clients/count,retention/cohort}`,
+`/v1/graphs/trash/{graph_id}/points`); deciding each is a pure read is a different (and
+larger) question than this issue asked, so they are measured, not adjudicated.
+
+Measured at this head, so the widening is a RECORDED measurement and not a guess:
+``hosted_api`` 62 GET routes / 5 read-only claims / 0 offenders; ``selfhost`` 11 GET
+routes / 0 claims / 0 offenders. Enumerating the second app therefore changed no verdict
+— which is the honest reading: it closed a hole (the next self-hosted GET fronting a
+declared writer would have passed silently), it did not catch a second bug.
 """
 from __future__ import annotations
 
@@ -93,24 +116,64 @@ def _violations(ops) -> list[str]:
     return sorted(out)
 
 
+def _served_apps():
+    """Every FastAPI app this repo SERVES, as (name, app) — TWO of them, not one.
+
+    The self-host daemon (``tortoise/selfhost.py``) is a second app: its ``/v1`` routes
+    come from ``tortoise/selfhost_api.router`` and are NOT in ``hosted_api.app.routes``
+    (no ``include_router`` links the two). Enumerating only ``hosted_api`` would make the
+    stated scope wider than the examined one — the #8076 defect, on this gate.
+    """
+    from tortoise import hosted_api, selfhost
+
+    return (("hosted_api", hosted_api.app), ("selfhost", selfhost.app))
+
+
+def _walk_routes(routes):
+    """Every request route in a FastAPI route tree, descending into INCLUDED routers.
+
+    How ``include_router`` is represented depends on the FastAPI version: older ones
+    copy the routes in FLAT, and the fastapi 0.141 / starlette 1.6 pair ``uv.lock``
+    pins here appends ONE ``_IncludedRouter`` whose ``original_router.routes`` hold
+    them. Walking only the top level therefore reads ZERO self-host ``/v1`` routes on
+    the pinned version while reading all of them on a flat one — an
+    environment-dependent hole, which is the one thing a scope gate must not have.
+
+    ``Mount`` is deliberately NOT descended: ``/mcp`` is a separate ASGI app mounted
+    on the daemon (its surface is #9575's registry lint), and its paths are not
+    OpenAPI operations of this app.
+    """
+    for route in routes:
+        nested = getattr(route, "original_router", None)
+        if nested is not None and hasattr(nested, "routes"):
+            yield from _walk_routes(nested.routes)
+            continue
+        if getattr(route, "methods", None) and hasattr(route, "endpoint"):
+            yield route
+
+
 def _served_get_operations():
-    """(path, served description, declared writers reached) for every GET route."""
+    """(app:path, served description, declared writers reached) for every GET route.
+
+    Keys carry the APP NAME because the two apps serve overlapping paths (``/health``,
+    ``/v1/context``): a bare path key would let one app's clean description hide the
+    other's claim, and the lookup helpers below would read whichever landed last.
+    """
     import inspect
 
-    from tortoise import hosted_api
-
     declared = _declared_read_through_writers()
-    schema = hosted_api.app.openapi()
     ops = []
-    for route in hosted_api.app.routes:
-        if "GET" not in (getattr(route, "methods", None) or set()):
-            continue
-        served = (schema["paths"].get(route.path, {}).get("get") or {})
-        ops.append((
-            route.path,
-            served.get("description") or "",
-            _names_reached(inspect.getsource(route.endpoint), declared),
-        ))
+    for app_name, app in _served_apps():
+        schema = app.openapi()
+        for route in _walk_routes(app.routes):
+            if "GET" not in (getattr(route, "methods", None) or set()):
+                continue
+            served = (schema["paths"].get(route.path, {}).get("get") or {})
+            ops.append((
+                f"{app_name}:{route.path}",
+                served.get("description") or "",
+                _names_reached(inspect.getsource(route.endpoint), declared),
+            ))
     return ops
 
 
@@ -164,11 +227,26 @@ class TestServedOpenApiReadOnlyClaim:
         its own subject — that is a gate failure, not a pass.
         """
         reached = {path: names for path, _desc, names in _served_get_operations()}
-        assert "/v1/packs" in reached, "the packs introspection route moved or vanished"
-        assert reached["/v1/packs"], (
+        assert "hosted_api:/v1/packs" in reached, "the packs introspection route moved or vanished"
+        assert reached["hosted_api:/v1/packs"], (
             "no declared read-through writer is derivable from the /v1/packs handler, "
             "so the read-only-claim gate no longer covers it — re-point the derivation "
             f"(declared: {sorted(_declared_read_through_writers())})")
+
+    def test_the_gate_reads_every_app_it_names(self):
+        """Non-vacuity for the SCOPE: both apps must actually be enumerated.
+
+        #8076 is the recorded shape of getting this wrong — a claim of both while the
+        parser read one — so the boundary is asserted per app rather than described.
+        Fails if ``_served_apps`` narrows back to ``hosted_api`` alone, which is a gate
+        failure (a whole served surface unread) and not a pass.
+        """
+        paths = {path for path, _desc, _names in _served_get_operations()}
+        assert "hosted_api:/v1/packs" in paths, sorted(paths)
+        assert "selfhost:/v1/points" in paths, (
+            "the self-host app's routes are not enumerated, so a self-hosted GET could "
+            "advertise itself as read-only while writing and every check stayed green "
+            "(#8076) — the gate reads one app only")
 
     def test_the_served_packs_description_states_the_self_heal(self):
         """Acceptance, positively: the description says the call may write.
@@ -179,7 +257,7 @@ class TestServedOpenApiReadOnlyClaim:
         """
         served = dict(
             (path, desc) for path, desc, _n in _served_get_operations())
-        description = served["/v1/packs"]
+        description = served["hosted_api:/v1/packs"]
         assert "read-only" not in description.lower(), description
         assert "ensure_tenant_packs" in description or "self-heal" in description, (
             "the /v1/packs description must state the self-heal (a graph with no "

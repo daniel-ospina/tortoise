@@ -86,6 +86,23 @@ slow_shards: 5
 
 surfaces:
   api:
+  - test_9583_openapi_read_only_claim.py
+  # #9583: a served GET docstring IS the OpenAPI operation `description` a customer
+  # reads, and `/v1/packs` advertised "read-only pack introspection" while its handler
+  # calls `pack_state.get_tenant_packs`, whose self-heal `ensure_tenant_packs` MERGEs a
+  # missing starter `:PackInstall`. This is the REST half of #9575's registry lint: it
+  # derives the offender from the ALREADY-SERVED schema of BOTH FastAPI apps this repo
+  # serves (`hosted_api` and the self-host daemon), so a NEW GET fronting a declared
+  # read-through writer fails without anyone remembering the file exists.
+  #
+  # `api` is the row that RUNS it: `tortoise/hosted_api.py` is an EXACT `api`
+  # SOURCE_PATTERNS match that REPLACES the `core` fallback in `select()` (measured:
+  # `--changed-files tortoise/hosted_api.py` -> surfaces ['api','onboarding']). The
+  # `core` row below is the OTHER half: the D4a record this file asserts lives in
+  # `tortoise/pack_state.py`, which matches no SOURCE_PATTERN and falls through to `core`
+  # (measured: that diff selects `core` ALONE). Reverting the fix is a diff to BOTH
+  # files, so this is the #1349/#2938/#3154 silent-drop class: without these rows the
+  # gate that exists to catch the regression would not run on the change that causes it.
   # #9189: REGISTERED, not diff-carrying — the file is a `carve_out:` member, so
   # `select()` strips it from `test_files` (`files -= carve`) on every non-full
   # selection and it RUNS through the carve-out leg instead (`carve_out_run` ->
@@ -1465,6 +1482,13 @@ surfaces:
   # it guards span `tortoise/` — a battery-only or sdk-only change must run it.
   - test_vector_write_seam_4520.py
   core:
+  - test_9583_openapi_read_only_claim.py
+  # #9583: the `core` arm of the read-only-claim / lockstep pin. Half of the file asserts
+  # the SERVED OpenAPI descriptions (`api`, above); the other half asserts that
+  # `tortoise/pack_state.py`'s D4a record still states the ensure half. `pack_state.py`
+  # matches no SOURCE_PATTERN, so a pack_state.py-only change selects `core` alone and
+  # the `api` row never applies — and D4a is exactly what such a change re-stales.
+  # `--integrity` also requires every `tests/**/test_*.py` to carry a classification.
   # #8093: the `:Graph.namespace` cell of `docs/registry-graph-schema.md` vs the
   # namespace the code derives (`acl_graph_users._graph_namespace`,
   # `sdk._graph_create`, `hosted_api._provision_graph` / `_org_graph_name`).
