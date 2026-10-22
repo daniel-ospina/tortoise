@@ -242,8 +242,13 @@ WHAT THIS PINS
    inputs are the TABLE's twenty-two doors, not the 99-tool registry, so adding a tool
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
-   `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` — the `#9506` arms,
-   and the only ones here about this instrument's OWN prose rather than §13's. The
+   `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` — the three
+   `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
+   than §13's. The third is the `#9522` capture arm: it replays the removed figure
+   through each of the four POSITIONS a duration can be written in (docstring, trailing
+   comment, `#` block above the `def`, and the live comment) and holds the `#`-line
+   floor that the capture widening would otherwise have retired. The
    gate-walk comment in `_about_call_time_census.py` carried a duration a re-verifier
    cannot settle — `measured 10.36 s of the control's 10.85 s` on the merge base, and
    `~2.6 s of ~17 s` on an intermediate head of the branch — neither with the framing
@@ -3756,6 +3761,13 @@ def _gate_walk_comment_lines(fn: Callable[..., object]) -> str:
     on a function whose mechanism prose was gone, which is the state `#9506` exists to
     prevent. So the floor reads THIS projection: the duration scan may see everything,
     but "the comment is still there" is a question only the `#` lines answer.
+
+    ⚠️ Its STRENGTH is "any `#` line survives", stated here rather than implied
+    (measured by the cycle-2 review): replacing the mechanism prose with
+    `# TODO: revisit this later` satisfies the floor while the mechanism claim is gone.
+    Pinning a phrase would red on a legitimate re-wording of a true comment — the
+    re-word-to-get-past-the-guard failure this file keeps re-learning — so the boundary
+    is named here and the phrase-level check is deliberately not attempted.
     """
     return "\n".join(
         line.strip()
@@ -3776,11 +3788,13 @@ def _prose_of(fn: Callable[..., object]) -> str:
     `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` does.
 
     `inspect.unwrap` is not decoration: four of `_narrow_gate_walk_sites`'s siblings in
-    `_about_call_time_census.py` are `@lru_cache`d, and `getsource` raises a bare
-    `TypeError` on the wrapper — a message that would name neither the guard nor the
-    comment (found by the `#9522` review). The assertion below makes that failure name
-    itself instead, and after an unwrap the `#` block is read from above the INNER `def`,
-    which is the line `getsourcelines` reports.
+    `_about_call_time_census.py` are `@lru_cache`d. `getsource` and `getsourcelines`
+    unwrap for you, but `getsourceFILE` — the call four lines below, which locates the
+    `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
+    neither the guard nor the comment (found by the `#9522` review; the first version
+    of this paragraph blamed `getsource`). The assertion below names the contract for
+    anything that is not a function at all, and after the unwrap the `#` block is read
+    from above the INNER `def`, which is the line `getsourcelines` reports.
     """
     fn = inspect.unwrap(fn)
     assert inspect.isfunction(fn) or inspect.ismethod(fn), (
@@ -3818,15 +3832,18 @@ def _prose_of(fn: Callable[..., object]) -> str:
 #: therefore matched whole, `\s*` absorbs a doubled space, and an exponent form is read
 #: as one number. Unit words are case-insensitive.
 #:
-#: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`, so
-#: the lookbehind refuses a number that starts mid-digit-run or mid-identifier.
+#: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`,
+#: and `x1,000 s` must not report `000 s` — the lookbehind refuses a number that starts
+#: mid-identifier, mid-digit-run or right after a separator. It is `[\w.,]`, not `[\w.]`,
+#: because the GROUP SEPARATOR is itself the character a fragment would restart after
+#: (measured by the `#9522` re-review: `(?<![\w.])` reported `000 s` for `x1,000 s`).
 #:
 #: Residual, recorded rather than silently accepted (`#9531`): a compound `min:sec`
 #: figure (`2m36s`) goes SILENT — the `36s` start is preceded by `m`, so the same
 #: lookbehind that refuses `sha256s` refuses it. That is the re-spelling class again,
 #: and the filed home is `#9531` with the line-vs-number coarseness.
 _DURATION = re.compile(
-    r"(?<![\w.])"
+    r"(?<![\w.,])"
     r"(?:\d{1,3}(?:,\d{3})+|\d+(?:[.,]\d+)?(?:e[+-]?\d+)?)\s*"
     r"(?:ms|us|µs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?)\b",
     re.IGNORECASE,
@@ -3846,7 +3863,20 @@ _DURATION_FRAMING = (
 
 #: A word that DENIES a framing marker when it governs it (`no --durations run`,
 #: `not measured with --durations`, `--durations=0 was never taken`).
-_DENIAL = re.compile(r"\b(?:no|not|never|without|none)\b", re.IGNORECASE)
+#:
+#: ⚠️ **A blacklist of SPELLINGS, not a parse** — the boundary is stated, not implied
+#: (measured by the `#9522` re-review: `--durations=0 wasn't taken` was GREEN while
+#: `was never taken` was RED, a one-apostrophe dodge). Contractions (`n't`), and the
+#: verbs a comment actually uses to say a measurement was not taken (`skipped`,
+#: `omitted`, `unavailable`, `unmeasured`, `unframed`, `unknown`) are in; a negation
+#: this list does not know is a one-line addition here, and the arm beside it pins the
+#: spellings rather than the intent.
+_DENIAL = re.compile(
+    r"\b(?:no|not|never|without|none|nothing|nobody)\b"
+    r"|\b\w+n['’]t\b"
+    r"|\b(?:skipped|omitted|unavailable|unmeasured|unframed|unknown)\b",
+    re.IGNORECASE,
+)
 
 #: How far a denial reaches from its marker, in characters, WITHIN one clause.
 _DENIAL_WINDOW = 40
@@ -3933,12 +3963,21 @@ def _unframed_durations(comment: str) -> list[str]:
 
     So the rule now reads the CLAIM rather than a phrase about it: a duration is a
     fact asserted about a measurement, and it is acceptable only when the text also
-    states the framing that produced it. This reds on the merge-base text and on the
-    intermediate `~2.6 s of ~17 s` sentence alike, and no rewording can retire it
-    because it never reads a denial PHRASE — the one denial it does read is a negation
-    of the framing marker itself, scoped to that marker's own sentence and checked on
-    BOTH sides of it (`_denied`), so `--durations=0 was never taken` reds exactly as
-    `not measured with --durations=0` does.
+    states the framing that produced it. This reds on the pre-`#9516` main text and on
+    the intermediate `~2.6 s of ~17 s` sentence alike, and no REWORDING of the claim
+    itself retires it, because it never reads a denial PHRASE — the only denial it
+    reads is a negation of the framing marker, scoped to that marker's own clause and
+    checked on BOTH sides of it (`_denied`). ⚠️ The denial VOCABULARY is open, and that
+    boundary is stated rather than implied (measured by the `#9522` re-review):
+    `--durations=0 was never taken` reds, and so do the contraction (`wasn't taken`),
+    `was skipped`, `was omitted` and `is unavailable` spellings, but a phrase the list
+    does not know (`never done here` in a new SENTENCE, `--durations=0 wasn't really
+    used` split across a `.`) is framed. The list is a blacklist of spellings, not a
+    parse, so a new denial phrasing is a one-line addition, not a rewording dodge.
+    Two costs are stated rather than found later: `_CLAUSE_BREAK` ends a denial's reach
+    at a sentence `.`, so `# 10.36 s --durations=0. Never taken.` is FRAMED (the denial
+    is a new sentence), and a denial separated from its marker by a comma does not
+    reach it (see `_framed`).
 
     ⚠️ **The framing is matched on the NUMBER'S OWN LINE, and that is the second fix.**
     Matching it over the whole text (the first version) passed a comment that merely
@@ -3993,7 +4032,8 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     # `#`-only, `assert comment` was falsifiable in the direction this arm exists for —
     # delete the mechanism comment and the arm reds. The `#9522` capture widening made it
     # unfalsifiable (a function's source is never empty), measured by deleting all five
-    # `#` lines from `_narrow_gate_walk_sites` and watching this arm stay GREEN.
+    # `#` lines from `_narrow_gate_walk_sites` and watching this arm stay GREEN. Its
+    # strength is "a `#` line survives, of any content" — see `_gate_walk_comment_lines`.
     assert _gate_walk_comment_lines(_call_time_census()._narrow_gate_walk_sites), (
         "`_narrow_gate_walk_sites` carries no `#` comment any more, so this arm "
         "asserts nothing — the mechanism it states was the whole point of the change"
@@ -4008,18 +4048,25 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
 
 
 def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
-    """Non-vacuity for `_unframed_durations`, on the MERGE BASE — not an
+    """Non-vacuity for `_unframed_durations`, on the PRE-`#9516` MAIN — not an
     intermediate commit of this branch (`#9506`).
 
     ⚠️ **The round-5 review found the first guard green on `origin/main`.** It red
     only on `says_none AND duration`, and the base text says no denial, so the arm
     passed on the very text this PR exists to delete. This arm feeds the same
-    three states through the same predicate the guard uses — the base string, the
-    intermediate string, and a framed duration — so "the guard reds on what it
+    three states through the same predicate the guard uses — the pre-`#9516` string,
+    the intermediate string, and a framed duration — so "the guard reds on what it
     replaced" is executed rather than asserted in a docstring, the shape this file
     already uses elsewhere ("mutation applied, all arms re-run").
+
+    ⚠️ The ANCHOR is named by COMMIT, not by `origin/main` (measured by the `#9522`
+    re-review): `git show origin/main:tests/_about_call_time_census.py | grep -c 10.36`
+    returns `0` at this PR's base — `#9516` already removed the figure — so the earlier
+    wording pointed a re-verifier at a tree that no longer says what this arm claims.
+    The string below is `fa84a473d:tests/_about_call_time_census.py:990-992`, the last
+    main commit to carry it.
     """
-    merge_base = (
+    pre_9516_main = (
         "# `_literal_files()` is already parsed and cached; re-reading `_sources()` "
         "and\n# rebuilding the same 29 `_File`s measured 10.36 s of the control's "
         "10.85 s for\n# byte-identical output."
@@ -4032,7 +4079,11 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
     # below. So the fix whose commit message calls out "an ABRIDGED PARAPHRASE labelled
     # 'the intermediate string'" had replaced it with a fabricated QUOTATION — a
     # quotation that is not the thing it quotes, the defect this file keeps re-learning.
-    # The text below is the blob's, unwrapped only where the source wrapped it.
+    # The blob's six lines (990-995), DE-INDENTED — that is the only transformation;
+    # nothing is re-wrapped. Pinned by line count and prefix below, because the cycle-1
+    # review measured that the abridged 4-line paraphrase this replaced returns the same
+    # `['2.6 s', '17 s']` and would pass a wording-only assertion (the "claim not
+    # executed" shape this file keeps re-learning).
     intermediate = (
         "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and\n"
         "# rebuilding the same 29 `_File`s is redundant work for byte-identical output —\n"
@@ -4047,8 +4098,15 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "from `aded3145d` — it is the state the earlier round called \"pre-fix\", and "
         f"the quoted literal must be that blob's text, not a paraphrase ({_unframed_durations(intermediate)})"
     )
-    assert _unframed_durations(merge_base) == ["10.36 s", "10.85 s"], (
-        "the predicate must red on the MERGE BASE text (`measured 10.36 s of the "
+    assert len(intermediate.splitlines()) == 6 and intermediate.startswith(
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and"
+    ), (
+        "the quoted intermediate must be the blob's SIX lines, de-indented — an abridged "
+        "or re-wrapped paraphrase returns the same durations and so cannot be caught by "
+        f"the assertion below (got {len(intermediate.splitlines())} lines)"
+    )
+    assert _unframed_durations(pre_9516_main) == ["10.36 s", "10.85 s"], (
+        "the predicate must red on the PRE-`#9516` main text (`measured 10.36 s of the "
         "control's 10.85 s`) — that is the figure this PR removes, so an arm that "
         "passes on it is vacuous: it would let the identical figure be re-introduced"
     )
@@ -4063,6 +4121,21 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "a denial written AFTER the marker must red as surely as one written before "
         "it — the marker is named only to say it was never taken"
     )
+    # ⚠️ The denial VOCABULARY, pinned as spellings: the cycle-2 review measured that a
+    # contraction (`wasn't taken`) or a verb the list did not know (`was skipped`,
+    # `is unavailable`) went SILENT while `was never taken` red — a one-apostrophe dodge.
+    for denied in (
+        "# 10.36 s --durations=0 wasn't taken",
+        "# 10.36 s --durations=0 was skipped",
+        "# 10.36 s --durations=0 was omitted",
+        "# 10.36 s --durations=0 is unavailable",
+        "# 10.36 s --durations=0 unmeasured",
+    ):
+        assert _unframed_durations(denied) == ["10.36 s"], (
+            f"{denied!r} denies the framing it names, so it must red "
+            f"({_unframed_durations(denied)}) — a denial spelling the list does not "
+            "know is a silent way past the guard, so each spelling is an arm here"
+        )
     assert not _unframed_durations(
         "# 14.4 s whole arm, --durations=0 — no other change to the control step"
     ), (
@@ -4094,6 +4167,11 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
     assert not _unframed_durations("# sha256s and 1,000 of them, no duration here"), (
         "the lookbehind must still refuse a token that is not a duration — `sha256s` "
         "and a bare count must not be reported as one"
+    )
+    assert _unframed_durations("# x1,000 s of whatever") == [], (
+        "`x1,000` is not a duration: the number must be refused from its first digit "
+        "and never reported from a fragment after the group separator — measured by "
+        "the cycle-2 review as `['000 s']`, a span that is not what was written"
     )
     assert not _unframed_durations(
         "# the arm measured 14.4 s whole arm, --durations=0, one box"
