@@ -2450,6 +2450,7 @@ surfaces:
   - test_collision_preflight.py
   - test_vector_write_seam_4520.py
   - test_who_is_on.py  # #4256: "who is on #N?" verb — local-only branches/worktrees included
+  - test_work_claim.py  # #5052: the dispatch-time claim CAS on the graph (tools/work_claim.py) — `core` here covers edits to THIS test file; the tool's own edits are covered by the `tools/work_claim.py` TOOL_CARVEOUTS entry in tools/ci_selection.py (a `tools/` source has NO named surface and is filtered out before the `core` fallback, so the registration alone would not select this suite for a tool-only PR)
   # RETIRED 2026-10-19: test_orchestrator_harness.py drove operations/orchestrator-harness/,
   # which moved to agent-infra/scripts/orchestrator-harness/. The suite was retired with the copy,
   # so it MUST NOT stay registered here: a stale registration schedules a test file that no longer
@@ -6603,6 +6604,16 @@ durations:
   test_tenancy_spine.py: 3.0
   test_transport_wait_bound.py: 2.1
   test_collision_preflight.py: 23.5  # ci-timing top-15 2026-10-19 (run 39191149586); was 3.6 — ci-timing top-15 2026-10-21 (run 39467226356): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (16.6s) is a LOWER bound; kept 23.5
+  # #5052: the claim CAS on the graph — 58 tests: 55 in-memory double + 3 live-SDK
+  # legs (skip visibly without TORTOISE_DB_URI: acquire→release→acquire, the two-contender
+  # fence, and the legacy-duplicate read). Counts re-derived with `--collect-only` at this
+  # head and pinned by test_the_documented_case_counts_match_what_this_file_collects.
+  # Measured 3.81 s / 5.75 s wall on two fleet-loaded
+  # runs (both above the local estimate this row replaces); 11.5 s at 40+3 on the review host.
+  # The weight is kept: #9487 review added the rc-3 invocation arms, the box-local and
+  # `--json` `check` arms and the audit-reason arm (40+3 → 46+3); a re-read on this host was
+  # 5.5 s at 46+3, inside the two wall readings above, so the 3.8 s weight is unchanged.
+  test_work_claim.py: 3.8
   # #8051: LOCAL readings on this fleet-loaded host (subprocess + real-git
   # harness): 173s / 182s at 61 tests (head 876dabfe), 187s at 69, 192s at 76,
   # 198s at 79, 223s at 82, 241s at 83, 250s at 83, 227s at 87, 323s at 90, 273s
