@@ -7815,7 +7815,7 @@ class HolderGateTests(unittest.TestCase):
         note = self.cp._holder_gate_note(self.cp.HolderRead(
             True, "cache", roster_rows=1, workspaces_count=11,
             workspaces_measured=True))
-        self.assertIn("lane roster: 1 row(s) vs 11 live workspace(s)", note)
+        self.assertIn("lane roster: 1 row(s); live cmux workspaces: 11", note)
         # An OLDER board publishes no counts. Absent is not zero: saying
         # "0 row(s)" would report an unmeasured roster as an empty one.
         self.assertNotIn("lane roster:",
@@ -7841,7 +7841,7 @@ class HolderGateTests(unittest.TestCase):
             workspaces_measured=False)
         note = self.cp._holder_gate_note(unmeasured)
         self.assertIn("lane roster: 12 row(s)", note)
-        self.assertNotIn("live workspace(s)", note)
+        self.assertNotIn("live cmux workspaces", note)
         self.assertNotIn("vs 0", note)
         # The count itself is still threaded (the board MEASURED the roster); the
         # published NUMBER is what the failed read cannot support.
@@ -7864,7 +7864,7 @@ class HolderGateTests(unittest.TestCase):
         read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
         self.assertTrue(read.measured)
         self.assertFalse(read.workspaces_measured)
-        self.assertNotIn("live workspace(s)", self.cp._holder_gate_note(read))
+        self.assertNotIn("live cmux workspaces", self.cp._holder_gate_note(read))
         # An OLDER board that carries a count but NOT the flag is UNMEASURED:
         # the strict-true polarity, so the gate prints one fewer number rather
         # than a fact it cannot support.
@@ -7874,7 +7874,7 @@ class HolderGateTests(unittest.TestCase):
         stale = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
         self.assertTrue(stale.measured)
         self.assertFalse(stale.workspaces_measured)
-        self.assertNotIn("live workspace(s)", self.cp._holder_gate_note(stale))
+        self.assertNotIn("live cmux workspaces", self.cp._holder_gate_note(stale))
 
 
     def test_the_claim_gate_never_clobbers_an_existing_incomplete_reason(self):

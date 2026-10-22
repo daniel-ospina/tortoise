@@ -3936,15 +3936,22 @@ def _board_can_answer(state: dict) -> str:
         # other readers of this note (`who_is_on.py`, and the exit-2 remedy)
         # must give a lane the SAME answer. `registry_remedy` is the one place
         # that sentence lives, so the three cannot disagree.
+        # ⛔ ONE BINDING, THREE USES (#9392 review P2). The prose, the remedy and
+        # `cause` are all derived from this ONE validated value: composing the
+        # prose from the raw field while publishing `cause` from the validator
+        # let them disagree — a truthy non-string cause printed "the roster
+        # EXISTS but could not be read" in the note while the exit-2 line said
+        # "the cause … was not recorded".
+        cause = _board_registry_error(rec)
         return BoardRefusal(
             "the board's lane registry could not be read "
-            f"({rec.get('registry_error') or 'cause not recorded'}) — the lane "
+            f"({cause or 'cause not recorded'}) — the lane "
             "roster is UNKNOWN, not empty — "
-            f"{fleet_state.registry_remedy(str(rec.get('registry_error') or ''))}",
+            f"{fleet_state.registry_remedy(cause or '')}",
             # …and the MACHINE value beside the sentence, so a downstream reader
             # classifies the cause it was given instead of re-parsing this prose
-            # back out of it (#9392 review P2).
-            cause=_board_registry_error(rec),
+            # back out of it.
+            cause=cause,
         )
     if rec.get("github_measured") is not True:
         return (
@@ -4588,7 +4595,12 @@ def _holder_gate_note(read: HolderRead) -> str:
         # reader that every roster row is a ghost lane, from a read that never
         # happened. `registered: N` alone is a smaller answer than a false one.
         if read.workspaces_count is not None and read.workspaces_measured:
-            counts += f" vs {read.workspaces_count} live workspace(s)"
+            # ⛔ TWO COUNTS, NOT A COMPARISON (#9392 review P2). Roster rows
+            # legitimately OUTLIVE the workspaces they name (the board retires
+            # such rows to `RECOVERABLE`/`RETIRED`), and a cell's ORCHESTRATOR
+            # workspace has no roster row at all, so `N vs M` printed a
+            # discrepancy in the HEALTHY case — the opposite of the intent.
+            counts += f"; live cmux workspaces: {read.workspaces_count}"
     if not read.measured:
         return (
             "claim gate: the FLEET BOARD could not answer — "
