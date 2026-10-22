@@ -53,6 +53,37 @@ fast_shards: 9
 # clock for aggregate runner-minutes, exactly like `fast_shards`.
 carve_shards: 3
 
+# #9539: the SLOW pool's leg count. `test-slow` is the merge ceiling: measured
+# over the 5 newest completed main runs (jobs API + each leg's own junit.xml,
+# 2026-10-21) the job is 14.2–23.0m while the pool it runs is 37.05m of
+# measured test time (37.88m on the committed `durations` map) split two ways
+# with no xdist — one serial pytest process per leg.
+#
+# The legs were ALREADY LPT-optimal (per-file medians pack to 18.52/18.52;
+# observed medians 18.25/18.80, and the run-to-run imbalance flips sign), so
+# rebalancing is not the lever and setup is only 1.9–2.1m of a ~20.5m leg. The
+# remaining lever is the number of legs, and 5 is that arithmetic rather than a
+# preference: `ceil(37.88 / (10m guideline − 2m setup)) = 5` → 7.58m of test
+# time per leg, ~9.6m projected job wall. 2 legs cannot fit a 37.9m pool into
+# 10m at any split, because the best a split can do is pool/2 = 18.9m.
+#
+# The legs are DERIVED (`tools/ci_selection.slow_shard_entries()` LPT-packs
+# `slow_files - carve_out` from the same `durations` map the fast band uses) so
+# no hand-maintained list can rot — the failure mode that made the two-leg
+# lists drift to 6.4:1 before #9017. WHAT IT COSTS: aggregate runner-minutes
+# scale with the leg count (~41 → ~48 for the setup term), the same trade
+# `fast_shards`/`carve_shards` make; wall clock is the objective (#9539).
+#
+# Absence means 2 — the shape this repo ran until now — so deleting this key
+# gives the leg count back. It is NOT, on its own, a complete rollback: the
+# wall-target guard recomputes from the map, and 2 legs project ~20.9m against
+# the 10m target, so removing the key reds it
+# (`tests/test_ci_selection.py::test_slow_shards_are_duration_packed_and_meet_
+# the_wall_target`). A real rollback therefore moves the target/guard too — which
+# is what makes a growing slow file red HERE rather than silently restoring the
+# ceiling.
+slow_shards: 5
+
 surfaces:
   api:
   # #9189: REGISTERED, not diff-carrying — the file is a `carve_out:` member, so
@@ -1512,6 +1543,11 @@ surfaces:
   # runtime reader of the directory (see the module docstring).
   - test_9231_record_migrations_trigger.py
   - test_9256_lane_probe_attribution.py
+  # #9494: registered ONCE, in the `core` block below beside `test_monitoring.py`
+  # (its consumers' siblings), with the `durations:` row the surface entry does
+  # not cover. Two lanes appended this file here and there while both fixed the
+  # same review finding, and a same-surface duplicate reds `duplicate_entries()`
+  # (#5373) — so this line is deliberately absent.
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new
@@ -3478,6 +3514,18 @@ surfaces:
   # on — a sdk.py-only PR must run it (dual-registered with battery).
   - test_battery_parity_vector_guard.py
   - test_monitoring.py
+  # #9494: the staleness measurement (`tortoise/code_freshness.py`) and its two
+  # consumers — `tortoise/monitoring.py` (the `server_code` health field) and
+  # `tortoise/mcp_server.py` (`_safe`'s measured-stale branch). Classification is
+  # not uniform across the three, and the difference is what the entry is for:
+  # `code_freshness.py` and `monitoring.py` match no SOURCE_PATTERN and fall to
+  # `core`, so a diff touching only them selects `core` — unregistered, the file
+  # that carries this fix runs in NO leg at all (and `ci_selection.py --integrity`
+  # reds on the unclassified file). `mcp_server.py` is a `SHARED_MODULES` member
+  # and goes FULL (verified: select(["tortoise/mcp_server.py"]) -> every surface),
+  # so it would still have run — the entry is what makes this file selectable on
+  # the `core`-only diffs.
+  - test_code_freshness_9494.py
   # #4491: dual-registered with `api` (see that surface's entry). It pins
   # tortoise/monitoring.py — which resolves to `core`, NOT `api` — so a
   # monitoring.py-only change (broken cap, lost clamp, reset bug) would
@@ -5648,27 +5696,34 @@ tier1:
 # (6.1x); the largest the OTHER way is `test_index_cli` 29.2 -> 25.0 — the row was
 # near-right, and it was the LOCAL re-measurement that was wrong.
 #
-# THE SPLIT is the LPT pack of that map into two legs of 18.945m / 18.933m — and
-# the honest framing of what that buys, stated against BOTH baselines because they
-# answer different questions:
+# THE SPLIT — HISTORICAL as of #9539: the 2-leg era's pack of that map, recorded
+# because it is the measurement the leg count was argued from, NOT the shape the
+# lane runs now. #9539 replaced the committed pair with legs DERIVED from this same
+# map (`slow_files - carve_out` LPT-packed into `slow_shards` = 5, 13 files each:
+# 7.56m / 7.58m / 7.58m / 7.58m / 7.58m, so a leg's wall is 7.58m + ~2m setup =
+# 9.58m against the 10m target). What the 2-leg pack bought, stated against BOTH
+# baselines because they answer different questions:
 #   vs the legs this PR actually REPLACES (main's, i.e. #9035's cut):
 #       17.06m / 20.82m  ->  18.95m / 18.93m   critical leg -1.88m, -9.0%
 #   vs the legs that stood BEFORE #9035 (the pre#9017 pair):
 #       17.98m / 19.90m  ->  18.95m / 18.93m   critical leg -0.96m, -4.8%
 #   and #9035's cut had itself made that leg 0.92m WORSE than the pair it replaced.
-# The ceiling is arithmetic and is the real answer to "why not 25%": a perfectly
-# balanced split of the 37.88m pool is 18.94m, and the pre#9017 split was already
-# within 0.97m of it. Re-balancing cannot cut the
-# critical path much further; only removing WORK from the pool can — which is why
-# the two tooling fixes in this change (a memoized AST parse in
-# `tools/surface_manifest.py`, two pre-filtered whole-tree scans in
-# `tests/test_markers.py`) are the part with the durable effect, and why the
-# re-cut is the part that measures whether the map is right.
+# The ceiling those numbers show is arithmetic and is the real answer to "why not
+# 25%": a perfectly balanced split of the 37.88m pool is 18.94m, and the pre#9017
+# split was already within 0.97m of it. Re-balancing the two legs cannot cut the
+# critical path much further — only removing WORK from the pool can, which is why
+# #9017's two tooling fixes (a memoized AST parse in `tools/surface_manifest.py`,
+# two pre-filtered whole-tree scans in `tests/test_markers.py`) are the part with
+# the durable effect, and why the re-cut is the part that measures whether the map
+# is right. Matching that arithmetic is also why #9539's lever is the LEG COUNT
+# rather than a better cut of two: `slow_shards: 5` takes the critical leg from
+# 18.95m to 7.58m.
 # `test_slow_leg_bounds_clear_the_committed_work` re-derives the 40m watchdog's
-# headroom from the map (2.11x the heavier leg, against the 2.0x floor) and the
-# workflow's drift guard pins the union to `slow_files - carve_out`. NOTHING was
-# deleted, moved off the pre-merge gate, or re-marked: all 65 files still run on
-# a PR, with the same nodeids.
+# headroom from the DERIVED legs — 5.3x the heavier one (7.58m, #9539) against the
+# 2.0x `WATCHDOG_HEADROOM` floor; in the 2-leg era above it read 2.11x at 18.95m —
+# and the workflow's drift guard pins the union of the EXPANDED legs to
+# `slow_files - carve_out`. NOTHING was deleted, moved off the pre-merge gate, or
+# re-marked: all 65 files still run on a PR, with the same nodeids.
 # #2008 review: the epic-1976 capstone report's claim guard (`core` above) — doc-text
 # and section scans plus three source-file reads, no DB, so a docs-only PR must run it
 # here.
@@ -5800,11 +5855,14 @@ slow_files:
 # (`.github/workflows/ci-timing.yml` → `tools/ci_timing.py --refresh-durations`),
 # which ships on its own and is NOT half-fixed here.
 #
-# The file lists in `.github/workflows/python-ci.yml` `test-slow` are the two
-# LPT legs of `slow_files - carve_out` on this same `durations` map, and that
-# job's own drift-guard step fails closed if the union stops matching this list.
-# Both legs are budgeted from that weight (a 40m watchdog under a 60m cap for
-# 14.192m / 14.188m legs), pinned by
+# There are NO committed file lists left to describe: `test-slow` carries a
+# `${{ fromJSON(...slow_matrix) }}` matrix, and that job's own drift-guard step
+# fails closed if the union of the EXPANDED legs stops matching
+# `slow_files - carve_out` on this same `durations` map. The 40m in-step
+# watchdog under the 60m outer cap are LITERALS #9539 deliberately left alone
+# (5.3x / 7.9x the 7.58m heavier derived leg); deriving them from the leg
+# weight is the per-leg `matrix.watchdog_minutes` follow-up. The floor that
+# keeps the literals honest is
 # tests/test_ci_selection.py::test_slow_leg_bounds_clear_the_committed_work.
 - eval/harness/test_harness_benchmark.py
 - eval/retrieval/test_gate_1349.py
@@ -7824,6 +7882,17 @@ durations:
   # sweep instead of leaving a stale note attached to a CI value (#9110 review P2).
   test_measure_ask_distilled.py: 2.0  # unmeasured — new in #9097: flat default until the first post-merge sweep
   eval/ask/test_ask_corpus.py: 2.0  # unmeasured — new in #9097: flat default until the first post-merge sweep
+  # #9494: a file ADDED BY THIS PR cannot appear in a junit artifact (the
+  # refresher samples push-to-main runs only), so it carries the flat default
+  # under the #3419/#2818 convention — the row is REQUIRED, not cosmetic: the
+  # `core` surface entry alone puts it in the fast pool and an absent `durations`
+  # key packs it at `DEFAULT_FAST_WEIGHT` while still moving the durations
+  # coverage RATIO (`duration_coverage_issues()`, the #3400/#4348 one-file trap).
+  # Do NOT substitute a local timing: the weight is a SHARD-LAYOUT input and only
+  # a measured CI junit value models the leg that carries the file. The tail LEADS
+  # with `# unmeasured` so `render_refreshed_manifest` clears it on that first
+  # sweep (#9110 review P2).
+  test_code_freshness_9494.py: 2.0  # unmeasured — new in #9494: flat default until the first post-merge sweep
 on_demand:
   - eval/retrieval/test_integration.py
   - test_perf_lane_volunteer_context.py

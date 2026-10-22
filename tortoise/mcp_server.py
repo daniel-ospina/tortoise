@@ -27,6 +27,9 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           _supersede_window_end, _now_iso,
                           _ledger_record as _ledger_record_page)
 from tortoise import monitoring
+# #9494: the loaded-module snapshot — used by `_safe` so a symbol failure on a
+# STALE process is answered with the measurement instead of a symbol name.
+from tortoise import code_freshness as _code_freshness
 # #8622: the epistemic label vocabulary is the WRITER's constant (sdk.py's
 # ``create_direct_edge`` / 2a-DIRECT transfer probe it in this exact order) —
 # imported, never re-listed, so the preview cannot drift from the write.
@@ -1910,6 +1913,16 @@ def _safe(fn, *args, **kwargs):
             # REVIEW-FIX P2: message scrubbed (#43).
             return _SafeError({"error": _scrub_error(str(e)),
                                **({"batch_id": e.batch_id} if e.batch_id else {})})
+        # #9494: a symbol-shaped failure (`cannot import name '_ledger_record'
+        # from 'tortoise.sdk'`) names the CODE, which sends the reader into
+        # `sdk.py` — where the symbol is defined and correct. When the drift is
+        # MEASURED, answer with it plus the fix (restart the server); when it is
+        # not, this branch changes nothing and the ImportError keeps reading as
+        # the real code defect it is.
+        hint = _code_freshness.staleness_hint(e)
+        if hint is not None:
+            return _SafeError({"error": f"{_scrub_error(str(e))}\n\n{hint}",
+                               "stale_server": True})
         msg = _scrub_error(str(e))
         return _SafeError({"error": msg})
 
@@ -3185,6 +3198,11 @@ def main():
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
 
         print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
+    # #9494: `main()`'s own import block above loads modules the module body
+    # never did (`tortoise._embedded`, `embedded_lifecycle`), so baseline again
+    # once they are in — otherwise their edits between start and the first health
+    # call would be absorbed silently, the #9494 window in miniature.
+    _code_freshness.observe(deep=True)
     try:
         mcp.run(transport="stdio")
     finally:
@@ -6011,6 +6029,10 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                                    RequestBodySizeMiddleware)
     from fastmcp.server.transforms import Transform
 
+    # #9494: this function's import block is the HTTP startup graph — baseline
+    # it now, before the app serves, so drift is measurable from the first call.
+    _code_freshness.observe(deep=True)
+
     # The transport's endpoint INSIDE this sub-app. One value, used both to
     # build the route and to gate the #3656 admission guard -- so the guard can
     # never intercept a path the route table does not serve (its 404).
@@ -7030,6 +7052,18 @@ _RETIRED_SHIMS = build_retired_tools(RETIRED_TOOL_REGISTRY, {
 if not getattr(mcp, "_retired_tool_transform_registered", False):
     mcp.add_transform(_RetiredToolTransform(_RETIRED_SHIMS))
     mcp._retired_tool_transform_registered = True
+
+# #9494: baseline the WHOLE startup graph at startup, and hash it (`deep=True`,
+# ~36 ms for this repo's 6 MB startup graph — invisible at boot). `monitoring`
+# already pulled `code_freshness` in, but `tool_registry`, `mcp_auth`, `quota`
+# and the rest load much later in this module body — without this call they would
+# only be observed by the first `check()` (a health call, which on a long-lived
+# server can be days away), and an edit to them in between would read as clean.
+# Measured: 25 of the 58 `tortoise.*` modules a server loads were outside the
+# baseline before this. `main()` and `create_http_app` call it again after THEIR
+# import blocks, because each imports modules this body has not (e.g.
+# `tortoise._embedded`, imported only when `main()` runs).
+_code_freshness.observe(deep=True)
 
 if __name__ == "__main__":
     main()
