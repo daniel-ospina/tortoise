@@ -1636,6 +1636,48 @@ def test_the_board_publishes_the_roster_size_beside_its_provenance(monkeypatch) 
     assert rec["workspaces_count"] == 3
 
 
+def test_the_workspace_count_excludes_synthetic_process_only_lanes(monkeypatch) -> None:
+    """the count is CMUX workspaces, not the `PROC:` entries the board mints.
+
+    `register_process_lanes` MUTATES the same live map to add a `PROC:<pid>` entry
+    for a lane found in the process table and not in cmux (#8999: the sanctioned
+    `nohup` launch path), so `len(workspaces)` published "live cmux workspaces: 2"
+    for a cmux list of ONE. That is the value the exit-2 remedy prints beside the
+    roster count, and it is wrong worst exactly here: the synthetic entry is minted
+    when the process's cwd is claimed by !=1 registry row — i.e. when the roster is
+    missing rows, the cell case #9392 exists for — while the remedy tells the
+    operator to take one uuid per lane from `cmux list-workspaces --json`, a list a
+    `PROC:` entry is not in.
+    """
+    monkeypatch.setattr(fs, "load_registry", lambda: [("cell-t3", "WS-A", "")])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {"WS-A": {"cwd": "/tmp/a"}}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    # One PROCESS-only lane: no cmux workspace, cwd not claimed by exactly one row.
+    monkeypatch.setattr(fs, "live_sessions", lambda: fs.LiveSessions(
+        {f"{fs.PROC_WS_PREFIX}4242": [
+            {"store": fs.LIVE_STORE_PROCESS, "cwd": "/tmp/elsewhere"}]},
+        measured=True))
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees",
+                        lambda _root: {"/tmp/elsewhere": {"branch": "fix/x"}})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    state = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                           sample_s=0.0, do_pane=False)
+    # …the synthetic workspace IS registered (the lane must not look terminal)…
+    assert any(fs.is_proc_ws(lane["identity"]["workspace"])
+               for lane in state["lanes"]), (
+        "the process-only lane must still be a lane with a namespaced workspace")
+    # …and the PUBLISHED COUNT is the cmux one, not the mutated map's length.
+    assert state["reconciliation"]["workspaces_count"] == 1, (
+        "a PROC: pseudo-workspace is not a live cmux workspace")
+
+
 def test_an_unmeasured_workspace_read_publishes_no_count(monkeypatch) -> None:
     """⛔ ABSENT IS NOT ZERO, for the LIVE count too (review P1).
 

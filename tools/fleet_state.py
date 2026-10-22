@@ -2808,7 +2808,22 @@ def build_state(
             # already obeys for the provenance fields, one field over. `None` is
             # the board saying "this read did not happen"; a reader that prints
             # counts must skip it (`collision_preflight._board_count` does).
-            "workspaces_count": len(workspaces) if workspaces_measured else None,
+            # ⛔ AND IT COUNTS CMUX WORKSPACES, NOT THE SYNTHETIC ONES (#9392
+            # review P2). `register_process_lanes` MUTATES this same map to add a
+            # `PROC:` entry for a lane it found in the process table and not in
+            # cmux (`title: "pi (process N) — no cmux workspace"`, #8999) — so a
+            # bare `len()` published "live cmux workspaces: 2" for a cmux list of
+            # 1. That is worst exactly where this disclosure was added: the
+            # synthetic entry is minted when the process's cwd is claimed by !=1
+            # registry row, i.e. when the roster is missing rows — the cell case
+            # #9392 is about — and the refusal tells the operator to take one
+            # uuid per lane from `cmux list-workspaces --json`, a list a
+            # `PROC:` entry is not in. The roster's row count stays as it is: it
+            # counts file ROWS, and the label says "row(s)".
+            "workspaces_count": (
+                sum(1 for name in workspaces if not is_proc_ws(name))
+                if workspaces_measured else None
+            ),
             # #8175: was the OPEN-ISSUE read WIDE ENOUGH to prove a negative? A
             # truncated read cannot support "no lane is attributed to issue N"
             # for an N it did not see, so the flag travels with the board and the
