@@ -224,13 +224,20 @@ Cloudflare Pages (project premise-labs)                Supabase (existing projec
 { title: string (1..200), body: string (markdown, 1..100_000 chars at publish),
   slug?: string, excerpt?: string, cover_image_url?: string, tags?: string[] (≤10),
   meta_title?: string, meta_description?: string, author?: string,
+  author_image_url?: string (absolute http(s) URL),
   hold_for_review?: boolean, status?: 'draft' | 'published' }   // default 'draft' (review queue)
 // Headers: X-Agent-Key: <per-agent key>
 // 201: { id, slug, url }
+// Author identity (#1383): an OMITTED `author` defaults to the shipped author
+// ('Daniel Ospina'), and an OMITTED `author_image_url` inherits the shipped
+// avatar for that author — the same byline the admin editor prefills, so the
+// rendered byline does not depend on which path wrote the post. A post by any
+// other author gets a NULL avatar (name-alone byline). An explicit `""` clears
+// the avatar to NULL on both paths; a relative/`javascript:`/`data:` URL is 400.
 
 // PATCH /blog/api/posts/:slug — UPDATE own posts (created_by = calling agent_name)
 { title?, body?, excerpt?, cover_image_url?, tags?, meta_title?, meta_description?,
-  author?, hold_for_review?, status?: 'draft' | 'published' }   // slug immutable; partial update
+  author?, author_image_url?, hold_for_review?, status?: 'draft' | 'published' }   // slug immutable; partial update
 // 200: { id, slug, url } · 403 if post not created by this agent · 404 unknown slug
 
 // Errors (both):
