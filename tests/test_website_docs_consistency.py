@@ -1297,19 +1297,24 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     """Close the same REVERSE ratchet one level up: the guard's OWN inputs.
 
     `test_every_in_scope_page_is_selectable_by_ci` covers the pages in the derived
-    scope, but four inputs change that scope or the rule WITHOUT being a page: the
+    scope, but four inputs change that scope or the rule WITHOUT being a page, so a
+    PR editing only one of them selects no surface and this file never runs: the
     shared extractor `tests/_html_links.py` (the rule itself), `website/_redirects`
     (which pages `_canonical_redirect_targets` drops from scope),
     `website/functions/blog/[[path]].ts` (what `_function_serves` resolves the blog
     link against), and `tortoise/quadrature.py` (whose EP factors
     `test_docs_states_the_formulas_quadrature_actually_computes` derives the
-    /docs expectation FROM). A PR editing only one of those selects no surface, so
-    this file never runs and the guard silently stops covering what it was written
-    for — verified before listing: `select(["website/_redirects"], ...)` returned
-    `surfaces=[]` with this file absent from `test_files`.
+    /docs expectation FROM). That is the property this ratchet pins — *editing it
+    selects no surface* — not "every non-page input", and the count of four is a
+    count of exactly that property. `tortoise/sdk.py` is a fifth rule input of the
+    same shape (the status vocabulary, the capture cap, the `_extract_session_v2`
+    call sites are all parsed out of it), but it is a `SHARED_MODULES` member, so a
+    PR touching it selects the FULL matrix (`full=True`, measured) and cannot be
+    dropped this way. Verified before listing: `select(["website/_redirects"], ...)`
+    returned `surfaces=[]` with this file absent from `test_files`.
 
     The fourth is the sharpest, and it was the one still broken at #9607 (the other
-    three were already covered when they were added):
+    three were selectable at that head — re-measured):
     `test_docs_states_the_formulas_quadrature_actually_computes` derives its
     expected factors from `tortoise/quadrature.py` itself, and its own docstring
     says *"editing `quadrature.py` itself reds the page that describes it"*. That
@@ -1324,6 +1329,15 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     catch this direction: it is derived FROM `SOURCE_PATTERNS`, so deleting an entry
     deletes its own only case (review finding, #3962). These paths are therefore
     pinned explicitly here.
+
+    ⚠️ Known remaining hole in this ratchet, measured: the two committed legal
+    drafts this file mirrors (`docs/drafts/2026-08-08-657-privacy-draft.md`,
+    `...-tos-draft.md`) are also select-no-surface inputs — a draft-only edit runs
+    57 tier-1 files and NOT this file — but they are deliberately NOT pinworthy by
+    the naive route: adding them to `SOURCE_PATTERNS["onboarding"]` drops three
+    tier-1 files (`test_config.py`, `test_guard.py`, `test_reaper_orphan.py`) and
+    adding `CORE_ALSO` on top of that flips `slow_run` to True. They need the
+    per-path extra-tests map (#9650, #3435 §2), not a pattern entry.
     """
     unselectable = [
         path
