@@ -30,6 +30,7 @@ from typing import NamedTuple
 
 import tortoise.mcp_server as mcp_server
 import tortoise.sdk as sdk_module
+from tortoise.tool_registry import MAINTENANCE_TIER, WRITE_RISK_TIERS
 
 # ── Declared sets (each with a reason; exactness is asserted by the guards) ──
 
@@ -42,10 +43,14 @@ HTTP_EXCLUDED_SDK_METHODS: dict[str, str] = {
 }
 
 # Operations that DO write on an internal self-heal / cache-refresh path but
-# are deliberately read-classified (a read-only MCP key may call them).  This
-# is a recorded posture (get_confidence/compute_confidence cite #1157; the
-# read-through decision is tracked in #4122).  The guard documents it and does
-# NOT override it.
+# are deliberately PERMISSIONED AS READ (a `graphs:read` key may call them).
+# The posture is #4122's owner ruling: they are `risk="maintenance"` — a
+# confined, idempotent refresh of a DERIVED value (PostgreSQL's `MAINTAIN`),
+# which is neither a pure read nor a caller-authored write.  They keep
+# `graphs:read` and, because they are not `read`, they must NOT claim
+# `readOnlyHint: true` — that hint is what clients auto-approve on.  The arms
+# below therefore require `risk == "maintenance"`: the declared set moves with
+# the code, so the posture cannot silently re-stale.
 READ_THROUGH_WRITE_METHODS: dict[str, str] = {
     "compute_confidence": "persists computed `SET n.confidence` (#1157/#4122)",
     "get_confidence": "lazy `dream(dirty_only=True)` writes n.confidence (#1157/#4122)",
@@ -932,22 +937,26 @@ def write_classification_violations(entries, mcp_src: str | None = None) -> list
             elif not handler_self_guards(e.name, mcp_src):
                 out.append(
                     f"{e.name}: HTTP-excluded writer whose handler does not self-guard")
-        # 2b — writer-annotated must be write-classified or self-guarded.
+        # 2b — a tool that is NOT a pure read must be write-classified, be a
+        # declared `maintenance` tool, or self-guard as an HTTP-excluded tool.
         # The self-guard branch is deliberate and stays (#4474's issue comment
         # pins it; `test_T1_exempted_tool_without_self_guard_fails` exercises
-        # it): an HTTP-excluded graph writer must self-guard. On a coherent
-        # registry the branch is reached only by a writer-annotated entry
-        # OUTSIDE WRITE_TOOL_NAMES — empty since #4474, and that class is caught
-        # by `exemption_set_violations` — so this arm remains the handler-side
-        # cross-check plus the synthetic-probe path, not the primary guard.
+        # it): an HTTP-excluded graph writer must self-guard. The `maintenance`
+        # branch is #4122's third state — the tool refreshes stored state and so
+        # correctly drops `readOnlyHint`, yet a `graphs:read` key must still be
+        # able to call it — so it is legitimate for such an entry to sit OUTSIDE
+        # WRITE_TOOL_NAMES. Without that branch this arm would red on every
+        # read-through tool, and the only ways to green would be to re-declare
+        # the false read hint or to take the tool away from read keys.
         writer_annotated = (
             e.annotations is not None and e.annotations.readOnlyHint is False
         )
         if writer_annotated and e.name not in _ms.WRITE_TOOL_NAMES and not (
-                e.http_policy is False and handler_self_guards(e.name, mcp_src)):
+                e.risk == MAINTENANCE_TIER
+                or (e.http_policy is False and handler_self_guards(e.name, mcp_src))):
             out.append(
                 f"{e.name}: writer-annotated but not in WRITE_TOOL_NAMES "
-                f"and not a self-guarding HTTP-excluded tool")
+                f"and not a declared maintenance / self-guarding HTTP-excluded tool")
         # 2c — empty sdk_method must be declared
         if not e.sdk_method and e.name not in (NON_SDK_WRITER_TOOLS | NON_SDK_READ_TOOLS):
             out.append(f"{e.name}: empty sdk_method but not declared non-SDK")
@@ -1062,35 +1071,49 @@ def binding_resolution_violations(entries, mcp_src: str | None = None) -> list[s
 
 
 def exemption_set_violations(entries) -> list[str]:
-    """An entry's read/write ANNOTATION and its declared `writes` flag must be
-    the same statement, over the whole served set.
+    """An entry's MCP hints and its declared `risk` tier must be one statement,
+    over the whole served set — the drift guard #4122's ruling demands.
 
-    This used to pin "writer-annotated AND NOT in WRITE_TOOL_NAMES AND
-    `http_policy is False`" to exactly `NON_HTTP_WRITER_TOOLS` — the five entries
-    that were writer-annotated yet served as reads (#4474). After those five
-    declared `writes=True` (#4170: the permission lives on the entry) the
-    exemption is empty, so that name-list equality is either a permanent false
-    red (list kept at its five names) or a narrower, one-directional restatement
-    keyed to `http_policy is False` (list emptied to match). It is restated as
-    the property it was approximating and could only ever see half of:
-    `readOnlyHint` and the declared `writes` flag must agree, in both
-    directions, for any entry. A `_rw()`/`_idem()` entry with `writes=False` —
-    the #4474 defect — still fails (pinned by the rogue probes in
-    `test_exemption_set_is_exact`).
+    Two independent statements are checked, because the tier model has THREE
+    hint/permission states, not two (`read`, `maintenance`, and the writing
+    tiers):
 
-    Note this is the ANNOTATION half, not the handler half: a handler that
-    reaches a graph mutation is caught by `write_classification_violations`.
+    1. `readOnlyHint` must be True exactly for `risk == "read"`.  A
+       `readOnlyHint: true` on a tool that is not a pure read is the #4122
+       defect: clients auto-approve on that hint, so a wrong one changes client
+       approval behaviour with no visible description change.
+    2. `writes` (needs `graphs:write`) must be True exactly for the writing
+       tiers `write|destructive|admin`.  A writer served as a read is the #4170
+       defect; a read served as a writer is the #4474 defect.
+
+    `maintenance` is the state that used to be unrepresentable — `readOnlyHint:
+    false` (correctly, it does refresh stored state) while `writes` is False
+    (correctly, a `graphs:read` key may call it) — and it is why this is no
+    longer the single `annotated_write == bool(writes)` equality it was.
+
+    History: this replaced a hard-coded name list (`NON_HTTP_WRITER_TOOLS`) in
+    #4474 with the property that list approximated. Both directions still fail
+    loudly — pinned by the rogue probes in `test_exemption_set_is_exact`.
+
+    Note this is the HINT half, not the handler half: a handler that reaches a
+    graph mutation is caught by `write_classification_violations`.
     """
     out: list[str] = []
     for e in entries:
         if e.annotations is None:
             continue
-        annotated_write = e.annotations.readOnlyHint is False
-        if annotated_write != bool(e.writes):
+        read_hint = e.annotations.readOnlyHint is True
+        if read_hint != (e.risk == "read"):
             out.append(
-                f"{e.name}: writer annotation and declared `writes` disagree — "
-                f"readOnlyHint={e.annotations.readOnlyHint}, writes={e.writes} "
-                f"(#4170: the entry's `writes` flag is the permission)")
+                f"{e.name}: readOnlyHint disagrees with the risk tier — "
+                f"risk={e.risk!r}, readOnlyHint={e.annotations.readOnlyHint} "
+                f"(#4122: only risk='read' may claim readOnlyHint)")
+        if bool(e.writes) != (e.risk in WRITE_RISK_TIERS):
+            out.append(
+                f"{e.name}: `writes` disagrees with the risk tier — "
+                f"risk={e.risk!r}, writes={e.writes} "
+                f"(#4122: writes is derived, writing tiers are "
+                f"{sorted(WRITE_RISK_TIERS)})")
     return out
 
 
@@ -1132,10 +1155,11 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
             out.append(f"READ_THROUGH_WRITE_METHODS entry {op!r} does not resolve")
         for e in by_method.get(op, []):
             if not e.http_policy or e.annotations is None \
-                    or e.annotations.readOnlyHint is not True:
+                    or e.risk != MAINTENANCE_TIER:
                 out.append(
                     f"{e.name}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
-                    f"non-read HTTP tool")
+                    f"non-maintenance HTTP tool — a read-through write must declare "
+                    f"risk={MAINTENANCE_TIER!r} (#4122), not {e.risk!r}")
         # #4035 split: a read-through op carried by a handler-served tool has no
         # `sdk_method` declaration left for the `by_method` loop above to key on,
         # so it becomes UNREACHABLE and the read-classification property stops
@@ -1150,10 +1174,11 @@ def declared_set_violations(entries, sdk_src: str | None = None) -> list[str]:
         if e is None:
             continue  # liveness ('has no tool binding') is asserted above
         if not e.http_policy or e.annotations is None \
-                or e.annotations.readOnlyHint is not True:
+                or e.risk != MAINTENANCE_TIER:
             out.append(
                 f"{bound_tool}: READ_THROUGH_WRITE_METHODS entry {op!r} bound to a "
-                f"non-read HTTP tool")
+                f"non-maintenance HTTP tool — must declare "
+                f"risk={MAINTENANCE_TIER!r} (#4122), not {e.risk!r}")
     for op in sorted(INTERNAL_PATH_READERS):
         if op not in methods:
             out.append(f"INTERNAL_PATH_READERS entry {op!r} does not resolve")
