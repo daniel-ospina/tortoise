@@ -15,11 +15,10 @@ it can record a result, and the gate reports "the drift check produced NO result
 a red that names a setup fault while removing the whole gate's coverage (#9541 review,
 round 6, P1).
 
-A single quote-free command survives the interpolation byte-for-byte. This script is that
-command; everything the override used to do inline lives here, where quoting is python's
-problem rather than the workflow consumer's:
-
-    check-command: python3 tools/agent_infra_drift_check.py
+A single quote-free command survives the interpolation byte-for-byte; this script is that
+command — `.github/workflows/ci.yml`'s `drift-check` job names this file in its
+`with.check-command`, and nothing else — so everything the override used to do inline lives
+here, where quoting is python's problem rather than the workflow consumer's.
 
 Contract
 --------
@@ -44,10 +43,20 @@ Exit codes
 
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/agent_infra_drift_check.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/agent_infra_drift_check.py`"
+    )
+
 import argparse
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
