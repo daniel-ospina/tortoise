@@ -77,7 +77,7 @@ Therefore:
 - forcing `exit 0`, or adding `continue-on-error: true` to the tool step, makes the window read
   **`covered`**;
 - **the same green is reachable without touching the exit code at all** — dropping `--apply` from
-  the step (`python3 tools/ci_check_repair.py --json`) makes `report()` stop escalating the
+  the step (`uv run python tools/ci_check_repair.py --json`) makes `report()` stop escalating the
   `needs_user_actor` case (`if apply: escalations += 1`), so the tool exits **0** for the very state
   this run exists to report, and the window reads `covered` again. A guard on the exit code alone
   does not see it;
@@ -103,7 +103,7 @@ holds the **workflow** end, in two different ways:
   or on the repair step, and the workflow must carry no job other than `repair`. All three keys
   conclude `success` without the repair succeeding: `continue-on-error` tolerates the failure, a
   skipped job or step is not a failure at all, and `needs:` skips the job whenever its dependency
-  skipped — so `repair: needs: [<a job with `if: false`>]` never runs the tool and yet greens the
+  skipped — so ``repair: needs: [<a job with `if: false`>]`` never runs the tool and yet greens the
   run. `if:` is the same green one line earlier, which is why it is banned alongside
   `continue-on-error` (the shape `tests/test_ai_review_gate_contract.py` already uses for the same
   reason, and it bans all three);
