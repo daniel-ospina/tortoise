@@ -76,6 +76,11 @@ Therefore:
 
 - forcing `exit 0`, or adding `continue-on-error: true` to the tool step, makes the window read
   **`covered`**;
+- **the same green is reachable without touching the exit code at all** — dropping `--apply` from
+  the step (`python3 tools/ci_check_repair.py --json`) makes `report()` stop escalating the
+  `needs_user_actor` case (`if apply: escalations += 1`), so the tool exits **0** for the very state
+  this run exists to report, and the window reads `covered` again. A guard on the exit code alone
+  does not see it;
 - the fallback then goes idle, and a PR in the `needs_user_actor` state has its required checks
   produced by **nobody**;
 - that is the #8254 miss this workflow exists to prevent, restored silently — the coverage read fails
@@ -100,11 +105,21 @@ holds the **workflow** end, in two different ways:
   earlier, which is why it is banned alongside `continue-on-error` (the shape
   `tests/test_ai_review_gate_contract.py` already uses for the same reason);
 - **behaviour** — the step's own shell is EXECUTED against a stubbed interpreter, and must hand back
-  `1` when the tool exits `1` (and `0` when it exits `0`). This is the half a text pin cannot do:
-  `declare -i rc=0`, `[ "$rc" -ne 0 ] && rc=0` and `printf -v rc 0` all force the exit code while
-  leaving `rc=${PIPESTATUS[0]}` and the literal `exit "$rc"` intact. So does a bare `rc=0` before the
-  assignment — an assignment is itself a simple command and resets `PIPESTATUS`, which is exactly why
-  that edit must be caught rather than reasoned about.
+  **every** non-zero class it is given (`1`, `2`, `3`) and `0` for a clean run — not just the two
+  spellings a reviewer would probe by hand. This is the half a text pin cannot do:
+  `declare -i rc=0` *after* the assignment, `[ "$rc" -ne 0 ] && rc=0` and `printf -v rc 0` all force
+  the exit code while leaving `rc=${PIPESTATUS[0]}` and the literal `exit "$rc"` intact. So does a bare
+  `rc=0` before the assignment — an assignment is itself a simple command and resets `PIPESTATUS`,
+  which is exactly why that edit must be caught rather than reasoned about. Probing only `1` is what
+  let `[ "$rc" = 2 ] && rc=0` — the natural way to green the "measurement failure" class under arm
+  (B) — read **green**, so every non-zero class is probed;
+- **the invocation** — the stub records its argv, and the step must still call
+  `tools/ci_check_repair.py --apply`. Without `--apply` the tool exits `0` for the state this run
+  exists to report, so an exit-code-only probe greens on a deletion;
+- **the crash is not the signal** — stderr must be empty and the step summary must be written. The
+  step re-arms `set -e` before its summary block and writes a fixed `/tmp` path, so a crashing block
+  exits `1` on its own; without this arm the `must exit 1` assertion would pass without `rc` ever
+  being propagated.
 
 The step is found by CONTENT (`tools/ci_check_repair.py` in its `run:`), not by its display `name:`,
 so renaming it for clarity is not a red — and the workflow is read as parsed YAML, so a job-level key
@@ -117,8 +132,12 @@ This is not redundant with `workflow_state`'s own polarity test — `workflow_co
 unconditionally makes the fallback permanently idle while every classifier assertion still passes.
 
 Mutation-tested, each vector one at a time: job-level and step-level `continue-on-error`, job-level and
-step-level `if:`, `rc=0` after the pipeline, `declare -i rc=0`, `[ "$rc" -ne 0 ] && rc=0`,
-`printf -v rc 0`, and `workflow_covered()` returning `0` — all red; a renamed step stays green.
+step-level `if:`, `rc=0` after the pipeline, `declare -i rc=0` placed **after** the assignment,
+`[ "$rc" -ne 0 ] && rc=0`, `printf -v rc 0`, `[ "$rc" = 2 ] && rc=0` (the single-class green),
+`--apply` dropped from the step, and `workflow_covered()` returning `0` — all red; a renamed step
+stays green. Placement matters in both directions: `declare -i rc=0` **before** the pipeline is
+harmless (the later `rc=${PIPESTATUS[0]}` overwrites it) and correctly stays green — only the
+post-assignment form is a fail-open.
 
 ## What the owner still has to decide
 

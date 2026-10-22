@@ -412,11 +412,25 @@ def _run_repair_step(script, tmp_path, tool_rc):
     leaving `rc=${PIPESTATUS[0]}` AND `exit "$rc"` intact, so a text pin reads
     green on a real fail-open. Running the script measures the only thing that
     matters: what exit code the step actually hands GitHub.
+
+    `tmp_path` must be FRESH per call — the journal below is the run's argv.
+
+    ARGV IS RECORDED, not just the exit code (#9365 review). An exit-code-only
+    stub accepts ANY invocation, so dropping `--apply` from the step read green:
+    without it `report()` stops escalating the `needs_user_actor` case
+    (`tools/ci_check_repair.py`: `if apply: escalations += 1`), the tool exits 0
+    where it exits 1 when armed, and `workflow_state()` therefore reads `covered`
+    — the same fail-open, reached by a deletion rather than by greening.
     """
     bindir = tmp_path / "bin"
-    bindir.mkdir(exist_ok=True)
+    bindir.mkdir(parents=True, exist_ok=True)
+    argv_log = tmp_path / "python3-argv.log"
     stub = bindir / "python3"
-    stub.write_text(f"#!/usr/bin/env bash\nexit {tool_rc}\n")
+    # `--workflow-state` is the LAUNCHER's flag and must NOT be answered here:
+    # this stub exists to stand in for the repair tool the step invokes.
+    stub.write_text("#!/usr/bin/env bash\n"
+                    f'printf "%s\\n" "$*" >> {str(argv_log)!r}\n'
+                    f"exit {tool_rc}\n")
     stub.chmod(0o755)
     summary = tmp_path / "step-summary.md"
     summary.write_text("")
@@ -424,8 +438,10 @@ def _run_repair_step(script, tmp_path, tool_rc):
            # The step appends to `$GITHUB_STEP_SUMMARY`. Unset, that redirect is
            # an "ambiguous redirect" and the run fails for the wrong reason.
            "GITHUB_STEP_SUMMARY": str(summary)}
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
-                          timeout=120, env=env, cwd=tmp_path)
+    r = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                       timeout=120, env=env, cwd=tmp_path)
+    argv = argv_log.read_text() if argv_log.exists() else ""
+    return r, argv, summary.read_text()
 
 
 def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
@@ -486,11 +502,35 @@ def test_the_red_is_the_coverage_signal_so_it_cannot_be_greened_alone(tmp_path):
 
     # Behaviour: the exit code the step hands GitHub, whatever the shell spelling.
     script = step["run"]
-    r = _run_repair_step(script, tmp_path, tool_rc=1)
-    assert r.returncode == 1, (
-        "a failed repair must exit 1 — that IS the local fallback's handoff "
-        f"signal (#9365); the step exited {r.returncode}. stderr={r.stderr!r}")
-    r = _run_repair_step(script, tmp_path, tool_rc=0)
+    # EVERY non-zero class, not the two spellings a reviewer would probe by hand.
+    # The tool's own contract is 1 = "a PR still needs a repair this credential
+    # cannot perform" and 2 = "could not measure" (`tools/ci_check_repair.py`
+    # CLI contract), and the record measures BOTH on main (68 exit-1, 5 exit-2).
+    # Probing only `1` left `[ "$rc" = 2 ] && rc=0` — the natural way to green
+    # the "measurement failure" class under #9365 arm (B) — reading GREEN, which
+    # is the fail-open this whole test exists to refuse (#9365 re-review).
+    for tool_rc in (1, 2, 3):
+        r, argv, summary_body = _run_repair_step(script, tmp_path / f"rc{tool_rc}", tool_rc)
+        assert not r.stderr, (
+            "the step's own shell failed for a reason that is NOT the repair "
+            f"(stderr={r.stderr!r}) — without this, the summary block crashing "
+            "would exit 1 and the `must exit 1` arm below would pass without "
+            "rc ever being propagated (#9365 review)")
+        assert r.returncode == tool_rc, (
+            f"a repair exiting {tool_rc} must exit {tool_rc} — a non-zero class "
+            "IS the local fallback's handoff signal (#9365); the step exited "
+            f"{r.returncode}. stdout={r.stdout!r} stderr={r.stderr!r}")
+        # ARGV: the step must still invoke the repair ARMED. Dropping `--apply`
+        # makes the tool exit 0 for a `needs_user_actor` PR, i.e. it greens the
+        # run while every exit-code assertion above still holds.
+        assert "tools/ci_check_repair.py" in argv and "--apply" in argv, (
+            "the repair step must invoke `tools/ci_check_repair.py --apply` — "
+            "without `--apply` the tool exits 0 for the very state this run "
+            f"exists to report, i.e. it greens the run (#9365); argv={argv!r}")
+        assert "```json" in summary_body, (
+            "the step summary must be written — its absence means the block "
+            f"crashed rather than the rc being propagated (#9365); summary={summary_body!r}")
+    r, _, _ = _run_repair_step(script, tmp_path / "rc0", tool_rc=0)
     assert r.returncode == 0, (
         f"a clean repair must exit 0 (#9365); the step exited {r.returncode}")
 
