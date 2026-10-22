@@ -2320,7 +2320,10 @@ def test_the_pglite_harness_runs_on_a_projection_only_change(tmp_path):
 
     Falsifier (measured on the pre-fix `if:`): with `schema-drill` gated on
     `migrations` alone, every case below left `pglite=false` AND
-    `migrations=false` — the job was skipped on all three inputs it reads, so
+    `migrations=false` — the job was skipped on all three inputs the narrow
+    predicate named (`supabase/tests/pglite/`, the module, the fixture), and a
+    fourth input it read — the assertion suites under `supabase/tests/*.sql` —
+    was skipped by the same gate, so
     `validate.mjs`'s #9553 leg could only ever fail where a human ran it.
     """
     wf = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "ci.yml")
@@ -2333,7 +2336,15 @@ def test_the_pglite_harness_runs_on_a_projection_only_change(tmp_path):
         "schema-drill does not consume the pglite output, so the gate below "
         "measures nothing")
 
+    # `supabase/tests/` is named WHOLE: `validate.mjs` reads
+    # `TESTS_DIR = supabase/tests` for every entry of its explicit `suites`
+    # list and for `C1_SUITE`, so an assertion suite is an input it reads —
+    # and a `supabase/tests/*.sql`-only edit is neither under
+    # `supabase/migrations/` nor under `supabase/tests/pglite/`, which is how
+    # the narrower first entry left the only job that runs those suites
+    # skipped.
     for path in ("supabase/tests/pglite/validate.mjs",
+                 "supabase/tests/20261012000001_record_schema.sql",
                  "tortoise/record_projection.py",
                  "supabase/tests/fixtures/record_projection_journal.jsonl"):
         outs = _gate_outputs([path], tmp_path)

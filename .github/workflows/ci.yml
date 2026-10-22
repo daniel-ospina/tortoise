@@ -168,11 +168,18 @@ jobs:
               # projection-only change — the exact shape of #9553 — skipped
               # the job and its legs could only fail where a human ran them.
               # Name the inputs it reads, not the surface they happen to look
-              # like: the harness dir, the module it executes, the fixture it
-              # replays. A migration change still reaches the job through
-              # `migrations` (schema-drill's `if:` ORs the two).
+              # like: the assertion suites + the harness dir it walks
+              # (`supabase/tests/` whole — `validate.mjs` reads
+              # `TESTS_DIR = supabase/tests` for every entry of its explicit
+              # `suites` list AND for `C1_SUITE`, so a suite-only edit is an
+              # input too), the module it executes, the fixture it replays. A
+              # migration change still reaches the job through `migrations`
+              # (schema-drill's `if:` ORs the two).
+              # (#9553 review P2: the first entry was `supabase/tests/pglite/`
+              # alone, so a `supabase/tests/*.sql`-only edit set BOTH outputs
+              # false and skipped the only job that executes those suites.)
               "pglite": any_file(
-                  startswith("supabase/tests/pglite/"),
+                  startswith("supabase/tests/"),
                   isfile("tortoise/record_projection.py"),
                   isfile("supabase/tests/fixtures/"
                          "record_projection_journal.jsonl"),
