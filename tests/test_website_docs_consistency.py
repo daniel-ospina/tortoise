@@ -165,16 +165,66 @@ def _quadrature_exponent(func: str) -> str:
     return re.sub(r"\s+", "", m.group(1))
 
 
-def _page_formulas(page: Path) -> set[str]:
-    """The formulas a rendered page states, in `_exp_bodies` form.
+def _page_plain(raw: str) -> str:
+    """`raw` page HTML as comparable plain text, formula renderings normalised.
 
     `<sup>2</sup>` becomes `**2` BEFORE the tags are stripped: the page writes the
     IMPL square as an HTML superscript, so a tag-stripping-only pass yields
     `(ca-cb)2` — a truncated exponent that would read as a mismatch on honest copy.
+    `·` and `−` are the page's multiplication and minus; the source writes `*`/`-`.
     """
-    raw = re.sub(r"<sup>2</sup>", "**2", _read(page))
-    plain = _normalise(raw).replace("·", "*").replace("−", "-")
-    return _exp_bodies(re.sub(r"\s+", "", plain))
+    return (
+        _normalise(re.sub(r"<sup>2</sup>", "**2", raw))
+        .replace("·", "*")
+        .replace("−", "-")
+    )
+
+
+def _compact_formulas(text: str) -> set[str]:
+    """The `exp(...)` factors stated in `text`, compacted the way `_exp_bodies` reads."""
+    return _exp_bodies(re.sub(r"\s+", "", text))
+
+
+def _relation_factors(
+    raw: str, relations: tuple[str, ...] = ("NAND", "IMPL")
+) -> dict[str, set[str]]:
+    """The factor stated in the CLAUSE that names each relation, per relation.
+
+    A page-wide set of `exp(...)` bodies is BLIND TO A SWAP: both bodies being
+    present is invariant under exchanging them, so a page reading
+    "NAND is a joint-truth penalty — exp(-w·(c_a−c_b)²)" stayed green while the
+    formula pin claimed to make a swap falsifiable (measured at the #9515 review).
+    Each relation's factor is therefore read only from the text after its NAME, up
+    to the next relation name, so the number is bound to the edge type it belongs
+    to and an exchange of the two reds. It also stops a formula restated in an
+    unrelated card from keeping the pin green after the card drops it.
+    """
+    names = [r.upper() for r in relations]
+    plain = _page_plain(raw)
+    boundary = re.compile(r"\b(?:" + "|".join(names) + r")\b", re.I)
+    hits = [(m.start(), m.end(), m.group(0).upper()) for m in boundary.finditer(plain)]
+    out: dict[str, set[str]] = {name: set() for name in names}
+    for idx, (_, end, name) in enumerate(hits):
+        if name not in out:
+            continue
+        stop = hits[idx + 1][0] if idx + 1 < len(hits) else len(plain)
+        out[name] |= _compact_formulas(plain[end:stop])
+    return out
+
+
+def _stated_factors(raw: str) -> dict[str, str]:
+    """Each `<code>exp(...)</code>` on the page, keyed by its DERIVED factor form.
+
+    Maps `-w*ca*cb` back to the page's own rendering
+    (`exp(-w&middot;c<sub>a</sub>&middot;c<sub>b</sub>)`), so a test can mutate the
+    page exactly the way a wrong edit would and show the pin reds.
+    """
+    out: dict[str, str] = {}
+    for m in re.finditer(r"<code>(exp\(.*?)</code>", raw, re.S):
+        forms = _compact_formulas(_page_plain(m.group(1)))
+        assert len(forms) == 1, f"could not derive one factor from {m.group(1)!r}"
+        out.setdefault(forms.pop(), m.group(1))
+    return out
 
 # ── Point status vocabulary ──────────────────────────────────────────────────
 
@@ -192,15 +242,20 @@ def test_sdk_status_vocabulary_is_what_the_pins_below_assume() -> None:
 
 
 def test_docs_states_the_formulas_quadrature_actually_computes() -> None:
-    """/docs' mechanism card must state the FACTORS the engine computes.
+    """/docs' mechanism card must state the FACTORS the engine computes, per edge type.
 
     The card's prose is pinned above, but prose is rewordable and a formula is
     not: `tortoise/quadrature.py` returns `np.exp(-w * ca * cb)` for NAND and
     `np.exp(-w * (ca - cb) ** 2)` for IMPL, and /docs renders both. Comparing the
-    two DERIVED (never restated) makes a swap falsifiable — replacing the NAND
-    factor on the page with IMPL's left the prose pin green (measured at the
-    #9515 review: `joint-truth penalty` survives a wrong formula), and editing
-    `quadrature.py` itself now reds the page that describes it.
+    two DERIVED (never restated) makes a wrong factor falsifiable — replacing the
+    NAND factor on the page with IMPL's left the prose pin green (measured at the
+    #9515 review: `joint-truth penalty` survives a wrong formula) — and editing
+    `quadrature.py` itself reds the page that describes it.
+
+    The factors are bound to the relation that NAMES them, because a page-wide SET
+    of bodies is invariant under a swap: `NAND — exp(-w·(c_a−c_b)²)` is materially
+    wrong and stayed green under the set-only version of this pin (measured at the
+    same review). The positive control at the end executes that swap.
     """
     nand = _quadrature_exponent("phi_nand")
     impl = _quadrature_exponent("phi_impl")
@@ -208,13 +263,49 @@ def test_docs_states_the_formulas_quadrature_actually_computes() -> None:
         "phi_nand and phi_impl return the same factor — the two edge types are no "
         "longer different constraints, and /docs says they are"
     )
-    formulas = _page_formulas(DOCS)
-    for func, exponent in (("phi_nand", nand), ("phi_impl", impl)):
-        assert exponent in formulas, (
-            f"website/docs.html does not state exp({exponent}), which is what "
-            f"tortoise/quadrature.py::{func} computes. The card's prose alone cannot "
-            f"catch a wrong formula: it is pinned as words, and words survive a swap."
+    raw = _read(DOCS)
+    factors = _relation_factors(raw)
+    for func, relation, exponent in (
+        ("phi_nand", "NAND", nand),
+        ("phi_impl", "IMPL", impl),
+    ):
+        other = impl if relation == "NAND" else nand
+        assert exponent in factors[relation], (
+            f"website/docs.html does not state exp({exponent}) in the clause that "
+            f"names {relation}, which is what tortoise/quadrature.py::{func} "
+            f"computes. The card's prose alone cannot catch a wrong formula: it is "
+            f"pinned as words, and words survive a swap."
         )
+        assert other not in factors[relation], (
+            f"website/docs.html states exp({other}) in the clause that names "
+            f"{relation} — the two factors are attached to the wrong edge types. "
+            f"{relation} must state exp({exponent})."
+        )
+
+    # POSITIVE CONTROL — the mutation this pin exists to catch actually reds it.
+    # Without this the guard could regress to a set membership check and stay
+    # green on a swapped page, which is the defect the #9515 review found.
+    rendered = _stated_factors(raw)
+    missing = {nand, impl} - set(rendered)
+    assert not missing, (
+        f"website/docs.html does not render exp(...) for {sorted(missing)} in a "
+        f"<code> element, so the swap control below cannot run"
+    )
+    assert raw.count(rendered[nand]) == 1 and raw.count(rendered[impl]) == 1, (
+        "the two factors are not each stated exactly once on /docs, so the swap "
+        "control is ambiguous"
+    )
+    swapped = (
+        raw.replace(rendered[nand], "\x00NAND-FACTOR\x00")
+        .replace(rendered[impl], rendered[nand])
+        .replace("\x00NAND-FACTOR\x00", rendered[impl])
+    )
+    red = _relation_factors(swapped)
+    assert nand not in red["NAND"] and impl in red["NAND"], (
+        "the factor pin is blind to a swap: exchanging the NAND and IMPL factors "
+        "on /docs did not red the clause-to-relation binding, so the pin cannot "
+        "catch the defect its docstring names"
+    )
 
 
 def _extraction_write_calls() -> list[ast.Call]:
@@ -373,16 +464,23 @@ def test_commit_schema_requires_a_source_on_every_extracted_claim() -> None:
 def test_faq_ties_only_extracted_claims_to_their_source() -> None:
     """The FAQ may not universalise the commit path's source requirement.
 
-    Pre-fix wording — "every claim is tied to the source it was drawn from" — was
-    false of the point-creation door (see the test above). The scoped sentence is
-    pinned so it cannot drift back, and the universal is pinned ABSENT so
-    restoring it is a red test rather than a silent overclaim.
+    The scoped sentence is pinned so it cannot drift back, and the UNIVERSAL is
+    pinned ABSENT — as a CLASS, not as one string, because the false universal has
+    never had a single fixed phrasing. What shipped on `origin/main` before this
+    ruling was "Your source stays, verbatim and authoritative … the source is never
+    rewritten" (removed by #9517; the capture-shaping test below pins that wording
+    against reintroduction). "every claim is tied to the source it was drawn from"
+    was this PR's own interim draft (`a5eff2b2d`), never copy that shipped on main —
+    an earlier version of this docstring called it the pre-fix wording, which was
+    wrong and is exactly why the detector matches the quantifier + requirement
+    predicate + source noun instead of one sentence.
     """
     text = _normalise(_read(FAQ))
     assert "every extracted claim carries the source it was drawn from" in text
-    # A SMELL DETECTOR, NOT A PROOF. It catches the phrasings this page has
-    # actually shipped the defect in; it cannot decide the general case, and the
-    # general case is a REVIEW judgement, not a lexical one.
+    # A SMELL DETECTOR, NOT A PROOF. It catches the SHAPE of the defect wherever it
+    # is written — quantifier + requirement predicate + source noun — which is what
+    # survives a rephrasing; it cannot decide the general case, and the general
+    # case is a REVIEW judgement, not a lexical one.
     #
     # Deliberately NOT widened toward "proof". Doing that was tried: scanning the
     # whole sentence for a source noun reds the page's own true thesis ("Every
