@@ -44,6 +44,7 @@ from typing import Any
 
 from tortoise.embeddings import EMBEDDING_MODEL
 
+from . import measurement_posture
 from .costing import PRICING_MAP_VERSION
 from .dataset_audit import is_trusted
 
@@ -889,6 +890,14 @@ def build_report(
     judge_model: str,
     extraction_approach: str,
     ingest_mode: str = "deterministic",
+    # #8486: the run's MEASUREMENT POSTURE — the ingest mode + whether the
+    # belief layer was activated. A LongMemEval number is only readable with
+    # both stated (an un-activated v2 graph is EP-INERT: every claim reads a
+    # Beta(1,1) 0.50 that was never measured, #2598). The runner passes the
+    # resolved block; an OMITTED block records the UNKNOWN posture (no
+    # decision reached this run) — never an assumed "off" (`w7_publish.
+    # validate_receipt` refuses a completed receipt that carries UNKNOWN).
+    measurement_posture_block: dict[str, Any] | None = None,
     ks: tuple[int, ...],
     top_k: int,
     extra: dict[str, Any] | None = None,
@@ -2503,6 +2512,15 @@ def build_report(
             "reader_type_fragments": reader_type_fragments or {},
             "judge_model": judge_model,
             "ingest_mode": ingest_mode,
+            # #8486: ingest mode + belief-layer activation ALWAYS ride the
+            # methodology — the disclosure every surface a number appears on
+            # is required to carry. Derived in ONE place
+            # (``measurement_posture.build``) so the runner, this report and
+            # the published receipt cannot disagree.
+            "measurement_posture": (
+                measurement_posture_block
+                if isinstance(measurement_posture_block, dict)
+                else measurement_posture.build(ingest_mode=ingest_mode)),
             "judge_rule": "official LongMemEval get_anscheck_prompt; "
                           "label = 'yes' in response.lower()",
             "judge_call_shape": "official evaluate_qa.py: messages=[user], "
@@ -3027,6 +3045,45 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
                 f"{human} differs: {m['a']} vs {m['b']} — deltas may reflect "
                 f"{human.replace('_', ' ')} drift, not memory content (v2 "
                 f"lesson F1)")
+    # #8486: the BELIEF LAYER is a comparison-invalidating difference in its
+    # own right, and the methodology drift loop above cannot see it (it reads
+    # flat methodology keys; the posture is a block). A v2 graph whose draft
+    # points were promoted + EP'd and one that was never activated carry the
+    # SAME retrieval structure but only one has MEASURED posteriors — the
+    # inert one reads an unmeasured Beta(1,1) 0.50 everywhere (#2598). A delta
+    # across those two is a belief-layer delta presented as a memory delta, so
+    # it is flagged like an ingest-mode drift and carried in the comparability
+    # block, never left for the reader to infer.
+    def _posture_side(r):
+        p = measurement_posture.of_report(r) or {}
+        return {"ingest_mode": p.get("ingest_mode"),
+                "beliefs_activated": p.get("beliefs_activated"),
+                "belief_layer": p.get("belief_layer")}
+
+    belief_layer = {"a": _posture_side(report_a),
+                    "b": _posture_side(report_b)}
+    ba = belief_layer["a"]["beliefs_activated"]
+    bb = belief_layer["b"]["beliefs_activated"]
+    # ``None`` (a pre-#8486 report: no posture was ever recorded) is not a
+    # mismatch — it is an UNKNOWN side, and claiming drift from it would be a
+    # fact about the report's age presented as a fact about the runs. The
+    # comparison is on the WHOLE posture (both ``beliefs_activated`` and the
+    # resolved ``belief_layer``): ``activated`` vs ``partial`` differ in fact
+    # — one side mixes EP-inert questions — and comparing the boolean alone
+    # would report them as a match.
+    belief_layer["match"] = (
+        (ba == bb
+         and belief_layer["a"]["belief_layer"]
+         == belief_layer["b"]["belief_layer"])
+        if (ba is not None and bb is not None) else None)
+    if belief_layer["match"] is False:
+        warnings.append(
+            f"belief layer differs: beliefs_activated {ba} vs {bb} "
+            f"({belief_layer['a']['belief_layer']} vs "
+            f"{belief_layer['b']['belief_layer']}) — the delta mixes an "
+            f"EP-measured graph with an EP-inert one, whose claims read an "
+            f"unmeasured 0.50 (#2598), so it is not a memory delta (#8486)")
+
     ph = _match("reader_prompt_hash")
     if ph["match"] is None:
         warnings.append(
@@ -3119,6 +3176,9 @@ def compare_reports(report_a: dict[str, Any], report_b: dict[str, Any]) -> dict[
             "reader_model": _match("reader_model"),
             "judge_model": _match("judge_model"),
             "ingest_mode": _match("ingest_mode"),
+            # #8486: ingest mode + belief-layer activation on BOTH sides — the
+            # disclosure the comparison table may not publish without.
+            "belief_layer": belief_layer,
             "reader_prompt_hash": ph,
             "warnings": warnings,
         },
@@ -3171,6 +3231,15 @@ def print_comparison(cmp: dict[str, Any], file=None) -> None:
             print(f"    flips: {len(flips)} ({sum(1 for f in flips if f['direction'] == 'b_win')} b-win / "
                   f"{sum(1 for f in flips if f['direction'] == 'a_win')} a-win)", file=file)
     print("── comparability ──", file=file)
+    bl = cmp["comparability"].get("belief_layer") or {}
+    if bl:
+        # #8486: the belief-layer posture rides the comparison the reader
+        # actually reads (ingest mode + whether EP measured the graph).
+        print("  belief layer: " + " | ".join(
+            f"{side.upper()} ingest={bl[side].get('ingest_mode') or 'unrecorded'} "
+            f"beliefs_activated={bl[side].get('beliefs_activated')} "
+            f"({bl[side].get('belief_layer') or 'unknown'})"
+            for side in ("a", "b")), file=file)
     warnings = cmp["comparability"]["warnings"]
     if warnings:
         for w in warnings:
