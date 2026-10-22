@@ -21,6 +21,7 @@ export type BlogPostRow = {
   cover_image_url: string | null;
   tags: string[];
   author: string | null;
+  author_image_url: string | null;
   status: 'draft' | 'published' | 'archived';
   meta_title: string | null;
   meta_description: string | null;

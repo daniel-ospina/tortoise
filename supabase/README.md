@@ -178,6 +178,36 @@ supabase functions deploy deck-view \
 gh workflow run deploy-hosted.yml --ref main   # the app flip, after a FAILED co-move
 ```
 
+**Pre-merge apply of a single migration (out-of-band).** The automated path is
+post-merge only: the `supabase-deploy` apply job refuses a non-`main` ref, so a
+migration that must land in prod BEFORE its code merges (e.g. #1383, whose
+`POST_COLS` cannot name a column the live project does not have yet) has to be
+applied by hand. Two rules, both load-bearing:
+
+1. **`--single-transaction`, never a bare `psql -f`.** `psql -f` autocommits per
+   statement, so a file that toggles a trigger (`DISABLE TRIGGER … ENABLE
+   TRIGGER`, the #1383 backfill) would commit the DISABLE and skip the ENABLE if
+   the batch aborted halfway — leaving the trigger off forever, silently. The
+   schema-drill harness (`supabase/tests/pglite`) sends each file as ONE query and
+   cannot see this: the precondition belongs to the apply command.
+2. **Record the version**, or the fail-closed drift gate blocks every later app
+   deploy reporting a migration that is in fact already applied. `psql` writes
+   the schema, NOT the ledger — that is owned by `db push` / `migration repair`.
+
+```bash
+# 1. apply the ONE file atomically, stopping on the first error
+psql --single-transaction -v ON_ERROR_STOP=1 "$DATABASE_URL" \
+  -f supabase/migrations/<version>_<name>.sql
+# 2. record it in the ledger, or check-migration-drift stays RED (it cannot tell
+#    "applied out-of-band" from "never applied")
+supabase migration repair --linked --status applied <version>
+supabase migration list --linked            # confirm: no repo-ahead version left
+```
+
+Do NOT add `BEGIN;`/`COMMIT;` to the migration file to get this: the CLI has
+already opened a transaction, so a nested `BEGIN` only warns and the inner
+`COMMIT` would end the CLI's transaction early.
+
 ## Post-deploy smoke checklist (#373)
 
 1. Confirm `TURNSTILE_SECRET_KEY` is set (captcha is REQUIRED once set —

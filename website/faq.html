@@ -191,7 +191,7 @@
       <h3 id="not-just-rag">Isn't this just RAG with extra steps?</h3>
       <p>Not quite, and the difference is specific.</p>
       <p>Similarity search returns text that <em>resembles</em> your question. A correction rarely resembles the thing it corrects — it's shorter, worded differently, often a footnote on a later document. So the agreeing text outranks the disagreeing text, and a model reading only the top results never learns there was a disagreement. It doesn't fail at reasoning; the counter-evidence never arrived.</p>
-      <p>Tortoise keeps the source text and additionally records the one thing the text cannot contain: the relationships <em>between</em> pieces, as typed constraints. &ldquo;These two conflict.&rdquo; &ldquo;This replaced that.&rdquo; Belief is then computed over those constraints &mdash; conflicts and support carry a weight and propagate, replacement is tracked structurally &mdash; rather than over text similarity, which is what makes Tortoise a cognitive layer for agents: reasoning, memory and learning, rather than a better index.</p>
+      <p>Tortoise keeps the source text and additionally records the one thing the text cannot contain: the relationships <em>between</em> pieces, as typed constraints. &ldquo;These two conflict.&rdquo; &ldquo;This replaced that.&rdquo; Belief is then computed over those constraints &mdash; conflicts and support carry a weight and propagate, replacement is tracked structurally &mdash; rather than over text similarity, which is what makes Tortoise a cognitive layer for agents: <strong>reasoning, memory and learning</strong>, rather than a better index. The mechanism itself — what each relation does to a score — is on <a href="/docs">the docs page</a>.</p>
 
       <h3 id="query-time">Why not let the model work out contradictions at query time?</h3>
       <p>It can only judge what is in front of it. Deciding whether A contradicts B requires having both, and contradictions are the least likely pair to be retrieved together.</p>
@@ -199,9 +199,9 @@
       <p>The model still makes every judgment call — what a conflict <em>means</em>, how much weight it deserves, and whether it matters for the question being asked. What it doesn't have to do is remember, on its own, that the conflict exists.</p>
 
       <h3 id="source-text">Do you replace my source text with extracted facts?</h3>
-      <p>No, and this is the one we would most want you to hold us to. Your source stays authoritative: extraction is additive. It builds a revisable index beside the stored evidence and does not rewrite what extraction read, so a correction in the extraction changes the index, not the record. The stored turn is shaped once, on the way in: a captured turn longer than 5,000 characters is kept with a truncation marker that names its original length, and credential-shaped spans are redacted — both applied before the write, not after it.</p>
+      <p>No, and this is the one we would most want you to hold us to. Your source stays authoritative: extraction is additive. It builds a revisable index beside the stored evidence — every extracted claim carries the source it was drawn from — and does not rewrite what extraction read, so a correction in the extraction changes the index, not the record. The stored turn is shaped once, on the way in: a captured turn longer than 5,000 characters is cut at that window, and any cut that discards readable text is marked with a truncation marker naming the turn's original length — while credential-shaped spans are redacted — both applied before the write, not after it.</p>
       <p>An external study — <a href="https://arxiv.org/abs/2601.00821"><em>Fidelity Before Structure: Verbatim Chunks Beat Lossy Artifact Extraction in Long-Conversation LLM Memory</em></a> (Tao An, arXiv 2601.00821) — held the retriever, reranker, answerer and judge fixed and swapped <em>only</em> the stored representation: verbatim source won by <strong>15.9 points on LoCoMo</strong> and <strong>22.0 points on LongMemEval-S</strong>, and a one-hop semantic graph did not close the gap. The authors read the result as lossy distillation rather than structure as such: accuracy tracks how much source text survives in the store.</p>
-      <p>The study measured a one-hop semantic graph; Tortoise computes over typed relations &mdash; <code>IMPL</code> and <code>NAND</code> constraints, each carrying a weight &mdash; propagating belief across them with expectation propagation, on top of a stored source layer. We keep both: the source text as the evidence layer, the graph as the reasoning layer over it.</p>
+      <p>That study measured one-hop semantic graphs — a store of relationships you look up; Tortoise is not one. It computes over typed relations &mdash; <code>IMPL</code> and <code>NAND</code> constraints, each carrying a weight &mdash; propagating belief across them with expectation propagation, so a contradiction changes a score rather than sitting in a table. The study is the case for keeping the source text rather than only extracted artifacts, and Tortoise keeps both layers: the captured source underneath, and the reasoning layer over it.</p>
 
       <h3 id="corrections">What happens when the graph is wrong?</h3>
       <p>You correct it, and belief recomputes. Nothing is frozen.</p>
@@ -219,25 +219,25 @@
       <h3 id="cost">Is a graph slower than vector search?</h3>
       <p>Two different costs, and it depends on how often you read.</p>
       <p>The expensive part of Tortoise is at write time: reading and judging incoming material to extract the relationships. That cost is linear in how much you ingest, and it does not get cheaper per item as you grow.</p>
-      <p>The read path is the opposite trade. Because the relationships are already recorded, working out a claim's belief needs only its neighbourhood, and the lookup itself is index-backed rather than a scan of the corpus. Retrieval runs in parallel across full-text, vector and structural strategies, against a pre-registered end-to-end target of 300&nbsp;ms p95 — the bar the engine is designed and benchmarked to.</p>
+      <p>The read path is the opposite trade. Because the relationships are already recorded, working out a claim's belief needs only its neighbourhood, and the lookup itself is index-backed rather than a scan of the corpus. Retrieval runs in parallel across full-text, vector and structural strategies, and on the SDK with hop expansion enabled, can expand from the retrieved hits to the neighbourhood around them.</p>
       <p>So: pay once at write, or re-derive on every read. Which is cheaper depends on how many questions you ask of the same material. Ingest a lot and ask twice, and the precomputation isn't worth it.</p>
 
       <h3 id="scale">How does it scale?</h3>
-      <p>The retrieval path is benchmarked by a harness that can run 1k / 10k / 100k-point corpora.</p>
-      <p>What we can tell you concretely today:</p>
+      <p>Belief propagation is bounded by design:</p>
       <ul>
-        <li>Adding a claim costs work proportional to how many things it connects to. Unrelated claims don't interact, and a write's belief work stays inside the claim's neighbourhood rather than the whole store.</li>
-        <li>Concurrent writers run on the Docker path — integration-tested to 5 writers — and on the hosted service. That is the deployment built for teams.</li>
+        <li>Adding a claim costs work proportional to how many things it connects to — not to the size of the store. Unrelated claims don't interact.</li>
+        <li>Belief is computed over a bounded neighbourhood around each claim, capped by default at a small number of hops (one for an anchored confidence read, two on the propagation path), and a dirty-root pass expands the exact affected closure instead of the whole graph — which is what keeps the common read local. Operator selection is capped too, truncated deterministically by id, and the result reports it (<code>truncated</code>), so a capped pass is visible rather than silent.</li>
+        <li>Concurrent writers run on the Docker path — integration-tested to 5 writers — and on the hosted service, which is the deployment built for teams.</li>
       </ul>
-      <div class="callout open">
-        <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every measured figure there names its source — a committed artifact, a code symbol, or the tracker issue holding it.</p>
+      <div class="callout">
+        <p><strong>Published:</strong> <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/capacity.md">docs/capacity.md</a> — write concurrency per deployment mode, request rate limits, graph-size caps, retrieval latency, storage footprint per element, and belief-propagation cost. Every number there names the committed artifact or code symbol it comes from.</p>
       </div>
 
       <h2>How belief works</h2>
 
       <h3 id="confidence">Is a confidence score a fixed verdict, or does it move?</h3>
       <p>It moves. Confidence is <em>derived</em>: every claim's score is recomputed from the evidence attached to it, and the stored number is a cache of that computation rather than a ruling.</p>
-      <p>Add a supporting claim and it rises. Add a contradiction and it falls. Supersede the evidence it rested on and it recomputes without it. Nothing is stamped at write time and frozen.</p>
+      <p>Add support from a stronger source and it rises toward that source's level. Add a contradiction and it falls. Supersede the evidence it rested on and it recomputes without it. Nothing is stamped at write time and frozen.</p>
 
       <h3 id="variance">What does the variance on a confidence score mean?</h3>
       <p>A confidence score is a distribution, not a single number — so it carries a spread as well as a centre.</p>
@@ -250,12 +250,12 @@
       <p>It also means a contradiction is a first-class force rather than a missing record. Silently replacing a contradicted claim looks identical to never having recorded the contradiction — until you need to know why the belief changed. For the mechanism itself, <a href="/docs">the docs page</a> has the full account.</p>
 
       <h3 id="missed">What happens if extraction misses something?</h3>
-      <p>If a relationship is missed when it is observable, it is gone — no later search recovers it, because the relationship was never inside either document — which is why extraction quality is what the write path spends its effort on.</p>
-      <p>That is why the captured source text is kept as the authoritative record, and why the graph is positioned as an index over the evidence rather than a replacement for it. A missed relationship makes the graph incomplete; it does not make the underlying record wrong, and the stored text is still there to search directly — within the capture window, where a turn over 5,000 characters is kept with a marker that names its original length.</p>
+      <p>If a relationship is missed when it is observable, no later search recovers it, because the relationship was never inside either document — which is why extraction quality is what the write path spends its effort on, and why the captured source text is kept as the authoritative record.</p>
+      <p>The graph sits over the evidence; it does not replace it. A missed relationship leaves the graph incomplete — the underlying record is untouched, and the stored text is still there to search directly, within the capture window: a turn over 5,000 characters is kept with a truncation marker that names its original length.</p>
 
       <h3 id="different">How is this different from other memory systems?</h3>
       <p>One specific thing: <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once. A graph <em>stores</em> relationships; Tortoise <em>computes</em> over them, propagating belief across the weighted ones so a claim's score reflects the evidence that actually bears on it.</p>
-      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, one has a formal revision theory, and <strong>no surveyed agent-memory product propagates credence</strong>.</p>
+      <p>Across the systems we have surveyed: most have some form of graph, two have partial contradiction handling, one has a formal revision theory, and <strong>no surveyed agent-memory product propagates credence</strong> — Tortoise is the one that pairs typed implication with propagated confidence, the combination no surveyed product ships.</p>
       <p>We keep a mechanism-named comparison in the public repo — what each system actually does, not what it claims — where every Tortoise row that carries a number is drawn from a run of ours, every vendor row is labelled as a vendor or third-party measurement, and anything of ours we have not run is marked PENDING, or recorded as not adopted, with no number. The capability survey behind those counts is <a href="https://github.com/daniel-ospina/tortoise/blob/main/product/competition/_analysis.md">product/competition/_analysis.md</a>; the benchmark-by-benchmark numbers are in <a href="https://github.com/daniel-ospina/tortoise/blob/main/docs/benchmarks/comparison-systems.md">docs/benchmarks/comparison-systems.md</a>.</p>
 
       <h2>Using Tortoise</h2>

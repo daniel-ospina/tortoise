@@ -34,10 +34,12 @@ tree, so no test here is vacuous.
 
 WHAT IS *NOT* CLAIMED. This suite is about `rebuild_from_record` only: the
 event store's writes and `rebuild_all` are already declared (#9224), and this
-file does not re-pin them. The scope's WIDTH (the raw-query lane is authorized
-inside any rebuild window, since `FalkorProjection.query`'s refusal is
-scope-conditioned) is stated at the engine, and narrowing it belongs to a lane
-the rebuild engines would own — it is not asserted here as a property.
+file does not re-pin them. The scope's WIDTH — that it authorizes the fold and
+the write handle but NOT the public raw-query lane — is pinned by
+`tests/test_9391_replay_window_raw_query_width.py` (#9391), which is where a
+reader auditing that width should look: this file states it here rather than
+asserting it, because the lanes are one `ContextVar` and the width belongs to
+the lane, not to any one engine.
 """
 from __future__ import annotations
 

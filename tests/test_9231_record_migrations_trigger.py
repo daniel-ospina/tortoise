@@ -44,6 +44,7 @@ from __future__ import annotations
 import re
 import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -227,6 +228,45 @@ def test_the_names_it_reads_are_all_present_in_the_shipped_tree():
     """
     missing = sorted(name for name in RECORD_MIGRATIONS if not (_SHIPPED / name).exists())
     assert not missing, f"RECORD_MIGRATIONS names files absent from {_SHIPPED}: {missing}"
+
+
+def test_every_record_migration_the_wheel_ships_is_named():
+    """The CONVERSE pin (R2/#9550): the tuple is the registry, not a subset.
+
+    The pin above (`RECORD_MIGRATIONS` → disk) and
+    `test_the_record_schema_ships_with_the_wheel` (tuple → `package-data` glob)
+    both only ever read the tuple, so a `.sql` file that nobody appended was
+    invisible in BOTH directions — and it was: measured 2026-10-22, the tree had
+    SEVEN `*_record_*.sql` files and SIX names, the erasure RPC
+    (`20261012000005`) absent since the commit that created the whole record
+    (#8179). Nothing was red, and nothing could be.
+
+    Why the FILENAME is the gate and not the SQL's shape:
+    `tests/test_record_projection.py` derives the set from the SQL (a
+    `CREATE TABLE`/`ALTER TABLE … ADD COLUMN`/re-declared CHECK regex), which is
+    a heuristic over spellings — a column added inside a `DO` block, or with
+    `ADD` spelled without `COLUMN`, is shipped and read by nobody with that pin
+    still green. `supabase/migrations/*_record_*.sql` is the one partition that
+    cannot miss a file, and it is the same convention `pyproject.toml` ships the
+    wheel by, so it is READ FROM `pyproject.toml` here rather than restated.
+
+    Non-vacuity: the assertion reds on the tree before this change names the
+    RPC (7 shipped, 6 named); it is green only while the two sets are equal.
+    """
+    with open(_ROOT / "pyproject.toml", "rb") as fh:
+        conf = tomllib.load(fh)["tool"]["setuptools"]
+    patterns = conf["package-data"]["tortoise.record_migrations"]
+    shipped = sorted(
+        p.name for pattern in patterns for p in _SHIPPED.glob(pattern)
+    )
+    assert shipped, f"no record migration matched {patterns} in {_SHIPPED}"
+    unnamed = sorted(set(shipped) - set(RECORD_MIGRATIONS))
+    assert not unnamed, (
+        f"record migration(s) ship in the wheel but are NOT in "
+        f"RECORD_MIGRATIONS: {unnamed} — the reader iterates the tuple, so a "
+        "file missing from it is read by nobody: append its name (the registry "
+        "is the tuple, not a subset of it — #9550)"
+    )
 
 
 def test_a_missing_name_degrades_silently_for_a_forward_migration(tmp_path: Path):

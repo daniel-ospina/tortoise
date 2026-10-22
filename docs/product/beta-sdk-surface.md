@@ -196,7 +196,8 @@ within the caller's own permission.
 > `canonical-mcp-tools.md`.
 
 Three things keep this narrower than the dropped container, and the ruling does not change any of
-them: it is **`writes=True`**, so a read-only key is refused even for `action="list"`; it
+them: it is **`risk="admin"`** (the `writes` permission is derived from that tier since #4122), so
+`_enforce_mcp_tool_scope` refuses a read-only key even for `action="list"`; it
 **never accepts a credential** (GitHub authorisation stays the separate
 `tortoise_onboarding_github_connect` handshake); and it **reverses no recorded default**
 (`agent_sessions` stays ON — the `#1927` optional off-switch).
