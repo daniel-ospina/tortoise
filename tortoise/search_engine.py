@@ -839,11 +839,15 @@ class SearchResult:
     # to any caller of the eval lane, and already named by
     # ``package_evidence_pool``'s own docstring as the key it collapses on. A
     # default-off gate would keep the read path's own documented contract inert
-    # by default, which is the defect #8658 exists to remove. Recorded here for
-    # the same reason the #3986 note exists: no ``response_fields`` surface
-    # exists to record it in (``config/surface-manifest.yml`` has no such key and
-    # ``tools/surface_manifest.py`` derives none — that rule is scoped to MCP
-    # tools / SDK methods, not to response fields).
+    # by default, which is the defect #8658 exists to remove. ⛔ It IS recorded,
+    # in the one place that records response fields: four `response_fields` rows
+    # on `tortoise_search` in ``config/surface-manifest.yml``, rendered into the
+    # "Recorded response fields" table in ``docs/product/mcp-sdk-surface.md``.
+    # (An earlier draft of this comment claimed no such surface existed — it
+    # does: the block, its `check` validation, and its `render` are all in
+    # ``tools/surface_manifest.py``, and ``CONTRIBUTING.md``"s "it must still be
+    # recorded" applies to exactly this shape. The `outdated` row is the
+    # non-flag-gated precedent.)
     quote: str = ""
     source_turn_id: Any = None
     span_start: Any = None

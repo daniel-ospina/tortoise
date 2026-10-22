@@ -54,6 +54,29 @@ response_fields:
   unchanged_when_off: n/a — not flag-gated; the key is absent on every non-outdated hit, so those responses stay
     byte-identical
 - response: tortoise_search
+  field: quote
+  emitted_when: '#8658 — the Point''s own E3 verbatim anchor (a quote lifted from its source turn). Present only
+    when the Point carries one, i.e. when an extractor/E3 write path wrote it; it is the key `retrieval._is_own_source`
+    and `_same_fact` collapse a distilled point''s own source chunk/turn onto'
+  unchanged_when_off: n/a — not flag-gated; the key is absent on every unprovenanced hit, so those responses stay
+    byte-identical
+- response: tortoise_search
+  field: source_turn_id
+  emitted_when: '#8658 — the 0-based source-TURN INDEX the quote anchors to (int; turn 0 is the first turn and is
+    a real value, so it is present, never dropped as falsey). Present only when the Point records one'
+  unchanged_when_off: n/a — not flag-gated; absent (not empty, not null) on every hit whose Point records no source
+    turn, so those responses stay byte-identical
+- response: tortoise_search
+  field: span_start
+  emitted_when: '#8658 / #5007 — the start character offset of the quote in its source text. A POINTER, not a payload.
+    A half span is not an address, so span_start and span_end are present together or neither is; 0 is a real offset'
+  unchanged_when_off: n/a — not flag-gated; absent on every spanless hit, so those responses stay byte-identical
+- response: tortoise_search
+  field: span_end
+  emitted_when: '#8658 / #5007 — the end character offset of the quote in its source text (see span_start; emitted
+    together with it)'
+  unchanged_when_off: n/a — not flag-gated; absent on every spanless hit, so those responses stay byte-identical
+- response: tortoise_search
   field: valid_from_precision
   emitted_when: '#2350 — the hit is a Point carrying a validity window, and the START''s precision: year|month|day,
     or null where the stored start is PRESENT but names no instant (`""`, `TBD`, `not-a-date` — the #6140 ruling
