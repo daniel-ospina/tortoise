@@ -1512,6 +1512,7 @@ surfaces:
   # runtime reader of the directory (see the module docstring).
   - test_9231_record_migrations_trigger.py
   - test_9256_lane_probe_attribution.py
+  - test_code_freshness_9494.py
   - test_kind_vocabulary_consistency.py
   # #9123 (§17.1's THIRD lane): the `:EpMeta` epoch declaration. BOTH its
   # subjects — `tortoise/projection/__init__.py` (the new

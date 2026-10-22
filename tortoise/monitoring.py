@@ -23,13 +23,13 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 
-from .env_truthy import is_truthy  # #4097: the declared truthy contract
 # #9494: the loaded-module snapshot. Imported HERE (not lazily) because the
 # observation must be taken when the process is still young — this module is
 # imported by every serving entrypoint (mcp_server, hosted_api, serve_health),
 # so the baseline covers the graph they serve. It imports nothing from tortoise,
 # so it cannot participate in an import cycle.
 from . import code_freshness as _code_freshness
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
 

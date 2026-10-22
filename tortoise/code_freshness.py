@@ -89,8 +89,14 @@ _baseline_at: float | None = None
 #: ``(module, disk_mtime_ns, disk_size)`` already warned about — one WARNING per
 #: distinct drift, never one per health call. Bounded: a process that drifts
 #: hundreds of times must not grow this without limit.
-_warned: set[tuple[str, int | None, int | None]] = set()
+_warned: set[tuple[str, int | None, str]] = set()
 _WARNED_CAP = 512
+#: ``module -> (disk mtime_ns, disk size, digest)`` — the last DISK snapshot we
+#: hashed. Without it a persistently drifted module is re-read on every
+#: ``check()``, i.e. on every health probe and every failing tool call, while
+#: ``sdk.py`` alone is ~2 MB. The cache is keyed by the disk STAT, so a revert
+#: (which moves the stat again) is re-read exactly once.
+_disk: dict[str, tuple[int, int, str | None]] = {}
 _lock = threading.Lock()
 
 #: The sentence a stale report carries. Deliberately names the FIX, because the
@@ -148,13 +154,21 @@ def _package_files() -> list[tuple[str, str]]:
     return out
 
 
-def observe() -> int:
+def observe(deep: bool = False) -> int:
     """Record a baseline for every loaded module not yet observed.
 
     Returns the number of modules newly recorded. The serving entrypoints call
     this at the END of their module body (``tortoise.mcp_server``) so the whole
     startup graph is baselined at startup rather than at the first health call,
     and :func:`check` calls it again to pick up lazily imported modules.
+
+    ``deep=True`` also hashes each file NOW (it reads the package — ~36 ms for
+    the 6 MB startup graph of this repo). The serving entrypoints use it at BOOT,
+    where that cost is invisible, because it removes the one window a shallow
+    baseline cannot: a module observed with no digest whose file is rewritten
+    byte-identically before the first ``check()``. With a boot digest that
+    rewrite is recognised as content-identical instead of being reported stale
+    (conservatively — see :func:`check`) for the process's whole life.
     """
     global _baseline_at
     added = 0
@@ -165,7 +179,7 @@ def observe() -> int:
             st = _stat(path)
             if st is None:
                 continue
-            _baseline[name] = (path, st[0], st[1], None)
+            _baseline[name] = (path, st[0], st[1], _digest(path) if deep else None)
             added += 1
         if added and _baseline_at is None:
             _baseline_at = time.time()
@@ -220,6 +234,26 @@ def _compose_hint(names: list[str], process_started: str | None) -> str:
     )
 
 
+def _disk_digest(name: str, path: str, st: tuple[int, int] | None) -> str | None:
+    """The digest of the file AS IT IS ON DISK now, memoised by its stat.
+
+    Re-reading is the expensive half of a drift check (a module of this repo is
+    up to 2 MB), and a persistent drift is exactly the state this module exists
+    to describe — so the drifted row must not cost a full read per health probe.
+    A revert moves the stat again, which invalidates the memo.
+    """
+    if st is None:
+        return None
+    with _lock:
+        cached = _disk.get(name)
+    if cached is not None and cached[0] == st[0] and cached[1] == st[1]:
+        return cached[2]
+    fresh = _digest(path)
+    with _lock:
+        _disk[name] = (st[0], st[1], fresh)
+    return fresh
+
+
 def _drifted() -> tuple[list[dict], int]:
     """The FULL drift list (never capped) plus the content-identical count.
 
@@ -242,7 +276,7 @@ def _drifted() -> tuple[list[dict], int]:
                     with _lock:
                         _baseline[name] = (path, mtime_ns, size, fresh)
             continue
-        disk_digest = _digest(path) if st is not None else None
+        disk_digest = _disk_digest(name, path, st)
         if st is not None and blake is not None and disk_digest == blake:
             # A content-identical rewrite (git checkout / stash round-trip /
             # rebase): the bytes did not move, so this is NOT drift. Re-arm the
@@ -251,12 +285,19 @@ def _drifted() -> tuple[list[dict], int]:
             with _lock:
                 _baseline[name] = (path, st[0], st[1], blake)
             continue
+        # `content_verified` is False when this process never confirmed which
+        # bytes it loaded (no digest yet — the server has not checked before).
+        # Such a row is reported STALE anyway, deliberately: the two failure
+        # directions are not symmetric. A conservative false alarm costs a
+        # restart; a false pass is precisely the #9494 lie (an authoritative
+        # answer computed by code that is not the repo's).
         changed.append({
             "module": name,
             "file": _display_path(path),
             "loaded_mtime": _iso(mtime_ns / 1e9),
             "disk_mtime": _iso(st[0] / 1e9) if st is not None else None,
             "removed": st is None,
+            "content_verified": blake is not None,
         })
     return changed, mtime_only
 
@@ -274,6 +315,8 @@ def check() -> dict:
                                             # `file` is repo-relative, never absolute
          "changed_count": int,              # `changed` is capped at 20
          "mtime_only": int,                 # content-identical rewrites, NOT drift
+         "unverified": int,                 # drifted rows whose loaded bytes were
+                                            # never hashed (see `content_verified`)
          "hint": str | None}                # which modules drifted + the restart
 
     ``mtime_only`` exists so the mtime-vs-content distinction is VISIBLE: a
@@ -285,9 +328,16 @@ def check() -> dict:
         tracked_count = len(_baseline)
     for row in changed:
         key = (row["module"], row["disk_mtime"], row["file"])
-        if key in _warned or len(_warned) >= _WARNED_CAP:
-            continue
-        _warned.add(key)
+        # Membership test AND insert under the lock: `check()` is served by a
+        # ThreadingHTTPServer and by concurrent tool calls, so an unlocked
+        # test-then-add lets a burst of probes emit duplicate STALE PROCESS
+        # lines — the invariant this set exists to hold ("one WARNING per
+        # distinct drift"). The log call stays outside the lock so logging can
+        # never hold it.
+        with _lock:
+            if key in _warned or len(_warned) >= _WARNED_CAP:
+                continue
+            _warned.add(key)
         _log.warning(
             "STALE PROCESS: %s changed on disk since this process imported it "
             "(%s -> %s). %s",
@@ -303,6 +353,7 @@ def check() -> dict:
         "changed": changed[:20],
         "changed_count": len(changed),
         "mtime_only": mtime_only,
+        "unverified": sum(1 for row in changed if not row["content_verified"]),
         "hint": _compose_hint([row["module"] for row in changed], started) if changed else None,
     }
 
@@ -356,16 +407,18 @@ def _reset_for_tests() -> None:
     global _baseline_at
     with _lock:
         _baseline.clear()
+        _disk.clear()
         _warned.clear()
         _baseline_at = None
 
 
 # The earliest observation this module can make, taken the moment a serving
 # entrypoint pulls it in (`tortoise.monitoring` imports it, and `mcp_server`
-# imports monitoring). `tortoise.mcp_server` calls `observe()` again at the END
-# of its module body so the whole startup graph — including modules imported long
-# after monitoring (`tool_registry`, `mcp_auth`, `quota`) — is baselined at
-# startup, not at the first health call. Without that second call 25 of the 58
-# modules a server loads would be baselined days later, i.e. their edits would be
-# invisible for exactly the window #9494 is about.
+# imports monitoring). SHALLOW: importing a diagnosis module must not read the
+# package. The serving entrypoints then call `observe(deep=True)` once at boot
+# (`tortoise.mcp_server`: end of module body, `main()`, `create_http_app`), which
+# baselines the WHOLE startup graph AND hashes it — without that the 25 modules
+# loaded long after monitoring (`tool_registry`, `mcp_auth`, `quota`) would be
+# baselined days later, i.e. their edits would be invisible for exactly the
+# window #9494 is about.
 observe()
