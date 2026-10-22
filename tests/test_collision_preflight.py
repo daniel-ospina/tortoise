@@ -6239,7 +6239,14 @@ class CollisionPreflightTest(unittest.TestCase):
         # pins all three. A header that names only two sends the no-cause reader
         # to the nearest clause, which is the board rebuild that fails on the
         # same read: the same dead end #9392 files, one arm narrower.
-        nocause = flat.find("recorded NO CAUSE")
+        # Every anchor is widened the same way arm 2's is (review, cycle 5):
+        # `registry_remedy` PRINTS its own wording for this arm too ("the cause
+        # of the failed roster read was not recorded"), so a lane aligning the
+        # header to the shipped sentence must not redden the pin.
+        nocause = max(
+            flat.find("recorded NO CAUSE"),
+            flat.find("the cause of the failed roster read was not recorded"),
+        )
         board = flat.find("the board is unreadable")
         self.assertNotEqual(absent, -1, "the ABSENT-roster arm must stay stated")
         self.assertNotEqual(present, -1, "the unreadable-roster arm needs its own clause")
@@ -6252,7 +6259,10 @@ class CollisionPreflightTest(unittest.TestCase):
         # slice checks below are satisfied TRIVIALLY when a sentence is deleted
         # altogether, so a partial undo — an arm that names a cause and gives
         # no remedy, the exact defect class this pin exists for — would have
-        # stayed green. Each arm must carry its own instruction.
+        # stayed green. Each arm must carry its own instruction: the POSITIVE
+        # half (where to go) AND, where the arm states one, the negative half
+        # (what cannot work). Pinning only the negative half was cycle 5's
+        # under-pin — the arm could lose "start from the FILE" and stay green.
         self.assertIn(
             "PROVISION", flat[absent:present], "the ABSENT roster's remedy is provisioning it"
         )
@@ -6268,10 +6278,16 @@ class CollisionPreflightTest(unittest.TestCase):
             flat[present:nocause],
             "a rebuild cannot repair an unreadable roster",
         )
-        self.assertIn(
-            "cannot create or repair",
-            flat[nocause:board],
+        self.assertTrue(
+            any(k in flat[nocause:board] for k in ("start from the FILE", "start from the file")),
             "a roster read that recorded no cause sends the reader to the file",
+        )
+        self.assertTrue(
+            any(
+                k in flat[nocause:board]
+                for k in ("cannot create or repair", "cannot repair or create")
+            ),
+            "the no-cause arm says the rebuild cannot create or repair the roster",
         )
         # ⛔ THE COMMAND IS PART OF THE REMEDY (review, cycle 4 P3). Pinning only
         # "rebuild the board" let the arm lose `… fleet_state.py build` and stay
