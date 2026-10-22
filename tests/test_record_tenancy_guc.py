@@ -84,16 +84,33 @@ class RecordingCursor:
 
     def execute(self, sql: str, params: Any = None) -> None:
         self._conn.executed.append((sql, None if params is None else list(params)))
+        if sql == rp.TENANT_GUC_SQL:
+            self._conn.guc_set = params[0] if params else None
+
+    def fetchone(self) -> tuple[Any]:
+        # #9600 review cycle 1 (P2): `replay()` reads the tenant GUC BACK after
+        # setting it (a `set_config(..., true)` that set nothing is silent for
+        # an UPDATE/DELETE-only plan). The recorder mirrors the value it was
+        # asked to set unless a test OVERRIDES it to model a lossy connection.
+        return (self._conn.guc_reports,)
 
 
 class RecordingConnection:
     """Remembers every statement it was asked to execute, and nothing else."""
 
-    def __init__(self) -> None:
+    def __init__(self, guc_lost: bool = False) -> None:
         self.executed: list[tuple[str, list[Any] | None]] = []
         self.commits = 0
         self.rollbacks = 0
         self.closed = 0
+        self.guc_set: Any = None
+        #: `True` models a connection whose transaction-local `set_config` did
+        #: nothing (autocommit, or a pooler that dropped the context).
+        self.guc_lost = guc_lost
+
+    @property
+    def guc_reports(self) -> Any:
+        return None if self.guc_lost else self.guc_set
 
     def cursor(self) -> RecordingCursor:
         return RecordingCursor(self)
@@ -109,6 +126,11 @@ class RecordingConnection:
 
     def prologues(self) -> list[list[Any] | None]:
         return [params for sql, params in self.executed if sql == rp.TENANT_GUC_SQL]
+
+    def plan_statements(self) -> list[tuple[str, list[Any] | None]]:
+        """Everything that is not the prologue or its read-back."""
+        return [(sql, params) for sql, params in self.executed
+                if sql != rp.TENANT_GUC_SQL and "current_setting" not in sql]
 
 
 def _migration_text(name: str) -> str:
@@ -196,9 +218,28 @@ def test_the_prologue_carries_the_org_the_plan_writes() -> None:
     # every parameter list that carries the org column carries THIS org.
     plan = rp.replay_plan(RECORDS, org_id=ORG, graph_id=GRAPH)
     assert plan, "the segment projected nothing — vacuous"
-    executed_after = conn.executed[1:]
+    executed_after = conn.plan_statements()
     assert [params for _, params in executed_after] == [
         list(s.params) for s in plan]
+
+
+def test_a_lost_tenant_setting_refuses_instead_of_applying_unscoped() -> None:
+    """#9600 review cycle 1 (P2): the prologue is READ BACK, not assumed.
+
+    `set_config(..., true)` sets nothing on an autocommit connection (and a
+    pooler can drop the transaction-local context). Every INSERT then fails
+    ``WITH CHECK`` loudly, but an UPDATE/DELETE is gated by ``USING`` alone and
+    simply affects ZERO rows — so a patch- or delete-only plan would be dropped
+    while `replay()` reported APPLIED. The read-back makes that a refusal.
+    """
+    conn = RecordingConnection(guc_lost=True)
+
+    with pytest.raises(rp.RecordProjectionError, match="tenant GUC"):
+        rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
+
+    assert conn.plan_statements() == [], (
+        "the plan was applied after the tenant setting was lost — an unscoped "
+        "UPDATE/DELETE would affect zero rows without raising")
 
 
 def test_two_tenants_on_one_connection_each_get_their_own_prologue() -> None:
@@ -292,8 +333,20 @@ def test_the_migration_covers_every_record_table() -> None:
     """
     text = _migration_text(TENANCY_MIGRATION.name)
 
-    missing_grants = [t for t in rp.THE_RECORD_TABLES
-                      if f"ON public.{t}" not in text]
+    # #9600 review cycle 1 (P2): this half used to test
+    # `f"ON public.{t}" not in text` — and EVERY table also carries
+    # `CREATE POLICY {t}_app_tenant ON public.{t}`, so the substring was always
+    # present and a DELETED grant could not redden the test (measured: the
+    # assertion passed with the grant block removed). The grant itself is
+    # asserted now, per table and per privilege, against the exact statement the
+    # migration writes.
+    _PRIVS = "SELECT, INSERT, UPDATE, DELETE"
+    missing_grants = [
+        t for t in rp.THE_RECORD_TABLES
+        if not re.search(
+            rf"GRANT\s+{_PRIVS}\s+ON\s+public\.{re.escape(t)}\s+"
+            rf"TO\s+tortoise_record_app\s*;", text)
+    ]
     missing_policies = [
         t for t in rp.THE_RECORD_TABLES
         if f"CREATE POLICY {t}_app_tenant ON public.{t}" not in text
@@ -344,16 +397,33 @@ def test_the_app_role_is_non_bypass_and_reasserted_on_every_apply() -> None:
 
     `service_role` looks like a tenancy boundary while bypassing RLS entirely,
     which is trap (i) of this issue. The role is created non-bypass AND
-    re-asserted with `ALTER ROLE` — an operator who flipped the attribute would
+    re-asserted on every apply — an operator who flipped the attribute would
     otherwise silently switch the boundary off on a live deployment.
+
+    #9600 review cycle 1 (P1): the re-assert is SUPERUSER-ONLY (Postgres refuses
+    `ALTER ROLE … NOSUPERUSER`/`… NOBYPASSRLS` to any other role), so it lives in
+    a `DO` block, and a non-superuser applier must FAIL CLOSED on drift rather
+    than silently skip the assertion. This pins BOTH halves: the re-assert
+    exists, and the drift-without-superuser arm raises.
     """
     text = _migration_text(TENANCY_MIGRATION.name)
 
     assert "CREATE ROLE tortoise_record_app " in text
-    assert "NOBYPASSRLS" in text
-    assert re.search(r"ALTER ROLE tortoise_record_app NOBYPASSRLS", text), (
-        "the attribute must be re-asserted on every apply — a one-time CREATE "
-        "leaves a flipped BYPASSRLS undetected"
+    assert re.search(
+        r"EXECUTE 'ALTER ROLE tortoise_record_app '"
+        r"\s*'NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE'", text), (
+        "the attribute must be re-asserted on every apply by an applier that "
+        "CAN re-assert it — a one-time CREATE leaves a flipped BYPASSRLS "
+        "undetected"
+    )
+    assert re.search(r"_applier_is_super boolean := ", text), (
+        "the re-assert must be guarded: `ALTER ROLE … NOBYPASSRLS` is a "
+        "superuser-only clause, and a bare ALTER ROLE aborted the whole "
+        "migration on a hosted non-superuser applier (measured)"
+    )
+    assert re.search(r"ELSIF _drifted THEN\s*\n\s*RAISE EXCEPTION", text), (
+        "a non-superuser applier that cannot re-assert a DRIFTED role must "
+        "raise — skipping the assertion silently is the fail-open"
     )
     assert not re.search(r"CREATE ROLE tortoise_record_app[^']*BYPASSRLS(?!\s*=)",
                          text.replace("NOBYPASSRLS", ""))

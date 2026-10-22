@@ -194,6 +194,14 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # the pre-ALTER schema, so `_split_properties` would leave an amount in the
     # `props` tail and `cache_projection` would not project it.
     "20261018000001_record_point_money_value_2782.sql",
+    # The tenancy boundary itself (#9554, epic #7879): the app role, its table
+    # grants and the tenant GUC. It contributes NO column and no refusal — and
+    # it is listed anyway, per the registry rule above. Leaving it out was the
+    # 1-of-8 gap the #9600 review cycle 1 measured: the wheel ships it
+    # (`pyproject.toml`'s `*_record_*.sql` glob matches) and
+    # `tests/test_9231_record_migrations_trigger.py` reds on the omission, so
+    # the registry is the tuple or it is nothing.
+    "20261022000001_record_tenancy_role_and_guc.sql",
 )
 
 #: The tenancy GUC every record RLS policy reads (`*_read_org`, `*_app_tenant`).
@@ -1963,6 +1971,18 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     which is the intended direction. The seam's own connections are not in
     autocommit (``_default_connect`` never turns it on), so the live path is
     unaffected.
+
+    ⛔ VERIFIED, NOT ASSUMED (#9600 review cycle 1, P2). Executing the prologue
+    is not the same event as the GUC being in force, and the failure mode of
+    the gap is SILENT in one shape: every plan statement's ``INSERT`` carries a
+    ``WITH CHECK`` that raises under a NULL GUC, but an `UPDATE`/`DELETE` is
+    gated by ``USING`` alone and simply affects 0 rows — so a patch- or
+    delete-only record (reachable with ``position=False``, which has no
+    ``journal_event`` insert left to fail) would be dropped while this function
+    returned an APPLIED report. The prologue is therefore read back
+    (``current_setting(..., true)``) and a mismatch RAISES: an autocommit
+    connection, a renamed GUC, or a pooler that dropped the transaction-local
+    set can never be mistaken for a successful replay.
     """
     plan = replay_plan(records, org_id=org_id, graph_id=graph_id,
                        start_seq=start_seq, position=position)
@@ -1971,6 +1991,21 @@ def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,
     # the pure journal→record declaration, and this statement is the session
     # context the plan is applied in.
     cursor.execute(TENANT_GUC_SQL, (org_id,))
+    # #9600 review cycle 1 (P2): read it BACK. A `set_config(..., true)` that
+    # set nothing (autocommit, a renamed GUC, a pooler that dropped the
+    # transaction-local context) leaves an affected-row count of 0 on an
+    # UPDATE/DELETE and raises nothing, so the replay would report APPLIED over
+    # a record nothing wrote.
+    cursor.execute("SELECT current_setting(%s, true)", (TENANT_GUC,))
+    _applied = cursor.fetchone()
+    _applied = _applied[0] if _applied else None
+    if str(_applied) != str(org_id):
+        raise RecordProjectionError(
+            f"the tenant GUC {TENANT_GUC!r} is {_applied!r} after setting it to "
+            f"{org_id!r} — refusing to apply the plan unscoped. A "
+            "transaction-local set does nothing on a connection in autocommit "
+            "mode, and an UPDATE/DELETE gated only by RLS USING would then "
+            "affect ZERO rows without raising (#9600 review cycle 1)")
     for statement in plan:
         cursor.execute(statement.sql, statement.params)
     report = ReplayReport(events=len(records), statements=0)

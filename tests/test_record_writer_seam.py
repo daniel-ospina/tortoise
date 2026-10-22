@@ -86,9 +86,17 @@ class FakeCursor:
     def __init__(self, conn: FakeConnection) -> None:
         self._conn = conn
 
+    def fetchone(self) -> tuple[Any]:
+        # `replay()` reads the tenant GUC back after setting it (#9600 review
+        # cycle 1): this fake is a connection that KEEPS its transaction-local
+        # set, so the read-back mirrors what was set.
+        return (self._conn.guc_set,)
+
     def execute(self, sql: str, params: Any = None) -> None:
         values = list(params) if params is not None else None
         self._conn.executed.append((sql, values))
+        if sql == rp.TENANT_GUC_SQL:
+            self._conn.guc_set = params[0] if params else None
         if not sql.startswith(rp._JOURNAL_INSERT_PREFIX):
             return
         # The real table is append-only by TRIGGER and keyed on
@@ -113,6 +121,7 @@ class FakeConnection:
 
     def __init__(self) -> None:
         self.executed: list[tuple[str, list[Any] | None]] = []
+        self.guc_set: Any = None
         self.journal_positions: set[tuple[Any, Any, Any]] = set()
         self.absorbed: list[tuple[Any, Any, Any]] = []
         self.commits = 0
@@ -134,7 +143,12 @@ class FakeConnection:
 
     # — assertions' helpers —
     def statements(self) -> list[tuple[str, list[Any] | None]]:
-        return list(self.executed)
+        # The tenant prologue and its read-back are CONTEXT, not the plan: the
+        # plan comparisons below are equality over the plan, so the read-back
+        # (`SELECT current_setting(...)`, #9600 review cycle 1) is filtered here
+        # rather than pinned into every expected list. Its presence and order
+        # are asserted separately.
+        return [r for r in self.executed if "current_setting" not in r[0]]
 
 
 def _plan(records: list[dict[str, Any]] | None = None, *,
@@ -198,8 +212,11 @@ def test_the_seam_emits_exactly_the_record_plan() -> None:
     # independently of the number it is compared against. The tenant prologue
     # is not a record mutation, so it is subtracted — exactly one of it.
     assert conn.statements().count(_tenant_statement()) == 1
+    # The context statements are outside the plan: the tenant prologue AND its
+    # read-back (#9600 review cycle 1 — `replay()` verifies the GUC took effect).
+    _context = 2
     assert result.statements == (
-        len(conn.executed) - len(conn.journal_positions) - 1)
+        len(conn.executed) - len(conn.journal_positions) - _context)
     assert result.statements > 0
     # The plan is one journal position per record, always.
     assert len(conn.journal_positions) == len(RECORDS)

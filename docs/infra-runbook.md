@@ -2635,7 +2635,19 @@ on `6543` (a silent zero-row read) and carried onto a pooled connection reused b
 **If a record read ever returns nothing**, check `current_setting('app.current_org_id')` first: a
 missing GUC reads as **zero rows and no error**, while an unscoped **write** raises `42501`. The
 asymmetry is deliberate and pinned in
-`supabase/tests/20261022000001_record_tenancy_posture.sql`.
+`supabase/tests/20261022000001_record_tenancy_posture.sql`. `record_projection.replay()` now also
+**reads the GUC back** immediately after setting it and refuses the replay on a mismatch (#9600
+review cycle 1), so a connection whose transaction-local set did nothing cannot report a successful
+write: without that read-back a patch/delete-only plan would simply affect zero rows.
+
+**⛔ NEVER GRANT `tortoise_record_app` MEMBERSHIP IN `service_role`, `postgres`, or any role that
+carries a permissive policy.** Policy applicability follows `has_privs_of_role`, so membership makes
+that role's policies apply to this one — including `service_role`'s `*_service_role_all USING (true)`
+— and `NOINHERIT` does **not** prevent it (measured on `postgres:16.15`: after `GRANT svc TO app` the
+app role saw 2 rows across 2 tenants while `rolbypassrls` still read `false`, and `NOINHERIT` changed
+nothing). The boundary is therefore the grants **and** the absence of membership; a role that was
+flipped or granted membership must be corrected as an operator, and the migration fails closed when
+the applying role cannot re-assert the attributes.
 
 ### Runtime Config (non-secret)
 

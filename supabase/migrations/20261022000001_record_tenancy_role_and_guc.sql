@@ -59,10 +59,17 @@
 -- role SHELL and grants in migration, credential operationally — is the
 -- documented Supabase guidance for custom roles.
 --
--- ⚠️ `NOINHERIT` is deliberately NOT set. The role holds only the grants below;
--- membership inheritance costs nothing here, while NOINHERIT would silently
--- break the pooler's `SET ROLE`-free login path if membership is ever granted
--- to it. Least privilege is expressed by the grants, not by the attribute.
+-- ⚠️ `NOINHERIT` is deliberately NOT set, and it would not buy the boundary:
+-- policy APPLICABILITY follows `has_privs_of_role`, so membership in any role
+-- that carries a permissive policy (`service_role`'s `*_service_role_all USING
+-- (true)`, `postgres`) makes that policy apply to this role — measured on
+-- `postgres:16.15`: `GRANT svc TO app` made the app role see 2 rows of 2
+-- tenants while `rolbypassrls` still read `false`, and `NOINHERIT` did NOT
+-- change that (PG16+ role membership applies regardless). The boundary is
+-- therefore expressed TWICE: by the grants below, and by the prohibition on
+-- membership (asserted in
+-- `supabase/tests/20261022000001_record_tenancy_posture.sql` and stated for
+-- operators in `docs/infra-runbook.md` → "The record's connecting role").
 -- ============================================================================
 
 -- ── 1. The application role ─────────────────────────────────────────────────
@@ -77,7 +84,37 @@ END $$;
 -- Re-assert the attributes on every apply: an operator who flipped BYPASSRLS on
 -- this role would silently turn the tenancy boundary off, and this migration is
 -- the one place that states what the role IS.
-ALTER ROLE tortoise_record_app NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE;
+--
+-- ⛔ `ALTER ROLE … SUPERUSER/NOSUPERUSER` and `… BYPASSRLS/NOBYPASSRLS` are
+-- SUPERUSER-ONLY clauses (#9600 review cycle 1, P1): a bare `ALTER ROLE` here
+-- aborted the whole migration on every applier that is not a superuser —
+-- including a hosted Postgres whose `postgres` role is a `CREATEROLE`
+-- non-superuser (measured as `NOSUPERUSER CREATEROLE`: `ERROR: permission
+-- denied to alter role`, and clause-by-clause `NOBYPASSRLS` alone fails too).
+-- The PGlite lane runs as superuser, so CI could never see it: the migration
+-- applied green there and refused on the deployment that matters.
+--
+-- So the re-assert is SUPERUSER-ONLY, and a non-superuser applier FAILS CLOSED
+-- instead of silently skipping it: if the attributes have drifted and this
+-- applier cannot correct them, the migration raises and names the operator step
+-- (docs/infra-runbook.md → "The record's connecting role").
+DO $$
+DECLARE
+    _applier_is_super boolean := (SELECT rolsuper FROM pg_roles WHERE rolname = current_user);
+    _drifted boolean := (SELECT rolbypassrls OR rolsuper OR rolcreatedb OR rolcreaterole
+                           FROM pg_roles WHERE rolname = 'tortoise_record_app');
+BEGIN
+    IF _applier_is_super THEN
+        EXECUTE 'ALTER ROLE tortoise_record_app '
+                'NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE';
+    ELSIF _drifted THEN
+        RAISE EXCEPTION 'tortoise_record_app has drifted from the R6 tenancy decision '
+                        '(needs NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE) and this '
+                        'applier is not a superuser, so it cannot re-assert them. Fix the role '
+                        'as an operator (docs/infra-runbook.md, "The record''s connecting role") '
+                        'and re-apply — refusing rather than leaving the tenancy boundary open.';
+    END IF;
+END $$;
 
 COMMENT ON ROLE tortoise_record_app IS
     'The record''s APPLICATION role (R6, epic #7879) — the only role the record write path may connect as. NOBYPASSRLS by design: RLS is the tenancy boundary, and every record policy reads app.current_org_id, which record_projection.replay() sets transaction-locally. Not for schema, backup/restore or erasure — those use the owner/service_role on purpose. LOGIN + password are provisioned by ops (docs/infra-runbook.md).';
