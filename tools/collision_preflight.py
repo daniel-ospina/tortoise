@@ -3845,6 +3845,11 @@ class HolderRead:
     source: str
     unanswerable: str = ""
     holders: tuple[Holder, ...] = ()
+    # The roster's SIZE, from the board's own counts (#9392). `None` means the
+    # board did not publish it (an older writer) — NOT zero: an unread roster
+    # must never be reported as an empty one.
+    roster_rows: int | None = None
+    workspaces_count: int | None = None
 
 
 def _board_can_answer(state: dict) -> str:
@@ -3869,10 +3874,18 @@ def _board_can_answer(state: dict) -> str:
             "lane-registry and GitHub reads succeeded is unknown"
         )
     if rec.get("registry_measured") is not True:
+        # ⛔ THE REMEDY IS DERIVED FROM THIS CAUSE (#9392), not left to the
+        # verdict line's generic sentence. An absent roster is not a read that
+        # went wrong on a bad day: it was never provisioned, `fleet_state.py
+        # build` cannot create it (the board is built FROM it), and the two
+        # other readers of this note (`who_is_on.py`, and the exit-2 remedy)
+        # must give a lane the SAME answer. `registry_remedy` is the one place
+        # that sentence lives, so the three cannot disagree.
         return (
             "the board's lane registry could not be read "
             f"({rec.get('registry_error') or 'cause not recorded'}) — the lane "
-            "roster is UNKNOWN, not empty"
+            "roster is UNKNOWN, not empty. "
+            f"{fleet_state.registry_remedy(str(rec.get('registry_error') or ''))}"
         )
     if rec.get("github_measured") is not True:
         return (
@@ -4411,6 +4424,21 @@ def _issue_entry_problem(state: dict, issue: int) -> str:
     return ""
 
 
+def _board_count(rec: dict, key: str) -> int | None:
+    """One of the board's published COUNTS, or ``None`` when it did not publish
+    a usable one (#9392).
+
+    ⛔ ABSENT IS NOT ZERO, the same rule the provenance fields obey: a board from
+    an older writer carries no `registry_rows`, and reporting `0` would say "the
+    roster is empty" about a row count nobody measured. A bool is rejected too —
+    `isinstance(True, int)` is True, and a `True` here would print "1 row".
+    """
+    value = rec.get(key) if isinstance(rec, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
 def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
     """The claim gate's answer for `issue`: who holds it, are they still there?
 
@@ -4428,12 +4456,32 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
         )
     return HolderRead(
         measured=True, source=source, holders=_holders_from_board(state, issue),
+        roster_rows=_board_count(
+            state.get("reconciliation") or {}, "registry_rows"),
+        workspaces_count=_board_count(
+            state.get("reconciliation") or {}, "workspaces_count"),
     )
 
 
 def _holder_gate_note(read: HolderRead) -> str:
     """One line stating what the gate read, so the row never claims a reader it
-    does not have — the row is named `issue assignee/holder` for that reason."""
+    does not have — the row is named `issue assignee/holder` for that reason.
+
+    ⛔ THE MEASURED ARMS PUBLISH THE ROSTER'S SIZE BESIDE ITS SOURCE (#9392).
+    `board source` is the READ's provenance, not the roster's coverage: a
+    hand-written ONE-ROW roster (the reader's own lane) prints `board source:
+    rebuilt` exactly like a full one, and the measured incident is that this
+    turned 11 live lanes invisible and flipped an INCOMPLETE into a CLEAN with no
+    code change. Printing the row count (and the live workspace count beside it)
+    makes a roster of one VISIBLY a roster of one. It changes no verdict — the
+    gate still keys on `registry_measured` — so it is disclosure, not a
+    dismissal switch.
+    """
+    counts = ""
+    if read.roster_rows is not None:
+        counts = f"; lane roster: {read.roster_rows} row(s)"
+        if read.workspaces_count is not None:
+            counts += f" vs {read.workspaces_count} live workspace(s)"
     if not read.measured:
         return (
             "claim gate: the FLEET BOARD could not answer — "
@@ -4442,19 +4490,23 @@ def _holder_gate_note(read: HolderRead) -> str:
     if not read.holders:
         return (
             "claim gate: holder read from the FLEET BOARD "
-            f"(board source: {read.source}) — NO lane is mechanically attributed "
-            "to this issue; comment prose is not read (#8175)"
+            f"(board source: {read.source}{counts}) — NO lane is mechanically "
+            "attributed to this issue; comment prose is not read (#8175)"
         )
-    counts = {verdict: 0 for verdict in
+    counts_by_verdict = {verdict: 0 for verdict in
               (HOLDER_LIVE, HOLDER_STOPPED, HOLDER_UNMEASURED, HOLDER_AMBIGUOUS)}
     for holder in read.holders:
-        counts[holder.verdict] = counts.get(holder.verdict, 0) + 1
+        counts_by_verdict[holder.verdict] = (
+            counts_by_verdict.get(holder.verdict, 0) + 1
+        )
     return (
         "claim gate: holder read from the FLEET BOARD (board source: "
-        f"{read.source}) — {len(read.holders)} lane(s) attributed: "
-        f"{counts[HOLDER_LIVE]} still holding, {counts[HOLDER_STOPPED]} stopped, "
-        f"{counts[HOLDER_UNMEASURED]} liveness unmeasured, "
-        f"{counts[HOLDER_AMBIGUOUS]} ambiguous (comment prose is not read, #8175)"
+        f"{read.source}{counts}) — {len(read.holders)} lane(s) attributed: "
+        f"{counts_by_verdict[HOLDER_LIVE]} still holding, "
+        f"{counts_by_verdict[HOLDER_STOPPED]} stopped, "
+        f"{counts_by_verdict[HOLDER_UNMEASURED]} liveness unmeasured, "
+        f"{counts_by_verdict[HOLDER_AMBIGUOUS]} ambiguous (comment prose is not "
+        "read, #8175)"
     )
 
 
@@ -5880,6 +5932,15 @@ def _assert_all_surfaces(ordered: list[Surface]) -> None:
         )
 
 
+#: The claim gate's OWN note text for an unreadable lane roster
+#: (`_board_can_answer`). `_incomplete_remedy` partitions on THIS, so the roster's
+#: remedy is selected from the cause the same run measured, rather than taking
+#: the generic arm — which prescribes a rebuild that fails on the same read
+#: (#9392). It is this module's own marker, never a foreign string: the two sites
+#: are asserted to agree by `test_the_roster_marker_is_the_note_the_gate_emits`.
+_LANE_ROSTER_NOTE = "the lane roster is UNKNOWN, not empty"
+
+
 def _incomplete_remedy(incomplete: list[Surface]) -> str:
     """The remedy for an INCOMPLETE run, keyed on its CAUSE (#9402).
 
@@ -5983,6 +6044,33 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
             f"the number and repository; re-authenticating cannot change it), "
             f"and PART is: {tail_cause}"
         )
+    # ⛔ THE LANE ROSTER IS ITS OWN CAUSE, AND ITS OWN REMEDY (#9392).
+    # Every arm below answers a cause a RE-READ can fix: a budget that resets, a
+    # cap a setting widens, a network that comes back. An unreadable roster is
+    # none of those — `fleet_state.py build` builds the board FROM that file, so
+    # "rebuild the fleet board" is the dead end this issue files, and `gh auth`
+    # is fine in the same run (every other surface answered). The marker is this
+    # module's OWN note text (`_board_can_answer`), not a foreign signature, and
+    # the cause is classified by `fleet_state.registry_remedy` from the raw error
+    # that note embeds — the same helper `fleet_state.py build` and the surface
+    # note take their sentence from, so a lane gets ONE answer from all three.
+    roster = [s for s in incomplete if _LANE_ROSTER_NOTE in (s.note or "")]
+    if roster:
+        roster_ids = {id(s) for s in roster}
+        roster_cause = fleet_state.registry_remedy(
+            " ".join(s.note or "" for s in roster)
+        )
+        text = (
+            "the LANE ROSTER is UNKNOWN (not empty) — no lane can be attributed "
+            "to this issue until it is readable, and this is NOT a read that "
+            f"retrying or rebuilding can fix: {roster_cause}"
+        )
+        if len(roster) == len(incomplete):
+            return text
+        tail_cause = _incomplete_remedy(
+            [s for s in incomplete if id(s) not in roster_ids]
+        )
+        return f"PART of this is {text}; PART is: {tail_cause}"
     if not both and not exhausted and not truncated:
         return generic
     budget = (
