@@ -1405,9 +1405,14 @@ class _PartialFillGraph:
         def __init__(self, rows):
             self.result_set = rows
 
-    def __init__(self, fail_during_assembly=False):
+    def __init__(self, fail_during_assembly=False, degenerate_pair=(0.0, 0.0)):
         self.support_rows_served = 0
         self.fail_during_assembly = fail_during_assembly
+        # The pair P2's peer carries. ``(0.0, 0.0)`` is the persisted state
+        # #8504 is about; a subnormal pair like ``(1e-200, 1e-200)`` is the
+        # SAME "unusable persisted pair" class and underflowed the sibling
+        # variance division into the identical batch-wiping raise.
+        self.degenerate_pair = degenerate_pair
 
     def query(self, cypher, **kwargs):
         params = kwargs.get("params") or {}
@@ -1430,7 +1435,8 @@ class _PartialFillGraph:
                 ("op1", "IMPL", 0, "A", "statement", "",
                  3.0, 1.0, True, None, False),
                 ("op2", "IMPL", 0, "B", "statement", status_b,
-                 0.0, 0.0, True, None, False),
+                 self.degenerate_pair[0], self.degenerate_pair[1], True, None,
+                 False),
             ])
         if "m.id" in cypher:
             return self._Result([])  # Q2b: no mitigations
@@ -1468,6 +1474,37 @@ def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
         "read as a fabricated Beta(1,1) posterior")
     assert peers["B"]["contested"] is False, (
         "a degenerate posterior is not evidence of contest")
+
+
+def test_subnormal_peer_pair_does_not_underflow_the_variance_division():
+    """#8504 (sibling site): a subnormal persisted pair must not abort the batch.
+
+    ``_beta_variance`` guards ``s <= 0`` but not the denominator it then
+    divides by: for α=β=1e-200 both ``α*β`` and ``s*s`` underflow to ``0.0``,
+    so the division raised ``ZeroDivisionError`` — the same failure shape one
+    line under the site #8504 repairs, discarding every assembled point. A
+    non-finite sum is the same class (α overflowing to ``+inf`` yielded
+    ``α/inf == 0.0``: maximum disbelief rather than the neutral fallback).
+
+    This is a stub-level unit test of the helpers' totality as reached through
+    the batch assembly, not a claim that the SDK's own EP arithmetic mints such
+    a pair (it clamps to >= 0.01) — the reachability is the direct property
+    write ``_write_node``/legacy graphs also give the ``(0.0, 0.0)`` case.
+    """
+    graph = _PartialFillGraph(degenerate_pair=(1e-200, 1e-200))
+    out = get_relationships_bounded(graph, ["P1", "P2"])
+    assert out.decoration_error == "", (
+        "a subnormal peer pair must decorate, not abort the batch: "
+        f"{out.decoration_error}")
+    peers = {e["related_id"]: e["peer"] for e in out["P1"] + out["P2"]}
+    assert set(peers) == {"A", "B"}, (
+        "the healthy peer's entry must survive alongside the subnormal one")
+    assert peers["B"]["variance"] == 0.0, (
+        "an underflowed/overflowed denominator carries no variance to report: "
+        f"{peers['B']['variance']!r}")
+    assert peers["B"]["confidence"] == 0.5, (
+        "α/s is still a usable mean for a subnormal pair (0.5), so the wire "
+        f"value stays the house fallback; got {peers['B']['confidence']!r}")
 
 
 @pytest.mark.parametrize("degenerate_write", [
@@ -1522,6 +1559,16 @@ def test_partially_filled_decoration_is_reset_to_the_all_empty_seed():
     payload that costs a marker-trusting consumer real edges.
     """
     graph = _PartialFillGraph(fail_during_assembly=True)
+    # Pin this test's OWN premise, with no cross-test dependence: the same stub
+    # in default mode must FILL P1. Without this, the (correct) all-empty reset
+    # makes the final assertion pass identically whether or not a partial fill
+    # ever happened, so a fixture edit that moved the injection earlier would
+    # leave this test green while it no longer exercises the invariant it is
+    # named for.
+    pre = get_relationships_bounded(_PartialFillGraph(), ["P1", "P2"])
+    assert pre["P1"], (
+        "the same fixture in default mode must fill P1 — otherwise the reset "
+        "assertion below proves nothing")
     out = get_relationships_bounded(graph, ["P1", "P2"])
     # Non-vacuity: the stub must actually have served P1 a real peer row and
     # reached the except path, or the assertion below proves nothing.

@@ -3249,9 +3249,20 @@ def _beta_variance(alpha: float, beta: float) -> float:
     TortoiseEP.get_contested_claims.
     """
     s = alpha + beta
-    if s <= 0:
+    # A sum that is not finite is not a usable pair either: an overflowing sum
+    # gives a denominator of inf (0.0/0.0-free but meaningless), and a NaN alpha
+    # would put a NaN variance on the wire (`json.dumps` emits a bare `NaN`
+    # token). Report "no variance" instead of a bogus or unwritable number.
+    if not math.isfinite(s) or s <= 0:
         return 0.0
-    return (alpha * beta) / (s * s * (s + 1))
+    denom = s * s * (s + 1)
+    # Underflow case: a subnormal pair (e.g. α=β=1e-200) makes `s*s` and
+    # `α*β` both 0.0 → 0.0/0.0 raised ZeroDivisionError out of the batch
+    # decoration, discarding every assembled point (the #8504 failure shape,
+    # one line under the site this change repairs).
+    if denom == 0.0 or not math.isfinite(denom):
+        return 0.0
+    return (alpha * beta) / denom
 
 
 def _beta_mean(alpha: float, beta: float) -> float:
@@ -3263,7 +3274,10 @@ def _beta_mean(alpha: float, beta: float) -> float:
     ZeroDivisionError.
     """
     s = alpha + beta
-    return alpha / s if s > 0 else 0.5
+    # `isfinite` as well as `> 0`: an overflowing sum (+inf) would otherwise
+    # yield α/inf == 0.0 — a wrong belief (maximum disbelief) rather than the
+    # neutral fallback this guard exists to serve.
+    return alpha / s if math.isfinite(s) and s > 0 else 0.5
 
 
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
