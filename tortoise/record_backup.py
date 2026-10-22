@@ -143,6 +143,7 @@ __all__ = [
     "RECORD_DUMP_FORMAT",
     "RecordBackupError",
     "RecordBackupUnavailable",
+    "RecordRestoreFailed",
     "RecordRestoreRefused",
     "RecordRestoreVerifyError",
     "compare_row_counts",
@@ -275,6 +276,26 @@ class RecordRestoreVerifyError(RecordBackupError):
     def __init__(self, message: str, *, mismatches: list[dict[str, Any]] | None = None):
         super().__init__(message)
         self.mismatches = list(mismatches or [])
+
+
+class RecordRestoreFailed(RecordBackupError):
+    """A DRILL run failed **after** the artifact was published (#9601 cycle 3, P2).
+
+    The drill publishes before it restores, so a post-publish failure leaves a
+    complete, checksummed artifact in ``record-backups/`` — and a call reporting
+    it as a plain :class:`RecordBackupError` told a scheduler "the record is NOT
+    backed up" (a durability outage that does not exist) and "retry" for the
+    one drill fault that retrying can never clear (a scratch target missing the
+    tenancy rows its foreign keys reference).
+
+    Carries ``backup_id``/``backup_key`` so the caller can say WHICH artifact is
+    durable instead of making a claim about the record's state it cannot support.
+    """
+
+    def __init__(self, message: str, *, backup_id: str, backup_key: str):
+        super().__init__(message)
+        self.backup_id = backup_id
+        self.backup_key = backup_key
 
 
 # ── connection-string handling ──────────────────────────────────────────────
@@ -745,7 +766,23 @@ def _write_secret_file(path: Path, data: bytes) -> None:
     """
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, data)
+        # Write until done, never one bare `os.write` (#9601 cycle 3, P2):
+        # `write(2)` may return SHORT — Linux caps a single write to a regular
+        # file near 2 GiB — and the old single call dropped the remainder
+        # silently, leaving a TRUNCATED dump that only `pg_restore` would notice
+        # (a red drill, exit 1, on an artifact that was never whole). A loop
+        # truncates nothing; a zero/negative return is a hard error rather than
+        # a quiet spin.
+        view = memoryview(data)
+        while len(view):
+            written = os.write(fd, view)
+            if written <= 0:
+                raise RecordBackupError(
+                    f"short write to {path.name}: wrote {len(data) - len(view)} of "
+                    f"{len(data)} byte(s) and the write stopped returning progress "
+                    "— refusing to leave a truncated record dump behind"
+                )
+            view = view[written:]
     finally:
         os.close(fd)
     if stat.S_IMODE(os.stat(path).st_mode) & 0o077:
@@ -753,6 +790,28 @@ def _write_secret_file(path: Path, data: bytes) -> None:
 
 
 # ── list / prune ────────────────────────────────────────────────────────────
+
+
+def _manifest_age_key(row: dict[str, Any]) -> tuple[int, float]:
+    """Sort key for retention: a determinable age first (oldest → newest), then unknown.
+
+    ``(0, timestamp)`` for a manifest whose ``created_at`` parses, ``(1, 0.0)``
+    otherwise — so every artifact this module cannot date sorts after every
+    artifact it can, whatever ``keep`` the caller asks for.
+    """
+    raw = row.get("created_at")
+    if not raw:
+        return (1, 0.0)
+    try:
+        stamp = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+    if stamp.tzinfo is None:
+        # A naive stamp is UTC here, not an error: `created_at` is stamped by
+        # this module as `datetime.now(UTC).isoformat()`, and an offset-less
+        # legacy value is still an older-or-newer fact worth sorting on.
+        stamp = stamp.replace(tzinfo=UTC)
+    return (0, stamp.timestamp())
 
 
 def list_record_backups(storage) -> list[dict[str, Any]]:
@@ -774,7 +833,14 @@ def list_record_backups(storage) -> list[dict[str, Any]]:
             continue
         parsed["_manifest_key"] = key
         rows.append(parsed)
-    rows.sort(key=lambda row: str(row.get("created_at") or ""))
+    # Oldest first, and an artifact whose age cannot be READ sorts LAST (#9601
+    # cycle 3): the naive `str(row.get("created_at") or "")` gives a manifest
+    # with no (or unparseable) `created_at` the empty string, which sorts
+    # FIRST — so `prune_record_backups` would evict the one artifact whose age
+    # this code cannot determine, on the strength of a field it never read. The
+    # safe direction is to delete what we can prove is old; an undatable
+    # artifact survives until someone looks at it.
+    rows.sort(key=_manifest_age_key)
     return rows
 
 
@@ -1167,6 +1233,12 @@ def run_restore_drill(
     * a non-empty scratch target (refused inside
       :func:`restore_record_backup`) — unless ``reset_scratch`` emptied it first.
 
+    A failure AFTER the artifact is published raises :class:`RecordRestoreFailed`,
+    not a bare :class:`RecordBackupError` (#9601 review cycle 3, P2): the drill
+    publishes before it restores, so at that point the record IS backed up and
+    only the restore is unproven. A caller told otherwise reports a durability
+    outage that does not exist.
+
     ⛔ THE ARTIFACT IS CUT BEFORE ANY RESET, and the identity test is COORDINATES,
     not string equality (#9601 review cycle 1, P0). Both halves of the old shape
     were a data-loss path: ``dsn == scratch_dsn`` misses every equivalent spelling
@@ -1217,57 +1289,74 @@ def run_restore_drill(
     manifest = create_record_backup(
         dsn, storage, run=run, connect=connect, workdir=workdir, key=key, pg_dump=pg_dump
     )
-    # The CEILING, read as soon as the artifact is cut. Its POSITION is the fix
-    # for #9601 review cycle 2 (P1): `claimed` (the manifest's own counts) is
-    # measured *inside* `create_record_backup`, i.e. AFTER `before`, so on a live
-    # append-only record `claimed > before` is the ordinary concurrent-insert
-    # signature — most of all for `journal_event`, which gets a row on every
-    # capture turn. Comparing the later read against the earlier one therefore
-    # red a HEALTHY backup on the documented daily schedule, on a run whose
-    # restore had not started, and — because `RecordRestoreVerifyError` carries
-    # no `mismatches` here — printed `{"verdict": "MISMATCH", "mismatches": []}:
-    # a loss verdict naming no loss. What the cross-check can legitimately
-    # decide is one-sided: an artifact may not claim more rows than the source
-    # held AFTER the dump, and that disagreement is a REFUSAL (exit 2, no
-    # verdict), not a data-loss incident.
-    after = record_row_counts(dsn, connect=connect)
-    if reset_scratch:
-        reset_record_tables(scratch_dsn, connect=connect)
-    # The source numbers are the ones READ FROM THE SOURCE DATABASE (`before`),
-    # never the artifact's own claim about itself (#9601 review cycle 1, P2):
-    # `compare_row_counts` accepts a window `[min(source, after), max(...)]`, so a
-    # manifest whose `row_counts` were zeroed widened acceptance to `[0, after]`
-    # and a short artifact restored green — while this function's own docstring
-    # promises it "never trusts the writer's own claim about what it wrote". The
-    # manifest is a CROSS-CHECK now, not the baseline.
-    source = {t: int(n) for t, n in before.items()}
-    claimed = {t: int(n) for t, n in (manifest.get("row_counts") or {}).items()}
-    if not source:
-        raise RecordBackupError(
-            "the source held no rows when they were read — a drill with nothing "
-            "to compare against is not a verification"
-        )
-    for table in source:
-        want = None if not claimed else claimed.get(table)
-        ceiling = after.get(table)
-        if want is not None and ceiling is not None and int(want) > int(ceiling):
-            raise RecordRestoreRefused(
-                f"the artifact claims {want} {table} row(s) but the source held "
-                f"{int(ceiling)} once the dump had finished — an artifact cannot "
-                "carry rows the record never held, so the drill produced no "
-                "verdict (nothing was restored)"
-            )
+    # The CEILING is read INSIDE the post-publish leg below; see the comment on
+    # the first statement of that `try` for why its position is the fix.
     backup_key = f"{RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{DUMP_OBJECT}"
-    restored = restore_record_backup(
-        storage,
-        backup_key,
-        scratch_dsn,
-        run=run,
-        connect=connect,
-        workdir=workdir,
-        key=key,
-        pg_restore=pg_restore,
-    )
+    # ⛔ FROM HERE THE ARTIFACT IS DURABLE, so a failure is no longer "the backup
+    # did not happen" (#9601 review cycle 3, P2). Re-raising it as a plain
+    # RecordBackupError made the verb print "the record is NOT backed up — retry"
+    # while a complete, checksummed artifact sat in `record-backups/`, and it told
+    # an operator to retry the one class here that retrying cannot clear (a
+    # scratch target missing the tenancy rows its FKs reference). The refusals and
+    # the verify verdict keep their own classes: they are NOT "attempted and did
+    # not happen", and the caller maps them to exit 2 / exit 3.
+    try:
+        # The CEILING, read as soon as the artifact is cut. Its POSITION is the fix
+        # for #9601 review cycle 2 (P1): `claimed` (the manifest's own counts) is
+        # measured *inside* `create_record_backup`, i.e. AFTER `before`, so on a live
+        # append-only record `claimed > before` is the ordinary concurrent-insert
+        # signature — most of all for `journal_event`, which gets a row on every
+        # capture turn. Comparing the later read against the earlier one therefore
+        # red a HEALTHY backup on the documented daily schedule, on a run whose
+        # restore had not started, and — because `RecordRestoreVerifyError` carries
+        # no `mismatches` here — printed `{"verdict": "MISMATCH", "mismatches": []}`:
+        # a loss verdict naming no loss. What the cross-check can legitimately
+        # decide is one-sided: an artifact may not claim more rows than the source
+        # held AFTER the dump, and that disagreement is a REFUSAL (exit 2, no
+        # verdict), not a data-loss incident.
+        after = record_row_counts(dsn, connect=connect)
+        if reset_scratch:
+            reset_record_tables(scratch_dsn, connect=connect)
+        # The source numbers are the ones READ FROM THE SOURCE DATABASE (`before`),
+        # never the artifact's own claim about itself (#9601 review cycle 1, P2):
+        # `compare_row_counts` accepts a window `[min(source, after), max(...)]`, so a
+        # manifest whose `row_counts` were zeroed widened acceptance to `[0, after]`
+        # and a short artifact restored green — while this function's own docstring
+        # promises it "never trusts the writer's own claim about what it wrote". The
+        # manifest is a CROSS-CHECK now, not the baseline.
+        source = {t: int(n) for t, n in before.items()}
+        claimed = {t: int(n) for t, n in (manifest.get("row_counts") or {}).items()}
+        if not source:
+            raise RecordBackupError(
+                "the source held no rows when they were read — a drill with nothing "
+                "to compare against is not a verification"
+            )
+        for table in source:
+            want = None if not claimed else claimed.get(table)
+            ceiling = after.get(table)
+            if want is not None and ceiling is not None and int(want) > int(ceiling):
+                raise RecordRestoreRefused(
+                    f"the artifact claims {want} {table} row(s) but the source held "
+                    f"{int(ceiling)} once the dump had finished — an artifact cannot "
+                    "carry rows the record never held, so the drill produced no "
+                    "verdict (nothing was restored)"
+                )
+        restored = restore_record_backup(
+            storage,
+            backup_key,
+            scratch_dsn,
+            run=run,
+            connect=connect,
+            workdir=workdir,
+            key=key,
+            pg_restore=pg_restore,
+        )
+    except (RecordRestoreRefused, RecordRestoreVerifyError):
+        raise
+    except RecordBackupError as e:
+        raise RecordRestoreFailed(
+            str(e), backup_id=manifest["backup_id"], backup_key=backup_key
+        ) from e
     report = verify_restore(source, restored["restored"], source_after=after)
     return {
         "verdict": "RESTORED",

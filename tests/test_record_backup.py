@@ -443,6 +443,30 @@ def _restore(manifest, storage, *, runner, db, dsn=SCRATCH_DSN):
     )
 
 
+def test_a_short_write_cannot_truncate_the_plaintext_dump(tmp_path, monkeypatch):
+    """#9601 review cycle 3 — `os.write` may return SHORT, and one bare call drops the rest.
+
+    `write(2)` to a regular file caps near 2 GiB on Linux, so the old single
+    `os.write(fd, data)` left a TRUNCATED dump behind without raising: the
+    artifact was published over a ciphertext cut from half a dump, and only
+    `pg_restore` noticed (a red drill on an artifact that was never whole).
+
+    The double caps every call at 7 bytes, which is the same shape as a kernel
+    short write at a scale a test can run: pre-fix exactly 7 of the 200 bytes
+    land and this fails.
+    """
+    real_write = rb.os.write
+
+    def _short(fd, data):
+        return real_write(fd, bytes(data[:7]))
+
+    monkeypatch.setattr(rb.os, "write", _short)
+    payload = bytes(range(200)) * 3
+    target = tmp_path / "record.dump"
+    rb._write_secret_file(target, payload)
+    assert target.read_bytes() == payload
+
+
 def test_restore_refuses_a_tampered_artifact_before_pg_restore_runs():
     manifest, storage, _r, _db = _dump_manifest()
     key = f"{rb.RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{rb.DUMP_OBJECT}"
@@ -985,6 +1009,70 @@ def test_prune_deletes_by_the_KEY_the_manifest_was_read_at_not_its_own_id():
         "20260102T000000000Z_bbbbbbbb")
 
 
+def test_prune_does_not_evict_an_artifact_whose_age_it_cannot_read():
+    """#9601 review cycle 3 — an undatable manifest used to be evicted FIRST.
+
+    `list_record_backups` sorted on `str(row.get("created_at") or "")`, so a
+    manifest with no `created_at` sorted as `""` — ahead of every real
+    timestamp — and `prune_record_backups` deleted the one artifact whose age
+    this code could not determine, on the strength of a field it failed to read.
+    Deleting is irreversible and keeping is not, so an undatable artifact must
+    sort LAST: the prune deletes what it can prove is old.
+
+    Two dated artifacts and one undatable, `keep=2`: pre-fix the undated object
+    goes and both dated ones survive, so the assertion below is a real
+    discriminator rather than a count that happens to match.
+    """
+    storage = MemoryStorage()
+    older = f"{rb.RECORD_BACKUP_PREFIX}20260101T000000000Z_aaaaaaaa"
+    newer = f"{rb.RECORD_BACKUP_PREFIX}20260102T000000000Z_bbbbbbbb"
+    undated = f"{rb.RECORD_BACKUP_PREFIX}20260103T000000000Z_cccccccc"
+
+    def put(base: str, manifest: dict) -> None:
+        storage.upload(f"{base}/{rb.DUMP_OBJECT}", b"ciphertext")
+        storage.upload(f"{base}/{rb.MANIFEST_OBJECT}", json.dumps(manifest).encode())
+
+    def manifest(backup_id: str, **extra) -> dict:
+        return {
+            "backup_id": backup_id,
+            "format": rb.RECORD_DUMP_FORMAT,
+            "tables": list(THE_RECORD_TABLES),
+            "row_counts": dict(SOURCE_COUNTS),
+            "sha256": "0" * 64,
+            **extra,
+        }
+
+    put(older, manifest("20260101T000000000Z_aaaaaaaa", created_at="2026-01-01T00:00:00+00:00"))
+    put(newer, manifest("20260102T000000000Z_bbbbbbbb", created_at="2026-01-02T00:00:00+00:00"))
+    # The newest artifact carries NO `created_at` — an older writer, or a
+    # hand-restored manifest. Nothing here proves it is old, so nothing may
+    # delete it.
+    put(undated, manifest("20260103T000000000Z_cccccccc"))
+
+    deleted = rb.prune_record_backups(storage, keep=2)
+    assert deleted == [f"{older}/{rb.DUMP_OBJECT}", f"{older}/{rb.MANIFEST_OBJECT}"]
+    assert storage.download(f"{undated}/{rb.DUMP_OBJECT}") == b"ciphertext"
+    assert storage.download(f"{newer}/{rb.DUMP_OBJECT}") == b"ciphertext"
+    # An UNPARSEABLE stamp is the same fact as a missing one: the age was never
+    # read. `"not-a-date"` is not `""`, so it only survives if the key PARSES
+    # rather than comparing the raw strings.
+    storage2 = MemoryStorage()
+    for base, created in (
+        (older, "2026-01-01T00:00:00+00:00"),
+        (newer, "2026-01-02T00:00:00+00:00"),
+        (undated, "not-a-date"),
+    ):
+        storage2.upload(f"{base}/{rb.DUMP_OBJECT}", b"ciphertext")
+        storage2.upload(
+            f"{base}/{rb.MANIFEST_OBJECT}",
+            json.dumps(manifest(base.rsplit("/", 1)[-1], created_at=created)).encode(),
+        )
+    assert rb.prune_record_backups(storage2, keep=2) == [
+        f"{older}/{rb.DUMP_OBJECT}", f"{older}/{rb.MANIFEST_OBJECT}",
+    ]
+    assert storage2.download(f"{undated}/{rb.DUMP_OBJECT}") == b"ciphertext"
+
+
 def test_list_record_backups_skips_unreadable_manifests():
     storage = MemoryStorage()
     storage.upload(f"{rb.RECORD_BACKUP_PREFIX}x/{rb.DUMP_OBJECT}", b"orphan")
@@ -997,7 +1085,7 @@ def test_list_record_backups_skips_unreadable_manifests():
 # ── the verb: it exists, and it refuses to report a green it did not measure ──
 
 
-def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None, *,
+def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None, *, runner=None,
          patch_connector=True, backup_key=KEY):
     from tortoise import __main__ as cli
 
@@ -1022,7 +1110,7 @@ def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None, *,
     # ...and the pg_dump/pg_restore boundary, because this lane has no
     # PostgreSQL client binaries. Same disclosure as above: this pins the verb's
     # WIRING and its exit-code contract, not a live dump.
-    monkeypatch.setattr(rb, "_default_run", FakeRunner())
+    monkeypatch.setattr(rb, "_default_run", runner if runner is not None else FakeRunner())
     if backup_key is None:
         monkeypatch.delenv("TORTOISE_BACKUP_KEY", raising=False)
     else:
@@ -1158,6 +1246,82 @@ def test_the_verb_drill_is_repeatable_with_reset_scratch(monkeypatch, capsys):
     assert run(base) == 0
     assert run(base) == 2  # the scratch target is now populated → refused
     assert run([*base, "--reset-scratch"]) == 0
+
+
+def test_a_drill_exit_1_does_not_claim_the_record_is_unbacked(monkeypatch, capsys):
+    """#9601 review cycle 3 (P2): exit `1` in DRILL mode is NOT "no backup".
+
+    The drill publishes the artifact and only THEN restores, so a failing
+    `pg_restore` exits `1` while a complete, checksummed artifact sits in
+    `record-backups/`. The old flat message — "the record is NOT backed up —
+    retry" — reports a durability outage that does not exist, and tells the
+    operator to retry a permanent scratch-target fault as if it were transient.
+    """
+    storage = MemoryStorage()
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN],
+        storage=storage,
+        runner=FakeRunner(restore_returncode=1),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "the record was NOT backed up" not in err
+    assert "the record IS backed up" in err
+    assert "NOT proven" in err
+    # The claim is supported by the object store, not asserted from the code path:
+    # the artifact really is durable, and the message names it.
+    assert any(k.endswith(rb.MANIFEST_OBJECT) for k in storage._objects)
+    assert any(k.endswith(rb.DUMP_OBJECT) for k in storage._objects)
+    published = next(
+        json.loads(storage.download(k))["backup_id"]
+        for k in storage._objects
+        if k.endswith(rb.MANIFEST_OBJECT)
+    )
+    assert published in err
+
+
+def test_a_backup_mode_exit_1_still_says_the_record_is_not_backed_up(monkeypatch, capsys):
+    """The other half of the same contract: the mode-aware wording must not go global.
+
+    Without this, a mutant that always prints "published" would pass the drill
+    test while telling a scheduler that a FAILED dump left the record backed up.
+    """
+    storage = MemoryStorage()
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN],
+        storage=storage,
+        runner=FakeRunner(dump_returncode=1),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "the record was NOT backed up" in err
+    assert "IS backed up" not in err
+    assert storage.list("") == []
+
+
+def test_the_documented_exit_1_contract_is_mode_aware_in_the_runbook_and_the_verb():
+    """The exit-code contract lives in two artifacts a scheduler's author reads.
+
+    Both said "the record is NOT backed up" flatly, which is false in the one
+    mode this same runbook tells the operator to schedule. Pinning both keeps a
+    later doc tidy-up from restoring the false claim.
+    """
+    from tortoise import __main__ as cli
+
+    runbook = Path(__file__).resolve().parent.parent / "docs" / "infra-runbook.md"
+    rows = [line for line in runbook.read_text().splitlines() if line.startswith("| `1` |")]
+    assert len(rows) == 1, f"expected exactly one exit-1 row, found {len(rows)}"
+    row = rows[0]
+    assert "drill mode" in row.lower()
+    assert "NOT proven" in row
+    assert "IS backed up" in row
+
+    doc = cli._cmd_record_backup.__doc__ or ""
+    assert "In DRILL mode" in doc
+    assert "IS backed up" in doc
+    assert "check preconditions 3-4" in doc
 
 
 def test_the_verb_backup_mode_does_not_claim_the_artifact_restores(monkeypatch, capsys):

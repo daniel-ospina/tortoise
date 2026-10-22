@@ -391,7 +391,7 @@ Exit codes (a scheduler's only signal):
 | code | meaning |
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
-| `1` | the backup/restore **could not be performed** (pg_dump/pg_restore non-zero, transport). The record is NOT backed up — **retry** |
+| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the mode: in **backup mode** (no `--scratch-dsn`) the record is NOT backed up — **retry**. In **drill mode** the artifact is published *before* the restore is attempted, so the record IS backed up and only the restore is **NOT proven** — retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry |
 | `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, an artifact whose own `row_counts` claim **more rows than the source ever held** (checked against the post-dump ceiling, so a live record's ordinary concurrent writes can never trigger it), or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
 | `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
 
@@ -399,6 +399,12 @@ Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg
 `TORTOISE_BACKUP_KEY` are fixed by editing a config, so a scheduler reading them as `1` would retry a
 permanent fault forever — minting a fresh artifact (and, on a keyless box, a fresh plaintext dump)
 on every attempt. `1` is reserved for "it was attempted and did not happen — try again".
+
+⚠️ **`1` in drill mode is not "the record has no backup".** The drill cuts and publishes the
+artifact *before* it restores, so a failure after that point leaves a complete, checksummed object
+in `record-backups/`: the record is backed up, the restore is unproven. The verb says which of the two
+it means on stderr, and the drill's own exit-1 class (`RecordRestoreFailed`) names the published
+`backup_id` — so an alert rule should read the sentence, not assume an outage.
 
 ⚠️ **A `0` in backup-only mode is not a durability claim.** The verb prints
 `NOT PROVEN RESTORABLE` in that mode on purpose: the posture asks for *"a backup whose artifact is

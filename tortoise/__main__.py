@@ -807,8 +807,15 @@ def _cmd_record_backup(args):
 
     Exit codes, because a scheduler's only signal is the code:
       ``0`` backup published (and, in drill mode, the restore VERIFIED)
-      ``1`` the backup/restore could not be performed (pg_dump/pg_restore
-          non-zero, a transport failure) — the record is NOT backed up
+      ``1`` the run could not be completed (pg_dump/pg_restore non-zero, a
+          transport failure). What that means depends on the MODE, and saying it
+          flatly made the drill's ordinary failure read as a durability outage:
+          in BACKUP mode the record is NOT backed up — retry. In DRILL mode the
+          artifact is published BEFORE the restore is attempted, so the record
+          IS backed up and only the restore is NOT proven — retry, and if it
+          repeats check preconditions 3-4 (the scratch target's schema and the
+          tenancy rows its foreign keys reference): a missing parent row never
+          clears on a retry
       ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
           a pooler DSN, `TORTOISE_BACKUP_KEY` absent or malformed, a populated
           scratch target, an empty record to drill, an artifact whose integrity
@@ -832,6 +839,7 @@ def _cmd_record_backup(args):
         RECORD_BACKUP_KEEP,
         RecordBackupError,
         RecordBackupUnavailable,
+        RecordRestoreFailed,
         RecordRestoreRefused,
         RecordRestoreVerifyError,
         create_record_backup,
@@ -906,8 +914,24 @@ def _cmd_record_backup(args):
         print(f"Error: {e} — nothing was backed up, and no verdict was produced.",
               file=sys.stderr)
         return 2
+    except RecordRestoreFailed as e:
+        # #9601 review cycle 3 (P2): the DRILL publishes before it restores, so
+        # this failure class means the artifact is DURABLE and only the restore
+        # is unproven. Exit `1` says "the run did not complete" — which is true —
+        # but the old flat message turned it into "the record is NOT backed up"
+        # (a durability outage that does not exist, alerted on by any scheduler
+        # reading that sentence) plus an unconditional "retry" for the one
+        # scratch-target fault retrying can never clear. The sibling prune path
+        # above already refuses to make that claim; this is the same shape.
+        print(f"Error: {e} — the artifact {e.backup_id} WAS published before the "
+              f"restore was attempted, so the record IS backed up but this "
+              f"restore was NOT proven. Retry; if it keeps failing, check the "
+              f"scratch target's schema and the tenancy rows its foreign keys "
+              f"reference (runbook preconditions 3-4) — a missing parent row "
+              f"never clears on a retry.", file=sys.stderr)
+        return 1
     except RecordBackupError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
         return 1
 
     # Retention is BEST-EFFORT and runs AFTER the artifact is durable. A prune
