@@ -1499,3 +1499,14 @@ What did NOT move with the retirement is the measured property finding (`#9397`/
 (`session_link.link_entity`, `subject_binding.bind_point_subjects`) and `idx` is re-materialized
 in an inline pattern map by `cache_projection.relation_statement`. The wider census changed the
 count, not that measurement, and `tests/test_9397_about_edge_properties.py` still pins it.
+
+## The narration stamp left §1, and the classification states its own ground (2026-10-22, `#9523`)
+
+`#9523` (W1b) corrected the id classification in §1 with a `corrected 2026-10-21` stamp and a
+"Provenance of that correction" preamble. That is change narration in a design document, and it
+redded `test_the_design_documents_carry_no_issue_state_or_change_narration` on `main`. The stamp and
+the provenance preamble are removed. The ground the classification rests on is stated in the same
+place instead — a re-derivation against `tortoise/ids.py` / `sdk._ULID_RE` and
+`tests/test_identity_contract.py`, **not** a re-census of the live graph, with the populations still
+the 2026-10-08 measurement — so the passage states the rule it settled on rather than the history of
+its own wording. The two-store finding and the three id groups are unchanged.
