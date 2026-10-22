@@ -330,7 +330,12 @@ WHAT THIS PINS
    claim, and it did not reproduce: measured at this PR's base (`81f5594dc`, fresh
    process, `_literal_files()` warm, two runs) the rebuild is 2.5–3.0 s of
    `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over half the arm**, not a small
-   fraction of it. `_unsettleable_magnitudes()` states that rule once for the word form
+   fraction of it. (The first measurement belongs to a DIFFERENT tree, `69390341f`, and
+   reads 1.70 s / 1.81 s of 3.35 s / 3.14 s; `#9549` changed the census universe between
+   them, so the two sets are not interchangeable and neither is a re-measurement of the
+   other. `_unsettleable_magnitudes`' docstring carries both rows and the percentages
+   recomputed from them, and an arm there holds the two prose sites to the same rows.)
+   `_unsettleable_magnitudes()` states that rule once for the word form
    (a magnitude — digit or word — is allowed only with the framing that produced it),
    and `test_the_gate_walk_comment_asserts_no_unmeasured_magnitude` applies it to the
    live comment, with its non-vacuity — and the legs that pin its per-line framing
@@ -4023,15 +4028,28 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
     `2.6 min`) cannot see it: a proportion spelled in words carries no number for it to
     match, so the sentence survived the guard written to delete exactly that claim — and
     it is **false at the
-    natural reading.** Measured at this PR's base (fresh process, `_literal_files()`
-    warm, two runs) with `_literal_files()` replaced by a rebuild over
-    `_sources().items()`:
-    the rebuild costs 2.5–3.0 s of `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over
-    half** the arm, not a small fraction of it. (The first measurement, at
-    `69390341f`, read 1.70 s / 1.81 s of 3.35 s / 3.14 s — the same over-half
-    direction on a box ~15 % faster, so a slightly lower ratio.) It reaches ~17 % only
-    if "this arm" is read as the whole gate walk, with the ungated pass folded in —
-    which is not the arm the comment sits in. A ratio whose truth depends on an unstated
+    natural reading.** Measured with `_literal_files()` replaced by a rebuild over
+    `_sources().items()`, fresh process, `_literal_files()` warm, two runs per tree
+    (`arm` = `_narrow_gate_walk_sites`'s own cost, `ungated` = the pass it gates):
+
+    - `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, arm 3.35 s / 3.14 s,
+      ungated 10.81 s / 9.90 s.
+    - `81f5594dc` (this PR's base, `#9549`): rebuild 2.50 s / 3.00 s, arm 3.90 s /
+      4.40 s. `#9549` changed the census universe, so these absolute times are NOT the
+      ones above; the direction (over half the arm) is the same on both trees.
+
+    Read against the ARM the comment sits in, the rebuild is **over half** of it, not a
+    small fraction. Each percentage below is RECOMPUTED from the row above it by
+    `test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name`, so a claim
+    and the figures it is made from cannot drift apart again (`#9501` review: the
+    percentages here were hand-computed once, and one of them was attributed to a
+    reading — and a tree — it did not belong to):
+
+    - `69390341f` arm 51 % / 58 %, ungated 16 % / 18 %, folded 12 % / 14 %.
+    - `81f5594dc` arm 64 % / 68 %.
+
+    The ungated and FOLDED readings are the only ones that make it look small, and
+    neither is the arm the comment sits in: a ratio whose truth depends on an unstated
     reading of "this arm" is the same unsettleable claim as `10.36 s of 10.85 s`,
     written so the duration guard misses it.
 
@@ -4106,6 +4124,238 @@ def _unsettleable_magnitudes(comment: str) -> list[str]:
                 continue
             found.append(match.group(match.lastgroup))
     return list(dict.fromkeys(found))
+
+
+#: One MEASURED row in `_unsettleable_magnitudes`'s paragraph: a COMMIT, and the three
+#: wall-clock pairs it produced. The ratio arm below RECOMPUTES every percentage claim
+#: from these, so a claim and its figures cannot drift apart (`#9501` review).
+_MAGNITUDE_MEASURED_ROW = re.compile(
+    r"^[ \t]*-[ \t]*`(?P<sha>[0-9a-f]{7,40})`[^\n]*?:[ \t]*rebuild "
+    r"(?P<rebuild>[0-9.]+ s\s*/\s*[0-9.]+ s),\s*arm "
+    r"(?P<arm>[0-9.]+ s\s*/\s*[0-9.]+ s)"
+    r"(?:,\s*ungated (?P<ungated>[0-9.]+ s\s*/\s*[0-9.]+ s))?\.",
+    re.MULTILINE,
+)
+
+#: One CLAIM row: the same commit, and the rebuild as a percentage of each reading.
+#: `ungated`/`folded` are omitted where the measured row carries no figures for them.
+_MAGNITUDE_CLAIM_ROW = re.compile(
+    r"^[ \t]*-[ \t]*`(?P<sha>[0-9a-f]{7,40})` arm "
+    r"(?P<arm>[0-9]+ % / [0-9]+ %)"
+    r"(?:, ungated (?P<ungated>[0-9]+ % / [0-9]+ %))?"
+    r"(?:, folded (?P<folded>[0-9]+ % / [0-9]+ %))?\.",
+    re.MULTILINE,
+)
+
+#: A stated percentage is rounded to a whole point, so recomputation agrees within one.
+_MAGNITUDE_RATIO_TOLERANCE_PP = 1.5
+
+#: The module docstring's base-anchored figures, which must be the SAME set the
+#: `81f5594dc` measurement row carries — the two prose sites state one measurement.
+_BASE_MEASUREMENT_PROSE = re.compile(
+    r"measured at this PR's base \(`(?P<sha>[0-9a-f]{7,40})`.*?the rebuild is "
+    r"(?P<rlo>[0-9.]+)–(?P<rhi>[0-9.]+) s of\s+`_narrow_gate_walk_sites`'s own "
+    r"(?P<alo>[0-9.]+)–(?P<ahi>[0-9.]+) s",
+    re.DOTALL,
+)
+
+
+def _seconds(text: str) -> list[float]:
+    """The numbers out of a `1.70 s / 1.81 s` (or `51 % / 58 %`) pair."""
+    return [float(number) for number in re.findall(r"\d+(?:\.\d+)?", text)]
+
+
+def _magnitude_ratios(figures: dict[str, list[float]], framing: str) -> list[float]:
+    """The two runs' percentages of the rebuild under ONE reading, row order kept."""
+    rebuild = figures["rebuild"]
+    if framing == "arm":
+        total = figures["arm"]
+    elif framing == "ungated":
+        total = figures["ungated"]
+    elif figures["ungated"]:
+        total = [
+            own + ungated
+            for own, ungated in zip(figures["arm"], figures["ungated"], strict=True)
+        ]
+    else:
+        total = []
+    if len(total) != len(rebuild):
+        return []
+    return [
+        100.0 * rebuild_run / total_run
+        for rebuild_run, total_run in zip(rebuild, total, strict=True)
+    ]
+
+
+def _magnitude_ratio_findings(prose: str) -> list[str]:
+    """What is wrong with the ratio claims in `prose`, recomputed from its own rows.
+
+    Three ways to be wrong, all MEASURED rather than argued: a percentage with no
+    commit-anchored figures behind it, a percentage that disagrees with the figures of
+    the commit it names, and a percentage written OUTSIDE a claim row — which no arm
+    recomputes, so it is free to rot. That last shape is the defect this replaces: the
+    paragraph said `It reaches ~17 % only if "this arm" is read as the whole gate walk,
+    with the ungated pass folded in`, and the folded reading is 12 % / 14 %.
+    """
+    findings: list[str] = []
+    measured: dict[str, dict[str, list[float]]] = {}
+    for row in _MAGNITUDE_MEASURED_ROW.finditer(prose):
+        measured[row.group("sha")] = {
+            "rebuild": _seconds(row.group("rebuild")),
+            "arm": _seconds(row.group("arm")),
+            "ungated": _seconds(row.group("ungated") or ""),
+        }
+    if not measured:
+        findings.append(
+            "the prose states no commit-anchored measurement row, so every "
+            "percentage in it is unrecomputable"
+        )
+    claims = list(_MAGNITUDE_CLAIM_ROW.finditer(prose))
+    if not claims:
+        findings.append(
+            "the prose states no recomputed percentage row, so its ratio claims name "
+            "neither the commit nor the reading they are a percentage OF"
+        )
+    for row in claims:
+        sha = row.group("sha")
+        figures = measured.get(sha)
+        if figures is None:
+            findings.append(
+                f"`{sha}` is named in a percentage row but no measurement row carries "
+                "it, so those percentages have no figures behind them"
+            )
+            continue
+        for framing in ("arm", "ungated", "folded"):
+            stated = row.group(framing)
+            computed = _magnitude_ratios(figures, framing)
+            if stated is None:
+                if computed:
+                    findings.append(
+                        f"`{sha}` carries the figures for the {framing} reading and "
+                        "the percentage row omits it"
+                    )
+                continue
+            stated_runs = _seconds(stated)
+            if not computed:
+                findings.append(
+                    f"the percentage row states a {framing} reading for `{sha}`, "
+                    "whose measurement row carries no figures for it"
+                )
+                continue
+            if len(stated_runs) != len(computed):
+                findings.append(
+                    f"`{sha}` {framing}: {len(stated_runs)} stated figure(s) for "
+                    f"{len(computed)} measurement(s)"
+                )
+                continue
+            for state, recomputed in zip(stated_runs, computed, strict=True):
+                if abs(state - recomputed) > _MAGNITUDE_RATIO_TOLERANCE_PP:
+                    findings.append(
+                        f"`{sha}` {framing}: the prose states {state:g} %, its own "
+                        f"figures give {recomputed:.1f} %"
+                    )
+    for bare in re.finditer(r"\d+(?:\.\d+)? %", prose):
+        if not any(row.start() <= bare.start() < row.end() for row in claims):
+            findings.append(
+                f"{bare.group()!r} is stated in prose that no arm recomputes, so it "
+                "is free to rot: state it in a percentage row"
+            )
+    return findings
+
+
+#: The measurement paragraph of `_unsettleable_magnitudes`' docstring VERBATIM as it
+#: shipped before this correction — figures anchored to "this PR's base" with
+#: `69390341f`'s numbers in the parentheses, and `~17 %` attributed to the FOLDED
+#: reading, which that arithmetic gives 12 % / 14 % for. Quoted rather than re-created,
+#: so the non-vacuity leg below is a statement about the shipped text.
+_PREFIX_MAGNITUDE_PARAGRAPH = """\
+Measured at this PR's base (fresh process, `_literal_files()`
+warm, two runs) with `_literal_files()` replaced by a rebuild over `_sources().items()`:
+the rebuild costs 2.5–3.0 s of `_narrow_gate_walk_sites`'s own 3.9–4.4 s — **over
+half** the arm, not a small fraction of it. (The first measurement, at
+`69390341f`, read 1.70 s / 1.81 s of 3.35 s / 3.14 s — the same over-half
+direction on a box ~15 % faster, so a slightly lower ratio.) It reaches ~17 % only
+if "this arm" is read as the whole gate walk, with the ungated pass folded in —
+which is not the arm the comment sits in.
+"""
+
+
+def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
+    """The word form's percentages are computed from the figures beside them (`#9501`).
+
+    ⚠️ **A hand-computed percentage is a claim, and this paragraph shipped two wrong
+    ones.** The `#9501` review found it attributing `1.70 s / 1.81 s of 3.35 s / 3.14
+    s` to this PR's base (`81f5594dc`) while its own parentheses said `69390341f`, and
+    attaching `~17 %` to the reading "with the ungated pass folded in" — which that
+    arithmetic gives 12 % / 14 % for, the ~16–18 % belonging to the ungated pass
+    ALONE. A figure whose provenance does not survive recomputation is the defect
+    class this file exists to close, one alphabet over from the comment it guards.
+
+    So the paragraph carries its measurements as commit-anchored ROWS and its claims as
+    rows this arm recomputes: each percentage must equal the rebuild over the reading it
+    names, for the commit it names, from figures stated in the same paragraph — and no
+    percentage may stand outside such a row.
+
+    Non-vacuity, three legs: (1) the paragraph as it shipped before this correction,
+    quoted verbatim in `_PREFIX_MAGNITUDE_PARAGRAPH`, produces findings — it states a
+    percentage nothing recomputes; (2) that shipped percentage re-written as a `folded`
+    row reds on the ARITHMETIC (the row's own figures give 12 % / 14 %, it claimed
+    ~17 %), so the comparison is live rather than the row-shape check alone; (3) the
+    module docstring's base-anchored figures must be the same set the `81f5594dc` row
+    carries, so the two prose sites cannot name different trees for one measurement
+    again.
+    """
+    prose = inspect.getdoc(_unsettleable_magnitudes) or ""
+    findings = _magnitude_ratio_findings(prose)
+    assert findings == [], (
+        "the magnitude paragraph's ratio claims do not recompute against the figures "
+        f"it states: {findings}"
+    )
+
+    stale = _magnitude_ratio_findings(_PREFIX_MAGNITUDE_PARAGRAPH)
+    assert stale, (
+        "the paragraph as it shipped before this correction passes the recomputation "
+        "check, so this arm pins nothing"
+    )
+    assert any("no recomputed percentage row" in finding for finding in stale), (
+        f"the shipped text reds for the wrong reason: {stale}"
+    )
+
+    folded_claim = (
+        "- `69390341f` (the `#9516` merge): rebuild 1.70 s / 1.81 s, "
+        "arm 3.35 s / 3.14 s, ungated 10.81 s / 9.90 s.\n"
+        "- `69390341f` arm 51 % / 58 %, ungated 16 % / 18 %, folded 17 % / 17 %."
+    )
+    mismatched = _magnitude_ratio_findings(folded_claim)
+    assert any("folded" in finding and "figures give" in finding for finding in mismatched), (
+        "a folded percentage that disagrees with its own row's figures passes, so the "
+        f"recomputation is not comparing them: {mismatched}"
+    )
+
+    base = _BASE_MEASUREMENT_PROSE.search(__doc__ or "")
+    assert base is not None, (
+        "the module docstring no longer states the base measurement in the form "
+        "`measured at this PR's base (`<sha>`, …) the rebuild is A–B s of "
+        "`_narrow_gate_walk_sites`'s own C–D s`, so the two prose sites cannot be held "
+        "to the same rows"
+    )
+    rows = {row.group("sha"): row for row in _MAGNITUDE_MEASURED_ROW.finditer(prose)}
+    assert base.group("sha") in rows, (
+        f"the module docstring anchors its figures to `{base.group('sha')}`, and no "
+        "measurement row in `_unsettleable_magnitudes`' docstring carries that commit"
+    )
+    row = rows[base.group("sha")]
+    for stated, measured in (
+        ((base.group("rlo"), base.group("rhi")), row.group("rebuild")),
+        ((base.group("alo"), base.group("ahi")), row.group("arm")),
+    ):
+        assert sorted(round(float(value), 1) for value in stated) == sorted(
+            round(value, 1) for value in _seconds(measured)
+        ), (
+            f"`{base.group('sha')}`: the module docstring states {stated} and the "
+            f"measurement row carries {measured!r} — the two prose sites describe "
+            "different measurements of the same tree"
+        )
 
 
 def test_the_gate_walk_comment_asserts_no_unmeasured_magnitude():
