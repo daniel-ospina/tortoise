@@ -3795,10 +3795,12 @@ def _unframed_durations(comment: str) -> list[str]:
     checked on BOTH sides of it (`_denied`). ⚠️ The denial VOCABULARY is open, and that
     boundary is stated rather than implied (measured by the `#9522` re-review):
     `--durations=0 was never taken` reds, and so do the contraction (`wasn't taken`),
-    `was skipped`, `was omitted` and `is unavailable` spellings, but a phrase the list
-    does not know (`never done here` in a new SENTENCE, `--durations=0 wasn't really
-    used` split across a `.`) is framed. The list is a blacklist of spellings, not a
-    parse, so a new denial phrasing is a one-line addition, not a rewording dodge.
+    `was skipped`, `was omitted` and `is unavailable` spellings. What stays framed is
+    only what the SENTENCE END puts out of reach: `never done here` after a `.`, or
+    `--durations=0. wasn't really used`, is framed — and dropping that `.`
+    (`--durations=0 wasn't really used`, a single sentence) reds the same words. The
+    list is a blacklist of spellings, not a parse, so a new denial phrasing is a
+    one-line addition, not a rewording dodge.
     Two costs are stated rather than found later: `_CLAUSE_BREAK` ends a denial's reach
     at a sentence `.`, so `# 10.36 s --durations=0. Never taken.` is FRAMED (the denial
     is a new sentence), and a denial separated from its marker by a comma does not
@@ -4027,6 +4029,39 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
             f"{strong_denial!r} denies the framing it names, parenthesised or "
             f"coordinated or not ({_unframed_durations(strong_denial)}) — a strong "
             "denial is not a side remark, so the after-side boundary must not stop it"
+        )
+    # ⚠️ The SENTENCE-END boundary the docstring STATES, executed. The `#9522` review
+    # measured a prose defect here: the docstring said `--durations=0 wasn't really
+    # used` "split across a `.`" is FRAMED while printing that example with no period,
+    # where `_DENIAL_STRONG` reads `wasn't` and the line REDS. Prose and predicate
+    # disagreed in the same sentence and no arm could tell, so the FRAMED example is now
+    # read out of the docstring itself and both sides of the boundary are run.
+    docstring_prose = " ".join((_unframed_durations.__doc__ or "").split())
+    assert "`--durations=0. wasn't really used`" in docstring_prose, (
+        "the docstring no longer states the boundary this arm executes — the FRAMED "
+        "example must carry the `.`, because the unpunctuated form is a single "
+        "sentence and reds"
+    )
+    for new_sentence in (
+        # the `.` ends the marker's sentence, so a strong denial beyond it does not
+        # reach the marker: this is the GREEN side the docstring states
+        "# 10.36 s --durations=0. wasn't really used",
+        "# 10.36 s --durations=0. never done here",
+    ):
+        assert not _unframed_durations(new_sentence), (
+            f"{new_sentence!r} states its denial in a NEW sentence, so the marker's "
+            f"own sentence frames the figure ({_unframed_durations(new_sentence)}) — "
+            "that `.` is the only reason the docstring's example is framed"
+        )
+    for one_sentence in (
+        "# 10.36 s --durations=0 wasn't really used",
+        "# 10.36 s --durations=0 never done here",
+    ):
+        assert _unframed_durations(one_sentence) == ["10.36 s"], (
+            f"{one_sentence!r} is the SAME words with the `.` dropped, so the denial "
+            f"sits in the marker's own sentence and must red "
+            f"({_unframed_durations(one_sentence)}) — otherwise the boundary the "
+            "docstring states is not the one the predicate implements"
         )
 
     # ── the SECOND fix this predicate claims: framing is per LINE, not whole-text.
