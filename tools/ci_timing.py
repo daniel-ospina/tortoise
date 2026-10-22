@@ -533,10 +533,10 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
     1. a nodeid a PROGRESS line already named — authoritative, unambiguous, and pytest writes the
        progress lines before the summary (bucketed by length so a failure-dense leg is not
        quadratic);
-    2. a separator whose remainder OPENS with pytest's longrepr shape (see `_LONGREPR_RE`) — the
-       only signal that is not bracket arithmetic, and it survives a message carrying its own
-       brackets PROVIDED the candidate's head is bracket-consistent with the whole tail (`depth
-       == 0` or `head delta == whole delta`) — the guard below names the case that rules out;
+    2. a depth-0 separator whose remainder OPENS with pytest's longrepr shape (see
+       `_LONGREPR_RE`) — the only signal that is not bracket arithmetic. Depth-0 only: an
+       in-parameter separator is refused, which also gives up the unbalanced-id case; the guard
+       below states the trade;
     3. a separator whose head has never gone bracket-negative AND whose bracket delta equals the
        whole tail's (sound when the message carries no brackets: then the id's delta IS the tail's);
     4. the same delta test without the non-negative requirement;
@@ -567,12 +567,11 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
         # measured; publishing such an id is the defect this pass must not reintroduce).
         #
         # ⚠️ DECLARED TRADE: a bracket-unbalanced id whose MESSAGE opens with a longrepr shape
-        # (`test_p[a[b] - assert ']' == 'a`) is the one case depth-0 gives up — it now splits at
-        # the ladder's delta candidate instead of at the in-parameter separator. The two families
-        # are indistinguishable by bracket shape (measured over both, 70 shapes), and the id it
-        # publishes there is still one pytest could report, unlike the pre-#9134 behaviour, which
-        # dropped the line entirely. Pinned by
-        # `test_a_bracket_carrying_message_is_a_declared_residual`.
+        # (`test_p[a[b] - assert ']' == 'a`) is given up — it resolves at a LATER rung of the
+        # ladder, so the published id may carry part of the message and need not be a nodeid
+        # pytest would report. Bracket shape alone cannot separate it from the family above
+        # (measured over both, 70 shapes), and pre-#9134 that line was dropped entirely.
+        # Pinned as-is by `test_a_bracket_carrying_message_is_a_declared_residual`.
         if clean and _depth == 0 and _LONGREPR_RE.match(tail[at + 1:]):
             return tail[:at]
     for at, _depth, clean in cands:
