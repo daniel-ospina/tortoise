@@ -1481,21 +1481,26 @@ class TortoiseEP:
         # already written half a pass is not fail-closed, and the caller could
         # not diagnose it — the traceback names a sort, not the graph. So the one
         # place every affected claim is collected refuses, before `_load_cache`
-        # and before any posterior is stamped, and names the repair.
+        # and before any posterior is computed, and names the repair.
+        # (NOT claim-write-free on every path: the #2884 evidence pre-write at
+        # the top of `run()` has already persisted a caller-supplied prior and
+        # cleared the stale posterior of a non-baseline evidence claim. The
+        # message says "no posterior is computed or stamped", which is what this
+        # guard actually buys.)
         if None in affected:
-            _idless = sum(1 for _c in affected if _c is None)
             raise UnaddressableClaimError(
-                f"EP cannot run: {_idless} node(s) in this run's affected set "
-                "carry no `id`. An id-less :Point wired as an operator's claim "
-                "(or as a direct-edge endpoint) cannot be addressed by EP — "
-                "every claim is keyed on `id` for hydration, for message "
-                "caching and for the posterior write-back — so it can be "
-                "neither computed nor stamped, and no SDK caller can repair it. "
-                "Refused BEFORE any posterior was stamped, so nothing is "
-                "half-written (#9275). Find and repair the node(s):\n"
+                "EP cannot run: this run's affected set contains a claim id that "
+                "is NULL — a :Point wired as an operator's claim carries no "
+                "`id`. Such a node cannot be addressed by EP (every claim is "
+                "keyed on `id` for hydration, for message caching and for the "
+                "posterior write-back), so it can be neither computed nor "
+                "stamped, and no SDK caller can repair it. Refused before EP "
+                "runs, so no posterior is computed or stamped (#9275). Find "
+                "and repair the node(s) — ONE NEW id per node, because a single "
+                "literal would mint the duplicate-id shape #7822:\n"
                 "  MATCH (n:Point) WHERE n.id IS NULL "
-                "RETURN n.pointKind, left(coalesce(n.content, ''), 80)\n"
-                "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<uuid>'  "
+                "RETURN id(n), n.pointKind, left(coalesce(n.content, ''), 80)\n"
+                "  MATCH (n:Point) WHERE n.id IS NULL SET n.id = '<a new uuid>'  "
                 "-- or DETACH DELETE it"
             )
         # Final strip: FAIL-SAFE only — every admission point into `affected`
