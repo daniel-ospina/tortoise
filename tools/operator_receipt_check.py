@@ -509,14 +509,38 @@ def check_receipt(
     # malformed receipt as a non-dict `resolved_config`: refused BY NAME, never
     # an uncaught TypeError that prints no rule at all.
     session_results = receipt.get("session_results")
+    # The list-ness is captured BEFORE the coercion, so a non-list value is
+    # refused for what it IS (one refusal by name) rather than a second time as
+    # "absent or empty" — a value that was neither (#9618 review, nit).
+    malformed_duplicate = False
     if session_results is not None and not isinstance(session_results, list):
         _fail(rules, "E4-NUMERATOR",
               "session_results: expected a list, got "
               f"{type(session_results).__name__} — the per-session duplicate "
               "cannot be bound to the per-edge rows")
         session_results = []
+        malformed_duplicate = True
+    planted_is_denominator = isinstance(planted, int) \
+        and not isinstance(planted, bool) and planted > 0
+    # ⛔ An ABSENT duplicate is a refusal, not a pass: `runner.py` always writes
+    # `session_results`, so a receipt without it is not a receipt the runner
+    # produced, and treating "no second copy" as "nothing to disagree with"
+    # makes the cross-check opt-in by the artifact under audit.
+    if planted_is_denominator and not malformed_duplicate and not session_results:
+        _fail(rules, "E4-NUMERATOR",
+              "receipt.session_results: absent or empty — a completed run always "
+              "publishes the per-session duplicate, so its absence is a receipt "
+              "defect, not a clean bill for the cross-check")
+    # The ids the duplicate ACTUALLY binds, collected as the loop walks it.
+    # `duplicate_shape_ok` records whether every duplicate ENTRY was bindable at
+    # all: a malformed entry is refused by its own named rule above, and the
+    # coverage arm below must not append a second, misleading refusal about
+    # "covering nothing" to a shape error it did not cause.
+    duplicate_ids: set[str] = set()
+    duplicate_shape_ok = True
     for entry in session_results or []:
         if not isinstance(entry, dict):
+            duplicate_shape_ok = False
             _fail(rules, "E4-NUMERATOR",
                   "session_results[]: not an object — the per-session duplicate "
                   "cannot be bound to the per-edge rows")
@@ -524,6 +548,7 @@ def check_receipt(
         session_id = entry.get("session_id") or "?"
         planted_rows = entry.get("planted_operators")
         if not isinstance(planted_rows, list):
+            duplicate_shape_ok = False
             # A malformed-but-parseable duplicate is a NAMED refusal, not a
             # traceback: `2` is reserved for an unreadable FILE, and an
             # uncaught TypeError here would print no rule at all (the same
@@ -535,12 +560,14 @@ def check_receipt(
             continue
         for duplicate in planted_rows:
             if not isinstance(duplicate, dict):
+                duplicate_shape_ok = False
                 _fail(rules, "E4-NUMERATOR",
                       f"session_results[{session_id!r}].planted_operators: "
                       "entry is not an object")
                 continue
             edge_id = duplicate.get("id")
             if not isinstance(edge_id, str):
+                duplicate_shape_ok = False
                 # `results.get(<dict>)` raises `unhashable type` — a malformed
                 # duplicate must be refused BY NAME, never crash the run.
                 _fail(rules, "E4-NUMERATOR",
@@ -548,6 +575,7 @@ def check_receipt(
                       f"{edge_id!r} is not a string — the duplicate cannot be "
                       "bound to the per-edge rows")
                 continue
+            duplicate_ids.add(edge_id)
             row = results.get(edge_id)
             if not isinstance(row, dict):
                 _fail(rules, "E4-NUMERATOR",
@@ -561,6 +589,26 @@ def check_receipt(
                           f"{edge_id}: session_results says {key}="
                           f"{duplicate.get(key)!r} while the graded row says "
                           f"{row.get(key)!r} — one artifact, two answers")
+
+    # ⛔ And the duplicate must COVER the graded rows, not merely exist: the
+    # refusal above binds the entries that are PRESENT, so an artifact that
+    # supplies one agreeing entry (or empties `planted_operators` in place,
+    # leaving seven keys) still chose WHICH rows get cross-checked — the same
+    # "opt-in by the artifact under audit" defect the absent/empty arm closes,
+    # one level in (#9618 review, P2). The committed receipt clears this
+    # strictly (15 duplicate ids == the 15 graded rows), so it is not a bar a
+    # real run cannot meet; it only forbids a subset.
+    if planted_is_denominator and not malformed_duplicate and duplicate_shape_ok \
+            and session_results and isinstance(results, dict) and results:
+        uncovered = sorted(set(results) - duplicate_ids)
+        if uncovered:
+            _fail(rules, "E4-NUMERATOR",
+                  "receipt.session_results covers "
+                  f"{len(duplicate_ids & set(results))} of the {len(results)} "
+                  "graded rows — the per-session duplicate must bind EVERY row "
+                  "the receipt grades, so that the cross-check cannot be made "
+                  "opt-in by the artifact under audit (uncovered: "
+                  f"{uncovered[:5]}{'…' if len(uncovered) > 5 else ''})")
 
     if named_misses:
         _pass(rules, "E4-CAUSE",
