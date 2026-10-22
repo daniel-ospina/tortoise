@@ -1564,6 +1564,12 @@ two-store finding and the three id groups are unchanged.
 
 `#9562` (main `22deecf83`) had already taken out the two words the narration guard matched — the
 `corrected` before the date — so that arm is green there. What remained, and what this change
-removes, is the preamble and the self-reference, which the guard's arms do not reach. The entry's
-own pointer is pinned by
+removes, is the preamble and the self-reference — shapes the guard's arms did not reach either. That
+second gap is closed here too: `_CHANGE_NARRATION` now carries `Provenance of (that|this)
+(correction|change)` and `the|this sentence|passage|paragraph|line above records|states|…`, each
+measured at 0 hits across the three design documents at this head (so the widening reds nothing) and
+pinned in both directions — the verbatim pre-fix lines and a near-miss — in
+`test_the_class_check_is_neither_dead_nor_noisy`. Removing the word an arm happens to match is not
+the same as pinning the class, which is why the class is now pinned. The entry's own pointer is
+pinned by
 `tests/test_extractor_v4_citation_rot.py::test_the_changelog_entry_names_the_section_the_stamp_actually_left`.
