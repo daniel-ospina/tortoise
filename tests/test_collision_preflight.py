@@ -2117,8 +2117,15 @@ class CollisionPreflightTest(unittest.TestCase):
         # or a reused worktree whose branch says `chore/bump-2024-10` would read
         # a live lane as free. This is the fail-closed direction: a false CLEAN
         # is strictly worse than a false COLLISION.
+        # ⛔ THE METRIC/SIZE NAMESPACES ARE CONTROL CASES, not filler: a
+        # fresh-context review found that an earlier, wider prefix list read
+        # `perf/1200-rps-cache` and `ci/1800-timeout` as ISSUE claims, so a real
+        # PATH hit would have been cancelled by a number that names no issue.
         for i, branch in enumerate((f"chore/bump-2024-10", f"release-1.2.3",
-                                    f"fix/{ISSUE}1-lookalike")):
+                                    f"fix/{ISSUE}1-lookalike",
+                                    "perf/1200-rps-cache", "ci/1800-timeout",
+                                    "chore/5000-graph-cleanup",
+                                    "feat/2048-batch")):
             with self.subTest(branch=branch):
                 self.add_worktree(f"wt-{ISSUE}-nonclaim-{i}", branch=branch)
                 rc, out = self.run_tool()
@@ -2134,7 +2141,14 @@ class CollisionPreflightTest(unittest.TestCase):
             ("fix/9397-about-edge-properties", 9397),
             ("refs/heads/fix/9397-about-edge-properties", 9397),
             ("feat/9397-x", 9397),
-            ("test/9397-x", 9397),
+            # `test/` `docs/` `chore/` ALSO carry `<n>-<slug>` names here (1163
+            # remote refs measured across those five prefixes), but the number in
+            # those namespaces can be a metric or a size, and EXCLUDING them costs
+            # only a residual over-block — the safe direction — while including
+            # them costs a false CLEAN. Widening needs a measurement, not an
+            # analogy.
+            ("test/9397-x", None),
+            ("docs/9397-x", None),
             # the branch names THIS issue → no contradiction
             ("fix/3061-mine", None),
             # …ANYWHERE in the name, even after a foreign claim: the order the
@@ -2151,6 +2165,10 @@ class CollisionPreflightTest(unittest.TestCase):
             ("mergify/merge-queue/6160bad001", None),
             ("(detached)", None),
             ("", None),
+            # this issue inside a hex digest is NOT a reference (#3611/#4935), so
+            # the branch's foreign claim is the only claim present → demotes the
+            # PATH hit, deliberately and documented in the helper's docstring.
+            ("fix/9397-abc3061def", 9397),
         ]
         for branch, expected in cases:
             with self.subTest(branch=branch):

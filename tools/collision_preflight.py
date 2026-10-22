@@ -1245,15 +1245,19 @@ def _is_generated_branch(name: str) -> bool:
     return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
 
 
-#: Branch namespaces a LANE chooses, in the shape this repo uses to name a
-#: claim: `<type>/<issue-number>-<slug>`. Narrow ON PURPOSE — see
-#: `_branch_names_other_issue`, which matches ONLY this shape. A name outside it
-#: (`chore/bump-2024-10`, a version, a date) is not read as naming an issue, so
-#: a path substring cannot be cancelled by a number that is not a claim.
-_LANE_BRANCH_CLAIM = re.compile(
-    r"(?:fix|feat|chore|test|tests|docs|refactor|perf|ci|build|wip|spec|spike)"
-    r"/#?(\d{3,7})(?![0-9])(?:-|$)"
-)
+#: Branch namespaces a LANE chooses that name an ISSUE, in the shape this repo
+#: uses for a claim: `<type>/<issue-number>-<slug>`.
+#:
+#: ⛔ TWO PREFIXES, NOT THE OBVIOUS TEN, AND THE WIDTH IS A FAIL-CLOSED DECISION.
+#: An earlier cut listed `perf|ci|build|chore|docs|refactor|test|…` — plausible
+#: until the first fresh-context review produced `perf/1200-rps-cache`,
+#: `ci/1800-timeout`, `feat/2048-batch` and `chore/5000-graph-cleanup`: in those
+#: namespaces the number is a METRIC or a SIZE, not an issue, so the helper would
+#: have cancelled a real PATH hit with evidence that names no issue at all.
+#: `fix/` and `feat/` are the two where `<n>-<slug>` is an issue reference in
+#: practice. WIDENING THIS NEEDS A MEASURED ARGUMENT AND A TEST, because every
+#: entry is a licence to demote a blocking hit.
+_LANE_BRANCH_CLAIM = re.compile(r"(?:fix|feat)/#?(\d{3,7})(?![0-9])(?:-|$)")
 
 
 def _branch_names_other_issue(branch: str, issue: int) -> int | None:
@@ -1275,17 +1279,29 @@ def _branch_names_other_issue(branch: str, issue: int) -> int | None:
       * a generated branch (`mergify/merge-queue/…`) claims nothing. It is
         excluded BEFORE this test by the caller, so the PATH still blocks —
         `test_worktree_on_a_generated_branch_is_still_found_by_its_path`;
-      * a name with no claim shape (`chore/bump-2024-10`, `release-1.2.3`)
-        returns None: a version or a date is not an issue reference;
+      * a name with no claim shape (`chore/bump-2024-10`, `release-1.2.3`), or
+        a number in a namespace that is not an issue reference
+        (`perf/1200-rps-cache`, `ci/1800-timeout`), returns None: a version, a
+        date, a metric and a size are not claims, and cancelling a real PATH hit
+        on one would be a false CLEAN;
       * a branch that names THIS issue returns None (the branch is the claim);
       * a detached worktree (`(detached)`) returns None — with no branch name
         there is no contradiction, so the path keeps blocking.
 
-    The residual risk is stated rather than hidden: a worktree whose PATH was
-    created for issue N and whose branch later claims issue M is attributed to
-    M. That is the attribution the fleet board makes too (a lane is identified
-    by its branch slug), so the two surfaces agree instead of the path silently
-    out-voting the branch.
+    ⛔ THE RESIDUAL IS STRUCTURAL AND IS STATED RATHER THAN HIDDEN: nothing in
+    the listing distinguishes "(stale PATH, live branch)" from "(live PATH,
+    branch recycled from another issue)". This rule chooses the BRANCH in both
+    cases, because the branch is the field the lane deliberately named and it is
+    the same attribution the fleet board makes (a lane is identified by its
+    branch slug) — so the two surfaces agree instead of the path silently
+    out-voting the branch. The alternative leaves the original defect in place
+    (a leftover directory name freezes an issue forever, with no dismissal
+    switch by design, #8175), which is the failure this rule exists to end.
+
+    A branch whose only mention of this issue is INTERIOR TO A HEX DIGEST
+    (`fix/9397-abc3718def`) is not read as naming it — that is #3611/#4935's
+    existing rule, not an exception made here — so such a branch demotes the
+    PATH hit exactly like any other foreign claim.
     """
     claimed_other: int | None = None
     for match in _LANE_BRANCH_CLAIM.finditer(branch or ""):
