@@ -465,8 +465,24 @@ _READ_CLAUSES = {"MATCH", "OPTIONAL MATCH"}
 #: The two boundaries a walk's bindings cannot cross (`_top_level_offsets` finds
 #: them outside brackets and strings): a `UNION` arm binds its OWN variables, and
 #: a comma-separated pattern is a second, independently matched walk.
+#:
+#: ⚠️ **The comma boundary is decided by CLAUSE, not by every top-level comma.**
+#: `_top_level_offsets(text, _COMMA)` finds the commas of a `WITH` projection list
+#: too, and there a comma separates ITEMS of one projection — evaluated in ONE
+#: scope — not two patterns. Splitting there cut `WITH r, n`'s window in two, so
+#: the registered fact fell outside the walk's window and `_scope_survives` (which
+#: correctly reports the projection as CARRYING `r`) was never consulted: `WITH r,
+#: n` / `WITH n, r` were reported ungrounded, the exact carrying projection
+#: `_walk_binding` and `_scope_survives` document as staying green (#9544 review
+#: P2). `_pattern_comma_offsets` decides each comma by the clause it sits in.
 _UNION_CLAUSE = re.compile(r"\bUNION\b", re.I)
 _COMMA = re.compile(r",")
+#: Clauses whose top-level commas separate INDEPENDENT patterns — the only commas a
+#: walk's fact cannot cross. In every other clause (`WITH`, `RETURN`, `SET`, …) a
+#: comma separates ITEMS of one projection, which are evaluated in one scope, so it
+#: ends no window. `CREATE`/`MERGE` are included because their `(a), (b)` patterns
+#: are independent matches in exactly the way a second `MATCH` pattern is.
+_PATTERN_CLAUSES = frozenset({"MATCH", "OPTIONAL MATCH", "MERGE", "CREATE"})
 
 #: A SCOPE boundary — the third way a NAME stops meaning the same relationship. A
 #: `WITH` re-projects the variables in scope: a name it does not carry is GONE, so a
@@ -999,6 +1015,45 @@ def _top_level_offsets(text: str, needle: re.Pattern[str]) -> list[int]:
     return hits
 
 
+def _pattern_comma_offsets(text: str) -> list[int]:
+    """Top-level commas that separate PATTERNS — never a projection's ITEM commas.
+
+    ⚠️ **`_top_level_offsets(text, _COMMA)` is not the pattern boundary, and
+    treating it as one cut a carrying projection in half.** Measured on the
+    pre-fix `_walk_spans`: `MATCH (s:Subject {id:$sid})-[r]->(n) WITH n, r MATCH
+    (x)-[r]->(y) RETURN type(r)` produced the windows `('… WITH n', 'r')` and
+    `(', r MATCH …', 'r')`, so the registered fact sat in the FIRST window, the
+    walk in the second, and `_scope_survives` — which correctly reports that
+    `WITH n, r` CARRIES `r` — was never consulted (#9544 review P2). `WITH r, n`
+    behaved identically.
+
+    A comma separates patterns only inside a clause that MATCHES them
+    (`_PATTERN_CLAUSES`); in a `WITH`/`RETURN` projection it separates items of
+    ONE projection, which are evaluated in one scope and cross no binding. The
+    clause is the nearest preceding TOP-LEVEL clause keyword, read by the same
+    `_PROJECTION_END` scanner that bounds a projection, so the two cannot agree
+    about the clause a comma belongs to and disagree about the boundary.
+
+    A comma with no clause keyword in front of it is treated as a boundary: no
+    valid Cypher query has one, and the conservative direction there is the
+    fail-open closure rather than a false red.
+    """
+    marks: list[tuple[int, str]] = []
+    for at in _top_level_offsets(text, _PROJECTION_END):
+        match = _PROJECTION_END.match(text, at)
+        assert match is not None, f"`_PROJECTION_END` matched nothing at {at}"
+        marks.append((at, " ".join(match.group(1).upper().split())))
+    marks.extend((at, "") for at in _top_level_offsets(text, _COMMA))
+    offsets: list[int] = []
+    clause = ""
+    for at, keyword in sorted(marks):
+        if keyword:
+            clause = keyword
+        elif not clause or clause in _PATTERN_CLAUSES:
+            offsets.append(at)
+    return offsets
+
+
 def _walk_binding(query: str, start: int) -> str:
     r"""What IDENTIFIES the walk at `start` — its relationship VARIABLE, or its own text.
 
@@ -1099,9 +1154,13 @@ def _walk_windows(query: str) -> tuple[tuple[str, str], ...]:
       overlap came from the second arm's own `RETURN type(r)`);
     * a WINDOW — the boundaries below. Two hard boundaries, both of them things a
       walk's bindings cannot cross: a `UNION` (each arm binds its OWN variables, so
-      a constraint in one says nothing about the other) and a top-level COMMA (a
-      second pattern in one `MATCH` matches independently, exactly as the escape's
-      own justification said).
+      a constraint in one says nothing about the other) and a top-level COMMA in a
+      clause that MATCHES patterns (a second pattern in one `MATCH` matches
+      independently, exactly as the escape's own justification said). A comma in a
+      projection list is NOT a boundary: it separates the ITEMS of one projection,
+      which are evaluated in one scope — `_pattern_comma_offsets` decides by clause,
+      because splitting there discarded the registered fact of `WITH n, r` before
+      the scope rule was ever asked (#9544 review P2).
 
     ⚠️ **A window is necessary and NOT sufficient,** which is the second half of
     this rule: a fact inside the window can still be a fact about a DIFFERENT walk
@@ -1144,7 +1203,9 @@ def _walk_spans(query: str) -> tuple[tuple[int, int, int, str], ...]:
     ]
     spans: list[tuple[int, int]] = []
     for low, high in windows:
-        local = [low + offset for offset in _top_level_offsets(query[low:high], _COMMA)]
+        local = [
+            low + offset for offset in _pattern_comma_offsets(query[low:high])
+        ]
         bounds = sorted({low, *local, high})
         spans.extend((bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1))
     return tuple(
@@ -1175,20 +1236,34 @@ def _scope_survives(query: str, fact_at: int, walk_at: int, binding: str) -> boo
     aggregate that drops the grouping variables (`WITH count(*) AS c`) are all
     barriers: the relationship itself does not survive them.
 
-    ⚠️ **A `CALL { … }` block is NOT a barrier — a `WITH` inside it is.** An
-    earlier revision refused every walk inside a subquery on the premise that a
-    subquery "imports nothing it is not given"; Cypher says the opposite (the
-    block imports every binding in scope, which is how state is passed in, and
-    the one thing it refuses is a RE-declaration). That inverts the rule: the
-    shape the blanket barrier claimed to catch cannot be written as a valid
-    query at all, while a `WITH` inside the body — which really does end the
+    ⚠️ **A `CALL { … }` block is NOT a barrier — a `WITH` inside it is, FOR THAT
+    BODY'S SCOPE ONLY.** An earlier revision refused every walk inside a subquery
+    on the premise that a subquery "imports nothing it is not given"; Cypher says
+    the opposite (the block imports every binding in scope, which is how state is
+    passed in, and the one thing it refuses is a RE-declaration). That inverts the
+    rule: the shape the blanket barrier claimed to catch cannot be written as a
+    valid query at all, while a `WITH` inside the body — which really does end the
     identity — was out of reach, because it sits at brace depth 1 where
     `_top_level_offsets` does not look. `_scope_boundary_offsets` descends into
     the body instead, so the same projection reader decides the subquery case and
     the top-level one.
+
+    ⚠️ **And the descent is BLOCK-SCOPED, not query-wide.** The first cut of it
+    handed every body-internal `WITH` to every walk in the query, so a walk AFTER
+    the block was refused by a projection that never had it in scope: measured,
+    `MATCH …-[r]->(n) CALL { WITH n RETURN n AS nn } MATCH (x)-[r]->(y)` reported
+    the post-`CALL` walk as ungrounded, though the subquery's `WITH` projects only
+    inside the subquery and the outer `r` is still in scope after the block
+    (#9544 review P3). `_scope_boundary_spans` pairs each boundary with the block
+    it belongs to, and a walk outside that block is untouched by it.
     """
     low, high = sorted((fact_at, walk_at))
-    for at in _scope_boundary_offsets(query):
+    for at, block_low, block_high in _scope_boundary_spans(query):
+        if not block_low <= walk_at < block_high:
+            # A `WITH` INSIDE a `CALL { … }` body ends that BODY's scope only; the
+            # enclosing scope's binding survives the block (a subquery imports the
+            # outer bindings, it does not consume them).
+            continue
         if not low < at < high:
             continue
         word = _SCOPE_BOUNDARY.match(query, at)
@@ -1253,6 +1328,11 @@ def _scope_boundary_offsets(query: str) -> list[int]:
     is a redeclaration, which Cypher rejects, so there is no valid query to pin
     the opposite direction with — which is exactly why the barrier could never be
     pinned and had to go (#9544 review P2).
+
+    ⚠️ **The offset alone is not enough: a boundary belongs to a BLOCK.** A `WITH`
+    inside a body ends that body's scope and nothing else, so the caller needs to
+    know which block each offset came from — that pairing is
+    `_scope_boundary_spans`, and this function stays the flat offset view of it.
     """
     offsets = _top_level_offsets(query, _SCOPE_BOUNDARY)
     for match in _CALL_SUBQUERY.finditer(query):
@@ -1263,6 +1343,27 @@ def _scope_boundary_offsets(query: str) -> list[int]:
             low + offset for offset in _scope_boundary_offsets(query[low:high])
         )
     return sorted(offsets)
+
+
+def _scope_boundary_spans(query: str) -> list[tuple[int, int, int]]:
+    """`(offset, block_low, block_high)` per `WITH` — the BLOCK whose scope it ends.
+
+    ⚠️ **A `WITH` inside a `CALL { … }` body ends that BODY's scope, not the
+    enclosing one — and applying it query-wide is a false red.**
+    `_scope_boundary_offsets` descends into bodies because a `WITH` at brace depth
+    1 is invisible to `_top_level_offsets`; the first cut of that descent then
+    handed every body-internal `WITH` to every walk in the query. Measured:
+    `MATCH (s:Subject {id:$sid})-[r]->(n) CALL { WITH n RETURN n AS nn } MATCH
+    (x)-[r]->(y) RETURN type(r)` reported the post-`CALL` walk as ungrounded,
+    though the subquery's `WITH` projects only inside the subquery and the outer
+    `r` is still in scope after the block (#9544 review P3).
+
+    `_block_span` supplies the pairing: for a `WITH` at brace depth 0 it answers
+    the whole query, so a top-level boundary reaches every walk exactly as before,
+    and for a body-internal one it answers that body's span, so the boundary
+    reaches only the walks the projection actually had in scope.
+    """
+    return [(at, *_block_span(query, at)) for at in _scope_boundary_offsets(query)]
 
 
 def _projection_items(projection: str) -> tuple[str, ...]:
@@ -4130,8 +4231,9 @@ def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
     `WITH type(r) AS t` projects a string, `WITH r.id AS rid` projects a value,
     and `WITH count(*) AS c` drops every grouping variable — each a fresh
     all-edge walk, each asserted below (#9493 review P2-1/P2-2). A `CALL { … }`
-    subquery imports nothing it is not given, so it is a barrier too, asserted
-    separately.
+    subquery IMPORTS the outer bindings (the block itself is not a barrier), so the
+    arm below asserts the opposite direction: a `WITH` INSIDE the body is what ends
+    the identity, for that body's scope.
     """
     census = _call_time_census()
     facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
@@ -4228,6 +4330,47 @@ def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
         "is what the previous blanket-`CALL`-barrier arm could not tell apart"
     )
 
+    # ⚠️ …and the descent is BLOCK-SCOPED: a `WITH` inside a body ends THAT body's
+    # scope, not the enclosing one. The first cut of the descent handed every
+    # inner `WITH` to every walk in the query, so a walk AFTER the block was
+    # refused by a projection that never had it in scope — a false red on a
+    # legitimate query (the block imports `r`; it does not consume it).
+    after_block = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) "
+        "CALL { WITH n RETURN n AS nn } MATCH (x)-[r]->(y) RETURN type(r)"
+    )
+
+    def pre_fix_boundary_spans(query: str) -> list[tuple[int, int, int]]:
+        """`_scope_boundary_spans` as it first shipped: every `WITH` spans the query."""
+        return [
+            (at, 0, len(query)) for at in _scope_boundary_offsets(query)
+        ]
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(globals(), "_scope_boundary_spans", pre_fix_boundary_spans)
+        assert _unbounded_walks(after_block, facts), (
+            "the query-wide boundary rule does not report the post-`CALL` walk — "
+            "then this fixture is not measuring the block-scoping escape and the "
+            "arm below proves nothing"
+        )
+    assert _unbounded_walks(after_block, facts) == [], (
+        "the `WITH n` sits INSIDE the `CALL { … }` body, so it ends that body's "
+        "scope only: the outer `r` is still in scope after the block, the "
+        f"post-`CALL` `[r]` is the SAME relationship — "
+        f"{_unbounded_walks(after_block, facts)!r} is a false red on a real query"
+    )
+    # …while a `WITH` at the TOP level after the block still ends the identity.
+    after_block_dropped = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n) "
+        "CALL { WITH n RETURN n AS nn } WITH nn MATCH (x)-[r]->(y) RETURN type(r)"
+    )
+    dropped_after = _unbounded_walks(after_block_dropped, facts)
+    assert len(dropped_after) == 1 and dropped_after[0][1] == "r", (
+        "a TOP-LEVEL `WITH nn` after the block does drop `r`, so the later "
+        f"`MATCH (x)-[r]->(y)` is a fresh all-edge walk ({dropped_after!r}) — the "
+        "block scoping must not reach a boundary that belongs to the outer scope"
+    )
+
     # The derivation half: the copy is on the registered line, so the SITE COUNT
     # still cannot see it — the walk net is the only net that can.
     source = (
@@ -4254,6 +4397,130 @@ def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
     assert all(_unbounded_walks(q, facts) for q in derived_queries), (
         f"the post-`WITH` walk is vouched for through the site's RESOLVED query "
         f"({derived_queries!r}) — the net is reading source text, or the wrong line"
+    )
+
+
+def test_a_with_projection_that_carries_beside_another_item_stays_green():
+    """A PROJECTION comma is not a pattern boundary — `WITH r, n` keeps the binding.
+
+    ⚠️ **Measured on the post-round-2 head, where the two nets disagreed.**
+    `_walk_spans` cut a `UNION` arm at every top-level comma, projection lists
+    included, so `WITH n, r` / `WITH r, n` produced the windows `('… WITH n', 'r')`
+    and `(', r MATCH …', 'r')`. The registered fact sat in the FIRST window, the
+    walk in the SECOND, and `_scope_survives` — which correctly reports that
+    `WITH n, r` CARRIES `r`, exactly as `_walk_binding` and `_scope_survives`
+    document — was never consulted. Both orders were reported ungrounded, so the
+    shipped contract in those two docstrings was false and nothing reded when it
+    broke (#9544 review P2).
+
+    In Cypher a projection comma separates ITEMS of one projection, evaluated in
+    ONE scope; a comma separates PATTERNS only inside a clause that matches them
+    (`MATCH`, `OPTIONAL MATCH`, `MERGE`, `CREATE`), which is what
+    `_pattern_comma_offsets` decides. This arm pins the whole CARRYING direction —
+    `*`, `r`, `DISTINCT r`, `r, n`, `n, r` — and the DROPPED/RENAMED direction
+    beside another item, so the closure the comma boundary existed for is not lost
+    along with the false red.
+    """
+    census = _call_time_census()
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+
+    def pre_fix_spans(query: str) -> tuple[tuple[int, int, int, str], ...]:
+        """`_walk_spans` as it shipped: EVERY top-level comma ends a window."""
+        arm_bounds = sorted(
+            {0, *_top_level_offsets(query, _UNION_CLAUSE), len(query)}
+        )
+        spans: list[tuple[int, int]] = []
+        for index in range(len(arm_bounds) - 1):
+            low, high = arm_bounds[index], arm_bounds[index + 1]
+            bounds = sorted(
+                {
+                    low,
+                    *[
+                        low + at
+                        for at in _top_level_offsets(query[low:high], _COMMA)
+                    ],
+                    high,
+                }
+            )
+            spans.extend((bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1))
+        return tuple(
+            (low, high, start, _walk_binding(query, start))
+            for start in census._walk_occurrences(query)
+            for low, high in spans
+            if low <= start < high
+        )
+
+    carrying = {
+        "*": "WITH * MATCH (x)-[r]->(y) RETURN type(r)",
+        "r": "WITH r MATCH (x)-[r]->(y) RETURN type(r)",
+        "DISTINCT r": "WITH DISTINCT r MATCH (x)-[r]->(y) RETURN type(r)",
+        "r, n": "WITH r, n MATCH (x)-[r]->(y) RETURN type(r)",
+        "n, r": "WITH n, r MATCH (x)-[r]->(y) RETURN type(r)",
+    }
+    queries = {
+        label: f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {carrying_forward}"
+        for label, carrying_forward in carrying.items()
+    }
+
+    # The NON-VACUITY half: the pre-fix window split still reports the two
+    # projection-comma shapes, so the green below is this rule's work and not a
+    # fixture that measures nothing.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setitem(globals(), "_walk_spans", pre_fix_spans)
+        for label in ("r, n", "n, r"):
+            reported = _unbounded_walks(queries[label], facts)
+            assert len(reported) == 1 and reported[0][1] == "r", (
+                f"the pre-fix window split does not report `WITH {label}` — then "
+                "this fixture is not measuring the projection-comma escape and "
+                f"the arm below proves nothing ({reported!r})"
+            )
+
+    for label, query in queries.items():
+        assert _unbounded_walks(query, facts) == [], (
+            f"`WITH {label}` CARRIES `r` forward, so the later `MATCH (x)-[r]->(y)` "
+            "is the SAME relationship and the registered fact bounds it — "
+            f"{_unbounded_walks(query, facts)!r} is the false red this fix removes"
+        )
+
+    # The CLOSURE half: a projection that drops or renames the binding still ends
+    # it, INCLUDING when it sits beside another item — the comma fix must not turn
+    # a multi-item projection into a blanket pass.
+    barrier = {
+        "n, m": "WITH n, m MATCH (x)-[r]->(y) RETURN type(r)",
+        "n, r AS rel": "WITH n, r AS rel MATCH (x)-[r]->(y) RETURN type(r)",
+        "n, type(r) AS t": "WITH n, type(r) AS t MATCH (x)-[r]->(y) RETURN type(r)",
+    }
+    for label, carrying_forward in barrier.items():
+        query = f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {carrying_forward}"
+        reported = _unbounded_walks(query, facts)
+        assert len(reported) == 1 and reported[0][1] == "r", (
+            f"`WITH {label}` does NOT carry `r` forward — the later "
+            "`MATCH (x)-[r]->(y)` binds a fresh all-edge walk and must be reported "
+            f"({reported!r}); an empty list here is a fail-open the comma fix "
+            "would have introduced"
+        )
+
+    # And the comma boundary a second PATTERN needs is untouched: `MATCH …, (x)`
+    # matches independently, so a fact in the first pattern reaches no further.
+    second_pattern = (
+        "MATCH (s:Subject {id:$sid})-[r]->(n), (x)-[rr]->(y) "
+        "RETURN type(r), type(rr)"
+    )
+    assert len(_walk_windows(second_pattern)) == 2, (
+        "the second pattern of one `MATCH` no longer gets its own window — the "
+        "clause-aware comma rule must keep pattern separators and drop only "
+        f"projection commas ({_walk_windows(second_pattern)!r})"
+    )
+    assert _pattern_comma_offsets(second_pattern) == [second_pattern.index(",")], (
+        "`_pattern_comma_offsets` did not keep the comma that separates the two "
+        f"`MATCH` patterns ({_pattern_comma_offsets(second_pattern)!r})"
+    )
+    assert _pattern_comma_offsets(
+        "MATCH (a)-[r]->(b) WITH r, a RETURN type(r), labels(a)"
+    ) == [], (
+        "a `WITH`/`RETURN` projection comma is not a pattern boundary — "
+        "`_pattern_comma_offsets` must find none here "
+        f"({_pattern_comma_offsets('MATCH (a)-[r]->(b) WITH r, a RETURN type(r), labels(a)')!r})"
     )
 
 
