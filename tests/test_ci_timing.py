@@ -1489,6 +1489,10 @@ def test_integrity_problems_mirrors_the_listed_integrity_composition(
         "slow_file_issues",
         "fast_shard_issues",
         "carve_shard_issues",
+        # #9539: the slow lane's `slow_shards` declaration must be validated on
+        # BOTH entry points (the gate of record AND the weekly durations
+        # refresh) — a malformed count there changes what `test-slow` runs.
+        "slow_shard_issues",
         "duration_issues",
         "leg_coverage_issues",
         "watchdog_headroom_issues",
