@@ -2103,12 +2103,23 @@ class CollisionPreflightTest(unittest.TestCase):
         # CONTROL for the test above: the demotion must fire ONLY when the branch
         # names something else. A branch that names THIS issue is the claim, and
         # the path merely agrees with it.
-        self.add_worktree(f"wt-{ISSUE}-stale-name", branch=f"fix/{ISSUE}-lane")
+        #
+        # ⛔ ROW-SCOPED (review cycle 4): `add_worktree(branch=...)` ALSO creates a
+        # local branch `fix/3061-lane`, and the branch surface blocks it — so a
+        # whole-output assertion was satisfied by the BRANCH row even if the
+        # WORKTREE row had been demoted. The label is unique per row, so this
+        # asserts the row under test.
+        branch = f"fix/{ISSUE}-lane"
+        name = f"wt-{ISSUE}-stale-name"
+        self.add_worktree(name, branch=branch)
         rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
-        self.assertIn(f"[local worktrees]", out)
-        self.assertIn(f"matched issue-number ({ISSUE})", out)
 
     def test_worktree_path_substring_still_blocks_for_a_non_claim_branch_name(self):
         # ⛔ THE NARROWNESS IS THE SAFETY PROPERTY. Only the shape a lane uses to
@@ -2124,7 +2135,9 @@ class CollisionPreflightTest(unittest.TestCase):
         # unique per case, so this pins the CURRENT one.
         for i, branch in enumerate((f"chore/bump-2024-10", f"release-1.2.3",
                                     "perf/1200-rps-cache", "ci/1800-timeout",
-                                    "chore/5000-graph-cleanup")):
+                                    "chore/5000-graph-cleanup",
+                                    f"feat/{ISSUE}0-lookalike",
+                                    "feat/2048-batch")):
             with self.subTest(branch=branch):
                 name = f"wt-{ISSUE}-nonclaim-{i}"
                 self.add_worktree(name, branch=branch)
@@ -2159,6 +2172,26 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotEqual(rc, 0, out)
         self.assertIn("VERDICT: COLLISION", out)
 
+    def test_generated_branch_with_a_claim_shaped_tail_still_blocks(self):
+        # ⛔ THE GENERATED EXCLUSION APPLIES TO BOTH HALVES (review cycle 4).
+        # `branch_matchable` gated the HIT test only, so a bot-minted name with a
+        # claim-shaped tail (`mergify/merge-queue/fix/9397-x`) had
+        # `branch_hit = False` by construction and the helper read its raw name
+        # and answered 9397 — demoting the path hit while the docstring promised
+        # the PATH still blocks. `scan_branch_surface` skips the same ref, so
+        # nothing else would have blocked this worktree.
+        branch = "mergify/merge-queue/fix/9397-x"
+        name = f"wt-{ISSUE}-generated-tail"
+        self.add_worktree(name, branch=branch)
+        rc, out = self.run_tool()
+        label = f"{name} [refs/heads/{branch}]"
+        line = next((l for l in out.splitlines() if label in l), "")
+        self.assertTrue(line, f"no row for {label!r}\n{out}")
+        self.assertIn(f"matched issue-number ({ISSUE})", line)
+        self.assertNotIn("its PATH contains", line)
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("VERDICT: COLLISION", out)
+
     def test_a_branch_number_that_is_not_the_issue_does_not_cancel_the_path(self):
         # `fix/3061cafe-mine` NAMES this issue (`number_present` matches 3061 —
         # the digits LEAD a hex-looking run, #3611), so the branch itself is the
@@ -2176,12 +2209,10 @@ class CollisionPreflightTest(unittest.TestCase):
 
     def test_worktree_path_substring_demotes_for_any_other_issue_claim(self):
         # The demotion is a POSITIVE rule, not a special case for one example:
-        # any `<fix|feat>/<n>-<slug>` that names a DIFFERENT issue contradicts the
-        # path. `feat/2048-batch` is included deliberately — under the narrow
-        # prefix rule `feat/<n>-` IS a claim, and the cycle-1 finding was about
-        # `perf/`-style namespaces, not this. Pinned per-line, like the controls.
+        # any `fix/<n>-<slug>` naming a DIFFERENT issue contradicts the path, even
+        # a LOOKALIKE number (`fix/30611-…` claims 30611, not 3061). Pinned
+        # per-line, plus `rc == 0`, so the strength cannot be flipped silently.
         for i, branch in enumerate((f"fix/9397-about-edge-properties",
-                                    "feat/2048-batch",
                                     f"fix/{ISSUE}1-lookalike")):
             with self.subTest(branch=branch):
                 name = f"wt-{ISSUE}-claim-{i}"
@@ -2205,13 +2236,15 @@ class CollisionPreflightTest(unittest.TestCase):
         cases = [
             ("fix/9397-about-edge-properties", 9397),
             ("refs/heads/fix/9397-about-edge-properties", 9397),
-            ("feat/9397-x", 9397),
-            # `test/` `docs/` `chore/` ALSO carry `<n>-<slug>` names here (1163
-            # remote refs measured across those five prefixes), but the number in
-            # those namespaces can be a metric or a size, and EXCLUDING them costs
-            # only a residual over-block — the safe direction — while including
-            # them costs a false CLEAN. Widening needs a measurement, not an
-            # analogy.
+            # `feat/` is NOT a claim namespace (#9540 review cycle 4:
+            # `feat/2048-batch` — a batch size, not an issue). Excluding it costs
+            # a residual over-block, the safe direction.
+            ("feat/9397-x", None),
+            ("feat/2048-batch", None),
+            # `test/` `docs/` `chore/` also carry `<n>-<slug>` names here, but in
+            # those namespaces the number can be a metric or a size, and
+            # EXCLUDING them costs only a residual over-block — the safe
+            # direction — while including them costs a false CLEAN.
             ("test/9397-x", None),
             ("docs/9397-x", None),
             # the branch names THIS issue → no contradiction

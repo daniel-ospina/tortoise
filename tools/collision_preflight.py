@@ -1245,19 +1245,20 @@ def _is_generated_branch(name: str) -> bool:
     return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
 
 
-#: Branch namespaces a LANE chooses that name an ISSUE, in the shape this repo
-#: uses for a claim: `<type>/<issue-number>-<slug>`.
+#: The branch namespace whose `<n>` is an ISSUE reference: `fix/<n>-<slug>`.
 #:
-#: ⛔ TWO PREFIXES, NOT THE OBVIOUS TEN, AND THE WIDTH IS A FAIL-CLOSED DECISION.
-#: An earlier cut listed `perf|ci|build|chore|docs|refactor|test|…` — plausible
-#: until the first fresh-context review produced `perf/1200-rps-cache`,
-#: `ci/1800-timeout`, `feat/2048-batch` and `chore/5000-graph-cleanup`: in those
-#: namespaces the number is a METRIC or a SIZE, not an issue, so the helper would
-#: have cancelled a real PATH hit with evidence that names no issue at all.
-#: `fix/` and `feat/` are the two where `<n>-<slug>` is an issue reference in
-#: practice. WIDENING THIS NEEDS A MEASURED ARGUMENT AND A TEST, because every
-#: entry is a licence to demote a blocking hit.
-_LANE_BRANCH_CLAIM = re.compile(r"(?:fix|feat)/#?(\d{3,7})(?![0-9])(?:-|$)")
+#: ⛔ ONE PREFIX, AND THE WIDTH IS A FAIL-CLOSED DECISION MADE THREE TIMES.
+#: Cycle 1 listed `perf|ci|build|chore|docs|refactor|test|…`, and review produced
+#: `perf/1200-rps-cache`, `ci/1800-timeout`, `chore/5000-graph-cleanup`; cycle 4
+#: produced `feat/2048-batch` — in every one of those namespaces the number can be
+#: a METRIC, a SIZE or a DATE, so cancelling a real PATH hit on one would be a
+#: false CLEAN. `fix/` is the one namespace measured where `<n>-<slug>` is an
+#: issue claim (828 remote refs, and the #9540 evidence itself, `fix/9397-…`).
+#: The cost of the narrow set is a residual OVER-block for a `feat/<n>-…` or
+#: `chore/<n>-…` worktree whose path is stale — the safe direction. Widening
+#: needs a measured argument that the number CANNOT be a size (or a lookup that
+#: the issue exists), plus a test, because every entry is a licence to demote.
+_LANE_BRANCH_CLAIM = re.compile(r"fix/#?(\d{3,7})(?![0-9])(?:-|$)")
 
 
 def _branch_names_other_issue(branch: str, issue: int) -> int | None:
@@ -1276,14 +1277,16 @@ def _branch_names_other_issue(branch: str, issue: int) -> int | None:
     claim a DIFFERENT issue, in the claim shape a lane actually writes?" — and
     returns None for everything else, so the caller keeps blocking:
 
-      * a generated branch (`mergify/merge-queue/…`) claims nothing. It is
-        excluded BEFORE this test by the caller, so the PATH still blocks —
-        `test_worktree_on_a_generated_branch_is_still_found_by_its_path`;
+      * a generated branch (`mergify/merge-queue/…`) claims nothing. The caller
+        never asks this question about one (`branch_matchable` gates the
+        demotion as well as the hit test), so the PATH still blocks —
+        `test_worktree_on_a_generated_branch_is_still_found_by_its_path` and
+        `test_generated_branch_with_a_claim_shaped_tail_still_blocks`;
       * a name with no claim shape (`chore/bump-2024-10`, `release-1.2.3`), or
         a number in a namespace that is not an issue reference
-        (`perf/1200-rps-cache`, `ci/1800-timeout`), returns None: a version, a
-        date, a metric and a size are not claims, and cancelling a real PATH hit
-        on one would be a false CLEAN;
+        (`perf/1200-rps-cache`, `ci/1800-timeout`, `feat/2048-batch`), returns
+        None: a version, a date, a metric and a size are not claims, and
+        cancelling a real PATH hit on one would be a false CLEAN;
       * a branch that names THIS issue returns None (the branch is the claim);
       * a detached worktree (`(detached)`) returns None — with no branch name
         there is no contradiction, so the path keeps blocking.
@@ -2722,7 +2725,16 @@ def scan_worktree_surface(
         # Scoped to the case where the branch is the ONLY contradiction: a
         # branch that names THIS issue blocks, and a detached/generated branch
         # leaves nothing to contradict the path, so both keep blocking.
-        if path_hit and not branch_hit:
+        if path_hit and not branch_hit and branch_matchable:
+            # ⛔ `branch_matchable` IS REQUIRED HERE, AND ITS ABSENCE WAS A
+            # DOCUMENTED-BUT-BYPASSED GUARD (review cycle 4). Without it a
+            # GENERATED branch whose name contains a claim-shaped tail
+            # (`mergify/merge-queue/fix/9397-x`) was demoted: `branch_hit` is
+            # False for it BY CONSTRUCTION, and the helper then read the raw name
+            # and answered 9397. A bot-minted name is not evidence about a lane,
+            # so it must not be evidence about the PATH either — the worktree
+            # record still blocks, which is what this module's docstring and
+            # `_is_generated_branch` already promised.
             other = _branch_names_other_issue(branch, issue)
             if other is not None:
                 surface.add(
