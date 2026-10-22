@@ -657,7 +657,8 @@ class ConversationMiner:
                 name = ent["name"]
                 if not self._reifiable_name(name, transcript):
                     continue
-                api.add_object(name, ent["objectKind"], id=self._object_id(name),
+                api.add_object(name, **self._kind_kwargs(ent),
+                               id=self._object_id(name),
                                canonical_name=_canonical_name(name), title=name)
                 wired += 1
             return wired
@@ -669,7 +670,8 @@ class ConversationMiner:
             if not self._reifiable_name(name, transcript):
                 continue
             canonical = _canonical_name(name)
-            api.add_object(name, ent["objectKind"], id=self._object_id(name),
+            api.add_object(name, **self._kind_kwargs(ent),
+                           id=self._object_id(name),
                            canonical_name=canonical, title=name)
             # #5509: the canonical id is the one this write just supplied —
             # `_upsert_object`'s ON MATCH writes `o.id=coalesce($id, o.id)`, so
@@ -709,6 +711,27 @@ class ConversationMiner:
         return wired
 
     # ── Internal helpers ───────────────────────────────────────────
+
+    @staticmethod
+    def _kind_kwargs(ent: dict) -> dict:
+        """The ``objectKind`` keyword for one extracted entity — or none at all.
+
+        #9572: `ConversationMiner` used to forward ``ent["objectKind"]``
+        unconditionally, and ``extractor._normalize_entity`` had already
+        normalized an ABSENT kind to ``'other'`` — so a conversation that merely
+        MENTIONED a stored ``capability`` Object reset it to ``other`` on the
+        fold's ``ON MATCH o.objectKind=coalesce($ok, o.objectKind)``. The
+        discriminator is forwarded only when the model actually named one; a
+        first create then takes the fold's ``ON CREATE`` default (``'other'``),
+        and a re-create leaves a stored kind alone.
+
+        ``objectKind_named`` is absent on hand-built entity dicts (callers and
+        tests that already carry a real kind): treat those as named, which is
+        the pre-#9572 behaviour for every such caller.
+        """
+        if ent.get("objectKind_named", True):
+            return {"object_kind": ent["objectKind"]}
+        return {}
 
     @staticmethod
     def _reifiable_name(name: str, transcript: str) -> bool:

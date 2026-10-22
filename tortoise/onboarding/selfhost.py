@@ -129,8 +129,12 @@ class _SdkSeedSurface:
     def query(self, cypher, **params):
         return _proj(self._sdk).query(cypher, **params)
 
-    def create_subject(self, name, subjectKind="other", **props):
-        return self._sdk.create_subject(name, subjectKind=subjectKind, **props)
+    def create_subject(self, name, subjectKind=None, **props):
+        # #9572: ``None`` = not supplied, forwarded as absent (see
+        # ``hosted_api._OrgSeedSurface`` for the hosted twin).
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
+        return self._sdk.create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
         return self._sdk.create_edge(relation, from_id, to_id)

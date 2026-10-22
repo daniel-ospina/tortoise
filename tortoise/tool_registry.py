@@ -161,13 +161,17 @@ class ToolDefinition:
 #                 REPEAT or a WRAPPER call reaches one of these (`mitigate_operator`
 #                 updates its mitigation point; `index_sessions` and
 #                 `mine_conversations` wrap the corpus re-index), and whenever a bare
-#                 call applies a LIBRARY DEFAULT over a user-authored discriminator:
-#                 `create_subject` / `create_object` send `"other"` even when the
-#                 caller named no kind, `create_entity` supplies none at all, and the
-#                 fold's never-`None` default then rewrites a stored
-#                 `subjectKind="organization"` (`projection/entities.py`,
-#                 `_upsert_subject` / `_upsert_object`: `ON MATCH … =coalesce($sk, …)`)
-#                 — #9572. Until that clobber is fixed these keep `main`'s hint.
+#                 repeat call applies values over a node that already exists:
+#                 `create_subject` / `create_object` / `create_entity` write the
+#                 caller's props ON MATCH (`_persist_extra_props`), so a re-create
+#                 re-applies them — the same overwrite basis `tortoise_update` is in
+#                 this tier for. The FABRICATED-DEFAULT half of that finding is
+#                 FIXED (#9572: a caller who names no `subjectKind`/`objectKind` now
+#                 journals none, and the fold supplies `"other"` ON CREATE only), so
+#                 the reason these three stay here is the props lane, not the
+#                 discriminator. Re-deriving the tier from #4122's axis now that the
+#                 clobber is gone is a classification question of its own, deliberately
+#                 NOT settled by a bug fix.
 #   admin       — changes what the product DOES for the org/graph/install:
 #                 provisioning, pack install, credentials, recording/monitoring and
 #                 source switches. `destructiveHint: true`.
@@ -1088,7 +1092,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_subject",
         id="surface.create_subject",
         description="Create a Subject node (team, role, organization, person).",
-        risk="destructive",  # #9572: bare re-create re-applies subjectKind="other"
+        risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_subject",
     ),
@@ -1096,7 +1100,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_create_object",
         id="surface.create_object",
         description="Create an Object node (product, customer, skill, etc.).",
-        risk="destructive",  # #9572: bare re-create re-applies objectKind="other"
+        risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_object",
     ),
@@ -1250,7 +1254,7 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
                     "For type='document', declaring extractedFrom materializes "
                     "the :Source (#8171); on subject/object/event it is inert "
                     "and an extracted_from_inert advisory is returned.",
-        risk="destructive",  # #9572: type=subject|object re-applies a "other" default
+        risk="destructive",  # a repeat call re-applies caller props ON MATCH (#9572)
         http_policy=True,
         sdk_method="create_entity",
     ),

@@ -388,6 +388,22 @@ def _normalize_object_kind(kind: str) -> str:
     return k if k in _OBJECT_KIND_VOCAB else "other"
 
 
+def _named_kind(key: str, value: object) -> dict:
+    """``{key: value}`` when the model NAMED a kind, ``{}`` when it named none.
+
+    #9572: the extractor used to fabricate ``"other"`` for a model that omitted
+    the kind, and every mention of an already-known Subject/Object then carried
+    that fabricated value into the fold's ``ON MATCH … =coalesce($k, stored)``
+    arm — silently resetting a stored ``team`` to ``other`` on document ingest.
+    "The model named no kind" must reach the write path as ABSENT, so the fold's
+    ``ON CREATE`` arm supplies the ``'other'`` default and ``ON MATCH`` leaves a
+    stored discriminator alone.
+    """
+    if value is None or not str(value).strip():
+        return {}
+    return {key: str(value)}
+
+
 def _intersect_object_kinds(kinds: list[str] | None) -> list[str]:
     """DE2E-review (objectKind vocab): the LLM prompt vocab must not be wider
     than the validator vocab — kinds that cannot survive _normalize_object_kind
@@ -414,7 +430,18 @@ def _canonical_name(name: str) -> str:
 
 def _normalize_entity(e) -> dict | None:
     """Normalize one raw entity dict into the Phase-2 contract shape
-    {name, objectKind, canonical_candidates, span, confidence}."""
+    {name, objectKind, objectKind_named, canonical_candidates, span, confidence}.
+
+    ``objectKind_named`` (#9572) is the provenance bit the contract was missing:
+    ``objectKind`` must stay a normalized VALUE for the pack gate and the
+    readers, but "the model named no kind" has to survive to the write door —
+    otherwise ``mining._reify_entities`` passes the normalized ``'other'`` to
+    ``api.add_object`` and the fold's ``ON MATCH o.objectKind=coalesce($ok, ...)``
+    resets a stored ``capability``. A named kind — including an explicit
+    ``'other'`` — is true; an absent or blank one is false; a kind that did not
+    survive the closed vocab (``_normalize_object_kind`` repaired it) is also
+    false, because a repair is our guess, not the caller's value.
+    """
     if not isinstance(e, dict) or not e.get("name"):
         return None
     name = str(e["name"]).strip()
@@ -424,9 +451,22 @@ def _normalize_entity(e) -> dict | None:
     if not (isinstance(span, list) and len(span) == 2
             and all(isinstance(x, int) for x in span) and span[0] <= span[1]):
         span = None
+    _raw_kind = e.get("objectKind")
+    _kind = _normalize_object_kind(_raw_kind)
+    _spelled = str(_raw_kind).strip().lower() if _raw_kind is not None else ""
+    # Idempotent (#9572): `_normalize_entity` runs twice on the conversation
+    # lane (the stage normalizes, then `extract_conversation_entities`
+    # normalizes the stage's output again), and the second pass sees the
+    # ALREADY-NORMALIZED `objectKind: "other"` — a real string — so recomputing
+    # the bit from the value would flip "the model named none" back to "named"
+    # and re-open the clobber. Carry the provenance when the input states it.
+    _named_in = e.get("objectKind_named")
+    _named = (bool(_named_in) if _named_in is not None
+              else bool(_spelled) and _spelled == _kind)
     return {
         "name": name,
-        "objectKind": _normalize_object_kind(e.get("objectKind")),
+        "objectKind": _kind,
+        "objectKind_named": _named,
         "canonical_candidates": [str(c) for c in (e.get("canonical_candidates") or [])],
         "span": span,
         "confidence": float(e.get("confidence", 0.5)),
@@ -490,7 +530,10 @@ class EntityStageMock:
                 try:
                     ent = _normalize_entity({
                         "name": name,
-                        "objectKind": e.get("objectKind", "other"),
+                        # #9572: pass the model's value THROUGH — a `"other"`
+                        # default here became a "named" kind and let the write
+                        # door clobber a stored discriminator.
+                        "objectKind": e.get("objectKind"),
                         "canonical_candidates": e.get("canonical_candidates") or [name],
                         "span": span,
                         "confidence": e.get("confidence", 1.0),
@@ -876,16 +919,21 @@ class _SemanticStage:
             }),
         )
         raw = _json(out)
+        # #9572: an omitted kind means the model named none — carry it as
+        # ABSENT, never as a fabricated "other". The fold supplies the
+        # `'other'` default ON CREATE; a fabricated value here reached
+        # `ON MATCH … =coalesce($sk, s.subjectKind)` as a real kind and reset a
+        # stored `team` to `other` merely because a document mentioned it.
         return {
             "subjects": [
                 {"name": str(s.get("name", "")),
-                 "subjectKind": str(s.get("subjectKind", "other"))}
+                 **_named_kind("subjectKind", s.get("subjectKind"))}
                 for s in raw.get("subjects", [])
                 if isinstance(s, dict) and s.get("name")
             ],
             "objects": [
                 {"name": str(o.get("name", "")),
-                 "objectKind": str(o.get("objectKind", "other"))}
+                 **_named_kind("objectKind", o.get("objectKind"))}
                 for o in raw.get("objects", [])
                 if isinstance(o, dict) and o.get("name")
             ],
@@ -1245,7 +1293,12 @@ class LLMExtractor:
                 if not name or name in seen_subjects:
                     continue
                 try:
-                    sid = api.add_subject(name, s["subjectKind"])
+                    # #9572: forward the kind ONLY when the model named one — a
+                    # fabricated default would clobber a stored discriminator on
+                    # the fold's ON MATCH arm.
+                    _kind = s.get("subjectKind")
+                    sid = (api.add_subject(name, _kind) if _kind is not None
+                           else api.add_subject(name))
                 except Exception as exc:
                     # #4938: hand the caller the Subjects already created in
                     # this run (each name is added to seen_subjects only once
@@ -1263,7 +1316,10 @@ class LLMExtractor:
                 if not name or name in seen_objects:
                     continue
                 try:
-                    oid = api.add_object(name, o["objectKind"])
+                    # #9572: the Object twin of the guard above.
+                    _kind = o.get("objectKind")
+                    oid = (api.add_object(name, _kind) if _kind is not None
+                           else api.add_object(name))
                 except Exception as exc:
                     # Same partial-result contract as the Subject write above.
                     _attach_partial_subjects(exc, sorted(seen_subjects))
@@ -1385,7 +1441,8 @@ def extract_conversation_entities(
     domain: str | None = None,
 ) -> list[dict]:
     """Phase-2 convenience: conversation entity extraction → Object-only list
-    [{name, canonical_candidates, objectKind, span, confidence}].
+    [{name, canonical_candidates, objectKind, objectKind_named, span,
+    confidence}] (#9572: see `_normalize_entity`).
 
     ``model=None`` + ``entity_stage=None`` → rule/keyword fallback only
     (deterministic, no LLM — the safe default for MockExtractor pipelines).

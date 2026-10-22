@@ -3875,7 +3875,18 @@ class _EntityHandlers:
         _set_emb = set_embedding_clause("s")
         self.g.query(
             f"MERGE (s:Subject {{{merge_key}:$key}}) "
-            "ON CREATE SET s.id=$id, s.name=$name, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
+            "ON CREATE SET s.id=$id, s.name=$name, "
+            # #9572: the discriminator is written ON MATCH as
+            # ``coalesce($sk, s.subjectKind)`` — which preserves a stored kind
+            # ONLY if "the caller named none" arrives as NULL. So the DEFAULT
+            # is applied here, on CREATE, and never at the door: this arm used
+            # to read ``s.subjectKind=$sk`` with ``ev.get("subject_kind",
+            # "other")``, so a fabricated door default and a caller value were
+            # indistinguishable and a bare re-create reset a stored `team` to
+            # `other` (the Object arm already coalesced here — the Subject twin
+            # was the gap).
+            "s.subjectKind=coalesce($sk, 'other'), "
+            "s.createdAt=coalesce($ca, $now), "
             # #1423: status ON CREATE only — the Subject twin of the #1350
             # Object clause. Before this, `status` rode the extra-props lane
             # (`_SUBJECT_HANDLED` lacked it, #2295), which applies on MATCH as
@@ -3908,7 +3919,9 @@ class _EntityHandlers:
             "            s.createdAt=coalesce(s.createdAt, $ca), "
             "            " + _set_emb,
             params={"key": merge_value, "id": sid, "name": name,
-                    "sk": ev.get("subject_kind", "other"),
+                    # #9572: NULL default — see the ON CREATE clause above. A
+                    # fabricated default here is the defect, not the fix.
+                    "sk": ev.get("subject_kind"),
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "st": ev.get("status"),  # #1423: status ON CREATE only
                     "embedding": embedding},
@@ -5006,13 +5019,17 @@ class _EntityHandlers:
                 uses = [uses]  # bare dict → normalize to list
             for use_item in uses:
                 if isinstance(use_item, dict):
-                    # #125 structured uses: {name, kind} → objectKind from kind
+                    # #125 structured uses: {name, kind} → objectKind from kind.
+                    # #9572: an ABSENT kind stays absent — a fabricated
+                    # `"other"` here becomes a real kind on a node that may
+                    # already exist, and the ON MATCH arm would then overwrite
+                    # a stored `capability`.
                     use_name = use_item.get("name", "")
-                    use_kind = use_item.get("kind", "other")
+                    use_kind = use_item.get("kind") or None
                 else:
-                    # legacy string uses → default objectKind='other'
+                    # legacy string uses name no kind at all (#9572)
                     use_name = str(use_item)
-                    use_kind = "other"
+                    use_kind = None
                 # #7369: `use_name` is the Object MERGE key.
                 if not _writable_id(use_name):
                     _log_identity_skip(
@@ -5027,8 +5044,12 @@ class _EntityHandlers:
                     # must still journal that registration.
                     self.g.query(
                         "MERGE (o:Object {name:$name}) "
-                        "ON CREATE SET o.id=$id, o.objectKind=$kind, o._stub=true "
-                        "ON MATCH SET o.objectKind=$kind",
+                        "ON CREATE SET o.id=$id, "
+                        "o.objectKind=coalesce($kind, 'other'), o._stub=true "
+                        # #9572: coalesce, not a hard SET — a `uses[]` entry that
+                        # names no kind must not reset a stored discriminator
+                        # (the Subject arm's ON MATCH already works this way).
+                        "ON MATCH SET o.objectKind=coalesce($kind, o.objectKind)",
                         params={"name": use_name, "kind": use_kind, "id": stub_id},
                     )
                     self.g.query(

@@ -1519,7 +1519,9 @@ def kind_spellings_in_payload(payload) -> list[tuple[str, str]]:
 #: all CORE spellings, i.e. the anti-paralysis half of the owner's 2026-10-17
 #: ruling ("an 'other' or more general kind … so we don't completely block the
 #: writer in paralyzing bureaucracy"). ``objectKind``/``subjectKind`` =
-#: ``other`` (the SDK/REST default and a declared canonical object kind);
+#: ``other`` (the FOLD's ``ON CREATE`` default — `projection/entities.py`,
+#: #9572 moved it there when the SDK/REST doors stopped fabricating it — and a
+#: declared canonical object kind);
 #: ``eventKind`` = ``occurrence`` and ``pointKind`` = ``statement`` (the
 #: extractor's own fallbacks); ``documentKind`` has no declared general kind, so
 #: it names none rather than inventing one.

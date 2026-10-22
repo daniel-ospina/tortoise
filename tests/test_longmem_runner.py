@@ -2040,6 +2040,55 @@ def test_ingest_v2_drops_a_half_span_without_losing_the_point(tmp_path):
         sdk.close()
 
 
+def test_ingest_v2_does_not_retype_a_stored_entity(tmp_path):
+    """#9572 (round 7): the eval ingest lane fabricated a kind too.
+
+    `_write_payload` passed `objectKind=str(e.get("kind", "core:other"))`, so an
+    entity naming NO kind shipped the classifier's repair sentinel, and the
+    Object fold's `ON MATCH o.objectKind=coalesce($ok, o.objectKind)` then
+    re-typed a stored `capability` → `core:other` on re-ingest. This is the eval
+    twin of the product `_payload_entity_kind` fix, and the lane is re-entrant
+    per session/question — a later session that mentions an already-classified
+    Object rewrote it. Pinned here (not in the #9572 file) because this lane's
+    host and fixtures live here.
+    """
+    from tools.longmem_eval.ingest_v2 import _write_payload
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        sdk.create_object("Tea set 9572", "capability")
+
+        def _ingest(entity):
+            _write_payload(
+                sdk, {"entities": [entity], "events": [], "operators": [],
+                      "points": []},
+                sid="s0", qid="q1", si=0, evidence_turns=[],
+                session_date=None, turns=[], ev_sessions=set(), n_turns=1)
+
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.name = 'Tea set 9572' "
+            "RETURN o.objectKind").result_set
+        assert rows and rows[0][0] == "capability", rows
+
+        for entity in ({"name": "Tea set 9572"},                      # names none
+                       {"name": "Tea set 9572", "kind": "core:other"}  # repaired
+                       ):
+            _ingest(entity)
+            got = sdk._get_proj().g.query(
+                "MATCH (o:Object) WHERE o.name = 'Tea set 9572' "
+                "RETURN o.objectKind").result_set
+            assert got and got[0][0] == "capability", (entity, got)
+
+        # …and a payload that DOES name a kind still writes it
+        _ingest({"name": "Tea set 9572", "kind": "tool"})
+        got = sdk._get_proj().g.query(
+            "MATCH (o:Object) WHERE o.name = 'Tea set 9572' "
+            "RETURN o.objectKind").result_set
+        assert got and got[0][0] == "tool", got
+    finally:
+        sdk.close()
+
+
 def test_ingest_v2_supersession_end_to_end(tmp_path, monkeypatch):
     """E5 Task 4 (#1537): the v2 eval ingest materializes point-level
     supersession records via the EXISTING canonical sdk.supersede() — a

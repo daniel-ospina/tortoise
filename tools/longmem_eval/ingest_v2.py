@@ -46,6 +46,11 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+# #9572: the classifier's family fallback (`core:other`) is a REPAIR, not a kind a
+# caller named — writing it here re-typed a stored Object on re-ingest (the same
+# clobber the SDK doors had; this lane is the eval twin of `_payload_entity_kind`).
+# `writable_kind` is the ONE predicate shared with the product doors.
+from tortoise.kind_fallbacks import writable_kind
 from tortoise.sdk import TortoiseSDK
 
 logger = logging.getLogger(__name__)
@@ -171,8 +176,13 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
         if not name:
             continue
         try:
-            sdk.create_entity("object", name,
-                              objectKind=str(e.get("kind", "core:other")),
+            # #9572: forward the kind only when the payload NAMES a writable one.
+            # An entity naming none (or carrying the repaired sentinel) must not
+            # ship a kind at all — the fold supplies `other` ON CREATE and
+            # leaves a stored discriminator alone ON MATCH.
+            _ekind = writable_kind(e.get("kind"))
+            _kind_kwargs = {"objectKind": _ekind} if _ekind is not None else {}
+            sdk.create_entity("object", name, **_kind_kwargs,
                               lme_question_id=qid, lme_session_index=si,
                               is_episodic=True)
             stats["entities"] += 1

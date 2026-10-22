@@ -1873,6 +1873,38 @@ class TestTeamInfo:
         r = client.post("/v1/subjects", json={"subjectKind": "person"})
         assert r.status_code == 422
 
+    def test_create_subject_bare_recreate_keeps_the_named_kind(self, client):
+        """#9572: the ROUTE, not just the request model, must forward the kind
+        only when it was named.
+
+        The first version of #9572's fix changed the pydantic defaults and left
+        the handler forwarding `body.subjectKind` — so the door kept sending the
+        fabricated `"other"` and kept resetting a stored kind. This pins the
+        handler's forwarding itself: a handler that re-introduces
+        `props["subjectKind"] = body.subjectKind or "other"` fails here while a
+        model-only test stays green.
+        """
+        r1 = client.post("/v1/subjects", json={"name": "probe-rest-z",
+                                               "subjectKind": "team"})
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["subjectKind"] == "team", r1.json()
+        # bare re-create: no kind named — must NOT reset the stored one
+        r2 = client.post("/v1/subjects", json={"name": "probe-rest-z"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["subjectKind"] == "team", (
+            f"bare re-create reset the kind: {r2.json().get('subjectKind')!r}")
+
+    def test_create_object_bare_recreate_keeps_the_named_kind(self, client):
+        """#9572: the Object twin of the route-level pin above."""
+        r1 = client.post("/v1/objects", json={"name": "probe-rest-obj-z",
+                                              "objectKind": "capability"})
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["objectKind"] == "capability", r1.json()
+        r2 = client.post("/v1/objects", json={"name": "probe-rest-obj-z"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["objectKind"] == "capability", (
+            f"bare re-create reset the kind: {r2.json().get('objectKind')!r}")
+
     def test_create_object_requires_name(self, client):
         r = client.post("/v1/objects", json={"objectKind": "project"})
         assert r.status_code == 422

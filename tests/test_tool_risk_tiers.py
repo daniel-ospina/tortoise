@@ -121,12 +121,14 @@ class TestTheRiskAxis:
         `destructiveHint` confirmation for them.
 
         The identity-upsert family joined them for the same reason one step
-        further out (#9572): `create_subject` / `create_object` always send a
-        `subjectKind` / `objectKind` — `"other"` when the caller named no kind —
-        and `create_entity` supplies none, which the fold reads as `"other"` too,
-        so a bare re-create rewrites a user-authored discriminator. `main` served
-        `destructiveHint: true` on all three, and a `write` tier would have taken
-        that confirmation away on a call that clobbers.
+        further out: a bare repeat call applies the CALLER'S props over a node
+        that already exists (`_persist_extra_props` runs ON MATCH), which is the
+        same overwrite basis `tortoise_update` is in this tier for. The
+        FABRICATED-DEFAULT half of that finding — the door sending
+        `subjectKind`/`objectKind` `"other"` when the caller named no kind — is
+        FIXED (#9572), so the discriminator is no longer the reason; re-deriving
+        the tier from #4122's axis now that the clobber is gone is a separate
+        classification question.
         """
         # A tool belongs here whenever a REPEAT or a WRAPPER call reaches an
         # overwrite: `mitigate_operator` re-runs `update_point` +
@@ -436,12 +438,12 @@ class TestTheReadThroughToolsRegressionPin:
         assert mismatches == [], mismatches
 
 
-#: #9572 — the family whose bare repeat call RE-APPLIES a library default over a
-#: user-authored property: `create_subject` / `create_object` always send a
-#: `subjectKind` / `objectKind` (`"other"` when the caller named none),
-#: `create_entity` sends none and the fold's `ev.get(..., "other")` default takes
-#: over, and `mine_conversations` wraps the corpus re-ingest (`ingest_corpus`,
-#: which is `destructive` for exactly that reason).
+#: The family whose bare repeat call RE-APPLIES values over a node that already
+#: exists: `create_subject` / `create_object` / `create_entity` write the caller's
+#: props ON MATCH (#9572 fixed the FABRICATED discriminator default — a caller who
+#: names no kind now journals none, and the fold supplies `"other"` ON CREATE only
+#: — so the props lane is what the tier rests on now), and `mine_conversations`
+#: wraps the corpus re-ingest (`ingest_corpus`, `destructive` for that reason).
 #:
 #: All four served `destructiveHint: true` on `main` (`_rw()`), so tiering them
 #: `write` silently removed the client's confirmation at the moment the call got
@@ -456,8 +458,8 @@ IDENTITY_UPSERT_OVERWRITERS = (
 
 
 class TestTheIdentityUpsertFamilyKeepsItsConfirmation:
-    """A repeat call applies a DEFAULT the caller never supplied, so these may not
-    claim to be additive (#9572 is the write, this is the HINT).
+    """A repeat call applies values over an existing node, so these may not claim
+    to be additive (#9572 is the bug fix, this is the HINT).
 
     Both halves fail on the pre-fix code: there the four are `risk="write"`, so
     `destructiveHint` is `False`.
@@ -468,11 +470,11 @@ class TestTheIdentityUpsertFamilyKeepsItsConfirmation:
         for name in IDENTITY_UPSERT_OVERWRITERS:
             entry = entries[name]
             assert entry.risk == "destructive", (
-                f"{name}: re-applying a library default over a user-authored "
-                f"property is `destructive`, not additive (#9572)")
+                f"{name}: re-applying props over an existing node is "
+                f"`destructive`, not additive (#4122 axis)")
             assert entry.annotations.destructiveHint is True, (
                 f"{name}: destructiveHint must stay true — `main` served it true "
-                f"and a bare re-create can clobber a stored discriminator")
+                f"and a bare repeat call re-applies caller props ON MATCH")
             assert entry.annotations.readOnlyHint is False, name
             # write and destructive BOTH derive `writes`, so nothing about key
             # scope moves: a `graphs:read` key was refused before and is refused now.
@@ -495,8 +497,8 @@ class TestTheIdentityUpsertFamilyKeepsItsConfirmation:
             assert ann is not None, f"{name}: no annotations on the served tool"
             assert ann.destructiveHint is True, (
                 f"{name}: served destructiveHint is {ann.destructiveHint!r} — a "
-                f"client gates its confirmation on this and a bare re-create "
-                f"overwrites a user-authored discriminator (#9572)")
+                f"client gates its confirmation on this and a bare repeat call "
+                f"re-applies caller props ON MATCH (#4122 axis)")
             assert ann.readOnlyHint is False, name
 
 

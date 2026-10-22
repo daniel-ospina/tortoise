@@ -510,15 +510,23 @@ class EventAPI:
                         corrects=corrects)
         return ev["event_id"]
 
-    def add_subject(self, name: str, subject_kind: str = "other") -> str:
-        """Emit SubjectAdded event. Returns the subject's id."""
+    def add_subject(self, name: str, subject_kind: str | None = None) -> str:
+        """Emit SubjectAdded event. Returns the subject's id.
+
+        ``subject_kind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572: the fabricated default reached the fold's ON MATCH
+        ``coalesce($sk, s.subjectKind)`` as a real value, so a bare re-mention
+        reset a user-authored kind. The ``'other'`` default is the fold's ON
+        CREATE arm.
+        """
         sid = ulid()
-        self._emit("SubjectAdded", id=sid, name=name,
-                   subject_kind=subject_kind,
-                   createdAt=now_iso())
+        ev: dict = {"id": sid, "name": name, "createdAt": now_iso()}
+        if subject_kind is not None:
+            ev["subject_kind"] = subject_kind
+        self._emit("SubjectAdded", **ev)
         return sid
 
-    def add_object(self, name: str, object_kind: str = "other", *,
+    def add_object(self, name: str, object_kind: str | None = None, *,
                    id: str | None = None, **props) -> str:
         """Emit ObjectRegistered event. Returns the object's id.
 
@@ -528,10 +536,15 @@ class EventAPI:
         extra-props handler. The projection MERGEs Object by name — a re-run
         with the same name never creates a duplicate node (idempotent
         reification, DE2E-1/DE2E-8).
+
+        ``object_kind`` defaults to ``None`` (**absent**) since #9572 — the
+        Object twin of ``add_subject``'s fabricated default.
         """
         oid = id or ulid()
-        self._emit("ObjectRegistered", id=oid, name=name,
-                   object_kind=object_kind, createdAt=now_iso(), **props)
+        ev: dict = {"id": oid, "name": name, "createdAt": now_iso(), **props}
+        if object_kind is not None:
+            ev["object_kind"] = object_kind
+        self._emit("ObjectRegistered", **ev)
         return oid
 
     def add_document(self, doc_id: str, title: str, *,
