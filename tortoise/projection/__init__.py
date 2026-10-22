@@ -761,10 +761,24 @@ def _strip_call_subqueries(statement: str) -> str:
 
 
 # ── #3007: delete-target-aware scoping ──────────────────────────────────────
-# A ``DETACH DELETE`` may name several variables (``DETACH DELETE n, m``); each
-# is a separate target. The clause tail is read up to the next clause keyword so
+# A DELETE may name several variables (``DETACH DELETE n, m``); each is a
+# separate target. The clause tail is read up to the next clause keyword so
 # ``DELETE n RETURN count(*)`` yields ``n``, never ``RETURN``/``count``.
-_DELETE_CLAUSE_RE = re.compile(r"\bDETACH\s+DELETE\b(.*)$", re.IGNORECASE | re.S)
+#
+# #8256: the ``DETACH`` prefix is OPTIONAL here. FalkorDB auto-detaches, so
+# ``MATCH (n) DELETE n`` deletes every node exactly as ``DETACH DELETE`` does,
+# and a classifier that only looked for the two-word spelling let that whole
+# graph wipe through L2 on a production graph.
+#
+# The two lookarounds keep a bare spelling from inventing a clause where there
+# is none — the same clause-position convention ``_WHERE_STOP_RE`` uses:
+#   * ``(?<![\w.$:])`` — a keyword only counts at clause position, never right
+#     after ``.`` (a property ``n.delete``) or ``:`` (a label ``:DELETE``);
+#   * ``(?!\s*:)`` — a map KEY (``{delete: true}``) is followed by ``:``, a
+#     deleted variable never is.
+_DELETE_CLAUSE_RE = re.compile(
+    r"(?<![\w.$:])(?:DETACH\s+)?DELETE\b(?!\s*:)(.*)$", re.IGNORECASE | re.S
+)
 #: Clause keywords that TERMINATE a DELETE target list (and must never be read
 #: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
 _CLAUSE_STOP_RE = re.compile(
@@ -777,17 +791,30 @@ _VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
 #: ``(n :Label1:Label2)``, ``[r:IMPL]``, ``(n:$param)``. The bracket must be a
 #: node/rel pattern delimiter immediately before the variable, so a label word
 #: elsewhere in the statement cannot satisfy it.
-_VAR_LABEL_RE = r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+#:
+#: #8256: the SECOND arm is the same signal for a label the masker BLANKED — a
+#: backtick-quoted type is a label too (``-[r:`extractedFrom`]->``, ``(n:`Point`)``),
+#: and ``_LITERAL_OR_COMMENT_RE`` replaces it with spaces. The residual shape is
+#: unambiguous, because a colon directly after a variable INSIDE a pattern
+#: bracket can only open a label: ``[r: ]``. Only the closing delimiter is
+#: asserted, so this cannot be satisfied by a label that appears in prose —
+#: comments and string literals are already blanked, delimiters and all.
+_VAR_LABEL_RE = (
+    r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+    r"|[\(\[]\s*{var}\s*:\s*(?=[)\]|\-]|\x7b)"
+)
 #: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
 #: forward, so it scopes whatever the projection carries FROM that point.
 _WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
 
 
 def _delete_targets(text: str) -> tuple[list[str], int]:
-    """(deleted variable names, index of the ``DETACH DELETE`` clause, or -1).
+    """(deleted variable names, index of the DELETE clause, or -1).
 
     Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
-    string/comment cannot become a variable name (#3037).
+    string/comment cannot become a variable name (#3037). #8256: a bare
+    ``DELETE`` is a clause here too — ``DETACH`` is the prefix FalkorDB applies
+    for you, not a different statement.
     """
     m = _DELETE_CLAUSE_RE.search(text)
     if m is None:
@@ -881,7 +908,8 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     Five lexical scoping signals, each anchored to the DELETED variable:
 
     (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
-         DETACH DELETE n``;
+         DETACH DELETE n`` (a BACKTICKED type counts: ``-[r:`extractedFrom`]->``
+         is a label the masker blanked, #8256);
     (a') a LABEL PREDICATE on it — ``WHERE n:Point``;
     (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``;
     (c)  a PROPERTY MAP on its own pattern — ``MATCH (n:Point {id:$id})``
@@ -917,14 +945,21 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
 
 
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215/#8256).
 
-    Bulk = contains DETACH DELETE and carries no targeting construct on the
-    DELETED variable itself: a property map on ITS node/relationship pattern, a
-    real WHERE reference to it, or a label/LIMIT scope on it. The verdict is
-    made on structure, not on raw text — comments, string literals, backtick
-    identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
-    ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    Bulk = contains a DELETE — with or without the ``DETACH`` prefix — and
+    carries no targeting construct on the DELETED variable itself: a property
+    map on ITS node/relationship pattern, a real WHERE reference to it, or a
+    label/LIMIT scope on it. The verdict is made on structure, not on raw text —
+    comments, string literals, backtick identifiers and ``CALL { ... }``
+    subqueries are blanked first, so a stray ``{`` in any of them cannot exempt a
+    whole-graph wipe (#3037).
+
+    #8256: ``DETACH`` is NOT part of the test. FalkorDB auto-detaches, so
+    ``MATCH (n) DELETE n`` deletes every node exactly as ``MATCH (n) DETACH
+    DELETE n`` does; requiring the two-word spelling left that whole-graph wipe
+    unclassified on every L2 call site (the guarded handle's ``query`` /
+    ``call_procedure`` and the raw-query lane, where L2 is the only layer).
 
     #3007: a label-scoped / LIMIT-bounded delete (``MATCH (n:GraphEvent) WITH n
     ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
@@ -939,21 +974,20 @@ def _is_bulk_wipe(cypher: str) -> bool:
     raw-query lane where L2 is the only layer, executed a whole-graph wipe on a
     production server graph with no name check and no token.
     """
-    # Fast path: the overwhelming majority of statements are reads. A DETACH
-    # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
-    # statement is not a wipe and the scan below is skipped entirely — the
-    # read path pays no more than it did before #3037.
+    # Fast path: the overwhelming majority of statements are reads. A DELETE
+    # clause cannot be MASKED INTO existence (masking only removes text), so a
+    # raw-text miss proves the statement is not a wipe and the scan below is
+    # skipped entirely — the read path pays no more than it did before #3037.
     up_raw = cypher.upper()
-    if "DETACH" not in up_raw or "DELETE" not in up_raw:
+    if "DELETE" not in up_raw:
         return False
-    # The DELETE keyword is read from the masked text (a CALL subquery's
-    # DELETE is still a DELETE; a DETACH DELETE that lives only in a string or
-    # a comment is not a DELETE at all); the TARGETING constructs are read from
-    # the text with CALL subqueries blanked, so a brace or WHERE clause that
-    # lives inside a read-subquery cannot exempt a wipe that sits outside it.
+    # The DELETE clause is read from the masked text (a CALL subquery's DELETE
+    # is still a DELETE; a DELETE that lives only in a string or a comment is
+    # not a DELETE at all); the TARGETING constructs are read from the text with
+    # CALL subqueries blanked, so a brace or WHERE clause that lives inside a
+    # read-subquery cannot exempt a wipe that sits outside it.
     masked = _mask_cypher_text(cypher)
-    up = masked.upper()
-    if "DETACH" not in up or "DELETE" not in up:
+    if _DELETE_CLAUSE_RE.search(masked) is None:
         return False
     # #3037: masking removes only TERMINATED literals/comments. A malformed
     # statement keeps its quote, and a brace after it would still look like a
@@ -2808,11 +2842,22 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     variable the DELETE names (``_var_is_scoped``), including through a
 #     ``WITH <src> AS <dst>`` alias, so a targeting construct on another
 #     pattern no longer makes a whole-graph wipe look scoped.
-#     REMAINDERS (still open):
-#       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
-#         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
-#         — tracked: #8256 (pre-existing; widening the classifier is its own
-#         scope decision).
+#     The REMAINDERS list that used to close this note is now EMPTY: its last
+#     entry (a bare ``DELETE`` was not classified at all) is the #8256 fix
+#     recorded directly below.
+#   * ``_is_bulk_wipe`` also UNDER-classified a BARE ``DELETE`` (FIXED by
+#     #8256): the clause pattern required the two-word ``DETACH DELETE``
+#     spelling, so ``MATCH (n) DELETE n`` — which FalkorDB auto-detaches into
+#     the same whole-graph wipe — returned False and reached a production
+#     server graph on every L2 lane. ``DETACH`` is now an OPTIONAL prefix, and
+#     the clause is read at clause position only (``(?<![\w.$:])`` /
+#     ``(?!\s*:)``, the same convention ``_WRITE_CLAUSE_RE`` below already
+#     uses), so a property named ``delete``, a ``:DELETE`` label or a
+#     ``{delete: …}`` map KEY cannot invent one. Widening the clause made one
+#     latent gap load-bearing and it is closed in the same change: a
+#     BACKTICK-quoted type is a label the masker blanks
+#     (``-[r:`extractedFrom`]->`` — session_source_migration's move helpers),
+#     so ``_VAR_LABEL_RE``'s second arm reads the residual ``[r: ]`` shape.
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -5635,13 +5680,14 @@ class _GuardedGraph:
         journal-backed/server projection (an unarmed EMBEDDED one keeps the
         pre-#9209 pass-through, which L2 itself exempts).
 
-        ⛔ AND L2'S OWN BOUNDARY APPLIES HERE UNCHANGED: it classifies a BULK
-        ``DETACH DELETE`` (``_is_bulk_wipe``), so a bare-DELETE procedure string
-        (``CALL db.labels() MATCH (n) DELETE n //``) is NOT refused by this verb
-        — exactly as the same bare DELETE is not refused through
-        ``proj.g.query``. That is the pre-existing scope of L2, pinned by
-        ``test_the_L2_classifier_still_requires_DETACH`` so a reader of this
-        docstring does not have to guess how wide the verb is.
+        ⛔ AND L2'S OWN BOUNDARY APPLIES HERE UNCHANGED: it classifies a bulk
+        ``DELETE`` whether or not the ``DETACH`` prefix is written
+        (``_is_bulk_wipe``), so a wipe-BEARING procedure string
+        (``CALL db.labels() MATCH (n) DELETE n //``) is refused by this verb
+        exactly as ``MATCH (n) DETACH DELETE n`` is — while a TARGETED delete
+        (``PROCEDURE ... MATCH (n:Point {id:$p}) DELETE n``) stays dispatchable.
+        #8256 made the bare spelling classifiable; before it, a bare-DELETE
+        procedure string reached the graph on every L2 call site.
         """
         statement = _call_procedure_statement(procedure, args=args, emit=emit)
         if statement is None:

@@ -726,6 +726,142 @@ def test_spoofed_wipe_is_refused_by_the_guard(statement):
     assert proj.g.wipes() == [], "a refused wipe must not reach the graph"
 
 
+# ── #8256: a bare DELETE deletes every node (FalkorDB auto-detaches) ───────
+#
+# The clause pattern required the two-word ``DETACH DELETE`` spelling, so
+# ``MATCH (n) DELETE n`` returned False and reached a production server graph
+# unguarded on EVERY L2 lane — the same wipe the guard exists to stop. The
+# storage comment in ``tortoise/projection/__init__.py`` named it as a known
+# remainder ("a bare ``DELETE`` ... is not classified at all"); these tests are
+# the statement of the widening, and the three halves the pin demanded: the
+# bulk case, the targeting constructs that must NOT be refused, and the
+# lookalikes that must not invent a clause.
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DELETE n",                                    # the plain wipe
+    "MATCH (n) DELETE n RETURN count(*)",                     # with a RETURN
+    "MATCH ()-[r]->() DELETE r",                              # every relationship
+    "MATCH (n) DELETE n //",                                  # trailing comment
+    "CALL db.labels() MATCH (n) DELETE n //",                 # procedure-pasted
+    "UNWIND [1] AS x MATCH (n) DELETE n",                     # expression prefix
+    "MATCH (n) DELETE n WHERE id(n) = '{'",                   # unterminated → fail closed
+    "CALL { MATCH (n) DELETE n }",                            # inside a subquery
+    # DISCRIMINATING: the scoping construct binds ANOTHER variable, so the
+    # delete still removes every node (#8215's attribution, on the bare spelling).
+    "MATCH (x:Foo) WITH x MATCH (n) DELETE n",
+    "MATCH (n:Point), (m) DELETE n, m",
+])
+def test_a_bare_DELETE_is_a_bulk_wipe(statement):
+    """#8256: ``DELETE`` without ``DETACH`` is the same whole-graph wipe.
+
+    MUTATION: restore ``\\bDETACH\\s+DELETE\\b`` in ``_DELETE_CLAUSE_RE`` (the
+    pre-#8256 spelling) and every case here reads False — which is exactly the
+    state in which ``MATCH (n) DELETE n`` executed on ``prod_tortoise``.
+    """
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    # The #3007 event-retention maintenance delete, spelled WITHOUT DETACH —
+    # the statement the widening must not start refusing on a server graph.
+    "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow DELETE n",
+    "MATCH (n:Label) WITH n LIMIT 10 DELETE n",
+    "MATCH (n:Label) DELETE n",
+    "MATCH (n:Point {id:$id}) DELETE n",
+    "MATCH (n) WHERE n.id = $id DELETE n",
+    "MATCH (n) WHERE n:Point DELETE n",
+    "MATCH (n) WHERE id(n) IN [1,2] DELETE n",
+    "MATCH (n:Point {id:$id}) WITH n AS m DELETE m",
+    "MATCH (a:Point), (b:Meta) DELETE a, b",
+    # #8256's latent gap, made load-bearing by the widening: a BACKTICK-quoted
+    # type is a label the masker blanks, so ``_VAR_LABEL_RE``'s second arm reads
+    # the residual ``[r: ]``. These are the two helpers in
+    # ``session_source_migration`` that move a backticked edge type.
+    "MATCH (old:Source {url:$u})-[r:`extractedFrom`]->(t) WHERE t.url <> $v "
+    "MATCH (new:Source {url:$v}) MERGE (new)-[r2:`extractedFrom`]->(t) "
+    "ON CREATE SET r2 = properties(r) DELETE r RETURN count(r2)",
+    "MATCH (p:Point)-[r:`extractedFrom`]->(old:Source {url:$u}) "
+    "WHERE coalesce(p.session_id, p.sessionId) = $sid DELETE r",
+    "MATCH (n:`Point` {id:$id}) DELETE n",
+])
+def test_a_bare_DELETE_keeps_every_targeting_construct(statement):
+    """#8256 keeps the #3007/#3037/#8215 exemptions intact for the bare spelling.
+
+    MUTATION: drop ``_VAR_LABEL_RE``'s masked-backtick arm and the last three
+    cases (backtick-quoted types) read True — a targeted delete refused, which
+    would have broken ``session_source_migration``'s move helpers on a real
+    graph. MUTATION: make the target test ``any`` instead of ``all`` and the
+    two-target case exempts a wipe (#8215).
+    """
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is False, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) SET n.delete = 1 RETURN n",                    # property, dotted
+    "MATCH (n:DELETE) RETURN n",                              # label named DELETE
+    "MATCH (n {delete: true}) RETURN n",                      # map KEY, not a clause
+    "MATCH (n) RETURN 'MATCH (n) DELETE n'",                  # string literal
+    "MATCH (n) RETURN n // MATCH (n) DELETE n",               # comment
+    "MATCH (n) WHERE n.k = 1 RETURN n",                       # no delete at all
+])
+def test_a_bare_DELETE_cannot_be_invented_by_a_lookalike(statement):
+    """The other direction: widening the clause must not make a READ a wipe.
+
+    MUTATION: drop the ``(?<![\\w.$:])`` lookbehind and the property/label
+    cases read True; drop the ``(?!\\s*:)`` lookahead and the map-KEY case
+    reads True. Both are the clause-position convention ``_WRITE_CLAUSE_RE``
+    already uses, so a statement that merely CONTAINS the word cannot be
+    refused as a destructive write.
+    """
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is False, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n) DELETE n",
+    "MATCH ()-[r]->() DELETE r",
+    "CALL db.labels() MATCH (n) DELETE n //",
+])
+def test_a_bare_wipe_is_refused_by_BOTH_L2_call_sites(statement):
+    """The issue's acceptance, end-to-end: BOTH L2 call sites refuse a bare
+    whole-graph delete on a non-test SERVER graph, before any graph I/O.
+
+    MUTATION: revert the clause pattern and neither refuses — ``proj.query``
+    and ``proj.g.query`` both dispatch the wipe (the pre-#8256 behaviour).
+    """
+    proj = _bare_projection(graph_name="prod_tortoise", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.query(statement)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.g.query(statement)
+    assert proj.g.wipes() == [], "a refused wipe must not reach the graph"
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (n:Point {id:$id}) DELETE n",
+    "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow DELETE n",
+    "MATCH (p:Point)-[r:`extractedFrom`]->(old:Source {url:$u}) DELETE r",
+])
+def test_a_targeted_bare_delete_still_reaches_the_graph(statement):
+    """The no-over-refusal half: a targeted bare delete is still EXECUTED on a
+    non-test server graph (the widening classifies the CLAUSE, not the verb).
+
+    MUTATION: drop the targeting constructs from ``_var_is_scoped`` and this
+    fails as a refusal — every targeted delete becomes a bulk-wipe refusal.
+    """
+    proj = _bare_projection(graph_name="team_x", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    proj.query(statement)
+    proj.g.query(statement)
+    assert len(proj.g._g.queries) == 2, "a targeted delete must reach the graph"
+
+
 # ── (b) the legitimate disposable paths still work ────────────────────────
 
 
