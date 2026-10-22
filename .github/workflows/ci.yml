@@ -1,9 +1,12 @@
 name: CI
 # Mixed CI: repo-local checks (self-contained, #555) + agent-infra reusable
-# workflows pinned to semver tags (#303, #387). The `scripts/` symlink stays
-# repo-local-independent (machine-local path, unverifiable on the runner) —
-# the agent-infra node-ci script-validate/skill-lint gates are therefore
-# skipped here (python-ci.yml carries the stack gates instead).
+# workflows pinned to semver tags (#303, #387). The repo-root `scripts` pointer is
+# MACHINE-LOCAL and not tracked at all (#9475: gitignored, materialised per machine by
+# tools/link_agent_infra_scripts.py from $AGENT_INFRA_PATH — a git symlink blob cannot
+# hold a variable, so tracking it made it dangle everywhere but the author's machine).
+# It is therefore absent on a runner, which is why the agent-infra node-ci
+# script-validate/skill-lint gates are skipped here (python-ci.yml carries the stack
+# gates instead).
 
 on:
   pull_request:
@@ -341,6 +344,9 @@ jobs:
               # drift-check (agent-infra check --ci: version pin, workflow
               # refs, symlinks, templates, AGENTS.md/.mcp.json/.husky)
               "drift": any_file(
+                  # a path named `scripts` can only appear in a diff via `git add -f`
+                  # since #9475 untracked it — which is exactly the regression this
+                  # gate must re-run on (the pointer is machine-local and gitignored)
                   isfile(".agent-infra-version", "AGENTS.md", ".mcp.json", "scripts"),
                   startswith(".github/workflows/"),
                   startswith(".husky/"),
@@ -1346,6 +1352,13 @@ jobs:
     # (it must, to read those outputs), and without the guard a FAILING
     # `changes` job would skip the whole job — losing the sigpipe coverage that
     # does not depend on `changes` at all. It runs unless the RUN was cancelled.
+    #
+    # That `!cancelled()` IS the consolidation's form of the guarantee the
+    # standalone `sigpipe-guard` job got by having no `needs:` at all (#841):
+    # the consolidated job cannot drop `needs: changes` — it exists to read those
+    # outputs for the per-step gates below — so run-unless-cancelled is what keeps
+    # a FAILING `changes` job from removing the sigpipe coverage.
+    #
     # 15 min: measured ≈190 s locally (the driver harness alone is 167 s); the
     # cap bounds a hung harness without failing a slow-runner run.
     timeout-minutes: 15
@@ -1369,9 +1382,11 @@ jobs:
       # NOT close #7588: that issue's own sites are a `printf | sed | head -n1`
       # shape this guard does not match.
       #
-      # The guard lives in agent-infra, reached locally through the committed
-      # `scripts/` symlink — an absolute MACHINE-LOCAL path, so it dangles on a
-      # runner (see the workflow header). Agent-infra is public, so it is checked
+      # The guard lives in agent-infra, reached locally through the machine-local
+      # `scripts` pointer (#9475: gitignored, NOT tracked, materialised from
+      # $AGENT_INFRA_PATH by tools/link_agent_infra_scripts.py), so it is ABSENT on a
+      # runner rather than dangling (see the workflow header). Agent-infra is public,
+      # so it is checked
       # out alongside (above) and the SAME guard runs: a vendored copy would be a
       # second source of truth free to drift from the one that owns the idiom
       # (#863's "guard nobody runs"). The pin above is a commit rather than a tag
@@ -2407,4 +2422,31 @@ jobs:
     # symlinks, missing templates, workflow refs vs manifest.check.ci.ref)
     # fails CI; content drift warns. Runs tiered via agent-infra check --ci.
     uses: daniel-ospina/agent-infra/.github/workflows/drift-check.yml@main
+    with:
+      # #9475: `scripts` is a MACHINE-LOCAL pointer now — gitignored, untracked,
+      # materialised per machine from $AGENT_INFRA_PATH — so a CI checkout has none and
+      # agent-infra's `check --ci` reports `❌ scripts/ — not symlinked` (tier: fail) on
+      # every drift-gated PR. Measured on this PR's head: the drift job failed with
+      # exactly that line, `status: FAIL`, `exempted surfaces: (none)`.
+      #
+      # That red is not drift, it is the deliberate shape of the fix, so materialise the
+      # pointer FIRST and then run the check UNCHANGED — the gate still verifies the link
+      # (and every other surface) instead of being bypassed or exempted. The reusable
+      # workflow sets AGENT_INFRA_PATH to its own checkout ($GITHUB_WORKSPACE/.agent-infra),
+      # which is precisely what the check expects the pointer to point at, so a materialised
+      # pointer reads `✅ scripts/`. If materialisation fails the check still runs and fails
+      # on the same line, so a broken setup cannot read as green.
+      #
+      # ⛔ ONE quote-free command, on ONE line, and NOT the script inline (#9541 review,
+      # round 6 P1). The reusable workflow consumes this input as
+      # `cmd="${{ inputs.check-command }}"` then `bash -c "$cmd"` — `${{ }}` substitution is
+      # textual and escapes nothing, so a `"`, `(`, `)` or backtick anywhere in the override
+      # closes the assignment early and dies at PARSE time (`syntax error near unexpected
+      # token '('`), before `drift_exit` is recorded: the gate then reds forever with "the
+      # drift check produced NO result", for every drift-gated PR, while verifying nothing.
+      # The wrapper holds the quoting-needing logic and re-states the reusable workflow's own
+      # default invocation (`node <infra>/bin/agent-infra.js check . --ci`); if that default
+      # changes, follow it in tools/agent_infra_drift_check.py. Pinned by
+      # tests/test_link_agent_infra_scripts.py::test_check_command_survives_the_reusable_workflows_interpolation.
+      check-command: python3 tools/agent_infra_drift_check.py
     secrets: inherit

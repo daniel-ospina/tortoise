@@ -37,6 +37,26 @@ check_version() {
 
 check_version
 
+# The repo-root `scripts` pointer is MACHINE-LOCAL since #9475: gitignored, never tracked,
+# so a fresh clone or lane has NO `scripts/` at all until it is materialised from
+# $AGENT_INFRA_PATH (`agent-infra init`/`update` does it where that CLI is installed, and
+# it is not installed on every lane). Until then every documented `scripts/<tool>.sh` is
+# dead — including `scripts/admin-merge.sh`, the merge rail. Nothing else guarantees a
+# run, and the SIGPIPE warning below only PRINTS the manual fix, so materialise it here,
+# quietly, when the pointer is absent (or dangling — `-e` is false for both) AND there is
+# something on this machine to point at.
+#
+# Never blocks: a pointer that cannot be materialised is the developer's environment, not
+# a reason to refuse a commit, so the status is discarded on purpose and the warning below
+# still names the manual command.
+if [ ! -e scripts ] && [ -n "${AGENT_INFRA_PATH:-}" ] && [ -d "$AGENT_INFRA_PATH/scripts" ]; then
+  if [ -x .venv/bin/python ]; then
+    .venv/bin/python tools/link_agent_infra_scripts.py --quiet >/dev/null 2>&1 || true
+  elif command -v uv >/dev/null 2>&1; then
+    uv run python tools/link_agent_infra_scripts.py --quiet >/dev/null 2>&1 || true
+  fi
+fi
+
 # #841 — builtin-writer SIGPIPE false-negative guard (agent-infra's). `printf`/`echo`
 # piped into a quiet `grep` under `pipefail` can report "not found" for a match that IS
 # present (the writer takes SIGPIPE once grep exits early on a multiline payload),
@@ -68,12 +88,15 @@ if [ -f "$SIGPIPE_GUARD" ]; then
     bash "$SIGPIPE_GUARD" --dirs "$(cat .sigpipe-grep-dirs)" || exit 1
   else
     echo "⚠️  $SIGPIPE_GUARD is too old to take --dirs (needs agent-infra#1643)." >&2
-    echo "    Your local agent-infra checkout is behind. Update it and re-link scripts/." >&2
+    echo "    Your local agent-infra checkout is behind. Update it, then re-materialise" >&2
+    echo "    scripts/: uv run python tools/link_agent_infra_scripts.py" >&2
     echo "    Commit NOT blocked -- the guard's CI job still runs." >&2
   fi
 else
   echo "[sigpipe-guard] scripts/check-no-sigpipe-grep.sh not found — NOT checked locally." >&2
-  echo "   Fix: set AGENT_INFRA_PATH and re-link scripts/. CI runs this guard regardless" >&2
+  echo "   Fix: set AGENT_INFRA_PATH, then materialise scripts/ (#9475 — it is gitignored," >&2
+  echo "   not tracked): uv run python tools/link_agent_infra_scripts.py" >&2
+  echo "   CI runs this guard regardless" >&2
   echo "   (ci.yml job: repo-harnesses), so this warning is not a pass for the committed tree." >&2
 fi
 
