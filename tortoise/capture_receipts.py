@@ -35,15 +35,33 @@ key name here fails there instead of silently drifting the registry (an
 unregistered key is dropped by the ``_update_onboarding_state`` allowlist
 filter).
 
-The dicts are the ONLY literal spelling left in the API (#5051). Every other
-Python consumer DERIVES its keys from these formatters, and the registry test
-pins each derivation, so the safe direction — change the format HERE and
-everything follows — holds rather than being merely intended: the delete path's
-orphan sweep (``_capture_receipt_buckets``) and the client-write-refusal set
-(``_capture_server_owned_keys``, #3681). The one consumer that CANNOT import
-these formatters — the dashboard's JS reader
-(``website/apps/dashboard/src/captureStatus.js``) — is pinned to their prefix
-from the test instead.
+The dicts above are a legitimate TABLE (the dashboard needs a REGISTERED row
+per harness). The ONE other literal spelling in the API is also a table, not a
+derivation: ``_PATCH_FIELD_TO_STATE_KEY`` in ``tortoise/hosted_api.py``. It is
+not a formatter call because it has to re-spell the harness itself — Pydantic
+field names cannot carry hyphens, so the underscore JSON-field spelling maps to
+the hyphenated STATE key, and the harness has to be transformed, not just
+suffixed.
+
+So the ``#5051`` rule is not "no literal key name anywhere in the API" — it is
+"no literal key name at a site that CONSUMES the format". The two consumers
+both DERIVE, and ``tests/test_5051_capture_receipt_key_registry.py`` pins every
+one of the three literal tables to these formatters, so the safe direction —
+change the format HERE and everything follows — holds rather than being merely
+intended:
+
+* the delete path's orphan sweep, ``_capture_receipt_buckets`` (derives — a
+  stale spelling there makes ``state.get(key)`` always falsy, so an orphaned
+  receipt is never cleared);
+* the client-write-refusal set, ``_capture_server_owned_keys`` (derives — a
+  stale spelling there leaves the live keys client-WRITABLE, re-opening the
+  fabricated-receipt surface #3681 closed);
+* the two onboarding default-state dicts and ``_PATCH_FIELD_TO_STATE_KEY``
+  (literal tables, pinned to the formatters by the same test).
+
+The one consumer that CANNOT import these formatters — the dashboard's JS
+reader (``website/apps/dashboard/src/captureStatus.js``) — is pinned to their
+prefix from the test instead.
 """
 from __future__ import annotations
 
