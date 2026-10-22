@@ -715,6 +715,38 @@ class NotAWorkItem(Exception):
     """
 
 
+class BoardRefusal(str):
+    """The board's refusal SENTENCE, carrying the RECORDED CAUSE as data (#9392
+    review P2).
+
+    ⛔ A REFUSAL THAT NAMES A CAUSE MUST CARRY IT, NOT SPELL IT. `_board_can_answer`
+    composes a sentence that embeds `reconciliation.registry_error` and ends with
+    the sentence `fleet_state.registry_remedy(raw)` derived FROM it; the exit-2
+    remedy then handed that whole sentence BACK to `registry_remedy`, so the note
+    (never empty) always looked like a cause: the helper's "no cause recorded" arm
+    was unreachable and the line asserted "the roster EXISTS but could not be read"
+    for a board that recorded nothing — the "states more than the read
+    established" defect this issue files, one cause over.
+
+    A `str` subclass, so every existing consumer (f-strings, comparisons,
+    `assertIn`, `who_is_on.py`) keeps working unchanged and the sentence stays the
+    one wording; only a reader that wants the machine value (`read_holders` →
+    `HolderRead.registry_error`) reaches for `.cause`. The pattern the
+    `truncation_widenable` / `budget_exhausted` comments on `Surface` record, with
+    the payload riding on the message rather than a new return shape — because
+    `_read_board`'s `None`-when-unanswerable contract is pinned by tests and must
+    NOT be loosened just to carry a cause.
+    """
+
+    #: The board's RECORDED cause, or ``None`` when it recorded none. Never prose.
+    cause: str | None
+
+    def __new__(cls, message: str = "", cause: str | None = None) -> BoardRefusal:
+        obj = super().__new__(cls, message)
+        obj.cause = cause
+        return obj
+
+
 class SurfaceError(Exception):
     """A surface could not be queried (INCOMPLETE — never CLEAN).
 
@@ -1004,6 +1036,13 @@ class Surface:
     note: str = ""
     truncated: bool = False
     truncation_note: str = ""
+    # The LANE-ROSTER read's recorded cause, as DATA beside the note (#9392
+    # review P2) — `None` means the board recorded none. `_incomplete_remedy`
+    # used to re-derive this by handing the composed note back to
+    # `registry_remedy`, which made the helper's "no cause recorded" arm
+    # unreachable and asserted "the roster EXISTS" from a board that had recorded
+    # nothing. Same lesson as `truncation_widenable` / `budget_exhausted` below.
+    registry_error: str | None = None
     # Whether this cap is a SETTING the operator can raise (`--pr-limit`), or a
     # ceiling no setting can lift (#9423 review, P3). The REST rescue reads ONE
     # page at GitHub's per_page maximum, so on that path `--pr-limit` cannot
@@ -3856,6 +3895,16 @@ class HolderRead:
     # publishes NO workspaces, so a bare `0` there is an artefact of the failed
     # read and printing it asserts an empty live fleet.
     workspaces_measured: bool = False
+    # THE ROSTER READ'S RECORDED CAUSE, as DATA beside the note (#9392 review
+    # P2). `_incomplete_remedy` used to hand the whole composed NOTE back to
+    # `fleet_state.registry_remedy`, so the note — which always ends with a
+    # remedy sentence — always read as a non-empty "cause" and the helper's
+    # "no cause recorded" arm was unreachable there: the exit-2 line asserted
+    # "the roster EXISTS but could not be read" for a board that had recorded no
+    # cause at all. `None` therefore means NOT RECORDED (distinct from "" only
+    # in provenance; both take that arm), exactly like `budget_exhausted` /
+    # `truncation_widenable` on `Surface`, which exist for this same reason.
+    registry_error: str | None = None
 
 
 def _board_can_answer(state: dict) -> str:
@@ -3887,11 +3936,15 @@ def _board_can_answer(state: dict) -> str:
         # other readers of this note (`who_is_on.py`, and the exit-2 remedy)
         # must give a lane the SAME answer. `registry_remedy` is the one place
         # that sentence lives, so the three cannot disagree.
-        return (
+        return BoardRefusal(
             "the board's lane registry could not be read "
             f"({rec.get('registry_error') or 'cause not recorded'}) — the lane "
             "roster is UNKNOWN, not empty — "
-            f"{fleet_state.registry_remedy(str(rec.get('registry_error') or ''))}"
+            f"{fleet_state.registry_remedy(str(rec.get('registry_error') or ''))}",
+            # …and the MACHINE value beside the sentence, so a downstream reader
+            # classifies the cause it was given instead of re-parsing this prose
+            # back out of it (#9392 review P2).
+            cause=_board_registry_error(rec),
         )
     if rec.get("github_measured") is not True:
         return (
@@ -4445,6 +4498,34 @@ def _board_count(rec: dict, key: str) -> int | None:
     return value if value >= 0 else None
 
 
+def _board_registry_error(state: object) -> str | None:
+    """The LANE-ROSTER cause the board RECORDED, or ``None`` when it recorded
+    none (#9392 review P2).
+
+    ⛔ THE CAUSE IS READ FROM THE BOARD, NEVER FROM A NOTE. `_board_can_answer`
+    composes a sentence that embeds this value AND appends `registry_remedy(...)`;
+    handing that sentence back to `registry_remedy` made its "no cause recorded"
+    arm unreachable and asserted "the roster EXISTS" for a board that recorded
+    nothing. The field is the one place the cause exists, so it is what travels.
+
+    Accepts either the whole state or its `reconciliation` mapping, so a caller
+    holding `rec` does not have to re-wrap it just to ask this question.
+    """
+    rec = state.get("reconciliation") if isinstance(state, dict) else None
+    if rec is None and isinstance(state, dict):
+        rec = state          # already the `reconciliation` mapping
+    if not isinstance(rec, dict):
+        return None
+    error = rec.get("registry_error")
+    if not isinstance(error, str) or not error.strip():
+        # A BLANK CAUSE IS NOT A CAUSE. The board writes `""` when the read
+        # recorded none (`load_registry` always writes a cause on its only failure
+        # path), so collapsing blank and absent here keeps `None` meaning exactly
+        # "no cause recorded" at every reader.
+        return None
+    return error
+
+
 def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
     """The claim gate's answer for `issue`: who holds it, are they still there?
 
@@ -4454,7 +4535,14 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
     """
     state, source, why = _read_board(slug, repo_root)
     if state is None:
-        return HolderRead(measured=False, source=source, unanswerable=why)
+        # ⛔ THE CAUSE TRAVELS INSIDE THE REFUSAL, NOT BESIDE IT (#9392 review
+        # P2). `why` is a `BoardRefusal`, so the roster cause the board RECORDED
+        # reaches the exit-2 remedy as data. `_read_board`'s contract is
+        # deliberately unchanged: an unanswerable board is still returned as
+        # `None`, so it can never be read as an answer (the two tests that pin
+        # that stay green — the cause rides on the sentence, not on the state).
+        return HolderRead(measured=False, source=source, unanswerable=why,
+                          registry_error=getattr(why, "cause", None))
     entry_problem = _issue_entry_problem(state, issue)
     if entry_problem:
         return HolderRead(
@@ -4586,6 +4674,11 @@ def scan_issue_surface(
 
     # ── the holder arm ──────────────────────────────────────────────────────
     holder_note = _holder_gate_note(holders)
+    # The roster cause travels as DATA beside the note so the exit-2 remedy
+    # classifies the board's RECORDED cause instead of re-parsing this prose
+    # (#9392 review P2). Set unconditionally: `None` is itself the answer
+    # "the board recorded no cause", which is the arm that was unreachable.
+    surface.registry_error = holders.registry_error
     for holder in holders.holders:
         if holder.verdict == HOLDER_LIVE:
             surface.add(
@@ -6076,9 +6169,15 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
     roster = [s for s in incomplete if _LANE_ROSTER_NOTE in (s.note or "")]
     if roster:
         roster_ids = {id(s) for s in roster}
+        # ⛔ THE CAUSE IS CARRIED, NOT RE-PARSED (#9392 review P2). Passing the
+        # composed note back to `registry_remedy` made the note itself look like
+        # the cause: it is never empty, so the helper's "no cause recorded" arm
+        # could not be reached and the exit-2 line asserted the roster EXISTS for
+        # a board that recorded nothing. The recorded cause is the only input.
+        recorded = [s.registry_error for s in roster
+                    if s.registry_error is not None]
         roster_cause = fleet_state.registry_remedy(
-            " ".join(s.note or "" for s in roster)
-        )
+            recorded[0] if recorded else "")
         text = (
             "the LANE ROSTER is UNKNOWN (not empty) — no lane can be attributed "
             "to this issue until it is readable, and this is NOT a read that "

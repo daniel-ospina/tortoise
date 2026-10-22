@@ -7728,6 +7728,10 @@ class HolderGateTests(unittest.TestCase):
         surface = self.cp.Surface("issue assignee/holder")
         surface.incomplete(self.cp._board_can_answer(
             _fleet_board_state(registry_measured=False, registry_error=error)))
+        # …and the CAUSE beside the note, the way `read_holders` carries it
+        # (`None` when the board recorded none — #9392 review P2).
+        surface.registry_error = self.cp._board_registry_error(
+            _fleet_board_state(registry_measured=False, registry_error=error))
         return surface
 
     def test_the_roster_marker_is_the_note_the_gate_emits(self):
@@ -7769,6 +7773,28 @@ class HolderGateTests(unittest.TestCase):
         self.assertIn("EXISTS but could not be read", remedy)
         self.assertNotIn("NEVER PROVISIONED", remedy)
         self.assertNotIn("fix gh auth/network", remedy)
+
+    def test_a_roster_with_no_recorded_cause_is_not_called_an_existing_file(self):
+        """Three causes, three sentences — and the third one was unreachable
+        (#9392 review P2).
+
+        `_incomplete_remedy` handed the whole composed NOTE back to
+        `registry_remedy`, and that note always ends with a remedy sentence, so
+        the helper's `if error.strip()` arm always matched: a board that recorded
+        NO cause still produced "the roster EXISTS but could not be read — fix the
+        file itself (permissions/encoding)". That asserts a file that was never
+        observed, and sends the reader to chmod something that may not exist —
+        the same dead end the issue files, one cause over. The cause now travels
+        as DATA (`Surface.registry_error`), so `None` reaches the third arm.
+        """
+        surface = self._roster_surface("")
+        self.assertIsNone(surface.registry_error, (
+            "the helper must say 'no cause recorded' when the board recorded none"))
+        remedy = self.cp._incomplete_remedy([surface])
+        self.assertIn("LANE ROSTER is UNKNOWN", remedy)
+        self.assertIn("was not recorded", remedy)
+        self.assertNotIn("EXISTS but could not be read", remedy)
+        self.assertNotIn("NEVER PROVISIONED", remedy)
 
     def test_a_mixed_run_keeps_the_roster_cause_and_the_other_remedy(self):
         """Partitioned, not replaced: a run whose roster AND a list are

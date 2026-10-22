@@ -2054,6 +2054,11 @@ def build_state(
     # truncated (the two are indistinguishable), and the flag travels with the
     # board so a reader can refuse rather than assert a negative.
     issues_truncated = len(issues_read) >= OPEN_ISSUES_LIMIT
+    # ⛔ AND THE ISSUE COUNT IS ITS OWN READ'S, not the AND of both (#9392 review
+    # P2): beside `open_issues_read` the only relevant provenance is this read's,
+    # and `github_measured` also goes false when the PR list alone failed — gating
+    # on it would throw away a count that WAS measured.
+    issues_measured = bool(getattr(issues_read, "measured", False))
     github_measured = bool(getattr(prs_read, "measured", False)) and bool(
         getattr(issues_read, "measured", False)
     )
@@ -2809,7 +2814,14 @@ def build_state(
             # for an N it did not see, so the flag travels with the board and the
             # pre-flight refuses for an absent issue rather than answering.
             "open_issues_truncated": issues_truncated,
-            "open_issues_read": len(issues_read),
+            # ⛔ ABSENT IS NOT ZERO, for this read too (review P2). `gh_json`
+            # returns NO rows on failure, so this `len()` beside a failed read is
+            # the artefact the comment above forbids for `registry_rows` — and
+            # `build --json` prints the object before its refusal. `None` is the
+            # board saying "this read did not happen"; every consumer
+            # (`_issue_entry_problem`, via `open_issues_truncated`) already reads
+            # only under a measured-True flag.
+            "open_issues_read": len(issues_read) if issues_measured else None,
             "open_issues_limit": OPEN_ISSUES_LIMIT,
             # #8999: the LIVE-SESSION store's provenance, in the same shape. The
             # reader can now say WHICH store answered (the cmux session store, the
