@@ -1800,6 +1800,16 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # never ran on the bytes they hard-code. Pinned by
              # tests/test_ci_selection.py::test_journal_growth_guard_runs_on_a_tool_or_probe_change.
              "supabase/tests/fixtures/record_projection_journal.jsonl",
+             # agent-infra#2344 (owner ruling): `tools/runner_autoscale.py` is this
+             # box's runner-capacity guard and `tests/test_runner_autoscale.py`
+             # owns its pins (ceiling arithmetic + 8 mutation gates). `tools/` is a
+             # flat NON_PYTHON_PREFIXES entry, so a tool-only change came back with
+             # `changed == []` and the guard's own tests never ran on the file they
+             # guard — the #1349/#3332/#3616 silent-drop class, the same shape as
+             # `tools/lane_stash.py` above. `CORE_ALSO` (not a SOURCE_PATTERNS row)
+             # is deliberate: this is a lane/fleet-hygiene contract about a TOOL, and
+             # `core` already carries the other `tools/` pins.
+             "tools/runner_autoscale.py",
              # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the
              # documented manual deploy, and the #8816 guard
              # (tests/test_e2e_wrangler_prewarm.py, registered `core`) both reads
