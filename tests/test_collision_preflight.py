@@ -6287,21 +6287,42 @@ class CollisionPreflightTest(unittest.TestCase):
                 [("rebuild the board",), ("tools/fleet_state.py build",)],
             ),
         }
+        # ⛔ THE DEAD END IS BOTH PHRASINGS AND THE COMMAND (review, cycle 8).
+        # #9392's sentence is `_incomplete_remedy`'s "fix gh auth/network (or
+        # rebuild the fleet board) and re-run", and the sibling pin above forbids
+        # it by THAT wording — a list carrying only "rebuild the board" would let
+        # a lane reintroduce the archived sentence into a roster arm and stay
+        # green. The runnable `tools/fleet_state.py build` is a separate dead end
+        # and is never something a roster arm should carry.
+        dead_ends = ("rebuild the fleet board", "rebuild the board")
+        command = "tools/fleet_state.py build"
+        # ⛔ PRESCRIPTIVE, NOT MENTIONED (review, cycle 8). A bare substring test
+        # forbids NAMING the dead end, so the strongest wording a header author
+        # has — "do not rebuild the board" — is the one that fails. A sentence
+        # that NAMES a dead end and states no negation is offering it; one that
+        # negates it is doing the pin's job. Hence the sentence split.
+        negation = re.compile(r"\b(?:not|never|cannot|can't|instead)\b")
         for arm, (region, requirements) in arms.items():
+            low = region.lower()
             for accepted in requirements:
                 self.assertTrue(
-                    any(k in region for k in accepted),
+                    any(k.lower() in low for k in accepted),
                     f"the {arm} arm's remedy must state {' or '.join(accepted)}",
                 )
             if arm == "board":
                 continue
-            for dead_end in ("rebuild the board", "tools/fleet_state.py build"):
-                self.assertNotIn(
-                    dead_end,
-                    region.lower(),
-                    f"the {arm} arm must not offer {dead_end!r}: that rebuild fails "
-                    "on the same read it is prescribed for",
-                )
+            self.assertNotIn(
+                command,
+                low,
+                f"the {arm} arm must not carry the runnable rebuild command",
+            )
+            for sentence in re.split(r"(?<=[.;])\s+", low):
+                for dead_end in dead_ends:
+                    self.assertFalse(
+                        dead_end in sentence and not negation.search(sentence),
+                        f"the {arm} arm offers {dead_end!r} ({sentence.strip()!r}): that "
+                        "rebuild fails on the same read it is prescribed for",
+                    )
 
     def test_the_header_contract_matches_the_surface_set(self):
         # #8629 review (P2, claim mismatch). This tool states its contract in the
