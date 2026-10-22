@@ -1,3 +1,14 @@
+---
+title: "#9664 capstone — the ChatGPT onboarding journey: the measurable half, and three steps corrected"
+type: evidence
+domain: platform
+doc_status: draft
+created: 2026-10-22
+subjects.team: epistemic-team
+aboutSubjects: Tortoise onboarding, MCP connector, ChatGPT
+aboutObjects: "#9664, #9340, #2208, tortoise-onboarding, website/docs.html, app.premiselabs.co/skills"
+---
+
 # #9664 — capstone acceptance: the ChatGPT onboarding journey
 
 **Status: the run has NOT been executed. This directory holds the half of it that an
@@ -23,7 +34,8 @@ tree that a re-run must re-verify). A step with no measurement is `NOT COVERED` 
 | `05-dashboard-copy-tests.log` | steps 3/10's copy constants (`node --test` over the pure modules; no `node_modules` needed, 38 passed). |
 
 Measured at `git HEAD 653980445f` (2026-10-22); deployed `commit_sha 81f5594dce` — an
-ancestor of `origin/main` `2bf86487c1`, **40 commits behind** it (deploy lag, not a stale or
+ancestor of `origin/main` `2bf86487c1`, **39 commits behind** it
+(`git rev-list --count 81f5594dce..2bf86487c1` → `39`; deploy lag, not a stale or
 rolled-back deploy; the served surfaces are therefore older than the tree this was measured
 against, which is why the two live documents are read from production rather than the repo).
 
@@ -41,8 +53,8 @@ contradicts the shipped system; the corrected wording follows the table) · **BL
 | 3 | Setup-guide card → choose ChatGPT → the card's steps, as rendered | **WRONG-AS-WRITTEN** | ChatGPT has **no dashboard surface at all**: `#2698` deleted its tab, `#2912`'s families exclude it, and the source says so in terms — *"chatgpt … has NO dashboard surface: … Its live carrier is the public setup docs page (#4836)"* (`harnesses.js:865-867`). MEASURED: the served door is `https://tortoise.premiselabs.co/docs#chatgpt` (HTTP 200, section present, `01` log). |
 | 4 | ChatGPT: add custom MCP server = `CANONICAL_MCP_URL` → OAuth; consent shows the right workspace; token issued | NOT-COVERED-HERE | premises MEASURED: PRM + AS metadata are live (DCR `/register`, `/oauth/authorize`, `/oauth/token`, PKCE `S256`, `resource=https://api.premiselabs.co/mcp`), an unauthenticated `POST /mcp` is **challenged** with `resource_metadata` (401, `01` log). The consent chooser is **org**-scoped (`_selectable_orgs`, `oauth.py:845`). The ChatGPT side needs the human Pro auth; the recipe differs from the step — see correction 3. |
 | 5 | `connection-written` + `harness-connected` close **at token issue** | **WRONG-AS-WRITTEN** | MEASURED (census rows 5a-5e): `connection-written` is in **no** completion gate and is a CLIENT checkpoint (`#3451`, `_NON_AGENT_STEPS`, `_CHECKPOINT_STEPS`); `harness-connected` is filed by the server on the **first successful agent write** (`#3784`/`#3913`), i.e. at step 8. Nothing closes at token issue. |
-| 6 | the agent calls `tortoise_load_skill` | **WRONG-AS-WRITTEN** | MEASURED (census rows 6a-6b): no such tool — `0` of the 81 registered tools contains `skill`, and the name occurs in no pre-existing file in the repo (only in this evidence set). ChatGPT is *skillless by design* (`HARNESS_SKILLLESS`), and the served onboarding document that onboards it names `tortoise_health` ×11, `tortoise_onboarding_state` ×6, `tortoise_create_point` ×3, `tortoise_file_decision` ×1, `load_skill` ×0 (`01` log). |
-| 7 | `tortoise_list_graphs` returns only entitled graphs | VERIFIED-HERE (contract layer) | `tortoise_list_graphs` filters to `org_{org_id}`/`team_{org_id}` in HTTP mode (`mcp_server.py:3257-3276`), pinned by 9 tests with a seeded present/absent pair and a negative control per seam (`04` log). Through ChatGPT: NOT COVERED. |
+| 6 | the agent calls `tortoise_load_skill` | **WRONG-AS-WRITTEN** | MEASURED (census rows 6a-6d): no such tool — `0` of the 81 registered tools contains `skill`, and the name occurs in no pre-existing file in the repo (only in this evidence set). ChatGPT is *skillless by design* (`HARNESS_SKILLLESS`), and the served onboarding document it is handed names the **advertised** `tortoise_overview(section="health")` for verification (the legacy `tortoise_health` it mentions ×11 is retired — census rows 6b/6c) plus `tortoise_onboarding_state` ×6, `tortoise_create_point` ×3, `tortoise_file_decision` ×1, `load_skill` ×0 (`01` log; those are mention counts over the document, and most `tortoise_health` mentions are the retirement disclosure itself). |
+| 7 | `tortoise_list_graphs` returns only entitled graphs | VERIFIED-HERE (contract layer) | `tortoise_list_graphs` filters to `org_{org_id}`/`team_{org_id}` in HTTP mode (`mcp_server.py:3257-3275`, the filter at `:3265-3274`), pinned by 9 tests with a seeded present/absent pair and a negative control per seam (`04` log). Through ChatGPT: NOT COVERED. |
 | 8 | file the first points → `first-points-filed` closes | VERIFIED-HERE (server layer) | 42 tests green (`03` log), including the call-site layer (`-k handler_env`) that reds if a point write stops observing the step. Through ChatGPT: NOT COVERED. |
 | 9 | run a decision → `decide-completed` closes | VERIFIED-HERE (server layer) | same 42 tests; `decide-completed` is filed only on a decision-shaped write (`tortoise_file_decision`, or a `pointKind` in `DECISION_SHAPED_POINT_KINDS`) — both documented decide protocols. Through ChatGPT: NOT COVERED. |
 | 10 | capture disclosure card: capture unavailable for ChatGPT, not silence | VERIFIED-HERE (copy) | `HARNESS_CAPTURE_SUPPORT.chatgpt === false` renders `HARNESS_CAPTURE_REASON.chatgpt` = *"ChatGPT connects from its own cloud — session capture isn't available for it"* (`harnessStatusCard.jsx:120`), pinned by 38 green tests (`05` log). Not silence. |
@@ -72,10 +84,16 @@ require `harness-connected` + `first-points-filed`, plus `decide-completed` +
 **6 — the pointer prompt is a document, not a tool call.** The human opens
 `https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md`, copies the whole
 document, and pastes it into the chat (ChatGPT has no local skills). The agent then follows
-*that document*: `tortoise_health` to verify, `tortoise_onboarding_state` to read state,
-`tortoise_create_point` to file. Corrected observation: *"the tool-call trace begins
-`tortoise_health` → `tortoise_onboarding_state` → `tortoise_create_point`, and
-`tortoise_load_skill` is never called because it does not exist."*
+*that document*: `tortoise_overview(section="health")` to verify — the document's ChatGPT
+section says so in terms, because the legacy `tortoise_health` name is retired and is absent
+from `tools/list` and from this connector's tool grant (`#3883`) — then
+`tortoise_onboarding_state` to read state, `tortoise_create_point` to file. The `×11`
+`tortoise_health` count in the `01` log is a **mention** count over the whole document, most
+of them the retirement disclosure itself, so it is not the instruction a runner follows.
+Corrected observation: *"the tool-call trace begins
+`tortoise_overview(section="health")` → `tortoise_onboarding_state` → `tortoise_create_point`,
+`tortoise_health` never appears in the grant because it is retired, and `tortoise_load_skill`
+is never called because it does not exist."*
 
 ## Blocker on the "deliberate ugly cases"
 
@@ -114,3 +132,8 @@ uri="$(.venv/bin/python tools/test_lane.py uri)"; eval "$uri"       # a private 
 
 The census probe exits `3` when a premise could not be measured — fail closed. A premise
 counted as falsified is **data**, not a probe failure: after a fix, the same row must flip.
+Each row measures exactly the clause it prints: a two-clause premise is read clause by clause
+(the org-create init fragment for "auto-satisfied", `_NON_AGENT_STEPS` for "never an agent
+act"), and "every completion gate" is the three named gates `_GATE_SELF` / `_GATE_BUILD` /
+`_GATE_COMPACT` — `state._GATES` holds only the first two, so reading it would answer a
+question about the compact gate it never asked.
