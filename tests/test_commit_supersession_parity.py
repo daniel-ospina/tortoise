@@ -137,7 +137,7 @@ def _supersession_records(old_pt_id: str, new_pt_id: str) -> list[dict]:
     ]
 
 
-def _commit_payload_and_plan(old_pt_id: str, new_pt_id: str):
+def _commit_payload_and_plan(old_pt_id: str, new_pt_id: str, when: str = ""):
     """A minimal but valid CommitPayload + CommitPlan driving the hosted
     write phase. §5 reconciles the successor POINT (new), §6 the successor
     ENTITY (new) — the natural pre-§6b writes — and payload.supersessions
@@ -154,6 +154,7 @@ def _commit_payload_and_plan(old_pt_id: str, new_pt_id: str):
         about_entities=[],
         source_ref="session.md",
         quote="",
+        when=when,
         status="live",
     )
     ent = Entity(name=SUCCESSOR_OBJECT_NAME, kind=OBJECT_KIND, passes_frequency_gate=True)
@@ -474,6 +475,7 @@ def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker
         about_entities=[],
         source_ref="session.md",
         quote="",
+        when="",
         status="live",
     )
     payload.points[0] = prior_pt
@@ -520,3 +522,58 @@ def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker
         "MATCH (p:Point {id:$id}) RETURN count(p)",
         params={"id": new_pt_id},
     ).result_set[0][0]) == 1, "successor point must still exist"
+
+
+def _stored_valid_from(sdk, pid: str):
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.validFrom", params={"id": pid},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def _status_and_flag(sdk, pid: str) -> tuple:
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, n.outdated",
+        params={"id": pid},
+    ).result_set
+    return (rows[0][0], bool(rows[0][1])) if rows else (None, False)
+
+
+def test_hosted_commit_reports_a_dropped_window_fold(tmp_path):
+    """#7819: a fold dropped on a terminal content address must be REPORTED.
+
+    The successor's content address already exists as a TERMINAL claim, so
+    ``create_point``'s dedup branch drops the WHOLE fold (it carries the
+    payload's ``when`` as ``validFrom``) rather than re-stamping a dead claim.
+    Before this pin the only trace was a server-side log line: the write phase
+    returned nothing, so the commit receipt was a 200 for a `when` that was
+    never applied. The write phase must hand the advisory out (the handler
+    folds it into the response's additive ``warnings[]``).
+
+    Fails on the pre-fix tree, where ``_execute_commit_writes`` returned
+    ``None`` and no advisory existed.
+    """
+    old_pt_id = _pt_id(OLD_PT_CONTENT)
+    new_pt_id = _pt_id(NEW_PT_CONTENT)
+    sdk = TortoiseSDK(str(tmp_path / "dropped-fold.db"))
+    assert sdk._get_proj()._graph_name.startswith("test_"), (
+        "docker-lane redirect must isolate this arm on a test_* graph"
+    )
+    _seed_baseline(sdk, old_pt_id)
+    # The successor's content already exists — and is DEAD.
+    sdk.create_point("statement", NEW_PT_CONTENT, id=new_pt_id, status="live")
+    sdk.retract_point(new_pt_id)
+    payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id,
+                                            when="2026-01-01")
+
+    advisories = hosted_api._execute_commit_writes(sdk, payload, plan)
+
+    codes = [a.get("code") for a in (advisories or [])]
+    assert "temporal_not_applied" in codes, advisories
+    adv = next(a for a in advisories if a.get("code") == "temporal_not_applied")
+    assert adv.get("node_id") == new_pt_id, adv
+    assert adv.get("advisory") is True, adv
+    # ...and the claim is true: the window really was not applied.
+    assert _stored_valid_from(sdk, new_pt_id) is None
+    assert is_terminal_status(*_status_and_flag(sdk, new_pt_id)), (
+        "the dead claim must stay dead")

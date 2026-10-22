@@ -65,6 +65,10 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
 )
 # #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
 from .sdk_retired import retirement_hint
+from .validity import (  # #2350: the ONE home for the precision PROP NAMES
+    FROM_PRECISION_PROP,
+    TO_PRECISION_PROP,
+)
 from .live import TERMINAL_EXCLUDED_STATUSES  # EP terminal vocabulary (shared)
 from .live import _live_only  # #6597 dream coverage closure mirrors EP liveness
 from .live import decay_clause, _terminal_excluded  # #2490 vacuity decay + terminal predicate
@@ -5888,8 +5892,15 @@ class UnapprovedKindNamespace(ValueError):
 #: #9649 covers the separate door ``update_entity`` opens onto the same window
 #: (its Point arms write caller props and ``status`` with a vocabulary check and
 #: no lifecycle guard, so they can also flip a ``retracted`` Point to ``live``).
+#:
+#: The two precision names are the CANONICAL constants from ``validity``, never
+#: re-spelled here: a hand-written copy of a canonical declaration is how
+#: ``outdated`` silently dropped out of three readers (#2901/#4058), and a
+#: rename in ``validity`` would be followed by the #2350 precision refusal while
+#: this set kept the stale spelling — the guard would then fail OPEN on the
+#: markers every other reader still gates.
 _TEMPORAL_RESTAMP_PROPS = frozenset({
-    "validFrom", "validTo", "validFromPrecision", "validToPrecision",
+    "validFrom", "validTo", FROM_PRECISION_PROP, TO_PRECISION_PROP,
     "expiredAt",
 })
 
@@ -8510,10 +8521,13 @@ class TortoiseSDK:
                 # there is the deterministic fail-closed 500 #3366 exists to
                 # prevent.
                 #
-                # A dropped fold WARNS (#5365's posture, never a silent skip):
-                # the caller keeps the honest outcome — the dedup HIT is still
-                # reported and the point is still terminal — and is told the
-                # window was not written. The operation for "replace what this
+                # A dropped fold WARNS **and ADVISES** (#5365's posture, never
+                # a silent skip): the caller keeps the honest outcome — the
+                # dedup HIT is still reported and the point is still terminal —
+                # and is told the window was not written, in the RESULT (the
+                # `temporal_not_applied` advisory, which the hosted commit
+                # receipt folds into `warnings`) as well as the log. The
+                # operation for "replace what this
                 # claim said, from a different time" is the retroactive
                 # correction, which is DESIGN ONLY and not shipped in this tree
                 # (`supersede_retroactively` has no SDK method and no registry
@@ -8528,7 +8542,13 @@ class TortoiseSDK:
                             "re-stamp its temporal record (%s), so NOTHING "
                             "was applied (#7819).",
                             pid, _terminal, sorted(_temporal))
-                        return self.get_point(pid)
+                        # ...and SAY it in the RESULT, not only in the log: a
+                        # warning is not observable to a hosted commit caller
+                        # or to an SDK caller reading the return value. The
+                        # advisory is transient (#8171) — it rides a COPY, so
+                        # neither `get_point` nor the journal ever holds it.
+                        return {**self.get_point(pid),
+                                **self._temporal_not_applied_advisory(pid)}
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -33626,6 +33646,43 @@ class TortoiseSDK:
         "sourceKind=agentSession) — an unsourced assertion carries whatever "
         "credibility its wording implies."
     )
+
+    #: #7819 — the DROPPED dedup fold's transient advisory. `create_point`'s
+    #: dedup branch discards the WHOLE fold when the target is a terminal claim
+    #: and the fold carries a temporal prop, and a `_logger.warning` is not a
+    #: return value: the hosted commit path
+    #: (`hosted_api._execute_commit_writes`) and any SDK caller would otherwise
+    #: get a SUCCESS with the window silently not applied. The #8171 advisory
+    #: channel is the seam for this — transient, rides a COPY of the write
+    #: result, never becomes a node property or a journal row.
+    #:
+    #: It names NO remedy on purpose: the fold's window is refused by the shared
+    #: lifecycle guard, the alternative is the retroactive correction (#5362,
+    #: design only — `supersede_retroactively` has no SDK method), and "re-create
+    #: under a NEW id" is wrong on an idempotent replay (the supplied window
+    #: equal to the stored one is a no-op the caller should not be told to
+    #: duplicate).
+    _TEMPORAL_NOT_APPLIED_MESSAGE: ClassVar[str] = (
+        "The dedup fold carried a temporal prop, and the point this content "
+        "addresses is a terminal claim, whose window cannot be re-stamped "
+        "(#7819) — NOTHING was applied and the stored point is returned "
+        "unchanged."
+    )
+
+    def _temporal_not_applied_advisory(self, node_id: str | None) -> dict:
+        """The `temporal_not_applied` advisory payload (#7819).
+
+        ADVISORY ONLY — a dropped fold has already written nothing; this only
+        makes the drop OBSERVABLE to the caller (`create_point` returns it on a
+        COPY of the dedup snapshot, and the hosted commit receipt folds it into
+        `warnings`). Never raises, never blocks.
+        """
+        return {"advisories": [{
+            "code": "temporal_not_applied",
+            "node_id": node_id,
+            "message": self._TEMPORAL_NOT_APPLIED_MESSAGE,
+            "advisory": True,
+        }]}
 
     def _no_source_advisory(self, node_id: str | None, *, hint: str = "") -> dict:
         """The `no_source` advisory payload, with an optional door-specific hint.

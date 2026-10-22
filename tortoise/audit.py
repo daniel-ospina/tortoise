@@ -43,6 +43,7 @@ from tortoise.live import (  # #7927: traversal-position widening + the ONE
     # surface must resolve through.
     epistemic_disjunction,
     epistemic_identity,
+    is_terminal_status,  # #7819: the shared terminal predicate (Python mirror)
 )
 
 # resolve_tier precedence: explicit credibilityTier (T0-T4) > sourceKind
@@ -916,6 +917,20 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # bound buckets as (1, <text>) and is a DIFFERENT concern (#5360) — not
     # reported here.
     #
+    # ⛔ The `fix` is LIFECYCLE-AWARE (#7819), and the scan deliberately keeps
+    # terminal rows. It must not drop them: the population this check exists
+    # for is the #4021 legacy supersession inversion, whose damaged row is the
+    # PREDECESSOR — which `supersede_point` terminalizes — and
+    # `get_historical_knowledge` walks exactly those predecessors, so an
+    # inverted window on a dead claim is still a live §5 defect, not a moot
+    # one. What did change is that `update_point` now REFUSES a temporal write
+    # on a terminal claim, so the repair this check published
+    # (`tortoise_update_point(id, {'validTo': …})`) is unexecutable for them.
+    # A remedy that always raises is worse than no remedy: the fix string
+    # branches, and the terminal branch states the truth instead of naming a
+    # call the SDK refuses (`tests/test_5361_inverted_window_audit.py` pins
+    # both branches).
+    #
     # The count is exact, and the scan is PAGED. The ordering is defined by a
     # Python primitive, so it cannot be counted in Cypher; but this tool is
     # reachable over MCP with no `point_kinds`, and materializing every bounded
@@ -932,7 +947,8 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             proj,
             f"MATCH (n:Point) WHERE {_kinds_w('n')} "
             "AND n.validFrom IS NOT NULL AND n.validTo IS NOT NULL "
-            "RETURN n.id, n.validFrom, n.validTo "
+            "RETURN n.id, n.validFrom, n.validTo, n.status, "
+            "coalesce(n.outdated, false) "
             # `n.id` is NOT unique (colliding ids are a tested shape), so
             # ordering by it alone is not a total order. This scan pages with
             # SKIP/LIMIT, and each page is a SEPARATE query, so a tie group
@@ -946,7 +962,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             f"SKIP {offset} LIMIT {CHECK8_PAGE}",
             params=params,
         )
-        for wid, w_from, w_to in window_rows:
+        for wid, w_from, w_to, w_status, w_outdated in window_rows:
             k_from = _created_sort_key(w_from)
             k_to = _created_sort_key(w_to)
             if k_from[0] != 0 or k_to[0] != 0:
@@ -954,6 +970,22 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
             if k_to < k_from:
                 count8 += 1
                 if len(issues8) < SAMPLE_LIMIT:
+                    # #7819: the repair differs by LIFECYCLE. A terminal claim's
+                    # temporal record is frozen by the shared guard, so naming
+                    # `tortoise_update_point` there would prescribe a call that
+                    # always raises; say what the state IS instead.
+                    if is_terminal_status(w_status, bool(w_outdated)):
+                        _fix = (
+                            f"Not repairable through the SDK: point {wid} is a "
+                            "terminal claim, and tortoise_update_point now "
+                            "refuses a temporal re-stamp on a dead claim "
+                            "(#7819) — the window stays as stored (a "
+                            "retroactive correction is #5362, not shipped)"
+                        )
+                    else:
+                        _fix = (f"Repair the window: tortoise_update_point("
+                                f"{_quoted(wid)}, {{'validTo': "
+                                "'<at-or-after validFrom>'})")
                     issues8.append(AuditIssue(
                         issue_type="inverted_validity_window",
                         severity="high",
@@ -962,8 +994,7 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
                                 f"(validFrom {w_from!r} > validTo {w_to!r}) — no "
                                 "instant is covered, so temporal queries cannot "
                                 "see it"),
-                        fix=(f"Repair the window: tortoise_update_point({_quoted(wid)}, "
-                             "{'validTo': '<at-or-after validFrom>'})"),
+                        fix=_fix,
                     ))
         if len(window_rows) < CHECK8_PAGE:
             break

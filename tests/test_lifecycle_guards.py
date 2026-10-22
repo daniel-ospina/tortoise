@@ -711,3 +711,93 @@ def test_create_point_dedup_without_a_window_still_folds(sdk):
     assert again["id"] == pid
     assert sdk.get_point(pid)["confidence"] == pytest.approx(0.99)
     assert sdk.get_point(pid)["status"] == "retracted"
+
+
+# ── #7819 after-care: the two surfaces the guard's consequence reaches ─────
+#
+# The refusal is correct; these pin what it must not leave silently wrong —
+# the dedup fold's drop (unobservable to a caller without an advisory) and the
+# canonical prop names the refusal set is built from.
+
+def test_a_dropped_fold_is_reported_in_the_write_result(sdk):
+    """A dropped fold returns the HIT **and** a transient advisory.
+
+    `_logger.warning` is not a return value: the hosted commit path and any SDK
+    caller would otherwise read a dedup HIT as success while the window was
+    never applied. The #8171 advisory channel is the seam — transient, riding a
+    COPY of the write result.
+
+    Fails on the pre-fix tree, where the drop returned the bare
+    ``get_point(pid)`` snapshot with no ``advisories`` key at all.
+    """
+    content = f"dedup advisory {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+
+    again = sdk.create_point("statement", content, validFrom="2026-01-01",
+                             dedup=True)
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    advisories = again.get("advisories") or []
+    assert advisories, (
+        f"a dropped fold must carry an advisory, got {again.keys()}")
+    adv = advisories[0]
+    assert adv.get("code") == "temporal_not_applied", adv
+    assert adv.get("node_id") == pid, adv
+    assert adv.get("advisory") is True, adv
+    assert "terminal" in adv.get("message", ""), adv
+    # TRANSIENT: it must not land on the node, so a later read cannot see it.
+    assert "advisories" not in sdk.get_point(pid)
+
+
+def test_hosted_commit_receipt_carries_a_dropped_fold_advisory():
+    """The advisory must reach the HOSTED surface, not just an SDK caller.
+
+    The hosted commit path is the reason the fold is dropped rather than raised
+    (`_execute_commit_writes` puts `validFrom` on the fold from the payload's
+    `when`), so it is exactly where a silent drop is invisible: a 200 with a
+    `when` that was never applied. The write phase returns the advisories and
+    the handler folds them into the response's additive `warnings[]`.
+
+    Census, not behaviour: driving a real commit payload to a terminal content
+    address needs the full commit harness, and this is the coupling that would
+    go stale silently (a create_point call site that forgets the advisory).
+    """
+    import tortoise.hosted_api as hosted
+
+    write_phase = inspect.getsource(hosted._execute_commit_writes)
+    assert write_phase.count('_written.get("advisories")') == 2, (
+        "both create_point legs of the write phase must carry the advisories")
+    assert "return _write_advisories" in write_phase
+    handler = inspect.getsource(hosted.commit_session)
+    assert "warnings.extend(_execute_commit_writes(" in handler, (
+        "the commit receipt must fold the write-time advisories into warnings")
+
+
+def test_the_temporal_refusal_set_uses_the_canonical_precision_names():
+    """`_TEMPORAL_RESTAMP_PROPS` must not re-spell the two precision prop names.
+
+    `validity.FROM_PRECISION_PROP` / `TO_PRECISION_PROP` are the ONE declaration
+    of those node property names, and a hand-written copy is how `outdated`
+    silently dropped out of three readers (#2901/#4058). Here the failure is
+    worse than a missed read: a rename followed by the #2350 precision refusal
+    and NOT by this set would leave the guard failing OPEN on the markers every
+    other reader still gates.
+
+    Fails on the pre-fix tree, where the set body carried the two literals.
+    """
+    import re
+
+    import tortoise.sdk as sdk_mod
+    from tortoise import validity
+
+    src = inspect.getsource(sdk_mod)
+    m = re.search(r"_TEMPORAL_RESTAMP_PROPS = frozenset\(\{(.*?)\}\)",
+                  src, re.S)
+    assert m, "the refusal set must be a named frozenset literal"
+    body = m.group(1)
+    assert "FROM_PRECISION_PROP" in body and "TO_PRECISION_PROP" in body, body
+    assert '"validFromPrecision"' not in body, body
+    assert '"validToPrecision"' not in body, body
+    # ...and the set really holds the canonical names.
+    assert {validity.FROM_PRECISION_PROP, validity.TO_PRECISION_PROP} <= \
+        sdk_mod._TEMPORAL_RESTAMP_PROPS
