@@ -480,8 +480,11 @@ _PROJECTION_END = re.compile(
     r"RETURN|ORDER\s+BY|SKIP|LIMIT|UNION)\b",
     re.I,
 )
-#: `WITH *` carries EVERY name into the next scope, so it is not a barrier.
-_PROJECTS_EVERYTHING = re.compile(r"(?<![A-Za-z0-9_])[*](?![A-Za-z0-9_])")
+#: `WITH *` carries EVERY name into the next scope, so it is not a barrier. It is
+#: matched as a STANDALONE projection ITEM (`_projection_items`), never as "any `*`
+#: in the projection": `WITH count(*) AS c` and `WITH a * 2 AS c` drop every grouping
+#: variable, and an unanchored `*` search read both as `WITH *` (#9493 review P2-2).
+_PROJECTS_EVERYTHING = "*"
 
 #: A walk's relationship SLOT, read at the offset `_walk_occurrences` reported:
 #: the bracket (`-[r]->`, `<-[r {c:$c}]-`, `-[]->`) and, for the bracket-less
@@ -1142,10 +1145,13 @@ def _scope_survives(query: str, fact_at: int, walk_at: int, binding: str) -> boo
     net exists to refuse, shipped green.
 
     The barrier is decided on the text a `WITH` projects (`_PROJECTION_END` bounds
-    it): `WITH n` drops `r` → the name is gone → a later `MATCH (x)-[r]->(y)` is a
-    FRESH relationship; `WITH r, n` and `WITH *` carry it → not a barrier, so that
-    shape stays green. A `CALL { … }` subquery imports nothing it is not given, so
-    it is a barrier outright.
+    it), by `_projection_carries`: `WITH n` drops `r` → the name is gone → a later
+    `MATCH (x)-[r]->(y)` is a FRESH relationship; `WITH r, n` and a standalone
+    `WITH *` carry it → not a barrier, so that shape stays green. A rename or a
+    derivation (`WITH r AS rel`, `WITH type(r) AS t`, `WITH r.id AS rid`) and an
+    aggregate that drops the grouping variables (`WITH count(*) AS c`) are all
+    barriers: the relationship itself does not survive them. A `CALL { … }`
+    subquery imports nothing it is not given, so it is a barrier outright.
     """
     low, high = sorted((fact_at, walk_at))
     for at in _top_level_offsets(query, _SCOPE_BOUNDARY):
@@ -1156,12 +1162,62 @@ def _scope_survives(query: str, fact_at: int, walk_at: int, binding: str) -> boo
         if word.group(0).upper().startswith("CALL"):
             return False
         projection = query[word.end() : _projection_end(query, at, high)]
-        if _PROJECTS_EVERYTHING.search(projection) or _names_binding(
-            projection, binding
-        ):
+        if _projection_carries(projection, binding):
             continue
         return False
     return True
+
+
+def _projection_items(projection: str) -> tuple[str, ...]:
+    """The `WITH` projection split into ITEMS at its top-level commas.
+
+    A comma inside `count(*)` or `r {c: $c}` is not an item separator, so the
+    split tracks bracket depth. `DISTINCT` is a keyword of the projection, not of
+    its first item, so it is stripped before the items are read.
+    """
+    text = projection.strip()
+    if text.upper().startswith("DISTINCT"):
+        text = text[len("DISTINCT") :].strip()
+    items: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in text:
+        if char in "([":
+            depth += 1
+        elif char in ")]":
+            depth -= 1
+        if char == "," and depth == 0:
+            items.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    items.append("".join(current))
+    return tuple(item.strip() for item in items if item.strip())
+
+
+def _projection_carries(projection: str, binding: str) -> bool:
+    """Does this `WITH` carry the RELATIONSHIP a fact bound under `binding`?
+
+    ⚠️ **Decided from the projection's TARGETS, never from a bare-token search of
+    its text** (#9493 review P2-1). A token search said `WITH r AS rel` carries
+    `r` because the substring `r` is in it — but `AS rel` RENAMES the name, so a
+    later `MATCH (x)-[r]->(y)` binds a FRESH relationship and the fact about the
+    first one grounds nothing. `WITH type(r) AS t` (`r` inside a function call)
+    and `WITH r.id AS rid` (`r` followed by a property access) were read the same
+    way, and all three are unconstrained all-edge walks.
+
+    So: a standalone `*` item carries everything; a bare `name` item carries
+    `name`; and an `expr AS alias` item carries the RELATIONSHIP only when no
+    alias is introduced at all — a renamed or derived value is not the same edge,
+    even when the alias happens to be spelled `alias`. The conservative
+    direction is a false red on a query that re-projects a relationship without
+    renaming it, which is the shape a reader can see and fix; the other direction
+    is a fail-open on the class this net exists to refuse.
+    """
+    return any(
+        item == _PROJECTS_EVERYTHING or item == binding
+        for item in _projection_items(projection)
+    )
 
 
 def _projection_end(query: str, at: int, limit: int) -> int:
@@ -3962,10 +4018,15 @@ def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
     cannot move.
 
     The barrier is scoped, not blanket — the converse shapes below stay green,
-    because `WITH *` and a projection that CARRIES `r` really do keep the same
+    because a standalone `WITH *` and a bare `WITH r` really do keep the same
     relationship, and reddening them would be a false red on every real query.
-    A `CALL { … }` subquery imports nothing it is not given, so it is a barrier
-    too, asserted separately.
+    What is NOT carrying is a projection that renames, derives or aggregates:
+    `WITH r AS rel` renames the name (so the later `[r]` is a NEW relationship),
+    `WITH type(r) AS t` projects a string, `WITH r.id AS rid` projects a value,
+    and `WITH count(*) AS c` drops every grouping variable — each a fresh
+    all-edge walk, each asserted below (#9493 review P2-1/P2-2). A `CALL { … }`
+    subquery imports nothing it is not given, so it is a barrier too, asserted
+    separately.
     """
     census = _call_time_census()
     facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
@@ -4007,13 +4068,32 @@ def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
     for label, carrying in {
         "*": "WITH * MATCH (x)-[r]->(y) RETURN type(r)",
         "r": "WITH r MATCH (x)-[r]->(y) RETURN type(r)",
-        "r AS rel": "WITH r AS rel MATCH (x)-[r]->(y) RETURN type(r)",
+        "DISTINCT r": "WITH DISTINCT r MATCH (x)-[r]->(y) RETURN type(r)",
     }.items():
         query = f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {carrying}"
         assert _unbounded_walks(query, facts) == [], (
             f"`{label}` carries the binding forward, so the second `MATCH` is "
             f"the SAME relationship and the registered fact bounds it — "
             f"{_unbounded_walks(query, facts)!r} is a false red on a real query"
+        )
+
+    # …and the shapes that RENAME, DERIVE or AGGREGATE do NOT carry it: the name is
+    # either a different entity or gone, so the later `[r]` is a fresh walk. Each of
+    # these was GREEN before the projection-target rule (#9493 review P2-1/P2-2).
+    for label, renaming in {
+        "r AS rel": "WITH r AS rel MATCH (x)-[r]->(y) RETURN type(r)",
+        "type(r) AS t": "WITH type(r) AS t MATCH (x)-[r]->(y) RETURN type(r)",
+        "r.id AS rid": "WITH r.id AS rid MATCH (x)-[r]->(y) RETURN type(r)",
+        "count(*) AS c": "WITH count(*) AS c MATCH (x)-[r]->(y) RETURN type(r)",
+        "a * 2 AS c": "WITH 2 * 1 AS c MATCH (x)-[r]->(y) RETURN type(r)",
+    }.items():
+        query = f"MATCH (s:Subject {{id:$sid}})-[r]->(n) {renaming}"
+        reported = _unbounded_walks(query, facts)
+        assert len(reported) == 1 and reported[0][1] == "r", (
+            f"`{label}` does not carry the RELATIONSHIP forward — the later "
+            f"`MATCH (x)-[r]->(y)` binds a fresh all-edge walk and the fact about "
+            f"the first one grounds nothing, so it must be reported "
+            f"({reported!r}); an empty list here is the fail-open"
         )
 
     # A `CALL { … }` subquery sees nothing it is not given, so it is a barrier
