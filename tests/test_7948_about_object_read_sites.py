@@ -277,7 +277,18 @@ WHAT THIS PINS
    is GREEN — and a `#` block separated from the `def` by one blank line is not
    captured at all. Both are filed as `#9531`, with the measurements, because binding
    framing per number reds on legitimate prose (a figure whose framing wraps) and
-   folding blank lines in would absorb a PEER function's comment block.
+   folding blank lines in would absorb a PEER function's comment block. A third
+   re-spelling is silent for the same structural reason: a compound `min:sec` figure
+   (`2m36s`) never matches, because the `36s` start is preceded by `m`, so the
+   lookbehind refuses it — the same class, recorded with `#9531`.
+   The THIRD arm in this class,
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written`, is the one
+   that EXECUTES the capture: it writes the removed figure into the DOCSTRING, a
+   TRAILING comment and the `#` block above the `def` of synthetic functions and
+   requires the capture to read all three, and then falsifies the live function's own
+   floor (`#`-line projection non-empty) and its `getsource` coverage (the docstring
+   first line present, and strictly more lines than the projection plus a `def`), so
+   neither the floor nor the capture can be a tautology.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -3809,6 +3820,11 @@ def _prose_of(fn: Callable[..., object]) -> str:
 #:
 #: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`, so
 #: the lookbehind refuses a number that starts mid-digit-run or mid-identifier.
+#:
+#: Residual, recorded rather than silently accepted (`#9531`): a compound `min:sec`
+#: figure (`2m36s`) goes SILENT — the `36s` start is preceded by `m`, so the same
+#: lookbehind that refuses `sha256s` refuses it. That is the re-spelling class again,
+#: and the filed home is `#9531` with the line-vs-number coarseness.
 _DURATION = re.compile(
     r"(?<![\w.])"
     r"(?:\d{1,3}(?:,\d{3})+|\d+(?:[.,]\d+)?(?:e[+-]?\d+)?)\s*"
@@ -4160,21 +4176,40 @@ def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
         "`getsource` returns (the block above the `def` is not in it) — otherwise the "
         "floor is a constant and the arm above it is vacuous for the wrong reason"
     )
-    assert _gate_walk_comment_lines(census._narrow_gate_walk_sites), (
+    stripped = _gate_walk_comment_lines(census._narrow_gate_walk_sites)
+    assert stripped, (
         "the live function carries no `#` line, so the mechanism comment is gone and "
         "the pin arm would be asserting nothing"
     )
     # And the capture must be MORE than that projection — otherwise the docstring and
-    # trailing-comment positions are invisible again. Compared against the projection
-    # itself, not against the capture's own `#` lines (a comparison that can never
-    # fail, since the capture always starts at the `def` — measured by the review).
-    stripped = _gate_walk_comment_lines(census._narrow_gate_walk_sites)
-    assert any(
-        line.strip() and line.strip() not in stripped.splitlines()
-        for line in _prose_of(census._narrow_gate_walk_sites).splitlines()
-    ), (
-        "the live capture is its own `#` lines and nothing else, so the docstring and "
-        "trailing-comment positions are invisible to the duration scan"
+    # trailing-comment positions are invisible on the LIVE function too.
+    #
+    # ⚠️ **The previous version of this check could never fail** (measured by the
+    # `#9522` review): it asked whether ANY captured line differs from the projection's
+    # lines, and a capture is `inspect.getsource` at minimum, whose first line is the
+    # `def` — so the answer was `True` for every implementation of `_prose_of`, INCLUDING
+    # a deliberately BLIND one (`#` lines + the `def` line, docstring and trailing
+    # comments still invisible). The two checks below are the falsifiable pair: the
+    # DOCSTRING is derived from the function object (no literal to reword), and the
+    # capture must strictly exceed the `#`-only projection plus that one `def` line —
+    # the smallest blind shape there is.
+    doc_lines = (inspect.getdoc(census._narrow_gate_walk_sites) or "").splitlines()
+    live = _prose_of(census._narrow_gate_walk_sites)
+    assert doc_lines, (
+        "`_narrow_gate_walk_sites` carries no docstring any more, so the DOCSTRING "
+        "position cannot be checked on the live function — the arm would be asserting "
+        "the capture covers a position that no longer exists"
+    )
+    assert doc_lines[0].strip() in live, (
+        "the live capture does not contain the function's own DOCSTRING first line "
+        f"({doc_lines[0].strip()!r}), so `getsource`'s docstring position is projected "
+        "away and a figure written there is invisible to the duration scan"
+    )
+    assert len(live.splitlines()) > len(stripped.splitlines()) + 1, (
+        f"the live capture is {len(live.splitlines())} line(s) for a "
+        f"{len(stripped.splitlines())}-line `#` projection — that is the projection "
+        "plus at most a `def` line, i.e. the smallest BLIND capture, so the docstring "
+        "and trailing-comment positions are invisible to the duration scan"
     )
 
 
