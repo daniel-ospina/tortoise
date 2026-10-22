@@ -389,6 +389,145 @@ def test_identity_row_precedes_its_node_row():
     assert kinds == ["identity", "point", "journal"]
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 2b. The capture's ENVELOPE edge — `contains_session` → a `relation` row
+#     (#9553 R5 class 2)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# The turn loop's `PointAdded` carries the container id on the ENVELOPE (never
+# in the point payload — a caller-supplied property of that name would forge a
+# link on replay). `_RECORD_ONLY_KEYS` dropped it, correctly, and dropped the
+# EDGE with it, so a record-sourced rebuild restored the turn Points with no
+# `(:Session)-[:CONTAINS]->(:Point)` above them while a journal rebuild restored
+# the link. These legs pin the three things that make the fix correct and none
+# of which a row count can see: WHICH records may carry it, the ORDER, and that
+# the cache projection can materialise the row it produces.
+
+_TURN_RECORD = {
+    "type": "PointAdded",
+    "ts": "2026-10-12T00:00:00Z",
+    "point": dict(_SNAPSHOT, pointKind="event", is_episodic=True),
+    "contains_session": "sess1",
+}
+
+
+def _relation_statements(record: dict[str, Any]) -> list[rp.Statement]:
+    return [s for s in rp.mutations_for(record, org_id="org-a", graph_id="g1")
+            if s.sql.startswith("INSERT INTO public.relation")]
+
+
+def test_a_capture_turn_lands_its_CONTAINS_relation_after_the_point_identity():
+    """The edge lands, and it lands LAST — its endpoints are FK children.
+
+    Ordering is the whole fix: `relation.src_key`/`tgt_key` are composite FKs
+    into `node_identity`, so a relation insert that ran before the Point's own
+    identity row would raise an FK violation — which lands on
+    `record_write_failures`, invisible without #9551.
+    """
+    plan = rp.replay_plan([_TURN_RECORD], org_id="org-a", graph_id="g1")
+    kinds = []
+    for statement in plan:
+        sql = statement.sql
+        # `relation` FIRST: its endpoint subqueries read `public.point`, so a
+        # table-name classifier that tested `point` before it would file the
+        # edge under the node and pass whatever the order was.
+        kinds.append("identity" if "public.node_identity" in sql else
+                     "relation" if "public.relation" in sql else
+                     "point" if "public.point" in sql else "journal")
+    assert kinds == ["identity", "point", "relation", "journal"], kinds
+
+    relation = plan[2]
+    # (org, graph, rel_type, src_label, tgt_label, idx) precede the `props`
+    # value and the two correlated endpoint subqueries, which resolve each key
+    # from the record's OWN node row rather than trusting the journal id.
+    assert relation.params[:6] == ("org-a", "g1", "CONTAINS", "Session",
+                                   "Point", 0), relation.params
+    assert "FROM (SELECT node_key FROM public.session" in relation.sql
+    assert "(SELECT node_key FROM public.point" in relation.sql
+    assert relation.params[7:10] == ("org-a", "g1", "sess1"), relation.params
+    assert relation.params[10:] == ("org-a", "g1", _SNAPSHOT["id"]), relation.params
+    # Idempotent: a replayed turn converges on the one row.
+    assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " in relation.sql
+
+
+def test_an_operator_turn_lands_the_same_CONTAINS_relation():
+    """`OperatorAdded` is the fold's OTHER `contains_session` consumer."""
+    operator = {**_TURN_RECORD, "type": "OperatorAdded",
+                "point": dict(_SNAPSHOT, is_operator=True, op_type="IMPL")}
+    relations = _relation_statements(operator)
+    assert len(relations) == 1, [s.sql for s in relations]
+    assert relations[0].params[2:5] == ("CONTAINS", "Session", "Point")
+
+
+def test_a_contains_session_the_fold_ignores_lands_no_relation():
+    """Only `PointAdded`/`OperatorAdded` may carry the directive.
+
+    The graph fold reads `contains_session` for exactly those two types
+    (`projection/__init__.py::apply`). A label-keyed rule would let a stray key
+    on ANY Point record mint a `relation` row the graph never wrote — the record
+    richer than the graph, the one direction Interface A forbids.
+    """
+    base = {k: v for k, v in _TURN_RECORD.items() if k != "contains_session"}
+    for record_type in ("PointPromoted", "OperatorPromoted", "DedupeRecorded",
+                        "DedupeRejected", "EntityBindingRefused"):
+        record = {**base, "type": record_type, "contains_session": "sess1"}
+        assert _relation_statements(record) == [], record_type
+
+
+def test_an_absent_or_unwritable_contains_session_lands_no_relation():
+    """A blank / non-string / self-referential id is the fold's own skip."""
+    for value in (None, "", "   ", 7, ["sess1"], _SNAPSHOT["id"]):
+        record = {**_TURN_RECORD, "contains_session": value}
+        assert _relation_statements(record) == [], value
+    assert len(_relation_statements(_TURN_RECORD)) == 1
+
+
+def test_the_contains_session_key_never_becomes_a_point_property():
+    """It is an ENVELOPE directive — a node prop would let a caller forge it.
+
+    The GRAPH fold reads it off the raw envelope, before `_norm` can splice the
+    payload over it, precisely so a Point property cannot shadow (and forge) the
+    link; the record must not store what the graph refuses to hold.
+    """
+    plan = rp.replay_plan([_TURN_RECORD], org_id="org-a", graph_id="g1")
+    point = [s for s in plan if s.sql.startswith("INSERT INTO public.point")]
+    assert len(point) == 1
+    props = point[0].params[-1]
+    assert "contains_session" not in props, props
+    assert props == "{}", props
+
+
+def test_a_record_sourced_rebuild_materialises_the_session_container():
+    """S3: the row this lands is one the cache projection can re-create.
+
+    A `relation` row is worthless if the record→FalkorDB leg refuses its
+    predicate or cannot resolve its endpoints: `cache_projection`
+    allowlist-validates the type and MATCHes both nodes by `(label, key)`. This
+    is parity the journal rebuild already had (`_link_session` MERGEs the same
+    edge) and the record path did not.
+    """
+    from tortoise import cache_projection as cp
+
+    statement = _relation_statements(_TURN_RECORD)[0]
+    rel_type, src_label, tgt_label = statement.params[2:5]
+    rel = cp.relation_from_row({
+        "rel_type": rel_type,
+        # Params: 0-6 are the row's own values; 7-9 / 10-12 are the two
+        # `(org, graph, key)` triples the endpoint subqueries bind, in that
+        # order.
+        "src_label": src_label, "src_key": statement.params[9],
+        "tgt_label": tgt_label, "tgt_key": statement.params[12],
+        "idx": 0, "props": {},
+    })
+    built = cp.relation_statement(rel)
+    assert built.cypher == (
+        "MATCH (src:Session {id:$src_key}), (tgt:Point {id:$tgt_key}) "
+        "MERGE (src)-[r:CONTAINS {idx:$idx}]->(tgt) SET r += $props"
+    ), built.cypher
+    assert built.params["src_key"] == "sess1"
+    assert built.params["tgt_key"] == _SNAPSHOT["id"]
+
+
 def test_dollar_placeholder_rewrite_is_faithful():
     for statement in _plan_for_everything():
         sql, params = rp.to_dollar_placeholders(statement)

@@ -1529,6 +1529,103 @@ def _nested_node_carrier(record: Mapping[str, Any],
     return None
 
 
+#: `(record type, envelope key, rel type, source label, target label)` — the
+#: edges a record carries as a *structural directive on its envelope* rather
+#: than as a node property, so no `NodeSnapshot` column can hold them.
+#:
+#: `contains_session` (#3947) is the capture turn loop's
+#: `(:Session)-[:CONTAINS]->(:Point)` link: the SDK/hosted writer MERGEs the
+#: edge live and journals the session id on the `PointAdded`/`OperatorAdded`
+#: ENVELOPE (`sdk.py::_write_capture_turns`), deliberately NOT in the point
+#: payload, because a Point property of that name would let a caller forge a
+#: container link on replay.
+#:
+#: ⛔ THE GAP THIS CLOSES (R5 / #9553, class 2). `_RECORD_ONLY_KEYS` drops
+#: `contains_session` — correctly, it must never become a node prop — and that
+#: drop ALSO dropped the EDGE: the record materialized the turn Point and no
+#: `relation` row, so a **journal** rebuild restored the CONTAINS link (its fold
+#: reads the same envelope key, `projection/__init__.py` →
+#: `_upsert_point_edges(contains_session=…)`) while a **record-sourced** rebuild
+#: did not. A capture therefore landed `relation` rows = 0 and lost the whole
+#: session container on the S3/S9 route.
+#:
+#: The set is keyed on the RECORD TYPE, not on the node label, because the fold
+#: honours the key for exactly `PointAdded`/`OperatorAdded`
+#: (`projection/__init__.py::apply`). A label-keyed rule would let a stray
+#: `contains_session` on any other Point record mint a `relation` row the graph
+#: never wrote — the record richer than the graph, which is the one direction
+#: Interface A forbids.
+#:
+#: ⛔ NOT covered here, named so the next reader does not infer it: the other
+#: three R5 classes stay missing. Point-PROPERTY edges (`extractedFrom`,
+#: `about*`, `mitigated_by`, `tags`) are derived by the graph fold from the
+#: Point's snapshot and have no record carrier yet (class 1); operator
+#: `IMPL`/`NAND`/`INPUT` sit in `point.props` and are not journaled as edges
+#: (class 3); the structural predicates `ownedBy`/`hasPart`/`dependsOn`/
+#: `references` and friends have a working `DirectEdgeCreated` fold and NO
+#: producer (class 4 — a producer-side change, not a projection one).
+_ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
+    ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
+)
+
+
+def _envelope_relation_statements(
+    org_id: str,
+    graph_id: str,
+    record: Mapping[str, Any],
+    record_type: Any,
+    target_key: str,
+    columns: Mapping[str, frozenset[str]],
+    refused: Mapping[str, frozenset[str]],
+) -> list[Statement]:
+    """The `relation` rows a record's ENVELOPE directs, as upserts.
+
+    Returned AFTER the node upsert by the caller so the target endpoint's
+    `node_identity` row exists before the insert — `relation.src_key`/`tgt_key`
+    are composite FKs into it, and an FK violation here lands on
+    `record_write_failures`, invisible without #9551 (the ordering half of
+    G4).
+
+    The SOURCE endpoint is resolved, never minted (`_endpoint_resolution`), so a
+    session the record does not hold produces ZERO rows instead of a phantom
+    identity — the fold's own `"absent"` verdict. That is the honest answer for
+    a pre-#3664 journal (no `SessionRecorded`, so no `session` row) and it
+    matches the fold only partially: `_link_session` MINTs a minimal
+    `:Session` stub on that path. The record does NOT copy that fallback —
+    minting a node from an edge directive would materialize a `session` row no
+    record created, which is the divergence class #9078 review refused.
+
+    A falsy / non-string key (a blank id, or a caller-supplied non-str) emits
+    nothing: that is `_upsert_point_edges`' own `isinstance(…, str) and …`
+    rule, and a blank one is the `_link_session` skip (`_writable_id`) rather
+    than a Session keyed `''`.
+    """
+    statements: list[Statement] = []
+    for rel_type_of, env_key, rel_type, src_label, tgt_label in _ENVELOPE_RELATIONS:
+        if rel_type_of != record_type or tgt_label != "Point":
+            continue
+        source = record.get(env_key)
+        if not isinstance(source, str) or not source.strip():
+            continue
+        if source == target_key:
+            # `MERGE (s)-[:CONTAINS]->(t)` cannot bind one node as both ends,
+            # so the fold writes no such edge; the record must not invent one.
+            continue
+        statements.extend(_relation_upsert_statement(
+            org_id, graph_id, RelationUpsert(),
+            {
+                "edge_type": rel_type,
+                "src": source,
+                "tgt": target_key,
+                "source_label": src_label,
+                "target_label": tgt_label,
+            },
+            columns=columns, refused=refused,
+        ))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -1614,6 +1711,10 @@ def mutations_for(
         return [
             _identity_statement(org_id, graph_id, node, key),
             _upsert_statement(org_id, graph_id, node, key, col_values, tail),
+            # AFTER the identity + node upsert: an edge endpoint must already
+            # be in `node_identity` or the composite FK refuses the insert.
+            *_envelope_relation_statements(
+                org_id, graph_id, record, record_type, key, columns, refused),
         ]
     if isinstance(effect, NodePatch):
         node = effect.node

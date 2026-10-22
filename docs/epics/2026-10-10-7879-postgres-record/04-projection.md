@@ -4,10 +4,10 @@ type: plan
 domain: engineering
 doc_status: draft
 created: 2026-10-12
-updated: 2026-10-12
+updated: 2026-10-22
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "issue #7969, epic #7879, interface A, record projection, Postgres record, idempotent replay"
+aboutObjects: "issue #7969, issue #9553, epic #7879, interface A, record projection, Postgres record, idempotent replay"
 ---
 
 # The record projection — journal → Postgres, total and idempotent
@@ -184,6 +184,15 @@ closed at both layers:
   point row today, and the `relation` table's structural family is a follow-up
   inside `#7969`/`#7951`. Every one of those is a **loud failure or a written
   declaration**, never a silent skip.
+  **Updated by #9553 (R5 class 2):** the ONE edge family that rode the record's
+  own envelope — the capture's `(:Session)-[:CONTAINS]->(:Point)` link, carried
+  as `contains_session` on `PointAdded`/`OperatorAdded` — now lands a `relation`
+  row (`record_projection._ENVELOPE_RELATIONS`), ordered after the Point's
+  `node_identity` because both endpoints are composite FKs into it.
+  The three remaining R5 classes are still **not** materialized and are named
+  where the producer lives: point-property edges (`extractedFrom`, `about*`,
+  `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural
+  predicates whose `DirectEdgeCreated` fold works but has **no producer**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,

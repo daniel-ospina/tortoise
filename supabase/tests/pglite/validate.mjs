@@ -9,7 +9,8 @@
 // Exit:  0 = all migrations applied + all assertions passed; 1 = any failure.
 import { PGlite } from '@electric-sql/pglite';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -660,8 +661,13 @@ rp = importlib.util.module_from_spec(spec)
 sys.modules["record_projection"] = rp
 spec.loader.exec_module(rp)
 records = [json.loads(line) for line in open(sys.argv[2], encoding="utf-8") if line.strip()]
+# The tenant is the CALLER's (#9553): the same emitter must be replayable into a
+# second tenant, or the harness stops testing the projection and starts testing
+# its own copy. #7969's own pair is the default.
+org, graph = (sys.argv[3] if len(sys.argv) > 3 else "7969-org",
+              sys.argv[4] if len(sys.argv) > 4 else "7969-graph")
 plan = []
-for statement in rp.replay_plan(records, org_id="7969-org", graph_id="7969-graph"):
+for statement in rp.replay_plan(records, org_id=org, graph_id=graph):
     sql, params = rp.to_dollar_placeholders(statement)
     plan.append({"sql": sql, "params": params})
 json.dump({"records": len(records), "plan": plan}, sys.stdout)
@@ -916,6 +922,112 @@ rp.replay_plan([{"type": "PointTeleported", "id": "p1"}], org_id="o", graph_id="
   console.log(`✓ #7969: the record projection replays ${wantJournal} journal records, is idempotent, total, and stores no EP scalar`);
 } catch (e) {
   console.error(`✗ #7969 record projection FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #9553 (R5 class 2): the capture's CONTAINS edge lands a `relation` row ──
+//
+// `contains_session` rides the `PointAdded` ENVELOPE, not the point payload
+// (a Point property of that name would let a caller forge a container link on
+// replay). `_RECORD_ONLY_KEYS` dropped the key — correctly — and dropped the
+// EDGE with it: a JOURNAL rebuild restored `(:Session)-[:CONTAINS]->(:Point)`
+// (its fold reads the same envelope key) while a RECORD-sourced rebuild
+// restored nothing, so `relation` was 0 rows after a capture. The fix is a
+// relation upsert emitted AFTER the point's identity row, because the endpoints
+// are composite FKs into `node_identity`: replayed out of order it resolves 0
+// endpoints and lands nothing — which is what the row count below reports.
+try {
+  const tenant = ['9553-org', '9553-graph'];
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9553-org', '9553-org', 'org_9553-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9553-graph', '9553-org', '9553-graph', 'org_9553-org_9553-graph');
+  `);
+  const fixture = join(HERE, '..', 'fixtures', 'record_projection_journal.jsonl');
+  const all = readFileSync(fixture, 'utf8').split('\n').filter((l) => l.trim());
+  // The LIVE order, taken from the shared fixture instead of restated: the
+  // session container is journaled BEFORE the turn loop emits any `PointAdded`
+  // (`sdk._write_session_and_turns`), while this fixture lists `SessionRecorded`
+  // AFTER the Points it contains. Replaying the pair in the fixture's own order
+  // would run the edge before its endpoint existed and land NOTHING — the exact
+  // failure mode this leg exists to catch — so the order here is the live one.
+  const sessionRecord = all.find(
+    (l) => l.includes('"SessionRecorded"') && l.includes('"sess1"'));
+  const turnRecord = all.find((l) => l.includes('"contains_session"'));
+  if (!sessionRecord || !turnRecord) {
+    throw new Error('the shared fixture no longer carries a SessionRecorded plus '
+      + 'a contains_session PointAdded — this leg would prove nothing, and a '
+      + 'silent skip reads as a pass');
+  }
+  const prefix = join(tmpdir(), `9553-prefix-${process.pid}.jsonl`);
+  writeFileSync(prefix, `${sessionRecord}\n${turnRecord}\n`);
+  const emitted = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     prefix, ...tenant],
+    { encoding: 'utf8' },
+  ));
+  if (!emitted.plan.some((x) => x.sql.startsWith('INSERT INTO public.relation'))) {
+    throw new Error('the pair emitted NO relation statement at all — the '
+      + 'CONTAINS producer is gone and the record loses the session container '
+      + 'again (#9553 R5 class 2)');
+  }
+  const applyPrefix = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  const readContains = async () => db.query(
+    `SELECT rel_type, src_label, src_key, tgt_label, tgt_key, idx
+       FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'CONTAINS'`,
+    tenant);
+  await applyPrefix();
+  const first = await readContains();
+  if (first.rows.length !== 1) {
+    const diag = await db.query(
+      `SELECT
+         (SELECT count(*) FROM public.session
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'sess1')  AS session_row,
+         (SELECT count(*) FROM public.point
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'p1')     AS point_row,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Session' AND node_key = 'sess1')         AS session_identity,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Point' AND node_key = 'p1')              AS point_identity`,
+      tenant);
+    throw new Error(
+      `expected exactly 1 CONTAINS relation row, got ${first.rows.length} — an `
+      + 'endpoint was absent when the insert ran (ORDERING), or the envelope '
+      + `key was dropped. endpoints: ${JSON.stringify(diag.rows[0])}`);
+  }
+  const row = first.rows[0];
+  const got = `${row.src_label}/${row.src_key} -> ${row.tgt_label}/${row.tgt_key} idx=${row.idx}`;
+  const want = 'Session/sess1 -> Point/p1 idx=0';
+  if (got !== want) {
+    throw new Error(
+      `the CONTAINS row is ${got}, expected ${want} — the endpoint resolution `
+      + 'or the envelope directive is wrong');
+  }
+  // Idempotent: the upsert is keyed on the relation's UNIQUE identity, so a
+  // SECOND replay of the same segment (the retry a crash produces) converges.
+  await applyPrefix();
+  const second = await readContains();
+  if (second.rows.length !== 1) {
+    throw new Error(
+      `a second replay produced ${second.rows.length} CONTAINS rows (expected `
+      + '1) — the relation upsert is not idempotent');
+  }
+  unlinkSync(prefix);
+  console.log('✓ #9553: the capture CONTAINS edge lands one `relation` row '
+    + '(Session/sess1 -> Point/p1), and re-replays idempotently');
+} catch (e) {
+  console.error(`✗ #9553 R5/CONTAINS FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
   process.exit(1);
 }
 
