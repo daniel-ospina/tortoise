@@ -31,9 +31,16 @@ cheap to pin:
    #9115 workflow itself (it did, before this property was added). The key is
    nevertheless REQUIRED where it appears, because collapsing it to a constant
    would cancel pending verdicts — a cancelled gate posts nothing (a fail-open)
-   — so the fan-out has to be bounded OUTSIDE the key: the classifier split, a
-   job-level ``if:`` that spends no runner, or a required check that is one run
-   per head. :data:`PER_UNIT_GROUP_OK` makes each such workflow name its bound.
+   — so the fan-out has to be bounded OUTSIDE a per-unit key: the group itself
+   must be low-cardinality, or a job-level ``if:`` must spend no runner, or the
+   check must be one run per head. :data:`PER_UNIT_GROUP_OK` names the bound.
+   A workflow whose across-unit fan-out is deliberately UNBOUNDED is not that
+   shape and does not belong in that list: it lives in
+   :data:`PER_ISSUE_GROUP_OK` under a contract that says so (#9577 review).
+   ⛔ A cheap ``classify`` leg is a **COST** bound, never a fan-out bound:
+   #9115's workflow had one in place *during* the #9577 flood (38 of 133 queued
+   runs, 0 of 28 PRs mergeable), so it cannot be the reason a per-unit key is
+   safe.
 
 3. **A per-push REPORTING workflow with no path filter fires on every merge.**
    Under a merge flood it starts, is cancelled by the next merge
@@ -49,17 +56,29 @@ What this module pins
   workflow grows an unbounded queue;
 * a per-unit group on a per-event workflow must declare what bounds its
   FAN-OUT (:data:`PER_UNIT_GROUP_OK`) — the #9115 shape, which a
-  block-exists rule cannot see;
+  block-exists rule cannot see — and a per-ISSUE key whose across-issue
+  fan-out is deliberately unbounded must be in :data:`PER_ISSUE_GROUP_OK`,
+  a DIFFERENT contract whose two halves are both asserted, so the excuse cannot
+  be copied onto a key it is not true of: the unit STRUCTURALLY is the issue
+  (:func:`_per_issue_key_problem` — one expression, `github.event.issue.number`
+  first, `github.run_id` last, no per-event-unique term), and the residue names
+  the PINNED tracking home (:data:`PER_ISSUE_RESIDUE_TRACKER`), which may not be
+  a CLOSED issue;
 * every workflow with a ``push`` trigger is either path-scoped or listed in
   :data:`UNFILTERED_PUSH_OK` with its reason (a merged-tree validation
   genuinely has no path filter to take), and an excused entry must actually
   BE unfiltered — the excuse and the artifact have to agree, or the entry
   silently licenses deleting a ``paths:`` filter that exists today;
-* ``finding-provenance`` — the workflow that actually flooded — keeps its
-  group keyed **per unit of work** and the two arms that make that key a
-  correctness requirement are pinned: a constant group would cancel a finding's
-  pending annotation (a fail-open: ``cancelled`` posts nothing), and a
-  ``paths:`` filter on an ``issue_comment`` gate would make it never run;
+* ``finding-provenance`` — the workflow that actually flooded — keys its
+  group **per issue**, and #9577 pins three properties of that key: it carries
+  EXACTLY ONE expression (an appended `${{ github.run_id }}` would make it
+  unique per run), it never carries a ``comment.id`` (a per-comment key is
+  unique-per-event, so ``cancel-in-progress`` could never fire), and its term
+  list is the exact ordered one in :data:`_FINDING_PROVENANCE_GROUP_TERMS`
+  (``||`` returns the first truthy operand, so an always-truthy term in front of
+  the issue re-creates the same bug under another name); separately, an
+  ``issue_comment`` gate must never carry a ``paths:`` filter (it would never
+  run);
 * the REQUIRED aggregate keeps its load-bearing identity: ``python-ci.yml``
   still defines a job with the id ``python-ci-gate`` and no ``name:`` override
   (renaming it silently un-requires the gate — branch protection and Mergify's
@@ -162,18 +181,16 @@ ZERO_COST_PR_EVENT = {
 # every comment is a different unit. So the per-unit shape is only safe when
 # something else bounds the fan-out, and each entry here must name that bound.
 #
+# ⛔ The bound must be SOMEWHERE ELSE. "the key is per unit, so it bounds each
+# unit" is not a bound, it is the definition of the shape — and it is exactly
+# the reasoning that let #9115's flood pass this module. A workflow whose fan-out
+# is unbounded ACROSS units by design does not belong here at all; it belongs in
+# :data:`PER_ISSUE_GROUP_OK`, whose contract states the residue out loud.
+#
 # ⛔ A new per-event workflow that copies the shape WITHOUT a bound fails
 # `test_per_event_per_unit_groups_declare_their_bound` — the rule the
 # block-exists test structurally cannot express.
 PER_UNIT_GROUP_OK = {
-    "finding-provenance.yml": (
-        "fan-out is bounded by the CLASSIFIER SPLIT (#9115), not by the key: "
-        "`classify` is `fetch-depth: 1` + `timeout-minutes: 6`, and the "
-        "full-history `provenance` leg runs only on "
-        "`needs: … is_finding == 'true'`. Collapsing the group to a constant "
-        "would cancel pending verdicts — a cancelled gate posts NOTHING, a "
-        "fail-open — so the bound has to stay OUTSIDE the concurrency key."
-    ),
     "ai-review-gate.yml": (
         "a REQUIRED check: one run per PR head, superseded on each push. A "
         "constant group would let one PR's review cancel another's and leave "
@@ -185,6 +202,155 @@ PER_UNIT_GROUP_OK = {
         "so the only fan-out is external `opened` events — one per unit."
     ),
 }
+
+# Per-event workflows keyed PER ISSUE whose across-issue fan-out is deliberately
+# UNBOUNDED and accepted, with the residue tracked.
+#
+# This is a DIFFERENT contract from :data:`PER_UNIT_GROUP_OK`, and keeping them
+# apart is the point (#9577 review): that list means "something else bounds the
+# fan-out", which a per-issue key does NOT do — N issues in flight still permit
+# N concurrent runs. Merged into one dict, a future per-unit workflow could quote
+# a per-issue reason verbatim to excuse a key that bounds nothing anywhere, and
+# the guard's only remaining check ("the entry carries prose") cannot tell.
+#
+# So an entry here is a recorded LOSS, and both halves of it are asserted by
+# `test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue`:
+#   * the unit IS the issue — STRUCTURALLY, not by substring. A bare
+#     `"issue.number" in group` admits
+#     `…-${{ github.event.issue.number }}-${{ github.run_id }}`, which is unique
+#     per RUN: `cancel-in-progress` can never fire, i.e. the #9577 defect under
+#     another token with the guard green (#9577 review).
+#     :func:`_per_issue_key_problem` therefore requires EXACTLY ONE expression,
+#     `github.event.issue.number` as the FIRST term, `github.run_id` as the LAST
+#     (the always-truthy fallback for a trigger with no `event.issue`), and
+#     nothing in between but the `inputs.issue_number` synonym — so a comment
+#     burst on one issue collapses to one run rather than one per comment
+#     (#9577: 100 comments an hour, 38 of 133 queued runs, 0 of 28 PRs
+#     mergeable);
+#   * the reason names the TRACKING HOME for the unbounded residue, and it must
+#     be the number PINNED in :data:`PER_ISSUE_RESIDUE_TRACKER` — an OPEN issue.
+#     A `#\d+` regex cannot tell a live tracker from a CLOSED one, and this
+#     artifact shipped citing `#9115`, closed as COMPLETED two days before the
+#     citation was written. Pinning the number makes re-citing a reviewed edit
+#     here instead of a prose tweak.
+PER_ISSUE_GROUP_OK = {
+    "finding-provenance.yml": (
+        "the key bounds ONE issue's stream: every comment on one issue shares a "
+        "group, so a burst supersedes that issue's own in-flight run instead of "
+        "adding a runner. ACROSS issues there is NO bound — N issues in flight "
+        "permit N concurrent runs — and that residue is the accepted trade, "
+        "tracked as #9595 (batching / coalescing with a catch-up sweep). What a "
+        "cancel loses, stated: the superseded run posts no verdict and there is "
+        "no `comment_id` dispatch input to recover that comment; the lane "
+        "re-posts (its own new group member), and the issue BODY gate is "
+        "re-runnable with `workflow_dispatch -f issue_number=` (#9577). NOTE the "
+        "CLASSIFIER SPLIT is a COST bound, never a fan-out bound: it was already "
+        "in place during the #9577 flood (38 of 133 queued runs, 0 of 28 PRs "
+        "mergeable)."
+    ),
+}
+
+# The tracking home for each PER_ISSUE_GROUP_OK entry's unbounded residue —
+# PINNED here rather than read out of the prose (#9577 review).
+#
+# ⛔ What the guard can and cannot check: it runs OFFLINE (no `gh`, no token), so
+# it cannot open the issue and ask whether it is still open. What it can do — and
+# does — is (a) require the exact pinned number, so moving the tracker is a
+# reviewed edit HERE rather than a prose tweak, and (b) refuse a number known to
+# be CLOSED. Both artifacts in the original #9588 revision cited `#9115`, closed
+# as COMPLETED two days before that head while its own last comment recorded the
+# flood recurring: a reference that reads like a tracker and tracks nothing.
+# Liveness of the number below is re-verified AT REVIEW TIME — the assertions do
+# not claim otherwise.
+PER_ISSUE_RESIDUE_TRACKER = {
+    "finding-provenance.yml": 9595,
+}
+
+# Tracking homes that are CLOSED. A closed issue is not the home of an ACCEPTED
+# residue: either the work landed (the allowance is stale and must go) or it did
+# not (the residue has no open home and must be filed).
+_CLOSED_TRACKERS = {
+    9115: (
+        "closed 2026-10-19 as COMPLETED, while its own last comment recorded the "
+        "flood recurring"
+    ),
+}
+
+# A tracking reference: `#9595`, `#9577`. Used by the per-issue list, which
+# records an ACCEPTED LOSS and must therefore name where the residue is handled.
+_TRACKING_REF = re.compile(r"#\d+")
+
+# The one term a PER-ISSUE key must START with, the synonym it may carry, and the
+# always-truthy fallback it must END with — see :func:`_per_issue_key_problem`.
+_PER_ISSUE_TERM = "github.event.issue.number"
+_PER_ISSUE_TERM_SYNONYMS = {"github.event.inputs.issue_number", "inputs.issue_number"}
+_PER_ISSUE_FALLBACK = "github.run_id"
+
+
+def _per_issue_key_problem(group: str) -> str | None:
+    """Why ``group`` is NOT a per-issue concurrency key, or ``None`` when it is.
+
+    The premise :data:`PER_ISSUE_GROUP_OK` excuses a key on is *the unit IS the
+    issue*, and a SUBSTRING test cannot check it: the group
+    ``…-${{ github.event.issue.number }}-${{ github.run_id }}`` contains
+    ``issue.number``, carries no ``comment.id``, and is unique per RUN — so
+    ``cancel-in-progress`` can never fire, which is the #9577 defect under
+    another token with the guard green (#9577 review). The premise is therefore
+    checked STRUCTURALLY:
+
+    * exactly ONE ``${{ … }}`` expression — an appended second expression is how
+      a run-unique suffix gets in while the first one still reads per-issue (the
+      same count pin ``test_finding_provenance_concurrency_group_never_keys_on_a_comment``
+      applies to the artifact);
+    * the FIRST term is ``github.event.issue.number`` — ``||`` returns the first
+      TRUTHY operand, so an always-truthy term ahead of it mints a per-run group
+      (``github.run_id``) or ONE group for the whole fleet (``github.event_name``);
+    * the LAST term is ``github.run_id`` — the fallback a ``workflow_dispatch``
+      trigger needs, and one that cannot collapse different units together;
+      without it the group can resolve EMPTY, one shared group for every unit;
+    * nothing else but the ``inputs.issue_number`` synonym — which keeps out
+      ``comment.id`` (unique per EVENT), ``event_name`` (global), and
+      ``ref``/``sha`` (per RUN).
+
+    Returns the reason instead of asserting so
+    ``test_the_per_issue_key_check_rejects_excused_shapes`` can prove the check
+    rejects each shape on SYNTHETIC groups: a guard whose only evidence is the
+    one artifact it happens to pass on cannot show its teeth.
+    """
+    expressions = _EXPRESSION.findall(group)
+    if len(expressions) != 1:
+        return (
+            f"it carries {len(expressions)} `${{{{ … }}}}` expressions; a per-issue "
+            "key must carry EXACTLY ONE — an appended `${{ github.run_id }}` suffix "
+            "makes the group unique per RUN while the first expression still reads "
+            "per-issue"
+        )
+    terms = [t.strip() for t in expressions[0].split("||")]
+    if terms[0] != _PER_ISSUE_TERM:
+        return (
+            f"its first term is {terms[0]!r}; `||` returns the FIRST truthy operand, "
+            f"so a per-issue key must START with {_PER_ISSUE_TERM!r} — an "
+            "always-truthy term ahead of it (`github.run_id`) mints one group per "
+            "RUN, and `github.event_name` collapses every event into ONE group"
+        )
+    if terms[-1] != _PER_ISSUE_FALLBACK:
+        return (
+            f"its last term is {terms[-1]!r}; a per-issue key must END with "
+            f"{_PER_ISSUE_FALLBACK!r} — the always-truthy fallback for a trigger "
+            "with no `event.issue` (`workflow_dispatch`). Without it the group can "
+            "resolve EMPTY, and one shared empty group lets one unit cancel another"
+        )
+    allowed = {_PER_ISSUE_TERM, _PER_ISSUE_FALLBACK, *_PER_ISSUE_TERM_SYNONYMS}
+    extra = [t for t in terms if t not in allowed]
+    if extra:
+        return (
+            f"it also resolves through {extra}, which is not a per-issue term. "
+            "`comment.id` is unique per EVENT (the #9577 defect: every comment in "
+            "its own group, `cancel-in-progress` cancels nothing); `event_name` is "
+            "ONE group for the whole fleet; `ref`/`sha` are per RUN. A per-issue "
+            "key is the issue, the dispatch synonym, and the run_id fallback"
+        )
+    return None
 
 # Per-event workflows that spend runner slots on REPORTING/BOOKKEEPING rather
 # than gating a merge. They must declare a `concurrency:` group — a flood in any
@@ -252,6 +418,23 @@ def test_every_workflow_declares_a_concurrency_block(path: Path) -> None:
 _PER_UNIT_TOKENS = ("comment.id", "issue.number", "pull_request.number", "run_id")
 _PER_EVENT_TRIGGERS = {"issues", "issue_comment", "pull_request", "pull_request_target"}
 
+# The ONE expression `finding-provenance`'s concurrency group may resolve through
+# (#9577). Pinned as an exact term list because every property that makes the key
+# a BOUND lives in the ORDER and in the ABSENCE of terms, not in their presence:
+# `||` returns the first truthy operand, so an always-truthy term placed AHEAD of
+# the issue (`github.run_id` gives one group per run; `github.event_name` gives
+# ONE group for every event in the fleet — the global group the workflow forbids)
+# breaks the bound, and a per-event-unique term (`github.event.comment.id`) makes
+# the key unique per event wherever it is the resolving term and is dead code
+# elsewhere — so it must not be in the KEY at all. A TRAILING always-truthy term
+# is required, not a hazard: it is the dispatch fallback for a trigger that has
+# no `github.event.issue.number`.
+_FINDING_PROVENANCE_GROUP_TERMS = [
+    "github.event.issue.number",
+    "github.event.inputs.issue_number",
+    "github.run_id",
+]
+
 
 @pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
 def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
@@ -263,6 +446,11 @@ def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
     that rule — and it still ran 12+ at once. A per-event workflow may keep a
     per-unit key only when something ELSE bounds its fan-out, and
     :data:`PER_UNIT_GROUP_OK` must say what.
+
+    A workflow whose across-unit fan-out is DELIBERATELY unbounded (the unit is
+    the issue and the residue is accepted) is excused by the other list instead,
+    :data:`PER_ISSUE_GROUP_OK`, whose two premises are asserted by
+    `test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue`.
     """
     doc = _load(path)
     triggers = _PER_EVENT_TRIGGERS & set(_triggers(doc))
@@ -273,17 +461,167 @@ def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
     per_unit = [tok for tok in _PER_UNIT_TOKENS if tok in group]
     if not per_unit:
         return  # a constant / low-cardinality group bounds the fan-out itself
-    assert path.name in PER_UNIT_GROUP_OK, (
+    # Two allow-lists, two contracts. The lookup is explicit (`or`, not a merged
+    # dict) so the failure message names the list the entry must satisfy; the
+    # lists are asserted disjoint in
+    # `test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue`, so
+    # a name in both cannot silently resolve to whichever is checked first.
+    reason = PER_UNIT_GROUP_OK.get(path.name) or PER_ISSUE_GROUP_OK.get(path.name)
+    assert reason is not None, (
         f"{path.name} takes per-event triggers ({sorted(triggers)}) and keys its "
         f"concurrency group PER UNIT ({per_unit}) — that bounds repeats of one "
         "unit but NOT the fan-out: N units still run at once. That is the #9115 "
         "flood shape exactly (the offending workflow already had a per-unit key). "
-        "Bound the fan-out (constant/low-cardinality group, a job-level `if:` "
-        "that spends no runner, or a cheap classify leg), or add it to "
-        "PER_UNIT_GROUP_OK with that bound named."
+        "Bound the fan-out (a constant/low-cardinality group, a required check "
+        "that is one run per head, or a job-level `if:` that spends no runner), "
+        "or add it to PER_UNIT_GROUP_OK with that bound named — or, when the "
+        "across-unit fan-out is acknowledged as unbounded and the loss is "
+        "accepted, to PER_ISSUE_GROUP_OK, which asserts that the unit really is "
+        "the issue and that the residue names its tracking home."
     )
-    assert PER_UNIT_GROUP_OK[path.name].strip(), (
-        f"PER_UNIT_GROUP_OK needs a reason for {path.name} — it is a reviewed decision"
+    assert reason.strip(), (
+        f"{path.name} needs a reason — an allow-list entry is a reviewed "
+        "decision, not an omission with a comment-shaped hole next to it"
+    )
+
+
+def test_the_per_issue_allow_list_keys_on_the_issue_and_names_its_residue() -> None:
+    """:data:`PER_ISSUE_GROUP_OK` is a CONTRACT, not prose (#9577 review).
+
+    The entry that lives here is excused from "bound the FAN-OUT" on a promise:
+    *the unit is the issue*, and the unbounded across-issue residue is *tracked*.
+    Both halves are checked — otherwise a FUTURE per-unit workflow can copy this
+    wording verbatim and pass a rule whose stated premise it denies, which is the
+    shape that let #9115's flood pass this module.
+
+    (1) The key is checked STRUCTURALLY through :func:`_per_issue_key_problem`,
+    not by substring: `…-${{ github.event.issue.number }}-${{ github.run_id }}`
+    contains `issue.number`, has no `comment.id`, and is unique per RUN.
+
+    (2) The tracking home is PINNED in :data:`PER_ISSUE_RESIDUE_TRACKER` and may
+    not be a CLOSED issue (:data:`_CLOSED_TRACKERS`). Liveness itself is NOT
+    checkable here — this suite runs offline — so the docstring does not claim
+    it; what the pin buys is that re-citing the residue is a reviewed edit rather
+    than a prose tweak. That distinction is the one that failed once: the entry
+    cited #9115 by name, and #9115 had been closed as COMPLETED two days before
+    that citation, so the deferred work had no open home while the entry read as
+    if it did.
+    """
+    assert set(PER_ISSUE_RESIDUE_TRACKER) == set(PER_ISSUE_GROUP_OK), (
+        "PER_ISSUE_RESIDUE_TRACKER and PER_ISSUE_GROUP_OK must name the same "
+        "workflows — an accepted residue with no pinned tracker slips through, "
+        "and a tracker with no entry is a stale pin. tracker-only: "
+        f"{sorted(set(PER_ISSUE_RESIDUE_TRACKER) - set(PER_ISSUE_GROUP_OK))}, "
+        f"entry-only: {sorted(set(PER_ISSUE_GROUP_OK) - set(PER_ISSUE_RESIDUE_TRACKER))}"
+    )
+    overlap = sorted(set(PER_UNIT_GROUP_OK) & set(PER_ISSUE_GROUP_OK))
+    assert not overlap, (
+        f"{overlap} appear in BOTH allow-lists. The guard resolves one of them, "
+        "so the other becomes documentary — and the two say different things "
+        "(fan-out bounded SOMEWHERE ELSE vs across-unit fan-out unbounded and "
+        "accepted). Keep the one that is true."
+    )
+    # Non-vacuity: an empty per-issue list is a bucket that no longer judges
+    # anything, and every assertion below would pass while checking nothing.
+    assert PER_ISSUE_GROUP_OK, "PER_ISSUE_GROUP_OK is empty — drop it or populate it"
+    for name, reason in PER_ISSUE_GROUP_OK.items():
+        path = WORKFLOW_DIR / name
+        assert path.exists(), f"PER_ISSUE_GROUP_OK names a missing workflow: {name}"
+        group = str((_load(path).get("concurrency") or {}).get("group", ""))
+        problem = _per_issue_key_problem(group)
+        assert problem is None, (
+            f"{name} is excused as PER-ISSUE but its group is {group!r}, and "
+            f"{problem}. The excuse's whole premise is that the UNIT IS THE "
+            "ISSUE — keyed on any other unit this is the per-event shape #9115 "
+            "measured, not an accepted residue. Key on "
+            "`github.event.issue.number` (dispatch synonym, `github.run_id` "
+            "fallback last), or move the entry to PER_UNIT_GROUP_OK and name the "
+            "bound its fan-out actually has."
+        )
+        # Kept as its own assertion for the message: the structural check above
+        # already excludes it, but the #9577 defect deserves to be named.
+        assert "comment.id" not in group, (
+            f"{name} is excused as PER-ISSUE and its group {group!r} still carries "
+            "`comment.id` — a per-comment key is the #9577 defect itself, and "
+            "no allow-list entry may excuse it"
+        )
+        tracker = PER_ISSUE_RESIDUE_TRACKER[name]
+        assert f"#{tracker}" in reason, (
+            f"PER_ISSUE_GROUP_OK[{name!r}] does not name its pinned tracking home "
+            f"#{tracker} for its unbounded across-issue residue. This list records "
+            "an ACCEPTED LOSS; an untracked residue is narration, and a future "
+            "entry could copy it without the loss landing anywhere."
+        )
+        assert tracker not in _CLOSED_TRACKERS, (
+            f"PER_ISSUE_RESIDUE_TRACKER[{name!r}] = #{tracker}, which is CLOSED "
+            f"({_CLOSED_TRACKERS.get(tracker)}). A closed issue is not the home of "
+            "an accepted residue: either the work landed (then this allowance is "
+            "stale — drop the entry) or it did not (then file the residue as an "
+            "OPEN issue and cite that number)."
+        )
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        # The exact shape the old substring check excused (#9577 review): it
+        # contains `issue.number`, carries no `comment.id`, and is unique per RUN,
+        # so `cancel-in-progress` can never fire.
+        "finding-provenance-${{ github.event.issue.number }}-${{ github.run_id }}",
+        "finding-provenance-${{github.event.issue.number}}${{github.run_id}}",
+        # An always-truthy term FIRST — `run_id`: one group per RUN.
+        "finding-provenance-${{ github.run_id || github.event.issue.number }}",
+        # `event_name` in front: ONE group for the whole fleet on a dispatch.
+        "finding-provenance-${{ github.event_name || github.event.issue.number }}",
+        # `comment.id`: per-EVENT wherever it resolves, dead code elsewhere.
+        "finding-provenance-${{ github.event.comment.id || github.event.issue.number || github.run_id }}",
+        "finding-provenance-${{ github.event.issue.number || github.event.comment.id || github.run_id }}",
+        # No trailing always-truthy fallback: can resolve EMPTY on a dispatch.
+        "finding-provenance-${{ github.event.issue.number || github.event.inputs.issue_number }}",
+        # A constant group: not per-issue at all, and it lets one issue cancel
+        # another's gate.
+        "finding-provenance",
+    ],
+)
+def test_the_per_issue_key_check_rejects_excused_shapes(group: str) -> None:
+    """The per-issue premise is STRUCTURAL — these mutants prove it (#9577 review).
+
+    The first group is the one the original guard admitted: it asserted
+    ``"issue.number" in group``, which
+    ``…-${{ github.event.issue.number }}-${{ github.run_id }}`` satisfies while
+    being unique per run. Each shape below reads like a per-issue key without
+    being one, and :func:`_per_issue_key_problem` must reject every one —
+    otherwise PER_ISSUE_GROUP_OK would excuse a key that bounds nothing, which is
+    the defect the allow-list exists to prevent.
+    """
+    problem = _per_issue_key_problem(group)
+    assert problem is not None, (
+        f"{group!r} reads like a per-issue key and is not one, yet the check "
+        "accepted it — the PER_ISSUE_GROUP_OK allowance would excuse a key that "
+        "bounds nothing (#9577)."
+    )
+
+
+@pytest.mark.parametrize(
+    "group",
+    [
+        "finding-provenance-${{ github.event.issue.number || github.run_id }}",
+        "finding-provenance-${{ github.event.issue.number || github.event.inputs.issue_number || github.run_id }}",
+        "finding-provenance-${{ github.event.issue.number || inputs.issue_number || github.run_id }}",
+        # Spacing inside `${{ }}` is not a property change.
+        "finding-provenance-${{github.event.issue.number||github.run_id}}",
+    ],
+)
+def test_the_per_issue_key_check_accepts_genuine_per_issue_shapes(group: str) -> None:
+    """The other direction: a real per-issue key must NOT red.
+
+    A pin that fails a correct artifact is worse than no pin — the next
+    maintainer's correct dispatch fallback or spacing tidy-up has to stay green,
+    or the guard gets deleted.
+    """
+    assert _per_issue_key_problem(group) is None, (
+        f"{group!r} IS a per-issue key (issue first, run_id fallback last) and "
+        "the check rejected it — the guard would red a correct artifact"
     )
 
 
@@ -376,13 +714,15 @@ def test_the_allow_list_has_no_dead_entries() -> None:
         )
 
 
-def test_finding_provenance_keeps_a_per_unit_group_and_no_path_filter() -> None:
+def test_finding_provenance_keeps_a_per_issue_group_and_no_path_filter() -> None:
     """The #9115 workflow's two correctness properties, pinned individually.
 
-    (a) The group is keyed PER UNIT. Collapsing it to one constant group would
-        make a burst of comments cancel each other, and a cancelled comment
-        gate posts NOTHING — so every cancelled finding would be silently
-        ungated (a fail-open), not merely deferred.
+    (a) The group is keyed PER ISSUE (#9577). Not per comment — a comment id is
+        unique per event, so a `comment.id` term puts every comment in its OWN
+        group and `cancel-in-progress: true` can never fire: the key bounds
+        nothing while reading like a bound (38 of 133 queued runs, 0 of 28 PRs
+        mergeable). Not a constant either — one issue must never cancel
+        another issue's gate.
     (b) An ``issue_comment`` gate must never gain a ``paths:``/``paths-ignore:``
         filter: those events carry no path, so a filtered gate never runs and a
         skipped check reads as a pass to the rail (the reason the sibling guard
@@ -390,9 +730,10 @@ def test_finding_provenance_keeps_a_per_unit_group_and_no_path_filter() -> None:
     """
     doc = _load(WORKFLOW_DIR / "finding-provenance.yml")
     group = str(doc["concurrency"]["group"])
-    assert "comment.id" in group and "issue.number" in group, (
-        "the per-unit key is load-bearing: keying by a constant silences the "
-        "flood by cancelling the verdicts that owed an annotation (#9115)"
+    assert _per_issue_key_problem(group) is None, (
+        "the key must be per ISSUE, structurally — a constant group would let one "
+        f"issue cancel another's gate, and a run-unique suffix cancels nothing "
+        f"(#9577): {group!r}"
     )
     assert doc["concurrency"]["cancel-in-progress"] is True
     trig = _triggers(doc)
@@ -401,6 +742,117 @@ def test_finding_provenance_keeps_a_per_unit_group_and_no_path_filter() -> None:
         assert trig[event] is None or not (
             isinstance(trig[event], dict) and {"paths", "paths-ignore"} & set(trig[event])
         ), f"`{event}` cannot carry a path filter — the gate would never run"
+
+
+def test_finding_provenance_concurrency_group_never_keys_on_a_comment() -> None:
+    """The #9577 guard: the concurrency KEY must never carry `comment.id`.
+
+    ``github.event.comment.id`` is unique PER COMMENT, so a group containing it
+    gives every comment its own group and ``cancel-in-progress: true`` can never
+    fire — the key is not a bound, it is a unique key that reads like a bound.
+    Measured 2026-10-21 (#9577): 100 comments in one hour, 38 of 133 queued runs
+    this workflow, ahead of the ``python-ci`` runs PRs need to merge, 0 of 28
+    open PRs mergeable (all ``PENDING``).
+
+    This is the assertion a ``yaml.safe_load`` -and-parses check structurally
+    cannot make: the file is valid YAML either way, because the expression IS
+    the bug. It scans the RUN-level group AND every job-level ``concurrency:``
+    block in the file — re-introducing the term at a narrower scope would starve
+    exactly the same pool.
+
+    ``comment.id`` is legitimately READ by this workflow (``COMMENT_ID`` in the
+    ``Resolve the issue body`` step fetches THAT comment's body by id, which is
+    the #4732 injection-safe path). Only the concurrency KEY is forbidden, so
+    this guard scopes to ``concurrency:`` blocks and must not be widened into a
+    file-wide grep — that would fail the very read the workflow needs.
+    """
+    doc = _load(WORKFLOW_DIR / "finding-provenance.yml")
+
+    groups: list[tuple[str, str]] = []
+    run_group = _concurrency_group(doc.get("concurrency"))
+    assert run_group is not None, "finding-provenance must keep a concurrency group (#9115)"
+    groups.append(("run-level `concurrency:`", run_group))
+    for name, job in (doc.get("jobs") or {}).items():
+        job_group = _concurrency_group(job.get("concurrency")) if isinstance(job, dict) else None
+        if job_group is not None:
+            groups.append((f"job `{name}` `concurrency:`", job_group))
+
+    # Non-vacuity: the `strip()` assertion below is the one that does work (the
+    # run-level group is appended under a `run_group is not None` assert, so a
+    # `len(groups) >= 1` check here could never fire — it would advertise a
+    # check that does not exist).
+    assert _normalise_group(run_group).strip(), "the run-level group is empty"
+
+    offenders = [(where, group) for where, group in groups if "comment.id" in group]
+    assert not offenders, (
+        f"{offenders} key a concurrency group on `comment.id` (#9577). Wherever "
+        "it is the RESOLVING term it makes the key unique per comment, so every "
+        "comment gets its own group and `cancel-in-progress: true` can NEVER "
+        "fire — the key bounds nothing while reading like a bound (measured: 38 "
+        "of 133 queued runs, 0 of 28 open PRs mergeable). Behind "
+        "`github.event.issue.number` it is dead code TODAY, and it still may not "
+        "be in the key: a re-order silently activates it, which is exactly how "
+        "this defect got in. Key on the ISSUE (`github.event.issue.number`). "
+        "`comment.id` may still be read as EVENT DATA (the body is fetched by "
+        "id) — it must never be part of the KEY."
+    )
+
+    # ⛔ A TOKEN blacklist alone is not the property (#9577 review). `||`
+    # short-circuits on the FIRST truthy operand, so a key that keeps
+    # `issue.number` but puts an always-truthy context in the MIDDLE —
+    # `finding-provenance-${{ github.event.issue.number || github.event_name ||
+    # github.run_id }}` — resolves to ONE SHARED group on `workflow_dispatch`
+    # (where `issue.number` is absent), i.e. one global dispatch group, which the
+    # workflow forbids two lines ABOVE its own key. A first-term-only check
+    # misses that; so does a `comment.id` blacklist. The exact TERM LIST is therefore
+    # pinned — the same exactness `test_supabase_deploy_apply_lock_…` uses and
+    # for the same reason (substring pins were vacuous there).
+    #
+    # The pin is scoped to INSIDE `${{ }}`, not to the group's literal prefix:
+    # renaming `finding-provenance-` is not a property change and must not red
+    # (see `_normalise_group`'s docstring: a pin must never fail with a message
+    # that is false about the artifact in front of the maintainer). Extracting
+    # through `_EXPRESSION` — never a hand-rolled `split("||")` — is what keeps
+    # a single-term group from leaving a stray `}}` in the compared text.
+    #
+    # ⛔ EXACTLY ONE expression. `_EXPRESSION.search` reads only the FIRST, so
+    # `…-${{ issue.number || … }}-${{ github.run_id }}` (a second, APPENDED
+    # always-truthy expression) passed a term-list pin that then described a key
+    # it had not checked — and that key is unique per run, i.e. the #9577 defect
+    # with the module green. The absence of extra terms is the property here
+    # (measured), so the count is pinned before the contents.
+    expressions = _EXPRESSION.findall(run_group)
+    assert len(expressions) == 1, (
+        f"the group is {run_group!r} and carries {len(expressions)} `${{{{ … }}}}` "
+        "expressions; it must carry EXACTLY ONE (#9577). A second expression —"
+        " appended as a suffix, e.g. `…-${{ github.run_id }}` — makes the group "
+        "unique per RUN while the term-list assertion is satisfied, so "
+        "`cancel-in-progress` cancels nothing: the exact #9577 defect, with a "
+        "green guard. Term ABSENCE is part of the property, not an extra."
+    )
+    terms = [
+        "github.event." + term if term.startswith("inputs.") else term
+        for term in (t.strip() for t in expressions[0].split("||"))
+    ]
+    assert terms == _FINDING_PROVENANCE_GROUP_TERMS, (
+        f"the group is {run_group!r} and resolves via the terms {terms}; it must "
+        f"be {_FINDING_PROVENANCE_GROUP_TERMS} (#9577). `||` returns the first "
+        "TRUTHY operand, so these are the shapes to avoid: (a) an always-truthy "
+        "term FIRST — `github.run_id` mints a group per RUN, `github.event_name` "
+        "collapses EVERY event into one group (the global group the workflow "
+        "forbids); (b) an always-truthy term in the MIDDLE — `github.event_name` "
+        "collapses every `workflow_dispatch`, which has no "
+        "`github.event.issue.number`, into ONE shared group; (c) DROPPING the "
+        "trailing `github.run_id` fallback does the same for any trigger whose "
+        "issue/input term is absent; and (d) a per-event-UNIQUE term "
+        "(`github.event.comment.id`) makes the key unique per event wherever it "
+        "is the resolving term — and dead code elsewhere, waiting for a re-order "
+        "— so it must never be in the KEY at all. Every one of (a)-(d) means "
+        "`cancel-in-progress` is not a per-issue bound. The `inputs.issue_number` "
+        "spelling is ACCEPTED as the synonym of `github.event.inputs.issue_number` "
+        "(normalised above), because GitHub evaluates both identically. Any other "
+        "change here is a reviewed decision, not a tidy-up: pin it deliberately."
+    )
 
 
 def test_finding_provenance_does_not_pay_for_history_before_classifying() -> None:

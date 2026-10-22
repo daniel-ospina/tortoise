@@ -395,11 +395,20 @@ class EpBreakdown:
 # (``createdAt``) are additive and OFF by default: the search point fetch reads
 # those columns only when this flag is set, so a default call is byte-identical
 # (the #3986 freeze carve-out — a default-off response field is not a surface
-# change. NO RECORDING SURFACE EXISTS for it: ``config/surface-manifest.yml`` has
-# no ``response_fields`` key and ``tools/surface_manifest.py`` derives none, so
-# this carve-out is ASSERTED here, not recorded in the manifest. Recording it
-# would need both a manifest key and its derivation path — a change to the
-# artifact and to the ``cut``/``check`` pair that owns it).
+# change).
+#
+# ⛔ AND IT IS RECORDED — the recording surface DOES exist, and this note used
+# to assert the opposite ("``config/surface-manifest.yml`` has no
+# ``response_fields`` key and ``tools/surface_manifest.py`` derives none");
+# both clauses were FALSE, and ``CONTRIBUTING.md``"s "And it must still be
+# recorded … an unrecorded field has no approval behind it" is the rule they
+# were invoked to escape. The block exists (``response_fields:`` in the
+# manifest), ``tools/surface_manifest.py`` carries it across a re-cut
+# (``_carried_response_fields``), validates it (non-empty, every entry anchored
+# to a row) and renders it into ``docs/product/mcp-sdk-surface.md``. This
+# carve-out's two fields ride it as the ``provenance.source`` /
+# ``provenance.captured_at`` rows — so the carve-out is RECORDED, not merely
+# asserted here. (The four default-ON #8658 keys below have their own rows.)
 SEARCH_PROVENANCE_FLAG_ENV = "TORTOISE_SEARCH_PROVENANCE"
 
 
@@ -815,6 +824,48 @@ class SearchResult:
     # them, so an unflagged call stays byte-identical; empty ⇒ absent.
     currency: str = ""  # current | stale | unknown
     outdated_sources: list = field(default_factory=list)  # the behind links
+    # #8658: the Point's VERBATIM PROVENANCE — the anchor Slice A's
+    # ``retrieval.package_evidence_pool`` (#2683) collapses a distilled point's
+    # own source chunk/turn onto (``quote`` + ``source_turn_id``) and the
+    # address #2684 surfaces (``span_start``/``span_end``). The eval lane's
+    # ingest supplies all four (``tools/longmem_eval/ingest.py::
+    # point_props_for_hits``); the PRODUCT point fetch read none of them, so
+    # ``_is_own_source`` returned False on its first line (empty quote) and
+    # both provenance legs were INERT on real graphs.
+    #
+    # ADDITIVE and PRESENT-ONLY in ``to_dict``: each key is emitted only when
+    # the Point actually carries the datum, so an unprovenanced hit — every row
+    # written before E3/E4, and every row whose writer never had a verbatim
+    # source — stays byte-identical to pre-change output. A default that
+    # emitted four empty fields would make every legacy hit look provenanced to
+    # the package's own truthiness gates.
+    #
+    # ⚠️ This is a DEFAULT-ON additive response field, and that IS a departure
+    # from the #3986 carve-out recorded on ``search_provenance_enabled`` above
+    # ("a default-off response field is not a surface change") — the shape that
+    # does not gate as an addition is by definition the one that is OFF by
+    # default and leaves the response unchanged when off
+    # (``CONTRIBUTING.md``). ⛔ So the response shape DOES change here, and that
+    # is stated plainly rather than argued away: what is NOT novel is the
+    # INFORMATION — the four values are the point's OWN stored verbatim anchor,
+    # already on the node, already emitted to any caller of the eval lane, and
+    # already named by ``package_evidence_pool``'s docstring as the key it
+    # collapses on — but a default-on key is still a response addition, so it
+    # is RECORDED as one. A default-off gate was rejected because it would keep
+    # the read path's own documented contract inert by default, which is the
+    # defect #8658 exists to remove. ⛔ It IS recorded, in the one place that
+    # records response fields: four `response_fields` rows on `tortoise_search`
+    # in ``config/surface-manifest.yml``, rendered into the "Recorded response
+    # fields" table in ``docs/product/mcp-sdk-surface.md``.
+    # (An earlier draft of this comment claimed no such surface existed — it
+    # does: the block, its `check` validation, and its `render` are all in
+    # ``tools/surface_manifest.py``, and ``CONTRIBUTING.md``"s "it must still be
+    # recorded" applies to exactly this shape. The `outdated` row is the
+    # non-flag-gated precedent.)
+    quote: str = ""
+    source_turn_id: Any = None
+    span_start: Any = None
+    span_end: Any = None
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -920,6 +971,20 @@ class SearchResult:
                 prov["fyi"] = {"reason": FYI_REASON_SOURCE_DRIFT,
                                "sources": self.outdated_sources}
             d["provenance"] = prov
+        # #8658: verbatim provenance — additive keys, each emitted ONLY when the
+        # Point carries it (present-only, so unprovenanced hits stay
+        # byte-identical). ``span_start == 0`` is a REAL address and must
+        # survive, so the gate is presence (``is not None``), never truthiness;
+        # ``source_turn_id`` arrives as ``int|None`` and the graph drops a null
+        # prop (#2949), so an absent link arrives as None or "".
+        if self.quote:
+            d["quote"] = self.quote
+        if self.source_turn_id is not None and self.source_turn_id != "":
+            d["source_turn_id"] = self.source_turn_id
+        if self.span_start is not None:
+            d["span_start"] = self.span_start
+        if self.span_end is not None:
+            d["span_end"] = self.span_end
         return d
 
 
