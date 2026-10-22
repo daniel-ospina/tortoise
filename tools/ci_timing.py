@@ -955,6 +955,17 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
     parameter; without it a refresh silently lands a lower bound as a weight
     (measured on #9134: `test_surface_manifest.py` 199.1 -> 36.0, 5.5x, from a
     reading that saw 2 of the file's testcases).
+
+    Every entry also carries `source`: which reading WON it, `census` (a leg's
+    `junit*.xml`) or `top-15` (that leg's `--durations=15` block). It exists
+    because the BASIS LABEL a refresh writes onto the rows it moves is built from
+    the readings the sweep actually took, never from the presence of a
+    `junit*.xml` file (PR #9651 review, P2). The label was hardcoded
+    `ci-timing top-15`, so once the census became the source for most rows every
+    row a refresh re-based or held stated a source its value did not come from.
+    Deriving the label from `source` is also the rule this whole module is about:
+    an artifact that is PRESENT is not an artifact that was READ (the
+    `--allow-window-only` refusal one level up makes the same distinction).
     """
     out: dict[str, dict] = {}
     for log_path in sorted(Path(logs_dir).rglob("*.log")):
@@ -964,9 +975,13 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
             # The LARGER reading across jobs wins, and its test count is the one
             # that describes it — pairing a winning `seconds` with a losing
             # job's count would make the coverage witness describe a different
-            # measurement than the weight it accompanies.
+            # measurement than the weight it accompanies. `source` travels with
+            # the same rule, for the same reason: it must describe the reading
+            # that WON, so the basis label never cites a source this file's
+            # value did not come from (PR #9651 review, P2).
             if seconds > out.get(path, {}).get("seconds", 0.0):
-                out[path] = {"seconds": seconds, "tests": int(entry["tests"])}
+                out[path] = {"seconds": seconds, "tests": int(entry["tests"]),
+                             "source": "top-15"}
 
     # THE CENSUS PASS (`parse_junit`): a leg's `junit.xml` reports EVERY executed
     # testcase, not its 15 slowest rows, so its `tests` witness is normally the
@@ -1000,9 +1015,10 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
             junit_covered.add(path)
             seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
             # Same rule as the log pass: the LARGER reading wins, and ITS test
-            # count is the witness that describes it.
+            # count and `source` are what describe it.
             if seconds > out.get(path, {}).get("seconds", 0.0):
-                out[path] = {"seconds": seconds, "tests": int(entry["tests"])}
+                out[path] = {"seconds": seconds, "tests": int(entry["tests"]),
+                             "source": "census"}
     if out and not junit_sources:
         # The census is the whole point of this sweep: without it the refresh
         # re-writes the map from the 15-row window and re-stamps
@@ -1804,8 +1820,16 @@ _CLAUSE_SEPARATORS = (" — ", "; ", ". ", ", ")
 # ADOPTED basis inside this shape (`; was 42.4`) is the exception:
 # `_strip_prior_held_basis` keeps it, because it is the only record of what
 # produced the surviving value.
+#
+# ⛔ BOTH label shapes must be recognised: `junit-census+top-15` is what this
+# render writes now that the census is the reading (PR #9651 review, P2), and
+# `top-15` is what every row ALREADY IN the map carries. Recognizing only the new
+# shape would leave the oldest rows' bases unpinned and let each one grow a second
+# sentence on its next hold — the defect this strip exists to prevent.
+_SAMPLE_LABEL_RE = r"ci-timing (?:junit-census\+top-15|top-15)"
 _PRIOR_BASIS_RE = re.compile(
-    r"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+)ci-timing top-15 \d{4}-\d{2}-\d{2} \(run [^)]*\)"
+    rf"(?:^[ \t]*#[ \t]*|[ \t]+—[ \t]+){_SAMPLE_LABEL_RE} \d{{4}}-\d{{2}}-\d{{2}} "
+    r"\(run [^)]*\)"
     r"(?:;[ \t]*was [0-9]+(?:\.[0-9]+)?|:[^—]*)?[ \t]*$")
 
 # …and the shape of an ADOPTED basis inside that match (`; was 42.4`). It records
@@ -1876,15 +1900,17 @@ def _is_stale_provenance(tail: str) -> bool:
 # OUR OWN basis strings — the shapes `render_refreshed_manifest` writes. A note
 # is "pure provenance" only when it is NOTHING BUT these, joined by ` — `:
 # `#9017 CI-junit 2026-10-18 (run 39165691659); was 42.6`,
-# `ci-timing top-15 2026-10-19 (run 39191149586): top-15 saw 3 of 4 testcases =
-# 274.5s, a LOWER bound; kept 275.9`. `_PURE_PROVENANCE_RE` is only a PREFIX
+# `ci-timing junit-census+top-15 2026-10-19 (run 39191149586): the reading saw 3
+# of 4 testcases = 274.5s, a LOWER bound; kept 275.9` (and the `top-15` label
+# shape every row already in the map carries — see `_SAMPLE_LABEL_RE`).
+# `_PURE_PROVENANCE_RE` is only a PREFIX
 # match, so using it alone read `#9017 CI-junit 2026-10-18 (run 42); was 180.7 —
 # do not drop this row; required for the #4348 floor` as "nothing survives" and
 # deleted the instruction with it (#9134 review, P2). The remainder after these
 # tokens must be separators only.
 _OUR_BASIS_TOKEN_RE = re.compile(
     r"(?:\d+\s+)?"          # `#9017 ` — `_note_body` strips the `#`
-    r"(?:ci-timing\s+top-15|CI-junit)\s+\d{4}-\d{2}-\d{2}"
+    r"(?:" + _SAMPLE_LABEL_RE.replace(" ", r"\s+") + r"|CI-junit)\s+\d{4}-\d{2}-\d{2}"
     r"(?:\s*\(run [^)]*\))?"
     r"(?::[^—]*|;[ \t]*was[ \t]+[0-9]+(?:\.[0-9]+)?)?"
     r"|\d{4}-\d{2}-\d{2}(?!\S)",
@@ -2034,8 +2060,13 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     a caller that has no witness must not be reported as having one.
 
     `sample_label` names the basis written onto every row this render RE-BASES
-    (`ci-timing top-15 2026-10-19 (run 39191149586)`), in the shape the map
-    already uses for a re-derived row. It pairs with the stale-provenance rule
+    (`ci-timing junit-census+top-15 2026-10-19 (run 39191149586)`), in the shape
+    the map already uses for a re-derived row. The caller builds it from the
+    readings the sweep actually took — `main` derives it from
+    :func:`collector_file_measurements`' per-file `source`, so the label cites the
+    census only when a census reading exists — and the witness this renderer
+    writes beside it states the COUNT, never the source (`the reading saw 3 of 4
+    testcases`), because `observed` describes whichever reading won. It pairs with the stale-provenance rule
     above: a note that IS the citation is dropped because it no longer applies, a
     rationale that merely DATES the value loses only that clause, and either way
     the replacement says what the basis now is. A HELD row (`kept`) keeps its
@@ -2164,7 +2195,7 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                           "the reading cannot prove it saw the whole file")
             elif declared == 1:
                 reason = ("a single-test file cannot prove full coverage from a "
-                          "top-15 projection")
+                          "partial reading")
             else:
                 reason = None
             # `# unmeasured` stops being true once a leg collected the file at
@@ -2173,12 +2204,21 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
             # follows it (`test_2296_document_created_journal.py` lost 27.0's
             # whole "WHAT THE NUMBER IS" note that way).
             tail = _restate_unmeasured_marker(tail)
-            # Two shapes: a COUNTED witness states what it saw (`top-15 saw 2 of
-            # 10 testcases = 36.0s`); a witness that cannot count at all
+            # Two shapes: a COUNTED witness states what it saw (`the reading saw
+            # 2 of 10 testcases = 36.0s`); a witness that cannot count at all
             # (single-test file, absent denominator) states why the count cannot
             # decide, then the reading itself.
+            #
+            # ⛔ SOURCE-NEUTRAL wording on purpose (PR #9651 review, P2). It used
+            # to read `top-15 saw …` and to name a "top-15 projection", both of
+            # which became false once this renderer's caller started supplying
+            # CENSUS readings: `observed` is whatever reading won (`census` or the
+            # `--durations` window), so the witness names the count, never the
+            # source. Which sources the sweep took is the LABEL's job
+            # (`sample_label`, built by `main` from
+            # :func:`collector_file_measurements`' `source`).
             basis = (
-                f"{sample_label}: top-15 saw {observed} of {declared} "
+                f"{sample_label}: the reading saw {observed} of {declared} "
                 f"testcases = {measured:.1f}s in the largest single job "
                 f"(not summed across legs), a LOWER bound; kept {previous:.1f}"
                 if reason is None else
@@ -3177,6 +3217,29 @@ def main() -> int:
                        or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))  # noqa: UP017
         manifest_path = Path(args.manifest)
         measurements = collector_file_measurements(Path(args.logs_dir))
+        # ⛔ AND IT MUST BE A CENSUS THAT WAS READ, NOT ONE THAT EXISTS (PR #9651
+        # review, P2). The refusal above keys on `rglob`, i.e. on artifact
+        # PRESENCE: a truncated `junit*.xml` (a leg killed by the in-step timeout
+        # watchdog) — or a partial artifact download — satisfies it while
+        # contributing not one measured file, and the sweep then writes the
+        # window's partial sums and re-stamps `durations_captured_at`. That is the
+        # exact outcome the refusal above exists to prevent, reached one level
+        # down, so the guard asks the question it means to ask: `source` is the
+        # reading's own account of which input WON, which a file listing cannot
+        # answer.
+        if (not any(m["source"] == "census" for m in measurements.values())
+                and not args.allow_window_only):
+            print(
+                f"2: {len(census_sources)} `junit*.xml` file(s) under "
+                f"{args.logs_dir} but NOT ONE of them produced a measured file — "
+                "a truncated or partially downloaded report leaves this sweep to "
+                "the `--durations` WINDOW, a partial sum (15 rows per leg), so "
+                "refreshing the map from it would re-stamp "
+                "`durations_captured_at` exactly as a census sweep does. "
+                "Re-download the run's `pytest-log-*` artifacts, or pass "
+                "--allow-window-only to accept a window-only refresh.",
+                file=sys.stderr)
+            return 2
         weights = {path: m["seconds"] for path, m in measurements.items()}
         # THE LOWER-BOUND WITNESS (#9134 review, P1): what the reading SAW, and
         # what the file declares. Built here, in the production path only, so the
@@ -3213,7 +3276,20 @@ def main() -> int:
             )
         coverage = {path: (m["tests"], declared[path])
                     for path, m in measurements.items() if path in declared}
-        sample_label = (f"ci-timing top-15 {captured_at[:10]} "
+        # ⛔ THE LABEL NAMES THE READING THIS SWEEP ACTUALLY TOOK (PR #9651
+        # review, P2). It was hardcoded `ci-timing top-15`, which was true before
+        # this tool learned to read `junit.xml` and false afterwards: the census is
+        # the source for most rows now, so the label cited a window that produced
+        # a minority of the values — and a `--allow-window-only` sweep would still
+        # have claimed nothing about the census it never read. `source` comes from
+        # the winning reading per file, so a broken/absent census cannot be
+        # mistaken for one that was read (unlike a listing of `junit*.xml`).
+        # A sweep that read NO census (its only justification is
+        # `--allow-window-only`) is labelled `top-15`, which is then the truth.
+        sweep_sources = {m["source"] for m in measurements.values()}
+        reading = ("junit-census+top-15" if "census" in sweep_sources
+                   else "top-15")
+        sample_label = (f"ci-timing {reading} {captured_at[:10]} "
                         f"(run {args.run_id.strip() or 'unknown'})")
         return refresh_durations(
             manifest_path,

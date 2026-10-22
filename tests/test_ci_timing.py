@@ -925,7 +925,7 @@ durations:
   test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 11.0
 """
 
-_LOWER_BOUND_LABEL = "ci-timing top-15 2026-10-19 (run 39191149586)"
+_LOWER_BOUND_LABEL = "ci-timing junit-census+top-15 2026-10-19 (run 39191149586)"
 
 
 def _rendered_lower_bound(tmp_path: Path) -> tuple[str, dict]:
@@ -973,7 +973,7 @@ def test_a_partial_reading_cannot_lower_a_recorded_weight(tmp_path: Path) -> Non
     # (#9134 review, P2).
     assert ("test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 "
             "(run 39165691659); was 180.7"
-            f" — {_LOWER_BOUND_LABEL}: top-15 saw 2 of 10 testcases = 36.0s in "
+            f" — {_LOWER_BOUND_LABEL}: the reading saw 2 of 10 testcases = 36.0s in "
             "the largest single job (not summed across legs), a LOWER bound; "
             "kept 199.1") in text
     assert ci_timing.validate_refreshed_manifest(text) == []
@@ -2207,6 +2207,13 @@ def test_a_note_that_OPENS_with_a_citation_is_not_deleted_whole() -> None:
     pure = (
         "  # #9017 CI-junit 2026-10-18 (run 39165691659); was 42.6",
         "  # ci-timing top-15 2026-10-19 (run 39191149586); was 11.8",
+        # …the label shape this render writes now, in both its ADOPTED
+        # (`; was 11.8`) and HELD (`: the reading saw …; kept …`) forms: a row
+        # rewritten under the current label must classify pure on its next
+        # refresh, or each week's hold appends another basis sentence.
+        "  # ci-timing junit-census+top-15 2026-10-22 (run 39782493641); was 11.8",
+        "  # ci-timing junit-census+top-15 2026-10-22 (run 39782493641): the "
+        "reading saw 2 of 15 testcases = 49.2s, a LOWER bound; kept 49.2",
         "  # #9017 CI-junit 2026-10-18 (run 1); was 20.3 — ci-timing top-15 "
         "2026-10-19 (run 2): top-15 saw 2 of 15 testcases = 49.2s, a LOWER "
         "bound; kept 49.2",
@@ -2919,7 +2926,12 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
     """The witness must describe the SAME reading as the weight it accompanies:
     the larger of two jobs wins, and its testcase count travels with it — pairing
     the winner's seconds with the loser's count would make a partial reading look
-    complete and re-open the under-weighting the guard exists to stop."""
+    complete and re-open the under-weighting the guard exists to stop.
+
+    `source` travels with them for the same reason (PR #9651 review, P2-2): it is
+    what `main` builds the row's basis label from, so a source naming the LOSING
+    reading would label a census value `top-15` (or the reverse).
+    """
     logs = tmp_path / "logs"
     logs.mkdir()
     write_log(logs, "pytest-log-test-a.log",
@@ -2939,10 +2951,22 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     assert measurements["test_alpha.py"] == {"seconds": pytest.approx(9.0),
-                                             "tests": 2}
+                                             "tests": 2, "source": "top-15"}
+    # A CENSUS reading that wins is what makes the label say `junit-census+top-15`
+    # — the label is derived from this field, never from a file listing.
+    write_junit(logs.parent, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="3">'
+                '<testcase classname="tests.test_alpha" name="test_one" '
+                'file="tests/test_alpha.py" line="1" time="12.0"/>'
+                '<testcase classname="tests.test_alpha" name="test_two" '
+                'file="tests/test_alpha.py" line="2" time="6.0"/>'
+                "</testsuite></testsuites>")
+    measurements = ci_timing.collector_file_measurements(logs)
+    assert measurements["test_alpha.py"] == {"seconds": pytest.approx(18.0),
+                                             "tests": 2, "source": "census"}
     # the long-standing weights-only view is a projection of the same reading
     assert ci_timing.collector_file_weights(logs) == {
-        "test_alpha.py": pytest.approx(9.0)}
+        "test_alpha.py": pytest.approx(18.0)}
 
 
 def test_the_cli_wires_the_lower_bound_witness(
@@ -2982,19 +3006,121 @@ def test_the_cli_wires_the_lower_bound_witness(
 
     monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
     monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+
+    def must_not_fetch(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError(
+            "the refresh shelled out to `gh api` for run metadata — this test is "
+            "about the witness WIRING and must not touch the network")
+
+    monkeypatch.setattr(ci_timing, "fetch_run", must_not_fetch)
     monkeypatch.setenv("CI_TIMING_NOW", "2026-10-19T05:02:37Z")
     monkeypatch.setattr(sys, "argv", [
         "ci_timing.py", "--repo", "o/r", "--run-id", "39191149586",
         "--logs-dir", str(logs), "--refresh-durations",
         "--manifest", str(manifest),
-        # This sweep carries a window only (the subject is the witness WIRING, not
-        # the basis guard), so the census refusal is overridden deliberately.
-        "--allow-window-only",
+        # BOTH refusals below this path are overridden deliberately — the subject
+        # is the witness WIRING, not either guard. `--allow-non-push-run` is not
+        # cosmetic: without it this test made a REAL
+        # `gh api repos/o/r/actions/runs/39191149586` call (PR #9651 review,
+        # P2-3). `o/r` is not a repo, so it passed only through the fail-open
+        # warning arm, and `fetch_run`'s `subprocess.run` carries no timeout to
+        # bound a hung or credential-prompting `gh`. `fetch_run` is stubbed to
+        # RAISE above, so this test now proves the flag short-circuits it instead
+        # of proving nothing and waiting on the network.
+        "--allow-window-only", "--allow-non-push-run",
     ])
     assert ci_timing.main() == 0
     assert captured["coverage"] == {"test_alpha.py": (1, 4)}
+    # A window-only sweep says so: its only justification is
+    # `--allow-window-only`, so the label may not claim a census it never read.
     assert captured["sample_label"] == (
         "ci-timing top-15 2026-10-19 (run 39191149586)")
+
+
+def test_the_basis_label_names_the_reading_the_sweep_actually_took(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The basis label is built from the readings the sweep TOOK (PR #9651 review,
+    P2-2), never from a file listing and never from a hardcoded source.
+
+    `--refresh-durations` writes this label onto every row it re-bases or holds, so
+    it is the only thing that tells the next lane whether a figure is a CI
+    measurement or a laden-host guess. It was hardcoded `ci-timing top-15` — a
+    15-row-per-leg window — while the value now comes from the junit census, so the
+    first weekly refresh after this tool landed would have committed a map whose
+    rows cite a source that did not produce them.
+
+    Non-vacuity, and it is the point of the three sweeps below: pre-fix the label is
+    `ci-timing top-15 …` for ALL of them, so sweep 1 fails. An implementation that
+    derived the label from the PRESENCE of a `junit*.xml` (the same
+    artifact-exists-but-was-not-read mistake `--allow-window-only` exists to
+    refuse) passes sweeps 1 and 2 and fails sweep 3.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    window = """============================= slowest 1 durations =============================
+
+3.30s call     tests/test_alpha.py::test_0
+
+============================= short test summary info =============================
+"""
+    census = ('<?xml version="1.0" encoding="utf-8"?>'
+              '<testsuites><testsuite name="pytest" tests="4">'
+              + "".join(
+                  f'<testcase classname="tests.test_alpha" name="test_{i}" '
+                  f'file="tests/test_alpha.py" line="{i}" time="1.25"/>'
+                  for i in range(4))
+              + "</testsuite></testsuites>")
+    captured: dict = {}
+
+    def fake_refresh(path, weights, captured_at, **kwargs):
+        captured.update(kwargs, path=path, weights=weights)
+        return 0
+
+    monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
+    monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-22T15:30:00Z")
+
+    def sweep(logs: Path, *extra: str) -> str:
+        captured.clear()
+        monkeypatch.setattr(sys, "argv", [
+            "ci_timing.py", "--repo", "o/r", "--run-id", "39786862344",
+            "--logs-dir", str(logs), "--refresh-durations",
+            "--manifest", str(manifest),
+            # the run's metadata is not the subject here, and `o/r` is not a repo
+            "--allow-non-push-run", *extra,
+        ])
+        assert ci_timing.main() == 0
+        return captured["sample_label"]
+
+    # 1. a sweep that READ a census names it …
+    both = tmp_path / "both"
+    write_log(both, "pytest.log", window)
+    write_junit(both, "junit.xml", census)
+    assert sweep(both / "logs") == (
+        "ci-timing junit-census+top-15 2026-10-22 (run 39786862344)")
+
+    # 2. … and one that could only read the window does not claim one …
+    window_only = tmp_path / "window-only"
+    write_log(window_only, "pytest.log", window)
+    assert sweep(window_only / "logs", "--allow-window-only") == (
+        "ci-timing top-15 2026-10-22 (run 39786862344)")
+
+    # 3. … INCLUDING when a junit artifact is present but unreadable: presence is
+    #    not a reading, so the label follows what the sweep measured.
+    broken = tmp_path / "broken"
+    write_log(broken, "pytest.log", window)
+    write_junit(broken, "junit.xml", "<testsuites><testsuite")
+    assert sweep(broken / "logs", "--allow-window-only") == (
+        "ci-timing top-15 2026-10-22 (run 39786862344)")
 
 
 
@@ -4993,18 +5119,34 @@ def test_cli_returns_2_when_the_manifest_path_cannot_be_read(tmp_path, label: st
     """A path that EXISTS but cannot be read was the sixth escape (#6092
     review round 6): `exists()` guards only absence, so a directory or a
     permission error reached the boundary as a traceback on both entry points.
+
+    A CENSUS artifact is supplied on purpose (PR #9651 review, P2-4). `main`'s
+    census refusal returns 2 for a logs dir carrying no `junit*.xml`, which is
+    why this test passed at #9651's head while never reaching the guard it was
+    written for: both parametrisations asserted rc=2 and "no Traceback", and both
+    held for the WRONG reason (the refusal fired before `refresh_durations` was
+    called). The assertion below names the READ guard's own message, so the
+    subject is reached rather than shadowed, and `--allow-window-only` keeps it
+    reached even if the fixture is ever dropped.
     """
     target = tmp_path / label
     if label == "directory":
         target.mkdir()
+    write_junit(tmp_path, "junit.xml", _JUNIT_CENSUS)
     proc = subprocess.run(
         [sys.executable, str(Path(__file__).resolve().parent.parent / "tools" / "ci_timing.py"),
          "--repo", "o/r", "--refresh-durations", "--dry-run",
-         "--manifest", str(target), "--logs-dir", str(tmp_path)],
+         "--manifest", str(target), "--logs-dir", str(tmp_path),
+         "--allow-window-only"],
         capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 2, f"{label}: rc={proc.returncode} stderr={proc.stderr[-400:]}"
     assert "Traceback" not in proc.stderr
+    expected = ("2: manifest not readable" if label == "directory"
+                else "2: manifest not found")
+    assert expected in proc.stderr, (
+        f"{label}: the run never reached the manifest read guard — stderr was "
+        f"{proc.stderr[-400:]}")
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -5249,12 +5391,22 @@ def test_cli_returns_2_when_a_manifest_leg_list_is_not_a_list(tmp_path, key: str
 # WHY THESE EXIST. `config/ci-surfaces.yml:durations` is the sole input the LPT
 # packer balances by, and the collector fed it from pytest's `--durations=15`
 # block — a WINDOW naming the 15 slowest rows of a whole leg. MEASURED on run
-# 39782493641 (2026-10-22, full matrix): `test (h)` executed 2,594 tests over 198
-# files and its durations block named 8 of them; across all 18 legs the window
-# named 119 files while the junit census named 713. The pack was therefore
-# balancing ~96 % stale weights, and the run's real per-pool spread was
-# 1.99x/2.54x/1.70x against the map's claimed 1.00x. These tests pin the census
-# path so the window can never silently become the source again.
+# 39782493641 (2026-10-22, full matrix), keyed the way the tool keys — by the
+# testcase `file=` attribute — `test (h)` executed 2,594 testcases over **76**
+# distinct files and its durations block named 8 of them (`test (g)` spans 71
+# files and its block names 9); across all legs the window names **82 of the fast
+# pool's 991 files — 8.3 %**, and its per-leg test time sums to 1,093 s against
+# the census's 3,341 s, a **3.06x** under-measurement of the pool. The pack was
+# therefore balancing weights that describe a slice of the work.
+#
+# ⛔ These are the FILE-keyed figures, and they are the only ones that belong
+# here: an earlier draft of this note quoted `classname` counts (198 and 157 for
+# `test(h)`/`test(g)`, and "119 files" for the window), which measure test
+# MODULES per leg rather than the files this map packs by, plus a per-pool spread
+# triple that does not reproduce from that run's artifacts. Corrected under the
+# #9651 review (P2-1) to match `tools/ci_timing.py::parse_junit`'s docstring — do
+# not "restore" the module counts. These tests pin the census path so the window
+# can never silently become the source again.
 
 _JUNIT_CENSUS = """<?xml version="1.0" encoding="utf-8"?>
 <testsuites><testsuite name="pytest" tests="4">
@@ -5476,6 +5628,56 @@ def test_a_window_only_sweep_is_refused_and_cannot_restamp_the_map(
     assert "--allow-window-only" in err, "the refusal must name its override"
     assert manifest.read_text() == before, (
         "a window-only sweep must not re-stamp the durations map")
+
+
+def test_a_present_but_unreadable_census_is_refused_and_cannot_restamp_the_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Artifact PRESENCE is not a READING — the same refusal, one level down.
+
+    The `--allow-window-only` guard keyed on `rglob("junit*.xml")`, so a single
+    truncated report (the reachable shape `python-ci.yml`'s in-step timeout
+    watchdog produces, and what a partial artifact download leaves) satisfied it
+    while contributing no measured file — the sweep then wrote the window's
+    partial sums over census values and re-stamped `durations_captured_at`, which
+    is the exact outcome that guard exists to prevent (PR #9651 reviews, P2). It
+    now asks what the sweep actually READ.
+
+    Non-vacuity: pre-fix `main()` returns 0 and the stamp moves, so the byte
+    comparison fails; and the message asserted here is this refusal's, not the
+    absent-artifact one.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\n"
+        'durations_captured_at: "2026-10-21T09:30:00Z"\n'
+        "durations:\n  test_alpha.py: 19.0\n", encoding="utf-8")
+    before = manifest.read_text()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              "============================= slowest 1 durations =============================\n"
+              "\n2.00s call     tests/test_alpha.py::test_0\n"
+              "\n============================= short test summary info =============================\n")
+    write_junit(tmp_path, "junit.xml", "<testsuites><testsuite")
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-22T15:30:00Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--logs-dir", str(logs),
+        "--refresh-durations", "--manifest", str(manifest),
+    ])
+    assert ci_timing.main() == 2
+    err = capsys.readouterr().err
+    assert "NOT ONE of them produced a measured file" in err, err
+    assert "--allow-window-only" in err, "the refusal must name its override"
+    assert manifest.read_text() == before, (
+        "an unreadable census must not re-stamp the durations map")
 
 
 def test_the_refresh_refuses_a_sampled_run_that_is_not_a_push_to_main(
