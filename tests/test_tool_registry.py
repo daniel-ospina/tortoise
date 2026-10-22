@@ -1242,6 +1242,64 @@ class TestCapabilityModel:
             "NON_SDK_READ_OPERATIONS entry 'get_tenant_packs' has no tool binding" in v
             for v in declared_set_violations(without))
 
+    def test_a_self_heal_writer_never_claims_read_only_in_its_description(self):
+        """#9575: the description is the OTHER string an agent reads before calling.
+
+        A tool that writes on a self-heal path may not advertise itself as
+        read-only.  `tortoise_packs_list` fronts `get_tenant_packs`, whose
+        `ensure_tenant_packs` MERGEs an inconsistent `:PackInstall` record; #4122
+        corrected the declaration for exactly that reason (it stopped claiming
+        `readOnlyHint: true`) but left the description asserting "Read-only;", four
+        lines above the comment that says the opposite.  The hint a client
+        auto-approves on and the prose an agent reads must agree about whether the
+        call can write.
+
+        The tool set is derived (read-through writers + every `writes=True` row),
+        not listed here, so a NEW read-through writer that inherits the same wrong
+        phrasing fails without anyone remembering this test exists.
+
+        Mutation: restore "Read-only;" to `tortoise_packs_list` and this goes red.
+        """
+        import re
+
+        import tool_surface_capabilities as tsc
+        from tool_surface_capabilities import served_registry
+
+        # A read-only CLAIM, negation-aware: `tortoise_get_source_reliability`
+        # legitimately says "so not read-only" and must not be flagged.
+        claim = re.compile(r"(?<!not )(?<!never )read[\s\-]?only", re.IGNORECASE)
+
+        entries = {e.name: e for e in served_registry()}
+        by_method = {e.sdk_method: e.name for e in entries.values() if e.sdk_method}
+        self_heal_writers = {
+            by_method[method]
+            for method in tsc.READ_THROUGH_WRITE_METHODS
+            if method in by_method
+        } | set(tsc.NON_SDK_READ_BINDINGS.values())
+        declared_writers = {name for name, e in entries.items() if e.writes}
+
+        # Non-vacuous: the derived set is live and names the #4122/ #9575 row.
+        assert self_heal_writers <= set(entries), (
+            f"a declared read-through writer binds no live tool: "
+            f"{sorted(self_heal_writers - set(entries))}")
+        assert "tortoise_packs_list" in self_heal_writers
+        assert "tortoise_compute_confidence" in self_heal_writers
+
+        # The predicate itself is falsifiable in both directions.
+        assert claim.search("Read-only; empty result when nothing is installed")
+        assert not claim.search("a write-through projection, so not read-only")
+
+        offenders = sorted(
+            f"{name}: {claim.search(e.description).group(0)!r} in a "
+            f"{'declared-writer' if e.writes else 'self-heal-writer'} row"
+            for name, e in entries.items()
+            if (e.writes or name in self_heal_writers) and claim.search(e.description)
+        )
+        assert offenders == [], (
+            "an entry that can write advertises itself as read-only — an agent that "
+            "reads the description (not the hint) will call it expecting no writes:\n  "
+            + "\n  ".join(offenders))
+
     def test_read_through_non_sdk_op_is_not_a_resolution_exemption(self):
         """#4035 review (P1 consequence 2): `get_tenant_packs` must NOT stay in
         DANGLING_SDK_DECLARATIONS.  Its only declaration was blanked, so keeping

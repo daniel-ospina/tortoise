@@ -114,6 +114,19 @@ is taken to govern what the assistant may DO, not to reverse what the product AL
 
 status: approved · principal: daniel-ospina · PR #8863 · date: 2026-10-17.
 
+**Amended 2026-10-22** (owner-filed and owner-scoped on **#9575**, **PR #NNNN**): the
+`tortoise_packs_list` description no longer claims *"Read-only;"*. PR #9573 (#4122) corrected
+that tool's HINT channel because the handler reaches `pack_state.get_tenant_packs`, whose
+`ensure_tenant_packs` MERGEs a missing starter `:PackInstall` activation — so the tool is
+**`maintenance`**, not `read` — and deliberately left the description, the other string an agent
+reads before deciding to call, asserting the opposite four lines above the comment that records
+why (#9575). The new text states what the call actually does (it seeds a missing starter
+activation, skipped when the graph's pack set was deliberately configured, #8648) rather than
+asserting a read-only guarantee. **No tool is added, removed or renamed; the served schema,
+parameters and bindings are unchanged** — only the description text, and hence that row's `job`
+and the baseline's `cut_at_commit`, change. status: approved · principal: daniel-ospina ·
+PR #NNNN · date: 2026-10-22.
+
 ## Principle: reads and writes never share a tool
 
 On the customer-grantable surface, a tool is either **read** or **write** — never both, so

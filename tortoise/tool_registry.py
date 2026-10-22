@@ -238,8 +238,12 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.packs_list",
         description="List this team's active packs (#318): the shared pack catalog "
                     "joined with the tenant graph's PackInstall activation records. "
-                    "Read-only; empty result when nothing is installed (existence "
-                    "masking — another tenant's packs are never observable).",
+                    "NOT a pure read: the handler seeds a missing starter activation "
+                    "before it answers (one MERGE per starter namespace, skipped when "
+                    "the graph's pack set was deliberately configured, #8648), so a "
+                    "graphs:read caller can cause a write. Empty result when nothing "
+                    "is installed (existence masking — another tenant's packs are "
+                    "never observable).",
         annotations=_ro(),
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)
