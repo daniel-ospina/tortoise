@@ -250,7 +250,7 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
             # absent from the rebuild) instead of minting a mis-pointed one —
             # the #2489 "one create path / byte-identical stubs" invariant.
             # ⚠️ The descriptor route is not the only caller: the name-path arm
-            # of `replay_about_links` above calls this same match — with
+            # of `replay_about_links` below calls this same match — with
             # `rel='aboutDocument'`, `target_label='Source'` and the journaled
             # `resolve_key` — whenever a pinned endpoint value does not resolve
             # by id (its `resolve_key` fallback; the key `resolve_about_link`
@@ -261,7 +261,7 @@ def resolve_structural_target(g, label: str, key: str, rel: str, *,
             # Pinned by tests/test_pointsuperseded_rebuild.py::
             # test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source
             # (delete the predicate below and it reds), and the
-            # `replay_about_links` route above by
+            # `replay_about_links` route below by
             # tests/test_8398_aboutobject_replay.py::
             # test_the_name_path_aboutdocument_arm_reaches_the_kind_guarded_resolver.
             # ⚠️ This replay arm is STRICTER than two live writers, which apply

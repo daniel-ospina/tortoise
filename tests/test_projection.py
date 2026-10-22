@@ -2883,8 +2883,7 @@ def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
     addressable by `url` (ONTOLOGY §4.4). A provenance Source at that shape is
     refused; a genuine document Source resolves.
 
-    ⚠️ Scoped on purpose, and it is the reason this docstring no longer says
-    "the live paths do". It is the same contract the two live paths that CARRY
+    ⚠️ Scoped on purpose. It is the same contract the two live paths that CARRY
     one apply — the `documentKind IS NOT NULL` auto-detect, and `create_edge`
     (which raises for a non-document `:Source`, #5206) — and it is STRICTER than
     the live writers that carry none: `create_about_edge`, reached from
@@ -2893,12 +2892,17 @@ def test_5026_b1_replay_aboutdocument_ignores_non_document_source(live_proj):
     `(edge_type, source_label, target_label)` triple and never inspects the
     target's kind. "Live and replay apply the SAME contract" is the #5206
     over-claim: a reader who takes it as parity concluded may relax this
-    replay guard, which is the only place the kind test runs on the REPLAY path
-    (`create_edge` and the auto-detect run theirs live, and a supersede
+    replay guard, which is the only replay DESCRIPTOR path that applies the
+    kind test — the auto-detect's own kind test also runs at replay, on the
+    fold paths (`_upsert_document` / `_upsert_point_edges` →
+    `_create_about_edges` → `_resolve_about_edge_target`) for every
+    document/point `about_entities` (pinned by the sibling
+    `test_5026_b1_live_aboutdocument_ignores_non_document_source` above, which
+    drives it through `proj.apply`), `create_edge` is live-only, and a supersede
     descriptor carries no kind of its own — delete this predicate and
     `test_pointsuperseded_rebuild.py::
     test_pre_5206_aboutdocument_descriptor_never_repoints_to_a_provenance_source`
-    reds). Closing the two unguarded writers is #9679.
+    reds. Closing the two unguarded writers is #9679.
     """
     from tortoise.projection.edges import resolve_structural_target
 
