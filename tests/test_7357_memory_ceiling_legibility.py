@@ -22,7 +22,7 @@ What these tests pin, in order:
 * the family predicate, and that it is EXCLUSIVE of the instance-outage family
   (an answered refusal is not a dead box, and a dead box is not an answer);
 * the note's content — capacity refusal, nothing applied, data intact, and the
-  the real remedy rather than an invitation to retry (a deterministic refusal
+  real remedy rather than an invitation to retry (a deterministic refusal
   is not a transient), and that it conforms to the repo's recorded #2981 ruling
   for the same refusal instead of advising a destructive one;
 * the contract: driver sentence at position 0, exception TYPE unchanged, one
@@ -232,6 +232,27 @@ def test_a_ceiling_refusal_is_never_a_retryable_write():
 
 
 # ── the wiring, through a real guarded client ───────────────────────────────
+class _CeilingConnection:
+    """Vendor-shaped connection (redis-py): the public verb IS the dispatcher.
+
+    ``Redis.execute_command`` is only a façade — ``return
+    self._execute_command(*args, **options)`` — so this is the shape
+    ``_guard_connection`` rebinds BOTH names of, and the shape a guarded command
+    therefore crosses on its way to the socket.
+    """
+
+    def __init__(self, error):
+        self.error = error
+        self.execute_command = self._execute_command
+        self.commands: list = []
+
+    def _execute_command(self, *args, **kwargs):
+        self.commands.append(args)
+        # A FRESH instance per command, as a real driver does: the note mutates
+        # the exception in place, so a shared instance would carry it forward.
+        raise type(self.error)(*self.error.args)
+
+
 class _CeilingGraph:
     """Vendor-shaped graph handle whose every command reaches *client*."""
 
@@ -256,12 +277,19 @@ class _CeilingClient:
 
     def __init__(self, error=None):
         self.error = error if error is not None else _ceiling_error()
+        self.connection = _CeilingConnection(self.error)
         self.execute_command = self._execute_command
         self.commands: list = []
 
     def _execute_command(self, *args, **kwargs):
+        # As redis-py does: the façade delegates to the connection's channel, so
+        # a handle command really crosses TWO appliers — `_forward_query` on the
+        # guarded handle proxy, then the connection's `_GuardedExecuteCommand`
+        # (rebound in place by `_guard_connection`). A façade that raised
+        # directly would cross only the first, which is the vacuous fixture
+        # the #9532 review caught.
         self.commands.append(args)
-        raise self.error
+        return self.connection.execute_command(*args, **kwargs)
 
     def select_graph(self, name):
         return _CeilingGraph(self, name)
@@ -290,7 +318,7 @@ def test_a_guarded_read_gets_the_same_note_and_no_write_ambiguity():
 
     The transport arm says "OUTCOME IS UNKNOWN, read back first" for a mutating
     statement because the REPLY was lost. Here the reply arrived, so the outcome
-    is known for both shapes — and claiming umbiguity would send the caller to
+    is known for both shapes — and claiming ambiguity would send the caller to
     read back a statement that provably did not run.
     """
     _client, graph = _guarded()
@@ -325,15 +353,43 @@ def test_a_duck_typed_handle_proxy_carries_the_note():
     assert "memory-ceiling" in str(caught.value).lower()
 
 
-def test_the_note_is_applied_once_across_two_nested_channels():
-    """A handle verb and the client channel both wrap the same failure.
+def test_the_note_is_applied_once_across_two_nested_channels(monkeypatch):
+    """A handle verb and the connection channel both wrap the same failure.
 
-    `_GuardedExecuteCommand` is applied to the client AND the connection, so one
-    command can pass two appliers. The opener is the idempotency marker; without
-    it the note would grow a second suffix per layer.
+    The fixture must make the delegations REAL, or this test proves nothing
+    (#9532 review): `_GuardedClientProxy` guards the connection IN PLACE and
+    `_guard_connection` rebinds both of its command entries, but a client whose
+    `_execute_command` raised directly would cross ONE applier — and then
+    `count == 1` would hold with no opener guard at all. So `_CeilingClient`
+    delegates to `self.connection` exactly as `redis.Redis` does, and the
+    applier count is ASSERTED (>= 2) rather than assumed: the chain is
+    `_forward_query` (the handle proxy) then `_GuardedExecuteCommand` (the
+    connection), two chances to append one suffix.
+
+    The opener is the shared idempotency marker; without it the note grows a
+    second suffix per layer — the #7357 double-note defect. NON-VACUOUS:
+    delete `if _LEGIBLE_OPENER in text` from `explain_memory_ceiling` and the
+    `count == 1` assertion below reddens (the applier count stays at 2).
     """
+    appliers: list = []
+    real_applier = cypher_guard._note_instance_outage
+
+    def counting_applier(exc, *, mutating):
+        appliers.append(mutating)
+        real_applier(exc, mutating=mutating)
+
+    # Both call sites (`_forward_query`, `_explain_instance_unavailable`) look
+    # the applier up on the MODULE, so this counts every layer in the chain.
+    monkeypatch.setattr(cypher_guard, "_note_instance_outage", counting_applier)
+
     _client, graph = _guarded()
     with pytest.raises(redis_exc.OutOfMemoryError) as caught:
         graph.query(WRITE_STATEMENT)
     message = str(caught.value)
+    assert len(appliers) >= 2, (
+        "the fixture stopped crossing two appliers, so the single-suffix "
+        f"assertion below is vacuous (appliers={len(appliers)}) — the client "
+        "must delegate to its guarded connection as redis.Redis does")
+    assert message.startswith(CEILING_SENTENCE)
     assert message.count(_LEGIBLE_OPENER) == 1, message
+    assert "memory-ceiling" in message.lower()
