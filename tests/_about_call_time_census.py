@@ -171,13 +171,25 @@ _UNKNOWN = ""
 #: `(file, symbol)`. That is the exact fail-open direction this class exists to
 #: close, one level up from the read itself.
 #:
-#: ⚠️ **The facts are bound PER SITE, and the fifth element is the site COUNT.** A
-#: symbol-keyed fact check owns any walk added inside that symbol later — measured
-#: on the first cut: one unconstrained all-edge walk appended to `sdk.provenance`
+#: ⚠️ **The facts are bound PER SITE, the fifth element is the site COUNT, and
+#: each stated fact must still be CARRIED by some site.** A symbol-keyed fact
+#: check owns any walk added inside that symbol later — measured on the first
+#: cut: one unconstrained all-edge walk appended to `sdk.provenance`
 #: (`MATCH (x)-[rr]->(y) RETURN count(rr)`) left all 43 arms green, because the
-#: entry's KEY already matched. The key is a symbol; the derivation is a site. The
-#: count is the cheap second net: a copy carrying the same fact still reds on the
-#: number.
+#: entry's KEY already matched. The key is a symbol; the derivation is a site.
+#:
+#: ⚠️ **The count is NOT the net for a copy written INSIDE an already-registered
+#: query string.** A site is keyed on `(symbol, line)`, so a second `MATCH`
+#: appended to an existing statement (a `UNION` clause beside the first walk)
+#: produces no new site and the number never moves — measured on that cut, the
+#: second walk shipped green on the first walk's fact. What catches it is the
+#: guard's per-CLAUSE fact check: every walk-bearing clause of the resolved query
+#: must carry a fact of its own (an earlier clause of the same query counts only
+#: when it binds a variable the walk's pattern uses, which is the rule the `#9400`
+#: guard used before the fold). The count catches the other shape — a copy on its
+#: OWN line — and the union direction (`every fact is still carried by some
+#: site`) catches a fact whose ground the code lost while another fact still
+#: matches. Three nets, three different blind spots; none of them implies another.
 #:
 #: Three grounds are legal, and each entry names the one it rests on:
 #:
