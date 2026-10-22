@@ -130,23 +130,26 @@ def tenant() -> tuple[str, str]:
 #:     json``. Two record types re-project the same snapshot
 #:     (``PointAdded``/``PointPromoted``), so the TYPE is not the unit.
 #:   * ``capture_redactions`` — the capture receipt's integer COUNT, while
-#:     `public.session.capture_redactions` is `jsonb`: ``column
+#:     `public.session.capture_redactions` was `jsonb`: ``column
 #:     "capture_redactions" is of type jsonb but expression is of type integer``.
+#:     **FIXED (#9264)** by the forward migration
+#:     `20261022000001_record_session_capture_redactions_integer.sql`, so the
+#:     entry and its detection are gone: every other counter on
+#:     `public.session` is `integer`, which made `jsonb` the anomaly rather than
+#:     a decision. The pin below is what made this a two-way obligation — with
+#:     the column narrowed, a re-added tolerance reds on "now projects
+#:     cleanly".
 #:
 #: Measured at #9200's head (`62ec432a8`) + this diff, against a real Postgres.
 #: Reported on #9200 (the producer-accuracy class it belongs to): the fix is a
 #: schema/placement decision, not a wiring one.
 _SCHEMA_DISAGREEMENTS = {
     "search_keys": "invalid input syntax for type json",
-    "capture_redactions": "capture_redactions",
 }
 
 
 def _disagreement(record: dict) -> str | None:
     """Which declared-column disagreement this journal record carries, if any."""
-    redactions = record.get("capture_redactions")
-    if redactions is not None and not isinstance(redactions, (dict, list)):
-        return "capture_redactions"
     snapshot = record.get("point") or {}
     keys = snapshot.get("search_keys")
     if isinstance(keys, str) and keys.strip():

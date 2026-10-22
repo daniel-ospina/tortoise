@@ -33,6 +33,11 @@ MIGRATIONS = [
     # to it (`UndefinedColumn` on the point INSERT). `tests/
     # test_7950_capstone_probe.py` pins this list to `RECORD_MIGRATIONS`.
     "20261018000001_record_point_money_value_2782.sql",
+    # FORWARD `ALTER TABLE public.session ALTER COLUMN capture_redactions TYPE
+    # integer` (#9264). Same reason as the entry above: the probe drives the
+    # SHIPPED projection, so a schema still declaring `jsonb` keeps refusing the
+    # producer's integer count with `DatatypeMismatch` here too.
+    "20261022000001_record_session_capture_redactions_integer.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 
