@@ -21,9 +21,16 @@ and ``EV-*``; both ``shape() == LEGACY``), not "two formats, one violation".
 the three COUNTS without naming labels; that ``p-NNNNNNN`` sits on ``:Point``
 and ``EV-*`` on ``:Event`` is read from the prefixes and from #8607's scoping
 census, and it is **load-bearing** — an ``EV-*`` on a ``:Point`` would be in
-scope and the rename population would be larger. :func:`census`'s
-``legacy_shapes`` per label is what confirms or refutes it on a real dump, and
-that is the first thing to read when one is available.
+scope and the rename population would be larger. **What settles it is
+:attr:`Census.by_label`** (``label -> {canonical, legacy, ...}``), which IS per
+label. ⚠️ **``legacy_shapes`` is not per label and cannot be**: it buckets by
+:func:`shape`, whose whole point is that an off-contract id is opaque, so every
+one of them lands under the single key ``legacy``. On the fixture that reads
+``legacy_shapes == {'legacy': 1002}`` while ``by_label['Point'] ==
+{'canonical': 8700, 'legacy': 1002}`` — the FORM MIX inside that 1,002 is not
+recoverable from the census, so a real dump whose ``:Point`` ids are both
+``p-NNNNNNN`` and near-ULID spellings reports one number. Read ``by_label``
+first; treat ``legacy_shapes`` as a total, never a breakdown.
 
 **Scope is a declared decision, not a property name.** Only ``:Point`` is
 re-keyed here, and the reason is on the label, in :data:`REKEY_SCOPE`.

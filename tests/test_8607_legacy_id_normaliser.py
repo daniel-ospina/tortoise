@@ -1401,3 +1401,39 @@ def test_a_dry_run_over_the_normalised_snapshot_cannot_wipe_the_apply_plan(tmp_p
     assert json.loads(before)["mode"] == "apply"
     assert main(["--dump", str(out), "--report", str(report)]) == 2
     assert report.read_text(encoding="utf-8") == before, "the apply plan survived a dry run"
+
+
+def test_a_revert_cannot_replace_another_passs_plan_with_its_snapshot(tmp_path):
+    """`--revert … --out plan_B.json` used to clobber B's plan and exit 0.
+
+    Apply mode refuses the identical command for `--out`; revert mode exempts
+    only `--report` (the plan being READ), not `--out`.
+    """
+    from tools.legacy_id_normalise import main
+
+    def write(path, ids):
+        nodes = [_node(i, ["Point"], id=v) for i, v in enumerate(ids, start=1)]
+        path.write_text(
+            json.dumps(
+                {
+                    "format": "tortoise-logical-dump-v1",
+                    "dump_revision": 2,
+                    "node_count": len(nodes),
+                    "edge_count": 0,
+                    "nodes": nodes,
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    a, b = tmp_path / "A.json", tmp_path / "B.json"
+    write(a, ["p-0000001", "p-0000002"])
+    write(b, ["p-0000001", "p-0000003"])
+    plan_a, plan_b = tmp_path / "plan_A.json", tmp_path / "plan_B.json"
+    na, nb = tmp_path / "A_norm.json", tmp_path / "B_norm.json"
+    assert main(["--dump", str(a), "--apply", "--out", str(na), "--report", str(plan_a)]) == 0
+    assert main(["--dump", str(b), "--apply", "--out", str(nb), "--report", str(plan_b)]) == 0
+    b_plan = plan_b.read_text(encoding="utf-8")
+    assert main(["--dump", str(na), "--revert", "--report", str(plan_a), "--out", str(plan_b)]) == 2
+    assert plan_b.read_text(encoding="utf-8") == b_plan, "B's plan survived the revert"

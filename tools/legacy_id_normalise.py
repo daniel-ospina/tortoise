@@ -495,14 +495,17 @@ def main(argv: list[str] | None = None) -> int:
     # So the check runs before EVERY report write and compares FINGERPRINTS: the
     # same dump's plan may be rewritten (byte-identical — a re-run is harmless),
     # a different dump's may not.
-    if not args.revert:
-        blocked = _overwrite_blocker(args.report, report, "--report")
-        if blocked is None and out is not None:
-            blocked = _overwrite_blocker(args.out, report, "--out")
-        if blocked is not None:
-            print("REFUSED — nothing was written:", file=sys.stderr)
-            print(f"  - {blocked}", file=sys.stderr)
-            return 2
+    # `--report` is exempt in REVERT mode only: there it is the plan being READ.
+    # `--out` is checked in BOTH modes — `--revert … --out plan_B.json` used to
+    # replace another pass's plan with a snapshot and exit 0, leaving that pass
+    # unrevertible from any artifact the tool wrote.
+    blocked = None if args.revert else _overwrite_blocker(args.report, report, "--report")
+    if blocked is None and out is not None:
+        blocked = _overwrite_blocker(args.out, report, "--out")
+    if blocked is not None:
+        print("REFUSED — nothing was written:", file=sys.stderr)
+        print(f"  - {blocked}", file=sys.stderr)
+        return 2
 
     if out is not None:
         # ⛔ In APPLY mode the report is an OUTPUT, written FIRST: if the snapshot
