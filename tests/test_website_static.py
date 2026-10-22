@@ -31,12 +31,22 @@ Repo-local, zero network, stdlib only (the test_waitlist_form.py pattern):
    line must stay gone. The verbatim quotation is an ACCEPTED RISK recorded by
    the owner, not a defect to "fix" — see `TestInvestorsProgressCopy`.
 
+7. Product-root marker contract (PR #9652 review, P1): the string that proves
+   the tortoise host serves product.html at `/` is pinned in TWO surfaces that
+   drift independently — `PRODUCT_ROOT_MARKER` in
+   `tests/e2e/test_legal_pages.py` (exercised by the pre-merge `legal-e2e` job
+   and by post-deploy `verify-legal`) and the `grep -qF` in the post-deploy DNS
+   preflight (`.github/workflows/deploy-pages.yml`), which NO pre-merge leg
+   reads. Both must be structural (not hero prose) and must agree; see
+   `TestProductRootMarkerContract`.
+
 Run:  TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_website_static.py -v
       (a URI-less run fails at session setup by construction — epic #1647 P4;
       this file is static, offline and stdlib-only, so the carve-out lane fits.)
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -1219,5 +1229,260 @@ class TestInvestorsProgressCopy:
             "disclaims the noun it modifies, a trailing '+' reads as a floor, "
             "and a count with no denominator invites the reader to discount it "
             "(PR #9283)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Product-root marker contract (PR #9652 review, P1)
+# ═══════════════════════════════════════════════════════════════════════════
+# The tortoise host serves `product.html` at `/` (the
+# `website/functions/_middleware.ts` rewrite). TWO surfaces pin a string to
+# prove that rewrite happened, and neither can catch the other:
+#
+#   1. `tests/e2e/test_legal_pages.py` — `PRODUCT_ROOT_MARKER`, read by the
+#      local-emulation canary and by the served-root assertions inside
+#      `_assert_serves_product` (raw body: an attribute does not survive
+#      `_clean()`'s tag stripping). No count is stated on purpose — every add
+#      or retirement would re-stale the number (#3950); the shape is pinned by
+#      `test_every_marker_read_goes_through_the_raw_body_helper` below.
+#   2. `.github/workflows/deploy-pages.yml` — the post-deploy DNS preflight
+#      greps the served root and only then exports `TORTISE_HOST_CHECK=1`.
+#
+# That preflight's miss branch is a `::warning::`, so a stale marker does not
+# red the job — it turns the tortoise-host half of the suite OFF, green. The
+# pre-merge `legal-e2e` job (`.github/workflows/ci.yml`) DOES run
+# `tests/e2e/test_legal_pages.py`, against a local `wrangler pages dev` with
+# `TORTISE_HOST_CHECK=1` — but it reads the e2e constant only, never the
+# workflow's grep, so it cannot see the preflight half drift; and until this PR
+# fixed the constant's ordering, its local-emulation canary was dead and the
+# tortoise-host tests skipped there too. Post-deploy, the preflight's marker is
+# read by no pre-merge leg at all. In BOTH legs a drifted marker SKIPS the
+# tortoise-host half green, so the change that breaks the marker is the one
+# whose verification quietly stops running (PR #8597 named this; PR #9652 hit it
+# again by replacing the hero `<h1>`, which WAS the marker) — which is why the
+# pin belongs here, graded at PR time on the committed files.
+#
+# This file is selected whenever `website/product.html` changes (the
+# `onboarding` surface in config/ci-surfaces.yml), AND also whenever
+# `tests/e2e/test_legal_pages.py` changes (a `SOURCE_PATTERNS["onboarding"]`
+# row in tools/ci_selection.py) — the file that holds the constant this gate
+# parses had to be reachable, or the marker could be re-cut there with the gate
+# asleep. Both paths are pinned by
+# tests/test_ci_selection.py::test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
+LEGAL_PAGES_E2E = REPO_ROOT / "tests" / "e2e" / "test_legal_pages.py"
+DEPLOY_PAGES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml"
+INDEX_HTML = REPO_ROOT / "website" / "index.html"
+
+
+def _product_root_marker() -> str:
+    """The marker `tests/e2e/test_legal_pages.py` asserts on the served root.
+
+    Parsed with `ast` rather than imported: that module needs playwright and a
+    live host, and it calls `_tortoise_emulated_locally()` at import time. `ast`
+    reads the literal exactly (quote style and escapes included) without
+    executing anything.
+    """
+    src = LEGAL_PAGES_E2E.read_text(encoding="utf-8")
+    for node in ast.parse(src).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(getattr(target, "id", None) == "PRODUCT_ROOT_MARKER"
+                   for target in node.targets):
+            continue
+        value = ast.literal_eval(node.value)
+        assert isinstance(value, str) and value, (
+            "PRODUCT_ROOT_MARKER must be a non-empty string literal")
+        return value
+    raise AssertionError(
+        "tests/e2e/test_legal_pages.py no longer defines a module-level "
+        "PRODUCT_ROOT_MARKER assignment — this gate's subject moved")
+
+
+def _deploy_preflight_marker() -> str:
+    """The literal the `verify-legal` DNS preflight greps the served root for."""
+    src = DEPLOY_PAGES_WORKFLOW.read_text(encoding="utf-8")
+    line = next(
+        (ln for ln in src.splitlines()
+         if "ROOT_MARKER" in ln and "grep" in ln and "-qF" in ln),
+        None)
+    assert line is not None, (
+        ".github/workflows/deploy-pages.yml has no `grep -qF` on $ROOT_MARKER — "
+        "the tortoise-host preflight this gate pairs with moved or was removed")
+    match = re.search(r"grep\s+-qF\s+(['\"])(.+?)\1", line)
+    assert match, f"cannot extract the preflight's root marker literal from: {line.strip()}"
+    return match.group(2)
+
+
+def _root_element(product_html: str) -> str:
+    """The page's `<html ...>` open tag."""
+    match = re.search(r"<html\b[^>]*>", product_html, re.I)
+    assert match, "website/product.html has no <html> open tag"
+    return match.group(0)
+
+
+RAW_BODY_HELPER = "_assert_serves_product"
+EMULATION_CANARY = "_tortoise_emulated_locally"
+
+
+def _marker_read_sites(src: str) -> list[tuple[str, int]]:
+    """Every READ of `PRODUCT_ROOT_MARKER`, as `(enclosing function, line)`.
+
+    `ast` rather than a regex: the constant's name also appears in the error
+    message below itself and in comments, which a text scan cannot tell from a
+    read.
+    """
+
+    class _Reads(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack: list[str] = []
+            self.reads: list[tuple[str, int]] = []
+
+        def _visit_function(self, node: ast.AST) -> None:
+            self.stack.append(getattr(node, "name", "<lambda>"))
+            self.generic_visit(node)
+            self.stack.pop()
+
+        visit_FunctionDef = _visit_function  # type: ignore[assignment]
+        visit_AsyncFunctionDef = _visit_function  # type: ignore[assignment]
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if node.id == "PRODUCT_ROOT_MARKER" and isinstance(node.ctx, ast.Load):
+                self.reads.append((self.stack[-1] if self.stack else "<module>", node.lineno))
+
+    visitor = _Reads()
+    visitor.visit(ast.parse(src))
+    return visitor.reads
+
+
+def _asserted_expressions(src: str, function: str) -> list[str]:
+    """The unparsed test expression of every `assert` inside `function`."""
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
+            return [
+                ast.unparse(child.test)
+                for child in ast.walk(node)
+                if isinstance(child, ast.Assert)
+            ]
+    return []
+
+
+class TestProductRootMarkerContract:
+    """The served-root marker is ONE structural string, agreed by both pins.
+
+    Scope, stated plainly: this asserts the marker exists in the COMMITTED page
+    and matches what the workflow greps. It cannot prove what production serves
+    (that is `tests/e2e/test_legal_pages.py`, post-deploy); its job is to make a
+    copy edit that orphans either pin red at PR time instead of silently
+    disarming the tortoise-host suite after deploy.
+    """
+
+    def test_the_marker_identifies_the_committed_product_page(self):
+        """The pinned marker must exist in `website/product.html`."""
+        marker = _product_root_marker()
+        html = PRODUCT_HTML.read_text(encoding="utf-8")
+        assert marker in html, (
+            f"PRODUCT_ROOT_MARKER {marker!r} does not occur in "
+            "website/product.html. The tortoise host serves that file at `/`, "
+            "so both consumers of the marker — tests/e2e/test_legal_pages.py "
+            "and the deploy-pages.yml DNS preflight — can no longer prove the "
+            "middleware rewrite. The preflight's miss branch is a ::warning::, "
+            "so the tortoise-host tests would SKIP (green) instead of failing. "
+            "If you edited the page's identity, move the marker in BOTH places.")
+
+    def test_the_marker_does_not_also_match_the_company_root(self):
+        """The marker's job is to discriminate product.html from index.html."""
+        marker = _product_root_marker()
+        index = INDEX_HTML.read_text(encoding="utf-8")
+        assert marker not in index, (
+            f"PRODUCT_ROOT_MARKER {marker!r} also occurs in website/index.html, "
+            "which the company root (`premiselabs.co/`) serves. It no longer "
+            "distinguishes the two roots, so `test_middleware_root_rewrites` "
+            "and the deploy preflight would pass on the wrong page.")
+
+    def test_the_deploy_preflight_greps_the_same_marker(self):
+        """One marker, one source: the workflow must grep the test's string."""
+        assert _deploy_preflight_marker() == _product_root_marker(), (
+            "the deploy-pages.yml DNS preflight and PRODUCT_ROOT_MARKER in "
+            "tests/e2e/test_legal_pages.py disagree. Moving one without the "
+            "other either reds the post-deploy suite on a correct page or "
+            "skips it green: the preflight only exports TORTISE_HOST_CHECK=1 "
+            "when its grep matches, and the miss branch is a ::warning::.")
+
+    def test_the_marker_is_an_attribute_on_the_root_element(self):
+        """Structural, not prose: a copy edit must not be able to move it."""
+        marker = _product_root_marker()
+        root = _root_element(PRODUCT_HTML.read_text(encoding="utf-8"))
+        assert marker in root, (
+            f"PRODUCT_ROOT_MARKER ({marker!r}) is not part of the page's <html> "
+            f"element ({root!r}). A marker that is a sentence of marketing copy "
+            "(the `#beat-hero` h1 was one until PR #9652) is re-broken by every "
+            "hero rewrite — PR #8597 and PR #9652 both had to move it. Keep the "
+            "pin on page identity; keep the hero owner-editable.")
+
+    def test_the_marker_is_defined_before_the_emulation_canary_runs(self):
+        """Ordering pin: the canary reads the marker, so it must be bound first.
+
+        `TORTISE_EMULATED = _tortoise_emulated_locally()` is a module-level call
+        whose body reads `PRODUCT_ROOT_MARKER`. Bound after it, the read raises
+        NameError, which the canary's own `except Exception: return False`
+        swallows — so the canary reads False unconditionally and the whole
+        tortoise-host half skips on the local (`127.0.0.1`) CI leg even when
+        emulation works.
+        """
+        lines = LEGAL_PAGES_E2E.read_text(encoding="utf-8").splitlines()
+        defined = next(
+            (i for i, ln in enumerate(lines) if ln.startswith("PRODUCT_ROOT_MARKER = ")),
+            None)
+        canary = next(
+            (i for i, ln in enumerate(lines)
+             if ln.startswith("TORTISE_EMULATED = _tortoise_emulated_locally()")),
+            None)
+        assert defined is not None, "PRODUCT_ROOT_MARKER assignment not found"
+        assert canary is not None, "the TORTISE_EMULATED canary call was moved or renamed"
+        assert defined < canary, (
+            f"PRODUCT_ROOT_MARKER is bound on line {defined + 1}, AFTER the "
+            f"`_tortoise_emulated_locally()` call on line {canary + 1} that reads "
+            "it. The NameError is swallowed by the canary's bare except, so "
+            "TORTISE_EMULATED is False on every local run and the tortoise-host "
+            "tests skip regardless of the marker. Define the marker first.")
+
+    def test_every_marker_read_goes_through_the_raw_body_helper(self):
+        """One shape for every served-root read: the RAW body, via one helper.
+
+        The marker is a structural ATTRIBUTE, and `_clean()` strips tags — so
+        an assertion written the old way (``PRODUCT_ROOT_MARKER in
+        _clean(body)``, which is what PR #9652 had to rewrite at two sites) can
+        never pass, and a copy of it added later would silently red the
+        post-deploy suite on a correct page. This pins the SHAPE rather than a
+        count, so adding or retiring a served-root assertion does not re-stale
+        it (#3950); only reverting to a `_clean()`d or ad-hoc read does.
+        """
+        src = LEGAL_PAGES_E2E.read_text(encoding="utf-8")
+        reads = _marker_read_sites(src)
+        assert reads, (
+            "no read of PRODUCT_ROOT_MARKER found in "
+            "tests/e2e/test_legal_pages.py — this gate's subject moved")
+        offenders = [
+            (fn, line) for fn, line in reads
+            if fn not in (RAW_BODY_HELPER, EMULATION_CANARY)
+        ]
+        assert not offenders, (
+            "PRODUCT_ROOT_MARKER is read outside "
+            f"{RAW_BODY_HELPER}()/{EMULATION_CANARY}() at "
+            + ", ".join(f"line {line} (in {fn}())" for fn, line in offenders)
+            + ". The marker is a structural attribute on <html>, and `_clean()` "
+            "strips tags, so an assertion that cleans the body first can never "
+            "match — it reds the served-root suite on a correct page and needs "
+            "a rewrite the next time it lands (PR #9652 rewrote two). Read the "
+            "raw document through `_assert_serves_product(body, where)`.")
+
+        asserted = _asserted_expressions(src, RAW_BODY_HELPER)
+        assert asserted, (
+            f"`{RAW_BODY_HELPER}` in tests/e2e/test_legal_pages.py contains no "
+            "assert — the served-root contract has no subject left")
+        assert "PRODUCT_ROOT_MARKER in body" in asserted, (
+            f"`{RAW_BODY_HELPER}` no longer asserts `PRODUCT_ROOT_MARKER in "
+            f"body` (found: {asserted!r}). It must read the RAW document — "
+            "`_clean(body)` strips the attribute off the <html> element, so the "
+            "assertion could never match.")
 
 

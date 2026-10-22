@@ -312,6 +312,53 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert "test_website_docs_consistency.py" in r["test_files"], changed
 
 
+def test_product_root_marker_guard_runs_on_a_legal_pages_only_diff():
+    """PR #9652 review (P2): the marker guard must run on the FILE it parses.
+
+    `tests/test_website_static.py::TestProductRootMarkerContract` pins three
+    surfaces together: `website/product.html`, the `PRODUCT_ROOT_MARKER`
+    literal in `tests/e2e/test_legal_pages.py`, and the DNS preflight grep in
+    `.github/workflows/deploy-pages.yml`. Only the first selected the guard —
+    `tests/e2e/test_legal_pages.py` matched no SOURCE_PATTERNS row and fell
+    back to `core`, where `test_website_static.py` (registered `onboarding`
+    only) does not live.
+
+    So re-cutting the marker by editing ONLY the e2e constant — the file the
+    contract is named after, and the edit PR #8597 and PR #9652 each had to
+    make — ran no guard, and the workflow kept grepping the old string: the
+    preflight's `::warning::` branch then skipped the tortoise-host half green.
+    MEASURED before the entries: `_sel(["tests/e2e/test_legal_pages.py"])` ->
+    `surfaces == ["core"]` with `test_website_static.py` ABSENT.
+
+    Both halves are asserted because the fix has both: the `onboarding`
+    SOURCE_PATTERNS row selects the guard, and the `CORE_ALSO` entry keeps
+    `core` (a named-surface match REPLACES the `tests/` -> `core` fallback).
+
+    Mutation check: dropping the SOURCE_PATTERNS row fails the `onboarding`
+    assert (surfaces become `["core"]`); dropping the CORE_ALSO entry fails
+    the `core` assert (surfaces become `["onboarding"]`).
+    """
+    changed = "tests/e2e/test_legal_pages.py"
+    assert (REPO / changed).exists(), f"the marker contract's subject is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False, (changed, r["full"])
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the guard that parses its "
+        "PRODUCT_ROOT_MARKER (test_website_static.py) never runs, so a marker "
+        "move in this file merges with the deploy preflight grepping a string "
+        "the page no longer serves (#8596/#8597 class, #9652 review P2)"
+    )
+    assert "test_website_static.py" in r["test_files"], (
+        f"{changed} does not select test_website_static.py — the served-root "
+        "marker contract has no guard on the one file that defines the marker"
+    )
+    assert "core" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the onboarding SOURCE_PATTERNS "
+        "match replaced the `tests/` -> core fallback, so every core-registered "
+        "test silently drops off the diff (CORE_ALSO entry removed?)"
+    )
+
+
 def test_the_capacity_guards_derived_source_selects_the_guard():
     """#3329/#8492: a change to the guard's DERIVED SOURCE must select the guard.
 
@@ -965,25 +1012,154 @@ def test_every_allowlisted_root_file_actually_exists():
 # module quotes it, and this test file hard-codes the members.
 _SELF_NAMERS = frozenset({"tools/ci_selection.py", "tests/test_ci_selection.py"})
 
+# The five roots the mention census greps. `scripts/` carries a TRAILING SLASH
+# deliberately (see `_readers_of`).
+_CENSUS_ROOTS = ("tests", "tools", "scripts/", ".github", "tortoise")
+
+# The materialiser for the `scripts/` root (#9475) — named in the announcement so
+# the reader gets the REMEDY, not only the fact.
+_SCRIPTS_MATERIALISER = "tools/link_agent_infra_scripts.py"
+
+# Census losses already announced, keyed by the absent-root tuple (#9541 review round 6,
+# minor 3). `test_no_allowlisted_root_file_has_a_reader` calls `_readers_of` TWICE per
+# allowlisted name (~30 calls on a fresh clone), so an unconditional print emitted ~30
+# identical `::warning::` annotations for ONE fact. Announcing once per distinct loss keeps
+# the loss audible without burying the log; the register is per-process because a pytest
+# session is the unit that reads it.
+_CENSUS_ANNOUNCED: set[tuple[tuple[str, ...], int | None]] = set()
+
 
 def _readers_of(name: str) -> list[str]:
     """Non-self files under tests/tools/scripts/.github/tortoise naming `name`.
 
-    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a tracked
-    SYMLINK, and BSD grep does not descend a symlinked directory named without
-    one — so `grep -rlF <n> tests tools scripts .github tortoise` silently
-    searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same dir with
-    the slash). The census numbers are only reproducible with the slash.
+    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a SYMLINK
+    (machine-local since #9475 — gitignored and materialised from
+    `$AGENT_INFRA_PATH`), and BSD grep does not descend a symlinked directory
+    named without one — so `grep -rlF <n> tests tools scripts .github tortoise`
+    silently searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same
+    dir with the slash). The census numbers are only reproducible with the slash.
+
+    ⛔ AND THE ROOT CAN BE ABSENT — which is ANNOUNCED, never silent (#9541
+    review ISSUE 1). `scripts` is no longer tracked, so a fresh clone, a CI
+    runner, and a lane before its first materialisation have no such path at
+    all: grep prints `scripts/: No such file or directory` to stderr, exits 2,
+    and uses only `.stdout`. The four present roots are still censused, but the
+    `scripts/` one is MISSING, and both ratchets this feeds can only be as good
+    as what the census saw — so the loss is printed with the command that
+    restores it. Before this, the root vanished from every fresh checkout
+    without a word while the ratchets stayed green.
+
+    ⛔ ANNOUNCED ONCE per distinct loss, not once per call (#9541 review round 6,
+    minor 3): the ratchets call this twice per allowlisted name, so an
+    unconditional print emitted ~30 identical `::warning::` annotations for one
+    fact and buried it. See `_CENSUS_ANNOUNCED`.
 
     SCOPE: a LITERAL-NAME grep. It does not see a reader that finds `name` by
     GLOB or directory walk, nor one outside these five roots.
     """
-    out = subprocess.run(
-        ["grep", "-rlF", name, "tests", "tools", "scripts/", ".github",
-         "tortoise"],
-        cwd=REPO, capture_output=True, text=True).stdout.split("\n")
+    result = subprocess.run(
+        ["grep", "-rlF", name, *_CENSUS_ROOTS],
+        cwd=REPO, capture_output=True, text=True)
+    absent = [root for root in _CENSUS_ROOTS if not (REPO / root).is_dir()]
+    # grep exits 1 for "no match" (normal here) and 2 for "a root could not be
+    # read". Any other non-zero, with every root present, is a fault that must
+    # not read as "no readers" — the same silent-narrowing class as an absent root.
+    # Announced ONCE per distinct loss: the ratchets above call this twice per
+    # allowlisted name, and ~30 identical annotations for one fact is noise that buries
+    # it (#9541 review round 6, minor 3).
+    loss = (tuple(absent), result.returncode if not absent else None)
+    if (absent or result.returncode not in (0, 1)) and loss not in _CENSUS_ANNOUNCED:
+        _CENSUS_ANNOUNCED.add(loss)
+        missing = (
+            f"{', '.join(absent)} absent from this checkout — a machine-local pointer that has "
+            f"not been materialised (#9475: `scripts` is gitignored, not tracked; run `uv run "
+            f"python {_SCRIPTS_MATERIALISER}`)"
+            if absent else "every root is present"
+        )
+        print(
+            f"::warning::MENTION CENSUS INCOMPLETE for {name!r}: {missing}; "
+            f"grep exited {result.returncode}."
+            + (f" {result.stderr.strip()}" if result.stderr.strip() else "")
+            + " A reader living under a root that was not searched cannot be seen here.",
+            file=sys.stderr,
+        )
+    out = result.stdout.split("\n")
     return sorted(h for h in (x.strip() for x in out)
                   if h and h not in _SELF_NAMERS and not h.endswith(".pyc"))
+
+
+def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypatch, capsys):
+    """#9541 review ISSUE 1 (P3): the narrowing must be AUDIBLE, not silent.
+
+    `scripts/` is untracked since #9475, so on a fresh clone, a runner, or a lane
+    before its first materialisation the path is ABSENT: grep prints
+    `scripts/: No such file or directory`, exits 2, and `_readers_of` kept only
+    `.stdout` — so the root vanished from the census without a word and both
+    ratchets it feeds stayed green while a reader under `scripts/` was
+    unseeable. RED before the fix: nothing was printed at all, so the assertion
+    below failed on empty stderr.
+
+    The second half is the discriminator: with every root present the same call
+    says nothing, so the message tracks the ABSENCE rather than being emitted
+    unconditionally.
+
+    The register is cleared first: the announcement is once-per-process, and an
+    earlier test may already have announced the same absent root.
+    """
+    for root in ("tests", "tools", ".github", "tortoise"):
+        (tmp_path / root).mkdir()
+    # `_readers_of` greps at `REPO`, the module global in THIS file — patch that one.
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
+    assert tmp_path == REPO, "the census must run against the throwaway tree"
+
+    # `scripts/` deliberately ABSENT — the fresh-clone / runner / new-lane state.
+    assert _readers_of("AGENTS.md") == []
+    absent_message = capsys.readouterr().err
+    assert "MENTION CENSUS INCOMPLETE" in absent_message, (
+        "the `scripts/` root is absent and the census said nothing: the two ratchets this "
+        "feeds (test_no_allowlisted_root_file_has_a_reader, test_no_content_reader) then "
+        "report a complete census over four of five roots"
+    )
+    assert "scripts/" in absent_message, absent_message
+    # The reader gets the REMEDY, not just the fact (the materialiser this PR ships).
+    assert "tools/link_agent_infra_scripts.py" in absent_message, absent_message
+
+    # Control: the pointer materialised — nothing to announce.
+    (tmp_path / "scripts").mkdir()
+    _readers_of("AGENTS.md")
+    assert capsys.readouterr().err == ""
+
+
+def test_the_mention_census_announces_an_absent_root_ONCE(tmp_path, monkeypatch, capsys):
+    """#9541 review round 6, minor 3: the announcement must not repeat per call.
+
+    `test_no_allowlisted_root_file_has_a_reader` calls `_readers_of` twice for each
+    allowlisted root file, so on a fresh clone / runner the unconditional print emitted
+    ~30 identical `::warning::MENTION CENSUS INCOMPLETE` annotations for ONE absent root
+    — the signal buried in its own repetitions, which is how an announcement stops being
+    read. RED before the fix: the second call printed the message again.
+    """
+    for root in ("tests", "tools", ".github", "tortoise"):
+        (tmp_path / root).mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
+
+    _readers_of("AGENTS.md")
+    first = capsys.readouterr().err
+    assert "MENTION CENSUS INCOMPLETE" in first, first
+
+    _readers_of("AGENTS.md")
+    assert capsys.readouterr().err == "", (
+        "the absent-root announcement repeated on a second call — the ratchets call this "
+        "twice per allowlisted name (~30 identical ::warning:: lines for one fact)"
+    )
+    # A DIFFERENT loss is still announced: dedupe must not mute a new fact.
+    (tmp_path / "tests").rmdir()
+    _readers_of("AGENTS.md")
+    assert "MENTION CENSUS INCOMPLETE" in capsys.readouterr().err, (
+        "a newly-absent root was not announced — the dedupe keyed on the wrong thing"
+    )
 
 
 def test_no_allowlisted_root_file_has_a_reader():
@@ -1128,8 +1304,10 @@ def test_subdirectory_markdown_is_unaffected():
 _READ_CALLS = frozenset({"open", "read_text", "read_bytes", "read",
                          "readlines", "load", "loads", "loadtxt"})
 
-# The CI roots the selector's surface map is built on. `scripts/` is a tracked
-# SYMLINK, so it must be walked on disk, not read from `git ls-files`.
+# The CI roots the selector's surface map is built on. `scripts/` is a SYMLINK to
+# an agent-infra checkout outside this repo — gitignored and materialised per
+# machine since #9475, not tracked — so it must be walked on disk, not read from
+# `git ls-files`.
 _NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
 
 # A shell read operation. `read\b` deliberately does NOT match "reads" (word
@@ -1199,19 +1377,23 @@ def _content_readers_of(path: str) -> list[str]:
     """Files under the five CI roots that READ `path`'s content.
 
     ⛔ The roots are WALKED on disk, not read from `git ls-files`: `scripts/` is
-    a tracked SYMLINK, so the listing returns the link itself and the ~70 files
-    behind it are never scanned — the same gap #6787 cycle 4 P3 found in the
-    sibling mention census. Shell files use a line-level read-op pattern, never
-    `ast.parse` (which returns False on every `.sh`).
+    a SYMLINK to a checkout OUTSIDE this repository, so a listing returns the
+    link itself (before #9475 it returned the tracked 120000 blob; now the path
+    is gitignored and untracked, so a listing returns nothing at all) and the
+    ~70 files behind it are never scanned — the same gap #6787 cycle 4 P3 found
+    in the sibling mention census. Shell files use a line-level read-op pattern,
+    never `ast.parse` (which returns False on every `.sh`).
 
     ⚠️ SCOPE, stated rather than overclaimed (cycle-2 review P2): `scripts/` is
-    a symlink to an ABSOLUTE machine-local path, so it DANGLES on the Ubuntu CI
-    runner (`python-ci.yml` / `ci.yml` say so) and this walk silently skips that
-    root there — the root is reached only where the symlink resolves. That is
-    the SAME CI limitation the sibling `_readers_of` grep has, and it is not
-    closable from inside the repo. A future member whose ONLY reader lives under
-    `scripts/` cannot rely on this ratchet on CI: grep the whole tree before
-    adding one.
+    a symlink to an ABSOLUTE machine-local target materialised from
+    `$AGENT_INFRA_PATH` (#9475), so on a fresh clone — the Ubuntu CI runner, a
+    lane before its first commit — the path is simply ABSENT and this walk
+    skips that root there; the root is reached only where the pointer has been
+    materialised (`uv run python tools/link_agent_infra_scripts.py`). That is
+    the SAME limitation the sibling `_readers_of` grep has (which now ANNOUNCES
+    the absent root), and it is not closable from inside the repo. A future
+    member whose ONLY reader lives under `scripts/` cannot rely on this ratchet
+    on CI: grep the whole tree before adding one.
     """
     name = path.rsplit("/", 1)[-1]
     out: list[str] = []
@@ -1911,6 +2093,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # `test_record_schema_placement.py` pins the record schema against the
         # placement table.
         "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
+        # #9264: the FORWARD migration that NARROWS
+        # `public.session.capture_redactions` from `jsonb` to `integer`. Same gap
+        # as the two entries above: it sorts outside the `2026101200000`
+        # CORE_ALSO prefix, so without its own entry a change to this file alone
+        # selects NO surface and neither reader runs on it.
+        "supabase/migrations/20261022000001_record_session_capture_redactions_integer.sql",
         "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
     ):
         r = _sel([changed])
@@ -2311,6 +2499,63 @@ def test_the_capstone_census_pin_runs_on_a_main_py_change():
     assert r["full"] is False, r
 
 
+def test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_it():
+    # PR #9668 review P1: `tests/test_5051_capture_receipt_key_registry.py` was
+    # registered in `core` ALONE, and `core` is a FALLBACK surface in
+    # `select()` (`if not matched: matched.add("core")`) — a named-surface match
+    # REPLACES it. Every subject the pin guards is a named-surface match:
+    #
+    #   * `tortoise/hosted_api.py` owns BOTH derivations the pin exists to hold
+    #     to the formatter — `_capture_receipt_buckets` (the delete path's orphan
+    #     sweep) and `_capture_server_owned_keys` (the client-write-refusal set
+    #     #3681 closed) — and is an EXACT `api` source pattern AND an EXACT
+    #     `onboarding` one;
+    #   * `website/apps/dashboard/src/captureStatus.js` is the JS reader pin
+    #     and matches `onboarding`;
+    #   * `tortoise/capture_receipts.py` — the ONLY intended change direction (a
+    #     FORMAT change) — falls through to `core`, which is what the original
+    #     row covers.
+    #
+    # So the pin fired only for a change that also moved the formatter: BOTH
+    # mutations #9668 used as its own evidence are `hosted_api.py`-only edits
+    # (a stale reconcile-bucket prefix; `hermes` dropped from the server-owned
+    # derivation), and a hosted_api.py-only diff selected `api`+`onboarding`
+    # with the pin ABSENT — the drift landed green. Same #1349/#2938/#3154
+    # silent-drop class (and same remedy: dual-registration) as
+    # `test_the_capstone_census_pin_runs_on_a_main_py_change` above and the
+    # #7809 / #8693 / #9068 `api` arms.
+    #
+    # Measured before the `api`/`onboarding` arms (2026-10-17, `select()`
+    # in-process): hosted_api.py -> surfaces=['api','onboarding'], pin ABSENT;
+    # captureStatus.js -> surfaces=['onboarding'], pin ABSENT;
+    # capture_receipts.py -> surfaces=['core'], pin PRESENT.
+    # Mutation check: removing either arm fails the assert below.
+    for source, surface in (
+        ("tortoise/hosted_api.py", "api"),
+        ("tortoise/hosted_api.py", "onboarding"),
+        ("website/apps/dashboard/src/captureStatus.js", "onboarding"),
+        ("tortoise/capture_receipts.py", "core"),
+    ):
+        r = _sel([source])
+        assert surface in r["surfaces"], (source, surface, r["surfaces"])
+        assert r["full"] is False, (source, r)
+        assert "test_5051_capture_receipt_key_registry.py" in r["test_files"], (
+            f"{source} selects {r['surfaces']} but does NOT run the #5051 "
+            "receipt-key pin — a re-spelled key at that site (or a moved "
+            "format) would merge green and only surface on the next full "
+            "run (#1349/#2938/#3154 silent-drop class)"
+        )
+
+    # The `onboarding` arm covers the `website/apps/dashboard/src/` PREFIX, not
+    # the dashboard root: its `package.json` / `package-lock.json` match no
+    # `onboarding` pattern and fall back to `core` (the #9524 note in
+    # `config/ci-surfaces.yml`). Pinned because the #9668 comment on that arm
+    # said `website/apps/dashboard/` was the pattern — a claim that would read
+    # as "a dashboard MANIFEST dependency is already covered" long after it
+    # stopped being true.
+    assert _sel(["website/apps/dashboard/package.json"])["surfaces"] == ["core"]
+
+
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
     # providers by `env(NAME)` substitution, so each of those names is required
@@ -2514,6 +2759,50 @@ def test_source_currency_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
     assert "core" in r["surfaces"], r
     assert "test_source_currency_5581.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_link_agent_infra_scripts_tool_change_selects_core_not_tier1():
+    # PR #9541 review P1: tools/link_agent_infra_scripts.py is the only executor
+    # of #9475's fix (it decides whether the repo-root `scripts` pointer exists at
+    # all), and its guard tests/test_link_agent_infra_scripts.py is `core`-
+    # registered. Without the CORE_ALSO entry the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallowed the path, so a MATERIALISER-only change
+    # selected NO surface and took the docs-only early return — the 14 cases
+    # pinning that the pointer stays gitignored, that a dangling link is repaired,
+    # that a RELATIVE --infra still writes a RESOLVING target (the #9475 symptom
+    # reinstated by its own fix) and that an explicit --infra is never silently
+    # discarded would not have run on the one PR that can break them. Measured
+    # before the entry: `--changed-files tools/link_agent_infra_scripts.py
+    # --event pull_request` -> surfaces=[], full=False, guard ABSENT — while
+    # `--integrity` stayed green, because the TEST file is classified. Same
+    # #1349/#3332/#3616 silent-drop class as #5084/#6138/#4174 above.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/link_agent_infra_scripts.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_link_agent_infra_scripts.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_agent_infra_drift_check_tool_change_selects_core_not_tier1():
+    # PR #9541 review (round 6 P1): tools/agent_infra_drift_check.py is the single
+    # quote-free command ci.yml's drift-check job passes as `check-command` — it
+    # materialises the machine-local `scripts` pointer and then runs agent-infra's
+    # checker. If its quoting breaks, the reusable workflow's textual `${{ }}`
+    # interpolation makes the step die at PARSE time and the gate reds forever with
+    # "produced NO result" while verifying nothing; if its exit contract breaks, the
+    # gate can read green over a pointer that was never written. Same silent-drop
+    # seam as the materialiser entry above: `tools/` is swallowed by
+    # NON_PYTHON_PREFIXES, so a WRAPPER-ONLY change selected NO surface and took the
+    # docs-only early return, and the cases pinning it would not run on the one PR
+    # that can break them — while `--integrity` stayed green, because the TEST file
+    # is classified.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/agent_infra_drift_check.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_link_agent_infra_scripts.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
 
 
@@ -5331,20 +5620,25 @@ def test_parse_matrix_halves_matches_no_literal_block_on_the_current_workflow():
 
 
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
-#: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
-#: runner case (no agent-infra checkout), and it is the ONLY case that may skip.
+#: The machine-local `scripts` pointer itself, WITHOUT following it. Since #9475 it is
+#: GITIGNORED and NOT tracked (a git symlink blob cannot hold `$AGENT_INFRA_PATH`), so the
+#: runner case that may skip is "it was never materialised here" — an absent path, not a
+#: dangling committed link.
 SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
 CI_RUNNER_GATE_ABSENT = (
     f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
-    f"reachable at {CI_RUNNER_GATE} (the tracked `scripts` symlink dangles where "
-    f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
+    f"reachable at {CI_RUNNER_GATE} (the machine-local `scripts` pointer is "
+    f"missing or does not resolve — #9475: it is gitignored, not tracked, so a "
+    f"fresh clone or lane has none until `uv run python "
+    f"tools/link_agent_infra_scripts.py` materialises it from $AGENT_INFRA_PATH, "
+    f"as on a runner where that variable is unset). The repo-side half of the "
     f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
     f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
     f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
     f"out, so a green CI run says nothing about it. Run this module on a host "
-    f"with $AGENT_INFRA_PATH set to verify that the gate still attaches only "
-    f"`ubuntu-latest`. Same shape and same limit as RAIL_ABSENT_REASON in "
-    f"tests/test_pytest_attribution.py."
+    f"with $AGENT_INFRA_PATH set (and the pointer materialised) to verify that "
+    f"the gate still attaches only `ubuntu-latest`. Same shape and same limit as "
+    f"RAIL_ABSENT_REASON in tests/test_pytest_attribution.py."
 )
 
 
@@ -5386,12 +5680,14 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         f"pool claims puts this leg back on the class that cannot finish it.")
 
     if not SCRIPTS_LINK.is_dir():
-        # The tracked `scripts` symlink DANGLES (no agent-infra checkout here), which
-        # is every CI runner: the link is a host convenience, not a repo dependency
-        # (`python-ci.yml` is self-contained by decision, fix #555). Announced, never
-        # silent, and the message says out loud that the premise half is untested by
-        # CI — a bare `skipped` would let a green run read as "the pool's labels were
-        # verified", which is the vacuous pass this guard exists to prevent.
+        # The machine-local `scripts` pointer is ABSENT or does not resolve, which is
+        # every CI runner and every fresh clone/lane: since #9475 it is gitignored and
+        # not tracked, so nothing creates it until
+        # `tools/link_agent_infra_scripts.py` runs. It is a host convenience, not a repo
+        # dependency (`python-ci.yml` is self-contained by decision, fix #555).
+        # Announced, never silent, and the message says out loud that the premise half
+        # is untested by CI — a bare `skipped` would let a green run read as "the pool's
+        # labels were verified", which is the vacuous pass this guard exists to prevent.
         print(CI_RUNNER_GATE_ABSENT)
         pytest.skip(CI_RUNNER_GATE_ABSENT)
     # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
@@ -5407,7 +5703,9 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         f"rather than letting this guard drift out of reach")
     gate = CI_RUNNER_GATE.read_text()
     # The premise this pin rests on lives in ANOTHER repo's script, reached here
-    # through the tracked `scripts` symlink. Pinning a literal against an external,
+    # through the machine-local `scripts` pointer (#9475 — gitignored, not tracked;
+    # materialised per machine from $AGENT_INFRA_PATH, absent until then). Pinning a
+    # literal against an external,
     # changeable fact with nothing asserting that fact is the "comment nobody
     # re-reads" failure this test criticises: harden the gate to attach a
     # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green

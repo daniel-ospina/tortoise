@@ -163,6 +163,13 @@ register_kind("diary")
 register_kind("checkpoint-item")
 register_kind("option")    # used by file_decision (#133)
 register_kind("evidence")  # used by file_decision (#133)
+# #6671: `criterion` is a DECIDE_PART_KINDS member (the decide rubric's
+# criteria axis: options/criteria/findings) and was the ONE decide-part kind
+# missing from this block — so a criterion write from the decide flow
+# (`graph-scripts/decide.py`, `tortoise decide`; NOT `file_decision`, which
+# writes decision/option/evidence only) warned "Unrecognized pointKind" while
+# the SDK itself already treated it as a decision part.
+register_kind("criterion")
 
 # Valid status values for Point nodes (used by update_point status validation)
 # #432: claim lifecycle vocabulary — draft → live → retracted → superseded
@@ -3846,6 +3853,18 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
         raise ValueError(
             "'_stub_completion' is a server-managed capture-completion "
             "discriminator and cannot be set via props."
+        )
+    # #9451: the sibling key on the same `SourceCreated` record. It states that
+    # the record's `ingestedAt` is the instant the write STORED (not the capture
+    # clock), which is what licenses the fold's ON MATCH arm to apply it — so a
+    # caller able to set it could move a `:Source`'s `ingestedAt` on replay, i.e.
+    # out of the recency/decay ordering, and the key rides the journal so every
+    # rebuild would restore it. Same class and same hard-reject as
+    # `_stub_completion` above; the ONE producer never re-enters this intake.
+    if "_ingestedAtStored" in props:
+        raise ValueError(
+            "'_ingestedAtStored' is a server-managed journal discriminator and "
+            "cannot be set via props."
         )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
@@ -11078,10 +11097,17 @@ class TortoiseSDK:
         entities/points it references exist (ordering contract) — ``pt_`` refs
         → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
         entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
-        full provenance) + the ``_fold_object_superseded`` status fold. Every
-        fold miss/skip/failure is surfaced through the shared meta
-        ``warnings`` channel — supersession application is best-effort and
-        never a silent drop (and never fails capture).
+        full provenance) + the ``_fold_object_superseded`` status fold. Fold
+        misses/skips/failures are surfaced through the shared meta
+        ``warnings`` channel under the BOUNDED contract of #5654: the first
+        ``commit_ops._MAX_SUPERSESSION_WARNS`` (20) per-record warnings are
+        appended verbatim; any beyond that budget are counted but NOT
+        appended individually — the call then closes with ONE summary entry
+        carrying the batch size, the true warning total and the withheld
+        count. An over-budget batch therefore stays SIZED, but a past-budget
+        skip is not individually identified (and the write is unaffected:
+        every record is still attempted). Supersession application is
+        best-effort and never fails capture.
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract
@@ -11711,8 +11737,14 @@ class TortoiseSDK:
         # #2164: supersessions — client-derived records (the deterministic
         # channel for the Object status fold; §6b parity). pt_ → supersede()
         # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
-        # entities exist (ordering contract). Warnings ride meta — never a
-        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        # entities exist (ordering contract). Warnings ride meta under the
+        # helper's BOUNDED #5654 contract: the first
+        # ``_MAX_SUPERSESSION_WARNS`` (20) per-record warns land in
+        # meta["warnings"] individually, the remainder are counted and
+        # reported in ONE summary entry (batch size + true warning total +
+        # withheld count) — so nothing is dropped from the WRITE, but past
+        # the budget a skip is not named individually. Best-effort — never
+        # fail capture (hosted §6b rule).
         try:
             from tortoise.commit_ops import (
                 apply_supersessions,
@@ -11889,6 +11921,30 @@ class TortoiseSDK:
             "s.summary=$sum",
             "s.topics=$topics",
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
+            # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
+            # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
+            # Tortoise FIRST saw this source" (`_upsert_document`'s note below,
+            # entities.py), and a writer never moves an instant another writer
+            # already recorded. The bug was never the coalesce: it was that the
+            # `SourceCreated` record further down stated `now` — a value this
+            # write does NOT store when the stub already existed. So on a
+            # PRE-EXISTING stub (minted by `_link_source`/`_mint_source_stub`
+            # via `create_point(session_id=...)`, the hosted commit path's
+            # `create_source`, the #4125 reconciler — a mint journals NO
+            # ingestion, so nothing carries its instant) the live node held the
+            # EARLIER instant while the record carried the capture's, and
+            # `_upsert_source`'s ON CREATE arm reads the RECORDED value (#5024):
+            # `rebuild_all()` folded a value the live write never wrote, so
+            # `derived == replay(journal)` (#5024/#5097/#8501) was FALSE for the
+            # field and a recovery silently re-ordered session Sources in the
+            # recency computation.
+            #
+            # The fix: the RETURN below reads back the instant this SET leaves on
+            # the node and the record carries THAT (the same "the payload carries
+            # the values the WRITE STORED" rule `validFrom`/`is_episodic` already
+            # follow), and `_upsert_source`'s ON MATCH arm applies it under the
+            # `$stub_completion` gate so the record also lands on the arm where
+            # the node already exists at fold time.
             "s.ingestedAt=coalesce(s.ingestedAt, $now)",
         ]
         if event_id:
@@ -11915,9 +11971,15 @@ class TortoiseSDK:
         # pins the resulting property set against the pre-#8501 shape.
         from .projection.edges import _mint_source_stub
         # `now` is the CAPTURE's instant, not a fresh clock read: for a capture
-        # that mints no Point this is the only writer of `ingestedAt`, and the
-        # `SourceCreated` record below carries `now` — so a fresh clock here
-        # would make the live node disagree with the replayed one (#8501).
+        # that mints no Point this is the only writer of `ingestedAt` on the arm
+        # where the mint CREATES the stub, and the `SourceCreated` record below
+        # states `now` on that arm — the SET coalesces into `$now`, so the
+        # read-back it journals is this same value. (#9451: on a PRE-EXISTING
+        # stub the mint's ON MATCH leaves `ingestedAt` alone and the SET's
+        # `coalesce` KEEPS the earlier writer's instant, so the record carries
+        # THAT, not `now` — the mint's clock is inert there.) A fresh clock here
+        # would make the live node on the create arm disagree with the replayed
+        # one (#8501).
         #
         # ⛔ THE RETURNED KEY IS USED, NEVER DISCARDED (#8501 review P3).
         # `_mint_source_stub`'s contract is explicit — callers MUST address
@@ -11938,11 +12000,26 @@ class TortoiseSDK:
         params["url"] = source_key
         _rows = proj.g.query(
             "MERGE (s:Source {url:$url}) SET " + ", ".join(set_clauses)
-            + " RETURN s.validFrom, s.is_episodic",
+            # `s.ingestedAt` is the THIRD read-back, for the same reason as the
+            # other two: #9451 — the record must state the instant this write
+            # STORED, which is the earlier writer's when the stub pre-existed
+            # (`s.ingestedAt=coalesce(s.ingestedAt, $now)` keeps it), not `now`.
+            + " RETURN s.validFrom, s.is_episodic, s.ingestedAt",
             params=params,
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
         prior_is_episodic = _rows[0][1] if _rows else None
+        # `now` only as a fallback for a MERGE that returned no row (nothing was
+        # written, so there is no stored value to state); every real write leaves
+        # a non-null instant because the SET above coalesces into `$now`.
+        #
+        # ⛔ AN EXPLICIT NULL TEST, NOT `or` (#9451 review round 2, P2): a node
+        # holding `ingestedAt=''` is FALSY but NON-NULL, and the live SET's
+        # `coalesce` KEEPS it — so `... or now` would state an instant the write
+        # did not store and hand `rebuild_all()` a `now` the live node never had,
+        # the very divergence this issue closes, on that one state.
+        _stored = _rows[0][2] if _rows else None
+        stored_ingested_at = now if _stored is None else _stored
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
@@ -11974,11 +12051,24 @@ class TortoiseSDK:
             sourceKind="agentSession",
             contentHash=content_hash,
             title=None,
-            ingestedAt=now,
+            ingestedAt=stored_ingested_at,
             updatedAt=now,
             validFrom=prior_valid_from,
             is_episodic=prior_is_episodic,
             _stub_completion=True,
+            # #9451: the record's `ingestedAt` above is the instant this write
+            # STORED (read back from the node), not the capture clock. This
+            # marker is what tells the two apart at FOLD time: a record written
+            # before #9451 carries `_stub_completion` but no marker and states a
+            # `now` the live write never stored on a pre-existing stub, so the
+            # ON MATCH arm leaves the node alone for those lines exactly as it
+            # did before this change (a legacy record must not start MOVING a
+            # value the pre-fix replay reproduced faithfully). Server-managed:
+            # refused as a caller key by `_sanitize_props` / `create_source` /
+            # MCP, listed in `_META_KEYS` so it never reaches a `:Source`, and
+            # in `record_projection._RECORD_ONLY_KEYS` so it never enters a
+            # record's props tail.
+            _ingestedAtStored=True,
             **{SOURCE_SEARCH_TEXT_FIELD: search_text},
             sessionId=session_id,
             capturedAt=now,
@@ -12043,39 +12133,55 @@ class TortoiseSDK:
         #   * `updatedAt` carries the instant the write stamped, so the fold's
         #     stub-completion arm reproduces it instead of the replay clock.
         #
-        #   * `ingestedAt` is emitted and IS faithful on the capture path
-        #     (#8501 corrected this note; it used to call the field a KNOWN
-        #     RESIDUAL on a premise this change removed). The stub this write
-        #     completes is now minted BY THIS DOOR — `_mint_source_stub(...
-        #     now=now)` above — so its `ingestedAt` is the CAPTURE's instant, not
-        #     a fresh clock at a later write; this record carries that same
-        #     `now`, and `_upsert_source`'s ON CREATE arm reads the RECORDED
-        #     value (`coalesce($ingestedAt, $now)`, the #5024 rule) instead of
-        #     the replay clock. So live == rebuilt for the field, which is what
-        #     `test_the_stub_the_early_materialization_mints_survives_a_rebuild`
-        #     asserts (`s.ingestedAt` compared after a destructive
-        #     `rebuild_all()`), and
+        #   * `ingestedAt` carries `stored_ingested_at` — the instant READ BACK
+        #     from the node the SET just wrote — not `now`. On the lane where this
+        #     door's own mint CREATES the stub, the two are the same value (the
+        #     mint is `_mint_source_stub(..., now=now)`, and the SET coalesces
+        #     into `$now`), which is what
         #     `test_a_keyless_capture_stamps_its_stub_with_the_capture_instant`
-        #     pins the value on the no-Point lane, and
+        #     and
         #     `test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`
-        #     pins it on the lane that extracts.
+        #     pin. On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
+        #     keeps the earlier writer's instant (#398's never-overwrite contract
+        #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
+        #     record stating `now` journals a value the write never wrote (#9451).
+        #     `_upsert_source`'s ON CREATE arm reads the recorded value (#5024)
+        #     and its ON MATCH arm applies it under the `$stub_completion AND
+        #     $ingestedAtStored` gate, so for a record written BY THIS VERSION
+        #     both replay engines reproduce the node's value on both arms —
+        #     pinned by `tests/test_9451_pre_existing_stub_ingest_instant.py`
+        #     (whole-bag live vs after `rebuild_all()` AND after `rebuild()`,
+        #     mutation-measured red on the pre-#9451 tree).
         #
-        #     The residual it used to describe is still REACHABLE — the
-        #     boundary is the stub's CREATOR, not the path. The field above is
-        #     faithful exactly where this door's own mint CREATED the node.
-        #     Whenever a `session:<id>` stub ALREADY EXISTS when this door runs,
-        #     the mint's ON MATCH arm leaves that earlier writer's `ingestedAt`
-        #     in place while the record carries the capture's instant, and
-        #     `_upsert_source`'s ON MATCH arm has no `ingestedAt` clause at all
-        #     (only ON CREATE reads the recorded value) — so a rebuild folds the
-        #     recorded instant onto a live node still holding the earlier one.
-        #     That earlier writer is any door that minted the ref first (a
-        #     `create_point` carrying a `session_id` → `_link_source`, the
-        #     hosted commit path's `create_source`, the #4125 reconciler) plus
-        #     every node written before #8501 or by a legacy writer. This record
-        #     cannot correct that — the instant was never journaled by the
-        #     writer that chose it — but it is no longer the capture path's
-        #     DEFAULT shape: a fresh capture now mints as it materializes.
+        #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied and
+        #     engine by engine (#9451 review rounds 3-4): a `SourceCreated` line
+        #     written BEFORE this change states `now`, which the live write never
+        #     stored on a pre-existing stub — and no record can correct that,
+        #     because the instant the mint chose was never journaled. Those lines
+        #     carry `_stub_completion` but NOT `_ingestedAtStored`, so the ON
+        #     MATCH arm leaves the node's `ingestedAt` alone for them, exactly as
+        #     it did before this change. The consequence, engine by engine: on
+        #     `rebuild_all()` the ON CREATE arm still applies the recorded `now`
+        #     in the shape where this record is the node's CREATOR (pass 1b folds
+        #     it before pass 2 mints the stub) — so those rebuilt nodes are still
+        #     not the LIVE node's value; on `rebuild()` such a node keeps the
+        #     replay clock the re-minted stub was given, as it did before. In the
+        #     other legacy shape — the node was created by a JOURNALLED earlier
+        #     write (`create_source`'s own `SourceCreated` at T0) and a pre-#9451
+        #     capture merely completed it — the ON MATCH arm being a NO-OP is
+        #     what keeps `rebuild()`/`rebuild_all()` FAITHFUL to the live T0
+        #     (#9451 review round 3, ISSUE 2: applying the legacy record's
+        #     never-stored `now` there would have turned a faithful recovery into
+        #     a divergence, so the marker — not just `$stub_completion` — is what
+        #     the clause is gated on; pinned by
+        #     `test_a_legacy_capture_record_does_not_move_a_journalled_instant`).
+        #     Convergence for the CREATOR shape needs a MIGRATION or a fresh
+        #     faithful record — NOT a plain re-capture, because `capture_session`
+        #     short-circuits an already-captured session ("session already
+        #     captured (same session_id) — no new extraction") and journals no
+        #     `SourceCreated` for it at all. What #9451 closes is the DOOR: every
+        #     capture that REACHES this writer from this version onward journals
+        #     the instant it stored, on either arm.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -21808,6 +21914,16 @@ class TortoiseSDK:
         try:
             rows = self._get_proj().g.query(
                 "MATCH (n:Point) WHERE n.ep_dirty = true "
+                # #9275: an id-LESS dirty :Point is excluded at the source —
+                # `_dirty_roots` is a set of ids the rest of the lifecycle
+                # MATCHes on, so a NULL id would hydrate as `None` and rejoin
+                # every downstream ordering (`dream_window`'s dirty-root sort,
+                # `_unsweepable_dirty_roots`) as a second id TYPE. It is also
+                # unreachable by construction: no pass can affect it (it can
+                # identify no factor participant) and no sweep can clear its
+                # flag, so mirroring it would only pin the mirror. Same
+                # posture as `analyze.py`'s keyless-legacy-node handling.
+                "AND n.id IS NOT NULL "
                 "AND NOT coalesce(n.status, 'live') IN $terminal "
                 "AND coalesce(n.outdated, false) = false "
                 "RETURN n.id",
@@ -21992,7 +22108,12 @@ class TortoiseSDK:
         if not candidates:
             return set()
         proj = self._get_proj()
-        ids = sorted(candidates)
+        # #9275: `key=str` — these are ids the engine returned and the caller's
+        # graph may carry a non-string one (`set_point_baseline(42, …)` is a
+        # supported, measured shape), so a bare `sorted()` is the same
+        # mixed-type ordering crash the affected-claim path no longer has. The
+        # order is only for a deterministic `$ids` batch.
+        ids = sorted(candidates, key=str)
         # The classification is :Point-only, exactly like the rest of the dirty
         # lifecycle (`_mark_dirty`'s persist, `_hydrate_dirty_roots`,
         # `_prune_nonexistent_dirty_roots` all anchor `MATCH (n:Point)`).
@@ -24975,9 +25096,13 @@ class TortoiseSDK:
         disagree (measured) — so it can never consume the
         ``limit=1`` probe's budget. It is excluded because no caller can name it
         to ``set_point_baseline`` and the run cannot survive it anyway: EP keys
-        claims on ``id``, so an id-less ``:Point`` wired as an operator claim
-        DIES the run with a ``TypeError`` during ordering — nothing is ever
-        stamped on it (#9275). Sorted (``key=str``, so a numeric id cannot raise
+        claims on ``id``, so an id-less claim wired to an operator makes the pass
+        REFUSE with ``UnaddressableClaimError`` before the refusing pass stamps
+        anything (#9275 — fixed there; it used to die in the ordering with a bare
+        ``TypeError``; a multi-batch ``dream_window``/``dream_all`` pass may have
+        committed an earlier batch) — nothing is ever stamped on such a node.
+        Sorted
+        (``key=str``, so a numeric id cannot raise
         on a mixed list) for a deterministic message.
         """
         if ids is not None and not ids:
@@ -25007,12 +25132,17 @@ class TortoiseSDK:
             f"AND {_live_only('n.status')} "
             "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
             "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "
-            # A hand-written / imported graph can hold an id-less :Point (no
-            # repo writer mints one). No caller can name it to
-            # ``set_point_baseline``, and an id-less participating claim crashes
-            # the run DURING ORDERING, after the batches have stamped the other
-            # nodes — so the run is not fail-closed, but nothing is ever stamped
-            # ON IT (no id to key) (#9275) — so it must never be reported — and
+            # A hand-written / imported graph can hold an id-less epistemic
+            # node (a :Point has no writer that mints one; an :Event has a
+            # LEGITIMATE id-less identity — ``session_indexer`` mints
+            # ``(:Event {eventId})``). No caller can name one to
+            # ``set_point_baseline``, and an id-less participating claim makes EP
+            # REFUSE the run before the refusing pass computes or stamps anything
+            # (``UnaddressableClaimError``, #9275 — it used to crash in the
+            # ordering AFTER the batches had stamped the other nodes), so
+            # no POSTERIOR is ever stamped on it — a graph-wide trivial stamp
+            # (``dream_all``) still writes its ``lastDreamedAt``, the residual
+            # #9275 records — so it must never be reported — and
             # the filter belongs HERE, in the WHERE clause, not only in the
             # Python post-pass: ``limit=1`` is applied by the engine BEFORE the
             # post-pass, so a single id-less row would consume the existence
@@ -36318,6 +36448,17 @@ class TortoiseSDK:
                 "discriminator and cannot be set via props — it is set only "
                 "by the session-capture writer (#5097)."
             )
+        # #9451: its sibling on the same record — `True` declares the record's
+        # `ingestedAt` to be the instant the write STORED, which the fold's ON
+        # MATCH arm then applies. Same class: a forged key moves a `:Source`'s
+        # `ingestedAt` on every replay. Same hard-reject; the ONE producer is
+        # the session-capture writer's own `_emit_event` call.
+        if "_ingestedAtStored" in props:
+            raise ValueError(
+                "'_ingestedAtStored' is a server-managed journal discriminator "
+                "and cannot be set via props — it is set only by the "
+                "session-capture writer (#9451)."
+            )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`
         # (`_SOURCE_EXTRA_PROPS`), which is the only form that can hold — a
@@ -37600,6 +37741,12 @@ class TortoiseSDK:
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
+
+        A ``Source`` target that resolves to the SAME node as ``source_url``
+        writes NO ``references`` self-loop (#5151): since D10 a document is a
+        ``:Source``, so equal keys collapse source and entity onto one node, and
+        the guard lives in the projection writer where the edge is written — the
+        ``:Source`` itself is still merged, unchanged.
         """
         proj = self._get_proj()
         # ── #5475 (residual): the SECOND writer of ``sourceKind`` ──
