@@ -24909,7 +24909,25 @@ class TortoiseSDK:
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
             evidence by the repo's own resolution (``backfill_v25`` fills
             'statement'; EP reads no kind at all), so a legacy kind-less
-            Point is gated like the statement it is. NORMALISED first — case
+            Point is gated like the statement it is. #9592: an EMPTY-after-
+            normalisation kind is in that SAME arm, because it means the same
+            thing to the consumer — no kind at all. It used to fall into the
+            string arm and fail membership, so an empty kind was a CONSUMED
+            claim with no prior while an absent kind was demanded (measured:
+            the gate answered ``[]``, ``calibrate_summary()`` said
+            uncalibrated, and a ``require_calibration=True`` run stamped the
+            node anyway) — the fail-open shape #7478 exists to prevent, and an
+            internal disagreement between the audit and the gate (#9063).
+            "Empty" means empty AFTER the normalisation below, so a
+            whitespace-only kind out of the SAME family
+            (``_KIND_WHITESPACE_CHARS``: space, tab, LF, VT, FF, CR, NBSP) is
+            covered too. The family's DECLARED BOUNDARY is unchanged and still
+            holds here: a kind padded with Unicode whitespace OUTSIDE it (em
+            space, ideographic space, ZWSP, BOM…) normalises to itself, so it
+            is still neither empty nor a member and stays ungated — the
+            pre-existing residual recorded at ``_KIND_WHITESPACE_CHARS`` and
+            filed as #9287, not a coverage claim of this arm.
+            NORMALISED first — case
             and surrounding whitespace — because the write path accepts an
             unrecognised kind VERBATIM with only a warning
             (``create_point('Statement', ...)``, ``' statement'``) and EP reads
@@ -24966,12 +24984,26 @@ class TortoiseSDK:
             return []
         proj = self._get_proj()
         kinds = ", ".join(f"'{k}'" for k in _CALIBRATION_EVIDENCE_KINDS)
+        # #9592: an EMPTY-after-normalisation kind is ABSENT, not a
+        # non-evidence kind: EP reads no kind at all, so a node whose kind is
+        # '' (or whitespace-only within the normalised family) is a consumed
+        # claim exactly like the kind-less legacy Point — the "absence is
+        # evidence" rule this predicate already carries. It is folded into the
+        # SAME membership list rather than added as an ``OR`` arm, so the
+        # widening costs one LIST ENTRY: the query text keeps ONE
+        # ``replace()`` chain and the engine evaluates the normalisation once
+        # per row (an ``OR {kind_norm} = ''`` arm interpolates the chain a
+        # SECOND time — measured +58% on the ``limit=1`` existence probe every
+        # scoped EP surface pays, 6.5 ms vs 4.1 ms at 2,000 Points). Inside the
+        # ``typeof = 'string'`` guard the normalised value is never NULL, so
+        # ``x = '' OR x IN [...]`` and ``x IN ['', ...]`` are the same
+        # predicate.
+        kind_norm = f"toLower({_strip_whitespace('n.pointKind')})"
         where = (
             f"(n.is_operator IS NULL OR n.is_operator = false) "
             f"AND (n.pointKind IS NULL "
             f"     OR (toLower(typeof(n.pointKind)) = 'string' "
-            f"         AND toLower({_strip_whitespace('n.pointKind')}) "
-            f"             IN [{kinds}])) "
+            f"         AND {kind_norm} IN ['', {kinds}])) "
             f"AND {_live_only('n.status')} "
             "AND (n.baseline_set IS NULL OR n.baseline_set <> true "
             "     OR n.ep_alpha IS NULL OR n.ep_beta IS NULL) "
@@ -28088,10 +28120,16 @@ class TortoiseSDK:
                 # runs, and the snapshot keeps a deliberately LEAN projection
                 # (``fallback_snapshot._SNAPSHOT_QUERY`` — no session column),
                 # so a degraded hit still carries ``sessionId == ""`` and
-                # renders ``[session ?]``. Widening that cached corpus is the
+                # renders ``[session ?]``. #8658's four verbatim-provenance
+                # columns (``quote`` / ``source_turn_id`` / ``span_start`` /
+                # ``span_end``) are read here, so a DEGRADED hit carries none of
+                # them either and Slice A's own-source leg stays inert on that
+                # tier (``retrieval._is_own_source`` returns False on its empty
+                # quote). Widening that cached corpus is the
                 # same separate, policy-governed change
                 # ``search_provenance_enabled`` already declares for
-                # provenance — a declared boundary, not an oversight of #3804.
+                # provenance — a declared boundary, not an oversight of #3804
+                # or of #8658.
                 #
                 # R17 (``tests/test_assembly_sdk.py``): naming these rows is a
                 # DELIBERATE content change, so the assembly goldens were
@@ -28100,12 +28138,21 @@ class TortoiseSDK:
                 # #3804 is that record.
                 _prov = search_provenance_enabled()
                 _prov_cols = ", n.extractedFrom, n.createdAt" if _prov else ""
+                # #8658: the verbatim provenance columns Slice A (#2683) and the
+                # #2684 span surface key on. Read UNCONDITIONALLY (they are
+                # plain row properties of a Point — no extra join, no policy
+                # flag: they are what a distilled claim's source anchor IS), and
+                # folded into the hit PRESENT-ONLY, so an unprovenanced hit is
+                # byte-identical. Placed AFTER ``_prov_cols`` so the #3837
+                # provenance indices above never shift.
+                _prov_q = 9 if _prov else 7   # first #8658 column index
                 rows = graph.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "OPTIONAL MATCH (sess:Session)-[:CONTAINS]->(n) "
                     "RETURN n.id, n.content, n.pointKind, "
                     "       coalesce(n.has_answer, false), n.sessionId, "
-                    "       n.session_id, sess.id" + _prov_cols,
+                    "       n.session_id, sess.id" + _prov_cols
+                    + ", n.quote, n.source_turn_id, n.span_start, n.span_end",
                     params={"ids": result_ids},
                 ).result_set
                 # A Point contained by MORE THAN ONE :Session yields one row
@@ -28127,11 +28174,30 @@ class TortoiseSDK:
                         "has_answer": bool(row[3]),
                         "sessionId": (row[4] or "") if len(row) > 4 else "",
                         # #3804: the snake spelling ``create_point(
-                        # session_id=…)`` writes — read here as the second
+                        # session_id=… )`` writes — read here as the second
                         # explicit identity source, never emitted raw (the
                         # wire key stays camel ``sessionId``).
                         "session_id": (row[5] or "") if len(row) > 5 else "",
                     }
+                    # #8658: verbatim provenance — PRESENT-ONLY, exactly like
+                    # the row's other optional fields. A falsy ``at``-style
+                    # empty quote and a null ``source_turn_id`` (FalkorDB
+                    # drops null props, #2949) mean the Point carries no
+                    # verbatim anchor, so NO key is added and the hit renders
+                    # / packages exactly as it did before. ``span_start == 0``
+                    # is a real address — presence, never truthiness.
+                    _quote = (row[_prov_q] or "") if len(row) > _prov_q else ""
+                    if _quote:
+                        entity_data[pid]["quote"] = _quote
+                    _turn = (row[_prov_q + 1]
+                             if len(row) > _prov_q + 1 else None)
+                    if _turn is not None and _turn != "":
+                        entity_data[pid]["source_turn_id"] = _turn
+                    for _off, _key in ((2, "span_start"), (3, "span_end")):
+                        if len(row) > _prov_q + _off:
+                            _v = row[_prov_q + _off]
+                            if _v is not None:
+                                entity_data[pid][_key] = _v
                     if _prov:
                         # Provenance (#3837): the Source/document ref and the
                         # capture time — additive, read ONLY when the flag is
@@ -28448,6 +28514,13 @@ class TortoiseSDK:
                 source_path=cap_source_path,
                 # A5 (#2070): stored evidence mark (additive in to_dict).
                 has_answer=pt.get("has_answer", False),
+                # #8658: the Point's verbatim provenance when the fetch found
+                # it — absent keys ⇒ the dataclass defaults ⇒ ``to_dict`` emits
+                # nothing, so an unprovenanced hit is byte-identical.
+                quote=pt.get("quote", ""),
+                source_turn_id=pt.get("source_turn_id"),
+                span_start=pt.get("span_start"),
+                span_end=pt.get("span_end"),
                 # Provenance (#3837): present only when the flag fetched it;
                 # SearchResult.to_dict emits the block only when set.
                 source_ref=pt.get("source_ref"),

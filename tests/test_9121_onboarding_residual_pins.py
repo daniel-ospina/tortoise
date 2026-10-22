@@ -355,8 +355,31 @@ def _declaration_primitives() -> set[str]:
     return _openers_under(_REPO / "tortoise")
 
 
+#: Openers that DELEGATE the permit instead of calling `_cache_write_authorized`
+#: themselves (`#9391`): `{opener: the opener it hands the permit to}`.
+#:
+#: Declared on purpose, and DECLARED rather than derived transitively, because the
+#: population is a detector: the honest derivation is "this function can put a
+#: declaration in flight", and a one-level delegation is that, while a blanket
+#: transitive closure would also enrol every CALLER of an opener
+#: (`rebuild_from_record` calls `_replay_write_scope()`) and change what the
+#: escape-(3) instrument sees. `#9391` routed `_replay_write_scope()` through the
+#: new `_handle_only_write_scope()` (so the raw-query closure travels with the
+#: scope stack); without this map the inventory would have silently SHRUNK —
+#: `_replay_write_scope` would drop out and any site wrapped in
+#: `with _replay_write_scope():` would become invisible to the detector, which is
+#: the #9157 hole. Both names are therefore recorded in the two lists below.
+_DELEGATED_OPENERS: dict[str, str] = {
+    "_replay_write_scope": "_handle_only_write_scope",
+}
+
+
 def _openers_under(root: Path) -> set[str]:
-    """Functions under `root` whose body declares via `_cache_write_authorized`.
+    """Functions under `root` that can put a §17.1 declaration in flight.
+
+    A function joins the population when its body declares through
+    `_cache_write_authorized` DIRECTLY, or through a DECLARED delegation hop
+    (`_DELEGATED_OPENERS`).
 
     A FILE path is allowed too (the inventory population is one module:
     `projection/__init__.py`, the bullet list a reader is told is exhaustive —
@@ -371,13 +394,16 @@ def _openers_under(root: Path) -> set[str]:
         for node in ast.walk(tree):
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            delegated_to = _DELEGATED_OPENERS.get(node.name)
             for inner in ast.walk(node):
-                if (
-                    isinstance(inner, ast.Call)
-                    and (getattr(inner.func, "id", None) == "_cache_write_authorized"
-                         or getattr(inner.func, "attr", None) == "_cache_write_authorized")
-                ):
+                if not isinstance(inner, ast.Call):
+                    continue
+                callee = (getattr(inner.func, "id", None)
+                          or getattr(inner.func, "attr", None))
+                if callee == "_cache_write_authorized" or (
+                        delegated_to is not None and callee == delegated_to):
                     found.add(node.name)
+                    break
     return found
 
 
@@ -805,6 +831,12 @@ def test_the_opener_inventory_is_pinned_so_a_new_lane_moves_this_file():
     expected = {
         "_live_write_scope",
         "_replay_write_scope",
+        # #9391: `_replay_write_scope()` now DELEGATES to this opener so the
+        # raw-query closure travels with the scope stack, so both names are in
+        # the bullet list and both are recorded here — the delegation is declared
+        # in `_DELEGATED_OPENERS`, which is what keeps the replay opener in the
+        # population instead of silently dropping it.
+        "_handle_only_write_scope",
         "_graph_metadata_write_scope",
         # #9210 added the PRE-WIPE RESTORE lane to the same bullet list (the
         # restore path writes records that did not come from the journal, so it
@@ -852,6 +884,9 @@ def test_the_detector_population_is_pinned_by_content():
     """
     expected = {
         "_graph_metadata_write_scope",
+        # #9391: both halves of the replay declaration are recorded — the opener
+        # that holds the permit and the one it delegates to (`_DELEGATED_OPENERS`).
+        "_handle_only_write_scope",
         "_live_write_scope",
         "_onboarding_write_scope",
         "_replay_write_scope",

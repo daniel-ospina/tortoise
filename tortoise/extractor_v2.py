@@ -3440,9 +3440,12 @@ def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,
 
     ⚠️ Reach: the span reaches a consumer only where the read path carries
     point provenance. The eval lane does (#2684 wired it); the PRODUCT ask
-    lane's hits carry no ``quote``/``source_turn_id`` at all, so neither the
-    span nor Slice A's own-source legs can fire there — measured and filed as
-    #8658, deliberately not fixed here.
+    lane's hits carried no ``quote``/``source_turn_id`` until **#8658** landed
+    (the point fetch now reads all four columns and ``SearchResult`` emits them
+    present-only), so both the span and Slice A's own-source legs now fire on
+    real graphs. ⛔ Residual, deliberately not fixed here: the two degraded
+    fallback tiers (``fallback_snapshot`` / ``fallback_tfidf``) keep their lean
+    projections, so a DEGRADED hit still carries no provenance.
     """
     if not _carries_value(content, quote):
         return None
