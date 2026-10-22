@@ -31,9 +31,13 @@ cheap to pin:
    #9115 workflow itself (it did, before this property was added). The key is
    nevertheless REQUIRED where it appears, because collapsing it to a constant
    would cancel pending verdicts — a cancelled gate posts nothing (a fail-open)
-   — so the fan-out has to be bounded OUTSIDE the key: the classifier split, a
-   job-level ``if:`` that spends no runner, or a required check that is one run
-   per head. :data:`PER_UNIT_GROUP_OK` makes each such workflow name its bound.
+   — so the fan-out has to be bounded OUTSIDE a per-unit key: the group itself
+   must be low-cardinality, or a job-level ``if:`` must spend no runner, or the
+   check must be one run per head. :data:`PER_UNIT_GROUP_OK` names the bound.
+   ⛔ A cheap ``classify`` leg is a **COST** bound, never a fan-out bound:
+   #9115's workflow had one in place *during* the #9577 flood (38 of 133 queued
+   runs, 0 of 28 PRs mergeable), so it cannot be the reason a per-unit key is
+   safe.
 
 3. **A per-push REPORTING workflow with no path filter fires on every merge.**
    Under a merge flood it starts, is cancelled by the next merge
@@ -55,11 +59,16 @@ What this module pins
   genuinely has no path filter to take), and an excused entry must actually
   BE unfiltered — the excuse and the artifact have to agree, or the entry
   silently licenses deleting a ``paths:`` filter that exists today;
-* ``finding-provenance`` — the workflow that actually flooded — keeps its
-  group keyed **per unit of work** and the two arms that make that key a
-  correctness requirement are pinned: a constant group would cancel a finding's
-  pending annotation (a fail-open: ``cancelled`` posts nothing), and a
-  ``paths:`` filter on an ``issue_comment`` gate would make it never run;
+* ``finding-provenance`` — the workflow that actually flooded — keys its
+  group **per issue**, and #9577 pins three properties of that key: it carries
+  EXACTLY ONE expression (an appended `${{ github.run_id }}` would make it
+  unique per run), it never carries a ``comment.id`` (a per-comment key is
+  unique-per-event, so ``cancel-in-progress`` could never fire), and its term
+  list is the exact ordered one in :data:`_FINDING_PROVENANCE_GROUP_TERMS`
+  (``||`` returns the first truthy operand, so an always-truthy term in front of
+  the issue re-creates the same bug under another name); separately, an
+  ``issue_comment`` gate must never carry a ``paths:`` filter (it would never
+  run);
 * the REQUIRED aggregate keeps its load-bearing identity: ``python-ci.yml``
   still defines a job with the id ``python-ci-gate`` and no ``name:`` override
   (renaming it silently un-requires the gate — branch protection and Mergify's
@@ -167,12 +176,14 @@ ZERO_COST_PR_EVENT = {
 # block-exists test structurally cannot express.
 PER_UNIT_GROUP_OK = {
     "finding-provenance.yml": (
-        "fan-out is bounded by the CLASSIFIER SPLIT (#9115), not by the key: "
-        "`classify` is `fetch-depth: 1` + `timeout-minutes: 6`, and the "
-        "full-history `provenance` leg runs only on "
-        "`needs: … is_finding == 'true'`. Collapsing the group to a constant "
-        "would cancel pending verdicts — a cancelled gate posts NOTHING, a "
-        "fail-open — so the bound has to stay OUTSIDE the concurrency key."
+        "fan-out per issue is bounded by the KEY: every comment on one issue "
+        "lands in the same group, so a comment burst supersedes that issue's own "
+        "in-flight run instead of adding a runner (#9577). ACROSS issues the "
+        "fan-out is only bounded by the number of issues in flight — that residue "
+        "is the accepted trade, and batching/coalescing with a catch-up sweep is "
+        "the remaining work on #9115. NOTE the CLASSIFIER SPLIT is a COST bound, "
+        "never a fan-out bound: it was already in place during the #9577 flood "
+        "(38 of 133 queued runs, 0 of 28 PRs mergeable)."
     ),
     "ai-review-gate.yml": (
         "a REQUIRED check: one run per PR head, superseded on each push. A "
@@ -252,6 +263,23 @@ def test_every_workflow_declares_a_concurrency_block(path: Path) -> None:
 _PER_UNIT_TOKENS = ("comment.id", "issue.number", "pull_request.number", "run_id")
 _PER_EVENT_TRIGGERS = {"issues", "issue_comment", "pull_request", "pull_request_target"}
 
+# The ONE expression `finding-provenance`'s concurrency group may resolve through
+# (#9577). Pinned as an exact term list because every property that makes the key
+# a BOUND lives in the ORDER and in the ABSENCE of terms, not in their presence:
+# `||` returns the first truthy operand, so an always-truthy term placed AHEAD of
+# the issue (`github.run_id` gives one group per run; `github.event_name` gives
+# ONE group for every event in the fleet — the global group the workflow forbids)
+# breaks the bound, and a per-event-unique term (`github.event.comment.id`) makes
+# the key unique per event wherever it is the resolving term and is dead code
+# elsewhere — so it must not be in the KEY at all. A TRAILING always-truthy term
+# is required, not a hazard: it is the dispatch fallback for a trigger that has
+# no `github.event.issue.number`.
+_FINDING_PROVENANCE_GROUP_TERMS = [
+    "github.event.issue.number",
+    "github.event.inputs.issue_number",
+    "github.run_id",
+]
+
 
 @pytest.mark.parametrize("path", _workflow_paths(), ids=lambda p: p.name)
 def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
@@ -278,8 +306,9 @@ def test_per_event_per_unit_groups_declare_their_bound(path: Path) -> None:
         f"concurrency group PER UNIT ({per_unit}) — that bounds repeats of one "
         "unit but NOT the fan-out: N units still run at once. That is the #9115 "
         "flood shape exactly (the offending workflow already had a per-unit key). "
-        "Bound the fan-out (constant/low-cardinality group, a job-level `if:` "
-        "that spends no runner, or a cheap classify leg), or add it to "
+        "Bound the fan-out (a constant/low-cardinality group, a required check "
+        "that is one run per head, or a job-level `if:` that spends no runner), "
+        "or add it to "
         "PER_UNIT_GROUP_OK with that bound named."
     )
     assert PER_UNIT_GROUP_OK[path.name].strip(), (
@@ -376,13 +405,15 @@ def test_the_allow_list_has_no_dead_entries() -> None:
         )
 
 
-def test_finding_provenance_keeps_a_per_unit_group_and_no_path_filter() -> None:
+def test_finding_provenance_keeps_a_per_issue_group_and_no_path_filter() -> None:
     """The #9115 workflow's two correctness properties, pinned individually.
 
-    (a) The group is keyed PER UNIT. Collapsing it to one constant group would
-        make a burst of comments cancel each other, and a cancelled comment
-        gate posts NOTHING — so every cancelled finding would be silently
-        ungated (a fail-open), not merely deferred.
+    (a) The group is keyed PER ISSUE (#9577). Not per comment — a comment id is
+        unique per event, so a `comment.id` term puts every comment in its OWN
+        group and `cancel-in-progress: true` can never fire: the key bounds
+        nothing while reading like a bound (38 of 133 queued runs, 0 of 28 PRs
+        mergeable). Not a constant either — one issue must never cancel
+        another issue's gate.
     (b) An ``issue_comment`` gate must never gain a ``paths:``/``paths-ignore:``
         filter: those events carry no path, so a filtered gate never runs and a
         skipped check reads as a pass to the rail (the reason the sibling guard
@@ -390,9 +421,9 @@ def test_finding_provenance_keeps_a_per_unit_group_and_no_path_filter() -> None:
     """
     doc = _load(WORKFLOW_DIR / "finding-provenance.yml")
     group = str(doc["concurrency"]["group"])
-    assert "comment.id" in group and "issue.number" in group, (
-        "the per-unit key is load-bearing: keying by a constant silences the "
-        "flood by cancelling the verdicts that owed an annotation (#9115)"
+    assert "issue.number" in group, (
+        "the key must be per ISSUE: a constant group would let one issue cancel "
+        "another issue's gate (#9577)"
     )
     assert doc["concurrency"]["cancel-in-progress"] is True
     trig = _triggers(doc)
@@ -401,6 +432,117 @@ def test_finding_provenance_keeps_a_per_unit_group_and_no_path_filter() -> None:
         assert trig[event] is None or not (
             isinstance(trig[event], dict) and {"paths", "paths-ignore"} & set(trig[event])
         ), f"`{event}` cannot carry a path filter — the gate would never run"
+
+
+def test_finding_provenance_concurrency_group_never_keys_on_a_comment() -> None:
+    """The #9577 guard: the concurrency KEY must never carry `comment.id`.
+
+    ``github.event.comment.id`` is unique PER COMMENT, so a group containing it
+    gives every comment its own group and ``cancel-in-progress: true`` can never
+    fire — the key is not a bound, it is a unique key that reads like a bound.
+    Measured 2026-10-21 (#9577): 100 comments in one hour, 38 of 133 queued runs
+    this workflow, ahead of the ``python-ci`` runs PRs need to merge, 0 of 28
+    open PRs mergeable (all ``PENDING``).
+
+    This is the assertion a ``yaml.safe_load`` -and-parses check structurally
+    cannot make: the file is valid YAML either way, because the expression IS
+    the bug. It scans the RUN-level group AND every job-level ``concurrency:``
+    block in the file — re-introducing the term at a narrower scope would starve
+    exactly the same pool.
+
+    ``comment.id`` is legitimately READ by this workflow (``COMMENT_ID`` in the
+    ``Resolve the issue body`` step fetches THAT comment's body by id, which is
+    the #4732 injection-safe path). Only the concurrency KEY is forbidden, so
+    this guard scopes to ``concurrency:`` blocks and must not be widened into a
+    file-wide grep — that would fail the very read the workflow needs.
+    """
+    doc = _load(WORKFLOW_DIR / "finding-provenance.yml")
+
+    groups: list[tuple[str, str]] = []
+    run_group = _concurrency_group(doc.get("concurrency"))
+    assert run_group is not None, "finding-provenance must keep a concurrency group (#9115)"
+    groups.append(("run-level `concurrency:`", run_group))
+    for name, job in (doc.get("jobs") or {}).items():
+        job_group = _concurrency_group(job.get("concurrency")) if isinstance(job, dict) else None
+        if job_group is not None:
+            groups.append((f"job `{name}` `concurrency:`", job_group))
+
+    # Non-vacuity: the `strip()` assertion below is the one that does work (the
+    # run-level group is appended under a `run_group is not None` assert, so a
+    # `len(groups) >= 1` check here could never fire — it would advertise a
+    # check that does not exist).
+    assert _normalise_group(run_group).strip(), "the run-level group is empty"
+
+    offenders = [(where, group) for where, group in groups if "comment.id" in group]
+    assert not offenders, (
+        f"{offenders} key a concurrency group on `comment.id` (#9577). Wherever "
+        "it is the RESOLVING term it makes the key unique per comment, so every "
+        "comment gets its own group and `cancel-in-progress: true` can NEVER "
+        "fire — the key bounds nothing while reading like a bound (measured: 38 "
+        "of 133 queued runs, 0 of 28 open PRs mergeable). Behind "
+        "`github.event.issue.number` it is dead code TODAY, and it still may not "
+        "be in the key: a re-order silently activates it, which is exactly how "
+        "this defect got in. Key on the ISSUE (`github.event.issue.number`). "
+        "`comment.id` may still be read as EVENT DATA (the body is fetched by "
+        "id) — it must never be part of the KEY."
+    )
+
+    # ⛔ A TOKEN blacklist alone is not the property (#9577 review). `||`
+    # short-circuits on the FIRST truthy operand, so a key that keeps
+    # `issue.number` but puts an always-truthy context in the MIDDLE —
+    # `finding-provenance-${{ github.event.issue.number || github.event_name ||
+    # github.run_id }}` — resolves to ONE SHARED group on `workflow_dispatch`
+    # (where `issue.number` is absent), i.e. one global dispatch group, which the
+    # workflow forbids two lines ABOVE its own key. A first-term-only check
+    # misses that; so does a `comment.id` blacklist. The exact TERM LIST is therefore
+    # pinned — the same exactness `test_supabase_deploy_apply_lock_…` uses and
+    # for the same reason (substring pins were vacuous there).
+    #
+    # The pin is scoped to INSIDE `${{ }}`, not to the group's literal prefix:
+    # renaming `finding-provenance-` is not a property change and must not red
+    # (see `_normalise_group`'s docstring: a pin must never fail with a message
+    # that is false about the artifact in front of the maintainer). Extracting
+    # through `_EXPRESSION` — never a hand-rolled `split("||")` — is what keeps
+    # a single-term group from leaving a stray `}}` in the compared text.
+    #
+    # ⛔ EXACTLY ONE expression. `_EXPRESSION.search` reads only the FIRST, so
+    # `…-${{ issue.number || … }}-${{ github.run_id }}` (a second, APPENDED
+    # always-truthy expression) passed a term-list pin that then described a key
+    # it had not checked — and that key is unique per run, i.e. the #9577 defect
+    # with the module green. The absence of extra terms is the property here
+    # (measured), so the count is pinned before the contents.
+    expressions = _EXPRESSION.findall(run_group)
+    assert len(expressions) == 1, (
+        f"the group is {run_group!r} and carries {len(expressions)} `${{{{ … }}}}` "
+        "expressions; it must carry EXACTLY ONE (#9577). A second expression —"
+        " appended as a suffix, e.g. `…-${{ github.run_id }}` — makes the group "
+        "unique per RUN while the term-list assertion is satisfied, so "
+        "`cancel-in-progress` cancels nothing: the exact #9577 defect, with a "
+        "green guard. Term ABSENCE is part of the property, not an extra."
+    )
+    terms = [
+        "github.event." + term if term.startswith("inputs.") else term
+        for term in (t.strip() for t in expressions[0].split("||"))
+    ]
+    assert terms == _FINDING_PROVENANCE_GROUP_TERMS, (
+        f"the group is {run_group!r} and resolves via the terms {terms}; it must "
+        f"be {_FINDING_PROVENANCE_GROUP_TERMS} (#9577). `||` returns the first "
+        "TRUTHY operand, so these are the shapes to avoid: (a) an always-truthy "
+        "term FIRST — `github.run_id` mints a group per RUN, `github.event_name` "
+        "collapses EVERY event into one group (the global group the workflow "
+        "forbids); (b) an always-truthy term in the MIDDLE — `github.event_name` "
+        "collapses every `workflow_dispatch`, which has no "
+        "`github.event.issue.number`, into ONE shared group; (c) DROPPING the "
+        "trailing `github.run_id` fallback does the same for any trigger whose "
+        "issue/input term is absent; and (d) a per-event-UNIQUE term "
+        "(`github.event.comment.id`) makes the key unique per event wherever it "
+        "is the resolving term — and dead code elsewhere, waiting for a re-order "
+        "— so it must never be in the KEY at all. Every one of (a)-(d) means "
+        "`cancel-in-progress` is not a per-issue bound. The `inputs.issue_number` "
+        "spelling is ACCEPTED as the synonym of `github.event.inputs.issue_number` "
+        "(normalised above), because GitHub evaluates both identically. Any other "
+        "change here is a reviewed decision, not a tidy-up: pin it deliberately."
+    )
 
 
 def test_finding_provenance_does_not_pay_for_history_before_classifying() -> None:
