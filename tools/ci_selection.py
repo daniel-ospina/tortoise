@@ -1124,6 +1124,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # already falls through to `core`). Pinned by
              # tests/test_ci_selection.py::test_graph_census_tool_change_selects_core_not_tier1.
              "tools/graph_census.py",
+             # #9523 review P1: tools/legacy_id_normalise.py is the CLI for the
+             # legacy-id normaliser, and its guard
+             # (tests/test_8607_legacy_id_normaliser.py) is `core`-registered —
+             # but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a CLI-only change was
+             # DROPPED by `_keep_changed` and took the docs-only early return:
+             # `select(["tools/legacy_id_normalise.py"])` returned
+             # surfaces=[], full=False, with the guard absent from test_files.
+             # Registering the test under `core` does not help — a name in a
+             # surface's test_files only runs when that surface is already
+             # selected — so the file whose ENTIRE content is the dry-run
+             # default, the `--apply`/`--revert`-requires-`--out` rule and the
+             # 0/1/2 exit contract (`test_cli_dry_run_writes_the_report_and_no_
+             # snapshot`, `test_cli_apply_then_revert_round_trips`,
+             # `test_cli_refusal_exits_2_and_writes_nothing`,
+             # `test_cli_usage_errors_exit_1_so_2_means_only_refused`) would run
+             # none of its own cases on the PR editing it. Same
+             # #1349/#3332/#3910 silent-drop class as
+             # tools/retype_snapshot.py and tools/graph_census.py above (both
+             # dump-transform CLIs in this family). `tortoise/legacy_ids.py`
+             # needs no entry (it matches no SOURCE_PATTERN, so a module-only
+             # change already falls through to `core`). Pinned by
+             # tests/test_ci_selection.py::test_legacy_id_normalise_tool_change_selects_core_not_tier1.
+             "tools/legacy_id_normalise.py",
              # #4495 review P2: tools/write_op_reachability.py is the CLI that
              # reports the write-op allowance's stock/flow conversion, and its
              # guard (tests/test_write_op_reachability.py) is `core`+`api`
@@ -1584,7 +1608,29 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_the_engine_pin_guards_are_selected_on_the_files_they_pin.
              "apps/graph-viz/docker-compose.yml",
-             "docs/quickstart-selfhosted.md")
+             "docs/quickstart-selfhosted.md",
+             # #9524 review I1/I3: the SPA `overrides` record. `tests/
+             # test_spa_dependency_overrides.py` (registered `core` AND
+             # `onboarding`) reads `apps/graph-viz/` and
+             # `website/apps/dashboard/` `package.json` +
+             # `package-lock.json`. Neither app's manifest matches a
+             # SOURCE_PATTERNS row AND `apps/` + `website/` are both in
+             # NON_PYTHON_PREFIXES, so such a diff was filtered out BEFORE any
+             # surface was matched, took the docs-only early return and ran
+             # tier-1 smoke only — measured on this branch:
+             # `select(['apps/graph-viz/package.json'])` -> surfaces=[] with the
+             # guard absent, i.e. the exact dependency-manifest diff the guard
+             # exists for would never run it (the #1349/#3332/#3616 silent-drop
+             # class). Named per file, not per directory: the guard reads these
+             # two files only, and a wholesale `apps/graph-viz/` claim would
+             # pull the whole `core` set onto every source edit in that app.
+             # blog-admin needs no entry — `website/apps/blog-admin/` is already
+             # a SOURCE_PATTERNS row of `onboarding`, where the guard's other
+             # arm is registered.
+             "apps/graph-viz/package.json",
+             "apps/graph-viz/package-lock.json",
+             "website/apps/dashboard/package.json",
+             "website/apps/dashboard/package-lock.json")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -1919,6 +1965,24 @@ TOOL_CARVEOUTS = (
     # matrix) is the safe default for a tool whose answer drives dispatch.
     "tools/who_is_on.py",
     "tools/who-is-on.sh",
+    # #5052/#9487 review P1: the dispatch-time CLAIM on the graph
+    # (tools/work_claim.py) owns tests/test_work_claim.py — the 55 hermetic arms
+    # that pin the fail-closed refusal contract (`acquire`/`status`/`release`
+    # refuse an unset store, a hosted-only target, an embedded target, a
+    # box-local target, an unreadable store and a failed read-back) plus the
+    # MERGE-token CAS. Same silent-drop class as the collision_preflight /
+    # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so
+    # a tool-only edit came back with `changed=[]`, select() took the docs-only
+    # early return — which bypasses the `if not matched: matched.add("core")`
+    # fallback entirely — and NOT ONE of the 55 arms ran on the most likely
+    # change to weaken the dispatch gate. Registering tests/test_work_claim.py
+    # under `core` in ci-surfaces.yml does NOT cover this: it applies to edits of
+    # the TEST file, not of the tool (measured before this entry:
+    # `select(["tools/work_claim.py"])` -> surfaces=[], full=False, tier-1 smoke,
+    # guard absent). Fail-closed (FULL matrix) is the safe default for a tool
+    # whose answer drives dispatch, exactly like the two entries above.
+    # Pinned by test_ci_selection.test_work_claim_tool_change_fails_closed_to_full.
+    "tools/work_claim.py",
     # #3554: the `:Session` writer inventory + D9 retrofit instrument
     # (tools/session_retrofit_audit.py) owns
     # tests/test_session_schema_3554.py. Same silent-drop class as the

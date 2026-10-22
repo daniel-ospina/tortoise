@@ -561,6 +561,450 @@ class TestDocumentsQuota:
         finally:
             tenant.close()
 
+    # ── #5140 P1: the meter key is not caller-demotable ────────────────────
+
+    def test_document_kind_cannot_be_demoted_out_of_the_meter(
+            self, reg_sdk, tmp_path):
+        """#5140 P1 (the B3 *effect*, reached off the declared B3 route).
+
+        B3 declares the route `DocumentCreated`; the DECLARED EFFECT is
+        "documents stop being metered". The effect was reachable without that
+        route at all, because the meter key is caller-writable on the two
+        public `:Source` surfaces: `_SOURCE_EXTRA_PROPS` (the `create_source`
+        passthrough) and `_SOURCE_NODE_PROPS` (the generic `update_entity`
+        surface). One call demoted an existing document to `transcript` — or
+        nulled the genre — and the node left the metered set, freeing a slot
+        per document, repeatably. The cap did not hold.
+
+        MEASURED on the pre-fix code, 3 seeded document Sources: the meter read
+        3 -> 2 via `create_source(did, 'document', documentKind='transcript')`
+        and 2 -> 1 via `update_entity(did, documentKind='transcript')` — both
+        after `enforce_org_limit` had already refused at the derived cap, i.e.
+        the refusal the previous test pins was bypassable one call later.
+        """
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            reg_sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) SET t.max_points = 1",
+                params={"id": tid})
+            for i in range(10):
+                self._seed_doc(tenant, i, kind="report")
+            limits = resolve_org_limits(tid)
+            assert count_org_usage(tid, "documents", sdk=tenant) == 10
+            # precondition: the derived cap is genuinely reached
+            with pytest.raises(QuotaExceededError, match="documents limit"):
+                enforce_org_limit(limits, "documents", sdk=tenant)
+
+            # ⛔ BOTH spellings on BOTH caller surfaces. The document writer
+            # reads `$dk` from the snake spelling and OVERWRITES the camelCase
+            # genre, so admitting the snake form would hide the same demotion
+            # one document-path write later.
+            attempts = {
+                "create_source/documentKind": (lambda: tenant.create_source(
+                    "doc_0", "document", documentKind="transcript"),
+                    "metered `documents` set"),
+                "create_source/document_kind": (lambda: tenant.create_source(
+                    "doc_1", "document", document_kind="transcript"),
+                    "inert second spelling"),
+                "update_entity/documentKind": (lambda: tenant.update_entity(
+                    "doc_2", documentKind="transcript"),
+                    "metered `documents` set"),
+                "update_entity/document_kind": (lambda: tenant.update_entity(
+                    "doc_3", document_kind="transcript"),
+                    "inert second spelling"),
+                # `None` through `SET n += $p` REMOVES the property, so the
+                # generic surface's null is a demotion too (the passthrough
+                # skips null values — see `_persist_extra_props`).
+                "update_entity/documentKind=None": (lambda: tenant.update_entity(
+                    "doc_4", documentKind=None), "metered `documents` set"),
+                # ⛔ #5140 REVIEW CYCLE 3 — the snake spelling is refused for
+                # EVERY value on a metered document, not only the demoting one.
+                # Its ONLY possible effect there is to put the genre on the
+                # node in a second place (`document_kind` next to
+                # `documentKind`), which is what the rule forbids. The
+                # value-scoped rule admitted `document_kind='brief'` (a real
+                # second home) and refused `document_kind=None` (the one snake
+                # write that cannot demote, and the cleanup of that home) —
+                # both arms are pinned here: they FAIL on the value-scoped
+                # predicate, the first with DID NOT RAISE.
+                "update_entity/document_kind='brief' (2nd home)": (
+                    lambda: tenant.update_entity("doc_5", document_kind="brief"),
+                    "inert second spelling"),
+                "update_entity/document_kind=None": (
+                    lambda: tenant.update_entity("doc_6", document_kind=None),
+                    "inert second spelling"),
+                "create_source/document_kind='report' (2nd home)": (
+                    lambda: tenant.create_source(
+                        "doc_7", "document", document_kind="report"),
+                    "inert second spelling"),
+            }
+            for label, (attempt, expected) in attempts.items():
+                with pytest.raises(ValueError, match=expected):
+                    attempt()
+                assert count_org_usage(tid, "documents", sdk=tenant) == 10, (
+                    f"{label} escaped the documents meter")
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.documentKind = 'transcript' "
+                "RETURN count(s)").result_set[0][0]
+            assert kinds == 0, f"{kinds} document(s) demoted to transcript"
+            # …and NO second home was created by any of the refusals: the
+            # genre lives in `documentKind` only.
+            second_home = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.document_kind IS NOT NULL "
+                "RETURN count(s)").result_set[0][0]
+            assert second_home == 0, (
+                f"{second_home} :Source node(s) carry `document_kind` beside "
+                f"`documentKind` — the second home the rule refuses")
+
+            # ⛔ NON-OVER-REACH: the guard must not turn the surfaces into a
+            # no-op for the genre axis. (a) one metered genre -> another still
+            # lands, and (b) SETTING a genre where none is stored is how a
+            # document `:Source` is minted through these surfaces at all.
+            tenant.create_source("doc_0", "document", documentKind="brief")
+            assert tenant._get_proj().g.query(
+                "MATCH (s:Source {url:'doc_0'}) RETURN s.documentKind"
+            ).result_set[0][0] == "brief"
+            self._seed_doc(tenant, 20, kind=None)   # provenance Source
+            tenant.create_source("doc_20", "document", documentKind="report")
+            assert tenant._get_proj().g.query(
+                "MATCH (s:Source {url:'doc_20'}) RETURN s.documentKind"
+            ).result_set[0][0] == "report"
+            assert count_org_usage(tid, "documents", sdk=tenant) == 11
+        finally:
+            tenant.close()
+
+    def test_document_writer_cannot_demote_out_of_the_meter(
+            self, reg_sdk, tmp_path):
+        """#5140 P1, review cycle 2 — the THIRD door: the document writer itself.
+
+        The two guarded surfaces above are not the only writers of the genre.
+        `_upsert_document`'s fixed clause used a plain
+        `s.documentKind=coalesce($dk, s.documentKind, '')`, and `$dk` is
+        caller-chosen, so the DEMOTION was still one call away — from two
+        documented routes:
+
+          * ``EventAPI.add_document(<existing doc id>, document_kind=...)`` —
+            the doc id is the caller's `:Source` MERGE key;
+          * ``sdk._doc_write(frontmatter, <derived doc id>, ...)`` — the
+            ``POST /v1/index/docs`` re-index path, whose id is DERIVED from the
+            file path, so re-indexing one file with ``type: transcript`` hits
+            the SAME node, journals the record, and survives ``rebuild_all``.
+
+        MEASURED before the fix (meter 3 -> 2 -> 1, one call each). The clause
+        is the fix rather than a Python guard because that same statement IS
+        the journal replay fold: the drop must be total, so a rebuild over a
+        pre-guard record re-materialises the metered genre instead of aborting.
+
+        ⛔ #5140 REVIEW CYCLE 3: the fold's drop was SILENT to the tenant — both
+        calls below returned normally (the index job even counted the file as
+        re-indexed) while the graph kept the old genre, so a genuine genre
+        correction became unobservable and no caller could tell. The producers
+        now REFUSE loudly, before the journal append, via
+        `quota.refuse_document_writer_demotion`; the CASE stays as the
+        replay-safe fold (`test_a_pre_guard_demotion_replays_to_the_metered_genre`
+        below). These calls FAIL on the pre-cycle-3 code with DID NOT RAISE.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            for i in range(3):
+                self._seed_doc(tenant, i, kind="report")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3
+            events = str(tmp_path / "dw_events.jsonl")
+            api = EventAPI(EventLog(events), initiated_by="extractor",
+                           projection=tenant._get_proj())
+
+            # (1) EventAPI.add_document on an EXISTING document's id.
+            with pytest.raises(ValueError, match="metered `documents` set"):
+                api.add_document("doc_1", "doc 1", document_kind="transcript")
+            # (2) the index path's own writer, same file-derived id.
+            with pytest.raises(ValueError, match="metered `documents` set"):
+                tenant._doc_write({"type": "transcript"}, "doc_0", "doc 0",
+                                  str(tmp_path / "doc_0.md"), None)
+
+            # ⛔ The refusal must land BEFORE the commit point: a journaled
+            # demotion would replay, and a `/v1/index/docs` job would report a
+            # write that never happened.
+            import os
+            assert not os.path.exists(events) or os.path.getsize(events) == 0, (
+                "a refused document write was JOURNALED — a rebuild would "
+                "replay it")
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.url IN ['doc_0','doc_1'] "
+                "RETURN s.url, s.documentKind ORDER BY s.url").result_set
+            assert [list(r) for r in kinds] == [
+                ["doc_0", "report"], ["doc_1", "report"]], (
+                f"a metered document was demoted by the document writer: {kinds!r}")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3, \
+                "the document writer demoted a document out of the meter"
+
+            # ⛔ NON-OVER-REACH, on the same writer: a fresh transcript document
+            # is still mintable (nothing metered stored to demote), a
+            # metered-to-metered retarget still lands, and re-writing the genre
+            # a transcript already carries is a no-op, not a refusal.
+            api.add_document("doc_new", "fresh transcript",
+                             document_kind="transcript")
+            api.add_document("doc_2", "doc 2", document_kind="brief")
+            api.add_document("doc_new", "fresh transcript",
+                             document_kind="transcript")
+            kinds2 = tenant._get_proj().g.query(
+                "MATCH (s:Source) WHERE s.url IN ['doc_2','doc_new'] "
+                "RETURN s.url, s.documentKind ORDER BY s.url").result_set
+            assert [list(r) for r in kinds2] == [
+                ["doc_2", "brief"], ["doc_new", "transcript"]], kinds2
+            assert count_org_usage(tid, "documents", sdk=tenant) == 3
+        finally:
+            tenant.close()
+
+    def test_a_pre_guard_demotion_replays_to_the_metered_genre(
+            self, reg_sdk, tmp_path):
+        """#5140: the fold must stay TOTAL over a journal that predates the fix.
+
+        The producers refuse a demotion, but the SAME clause is the replay fold,
+        and a journal written BEFORE the guard can hold a `DocumentCreated` that
+        demotes its document. `rebuild_all` over such a log must re-materialise
+        the metered genre (fail-closed: over-counts) and must NOT raise —
+        refusing at replay would abort every rebuild of that log.
+
+        FAILS on a fold that raises (rebuild raises) and on the pre-#5140
+        `coalesce($dk, …)`, which replays the demotion and reads 'transcript'.
+        """
+        from tortoise.api import EventAPI
+        from tortoise.log import EventLog
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            events = str(tmp_path / "replay_events.jsonl")
+            api = EventAPI(EventLog(events), initiated_by="extractor",
+                           projection=tenant._get_proj())
+            api.add_document("doc_r", "Report doc", document_kind="report")
+            # A LEGACY (pre-guard) record that demotes the same node.
+            EventLog(events).append({"type": "DocumentCreated", "id": "doc_r",
+                                     "title": "Report doc",
+                                     "document_kind": "transcript"})
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+            tenant._get_proj().rebuild_all(
+                str(tmp_path), confirm_destructive=True)
+            kinds = tenant._get_proj().g.query(
+                "MATCH (s:Source {url:'doc_r'}) RETURN s.documentKind"
+            ).result_set
+            assert kinds and kinds[0][0] == "report", (
+                f"a pre-guard demotion re-materialised as {kinds!r} — the "
+                f"rebuild must fail CLOSED (keep the metered genre)")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1, \
+                "the replayed demotion dropped the document out of the meter"
+        finally:
+            tenant.close()
+
+    def test_the_source_genre_guard_costs_nothing_without_the_key(
+            self, reg_sdk, tmp_path, monkeypatch):
+        """#5140 (review cycle 2, P2): the guard is off the hot write path.
+
+        `create_source` is THE `:Source` writer (`_index_source_merge` calls it
+        per indexed file) and almost no caller supplies a genre, so the stored-
+        kind read MUST be gated on the key's PRESENCE. An unconditional read
+        puts 1-3 graph round trips on every capture/connector write for a key
+        nobody sent. FAILS on the unconditional revision (the no-genre call
+        below records a read).
+        """
+        from tortoise.sdk import TortoiseSDK
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        reads: list[str] = []
+        original = TortoiseSDK._stored_source_document_kinds
+
+        def spy(self, g, id_val):
+            reads.append(id_val)
+            return original(self, g, id_val)
+
+        monkeypatch.setattr(TortoiseSDK, "_stored_source_document_kinds", spy)
+        try:
+            tenant.create_source("plain_src", "web")
+            tenant.create_source("plain_src_2", "web", raw_state="present")
+            assert reads == [], (
+                f"the genre guard read the graph for writes that carry no "
+                f"genre: {reads}")
+            # …and it IS engaged when the key is present (the gate is a gate,
+            # not a disable).
+            tenant.create_source("doc_g", "document", documentKind="report")
+            assert reads == ["doc_g"], reads
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_demotion_guard_fails_closed_on_every_node_the_write_reaches(
+            self, reg_sdk, tmp_path):
+        """#5140 P1 (review cycle 4) — the guard must read ALL nodes, not one row.
+
+        `update_entity` writes ``MATCH (n:Source {key:$id}) SET n += $p``, which
+        applies to EVERY node sharing the key. An earlier revision of the stored-
+        genre reader returned ``rows[0][0]`` of the first matching key, so a
+        non-metered sibling that the engine listed first answered for the whole
+        set: the guard read 'nothing metered stored', admitted the write, and the
+        `SET` demoted the metered sibling out of the cap. MEASURED on that
+        revision with this exact shape: meter 1 -> 0.
+
+        FAILS on the first-row reader (the `pytest.raises` below does not
+        raise), and it is order-sensitive there by construction — the decoy is
+        inserted FIRST so it is the row a first-row reader sees.
+        """
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            g = tenant._get_proj().g
+            # decoy FIRST: same `id` the write addresses, no genre
+            g.query("CREATE (s:Source {id:$i, url:$u, title:'decoy'})",
+                    params={"i": "shared5140", "u": "decoy_url"})
+            # the metered document, reachable by the SAME key
+            g.query("CREATE (s:Source {id:$i, url:$u, title:'doc', "
+                    "documentKind:'report'})",
+                    params={"i": "shared5140", "u": "shared5140"})
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+            with pytest.raises(ValueError, match="metered `documents` set"):
+                tenant.update_entity("shared5140", documentKind="transcript")
+            kinds = g.query(
+                "MATCH (s:Source) WHERE s.id = 'shared5140' "
+                "RETURN s.documentKind ORDER BY s.url").result_set
+            assert [r[0] for r in kinds] == [None, "report"], (
+                f"a metered sibling was demoted behind a non-metered decoy: "
+                f"{kinds!r}")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1, \
+                "the multi-node write demoted a document out of the meter"
+        finally:
+            tenant.close()
+
+    def test_meter_predicate_halves_agree(self, reg_sdk, tmp_path):
+        """#5140: the `documents` predicate has ONE definition, in two halves.
+
+        `count_org_usage` counts with `DOCUMENT_METER_PREDICATE` (Cypher) and
+        the write guard tests with `is_metered_document_kind` (Python). The
+        escape above existed because the rule had a counter and no defender;
+        two halves that can drift would put it back, so pin them to each other
+        across the values the write paths actually produce (`''` is the
+        projection's CREATE default, #5026/D10; `'transcript'` is the capture
+        genre; `None` is a kind-less provenance Source).
+        """
+        from tortoise.quota import (DOCUMENT_METER_PREDICATE,
+                                    is_metered_document_kind)
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            g = tenant._get_proj().g
+            for kind in (None, "", "report", "brief", "transcript", "other"):
+                g.query("MATCH (s:Source) DETACH DELETE s")
+                g.query("CREATE (s:Source {url:'probe5140', documentKind:$k})",
+                        params={"k": kind})
+                # ⛔ Through the COUNTER, not through a copy of the predicate: the
+                # wiring `_count_resource` -> `DOCUMENT_METER_PREDICATE` is what
+                # the write guards are pinned against, so a constant that stopped
+                # being used would show up here instead of passing silently.
+                counted = count_org_usage(tid, "documents", sdk=tenant)
+                assert bool(counted) == is_metered_document_kind(kind), (
+                    f"predicate halves disagree on {kind!r}: "
+                    f"count={counted} python={is_metered_document_kind(kind)}")
+                g.query("MATCH (s:Source) DETACH DELETE s")
+        finally:
+            tenant.close()
+
+    def test_session_commit_transcript_merge_cannot_demote_a_document(
+            self, reg_sdk, tmp_path):
+        """#5140 P1 (review cycle 3) — the FOURTH writer of the meter key.
+
+        `/v1/sessions/commit` mints the session transcript with
+        ``s.documentKind='transcript'`` written UNCONDITIONALLY (a plain `SET`,
+        unlike the `coalesce`-guarded `sourceKind`/`ingestedAt` on the same
+        statement), and the id it MERGEs on is fully caller-computable:
+        ``doc_<sha256(f'{session_id}:{captured_at}')>`` from two request-body
+        fields. So a tenant could seed a metered document `:Source` at that url
+        and demote it with one commit — repeatable per document, the same P1
+        escape this PR closes on the other doors (the defensible reading of
+        "one predicate, one defender" is every writer of the key).
+
+        FAILS on the pre-fix statement: the seeded `report` document reads
+        `'transcript'` after the commit and the meter drops 1 -> 0.
+
+        NON-OVER-REACH on the same statement: a commit for a session with NO
+        document at that id still mints the transcript, and the document's
+        OTHER fields still update (the clamp is a genre clamp, not a skipped
+        write) — so the negative arm cannot pass by the write being a no-op.
+        """
+        from tortoise import hosted_api  # noqa: I001
+        from tortoise.ids import content_hash
+
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            sid, cap = "sess_clamp_5140", "2026-02-03T04:05:06Z"
+            did = f"doc_{content_hash(f'{sid}:{cap}')}"
+            tenant.create_source(did, "document", documentKind="report")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+
+            payload, plan = _transcript_commit(sid, cap, summary="clamped")
+            hosted_api._execute_commit_writes(tenant, payload, plan)
+
+            rows = tenant._get_proj().g.query(
+                "MATCH (s:Source {url:$u}) "
+                "RETURN s.documentKind, s.title",
+                params={"u": did}).result_set
+            assert rows and rows[0][0] == "report", (
+                f"the /v1/sessions/commit transcript MERGE demoted a metered "
+                f"document to {rows!r}")
+            assert rows[0][1] == "clamped", (
+                "the commit must still write the document's other fields — "
+                "the clamp is a GENRE clamp, not a skipped write")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1, \
+                "the commit demoted a document out of the meter"
+
+            # non-over-reach: a session with no document at its derived id
+            # still mints its transcript (the genre stays writable where none
+            # is stored), and a transcript is not metered.
+            sid2 = "sess_clamp_5140_fresh"
+            did2 = f"doc_{content_hash(f'{sid2}:{cap}')}"
+            payload2, plan2 = _transcript_commit(sid2, cap, summary="fresh")
+            hosted_api._execute_commit_writes(tenant, payload2, plan2)
+            rows2 = tenant._get_proj().g.query(
+                "MATCH (s:Source {url:$u}) RETURN s.documentKind, s.sourceKind",
+                params={"u": did2}).result_set
+            assert rows2 and list(rows2[0]) == ["transcript", "document"], (
+                f"a fresh session transcript was not minted: {rows2!r}")
+            assert count_org_usage(tid, "documents", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+
+def _transcript_commit(session_id: str, captured_at: str, *, summary: str):
+    """A minimal, valid `CommitPayload`/`CommitPlan` for the hosted write
+    phase (#5140 review cycle 3): the transcript document and its Session are
+    written by `_execute_commit_writes` itself, so an EMPTY reconcile still
+    drives the statement under test — the same seam
+    `test_commit_supersession_parity.py` uses for the full path."""
+    from tortoise.commit_schema import (  # noqa: I001
+        BudgetDecision, CommitPayload, CommitPlan, ExtractorInfo,
+        ReconcileResult, Telemetry, TelemetryCounts, TelemetryExtractor,
+        TelemetryModel,
+    )
+
+    payload = CommitPayload(
+        session_id=session_id,
+        client_commit_id=f"ccid-{session_id}",
+        captured_at=captured_at,
+        extractor=ExtractorInfo(version="value@1.0.0", mode="byok",
+                                calibration_version="v3"),
+        summary=summary,
+        telemetry=Telemetry(
+            extractor=TelemetryExtractor(version="value@1.0.0", mode="byok",
+                                         calibration_version="v3"),
+            model=TelemetryModel(provider="anthropic", id="m", cfg_hash="h"),
+            counts=TelemetryCounts(kept=0, candidate=0, segment=0, window=1,
+                                   empty_windows=0),
+            keep_ratio=1.0, dedup_hits=0),
+    )
+    plan = CommitPlan(
+        payload=payload, duplicate=False, first_adjudication=True,
+        reconcile=ReconcileResult(points=[], entities=[]),
+        budget=BudgetDecision(outcome="ok", cumulative_after=0),
+    )
+    return payload, plan
+
 
 # ── #1911: object/subject writes count against the quota cap ──────────────
 

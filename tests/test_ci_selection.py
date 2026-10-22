@@ -380,6 +380,46 @@ def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
         )
 
 
+def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
+    """#9524 review I1/I3: a dependency-manifest diff must run the override guard.
+
+    `tests/test_spa_dependency_overrides.py` reads six files — the
+    `package.json` + `package-lock.json` of the three SPAs — and two of those
+    apps' manifests match NO `SOURCE_PATTERNS` row while `apps/` and `website/`
+    are both in `NON_PYTHON_PREFIXES`. Before the `CORE_ALSO` entries, such a
+    diff filtered to `changed == []` and took the docs-only early return (tier-1
+    smoke only) — measured on the branch that fixed I1/I3:
+    `select(['apps/graph-viz/package.json'])` -> `surfaces=[]` with the guard
+    absent. That is the #1349/#3332/#3616 silent-drop class on exactly the diff
+    the guard exists for: the graph-viz arm is the one that reds when the
+    manifest loses its `nanoid`/`source-map-js` floors again.
+
+    blog-admin reaches the guard through the OTHER arm: `website/apps/blog-admin/`
+    is a `onboarding` SOURCE_PATTERNS row, where the guard is dual-registered.
+
+    Asserted per FILE, on the guard's presence, not on non-emptiness: the
+    pre-entry tree selects tier-1 smoke for these paths, which is non-empty and
+    contains no guard.
+    """
+    guard = "test_spa_dependency_overrides.py"
+    for app, surface in (("apps/graph-viz", "core"),
+                         ("website/apps/dashboard", "core"),
+                         ("website/apps/blog-admin", "onboarding")):
+        for name in ("package.json", "package-lock.json"):
+            changed = f"{app}/{name}"
+            assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+            r = _sel([changed])
+            assert surface in r["surfaces"], (
+                f"{changed} selects {r['surfaces']} — the override guard is "
+                f"registered on `{surface}` and a manifest-only diff must reach it"
+            )
+            assert guard in r["test_files"], (
+                f"{changed} does not select {guard} — a dependency override could "
+                f"lose its floor (or gain one that clears nothing) with every "
+                f"check green"
+            )
+
+
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
     """#3673 indicator (2): the parity gate runs on every PR touching either copy.
 
@@ -2011,6 +2051,32 @@ def test_graph_census_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
 
 
+def test_legacy_id_normalise_tool_change_selects_core_not_tier1():
+    # #9523 review P1: tools/legacy_id_normalise.py is the CLI for the legacy-id
+    # normaliser and owns tests/test_8607_legacy_id_normaliser.py, registered
+    # `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, and the
+    # file whose entire content is the dry-run default, the
+    # `--apply`/`--revert`-requires-`--out` rule and the 0/1/2 exit contract ran
+    # none of its own cases. Registering the test under `core` does not help — a
+    # name in a surface's test_files only runs when that surface is already
+    # selected.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/legacy_id_normalise.py"])`
+    # -> surfaces=[], full=False, test_8607_legacy_id_normaliser.py absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic (pure functions over a dict — no graph, no Postgres), so selecting
+    # `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/legacy_id_normalise.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_8607_legacy_id_normaliser.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
 def test_write_op_reachability_tool_change_selects_core_not_tier1():
     # #4495 review P2: tools/write_op_reachability.py is the CLI that reports the
     # write-op allowance's stock/flow conversion, and its guard
@@ -2771,6 +2837,26 @@ def test_session_retrofit_audit_tool_change_fails_closed_to_full():
     assert r["full"] is True
     assert r["test_files"] == "ALL"
     assert "core" in r["surfaces"]
+
+
+def test_work_claim_tool_change_fails_closed_to_full():
+    # #5052/#9487 review P1: tools/work_claim.py owns tests/test_work_claim.py — the
+    # dispatch-time claim gate, whose 55 hermetic arms pin every fail-closed refusal the
+    # tool exists for. Same #3261/#4256 silent-drop class as the collision_preflight and
+    # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so without
+    # this TOOL_CARVEOUTS entry a claim-tool-only change came back as `changed=[]`,
+    # select() took the docs-only early return (surfaces=[], tier-1 smoke only) — which
+    # BYPASSES the `if not matched: matched.add("core")` fallback — so none of the arms
+    # ran on the file most likely to weaken the gate. Registering
+    # tests/test_work_claim.py under `core` in ci-surfaces.yml does NOT cover this: it
+    # applies to edits of the TEST file, not of the tool (the ci-surfaces.yml comment said
+    # the opposite and is corrected in the same change).
+    # Mutation check: removing the TOOL_CARVEOUTS entry filters the path out (docs-only
+    # early return), failing all three asserts below.
+    r = _sel(["tools/work_claim.py"])
+    assert r["full"] is True, r
+    assert r["test_files"] == "ALL", r
+    assert "core" in r["surfaces"], r
 
 
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
