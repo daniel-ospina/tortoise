@@ -3532,7 +3532,7 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: SHIPPED bytes and so compares equal by construction.  Edit the artifact, move
 #: the generation, update this pair — all three in one commit.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    6, "0ea7fd5b4192b38d0ee0a13bc71650503cad4834bfb4fe311ab02fd48c24a67a")
+    6, "6f8c94b5f333fe571b9e913e9cec17c00d537395bce804290d9f2fe7ca445ae9")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -3551,7 +3551,16 @@ _GENERATION_DIGESTS = {
     # has NOT shipped (it is introduced by the same unmerged PR), which is the
     # one case where rewriting its entry is legitimate: the never-rewrite rule
     # protects a SHIPPED digest, not an unshipped one.
-    6: "0ea7fd5b4192b38d0ee0a13bc71650503cad4834bfb4fe311ab02fd48c24a67a",
+    #
+    # ⚠️ RECOMPUTE AFTER EVERY MERGE OF MAIN. This digest was briefly stale by
+    # exactly one merge: a comment-only merge resolution on
+    # `tortoise-capture.ts` changed the bytes without changing the marker, the
+    # pin kept naming the pre-merge blob, and the install-contract test went red
+    # on a tree where the fix itself was correct. A comment-only edit still
+    # changes the sha256 — derive it, never assume it:
+    #   `sha256sum tortoise/pi-hooks/tortoise-capture.ts`
+    # (or `git show HEAD:tortoise/pi-hooks/tortoise-capture.ts | sha256sum`).
+    6: "6f8c94b5f333fe571b9e913e9cec17c00d537395bce804290d9f2fe7ca445ae9",
 }
 
 
