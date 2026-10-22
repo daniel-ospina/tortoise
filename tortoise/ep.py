@@ -1536,9 +1536,10 @@ class TortoiseEP:
             "endpoint rather than an operator's claim. Find and repair the "
             "node(s) — ONE NEW id per node, because a single literal would mint "
             "the duplicate-id #7822 / #8879 cross-key shapes; a node that "
-            "already carries a second identity key (``:Event {eventId}`` — no "
-            "repo writer gives it an ``id``) needs a DISTINCT id, never a copy "
-            "of that key:\n"
+            "already carries a second identity key (the ``session_indexer`` "
+            "producer mints ``(:Event {eventId})`` with no ``id``; "
+            "``_upsert_event`` sets both) needs a DISTINCT id, never a copy of "
+            "that key:\n"
             "  MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event) "
             "AND n.id IS NULL "
             "RETURN labels(n), id(n), n.pointKind, "
@@ -2403,7 +2404,17 @@ class TortoiseEP:
         # inputs, so such a node cannot change any belief; refusing on it would
         # turn a graph `main` computes (measured: iterations 9, converged, both
         # posteriors stamped) into a refused one.
-        if any(any(_i is None for _i in f[2]) for f in factors):
+        # GATED ON FLOW: a `-` factor transfers NO confidence — `_update_factor`
+        # returns before writing anything when `direction_flows` is
+        # (False, False) — so a NULL input there cannot move a named claim and
+        # refusing on it would reject a graph `origin/main` computes and that
+        # this guard exists to leave alone (measured: both the
+        # legacy-operator and the direct-edge `-` shapes leave `_node_cache` /
+        # `_msg_cache` untouched). Any OTHER direction is refused: an IMPL star
+        # dilutes its named claims by `scale = 1/(n-1)`, so even an unreached
+        # NULL target changes their messages.
+        if any(any(_i is None for _i in f[2]) and any(direction_flows(f[5]))
+               for f in factors):
             # No run set is published: `_last_affected` was reset at entry and is
             # assigned only after this guard. (`_last_skipped_factors` keeps what
             # the assembly just collected — those factors WERE dropped, so the

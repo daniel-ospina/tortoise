@@ -25034,8 +25034,9 @@ class TortoiseSDK:
             # REFUSE the run before the refusing pass computes or stamps anything
             # (``UnaddressableClaimError``, #9275 — it used to crash in the
             # ordering AFTER the batches had stamped the other nodes), so
-            # nothing is ever stamped ON IT (no id to key) — so it must never be
-            # reported — and
+            # no POSTERIOR is ever stamped on it — a graph-wide trivial stamp
+            # (``dream_all``) still writes its ``lastDreamedAt``, the residual
+            # #9275 records — so it must never be reported — and
             # the filter belongs HERE, in the WHERE clause, not only in the
             # Python post-pass: ``limit=1`` is applied by the engine BEFORE the
             # post-pass, so a single id-less row would consume the existence

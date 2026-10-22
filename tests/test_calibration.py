@@ -1775,10 +1775,52 @@ def test_the_refusal_names_a_non_point_offender_and_its_repair_finds_it(sdk):
     message = str(exc.value)
     assert ":Event" in message and "eventId" in message
 
-    # The probe the message prescribes finds the offender (its own predicate,
-    # run here): a :Point-only probe would return nothing.
-    found = proj.g.query(
-        "MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event) "
-        "AND n.id IS NULL RETURN labels(n), id(n), n.eventId").result_set
-    assert len(found) == 1
-    assert found[0][2] == "evt-9275"
+    # The probe the message PRESCRIBES is extracted from the message and run —
+    # a hand-copied equivalent would keep this green if only the message's query
+    # regressed to :Point-only (the prose still names the labels).
+    probe = next(ln.strip() for ln in message.splitlines()
+                 if ln.strip().startswith("MATCH (n) WHERE"))
+    found = proj.g.query(probe).result_set
+    assert len(found) == 1, f"the prescribed probe found {found!r}"
+    assert any("Event" in str(cell) for cell in found[0])
+
+
+def test_a_direction_less_edge_to_an_id_less_node_does_not_refuse(sdk):
+    """#9275 (review round 6): a `-` factor transfers NO confidence — not fatal.
+
+    ``_update_factor`` returns before writing anything when ``direction_flows``
+    is ``(False, False)``, so a NULL input on such a factor cannot move a named
+    claim. Refusing on it would reject a graph ``origin/main`` computes — the
+    same falsifier the id-less-OPERATOR arm is exempted by. Any OTHER direction
+    stays fatal: an IMPL star dilutes its named claims by ``scale = 1/(n-1)``,
+    so even an unreached NULL target changes their messages.
+
+    The fixture needs a NON-EMPTY affected set, or no factor forms at all and
+    the test proves nothing (measured: a lone `-` edge to an id-less node yields
+    ``affected == set()``, ``factors == []``): two calibrated claims behind an
+    operator give the affected set, and the `-` direct edge off the TARGET is the
+    factor that carries the NULL input.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "A", status="live")
+    b = sdk.create_point("statement", "B", status="live")
+    for p in (a, b):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", a["id"], [b["id"]])
+    proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
+    proj.g.query(
+        "MATCH (x:Point {id:$b}), (n:Point) WHERE n.id IS NULL "
+        "CREATE (x)-[:IMPL {direction:'-'}]->(n)", params={"b": b["id"]})
+
+    # The factor carrying the NULL input really is assembled (so the refusal
+    # this test forbids would otherwise fire on it).
+    ep = sdk._get_ep()
+    factors = ep._affected_factors(ep._affected_claims([a["id"]], 2))
+    assert any(f[5] == "-" and None in f[2] for f in factors), factors
+
+    out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    assert out["converged"] is True
+    posterior = proj.g.query(
+        "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha",
+        params={"i": a["id"]}).result_set
+    assert posterior[0][0] is not None
