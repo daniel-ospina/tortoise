@@ -15,7 +15,7 @@ the contract: what the body may contain, and what each construct renders as.
 
 | You write | You get |
 |---|---|
-| `##`–`####` headings | `<h2>`–`<h4>` — the post title supplies the page's `<h1>` |
+| `#`–`####` headings | `<h2>`–`<h4>` — the post title supplies the page's `<h1>`, so a single `#` is demoted to `<h2>` (a body `<h1>` would be an SEO defect) |
 | `**bold**`, `*italic*`, `` `code` `` | the obvious tags |
 | `[text](https://example.com)` | an external link, `target="_blank"` + `rel="noopener"` |
 | `[text](/blog/other-post)` or `[text](#a-heading)` | an **internal** link — same tab, no `target` |
@@ -23,8 +23,9 @@ the contract: what the body may contain, and what each construct renders as.
 | pipe tables (`\| a \| b \|`) | a real `<table>`, wrapped so it scrolls on mobile |
 | `> quote` | a blockquote |
 
-**Headings get anchors automatically.** Every `##`/`###`/`####` heading is given an `id` derived from
-its text, so a deep link like `/blog/a-post#why-it-matters` works without you doing anything.
+**Headings get anchors automatically.** Every heading below the title — `#` through `####` — is given
+an `id` derived from its text, so a deep link like `/blog/a-post#why-it-matters` works without you
+doing anything.
 
 ⚠️ **Raw HTML does not render.** `<table>`, `<div>`, `<iframe>` etc. publish as visible text. Use the
 markdown construct instead.
@@ -39,8 +40,8 @@ Write the marker on its own line:
 [[toc]]
 ```
 
-It is replaced with a linked table of contents built from the article's `##` headings **after**
-parsing — so the links can never drift from the headings they name.
+It is replaced with a linked table of contents built from the article's level-2 headings (`#` and
+`##`) **after** parsing — so the links can never drift from the headings they name.
 
 **If your body already has a hand-written TOC** in this shape, it is recognised and replaced too —
 no need to convert it:
@@ -52,8 +53,9 @@ no need to convert it:
 2. Second section
 ```
 
-The generated version replaces the paragraph *and* the list. If there is no `##` heading to link to,
-your hand-written list is left alone (content is never deleted to make room for an empty replacement).
+The generated version replaces the paragraph *and* the list. If there is no level-2 heading (`#`
+or `##`) to link to, your hand-written list is left alone (content is never deleted to make room for
+an empty replacement).
 
 ---
 
@@ -102,8 +104,8 @@ colon. `> Quick answers are short.` is an ordinary blockquote — only `Quick an
 
 ## FAQ section
 
-Give the section an `##` heading containing **"FAQ"** or **"Frequently asked"**, then make **each
-question an `###` heading** and the answer the prose beneath it:
+Give the section a level-2 heading (`#` or `##`) containing **"FAQ"** or **"Frequently asked"**, then
+make **each question an `###` heading** and the answer the prose beneath it:
 
 ```text
 ## FAQ
@@ -189,7 +191,6 @@ transcript separately rather than pasting it into the article.
 ## What is *not* supported
 
 - Raw HTML — escaped, publishes as text.
-- Single-`#` headings — the post title is the page's `<h1>`, and a lone `#` publishes as literal text.
 - Footers/footnote syntax, definition lists, `<details>`.
 - Autolinked bare URLs — link them explicitly.
 - Anything requiring a custom `id`: heading anchors are generated from heading text.
