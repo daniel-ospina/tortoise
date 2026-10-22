@@ -1297,39 +1297,56 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     """Close the same REVERSE ratchet one level up: the guard's OWN inputs.
 
     `test_every_in_scope_page_is_selectable_by_ci` covers the pages in the derived
-    scope, but four inputs change that scope or the rule WITHOUT being a page — the
+    scope, but five inputs change that scope or the rule WITHOUT being a page — the
     shared extractor `tests/_html_links.py` (the rule itself), `website/_redirects`
     (which pages `_canonical_redirect_targets` drops from scope),
     `website/functions/blog/[[path]].ts` (what `_function_serves` resolves the blog
-    link against), and `tortoise/quadrature.py` (whose EP factors
+    link against), `tortoise/quadrature.py` (whose EP factors
     `test_docs_states_the_formulas_quadrature_actually_computes` derives the
-    /docs expectation FROM). Before each was listed, a PR editing only that one
-    either selected no surface (`website/_redirects`, `website/functions/blog/
-    [[path]].ts`: `surfaces=[]`) or fell through to the `core` fallback
-    (`tests/_html_links.py`, `tortoise/quadrature.py`: `surfaces=['core']`) — and
-    in every case this file never ran, which is the property this ratchet pins.
-    Coverage breadth is NOT part of that property, and listing an input can cost
-    it: the two `website/` inputs go from the 57-file tier-1 set to the 125-file
-    `onboarding` surface, trading three curated-smoke files (`test_config.py`,
-    `test_guard.py`, `test_reaper_orphan.py` — the same three the legal-drafts
-    note below counts), while a `tests/`- or
-    `tortoise/`-prefixed input REPLACES its `core` fallback (633 files) with that
-    125-file surface — measured at this head, and narrower on purpose (a single
-    matrix consumer, per the `tests/_html_links.py` comment in
-    `tools/ci_selection.py`); `CORE_ALSO` is the lever if that breadth is ever
-    wanted back. The two legal drafts at the end of this docstring are NOT here
-    because that route costs the same three tier-1 files there. `tortoise/sdk.py` is a
-    fifth rule input
-    of the same shape
-    (the status vocabulary, the capture cap, the `_extract_session_v2` call sites
-    are all parsed out of it), but it is a `SHARED_MODULES` member, so a PR
-    touching it selects the FULL matrix (`full=True`, measured) and cannot be
-    dropped this way. Verified before listing, i.e. at the head that introduced
-    each entry: `select(["website/_redirects"], ...)` returned `surfaces=[]` with
-    this file absent from `test_files`.
+    /docs expectation FROM), and `tortoise/commit_schema.py` (whose `Point` /
+    `point_content_id` contract is the evidence under the FAQ's published
+    traceability sentence).
 
-    The fourth is the sharpest, and it was the one still broken at #9607 (the other
-    three were selectable at that head — re-measured):
+    Before each was listed, a PR editing only that one never ran this file — but by
+    TWO mechanisms, and which one applies decides whether listing it costs
+    coverage. `website/_redirects` and `website/functions/blog/[[path]].ts`
+    selected NO surface (`surfaces=[]`). `tests/_html_links.py`,
+    `tortoise/quadrature.py` and `tortoise/commit_schema.py` fell through to the
+    `core` fallback (`surfaces=['core']`), where a non-empty `surfaces` says
+    nothing about this file — it is not registered in `core` (see
+    `_guard_reachable_for`'s docstring). Either way the guard never ran; that, and
+    NOT the breadth of the selection, is the property this ratchet pins.
+
+    Breadth is a separate, per-input fact, because a `SOURCE_PATTERNS` match
+    REPLACES the `core` fallback (#2938):
+
+      * `tests/_html_links.py` has no `CORE_ALSO` entry, so a change to it now
+        selects the `onboarding` set ALONE and drops the `core` pool it used to
+        select. That narrowness is deliberate (a single matrix consumer, per its
+        comment in `tools/ci_selection.py`) — it is the #2938 trade, not a
+        non-event.
+      * `tortoise/quadrature.py` and `tortoise/commit_schema.py` are each paired
+        with a `CORE_ALSO` entry, so a change to either selects
+        `['core','onboarding']` and KEEPS the core pool it selected before;
+        without that half the fix would trade one silent drop for another. Both
+        halves of both are pinned in `tests/test_ci_selection.py`
+        (`test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard`,
+        `test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard`).
+      * the two `website/` inputs go from the 57-file tier-1 set to the
+        `onboarding` surface, trading three curated-smoke files (`test_config.py`,
+        `test_guard.py`, `test_reaper_orphan.py`).
+
+    `tortoise/sdk.py` is a sixth rule input of the same shape (the status
+    vocabulary, the capture cap, the `_extract_session_v2` call sites are all
+    parsed out of it), but it is a `SHARED_MODULES` member, so a PR touching it
+    selects the FULL matrix (`full=True`, measured) and cannot be dropped this way.
+    Verified before listing: every `website/` input above measured `surfaces=[]`,
+    and every `core`-fallback input measured `surfaces=['core']` with this file
+    absent from `test_files`.
+
+    `tortoise/quadrature.py` is the sharpest of the five, and it was one of the two
+    still broken at #9607 (`tests/_html_links.py` and the two `website/` inputs
+    were already selectable there — re-measured);
     `test_docs_states_the_formulas_quadrature_actually_computes` derives its
     expected factors from `tortoise/quadrature.py` itself, and its own docstring
     says *"editing `quadrature.py` itself reds the page that describes it"*. That
@@ -1341,6 +1358,13 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     formula pin therefore could not run on a QUADRATURE-ONLY PR — a PR that also
     touched a page selecting `onboarding` still ran it.
 
+    `tortoise/commit_schema.py` was in the IDENTICAL state at that head (measured:
+    `surfaces=['core']`, this file absent from `test_files`), so a quadrature-only
+    fix would have left the sibling instance open — the one change that relaxes
+    `Point.source_ref`, falsifying the FAQ's published traceability sentence, would
+    still never run the pin on the page. It is pinned here too, both halves
+    (#9607 review P2, round 5).
+
     `tests/test_ci_selection.py::test_every_source_pattern_is_selectable` cannot
     catch this direction: it is derived FROM `SOURCE_PATTERNS`, so deleting an entry
     deletes its own only case (review finding, #3962). These paths are therefore
@@ -1350,10 +1374,12 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
     drafts this file mirrors (`docs/drafts/2026-08-08-657-privacy-draft.md`,
     `...-tos-draft.md`) are also select-no-surface inputs — a draft-only edit runs
     57 tier-1 files and NOT this file — but they are deliberately NOT pinworthy by
-    the naive route: adding them to `SOURCE_PATTERNS["onboarding"]` drops three
-    tier-1 files (`test_config.py`, `test_guard.py`, `test_reaper_orphan.py`) and
-    adding `CORE_ALSO` on top of that flips `slow_run` to True. They need the
-    per-path extra-tests map (#9650, #3435 §2), not a pattern entry.
+    the naive route. The discriminator is not cost: the three tier-1 files that
+    route would drop (`test_config.py`, `test_guard.py`, `test_reaper_orphan.py`)
+    are a cost two of the pinned inputs above already pay. It is that a draft-only
+    edit is CONTENT DRIFT, so the intended fix is the per-path extra-tests map
+    (#9650, #3435 §2), not a surface pattern; pinning them also flips `slow_run` to
+    True on top of that. Tracked, not silently accepted.
     """
     unselectable = [
         path
@@ -1362,6 +1388,7 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
             "website/_redirects",
             "website/functions/blog/[[path]].ts",
             "tortoise/quadrature.py",
+            "tortoise/commit_schema.py",
         )
         if not _guard_reachable_for(path)
     ]
@@ -1370,7 +1397,8 @@ def test_every_guard_input_is_selectable_by_ci() -> None:
         f"touching only such an input never executes test_website_docs_consistency.py, "
         f"so the guard silently stops covering the pages it was written for — the "
         f"#1349/#3332 silent-drop class. Add them to SOURCE_PATTERNS['onboarding'] "
-        f"in tools/ci_selection.py."
+        f"in tools/ci_selection.py and, when the input used to fall back to `core`, "
+        f"to CORE_ALSO as well (#2938)."
     )
 
 

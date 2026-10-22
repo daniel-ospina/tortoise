@@ -1170,6 +1170,17 @@ class _EntityHandlers:
         # reason `_stub` (the Event stub discriminator) is in `_SUBJECT_HANDLED`
         # / `_OBJECT_HANDLED`, and it is not a declared node prop.
         "_stub_completion",
+        # #9451: the SIBLING discriminator on the same `SourceCreated` record, and
+        # for the same reason it belongs here — a payload key that decides replay
+        # behaviour is server-managed, not a node property. Only
+        # `sdk._materialize_session_source` (this version) sets it; it says "the
+        # record's `ingestedAt` is the instant the live write STORED, read back
+        # from the node", which is what licenses `_upsert_source`'s ON MATCH arm
+        # to apply that value. A record written before #9451 carries no marker, so
+        # the arm stays the no-op it always was for those lines (a legacy `now`
+        # must not start MOVING an instant the pre-fix replay reproduced
+        # faithfully — #9451 review round 3, ISSUE 2).
+        "_ingestedAtStored",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -5669,6 +5680,46 @@ class _EntityHandlers:
             "                     WHEN s.contentHash IS NULL OR s.contentHash <> $hash "
             "                     THEN coalesce($updatedAt, $now) "
             "                     ELSE coalesce(s.updatedAt, $updatedAt) END, "
+            # #9451: the RECORDED ingest instant, applied on the arm that has a
+            # node to land on. The capture writer keeps its `coalesce(s.ingestedAt,
+            # $now)` live SET (#398's never-overwrite contract) but now states in
+            # its `SourceCreated` payload the instant it READ BACK from the node —
+            # the earlier writer's when the stub already existed. This clause did
+            # not exist, so on the arm where the node is present when the record
+            # folds (`rebuild()`, whose per-record replay re-mints the stub from a
+            # `PointAdded` record at the REPLAY clock first) the node kept a
+            # replay-clock value while live held the recorded one. Measured on a
+            # stub minted earlier by `create_point(session_id=…)`: live
+            # `...468430` vs rebuilt `...471988` — the recovery path silently
+            # re-ordering session Sources in the recency computation.
+            #
+            # ⛔ GATED ON `$stub_completion`, exactly like `version` above, and for
+            # the same reason in the other direction: this writer's live ON MATCH
+            # never touches `ingestedAt`, so an UNGATED clause would make a
+            # replayed `create_source`/index record (whose live write preserved
+            # the node's first instant) OVERWRITE it, i.e. trade one
+            # live≠replay divergence for another. `coalesce($ingestedAt, …)` keeps
+            # a legacy/foreign capture record without the key a no-op.
+            # `ingestedAt` does not test `s.contentHash`, so its position inside
+            # this clause is free of the #8870/#7362 write-order rule (only items
+            # that READ the hash must precede the guarded write, which stays LAST).
+            #
+            # ⛔ ALSO GATED ON `$ingestedAtStored` (#9451 review round 3,
+            # ISSUE 2), and that second gate is load-bearing: `$stub_completion`
+            # alone is true on PRE-#9451 capture records too, whose `ingestedAt`
+            # is the capture clock the live write never stored. Applying one of
+            # those would MOVE a node the pre-fix replay reproduced faithfully —
+            # shape: `create_source("session:S1")` created the node at T0 and
+            # journaled it, a pre-change capture completed it (record states
+            # `now`), live keeps T0 via the coalesce, and pre-fix both engines
+            # replayed T0 = live. With only the `$stub_completion` gate the
+            # replay would land the never-stored `now` and manufacture the exact
+            # live≠replay divergence this issue exists to remove. The marker is
+            # set by the ONE producer that journals what the write stored, so a
+            # legacy line stays a no-op.
+            "           s.ingestedAt = CASE WHEN $stub_completion AND $ingestedAtStored "
+            "                             THEN coalesce($ingestedAt, s.ingestedAt) "
+            "                             ELSE s.ingestedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
             # #3644: the window start moves ONLY on the same hash-diff gate as
             # `version`/`updatedAt` — a create/stub-completion (stored hash
@@ -5760,6 +5811,13 @@ class _EntityHandlers:
                 # `_SOURCE_CAPTURE_REPLAY_PROPS`). Read as a parameter, never
                 # persisted — `_META_KEYS` keeps it off the node.
                 "stub_completion": bool(ev.get("_stub_completion")),
+                # #9451: the record states the instant the live write STORED
+                # (`sdk._materialize_session_source` reads it back off the node),
+                # rather than the capture clock. Absent on every record written
+                # before that change — `bool(None)` is False, so those keep the
+                # pre-#9451 behaviour on the ON MATCH arm instead of being moved
+                # onto a `now` the live write never stored.
+                "ingestedAtStored": bool(ev.get("_ingestedAtStored")),
                 "ext": ev.get("externalId", ""),
                 "fmt": ev.get("format"),
                 "sp": ev.get("source_path"),

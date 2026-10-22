@@ -738,6 +738,30 @@ SOURCE_PATTERNS = {
                    # #3261/#3616/#8334 silent-drop class.
                    "tools/ts/",
                    "config/pages-upload-classification.txt",
+                   # PR #9652 review (P2): `tests/test_website_static.py`'s new
+                   # `TestProductRootMarkerContract` has THREE subjects, and only
+                   # two of them selected this surface — `website/product.html`
+                   # (a row above) and `deploy-pages.yml` (deliberately unlisted,
+                   # so it takes the fail-closed FULL matrix). The third is
+                   # `tests/e2e/test_legal_pages.py`, which holds the
+                   # `PRODUCT_ROOT_MARKER` constant the guard parses: `tests/`
+                   # matched no SOURCE_PATTERNS row, so it fell back to `core` and
+                   # `test_website_static.py` — this surface only — never ran.
+                   # MEASURED before this entry: `--changed-files
+                   # tests/e2e/test_legal_pages.py --event pull_request` ->
+                   # surfaces=["core"], test_website_static.py ABSENT. So re-cutting
+                   # the marker by editing only the file the contract is named
+                   # after re-created the silent-green this PR fixes, with the
+                   # guard asleep — the #1349/#3332/#3616 silent-drop class, one
+                   # level down from where #9652 closed it. Same shape as
+                   # `tests/_html_links.py` above (the file implementing a guard's
+                   # rule needs the guard's reachability guarantee). Paired with a
+                   # CORE_ALSO entry below, because a named-surface match REPLACES
+                   # the `tests/` -> `core` fallback and would otherwise trade one
+                   # silent drop for another. Pinned by
+                   # tests/test_ci_selection.py::
+                   # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
+                   "tests/e2e/test_legal_pages.py",
                    # #9607: `tortoise/quadrature.py` is an input this guard
                    # DERIVES from — `test_docs_states_the_formulas_quadrature_
                    # actually_computes` reads both factors out of the module and
@@ -758,7 +782,24 @@ SOURCE_PATTERNS = {
                    # `tests/test_website_docs_consistency.py::
                    # test_every_guard_input_is_selectable_by_ci` pins it so the
                    # entry cannot be dropped again.
-                   "tortoise/quadrature.py"),
+                   "tortoise/quadrature.py",
+                   # #9607 review P2 (round 5): the SIBLING instance of the entry
+                   # above, one file over. `test_website_docs_consistency.py`
+                   # imports `Point` / `point_content_id` from this module and its
+                   # `test_commit_schema_requires_a_source_on_every_extracted_claim`
+                   # is the evidence under the FAQ's PUBLISHED traceability
+                   # sentence — so relaxing `Point.source_ref` is the one change
+                   # that can falsify what `website/faq.html` ships. Measured
+                   # before this entry: `select(["tortoise/commit_schema.py"])`
+                   # returned `full=False`, `surfaces=['core']`, this file ABSENT
+                   # from `test_files` — the same `core` fallback as quadrature,
+                   # so the change that reds the contract tests could edit them and
+                   # still never run the pin on the page. Paired with a `CORE_ALSO`
+                   # entry below (a named-surface match REPLACES the `core`
+                   # fallback, #2938) and pinned by
+                   # tests/test_ci_selection.py::
+                   # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
+                   "tortoise/commit_schema.py"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -1072,6 +1113,16 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # `test_gmm_proofs.py`). That half is pre-existing and is tracked
              # separately (#9621) rather than folded in here.
              "tortoise/quadrature.py",
+             # #9607 review P2 (round 5): `tortoise/commit_schema.py` is the other
+             # `core`-fallback input now registered in `onboarding` — same #2938
+             # trade, same remedy. Without this entry the very PR that relaxes
+             # `Point.source_ref` stops running the core pool it selects today
+             # (measured: `select(["tortoise/commit_schema.py"])` collapses to the
+             # `onboarding` set alone), i.e. the fix for one silent drop would
+             # create another. Pinned by
+             # tests/test_ci_selection.py::
+             # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
+             "tortoise/commit_schema.py",
              # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
              # entry of `eval` (the measurement sources), and a named-surface
              # match REPLACES the `tests/` -> core fallback — but `core`
@@ -1749,7 +1800,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              "apps/graph-viz/package.json",
              "apps/graph-viz/package-lock.json",
              "website/apps/dashboard/package.json",
-             "website/apps/dashboard/package-lock.json")
+             "website/apps/dashboard/package-lock.json",
+             # PR #9652 review (P2): `tests/e2e/test_legal_pages.py` is the third
+             # subject of the served-root marker contract in
+             # `tests/test_website_static.py::TestProductRootMarkerContract` (it
+             # holds the `PRODUCT_ROOT_MARKER` literal that guard parses). The
+             # `onboarding` SOURCE_PATTERNS row above is what makes that guard run
+             # on an e2e-only edit — but a named-surface match REPLACES the
+             # `tests/` -> `core` fallback, so without this entry the same diff
+             # would lose the `core` half: every core-registered test (including
+             # the ones reading this e2e harness) would silently drop out of the
+             # selection, trading one silent drop for another (the #7947 lesson on
+             # `tests/eval/write_path/`). Both halves are asserted by
+             # tests/test_ci_selection.py::
+             # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
+             "tests/e2e/test_legal_pages.py")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",

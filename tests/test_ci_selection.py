@@ -312,6 +312,53 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert "test_website_docs_consistency.py" in r["test_files"], changed
 
 
+def test_product_root_marker_guard_runs_on_a_legal_pages_only_diff():
+    """PR #9652 review (P2): the marker guard must run on the FILE it parses.
+
+    `tests/test_website_static.py::TestProductRootMarkerContract` pins three
+    surfaces together: `website/product.html`, the `PRODUCT_ROOT_MARKER`
+    literal in `tests/e2e/test_legal_pages.py`, and the DNS preflight grep in
+    `.github/workflows/deploy-pages.yml`. Only the first selected the guard —
+    `tests/e2e/test_legal_pages.py` matched no SOURCE_PATTERNS row and fell
+    back to `core`, where `test_website_static.py` (registered `onboarding`
+    only) does not live.
+
+    So re-cutting the marker by editing ONLY the e2e constant — the file the
+    contract is named after, and the edit PR #8597 and PR #9652 each had to
+    make — ran no guard, and the workflow kept grepping the old string: the
+    preflight's `::warning::` branch then skipped the tortoise-host half green.
+    MEASURED before the entries: `_sel(["tests/e2e/test_legal_pages.py"])` ->
+    `surfaces == ["core"]` with `test_website_static.py` ABSENT.
+
+    Both halves are asserted because the fix has both: the `onboarding`
+    SOURCE_PATTERNS row selects the guard, and the `CORE_ALSO` entry keeps
+    `core` (a named-surface match REPLACES the `tests/` -> `core` fallback).
+
+    Mutation check: dropping the SOURCE_PATTERNS row fails the `onboarding`
+    assert (surfaces become `["core"]`); dropping the CORE_ALSO entry fails
+    the `core` assert (surfaces become `["onboarding"]`).
+    """
+    changed = "tests/e2e/test_legal_pages.py"
+    assert (REPO / changed).exists(), f"the marker contract's subject is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False, (changed, r["full"])
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the guard that parses its "
+        "PRODUCT_ROOT_MARKER (test_website_static.py) never runs, so a marker "
+        "move in this file merges with the deploy preflight grepping a string "
+        "the page no longer serves (#8596/#8597 class, #9652 review P2)"
+    )
+    assert "test_website_static.py" in r["test_files"], (
+        f"{changed} does not select test_website_static.py — the served-root "
+        "marker contract has no guard on the one file that defines the marker"
+    )
+    assert "core" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the onboarding SOURCE_PATTERNS "
+        "match replaced the `tests/` -> core fallback, so every core-registered "
+        "test silently drops off the diff (CORE_ALSO entry removed?)"
+    )
+
+
 def test_the_capacity_guards_derived_source_selects_the_guard():
     """#3329/#8492: a change to the guard's DERIVED SOURCE must select the guard.
 
@@ -1064,7 +1111,7 @@ def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypat
     # `_readers_of` greps at `REPO`, the module global in THIS file — patch that one.
     monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
     monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
-    assert REPO == tmp_path, "the census must run against the throwaway tree"
+    assert tmp_path == REPO, "the census must run against the throwaway tree"
 
     # `scripts/` deliberately ABSENT — the fresh-clone / runner / new-lane state.
     assert _readers_of("AGENTS.md") == []
@@ -1977,21 +2024,77 @@ def test_quadrature_change_keeps_the_core_pool_and_runs_the_formula_guard():
     # `CORE_ALSO` fails the `test_record_schema_placement.py` assert (682 files ->
     # 125, the `onboarding` set alone); removing it from
     # `SOURCE_PATTERNS["onboarding"]` fails the `test_website_docs_consistency.py`
-    # assert (682 -> 633, the `core` pool alone).
+    # assert (682 -> 633, the `core` pool alone) — counts are dated anchors.
+    #
+    # The coverage asserts tolerate the FULL matrix: `test_files` is then the STRING
+    # "ALL", so a bare `in` test reads False. Promoting `tortoise/quadrature.py` to
+    # `SHARED_MODULES` is a strictly WIDER selection, and reding this pin for it
+    # would hand the next developer a red gate for better coverage (#9623 review
+    # P3). `full` is therefore treated as "runs everything", mirroring
+    # `tests/test_website_docs_consistency.py::_guard_reachable_for`'s treatment of
+    # the sentinel; the `surfaces` asserts hold under `full` too, which returns
+    # every surface.
     r = _sel(["tortoise/quadrature.py"])
-    assert r["full"] is False, r
-    assert "test_website_docs_consistency.py" in r["test_files"], (
+
+    def runs(name: str) -> bool:
+        return r["full"] is True or name in r["test_files"]
+
+    assert runs("test_website_docs_consistency.py"), (
         "the /docs formula guard is not selected by a change to the module it "
         "derives its expected factors from (SOURCE_PATTERNS entry missing?)", r)
     assert "onboarding" in r["surfaces"], (
         "the guard ran from some other surface — a quadrature-only diff must "
         "select `onboarding`, which is where the guard is registered",
         r["surfaces"])
-    assert "test_record_schema_placement.py" in r["test_files"], (
+    assert runs("test_record_schema_placement.py"), (
         "the core-registered pool is missing from a quadrature-only selection "
         "(CORE_ALSO entry removed?)", r)
     assert "core" in r["surfaces"], (
         "a quadrature-only diff dropped the core pool (CORE_ALSO entry removed?)",
+        r["surfaces"])
+
+
+def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
+    # #9607 review P2 (round 5): the SIBLING of the quadrature arm one test up, and
+    # the reason an enumeration claiming to be exhaustive was wrong. The /docs
+    # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
+    # (`tests/test_website_docs_consistency.py:56`) and derives an asserted
+    # expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
+    # claim` is the evidence under the FAQ's PUBLISHED traceability sentence — but
+    # a commit_schema-only diff selected `surfaces=['core']`, where that guard is
+    # not registered. So relaxing `Point.source_ref` reds the contract tests, gets
+    # its author to edit them, and never runs the pin on the page that publishes
+    # the claim.
+    #
+    # Same two halves as quadrature, and for the same reason (#2938): the
+    # `SOURCE_PATTERNS["onboarding"]` entry makes the guard run, and the
+    # `CORE_ALSO` entry keeps the `core` pool the match would otherwise REPLACE.
+    # Each half is named by a file registered ONLY in the surface it adds
+    # (`test_website_docs_consistency.py` is `onboarding`-only,
+    # `test_record_schema_placement.py` is `core`-only), so neither can mask the
+    # other.
+    #
+    # Mutation check, both measured: removing "tortoise/commit_schema.py" from
+    # `CORE_ALSO` fails the `test_record_schema_placement.py` assert (the selection
+    # collapses to the `onboarding` set alone); removing it from
+    # `SOURCE_PATTERNS["onboarding"]` fails the `test_website_docs_consistency.py`
+    # assert (the selection is the `core` pool alone).
+    r = _sel(["tortoise/commit_schema.py"])
+    files = r["test_files"]
+    docs_guard_runs = r["full"] is True or "test_website_docs_consistency.py" in files
+    core_pool_runs = r["full"] is True or "test_record_schema_placement.py" in files
+    assert docs_guard_runs, (
+        "the /docs guard is not selected by a change to `tortoise/commit_schema.py`, "
+        "whose `Point` contract it asserts the FAQ sentence against "
+        "(SOURCE_PATTERNS entry missing?)", r)
+    assert "onboarding" in r["surfaces"], (
+        "a commit_schema-only diff must select `onboarding`, where the guard is "
+        "registered", r["surfaces"])
+    assert core_pool_runs, (
+        "the core-registered pool is missing from a commit_schema-only selection "
+        "(CORE_ALSO entry removed?)", r)
+    assert "core" in r["surfaces"], (
+        "a commit_schema-only diff dropped the core pool (CORE_ALSO entry removed?)",
         r["surfaces"])
 
 
@@ -2491,6 +2594,63 @@ def test_the_capstone_census_pin_runs_on_a_main_py_change():
     assert "api" in r["surfaces"], r
     assert "test_7950_capstone_probe.py" in r["test_files"], r
     assert r["full"] is False, r
+
+
+def test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_it():
+    # PR #9668 review P1: `tests/test_5051_capture_receipt_key_registry.py` was
+    # registered in `core` ALONE, and `core` is a FALLBACK surface in
+    # `select()` (`if not matched: matched.add("core")`) — a named-surface match
+    # REPLACES it. Every subject the pin guards is a named-surface match:
+    #
+    #   * `tortoise/hosted_api.py` owns BOTH derivations the pin exists to hold
+    #     to the formatter — `_capture_receipt_buckets` (the delete path's orphan
+    #     sweep) and `_capture_server_owned_keys` (the client-write-refusal set
+    #     #3681 closed) — and is an EXACT `api` source pattern AND an EXACT
+    #     `onboarding` one;
+    #   * `website/apps/dashboard/src/captureStatus.js` is the JS reader pin
+    #     and matches `onboarding`;
+    #   * `tortoise/capture_receipts.py` — the ONLY intended change direction (a
+    #     FORMAT change) — falls through to `core`, which is what the original
+    #     row covers.
+    #
+    # So the pin fired only for a change that also moved the formatter: BOTH
+    # mutations #9668 used as its own evidence are `hosted_api.py`-only edits
+    # (a stale reconcile-bucket prefix; `hermes` dropped from the server-owned
+    # derivation), and a hosted_api.py-only diff selected `api`+`onboarding`
+    # with the pin ABSENT — the drift landed green. Same #1349/#2938/#3154
+    # silent-drop class (and same remedy: dual-registration) as
+    # `test_the_capstone_census_pin_runs_on_a_main_py_change` above and the
+    # #7809 / #8693 / #9068 `api` arms.
+    #
+    # Measured before the `api`/`onboarding` arms (2026-10-17, `select()`
+    # in-process): hosted_api.py -> surfaces=['api','onboarding'], pin ABSENT;
+    # captureStatus.js -> surfaces=['onboarding'], pin ABSENT;
+    # capture_receipts.py -> surfaces=['core'], pin PRESENT.
+    # Mutation check: removing either arm fails the assert below.
+    for source, surface in (
+        ("tortoise/hosted_api.py", "api"),
+        ("tortoise/hosted_api.py", "onboarding"),
+        ("website/apps/dashboard/src/captureStatus.js", "onboarding"),
+        ("tortoise/capture_receipts.py", "core"),
+    ):
+        r = _sel([source])
+        assert surface in r["surfaces"], (source, surface, r["surfaces"])
+        assert r["full"] is False, (source, r)
+        assert "test_5051_capture_receipt_key_registry.py" in r["test_files"], (
+            f"{source} selects {r['surfaces']} but does NOT run the #5051 "
+            "receipt-key pin — a re-spelled key at that site (or a moved "
+            "format) would merge green and only surface on the next full "
+            "run (#1349/#2938/#3154 silent-drop class)"
+        )
+
+    # The `onboarding` arm covers the `website/apps/dashboard/src/` PREFIX, not
+    # the dashboard root: its `package.json` / `package-lock.json` match no
+    # `onboarding` pattern and fall back to `core` (the #9524 note in
+    # `config/ci-surfaces.yml`). Pinned because the #9668 comment on that arm
+    # said `website/apps/dashboard/` was the pattern — a claim that would read
+    # as "a dashboard MANIFEST dependency is already covered" long after it
+    # stopped being true.
+    assert _sel(["website/apps/dashboard/package.json"])["surfaces"] == ["core"]
 
 
 def test_supabase_config_change_selects_core_not_tier1():
