@@ -2363,31 +2363,45 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
     # None`), so an unarmed deployment yields `record_write_failures: {}`,
     # `record_non_journal_skips: {}` and an empty `fly logs` grep — the "no
     # unexpected failure" half is then VACUOUSLY satisfied. But an ARMED
-    # deployment can be all-empty too: a durable write that failed or
-    # `circuit_open`-ed writes no row, an armed append with an unproven position
-    # writes no layer-1 row, and a capture that emitted no record writes nothing
-    # at all. Each of those is a different fault, so the bar may not read the
-    # empty result as `NOT_ARMED` alone (#9585 review).
-    for presence in ("no_journal", "record_position_unproven", "journal_event"):
-        assert presence in section, (
-            f"the presence requirement omits {presence!r} — an ARMED deployment "
-            "whose write FAILED, whose position was unproven, or which journaled "
-            "a row is then indistinguishable from an unarmed one"
-        )
-    assert "seam_unimportable" in section, (
-        "the bar does not say `seam_unimportable` is counted with NO DSN "
-        "present — an operator would read it as proof the seam was reached"
-    )
-    assert re.search(r"every reading above\s+\*\*?is empty or zero|is empty or zero", section), (
+    # deployment can be all-empty too (a durable write that failed, an armed
+    # journal-less write, a capture with no record to write), so the bar may not
+    # read the empty result as `NOT_ARMED` alone.
+    #
+    # Each assertion below pins a CLAUSE (a sentence and its meaning), never a
+    # bare token: `record_position_unproven` and `journal_event` already appear
+    # elsewhere in the section (the recipe-2 counter list and the SQL block), so
+    # a membership test on them is satisfied without the bar saying anything
+    # (#9585 review: three of the six assertions written this way were vacuous).
+    assert re.search(r"An all-empty reading is NOT a pass", section), (
         "the bar never says an all-empty reading is not a pass — an unarmed "
         "deployment counts nothing at all, so a bar written only as 'no growth' "
         "is vacuously green on the silent-inert deployment this exists to detect"
     )
-    assert re.search(r"unarmed.{0,400}?produced no record", section, re.S), (
-        "the bar attributes an all-empty reading to `NOT_ARMED` ALONE — the other "
-        "reachable cause is an ARMED deployment whose capture emitted no record, "
-        "and an operator sent to check the GitHub secret has no reading that "
-        "tells the two apart"
+    assert re.search(r"at least one reading must be present", section), (
+        "the bar states no presence requirement — name the reading that must "
+        "EXIST after a capture before the reason breakdown means anything"
+    )
+    assert re.search(r"If nothing appeared at all", section), (
+        "the bar has no arm for the case where the reading is empty — that case "
+        "is the whole point of the section"
+    )
+    # The reason vocabulary must be given MEANINGS that agree with the code, not
+    # just listed: `no_journal` is armed-but-journal-less and `seam_unimportable`
+    # means the seam never ran (so it is NOT evidence it was reached).
+    assert re.search(
+        r"`no_journal` — the record is \*\*armed\*\* on a deployment with \*\*no JSONL",
+        section,
+    ), (
+        "the bar does not say `no_journal` means an ARMED deployment with no "
+        "journal — an operator would read it as a landed write"
+    )
+    assert re.search(
+        r"`seam_unimportable` —[^`]*`?tortoise\.record_writer`? could not be imported",
+        section,
+    ), (
+        "the bar does not say `seam_unimportable` means the seam NEVER RAN — "
+        "without that meaning the exclusion is a bare assertion and its "
+        "inversion reads the same (it can be counted WITH a DSN present)"
     )
 
 

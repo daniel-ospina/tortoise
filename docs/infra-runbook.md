@@ -2698,32 +2698,35 @@ armed deployment:
 
 So the bar has **two parts, and BOTH are required**:
 
-1. **The seam was REACHED.** After one capture, at least one expected reading
-   must be *present* — **any** of:
-   - `record_non_journal_skips{reason="no_durable_journal"}` ≥ 1 (the M2 capture
-     lane declining, by design — see the bullets above);
-   - `record_write_failures` non-empty for **any** of `malformed_dsn` /
-     `no_tenant` / `circuit_open` / `write_failed` / `no_journal` — each is
-     counted only *after* the DSN resolved, so any of them proves the seam
-     exists and ran;
-   - `record_position_unproven` > 0 (`tortoise/monitoring.py`) — an armed
-     durable append that could not prove its position;
-   - new `journal_event` / `point` rows on the record project.
+1. **Something must have APPEARED.** ⛔ **An all-empty reading is NOT a pass.**
+   When the seam is unarmed, `write_live_record` returns *before counting
+   anything* — nothing on either counter, nothing in the WARN log — which is
+   **byte-identical** to a healthy zero. So at least one reading must be present
+   after a capture: any reason on `record_write_failures`, any reason on
+   `record_non_journal_skips`, `record_position_unproven` above zero, or a new
+   `journal_event` / `point` row on the record project.
 
-   `write_live_record` returns *before counting anything* when unarmed, so an
-   absent reading and a healthy zero are **byte-identical** on both recipes
-   above — which is why presence, not only the reason breakdown, is part of the
-   bar. ⛔ **`seam_unimportable` is NOT presence evidence** — it is counted with
-   no DSN present, so it proves nothing about arming. **If every reading above
-   is empty or zero, the capture wrote nothing — and that has two very different
-   causes:** the seam is **unarmed** (missing or blank GitHub secret, or a Fly
-   value the deploy did not stage), **or** the deployment is **armed and this
-   capture produced no record to write** (extraction disabled / no provider —
-   the state the Reproducibility checklist names). Do not read the empty result
-   as `NOT_ARMED` alone: tell them apart by taking a capture known to journal (a
-   per-graph SDK write under `TORTOISE_EVENT_LOG_BASE_DIR`) or by enabling
-   extraction, then re-reading. An all-empty reading is a **FAIL** either way —
-   but with an armed DSN it is not an arming failure.
+   **Which** reading appeared decides what it means, and the reasons are not
+   interchangeable:
+   - `no_durable_journal` — the M2 capture lane declining by design (above); the
+     row-producing path is a durable journal lane.
+   - `no_journal` — the record is **armed** on a deployment with **no JSONL
+     journal**, so the write has no source and no replay can heal it
+     (`tortoise/sdk.py`, `monitoring.py`). Armed, but the seam is never entered.
+   - `write_failed` / `circuit_open` / `no_tenant` — an armed write that did not
+     land (the #9264 baseline, an unreachable project, a missing tenant).
+   - `malformed_dsn` — a DSN that could **not** be parsed, so this one is
+     evidence of a *configured but broken* value, not of a working seam.
+   - `seam_unimportable` — `tortoise.record_writer` could not be imported, so the
+     seam **never ran**. **Not** evidence that it was reached.
+
+   **If nothing appeared at all**, the empty result does **not** tell you why:
+   it is equally the unarmed deployment (missing/blank GitHub secret, or a Fly
+   value the deploy did not stage), an unimportable seam, or a capture that had
+   no record to write (extraction disabled / no provider — the state the
+   Reproducibility checklist names). Do not read it as an arming failure by
+   default: take a capture known to journal (a per-graph SDK write under
+   `TORTOISE_EVENT_LOG_BASE_DIR`) or enable extraction, then read again.
 2. **No unexpected failure.** *Then*: **no growth in a reason other than the
    documented #9264 `write_failed` refusals, and none at all for `no_tenant` /
    `malformed_dsn` / `circuit_open`.** Those three are always a fail-and-fix:
