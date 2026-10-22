@@ -31,7 +31,9 @@
 #   RUNNER_AUTOSCALE_INTERVAL  seconds between passes (default 600 — a dead runner is replaced
 #                              within ~10 min, and a convergence pass is idempotent)
 #   RUNNER_AUTOSCALE_REPO      pool to serve (default daniel-ospina/tortoise; the tool's default)
-#   AUTOSCALE_PYTHON           interpreter to pin (default: the repo's .venv, else python3)
+#   AUTOSCALE_PYTHON           interpreter to pin (default: /usr/bin/python3, the checkout's
+#                              .venv, then python3 — the first one that is >= 3.12)
+#   AUTOSCALE_PYTHON_CANDIDATES  the whole candidate list, newline-separated — test seam
 #   AUTOSCALE_REPO_ROOT        checkout the schedule runs from (default: this script's repo)
 #   AUTOSCALE_ALLOW_WORKTREE=1  install from a linked worktree (default: refused — a worktree is
 #                              reaped when its PR merges, and the timer would then fail forever)
@@ -39,6 +41,10 @@
 #   AGENTS_DIR                 launchd dir (default $HOME/Library/LaunchAgents)
 #   AUTOSCALE_LOG              log path (default <state dir>/runner-autoscale.job.log)
 #   AUTOSCALE_INSTALL_DIR      where the RUNNABLE copy lives (default $HOME/.pi/agent/scripts)
+#   AUTOSCALE_SKIP_PROBE=1     arm the schedule even though the guard cannot measure here
+#                              (the install-time `--status` probe is what refuses that by default)
+#   AUTOSCALE_SHA256           hasher for the drift check (default sha256sum, else shasum -a 256)
+#   AUTOSCALE_PLATFORM         force one platform branch (systemd|cron|launchd) — test seam
 #
 # ⛔ WHY A COPY AND NOT THE CHECKOUT PATH. The timer must survive the checkout: a linked worktree
 # is reaped when its PR merges, and the main worktree's branch moves. The fleet's own machinery is
@@ -59,6 +65,8 @@ case "$INTERVAL" in ''|*[!0-9]*) echo "ERROR: RUNNER_AUTOSCALE_INTERVAL must be 
 [ "$INTERVAL" -ge 60 ] || { echo "ERROR: interval must be >= 60s (got $INTERVAL) — a tighter loop only hammers the API" >&2; exit 2; }
 
 usage() { sed -n '2,/^# EXIT/p' "$0" | sed 's/^# \{0,1\}//'; }
+# `--help` needs no checkout and must never be gated by the worktree/platform refusals below.
+case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 
 # ── the checkout the schedule runs FROM ────────────────────────────────────────────────────────
 # ⛔ A LINKED WORKTREE IS EPHEMERAL: it is deleted when its PR merges, so a timer pinned to
@@ -77,25 +85,39 @@ case "$_common" in
     fi ;;
 esac
 
-# ⛔ A STABLE INTERPRETER. The tool is stdlib-only on purpose, so the SYSTEM python is the right
-# pin: the repo's .venv lives in a worktree that is reaped with its PR, and a timer pointing at a
-# deleted interpreter fails forever while still reporting "installed".
-PYTHON="${AUTOSCALE_PYTHON:-}"
-if [ -z "$PYTHON" ]; then
-  if [ -x /usr/bin/python3 ]; then PYTHON=/usr/bin/python3
-  elif [ -x "$REPO/.venv/bin/python" ]; then PYTHON="$REPO/.venv/bin/python"
-  else PYTHON="$(command -v python3 || true)"; fi
+# ⛔ A STABLE INTERPRETER, CHOSEN BY THE FLOOR — NOT BY `-x`. The tool is stdlib-only on purpose,
+# so a SYSTEM python is the right pin (a repo .venv can be reaped with a worktree). But choosing by
+# existence alone picked `/usr/bin/python3` on EVERY box, and on macOS that is the Command Line
+# Tools' 3.9 — so the floor check below refused on a machine with a perfectly good 3.12 one line
+# further down the chain, and the `.venv` branch was unreachable dead code (round 9, finding 3).
+# Resolution order: AUTOSCALE_PYTHON (explicit; the ONLY candidate when set), /usr/bin/python3,
+# the checkout's .venv, then python3 on PATH — the FIRST one that satisfies the >= 3.12 floor wins.
+FLOOR_CHECK='import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)'
+PYTHON=""
+_TRIED=""
+if [ -n "${AUTOSCALE_PYTHON:-}" ]; then
+  _CANDIDATES="$AUTOSCALE_PYTHON"
+elif [ -n "${AUTOSCALE_PYTHON_CANDIDATES:-}" ]; then
+  # test seam: the full candidate list, in order (one per line)
+  _CANDIDATES="$AUTOSCALE_PYTHON_CANDIDATES"
+else
+  _CANDIDATES="/usr/bin/python3
+$REPO/.venv/bin/python
+$(command -v python3 || true)"
 fi
-[ -n "$PYTHON" ] && [ -x "$PYTHON" ] || { echo "ERROR: no python3 interpreter (set AUTOSCALE_PYTHON)" >&2; exit 2; }
-# INTERPRETER FLOOR, CHECKED AT INSTALL TIME. The tool refuses anything below 3.12 with
-# SystemExit(2) — and on macOS `/usr/bin/python3` is the Command Line Tools' 3.9, so an installer
-# that only tested `-x` wrote a job that verifies "active" and exits 2 on every fire, forever:
-# the "installed but inert" failure this script exists to prevent, one layer below its own check
-# (round 7, finding 2). Refuse BEFORE writing anything.
-"$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 12) else 1)' 2>/dev/null \
-  || { echo "REFUSED: $PYTHON is older than 3.12 — tools/runner_autoscale.py requires >= 3.12" >&2
-       echo "          point AUTOSCALE_PYTHON at a >= 3.12 interpreter." >&2
-       exit 2; }
+while IFS= read -r _cand; do
+  [ -n "$_cand" ] || continue
+  if [ -x "$_cand" ]; then
+    if "$_cand" -c "$FLOOR_CHECK" 2>/dev/null; then PYTHON="$_cand"; break; fi
+    _TRIED="${_TRIED} ${_cand}"
+  fi
+done <<EOF
+$_CANDIDATES
+EOF
+[ -n "$PYTHON" ] || { echo "REFUSED: no interpreter >= 3.12 — tools/runner_autoscale.py requires it." >&2
+                    echo "         too old:${_TRIED:- (none found)}" >&2
+                    echo "         point AUTOSCALE_PYTHON at a >= 3.12 interpreter." >&2
+                    exit 2; }
 TOOL="$REPO/tools/runner_autoscale.py"
 [ -f "$TOOL" ] || { echo "ERROR: $TOOL is missing — the schedule would run nothing" >&2; exit 2; }
 INSTALL_DIR="${AUTOSCALE_INSTALL_DIR:-$HOME/.pi/agent/scripts}"
@@ -107,22 +129,43 @@ INSTALLED="$INSTALL_DIR/runner_autoscale.py"
 # shim found no credential and launched the interactive device flow, and the installer hung for
 # its whole timeout having written NOTHING. So: no backticks in this file, and the gh directory is
 # resolved from real file candidates (no execution) and pinned.
+GH_BIN=""
 GH_DIR=""
-for _c in /usr/bin/gh /usr/local/bin/gh "$HOME/bin/gh"; do
-  [ -x "$_c" ] && { GH_DIR="$(dirname "$_c")"; break; }
+for _c in /usr/bin/gh /usr/local/bin/gh /opt/homebrew/bin/gh "$HOME/bin/gh"; do
+  [ -x "$_c" ] && { GH_BIN="$_c"; GH_DIR="$(dirname "$_c")"; break; }
 done
-[ -n "$GH_DIR" ] || GH_DIR="$(dirname "$(type -P gh 2>/dev/null || echo /usr/bin/gh)")"
+if [ -z "$GH_BIN" ]; then
+  GH_BIN="$(command -v gh 2>/dev/null || true)"
+  GH_DIR="$(dirname "${GH_BIN:-/usr/bin/gh}")"
+fi
 
 STATE_DIR="${RUNNER_AUTOSCALE_STATE_DIR:-$HOME/.pi/agent/state}"
 LOG="${AUTOSCALE_LOG:-$STATE_DIR/runner-autoscale.job.log}"
 ARGV_TAIL=""
 [ -n "${RUNNER_AUTOSCALE_REPO:-}" ] && ARGV_TAIL=" --repo $RUNNER_AUTOSCALE_REPO"
 
+# ⛔ THE FILL LEG'S PROVISIONER, IF THIS BOX HAS ONE, IS PINNED FOR THE TIMER TOO. The tool
+# resolves `install-ci-runner-x64.sh` itself, but a timer's cwd and PATH are not a shell's — a
+# schedule that can repair runners and never ADD one is the "installed but inert" half this
+# installer exists to avoid. Emitted ONLY when the file is really there: the tool treats
+# RUNNER_AUTOSCALE_PROVISIONER as authoritative, so a stale path would turn a working candidate
+# list into a refusal.
+PROVISIONER=""
+for _p in "$REPO/tools/install-ci-runner-x64.sh" "$HOME/.pi/agent/scripts/install-ci-runner-x64.sh"; do
+  [ -f "$_p" ] && { PROVISIONER="$_p"; break; }
+done
+CRON_ENV="PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
+[ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER"
+
 # ── platform detection, fail-closed ───────────────────────────────────────────────────────────
 has_systemd() { [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; }
 has_cron()    { command -v crontab >/dev/null 2>&1 && [ -n "$(command -v cron 2>/dev/null || command -v crond 2>/dev/null || ls /usr/sbin/cron 2>/dev/null)" ]; }
 
 platform() {
+  # A TEST SEAM, like AUTOSCALE_PYTHON: `has_systemd` needs /run/systemd/system, which no
+  # hermetic sandbox can create, so the systemd leg would otherwise be untestable on the macOS box
+  # where the fleet's own lanes run its suite.
+  if [ -n "${AUTOSCALE_PLATFORM:-}" ]; then echo "$AUTOSCALE_PLATFORM"; return; fi
   case "$(uname -s)" in
     Darwin) echo launchd ;;
     Linux)
@@ -131,6 +174,18 @@ platform() {
       else echo none; fi ;;
     *) echo unsupported ;;
   esac
+}
+
+# ── a sha256 hasher, on BOTH platforms ────────────────────────────────────────────────────────
+# ⛔ GNU `sha256sum` does NOT exist on macOS (its form is `shasum -a 256`). The plain substitution
+# yielded "" on both sides, so the comparison was "" = "" and the DRIFT line could never print: the
+# `--status` feature this file's header advertises was silently inert on the very platform the
+# launchd leg runs on. Resolved once, used by both `--status` and the install.
+_sha256() {
+  if [ -n "${AUTOSCALE_SHA256:-}" ]; then "$AUTOSCALE_SHA256" "$1" 2>/dev/null | cut -d' ' -f1; return 0; fi
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" 2>/dev/null | cut -d' ' -f1; return 0; fi
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" 2>/dev/null | cut -d' ' -f1; return 0; fi
+  return 1
 }
 
 render_systemd_service() {
@@ -153,6 +208,7 @@ WorkingDirectory=$REPO
 Environment=HOME=$HOME
 Environment=RUNNER_AUTOSCALE_STATE_DIR=$STATE_DIR
 Environment=PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+$( [ -n "$PROVISIONER" ] && printf 'Environment=RUNNER_AUTOSCALE_PROVISIONER=%s\n' "$PROVISIONER" )
 ExecStart=$PYTHON $INSTALLED${ARGV_TAIL}
 # A pass is idempotent, so a non-zero exit is a RECORD, not a reason to retry in a tight loop:
 # Restart= is deliberately UNSET, and the next timer fire re-evaluates from a fresh measurement.
@@ -176,6 +232,13 @@ UNIT
 }
 
 render_plist() {
+  # ⛔ PATH AND `gh` ARE PINNED HERE FOR THE SAME MEASURED REASON THE SYSTEMD UNIT PINS THEM. A
+  # launchd agent does NOT inherit the user's shell PATH: it gets
+  # /usr/bin:/bin:/usr/sbin:/sbin, where a Homebrew `gh` (/opt/homebrew/bin/gh) does not live. The
+  # tool then resolves `gh` to "", `read_pool` raises "gh is not on PATH", and every fire exits 2
+  # — installed, reports "installed", and inert forever (round 9, finding 2). PATH is widened to
+  # the same candidate list the unit uses, and RUNNER_AUTOSCALE_GH pins the resolved binary
+  # because the tool has no fallback for it.
   cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -193,6 +256,9 @@ $( [ -n "${RUNNER_AUTOSCALE_REPO:-}" ] && printf '    <string>--repo</string>\n 
   <dict>
     <key>HOME</key><string>$HOME</string>
     <key>RUNNER_AUTOSCALE_STATE_DIR</key><string>$STATE_DIR</string>
+    <key>PATH</key><string>$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>RUNNER_AUTOSCALE_GH</key><string>${GH_BIN:-gh}</string>
+$( [ -n "$PROVISIONER" ] && printf '    <key>RUNNER_AUTOSCALE_PROVISIONER</key><string>%s</string>\n' "$PROVISIONER" )
   </dict>
   <key>StartInterval</key><integer>$INTERVAL</integer>
   <key>RunAtLoad</key><true/>
@@ -209,16 +275,24 @@ cron_line() {
   if [ "$minutes" -lt 60 ]; then sched="*/$minutes * * * *"
   elif [ $(( minutes % 60 )) -eq 0 ] && [ $(( minutes / 60 )) -le 23 ]; then sched="0 */$(( minutes / 60 )) * * *"
   else sched="0 * * * *"; fi
-  printf '%s cd %s && %s %s%s >> %s 2>&1 # %s\n' \
-    "$sched" "$REPO" "$PYTHON" "$INSTALLED" "$ARGV_TAIL" "$LOG" "$LABEL-cron"
+  printf '%s %s; cd %s && %s %s%s >> %s 2>&1 # %s\n' \
+    "$sched" "$CRON_ENV" "$REPO" "$PYTHON" "$INSTALLED" "$ARGV_TAIL" "$LOG" "$LABEL-cron"
 }
 
 # ── status: "installed" is not "will fire" ────────────────────────────────────────────────────
 status() {
   if [ -f "$INSTALLED" ]; then
-    echo "run-copy: $INSTALLED sha256=$(sha256sum "$INSTALLED" 2>/dev/null | cut -d' ' -f1)"
-    if [ "$(sha256sum "$INSTALLED" 2>/dev/null | cut -d' ' -f1)" != "$(sha256sum "$TOOL" 2>/dev/null | cut -d' ' -f1)" ]; then
+    local run_sum repo_sum
+    run_sum="$(_sha256 "$INSTALLED" || true)"
+    repo_sum="$(_sha256 "$TOOL" || true)"
+    echo "run-copy: $INSTALLED sha256=${run_sum:-unavailable}"
+    if [ -n "$run_sum" ] && [ "$run_sum" != "$repo_sum" ]; then
       echo "DRIFT: the repo copy ($TOOL) differs from the RUNNING copy — re-run this installer"
+    fi
+    if [ -z "$run_sum" ] || [ -z "$repo_sum" ]; then
+      # ⛔ NEVER SILENT. Two unavailable readings must not look like "no drift": that is exactly
+      # the empty-string comparison this check was fixed from.
+      echo "WARNING: no sha256 hasher (sha256sum/shasum) — drift cannot be verified on this box" >&2
     fi
   else
     echo "run-copy: MISSING ($INSTALLED) — the schedule would run nothing"
@@ -287,7 +361,12 @@ case "$MODE" in
         rm -f "$INSTALLED" 2>/dev/null || true
     echo "removed: $LABEL.timer/.service + the runnable copy" ;;
       cron)
-        crontab -l 2>/dev/null | grep -vF "$LABEL-cron" | crontab - || { echo "ERROR: could not rewrite crontab" >&2; exit 1; }
+        # ⛔ `grep -vF` prints NOTHING and exits 1 when our line is the ONLY one, and `crontab -l`
+        # exits 1 on a box with no crontab yet — under `set -o pipefail` both made a SUCCESSFUL
+        # rewrite look failed ("could not rewrite crontab"). The `|| true` is on the READS only;
+        # the final write stays fatal.
+        { crontab -l 2>/dev/null | grep -vF "$LABEL-cron" || true; } | crontab - \
+          || { echo "ERROR: could not rewrite crontab" >&2; exit 1; }
         echo "removed: $LABEL-cron" ;;
       launchd)
         launchctl bootout "gui/$(id -u)/$PLIST_LABEL" 2>/dev/null || true
@@ -308,9 +387,26 @@ case "$PLATFORM" in
      echo "         Install one, or run tools/runner_autoscale.py from the fleet's controller loop." >&2
      exit 2 ;;
 esac
+# ⛔ "INSTALLED" MUST MEAN "IT WILL DO SOMETHING". One READ-ONLY pass with the pinned interpreter,
+# BEFORE anything is written. Exit 2 is the tool's own UNMEASURABLE verdict (no `gh` on PATH, no
+# memory reading, unreadable pool) — a schedule armed in that state fires every INTERVAL into a
+# refusal forever, which is the inert enforcer this file's header exists to refuse. `--status`
+# alone cannot settle it either: it only proves the unit/plist is LOADED. The probe's only write is
+# the tool's own run log (which it tolerates being unwritable); no schedule state exists yet, so a
+# refusal here leaves the box as it was. AUTOSCALE_SKIP_PROBE=1 arms it anyway.
+if [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
+  probe="$(RUNNER_AUTOSCALE_STATE_DIR="$STATE_DIR" "$PYTHON" "$TOOL" --json --status 2>&1)"
+  probe_rc=$?
+  if [ "$probe_rc" = "2" ]; then
+    echo "REFUSED: the guard cannot MEASURE on this box, so a schedule here would fire and do nothing." >&2
+    echo "         probe said: $(printf '%s' "$probe" | tail -1)" >&2
+    echo "         fix that reading (gh on PATH, memory readable), or AUTOSCALE_SKIP_PROBE=1 to arm it anyway." >&2
+    exit 2
+  fi
+fi
 mkdir -p "$STATE_DIR" "$INSTALL_DIR" || exit 1
 install -m 0755 "$TOOL" "$INSTALLED" || { echo "ERROR: could not install the runnable copy" >&2; exit 1; }
-echo "run-copy: $INSTALLED (sha256=$(sha256sum "$INSTALLED" | cut -d' ' -f1))"
+echo "run-copy: $INSTALLED (sha256=$(_sha256 "$INSTALLED" || echo unavailable))"
 case "$PLATFORM" in
   systemd)
     changed=0
@@ -340,9 +436,10 @@ case "$PLATFORM" in
     if crontab -l 2>/dev/null | grep -qF "$LABEL-cron"; then
       cur="$(crontab -l 2>/dev/null | grep -F "$LABEL-cron")"
       if [ "$cur" = "$line" ]; then echo "installed (unchanged): cron entry present"; exit 0; fi
-      crontab -l 2>/dev/null | grep -vF "$LABEL-cron" | { cat; echo "$line"; } | crontab - || exit 1
+      { crontab -l 2>/dev/null | grep -vF "$LABEL-cron" || true; } | { cat; echo "$line"; } | crontab - \
+        || exit 1
     else
-      { crontab -l 2>/dev/null; echo "$line"; } | crontab - || exit 1
+      { crontab -l 2>/dev/null || true; echo "$line"; } | crontab - || exit 1
     fi
     echo "installed: cron entry -> $line" ;;
   launchd)
