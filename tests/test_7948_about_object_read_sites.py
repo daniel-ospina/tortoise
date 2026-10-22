@@ -182,30 +182,28 @@ WHAT THIS PINS
    states the customer-callable figure TWICE, so the arm that checks it
    collects with `finditer` and compares SETS. A `re.search` binds the first
    statement only, and the second copy is then read by nothing.
-16. `test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion` — the
-   UNTYPED-WALK class is now DERIVED from the tree, not hand-listed: every
-   relationship bracket carrying no type at all, in a read clause, must own a
-   §13 row or appear in `_EXCLUDED_UNTYPED` **with the code fact that bounds
-   that walk** — in its own clause, or in an earlier clause of the same query
-   that binds one of its endpoints (Cypher matches each `MATCH` pattern
-   independently, so a constraint written for another walk does not count). This
-   is the class that was wrong five times running — each pass re-applied §13's
-   inclusion rule by hand and reached a different count, the last one finding 27
-   sites where the tree had 33 (the backup's all-edge dump and the
-   `backfill_v25` count among the six). **The same arm also censuses the
-   FRAGMENT half of that class** — a dash-delimited part carrying no clause of
-   its own (`_WALK = "-[r]->"`, then `"MATCH (n)" + _WALK + "(m)"`), which the
-   query-shaped census cannot see and which is owned by a row, an exclusion, or a
-   `_NON_LITERAL` pin. That census existed for three review cycles and was never
-   CALLED, so its docstring was a claim nothing executed and the bypass it
-   describes stayed open; it is wired here, with a synthetic part-assembled
-   fixture so the detection is falsifiable.
-17. `test_every_stated_exclusion_is_still_true` — an exclusion is not a
-   promise: its code facts are asserted inside the excluded symbol's span, and
-   (16) requires the fact that bounds THIS walk to sit in the walk's own clause —
-   so removing the constraint reds as an unowned read rather than silently
-   re-entering the class, and a second walk cannot inherit the first one's
-   exclusion.
+16. `test_the_empty_pattern_class_is_derived_and_declared` — the
+   UNTYPED-WALK class is DERIVED from the tree, not hand-listed: every
+   relationship pattern naming NO type — the bracketed `-[r]->`, the
+   bracket-less `(n)--()`, and a pattern comprehension
+   (`size([(n)-[r]->(m) | r])`) whatever clause introduces it — keyed on its
+   enclosing symbol, must own a §13 row or an `EMPTY_PATTERN` entry in
+   `tests/_about_call_time_census.py` saying why the walk cannot observe the
+   edge. This is the class that was wrong five times running — each pass
+   re-applied §13's inclusion rule by hand and reached a different count, the
+   last one finding 27 sites where the tree had 33 (the backup's all-edge dump
+   and the `backfill_v25` count among the six). `#9493` folded the guard's own
+   second derivation of the same class (`_EXCLUDED_UNTYPED`, bracket-only,
+   module-keyed, blind to the bracket-less spelling that was live at the merge)
+   into the `#9398` derivation the support module already carries, so there is
+   ONE derivation and ONE register; a walk split across string parts still
+   enters the census through the consumer the resolver follows.
+17. `test_no_empty_pattern_entry_outlives_its_site` — an exclusion is not a
+   promise: an `EMPTY_PATTERN` entry whose site no longer derives is stale and
+   reds here (it would excuse a read that is not there and keep the class
+   silently smaller than it is), and `test_no_empty_pattern_entry_is_also_a_row`
+   reds the dead-entry shape — a site that is BOTH a §13 row and a register
+   entry hides nothing today and would hide a real walk tomorrow.
 18. `test_a_docstring_is_prose_and_not_a_read_site` — a docstring is prose, not
    a query. The literal halves used to accept every string constant while the
    untyped census filtered prose, so a row kept *"the named symbol really reads
@@ -218,8 +216,8 @@ WHAT THIS PINS
    left that copy stale. The durable form is a POINTER, so the row must name
    §13's table and mark its own figure superseded.
 20. The mechanical floors: every arm that iterates a derived set asserts it
-   EXAMINED something (`assert census`, `assert pins`, `assert _EXCLUDED_UNTYPED`,
-   `assert fragments`, and the carrier arm's `assert checked`). A predicate that
+   EXAMINED something (`assert census`, `assert pins`, `assert register`,
+   and the carrier arm's `assert checked`). A predicate that
    silently stops recognising its candidates turns the arm green on an assertion
    it never made — the carrier arm was exactly that before its floor.
 21. `test_the_door_attribution_refuses_a_door_that_reaches_another_reader` —
@@ -242,22 +240,84 @@ WHAT THIS PINS
    inputs are the TABLE's twenty-two doors, not the 99-tool registry, so adding a tool
    does not move them — which is what makes them pinnable without churn.
 23. `test_the_gate_walk_comment_pins_no_wall_clock_figure` +
-   `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` — the `#9506` arms,
-   and the only ones here about this instrument's OWN prose rather than §13's. The
+   `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` +
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` +
+   `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` — the four
+   `#9506`/`#9522` arms, and the only ones here about this instrument's OWN prose rather
+   than §13's. The third is the `#9522` capture arm: it replays the removed figure
+   through each of the three SYNTHETIC positions (docstring, trailing comment, `#` block
+   above the `def`), then holds the LIVE function by containment (its docstring's first
+   line is in the capture) and by width (strictly more lines than the `#`-line
+   projection), plus the `#`-line floor that the capture widening would otherwise have
+   retired. The
    gate-walk comment in `_about_call_time_census.py` carried a duration a re-verifier
-   cannot settle — `measured 10.36 s of the control's 10.85 s` on the merge base, and
+   cannot settle — `measured 10.36 s of the control's 10.85 s` at
+   `fa84a473d:990-992`, the last main commit to carry it (NOT the merge base: measured
+   at this PR's base, `git show origin/main:tests/_about_call_time_census.py | grep -c
+   10.36` is `0`, `#9516` already removed the figure), and
    `~2.6 s of ~17 s` on an intermediate head of the branch — neither with the framing
    that produced it (whole arm? control step? `--durations=0`? which box?), the
    defect class three earlier rounds removed from that file. The rule is stated once
    as `_unframed_durations()`: a duration is a claim, and it is allowed only when the
    comment also carries the framing that produced it. ⚠️ The first version of the
    guard keyed on the self-denial PHRASE instead (`no (magnitude|wall-clock)` AND a
-   duration), which was **green on the merge base** — the text the PR exists to
-   replace names no denial — and would go green again on any rewording of the denial,
-   so it retired itself on the next prose edit. The predicate no longer reads the
-   denial at all, and the second arm is its non-vacuity: the merge-base string and
-   the intermediate string RED, a duration carrying its framing stays GREEN, and a
-   duration with only "one box" for company (hardware is not framing) REDs.
+   duration), which was **green on the pre-`#9516` main** — `fa84a473d:990-992`, the
+   text the PR exists to replace, names no denial — and would go green again on any
+   rewording of the denial, so it retired itself on the next prose edit. The predicate
+   now reads the CLAIM, and the only denial it reads is a negation of the framing
+   marker ITSELF: a STRONG denial (`not`, `never`, `without`, `n't`, `skipped`, …) AFTER
+   the marker is searched to the end of the sentence (a `,` `;` or `—` does not stop it),
+   while BEFORE the marker it is read only inside the marker's own clause
+   (`_CLAUSE_BREAK` ends its reach and `_DENIAL_WINDOW` caps it) — so
+   `# never taken; 10.36 s with --durations=0` is FRAMED while its mirror reds, and that
+   before-side cut is what keeps `# no gating change: 14.4 s whole arm, --durations=0`
+   framed. A WEAK quantifier (`no`, `none`) is read only to the next clause break, and a
+   weak quantifier that PREDICATES a measurement noun (`no framing was taken`) counts as
+   strong. ⚠️ That is a copy-level
+   heuristic, and its boundaries are stated rather than implied: it does not decide WHICH
+   marker a denial governs, so `# the control step was 14.4 s, not the whole arm` reds a
+   settleable figure, `i.e.`/`e.g.` read as sentence ends, and a denial more than
+   `_DENIAL_WINDOW` characters after its marker is framed — all filed as `#9531` with the
+   measurements. The second arm is the non-vacuity: the pre-`#9516`
+   string and the intermediate string RED, a duration carrying its framing stays GREEN,
+   and a duration with only "one box" for company (hardware is not framing) REDs.
+   ⚠️ **Three later corrections, each found by putting the removed string somewhere
+   else and watching the arm stay green.** (1) The capture kept only `#`-leading
+   lines, so the same figure in the function DOCSTRING, in a TRAILING comment, or in
+   the `#` block above the `def` went unnoticed — it now reads the function's whole
+   source plus that CONTIGUOUS block. (2) Framing was matched over the whole text, so
+   a comment that merely NAMED `--durations` while denying it passed; the window is
+   now the number's own line, and a marker whose OWN sentence denies it — before it
+   (`not measured with …`) or after it (`… was never taken`) — is not framing.
+   (3) The duration unit was `ms|s`, so `30 seconds` and `2.6 sec` — the same claim
+   re-spelled — was GREEN; every second-and-below unit word is in (`h`/`hours`
+   included), comma-grouped and double-spaced figures are read whole (`1,000 s`
+   reports as `1,000 s`), and `sha256s` is still refused.
+   ⚠️ **What those corrections do NOT close, measured by the `#9522` review (`#9531`).**
+   Framing is matched on the number's LINE, not per NUMBER, so a bare MENTION of a
+   marker on that line frames the figure — `… measured 10.36 s …, unlike the whole arm`
+   is GREEN — and a `#` block separated from the `def` by one blank line is not
+   captured at all. Both are filed as `#9531`, with the measurements, because binding
+   framing per number reds on legitimate prose (a figure whose framing wraps) and
+   folding blank lines in would absorb a PEER function's comment block. A third
+   re-spelling is silent for the same structural reason: a compound `min:sec` figure
+   (`2m36s`) never matches, because the `36s` start is preceded by `m`, so the
+   lookbehind refuses it — the same class, recorded with `#9531`.
+   The THIRD arm in this class,
+   `test_the_gate_walk_capture_reads_every_position_a_duration_is_written`, is the one
+   that EXECUTES the capture: it writes the removed figure into the DOCSTRING, a
+   TRAILING comment and the `#` block above the `def` of synthetic functions and
+   requires the capture to read all three, and then falsifies the live function's own
+   floor (`#`-line projection non-empty) and its `getsource` coverage (the docstring
+   first line present, and strictly more lines than the projection plus a `def`), so
+   neither the floor nor the capture can be a tautology. The FOURTH is the citation
+   arm: the prose that names where the pre-`#9516` figure came from is read back as
+   PROSE (module docstring + that arm's docstring), and it must not name a TREE as
+   that carrier — both forms now listed in `_STALE_GATE_WALK_ANCHORS` shipped in this
+   file and were false at the head that shipped them — it must name the
+   commit `fa84a473d:990-992`, and — where this checkout can reach the objects,
+   skipped rather than shallow-ified otherwise — that blob must carry the figure while
+   `origin/main`'s does not.
 
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
@@ -284,6 +344,8 @@ import ast
 import functools
 import inspect
 import re
+import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -489,102 +551,6 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     ),
 }
 
-#: Untyped walks that CANNOT observe the edge, keyed by the symbol that owns
-#: them: `row key -> (the code facts to assert in its span, why it is out).`
-#:
-#: ⚠️ **This table is what turns §13's *"the class is enumerated, not excluded"*
-#: from a promise into a check, and it exists because the previous four hand
-#: passes each produced a DIFFERENT answer.** Rows 24-27 were added by applying
-#: the section's own rule (*an unfiltered walk reads the edge without naming
-#: it*), and every subsequent reader of the section applied the same rule and
-#: got a different count — because the rule admitted, and nothing said where it
-#: STOPPED. An exclusion that is not written down is indistinguishable from an
-#: omission, so each one below carries the code fact that earns it and a red when
-#: that fact goes away.
-#:
-#: The two shapes that exclude are the two ways a walk can bound the RESULT SET
-#: away from the edge:
-#:
-#: * the relationship TYPE is restricted downstream (`type(r) IN [...]`), or
-#: * an ENDPOINT label excludes BOTH ends of every `aboutObject` triple.
-#:
-#: ⚠️ **The endpoint shape is stated against the SCHEMA, not against a memory of
-#: it (#9400 review).** The first cut said "`aboutObject` starts at a Point" and
-#: "its target is `:Object` (`STRUCTURAL_REL_LABELS`)" — the second half is true
-#: of the TARGET only (`STRUCTURAL_REL_LABELS` maps rel -> the TARGET's label,
-#: `projection/edges.py`), and the first half is FALSE: `session_link
-#: .ENTITY_LINKED_TRIPLES` permits `aboutObject` from a `Point`, an `Event` AND a
-#: `Session`, and `projection.create_about_edge` resolves its source across every
-#: label. The conclusions below hold either way — but the register's rationale is
-#: what a future exclusion copies, so it has to name the fact the schema actually
-#: carries: **a `aboutObject` source is `Point`/`Event`/`Session` (never `Subject`,
-#: never `Source`) and its target is `Object`.**
-#:
-#: A pattern-comprehension degree (`size([(old)-[x]-(y) | x])`) is the endpoint
-#: shape: it is anchored on a `:Source`, and no `aboutObject` starts or ends at a
-#: Source.
-_EXCLUDED_UNTYPED: dict[str, tuple[tuple[str, ...], str]] = {
-    "hosted_api.py::_load_commit_graph_state": (
-        (
-            "MATCH (o:Point {is_operator:true})-[r]->(t) ",
-            "WHERE type(r) IN ['IMPL','NAND'] ",
-        ),
-        "the walked relationship type is restricted to the operator pair, so an "
-        "`aboutObject` edge is filtered out before the row is returned",
-    ),
-    "mining.py::EpSafeCommit.verify_no_auto_wire": (
-        (
-            "MATCH (o:Point {is_operator:true})-[r]->(n:Point) ",
-            "MATCH (o:Point {id:$oid})-[r]->(s:Point) ",
-        ),
-        "both endpoints are pinned to `:Point`, and `aboutObject`'s target is "
-        "`:Object` (`STRUCTURAL_REL_LABELS`)",
-    ),
-    "projection/entities.py::_EntityHandlers._materialize_connector_source": (
-        (
-            "size([(old)-[x]-(y) | x]) AS deg",
-            "MATCH (old:Source)-[r:references]->(e:Event {eventId: $eid}) ",
-        ),
-        "a pattern-comprehension degree over a `:Source` re-point — no "
-        "`aboutObject` starts or ends at a Source",
-    ),
-    "sdk.py::TortoiseSDK.provenance": (
-        ("MATCH (s:Subject {id:$sid})-[r]->(n) ",),
-        "the walk is OUTGOING from a `:Subject`, and no `aboutObject` triple has a "
-        "`:Subject` source (`session_link.ENTITY_LINKED_TRIPLES`: the sources are "
-        "`Point`, `Event` and `Session`, the target is `Object`)",
-    ),
-    "sdk.py::TortoiseSDK._connected_pairs": (
-        (
-            "MATCH (op:Point {is_operator:true})-[r1]->(a:Point), ",
-            "MATCH (a:Point)-[r]-(b:Point) ",
-        ),
-        "BOTH walks pin every endpoint to `:Point` — the shared-operator pair and "
-        "the direct-edge pair — and `aboutObject`'s target is `:Object`",
-    ),
-    "session_source_migration.py::_OUT_TYPES": (
-        ("MATCH (old:Source {url:$u})-[r]->(t) ",),
-        "the walk is OUTGOING from a `:Source`, which no `aboutObject` starts at",
-    ),
-    "session_source_migration.py::_IN_TYPES": (
-        ("MATCH (n)-[r]->(old:Source {url:$u}) ",),
-        "the walk is INCOMING to a `:Source`, which no `aboutObject` targets",
-    ),
-    "session_source_migration.py::_DEGREE": (
-        (
-            "size([(old)-[x]-(y) | x]) AS deg",
-            "MATCH (old:Source {url:$u}) ",
-        ),
-        "a pattern-comprehension degree over a `:Source`",
-    ),
-    "session_source_migration.py::_delete_if_orphan": (
-        (
-            "size([(old)-[x]-(y) | x]) AS deg",
-            "MATCH (old:Source {url:$u}) ",
-        ),
-        "a pattern-comprehension degree over a `:Source`",
-    ),
-}
 
 #: Facts OUTSIDE the row's own symbol that make a computed-name reader a
 #: COMPLETE read, keyed by the row they belong to: `row key -> (the symbol the
@@ -749,6 +715,61 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
     return None
 
 
+def _owning_span(tree: ast.Module, symbol: str) -> tuple[int, int] | None:
+    """`_span`, plus one CLASS level down for a bare method name.
+
+    The census attributes a read to the innermost `def`, so a register entry may
+    name `_materialize_connector_source` without its class — `_span` only
+    resolves that spelling when the entry writes `Class.attr`. The register does
+    not, and a fact check that silently found NO span would be checking nothing.
+    """
+    found = _span(tree, symbol)
+    if found is not None:
+        return found
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for inner in node.body:
+            if _bound_name(inner) == symbol:
+                return (inner.lineno, inner.end_lineno or inner.lineno)
+    return None
+
+
+def _symbol_fact_text(rel: str, symbol: str) -> str:
+    """The source a stated exclusion FACT must appear in, or raise.
+
+    The symbol's own span, plus — ONE level, no recursion — the body of every
+    module-level constant that span NAMES. The second half is load-bearing and
+    was measured, not assumed: three of the nine entries have no Cypher in their
+    own span at all, because the walk lives in a query CONSTANT their body
+    executes (`session_source_migration._DEGREE` behind `_degree`,
+    `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`). Without it the arm would have
+    had to weaken those facts to the constant's NAME — a check that the entry
+    still mentions a symbol, which is the unread claim it exists to replace.
+
+    `rel` is spelled from the REPO root (`tortoise/projection/entities.py`,
+    as the register writes it), while a §13 row spells it from the package
+    (`projection/entities.py`); both forms resolve here.
+    """
+    path = PKG / rel.removeprefix("tortoise/")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tree = _module_tree(path)
+    span = _owning_span(tree, symbol)
+    assert span is not None, (
+        f"`{rel}::{symbol}` — the register names a symbol this module does not "
+        "bind, so its stated exclusion cannot be checked against any code"
+    )
+    text = "\n".join(lines[span[0] - 1 : span[1]])
+    for node in tree.body:
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        name = _bound_name(node)
+        if name is None or not re.search(rf"\b{re.escape(name)}\b", text):
+            continue
+        text += "\n" + "\n".join(lines[node.lineno - 1 : node.end_lineno or node.lineno])
+    return text
+
+
 def _reads_literally(value: str) -> bool:
     """True when ANY `aboutObject` bracket in this literal belongs to a READ.
 
@@ -771,7 +792,7 @@ def _reads_literally(value: str) -> bool:
     the file is green on the shipped rule, seventeen of them at `73e3c68b4`).
     """
     for match in _EDGE_PATTERN.finditer(value):
-        if _in_pattern_comprehension(value, match.start()):
+        if _call_time_census()._inside_pattern_comprehension(value, match.start()):
             return True
         clauses = _CLAUSE.findall(value[: match.start()])
         if clauses and " ".join(clauses[-1].upper().split()) in _READ_CLAUSES:
@@ -783,7 +804,8 @@ def _reads_naming_the_edge(tree: ast.Module, lo: int, hi: int) -> bool:
     """True when a Cypher READ clause inside [lo, hi] names the edge literally.
 
     ⚠️ **A DOCSTRING is prose, not a query, and it is skipped here** — the same
-    `_docstring_ids()` filter `_untyped_read_sites()` has always applied, threaded
+    `_docstring_ids()` filter the `#9398` derivation applies (`_docstrings` in
+    `tests/_about_call_time_census.py`), threaded
     through so the two halves of this census agree on what a read is. Without it
     a row kept its *"the named symbol really reads the edge"* verdict after the
     code stopped reading it: paste the old query into the function's docstring and
@@ -998,21 +1020,6 @@ def _literal_read_sites() -> dict[str, list[int]]:
     return found
 
 
-#: A Cypher relationship bracket with NO rel-type constraint: `[r]`,
-#: `[r*1..2]`, `[x]`, `[r {idx:0}]`. A bracket carrying a `:` outside a
-#: property MAP is either a TYPED read or a run-time type name — the
-#: carrier/computed-name half, which `_NON_LITERAL` already decides — so the
-#: colon is exactly the line between the two halves of this census. ⚠️ **The
-#: property map has to come out first**: Cypher allows `-[r {idx:0}]->` on an
-#: UNTYPED relationship, and the colon there is a key separator, so a bare
-#: `":" in bracket` test made an unconstrained all-edge walk invisible to the
-#: arm whose whole job is to derive the untyped class.
-_UNTYPED_BRACKET = re.compile(r"(?:<-|-)\s*\[([^\]\n]*)\]\s*(?:-|->)")
-
-#: The property map inside a relationship bracket — removed before the colon
-#: test, because `{idx:0}` is not a type.
-_PROPERTY_MAP = re.compile(r"\{[^}]*\}")
-
 #: The stand-in for a run-time hole in a reconstructed query string. Marks where
 #: a value is computed (a rel type, a label, an id) WITHOUT destroying the
 #: surrounding Cypher, so `[r:{rel}]` still reads as a bracket that carries a
@@ -1070,292 +1077,6 @@ def _query_text(node: ast.AST, docstrings: set[int]) -> tuple[str, int] | None:
         return text, (left or right)[1]
     return None
 
-
-def _in_pattern_comprehension(query: str, start: int) -> bool:
-    """Is the bracket at `start` inside a Cypher PATTERN COMPREHENSION?
-
-    Cypher opens one with a `[` that is still unclosed when the relationship
-    bracket is reached — `[(n)-[r]->(m) | r]`, `size([(n)-[r]->(m) | r])`. No
-    other construct puts a relationship bracket inside an unclosed `[` of the
-    same query string, so the delimiter test is exact rather than a heuristic.
-    """
-    depth = 0
-    for char in reversed(query[:start]):
-        if char == "]":
-            depth += 1
-        elif char == "[":
-            if depth == 0:
-                return True
-            depth -= 1
-    return False
-
-
-def _clause_opening_at(query: str, start: int):
-    """The LAST clause that starts the expression containing `start`.
-
-    For a walk inside a pattern comprehension the comprehension is the thing
-    that reads, so the segment is attributed to the clause that introduces the
-    comprehension (`SET`, `WITH`, `RETURN`) rather than to no clause at all.
-    """
-    prior = [clause for clause in _CLAUSE.finditer(query) if clause.start() < start]
-    return prior[-1] if prior else None
-
-
-def _untyped_read_segments(query: str) -> list[tuple[int, str, tuple[str, ...]]]:
-    """Every UNTYPED relationship bracket in a READ clause, with its CLAUSE segment.
-
-    Returns `(bracket offset, this walk's segment, the segments before it)`.
-
-    One rule, used by the census AND by the fixture that pins it: a bracket is
-    untyped when it carries no type after its property map is removed, and it is
-    a READ when the last Cypher clause before it is `MATCH`/`OPTIONAL MATCH`
-    (`MERGE … MATCH` is a write, `MATCH … MERGE` is a write).
-
-    ⚠️ **The unit is the CLAUSE, not the string literal.** A query can carry two
-    walks, and a constraint written for one of them does not bound the other —
-    Cypher matches each `MATCH` pattern independently. Attributing an exclusion
-    to the whole literal let a second, unconstrained walk appended to the same
-    query string inherit the first one's exclusion, which is the opposite of what
-    the register exists to say.
-    """
-    clauses = list(_CLAUSE.finditer(query))
-    found: list[tuple[int, str, tuple[str, ...]]] = []
-    for match in _UNTYPED_BRACKET.finditer(query):
-        if ":" in _PROPERTY_MAP.sub("", match.group(1)):
-            continue  # a typed read, or a run-time type name
-        prior = [clause for clause in clauses if clause.start() < match.start()]
-        start = prior[-1] if prior else None
-        readable = start is not None and (
-            " ".join(start.group(1).upper().split()) in _READ_CLAUSES
-        )
-        if not readable:
-            # ⚠️ A PATTERN COMPREHENSION is a read whatever clause introduces it.
-            # In `SET n.deg = size([(n)-[r]->(m) | r])` the last clause before the
-            # bracket is `SET`, so a walk that enumerates every relationship type
-            # was discarded — a fail-open in the one direction this census exists
-            # to close. A comprehension ENUMERATES the edges it walks. It also has
-            # to survive carrying NO clause at all (`RETURN` is not in `_CLAUSE`),
-            # which is why this is not folded into the clause test.
-            if not _in_pattern_comprehension(query, match.start()):
-                continue
-            start = _clause_opening_at(query, match.start())
-        if start is None:
-            following = [clause for clause in clauses if clause.start() > match.end()]
-            end = following[0].start() if following else len(query)
-            found.append((match.start(), query[:end], ()))
-            continue
-        following = [clause for clause in clauses if clause.start() > match.end()]
-        end = following[0].start() if following else len(query)
-        before = [clause for clause in clauses if clause.start() < start.start()]
-        earlier = tuple(
-            query[clause.start() : (
-                before[index + 1].start() if index + 1 < len(before) else start.start()
-            )]
-            for index, clause in enumerate(before)
-        )
-        found.append((match.start(), query[start.start() : end], earlier))
-    return found
-
-
-def _pattern_variables(text: str) -> set[str]:
-    """Variable names bound in a Cypher pattern — `(old:Source …)`, `(a)`, `(op)`."""
-    return {
-        name
-        for name in re.findall(r"\(\s*([A-Za-z_]\w*)\s*[:)\s]", text)
-        if name.upper()
-        not in {"MATCH", "OPTIONAL", "WHERE", "WITH", "RETURN", "SET", "DELETE"}
-    }
-
-
-def _exclusion_bounds_the_walk(
-    segment: str, earlier: tuple[str, ...], facts: tuple[str, ...]
-) -> bool:
-    """Does one of `facts` bound THIS walk?
-
-    In the walk's own clause first — that is the clause whose pattern the walk
-    is. A fact in an EARLIER clause of the same query also counts, but only when
-    that clause binds a variable this walk's pattern uses: `MATCH (old:Source …)`
-    bounds a later degree over `(old)-[x]-(y)`, and a constraint written for a
-    different walk does not, because Cypher matches each `MATCH` pattern
-    independently. That distinction is what a whole-literal check could not make.
-    """
-    if any(fact in segment for fact in facts):
-        return True
-    own = _pattern_variables(segment)
-    return any(
-        any(fact in prior for fact in facts) and bool(own & _pattern_variables(prior))
-        for prior in earlier
-    )
-
-
-def _untyped_read_brackets(query: str) -> list[int]:
-    """Start offsets of every UNTYPED relationship bracket in a READ clause."""
-    return [offset for offset, _segment, _earlier in _untyped_read_segments(query)]
-
-
-def _record_untyped_site(
-    found: dict[str, list[tuple[int, str, tuple[str, ...]]]],
-    module: str,
-    lineno: int,
-    segment: str,
-    earlier: tuple[str, ...],
-) -> None:
-    """Record one untyped walk, deduped on `(line, clause)` — never on text alone.
-
-    ⚠️ **The identity is the SITE, not the query string.** Deduping on the text
-    dropped the second copy of an identical walk in another symbol of the same
-    module — measured: `hosted_backup.py` already carries `MATCH ()-[r]->()
-    RETURN count(r)` five times, so a sixth copy in a new helper vanished from
-    the census while its text matched the row-29 constant. Deduping on the line
-    alone collides two brackets inside ONE clause (`_connected_pairs`' operator
-    pair), which is the same walk and should stay one entry. The pair is exact:
-    same line and same clause is one walk; anything else is its own site.
-    """
-    sites = found.setdefault(module, [])
-    if any((lineno, segment) == (line, clause) for line, clause, _ in sites):
-        return
-    sites.append((lineno, segment, earlier))
-
-
-def _untyped_read_sites() -> dict[str, list[tuple[int, str, tuple[str, ...]]]]:
-    """Census: module → `(line, walk segment, earlier segments)` of untyped reads.
-
-    `_literal_read_sites` finds the reader that SPELLS the edge. This one finds
-    the reader that CANNOT: a relationship bracket carrying no type at all
-    (`[r]`, `[r*1..2]`, `[x]`, `[r {idx:0}]`), in a `MATCH`/`OPTIONAL MATCH`.
-    Such a walk returns `aboutObject` edges as data and no `grep` for the edge
-    name will ever see it.
-
-    ⚠️ **This arm is the point of the whole file, applied to the LAST class that
-    was still hand-maintained.** The literal census plus `_NON_LITERAL` made
-    every NAMED reader executable. The untyped walk stayed a hand pass — and it
-    is the hand pass that was wrong five times running: rows 24-27 were added by
-    applying §13's own inclusion rule (*an unfiltered walk reads the edge without
-    naming it*), and each later reader of the section re-applied the same rule
-    and reached a different count, because the rule admitted everything and
-    nothing recorded where it stopped. Measured at the head this arm was written
-    for: the table carried 27 sites and the tree had 33, and the six missing ones
-    included `POST /v1/backups` — the durability mechanism the ruling's own
-    bullet is about.
-
-    Membership is decided the same way as the literal census (by ENCLOSING
-    SYMBOL, so a new walk added beside a row reds), and the sites that CANNOT
-    observe the edge are carried by `_EXCLUDED_UNTYPED` with the code fact that
-    earns the exclusion.
-
-    ⚠️ **The WALK travels with each site, not just its line**, because an
-    exclusion is a claim about a walk, not about a symbol or a string: without it,
-    a second unconstrained walk added inside an excluded symbol — or appended to
-    the same query string — is absorbed by the first walk's exclusion, the one
-    direction where coarser granularity is backwards (a row says "this symbol
-    reads the edge"; an exclusion says "this walk cannot reach it").
-    """
-    found: dict[str, list[tuple[int, str, tuple[str, ...]]]] = {}
-    for path in sorted(PKG.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        # Case-INSENSITIVE: `_CLAUSE` matches `match` in any case, so a
-        # capital-only pre-filter skipped a module whose only read clause was
-        # lower-cased — a fail-open in a guard whose purpose is not to fail open.
-        if "match" not in text.lower():
-            continue
-        tree = _parsed(str(path))
-        docstrings = _docstring_ids(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
-                continue
-            rebuilt = _query_text(node, docstrings)
-            if rebuilt is None:
-                continue
-            value, lineno = rebuilt
-            for _offset, segment, earlier in _untyped_read_segments(value):
-                _record_untyped_site(
-                    found, str(path.relative_to(PKG)), lineno, segment, earlier
-                )
-    return found
-
-
-def _fragment_brackets(value: str) -> list[int]:
-    """Offsets of the UNTYPED, clause-free relationship brackets in `value`.
-
-    The fragment rule, split out so the census and its fixture decide it the same
-    way: untyped (no type once the property map is removed) and with NO Cypher
-    clause before it, which is what makes it a PART rather than a query.
-    """
-    return [
-        match.start()
-        for match in _UNTYPED_BRACKET.finditer(value)
-        if ":" not in _PROPERTY_MAP.sub("", match.group(1))
-        and not _CLAUSE.findall(value[: match.start()])
-    ]
-
-
-def _fragment_sites_in(tree: ast.Module) -> list[tuple[int, str]]:
-    """`(line, text)` of every FRAGMENT in ONE module that supplies an untyped walk.
-
-    Split out of the census so the fixture can assert the detection on a
-    SYNTHETIC tree: the bypass this closes is a shape (`_WALK = "-[r]->"` beside
-    `"MATCH (n)" + _WALK + "(m)"`), and a fixture that builds exactly that shape
-    is what proves the arm measures something. See `_untyped_fragment_sites`.
-    """
-    docstrings = _docstring_ids(tree)
-    sites: list[tuple[int, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.Constant, ast.JoinedStr, ast.BinOp)):
-            continue
-        rebuilt = _query_text(node, docstrings)
-        if rebuilt is None:
-            continue
-        value, lineno = rebuilt
-        if not _fragment_brackets(value):
-            continue
-        if all(lineno != line for line, _ in sites):
-            sites.append((lineno, value))
-    return sites
-
-
-def _untyped_fragment_sites() -> dict[str, list[tuple[int, str]]]:
-    """Census: module → `(line, text)` of a FRAGMENT that supplies an untyped walk.
-
-    ⚠️ **This is the bypass a query-shaped census cannot see, and it was
-    measured.** A walk assembled from parts — `_WALK = "-[r]->"`, then
-    `"MATCH (n)" + _WALK + "(m)"` — keeps the bracket in a DIFFERENT string
-    constant from its `MATCH`, so `_untyped_read_sites` finds no bracket at the
-    query, and the fragment carries no clause of its own, so no clause rule
-    applies to it either: the walk entered neither census and every test stayed
-    green. So any string expression holding a dash-delimited relationship
-    bracket with **no rel type and no clause at all** is itself a site, and its
-    enclosing symbol must account for it (a row, an exclusion, or a
-    `_NON_LITERAL` pin).
-
-    Read-vs-write cannot be decided for a fragment, and that is the point: the
-    requirement is unconditional ownership, so a part-assembled walk cannot be
-    introduced silently.
-
-    ⚠️ **This census is WIRED IN, not documentation.** It was defined and never
-    called, which made its docstring a claim the suite never executed — the very
-    defect class this file exists to end, inside this file. Its owner check (and
-    a floor, so it cannot go vacuous) is in
-    `test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion`.
-
-    **Limit, stated rather than implied.** This arm sees a DASH-DELIMITED
-    fragment (`"-[r]->"`, `"(n)-[r]->(o)"`) — Cypher's own relationship
-    delimiter, which is what makes the bracket a relationship at all. A fragment
-    carrying only `"[r]"` is not distinguishable from a list index or a JSON
-    array without knowing the caller, so it is not counted here; a reader built
-    that way is held by the PINS (`_NON_LITERAL`), not by this census. That is
-    why §13 states the derived class as *relationship brackets, in a read clause
-    or assembled from a dash-delimited fragment* — not as *every possible
-    assembly*.
-    """
-    found: dict[str, list[tuple[int, str]]] = {}
-    for path in sorted(PKG.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        if "match" not in text.lower() and "[" not in text:
-            continue
-        sites = _fragment_sites_in(_parsed(str(path)))
-        if sites:
-            found[str(path.relative_to(PKG))] = sites
-    return found
 
 
 def _row_symbols(tree: ast.Module) -> list[tuple[str, int, int]]:
@@ -1606,274 +1327,6 @@ def test_the_computed_name_readers_are_still_complete_reads():
                 "symbol that computes it), so the row's reach claim must be "
                 "re-derived."
             )
-
-
-def test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion():
-    """Every untyped walk is a row, or carries the code fact that excludes it.
-
-    ⚠️ **The class this decides is the one that was wrong five times.** §13 says
-    *the class is enumerated, not excluded*, and rows 24-27 were added by
-    applying that rule to the code. Every subsequent pass applied the same rule
-    and got a different answer, because a rule that admits every unfiltered walk
-    admits more than any hand pass will find — the last one found 27 sites where
-    there were 33, and the six it missed included `POST /v1/backups`.
-
-    So the enumeration is now derived from the TREE, the same way the literal
-    census is: every relationship bracket with no type at all, in a READ clause,
-    keyed on its enclosing `module.py::symbol`. Each site must then either own a
-    §13 row or appear in `_EXCLUDED_UNTYPED` **with the code fact that earns the
-    exclusion present in that walk's own clause** — so an exclusion cannot be a
-    claim, it cannot silently stop being true, and it cannot swallow a SECOND,
-    unconstrained walk added either beside it or in the same query string.
-    """
-    # The bracket rule itself, before the census uses it: an UNTYPED walk is one
-    # whose bracket carries no type, and a property map is not a type.
-    must_match = (
-        "MATCH (n)-[r]->(m)",
-        "MATCH (n)-[r*1..2]->(m)",
-        "MATCH (n)-[r {idx:0}]->(m)",
-    )
-    must_not_match = (
-        "MATCH (n)-[r:aboutObject]->(m)",
-        "MATCH (n)-[r:{rel}]->(m)",
-        "MERGE (n)-[r]->(m)",
-    )
-
-    # ⚠️ A pattern comprehension ENUMERATES the edges it walks, so it is a READ
-    # whatever clause introduces it. Before this arm, `SET n.deg = size([…])`
-    # was discarded on the preceding `SET` — a walk over every relationship type
-    # invisible to the census that exists to find it.
-    must_match_comprehension = (
-        "SET n.deg = size([(n)-[r]->(m) | r])",
-        "RETURN size([(n)-[r]-(m) | r]) AS deg",
-    )
-
-    def _brackets(query: str) -> list[int]:
-        return _untyped_read_brackets(query)
-
-    for query in must_match:
-        assert _brackets(query), (
-            f"this census is blind to {query!r} — a bracket with no rel type is "
-            "an ALL-EDGE walk, and a `{{…}}` property map must not read as a type."
-        )
-    for query in must_not_match:
-        assert not _brackets(query), (
-            f"this census reads {query!r} as untyped — a bracket that carries a "
-            "type (`[r:aboutObject]`, `[r:{rel}]`) is the computed-name half, and "
-            "a MERGE is a write."
-        )
-    for query in must_match_comprehension:
-        assert _brackets(query), (
-            f"this census reads {query!r} as a non-read — a PATTERN "
-            "COMPREHENSION enumerates the edges it walks, so the clause that "
-            "introduces it (`SET`, `RETURN`) cannot make it a write."
-        )
-
-    # The FRAGMENT rule, asserted directly: a clause-free relationship part is a
-    # site, and a typed one is not. This is the shape that entered NO census.
-    assert _fragment_brackets("-[r]->"), (
-        "a clause-free relationship FRAGMENT (`-[r]->`) is not counted as a "
-        'site — that is the part-assembled walk (`"MATCH (n)" + _WALK + "(m)"`) '
-        "which stayed invisible to the query-shaped census."
-    )
-    assert not _fragment_brackets("-[r:aboutObject]->"), (
-        "a TYPED relationship fragment is the computed-name half, not an untyped "
-        "walk — the fragment rule must not swallow it."
-    )
-
-    # The census IDENTITY: one walk per (line, clause) — not per query string.
-    # Two symbols carrying the SAME untyped query are two sites (a text-keyed
-    # census dropped the second, which is how a sixth copy of
-    # `MATCH ()-[r]->() RETURN count(r)` would vanish beside row 29's constant),
-    # and two brackets inside ONE clause are one walk (`_connected_pairs`).
-    synthetic: dict[str, list[tuple[int, str, tuple[str, ...]]]] = {}
-    _record_untyped_site(synthetic, "m.py", 10, "MATCH (a)-[r]->(b) ", ())
-    _record_untyped_site(synthetic, "m.py", 20, "MATCH (a)-[r]->(b) ", ())
-    assert len(synthetic["m.py"]) == 2, (
-        "two symbols carrying the same untyped query collapsed into one census "
-        "entry — the identity must be the SITE, or a second walk is shielded by "
-        "the first one's row/exclusion."
-    )
-    _record_untyped_site(synthetic, "m.py", 30, "MATCH (op)-[r1]->(a), (op)-[r2]->(b) ", ())
-    _record_untyped_site(synthetic, "m.py", 30, "MATCH (op)-[r1]->(a), (op)-[r2]->(b) ", ())
-    assert len(synthetic["m.py"]) == 3, (
-        "two brackets inside ONE clause were recorded as two walks — that is one "
-        "walk with two relationship positions, and splitting it inflates the "
-        "census with a duplicate."
-    )
-
-    # The cross-clause arm of the exclusion rule, asserted directly (no live site
-    # relies on it today, so this is what makes it falsifiable): a fact in an
-    # EARLIER clause counts when it binds a variable this walk uses, and not
-    # otherwise.
-    assert _exclusion_bounds_the_walk(
-        "MATCH (old:Source {url:$u}) WITH old, size([(old)-[x]-(y) | x]) AS deg ",
-        (),
-        ("MATCH (old:Source {url:$u}) ",),
-    ), "the walk's own clause carries the binding but the exclusion was refused"
-    assert _exclusion_bounds_the_walk(
-        "WITH old, size([(old)-[x]-(y) | x]) AS deg RETURN deg ",
-        ("MATCH (old:Source {url:$u}) ",),
-        ("MATCH (old:Source {url:$u}) ",),
-    ), "an earlier clause binds `old`, which this walk uses, but was refused"
-    assert not _exclusion_bounds_the_walk(
-        "MATCH (q)-[r2]->(w) RETURN type(r2), old.url",
-        ("MATCH (old:Source {url:$u}) ",),
-        ("MATCH (old:Source {url:$u}) ",),
-    ), "an earlier clause binding an UNRELATED variable excused this walk"
-
-    named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
-    census = _untyped_read_sites()
-    assert census, (
-        "the untyped-walk census found NOTHING under tortoise/ — the bracket "
-        "pattern or the clause rule was changed and this arm has stopped "
-        "measuring. Rows 22, 24-27 and 28-33 are all of this shape, so an empty "
-        "census cannot be true."
-    )
-
-    unowned: list[str] = []
-    for module, sites in sorted(census.items()):
-        tree = _module_tree(_module_path(module))
-        symbols = _row_symbols(tree)
-        for line, segment, earlier in sites:
-            candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
-            keys = [f"{module}::{name}" for name in candidates]
-            if any(key in named for key in keys):
-                continue
-            excluded = [key for key in keys if key in _EXCLUDED_UNTYPED]
-            if any(
-                _exclusion_bounds_the_walk(segment, earlier, _EXCLUDED_UNTYPED[key][0])
-                for key in excluded
-            ):
-                continue
-            unowned.append(
-                f"{module}:{line}  (inside {', '.join(candidates) or 'module level'})"
-                + (
-                    "  — its symbol is excluded, but THIS walk carries none of "
-                    "the facts that exclusion rests on"
-                    if excluded
-                    else ""
-                )
-            )
-    assert not unowned, (
-        "these walks read EVERY relationship type (so they read `aboutObject`) "
-        "and are neither absorbed by a §13 row nor covered by a stated "
-        "exclusion:\n  " + "\n  ".join(unowned) + "\n§13's `the class is "
-        "enumerated, not excluded` is only true if every such walk is one or the "
-        "other. Add the row, or add an `_EXCLUDED_UNTYPED` entry carrying the "
-        "code fact that puts the edge out of this walk's result set."
-    )
-
-    # ── the FRAGMENT half of the same class ────────────────────────────────
-    #
-    # ⚠️ **This census existed and was never called, so the bypass it documents
-    # was still open and its docstring was an unbacked claim.** A walk assembled
-    # from parts keeps the bracket in a different string constant from its
-    # `MATCH`, so the query-shaped census above sees no bracket at all: append
-    # `_WALK = "-[r]->"` beside `query("MATCH (n)" + _WALK + "(m)")` to any
-    # module and all seventeen arms stayed green. It is now wired here, with the
-    # ownership rule the docstring states (a row, an exclusion, or a
-    # `_NON_LITERAL` pin — the last of which the query-shaped arm never
-    # consults).
-    part_assembled = ast.parse(
-        '_WALK = "-[r]->"\n'
-        "\n"
-        "\n"
-        "def _probe_part_assembled_walk(query):\n"
-        '    return query("MATCH (n)" + _WALK + "(m)")\n'
-    )
-    assert _fragment_sites_in(part_assembled), (
-        "a part-assembled walk (`\"MATCH (n)\" + _WALK + \"(m)\"`, with the "
-        "bracket in its own clause-free constant) is not counted as a site — "
-        "that is the bypass this half of the census exists to close, and the "
-        "fixture is what makes it falsifiable."
-    )
-    assembled = ast.parse(
-        "def _probe_assembled_walk(query):\n"
-        '    return query("MATCH (n)-[r]->(m)")\n'
-    )
-    assert not _fragment_sites_in(assembled), (
-        "an ASSEMBLED walk is being read as a FRAGMENT — the fragment rule must "
-        "fire only where the bracket carries no clause of its own, or every "
-        "ordinary query becomes a phantom site."
-    )
-
-    fragments = _untyped_fragment_sites()
-    assert fragments, (
-        "the fragment census found NOTHING under tortoise/ — either the rule "
-        "changed or the part-assembled shape it exists for is gone. Re-point "
-        "this arm, or delete it with the claim; do not leave it vacuous."
-    )
-    pins = set(_NON_LITERAL) | set(_NON_LITERAL_SIBLINGS)
-    unowned_fragments: list[str] = []
-    for module, sites in sorted(fragments.items()):
-        symbols = _row_symbols(_module_tree(_module_path(module)))
-        for line, text in sites:
-            candidates = [name for name, lo, hi in symbols if lo <= line <= hi]
-            keys = [f"{module}::{name}" for name in candidates]
-            if any(key in named or key in _EXCLUDED_UNTYPED or key in pins for key in keys):
-                continue
-            unowned_fragments.append(
-                f"{module}:{line}  (inside {', '.join(candidates) or 'module level'})"
-                f"  — fragment {text!r}"
-            )
-    assert not unowned_fragments, (
-        "these DASH-DELIMITED relationship fragments supply an untyped walk — "
-        "the `aboutObject` edge reaches the result set of whatever assembles "
-        "them — and no §13 row, stated exclusion or `_NON_LITERAL` pin owns the "
-        "symbol they sit in:\n  " + "\n  ".join(unowned_fragments) + "\nA walk "
-        "can be split across string parts to stay invisible to the query-shaped "
-        "census; the ownership requirement is unconditional, so add the row (or "
-        "the exclusion, with the code fact that earns it), or state the pin."
-    )
-
-
-def test_every_stated_exclusion_is_still_true():
-    """An exclusion must stay earned: its code facts are asserted where they live.
-
-    `_EXCLUDED_UNTYPED` is the register that makes *"not excluded by silence"*
-    mean something, so it is held from both sides. A fact that no longer appears
-    in the symbol's span means the constraint that excluded the edge was removed
-    — and the site is then an unowned READ of the edge, which is exactly the
-    under-count this file exists to end. A symbol that no longer exists, or that
-    has since been given a row, is a dead entry: it hides nothing today and would
-    hide a real walk tomorrow.
-    """
-    named = {f"{row['module']}::{row['symbol']}" for row in _rows()}
-    assert _EXCLUDED_UNTYPED, (
-        "the exclusion register is empty — this direction now measures nothing, "
-        "and every untyped walk would have to own a row instead."
-    )
-    problems: list[str] = []
-    for key, (facts, _reason) in sorted(_EXCLUDED_UNTYPED.items()):
-        module_rel, _, symbol = key.partition("::")
-        path = _module_path(module_rel)
-        if not path.exists():
-            problems.append(f"{key} — {module_rel} no longer exists")
-            continue
-        tree = _module_tree(path)
-        span = _span(tree, symbol)
-        if span is None:
-            problems.append(f"{key} — the symbol no longer resolves")
-            continue
-        if key in named:
-            problems.append(
-                f"{key} — is excluded AND has a §13 row; one of the two is dead"
-            )
-            continue
-        span_text = "\n".join(
-            path.read_text(encoding="utf-8").splitlines()[span[0] - 1 : span[1]]
-        )
-        lost = [fact for fact in facts if fact not in span_text]
-        if lost:
-            problems.append(
-                f"{key} — the constraint that excluded the edge is gone: {lost!r}. "
-                "The walk now reads `aboutObject` and needs a row."
-            )
-    assert not problems, (
-        "§13's exclusion register no longer matches the code:\n  "
-        + "\n  ".join(problems)
-    )
 
 
 def test_every_computed_name_pin_owns_a_row():
@@ -2922,7 +2375,7 @@ def test_every_carrier_constant_a_row_reads_through_still_names_the_edge():
     loops run zero times, `broken` stays empty, and the arm reports green on an
     assertion it never made — while the `_NON_LITERAL` pins those rows carry
     survive the edge leaving the constant, so nothing else covers this claim. The
-    sibling arms (`assert census`, `assert pins`, `assert _EXCLUDED_UNTYPED`)
+    sibling arms (`assert census`, `assert pins`, `assert register`)
     already guard the same way; this one now does too, and the synthetic fixture
     below pins WHICH shape empties the set.
     """
@@ -3323,6 +2776,12 @@ _DERIVED_ALIASES: dict[str, str] = {
 #: pairing is a stated fact rather than a fuzzy match.
 _SITE_ALIASES: dict[str, str] = {
     "definite_description_backfill.py::CENSUS_QUERY": "definite_description_backfill.py::census_rows",
+    # #9493: rows that name the CONSTANT an all-edge walk lives in, while the
+    # derivation attributes the site to the function that EXECUTES it — the same
+    # stated-fact pairing the entry above established.
+    "hosted_backup.py::_DUMP_EDGE_PAGE_QUERY": "hosted_backup.py::dump_graph",
+    "hosted_backup.py::_COUNT_ALL_EDGES_QUERY": "hosted_backup.py::_independent_counts",
+    "subgraph.py::_CYPHER_HUB_DEGREE": "subgraph.py::_hub_degrees",
 }
 
 
@@ -3338,7 +2797,9 @@ def _derived(keys: dict[tuple[str, str], tuple[int, ...]]) -> dict[str, tuple[in
 
 
 def _register_keys(entries) -> set[str]:
-    return {_site_key(rel, symbol) for rel, symbol, _why in entries}
+    # `EMPTY_PATTERN` entries carry a fourth element (the code facts their reason
+    # rests on), `CALL_TIME_REL` entries do not — both key the same way.
+    return {_site_key(rel, symbol) for rel, symbol, *_rest in entries}
 
 
 def _declared_keys() -> set[str]:
@@ -3476,6 +2937,301 @@ def test_no_empty_pattern_entry_outlives_its_site():
         f"finds them: {stale} — delete the entry, or the resolver has regressed"
     )
 
+
+
+
+def test_no_empty_pattern_entry_is_also_a_row():
+    """An exclusion that ALSO has a §13 row is dead — one of the two hides nothing.
+
+    The row says "this reader is enumerated"; the register entry says "this
+    walk cannot observe the edge". A site carrying both makes the opposite
+    claims at once, and whichever is stale silently shields the other's drift:
+    the `#9400` remerge left the class with exactly this shape of ambiguity
+    across TWO registers, and `#9493` folded them into one — this arm is what
+    keeps the folded register from regrowing a dead entry.
+    """
+    census = _call_time_census()
+    registered = _register_keys(census.EMPTY_PATTERN)
+    assert registered, (
+        "the `EMPTY_PATTERN` register is empty — this direction now measures "
+        "nothing, and every derived site of the class would have to own a row "
+        "instead."
+    )
+    both = sorted(registered & _declared_keys())
+    assert not both, (
+        "these sites are BOTH a §13 row and an `EMPTY_PATTERN` entry — one of "
+        f"the two is dead: {both}"
+    )
+
+
+def test_every_empty_pattern_entry_states_a_true_fact():
+    """Each entry's REASON is checked against the code it claims to describe.
+
+    ⚠️ **This arm restores the half the `#9493` fold deleted, and its absence was
+    a fail-open in the direction this class exists to close.** An entry is
+    `(file, symbol, why, facts)`; the other three arms read only `(file, symbol)`,
+    so the prose — the register's ONLY record of *why* a walk is out — was never
+    checked against anything. Measured on the pre-arm tree: retyping
+    `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to
+    `(old)`, or dropping `:Subject` from `sdk.provenance`, makes the walk start
+    observing an `aboutObject` edge while EVERY arm stays green — the entry goes
+    on excusing it, and §13's two legal grounds no longer hold for that site.
+
+    The facts are asserted as plain substrings of the symbol's own span plus the
+    module-level constants that span names (`_symbol_fact_text`), so a fact
+    cannot be satisfied by an unrelated reader elsewhere in the file — which is
+    what the old guard's cross-clause formatter existed for, and what a
+    package-wide `grep` would have broken.
+    """
+    census = _call_time_census()
+    assert census.EMPTY_PATTERN, (
+        "the `EMPTY_PATTERN` register is empty — this arm would then assert "
+        "nothing, which is how an unread prose reason ships green"
+    )
+    checked = 0
+    failures: list[str] = []
+    for rel, symbol, _why, facts in census.EMPTY_PATTERN:
+        assert facts, (
+            f"`{_site_key(rel, symbol)}` carries no code fact — its reason is "
+            "prose nothing can falsify, so weakening the walk would leave it "
+            "excusing a site that now reads the edge"
+        )
+        text = _symbol_fact_text(rel, symbol)
+        for fact in facts:
+            checked += 1
+            if fact not in text:
+                failures.append(f"  - {_site_key(rel, symbol)} no longer states `{fact}`")
+    assert not failures, (
+        "these `EMPTY_PATTERN` entries excuse a walk on a fact their code no "
+        "longer carries, so the walk may now be observing an `aboutObject` edge "
+        "while the register keeps it out of §13:\n"
+        + "\n".join(failures)
+        + "\nRe-derive the reason from the site: either restore the bound (a "
+        "`type(r) IN [...]` restriction, an endpoint label outside every "
+        "`aboutObject` triple, or a degree/existence count that returns no "
+        "edge), or move the site to a §13 row."
+    )
+    assert checked >= len(census.EMPTY_PATTERN), (
+        f"{len(census.EMPTY_PATTERN)} entries produced only {checked} fact "
+        "assertions — every entry must carry at least one, or the register's "
+        "reasons are unverified again"
+    )
+
+
+def test_a_part_assembled_walk_is_derived():
+    """The assembled spelling is DERIVED, not merely admitted by the gate.
+
+    ⚠️ **Two properties, one fixture, because they are two halves of one bypass.**
+    `_WALK = "-[r]->"` plus `"MATCH (n)" + _WALK + "(m)"` is a walk over every
+    relationship type whose dash, bracket and node patterns sit in three
+    different literals. §13 claims such a walk *"enters the census through the
+    consumer the resolver follows"*; that is true ONLY because `_resolve()` folds
+    `ast.BinOp/Add` (`tests/_about_call_time_census.py`), and until this arm
+    existed nothing asserted it — a change to `_resolve` would have reopened the
+    bypass silently while the document kept claiming the property. The GATE half
+    is `_may_traverse_every_type`, which must admit the module before any of this
+    runs (`test_the_module_filter_admits_a_split_traversal`).
+    """
+    census = _call_time_census()
+    source = (
+        '_WALK = "-[r]->"\n'
+        "\n"
+        "\n"
+        "def _assembled(query):\n"
+        '    return query("MATCH (n)" + _WALK + "(m)")\n'
+        "\n"
+        "\n"
+        "def _typed(query):\n"
+        '    return query("MATCH (n)-[r:aboutObject]->(m)")\n'
+    )
+    file = census._File(Path("synthetic_split.py"), "synthetic_split.py", source)
+    derived = {symbol for symbol, _line in census._empty_pattern_sites_in(file)}
+    assert "_assembled" in derived, (
+        "a walk assembled from a fragment constant (`\"MATCH (n)\" + _WALK + "
+        "\"(m)\"`) is not derived — `_resolve()` no longer folds `ast.BinOp/Add`, "
+        "so every walk built from parts ships green, and §13's claim that it "
+        "enters the census through the resolver is false"
+    )
+    assert "_typed" not in derived, (
+        "a typed walk derived as an empty-pattern site — the fold must not "
+        "swallow the half that belongs to the named class"
+    )
+
+
+def test_the_module_filter_admits_a_split_traversal():
+    """The file gate must admit a walk whose dash is outside the bracket literal.
+
+    ⚠️ Measured on the pre-fix filter: both assembled spellings returned `False`
+    while the one-literal spelling returned `True`, so a module holding only the
+    assembled form was dropped before the derivation — which can see it — ran.
+    `test_the_file_filter_un_sees_nothing` cannot catch this: the corpus holds no
+    such file today, so the difference it compares stays empty either way. The
+    assertion is therefore synthetic, on the two shapes a `+` concatenation
+    produces.
+    """
+    census = _call_time_census()
+    cases = {
+        'q("MATCH (n)-" + "[r]->(m)")': "the bracket is its own literal",
+        'q("MATCH (n)-[r]" + "->(m)")': "the dash is its own literal",
+    }
+    for source, shape in cases.items():
+        assert census._may_traverse_every_type(source), (
+            f"the module filter refuses the assembled spelling ({shape}): "
+            f"{source} — the file is never walked, so the walk inside it is "
+            "invisible however good the resolver is"
+        )
+    assert not census._may_traverse_every_type("no cypher here at all"), (
+        "the filter admits a module with no traversal in it — as a filter that "
+        "is free, but it also means the assertions above measure nothing"
+    )
+
+
+def test_the_empty_pattern_type_slot_rules():
+    """Variable-length and property-map brackets name NO type — `MERGE` is a write.
+
+    Three rules this class rests on, each correct and each unpinned once the
+    retired guard's `_EMPTY_PATTERN_CASES` table went with the fold:
+
+    * `[r*1..2]` — a variable-length traversal has no type slot, so it walks every
+      type (the `*` is a length, not a type);
+    * `[r {idx:0}]` — a property map is not a type, and the colon inside `{}` is a
+      map key;
+    * `MERGE (n)-[r]-(m)` / `CREATE` — the pattern MINTS the edge, so it is a
+      writer, not a reader of it. Deleting the clause test would inflate the
+      class with every write site and force an entry for each.
+    """
+    census = _call_time_census()
+    source = (
+        "def _ranged(query):\n"
+        '    return query("MATCH (n)-[r*1..2]->(m)")\n'
+        "\n"
+        "\n"
+        "def _mapped(query):\n"
+        '    return query("MATCH (n)-[r {idx:0}]->(m)")\n'
+        "\n"
+        "\n"
+        "def _minted(query):\n"
+        '    return query("MERGE (n)-[r]-(m)")\n'
+        "\n"
+        "\n"
+        "def _created(query):\n"
+        '    return query("CREATE (n)-[r]-(m)")\n'
+    )
+    file = census._File(Path("synthetic_slots.py"), "synthetic_slots.py", source)
+    derived = {symbol for symbol, _line in census._empty_pattern_sites_in(file)}
+    for symbol in ("_ranged", "_mapped"):
+        assert symbol in derived, (
+            f"`{symbol}` names no relationship TYPE (a length, or a property "
+            "map, is not a type) so it walks every type — a bracket this walk "
+            "cannot see is a reader that ships green"
+        )
+    for symbol in ("_minted", "_created"):
+        assert symbol not in derived, (
+            f"`{symbol}` derives as an empty-pattern READ — `MERGE`/`CREATE` "
+            "mint the edge, so the pattern is a writer, and admitting writers "
+            "inflates the class with sites that never read a referent"
+        )
+
+
+def test_the_two_halves_of_the_register_are_measured():
+    """One symbol can own TWO sites — the derivation is per-site, the key per-symbol.
+
+    ⚠️ A census that collapsed its sites to a set of SYMBOLS would lose the
+    difference: `mining.verify_no_auto_wire` walks the edge twice (1409 and
+    1435 at this head), `session_source_migration._rel_types` twice (its two
+    query constants). Every register key is therefore a symbol that may hide
+    more than one read, and both counts are asserted so that neither side can
+    quietly become the other: the KEYS are what the register matches, the ROWS
+    are what the class is.
+    """
+    census = _call_time_census()
+    sites = census._empty_pattern_sites()
+    keys = len(sites)
+    rows = sum(len(lines) for lines in sites.values())
+    assert keys > 2, f"the empty-pattern derivation found {keys} symbols — nothing to measure"
+    assert rows > keys, (
+        f"{keys} symbols own {rows} sites — the multiplicity is gone, so either "
+        "the derivation now stops at the first site of each symbol (and a second "
+        "walk beside a registered one ships green) or the class shrank"
+    )
+    assert rows - keys >= 2, (
+        f"{keys} symbols over {rows} sites leaves only {rows - keys} extra "
+        "site(s); at least TWO symbols are known to own two sites each, so a "
+        "collapse to one is a derivation regression"
+    )
+
+
+def test_the_site_aliases_are_grounded():
+    """BOTH halves of every `_SITE_ALIASES` row must resolve (#9493).
+
+    ⚠️ **This table turns a deleted entry into a row-owned site, so a mis-pairing
+    is a hole with a footnote.** Each row key is a constant that owns a §13 row
+    (`hosted_backup._DUMP_EDGE_PAGE_QUERY`); each target is the consumer the
+    derivation actually attributes the site to (`dump_graph`). The three pairs
+    this change adds are correct — but a row key that names no row, or a target
+    that names no derived site, would let an unrowed site be excused by an
+    UNRELATED row, which is the stale-shield shape `test_no_empty_pattern_entry_
+    is_also_a_row` closes on the register side. The grounding arm above covers
+    the other table (`_DERIVED_ALIASES`); this one is its twin and was missing.
+    """
+    census = _call_time_census()
+    assert _SITE_ALIASES, "`_SITE_ALIASES` is empty — this arm would assert nothing"
+    declared = {
+        _site_key("x/" + str(row["module"]), str(row["symbol"])) for row in _rows()
+    }
+    derived = set(_derived(census._empty_pattern_sites()))
+    for row_key, target in sorted(_SITE_ALIASES.items()):
+        assert row_key in declared, (
+            f"`_SITE_ALIASES` maps `{row_key}` to `{target}`, and §13 has no row "
+            "under that key — the alias stands for a row that does not exist, so "
+            "it excuses nothing and hides that fact"
+        )
+        assert target in derived, (
+            f"`_SITE_ALIASES` maps `{row_key}` to `{target}`, and the empty-pattern "
+            "derivation attributes no site to that name — the alias points at a "
+            "symbol that reads nothing, so an UNROWED site elsewhere can be "
+            "matched by the row key while the alias supplies the missing key"
+        )
+
+
+def test_a_comprehension_only_walk_derives():
+    """The comprehension half of the class, asserted on a synthetic source (#9493).
+
+    The retired guard's untyped census was the only derivation that treated a
+    pattern comprehension as a read whatever clause introduces it; the rule
+    moved into `_is_empty_pattern_read` with the class, and this fixture is
+    what keeps it falsifiable — `SET n.deg = size([(n)-[r]->(m) | r])` carries
+    no `MATCH` at all, so the governing-clause rule alone would discard the
+    walk over every relationship type as a write.
+    """
+    census = _call_time_census()
+    source = (
+        'def _probe_deg(query):\n'
+        '    return query("SET n.deg = size([(n)-[r]->(m) | r])")\n'
+        '\n'
+        'def _probe_typed(query):\n'
+        '    return query("SET n.deg = size([(n)-[r:aboutObject]->(m) | r])")\n'
+        '\n'
+        'def _probe_bare(query):\n'
+        '    return query("RETURN size([(n)-[r]-(m) | r]) AS deg")\n'
+    )
+    file = census._File(Path("synthetic.py"), "synthetic.py", source)
+    derived = census._empty_pattern_sites_in(file)
+    assert ("_probe_deg", 2) in derived, (
+        "a pattern comprehension introduced by `SET` is not derived — a walk "
+        "over every relationship type was discarded as a write, the fail-open "
+        "the comprehension rule exists to close"
+    )
+    assert ("_probe_bare", 8) in derived, (
+        "a comprehension with no clause before it at all (`RETURN size([...])`) "
+        "is not derived — the rule must survive carrying no clause, not only "
+        "carrying a non-reading one"
+    )
+    assert not any(symbol == "_probe_typed" for symbol, _line in derived), (
+        "a comprehension whose bracket carries a type (`-[r:aboutObject]->`) "
+        "derived as an empty-pattern site — the typed half belongs to the "
+        "named/call-time classes, and the rule must not swallow it"
+    )
 
 def test_the_bracket_less_spelling_is_inside_the_walk():
     """The bracket-less traversal is the half that was invisible; pin the detector.
@@ -3687,16 +3443,144 @@ def test_a_module_constant_is_attributed_to_its_consumer():
 
 
 def _gate_walk_comment() -> str:
-    """The `#` lines of `_narrow_gate_walk_sites` — the comment `#9506` is about."""
+    """Every PROSE line `_narrow_gate_walk_sites` carries — the text `#9506` is about.
+
+    ⚠️ **This used to keep only lines that start with `#`, and that made the arm blind
+    to the exact string the PR removes** — measured by the round-6 review, which put
+    `measured 10.36 s of the control's 10.85 s` in three other positions inside the
+    same function and got GREEN on both arms each time: the function DOCSTRING (which
+    `inspect.getsource` returns and the `#` filter dropped), a TRAILING comment on a
+    code line (`for file in _literal_files():  # measured 10.36 s …`), and a `#`
+    comment above the `def` (which `getsource` does not return at all). A guard that
+    reads one of the four places a duration can be written is a guard with three
+    documented ways past it.
+
+    So the capture is: the function's WHOLE source (docstring, inline code and
+    trailing comments) plus the CONTIGUOUS `#` block immediately above the `def`.
+    Within that span nothing is projected away, so a duration is dropped only by being
+    absent — and the two boundaries are stated rather than implied (`#9531`): a `#`
+    block separated from the `def` by a blank line is NOT captured (folding it in would
+    absorb a peer function's prose), and neither is prose elsewhere in the file (a
+    module docstring, a sibling's comment). Both were measured by the `#9522` review.
+    """
     census = _call_time_census()
-    source = inspect.getsource(census._narrow_gate_walk_sites)
+    return _prose_of(census._narrow_gate_walk_sites)
+
+
+def _gate_walk_comment_lines(fn: Callable[..., object]) -> str:
+    """The `#` lines `fn` carries — the PRE-`#9522` capture, kept as the arm's FLOOR.
+
+    ⚠️ **The widened capture retired the arm's own anti-vacuity floor, and this puts it
+    back** (measured by the `#9522` review).
+    `test_the_gate_walk_comment_pins_no_wall_clock_figure` opens with `assert comment`
+    — "the function still carries the mechanism comment" — and that was falsifiable
+    only while the capture was `#`-only. Once `_prose_of` returns the function's whole
+    source, the assertion can NEVER fail: measured by deleting all five `#` lines from
+    `_narrow_gate_walk_sites` and watching the arm stay GREEN, i.e. the guard would pass
+    on a function whose mechanism prose was gone, which is the state `#9506` exists to
+    prevent. So the floor reads THIS projection: the duration scan may see everything,
+    but "the comment is still there" is a question only the `#` lines answer.
+
+    ⚠️ Its STRENGTH is "any `#` line survives", stated here rather than implied
+    (measured by the cycle-2 review): replacing the mechanism prose with
+    `# TODO: revisit this later` satisfies the floor while the mechanism claim is gone.
+    Pinning a phrase would red on a legitimate re-wording of a true comment — the
+    re-word-to-get-past-the-guard failure this file keeps re-learning — so the boundary
+    is named here and the phrase-level check is deliberately not attempted.
+    """
     return "\n".join(
-        line.strip() for line in source.splitlines() if line.lstrip().startswith("#")
+        line.strip()
+        for line in inspect.getsource(inspect.unwrap(fn)).splitlines()
+        if line.lstrip().startswith("#")
     )
 
 
-#: A duration, as a comment pins one (`10.36 s`, `~2.6 s`, `850 ms`).
-_DURATION = re.compile(r"\d+(?:\.\d+)?\s?(?:ms|s)\b")
+def _prose_of(fn: Callable[..., object]) -> str:
+    """Every prose line `fn` carries, plus the contiguous `#` block above its `def`.
+
+    ⚠️ **Factored out of `_gate_walk_comment` so the four POSITIONS a duration can be
+    written in are executable, not prose** (`#9522`). A guard over a comment is only
+    as good as its capture, and the capture was green on three of the four positions —
+    measured by splicing the removed figure into each one and watching both arms pass.
+    Taking a CALLABLE makes the capture testable on synthetic functions that write the
+    figure in each position, which is what
+    `test_the_gate_walk_capture_reads_every_position_a_duration_is_written` does.
+
+    `inspect.unwrap` is not decoration: TEN of `_narrow_gate_walk_sites`'s siblings in
+    `_about_call_time_census.py` are `@lru_cache`d (measured: `_universe`, `_sources`,
+    `_literal_files`, `_files`, `_module_consts`, `_attr_consts`,
+    `_rel_constant_names`, `_census`, `_empty_pattern_sites`, `_call_time_sites`).
+    `getsource` and `getsourcelines`
+    unwrap for you, but `inspect.getsourcefile(fn)` — the call below, after the
+    unwrap, which locates the `#` block — raises `TypeError: … got _lru_cache_wrapper`, a message that names
+    neither the guard nor the comment (found by the `#9522` review; the first version
+    of this paragraph blamed `getsource`). The assertion below names the contract for
+    anything that is not a function at all. ⚠️ `getsourcelines` scans BACK OVER
+    DECORATORS, so for the functions this paragraph is about its line number is the
+    first DECORATOR line, not the `def` (measured by the cycle-5 review) — the `#` block
+    is therefore read from above the decorator, which is the right place and not the
+    place the sentence used to claim.
+    """
+    fn = inspect.unwrap(fn)
+    assert inspect.isfunction(fn) or inspect.ismethod(fn), (
+        f"`_prose_of` needs a plain function to read source from, got "
+        f"{type(fn).__name__} — a `functools.cache` / `lru_cache` wrapper hides the "
+        "source, so unwrap it (or pass the inner function)"
+    )
+    source = inspect.getsource(fn)
+    path = inspect.getsourcefile(fn)
+    first = inspect.getsourcelines(fn)[1]
+    above: list[str] = []
+    if path:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        index = first - 2  # the line before the `def`
+        while index >= 0 and lines[index].lstrip().startswith("#"):
+            above.append(lines[index].strip())
+            index -= 1
+    return "\n".join([*reversed(above), source])
+
+
+#: A duration, as a comment pins one (`10.36 s`, `~2.6 s`, `850 ms`, `30 seconds`,
+#: `1,000 s`, `1.5 h`).
+#:
+#: ⚠️ **Three reviews changed this regex, and every change is about the same thing: a
+#: guard whose unit list or number shape is narrow is retired by a RE-SPELLING.** The
+#: round-6 review measured `30 seconds of the control's 60 seconds` and `2.6 sec of a
+#: 17 sec arm` going GREEN — the identical claim, re-spelled — so every
+#: second-and-below unit word is here, `h`/`hours`/`days` included AND the word forms
+#: (`milliseconds`, `microseconds`, `nanoseconds`), which were still silent in the
+#: previous list (cycle-4 review: `850 milliseconds` reported nothing while `850 ms` did).
+#:
+#: The `#9522` review then measured the OPPOSITE failure in the first version of the
+#: lookbehind: `1,000 s`, `10,36 s` (decimal comma), `2,048 ms`, `1e3 s` and
+#: `10.36  s` (double space) all went GREEN — not half-matched (`000 s`), not matched
+#: AT ALL — so a grouped or re-separated figure was undetectable, which is strictly
+#: worse than quoting a sub-token. Grouped numbers and BOTH decimal separators are
+#: therefore matched whole, `\s*` absorbs a doubled space, and an exponent form is read
+#: as one number. A GROUPED number with a fraction composes too (`1,000.5 s` matched
+#: nothing at all in the first version — cycle-4 review). Unit words are
+#: case-insensitive.
+#:
+#: And the match must stay WHOLE in one direction: `sha256s` must not report `256s`,
+#: and `x1,000 s` must not report `000 s` — the lookbehind refuses a number that starts
+#: mid-identifier, mid-digit-run or right after a SEPARATOR. The second lookbehind is
+#: `\d,` and nothing broader, because a comma between two figures is a normal way to
+#: write them (`# arms were 10.36s,10.85s` must report BOTH; `(?<![\w.,])` dropped every
+#: figure after such a comma — measured by the cycle-3 review).
+#:
+#: Residual, recorded rather than silently accepted (`#9531`): a compound `min:sec`
+#: figure (`2m36s`) goes SILENT — the `36s` start is preceded by `m`, so the same
+#: lookbehind that refuses `sha256s` refuses it. That is the re-spelling class again,
+#: and the filed home is `#9531` with the line-vs-number coarseness.
+_DURATION = re.compile(
+    r"(?<![\w.])(?<!\d,)"
+    r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d+)?(?:e[+-]?\d+)?\s*"
+    r"(?:"
+    r"milliseconds?|msecs?|usecs?|microseconds?|µsecs?|μsecs?|nsecs?|nanoseconds?|"
+    r"ms|us|µs|μs|ns|seconds?|secs?|s|minutes?|mins?|hours?|hrs?|h|days?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 #: What makes a pinned duration SETTLEABLE — the framing that produced it.
 #: Each entry names the measurement a re-verifier must reproduce to check the
@@ -3710,34 +3594,242 @@ _DURATION_FRAMING = (
 )
 
 
+#: A word that DENIES a framing marker when it governs it (`no --durations run`,
+#: `not measured with --durations`, `--durations=0 was never taken`).
+#:
+#: ⚠️ **A blacklist of SPELLINGS, not a parse** — the boundary is stated, not implied
+#: (measured by the `#9522` re-review: `--durations=0 wasn't taken` was GREEN while
+#: `was never taken` was RED, a one-apostrophe dodge). Contractions (`n't`), and the
+#: verbs a comment actually uses to say a measurement was not taken (`skipped`,
+#: `omitted`, `unavailable`, `unmeasured`, `unframed`, `unknown`) are in; a negation
+#: this list does not know is a one-line addition here, and the arm beside it pins the
+#: spellings rather than the intent.
+#:
+#: It is SPLIT IN TWO, and that split is load-bearing (cycle-4 review):
+#:
+#: * `_DENIAL_STRONG` — a denial that can only be read as denying its own clause
+#:   (`not`, `never`, `without`, `n't`, `skipped`, `omitted`, `unavailable`, …). It is
+#:   searched ACROSS a parenthesis and a coordinated `and`, because
+#:   `--durations=0 (never taken)` and `--durations=0 and never taken` deny the marker
+#:   just as plainly as the un-parenthesised form, and the previous single list made
+#:   all seven of those spellings SILENT — a fail-open introduced by widening the
+#:   after-side boundary.
+#: * `_DENIAL_WEAK` — a subject-less quantifier (`no`, `none`, `nothing`, `nobody`),
+#:   which very often governs a LATER noun in a side remark (`(no flakes)`, `(no
+#:   failures)`, `and no flakes`). It honours the wider boundary, so those stay framed.
+_DENIAL_STRONG = re.compile(
+    r"\b(?:not|never|without)\b"
+    r"|\b\w+n['’]t\b"
+    r"|\b(?:skipped|omitted|unavailable|unmeasured|unframed|unknown)\b",
+    re.IGNORECASE,
+)
+
+_DENIAL_WEAK = re.compile(r"\b(?:no|none|nothing|nobody)\b", re.IGNORECASE)
+
+#: A WEAK quantifier that is nevertheless DENYING a measurement — `and no framing was
+#: taken`, `(no measurement exists)` — is a denial, not a side remark, because its object
+#: is the measurement vocabulary. Searched across the same breaks as `_DENIAL_STRONG`
+#: (cycle-4 review: `--durations=0 and no framing was taken` was otherwise SILENT, since
+#: `no` is weak and `and` starts the side-remark window at once). `(no flakes)` and
+#: `(no failures)` stay framed — their object is not a measurement.
+_DENIAL_GOVERNING = re.compile(
+    r"\b(?:no|none|nothing|nobody)\b[^.;]{0,40}?"
+    r"\b(?:framing|measure\w*|figure|duration|timing|numbers?|wall-clock|magnitude|split)\b"
+    # ...and it must PREDICATE that noun (`no framing WAS TAKEN`, `no measurement
+    # EXISTS`). Without the lookahead, a parenthetical that denies a DIFFERENT quantity
+    # reds a framed figure — `# 14.4 s whole arm (no spread figure)` and
+    # `(no per-file timing)` were both RED at the previous head (cycle-5 review), which is
+    # the true-comment-gets-reworded failure this file keeps re-learning.
+    r"(?=\s*(?:was|is|were|are|exists?|available|taken|run|measured|pinned|stated|recorded))",
+    re.IGNORECASE,
+)
+
+#: Every denial symbol — what the BEFORE side searches, because a negation in front of
+#: a marker governs it whichever of the two lists it is in.
+_DENIAL = re.compile(
+    rf"(?:{_DENIAL_STRONG.pattern})|(?:{_DENIAL_WEAK.pattern})", re.IGNORECASE
+)
+
+#: How far a denial reaches from its marker, in characters, WITHIN one clause.
+_DENIAL_WINDOW = 40
+
+#: A clause boundary — a separator that ends the reach of a denial, so
+#: `--durations=0 — no other change to the control step` does not deny `--durations`.
+#: A DECIMAL POINT (`10.36 s`) is not a boundary: `.` counts only when a space or the
+#: line end follows it.
+_CLAUSE_BREAK = re.compile(r"[,;:—–]|[.;](?=\s|$)")
+
+#: A boundary for a denial that FOLLOWS its marker — a superset of `_CLAUSE_BREAK`.
+#:
+#: ⚠️ **Asymmetric on purpose, and each half is measured.** A parenthesis or a bare
+#: `and` after the marker is a SIDE REMARK, so `# whole arm 14.4 s (no flakes)` and
+#: `# 14.4 s whole arm and no flakes` must stay framed — both were RED with
+#: `_CLAUSE_BREAK` alone (cycle-3 review), i.e. a true comment was being reworded to
+#: pass the guard. In front of the marker the same words are the governing clause, so
+#: `# (no --durations run): 10.36 s` stays RED and is pinned as such: only this
+#: after-side boundary knows about parentheses.
+#:
+#: ⚠️ And it applies ONLY to `_DENIAL_WEAK` (cycle-4 review). The boundary only ever
+#: SHORTENS the text a denial is searched in, so applying it to the strong denials made
+#: `--durations=0 (never taken)` and `--durations=0 and never taken` SILENT — a
+#: fail-open with no compensating red. A strong denial is searched across these breaks.
+_CLAUSE_BREAK_AFTER = re.compile(r"[,;:—–()]|\band\b|[.;](?=\s|$)")
+
+#: A real sentence end — where the search for a STRONG denial stops, because a strong
+#: denial after the marker is about the marker however it is CLAUSE-punctuated.
+#:
+#: ⚠️ `;` is NOT here (cycle-6 review): it is a clause separator, and including it made
+#: `--durations=0; never taken` SILENT — a one-character substitution for the hole the
+#: veto exists to close, with no arm able to tell the two behaviours apart. `.` keeps its
+#: `(?=\s|$)` guard so a decimal (`10.36 s`) is not a sentence end. Residual, stated:
+#: an ABBREVIATION dot (`i.e. never taken`, `e.g.`) still reads as a sentence end, so a
+#: strong denial after one is framed — it is in `#9531` with the other residuals.
+_SENTENCE_END = re.compile(r"[.](?=\s|$)")
+
+
+def _marker_spans(line: str) -> list[tuple[int, int]]:
+    """Every framing-marker occurrence on `line`, as `(start, end)` spans."""
+    lowered = line.lower()
+    spans: list[tuple[int, int]] = []
+    for marker in _DURATION_FRAMING:
+        start = lowered.find(marker)
+        while start >= 0:
+            spans.append((start, start + len(marker)))
+            start = lowered.find(marker, start + 1)
+    return spans
+
+
+def _denied(line: str, start: int, end: int) -> bool:
+    """Is the marker at `[start, end)` denied by its OWN clause?
+
+    ⚠️ **Per OCCURRENCE, in both directions, because the first version was wrong both
+    ways** — both measured by the `#9522` review:
+
+    * FAIL-CLOSED (red on legitimate prose): the veto was one line-level search, so any
+      negation anywhere on the line killed the line's framing —
+      `# 14.4 s whole arm, --durations=0 — no other change to the control step` RED,
+      with two of its three markers un-negated.
+    * FAIL-OPEN (green on denied prose): the regex only searched `negation … marker`, so
+      `# … measured 10.36 s of the control's 10.85 s — --durations=0 was never taken`
+      was GREEN — one word-order swap from the hole the veto exists to close.
+
+    So a denial counts only within `_DENIAL_WINDOW` characters of the marker and only
+    inside the marker's own clause: `_CLAUSE_BREAK` (`,` `;` `:` `—` `–` and a real
+    sentence `.`) ends its reach on either side. That is what makes both measured cases
+    come out right — `no other change to the control step` is behind a dash and an
+    unrelated noun phrase, while `was never taken` sits in the marker's own clause.
+
+    ⚠️ **A STRONG denial after the marker is searched past a parenthesis and past a
+    coordinated `and`** (`_DENIAL_STRONG` vs `_DENIAL_WEAK`): `--durations=0 (never
+    taken)` and `--durations=0 and never taken` are denials of the marker, while
+    `(no flakes)` and `and no failures` are side remarks about something else. Applying
+    the wider boundary to both lists made the first pair SILENT (cycle-4 review), which
+    is the fail-open direction and the worse one.
+    """
+    before = line[max(0, start - _DENIAL_WINDOW) : start]
+    breaks = list(_CLAUSE_BREAK.finditer(before))
+    if breaks:
+        before = before[breaks[-1].end() :]
+    if _DENIAL.search(before):
+        return True
+    after = line[end : end + _DENIAL_WINDOW]
+    # ⚠️ THREE windows, because the three lists are denied by different shapes:
+    #   * `_DENIAL_STRONG` is searched to the end of the SENTENCE — `--durations=0 — never
+    #     taken` and `--durations=0, never taken` deny the marker as plainly as the
+    #     parenthesised form, and cutting at `,`/`—` made both SILENT (cycle-5 review);
+    #   * `_DENIAL_GOVERNING` reads the SAME sentence window (its own predicate lookahead
+    #     is what keeps `(no spread figure)` green), and `_DENIAL_WEAK` is searched only to
+    #     the next clause break, so `— no other change to the control step` (a weak
+    #     quantifier over a different noun) stays a side remark;
+    #   * `_DENIAL_WEAK` is searched inside the narrower after-side boundary again, so
+    #     `(no flakes)` and `and no failures` stay framed.
+    sentence = _SENTENCE_END.search(after)
+    strong_window = after[: sentence.start()] if sentence else after
+    if _DENIAL_STRONG.search(strong_window):
+        return True
+    # The GOVERNING list also reads the sentence window: its own lookahead is what keeps
+    # `(no spread figure)` green (no predicate follows the noun), so it does not need the
+    # clause cut — and with the cut, `— no measurement was ever taken` went SILENT.
+    if _DENIAL_GOVERNING.search(strong_window):
+        return True
+    stop_after = _CLAUSE_BREAK_AFTER.search(after)
+    weak_window = after[: stop_after.start()] if stop_after else after
+    return bool(_DENIAL_WEAK.search(weak_window))
+
+
+def _framed(line: str) -> bool:
+    """Does `line` frame its durations — does it carry one marker that is NOT denied?
+
+    Per marker OCCURRENCE, so one denied marker cannot sink a line whose other markers
+    are not denied. Cost, stated: a denial that is not separated from a marker by a
+    clause boundary still reaches it — `# no framing was taken, 10.36 s --durations=0`
+    is ambiguous prose and comes out FRAMED (the comma cuts the denial off), which is
+    the fail-open direction and is filed with the line-vs-number coarseness as `#9531`.
+    """
+    return any(
+        not _denied(line, start, end) for start, end in _marker_spans(line)
+    )
+
+
 def _unframed_durations(comment: str) -> list[str]:
     """Durations `comment` pins WITHOUT the framing that produced them (`#9506`).
 
     ⚠️ **This predicate is the fix to a FAIL-OPEN guard, not a rewording of one.**
     The first version of the arm red on the co-occurrence of a self-denial phrase
     (`no magnitude` / `no wall-clock`) AND a duration. That made it **green on the
-    merge base** — `git show origin/main:tests/_about_call_time_census.py` carried
+    pre-`#9516` main** — `fa84a473d:tests/_about_call_time_census.py:990-992` carried
     *"re-reading `_sources()` and rebuilding the same 29 `_File`s measured 10.36 s
-    of the control's 10.85 s for byte-identical output"*, which says no denial at
+    of the control's 10.85 s for byte-identical output"* (`git show origin/main:… |
+    grep -c 10.36` is `0` at this base — the figure is gone), which says no denial at
     all, so there was nothing for the guard to fire on: the arm passed on precisely
     the text this PR deletes, and would pass again if that figure were re-introduced.
     It was also fail-open on REWORDING — turning "No magnitude is pinned" into "No
     timing figure is named" silently retired it.
 
     So the rule now reads the CLAIM rather than a phrase about it: a duration is a
-    fact asserted about a measurement, and it is acceptable only when the comment
-    also states the framing that produced it. This reds on the merge-base text and
-    on the intermediate `~2.6 s of ~17 s` sentence alike, and no rewording can
-    retire it because it never reads the denial.
+    fact asserted about a measurement, and it is acceptable only when the text also
+    states the framing that produced it. This reds on the pre-`#9516` main text and on
+    the intermediate `~2.6 s of ~17 s` sentence alike, and no REWORDING of the claim
+    itself retires it, because it never reads a denial PHRASE — the only denial it
+    reads is a negation of the framing marker, scoped to that marker's own clause and
+    checked on BOTH sides of it (`_denied`). ⚠️ The denial VOCABULARY is open, and that
+    boundary is stated rather than implied (measured by the `#9522` re-review):
+    `--durations=0 was never taken` reds, and so do the contraction (`wasn't taken`),
+    `was skipped`, `was omitted` and `is unavailable` spellings. What stays framed is
+    only what the SENTENCE END puts out of reach: `never done here` after a `.`, or
+    `--durations=0. wasn't really used`, is framed — and dropping that `.`
+    (`--durations=0 wasn't really used`, a single sentence) reds the same words. The
+    list is a blacklist of spellings, not a parse, so a new denial phrasing is a
+    one-line addition, not a rewording dodge.
+    Two costs are stated rather than found later: `_CLAUSE_BREAK` ends a denial's reach
+    at a sentence `.`, so `# 10.36 s --durations=0. Never taken.` is FRAMED (the denial
+    is a new sentence), and a denial separated from its marker by a comma does not
+    reach it (see `_framed`).
 
-    Coarse in one documented direction: the framing marker is matched over the whole
-    comment, not per number, so a comment that carries its framing may also mention
-    a second figure. That is the harmless direction — it can only stay GREEN where
-    the framing IS stated, which is the state the reviewer asked to keep allowed.
+    ⚠️ **The framing is matched on the NUMBER'S OWN LINE, and that is the second fix.**
+    Matching it over the whole text (the first version) passed a comment that merely
+    NAMED `--durations` somewhere — `… 10.36 s of the control's 10.85 s — not measured
+    with --durations=0, so no framing was ever taken` was GREEN, and the docstring's
+    claim that it "can only stay GREEN where the framing IS stated" was false. A
+    framed number and a framed comment are different things, so the window is the line.
+    Cost, stated: a duration whose framing wraps onto the NEXT line reds, and the fix
+    is to put them on one line — the direction that keeps a claim settleable.
+
+    ⚠️ **Residual coarseness, restored and now HONEST (`#9531`).** The window is the
+    line, not the number, so a bare MENTION of a marker on a duration's line frames
+    it — `… measured 10.36 s …, unlike the whole arm` is GREEN, and a second figure on
+    a framed line (`# the whole arm is 14.4 s; a stale 99 s …`) rides on the first
+    one's framing. The earlier version of this docstring claimed that direction "can
+    only stay GREEN where the framing IS stated", which the `#9522` review measured to
+    be FALSE; a per-number binder reds on legitimate prose (a figure whose framing
+    wraps, `# 14.4 s, --durations=0`), so the bypass is filed as `#9531` instead of
+    being described as harmless.
     """
-    found = _DURATION.findall(comment)
-    if any(marker in comment for marker in _DURATION_FRAMING):
-        return []
+    found: list[str] = []
+    for line in comment.splitlines():
+        if _framed(line):
+            continue
+        found.extend(match.group(0).strip() for match in _DURATION.finditer(line))
     return found
 
 
@@ -3748,7 +3840,9 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     refactor's comment read *"No magnitude is stated on purpose: the redundant
     rebuild is a fraction of this arm (a re-verifier measured ~2.6 s of ~17 s on one
     box)"* — an assertion that no magnitude is stated, immediately followed by one,
-    on the exact axis the change exists to fix — and its merge-base predecessor read
+    on the exact axis the change exists to fix — and its predecessor at
+    `fa84a473d:990-992`, the last main commit to carry it (NOT the merge base, which
+    greps `0` for `10.36`), read
     *"measured 10.36 s of the control's 10.85 s"*, a ratio that reproduces under no
     framing the reviewer constructed (the redundant rebuild is ~2.6 s of a ~17 s
     arm; the arm's dominant cost is the 242-module ungated walk, not the control).
@@ -3763,7 +3857,13 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
     pre-fix code guards nothing (the defect the round-5 review found here).
     """
     comment = _gate_walk_comment()
-    assert comment, (
+    # ⚠️ The FLOOR reads the `#`-only projection, NOT the capture. While the capture was
+    # `#`-only, `assert comment` was falsifiable in the direction this arm exists for —
+    # delete the mechanism comment and the arm reds. The `#9522` capture widening made it
+    # unfalsifiable (a function's source is never empty), measured by deleting all five
+    # `#` lines from `_narrow_gate_walk_sites` and watching this arm stay GREEN. Its
+    # strength is "a `#` line survives, of any content" — see `_gate_walk_comment_lines`.
+    assert _gate_walk_comment_lines(_call_time_census()._narrow_gate_walk_sites), (
         "`_narrow_gate_walk_sites` carries no `#` comment any more, so this arm "
         "asserts nothing — the mechanism it states was the whole point of the change"
     )
@@ -3777,37 +3877,254 @@ def test_the_gate_walk_comment_pins_no_wall_clock_figure():
 
 
 def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
-    """Non-vacuity for `_unframed_durations`, on the MERGE BASE — not an
+    """Non-vacuity for `_unframed_durations`, on the PRE-`#9516` MAIN — not an
     intermediate commit of this branch (`#9506`).
 
     ⚠️ **The round-5 review found the first guard green on `origin/main`.** It red
     only on `says_none AND duration`, and the base text says no denial, so the arm
     passed on the very text this PR exists to delete. This arm feeds the same
-    three states through the same predicate the guard uses — the base string, the
-    intermediate string, and a framed duration — so "the guard reds on what it
+    three states through the same predicate the guard uses — the pre-`#9516` string,
+    the intermediate string, and a framed duration — so "the guard reds on what it
     replaced" is executed rather than asserted in a docstring, the shape this file
     already uses elsewhere ("mutation applied, all arms re-run").
+
+    ⚠️ The ANCHOR is named by COMMIT, not by `origin/main` (measured by the `#9522`
+    re-review): `git show origin/main:tests/_about_call_time_census.py | grep -c 10.36`
+    returns `0` at this PR's base — `#9516` already removed the figure — so the earlier
+    wording pointed a re-verifier at a tree that no longer says what this arm claims.
+    The string below is `fa84a473d:tests/_about_call_time_census.py:990-992`, the last
+    main commit to carry it.
     """
-    merge_base = (
+    pre_9516_main = (
         "# `_literal_files()` is already parsed and cached; re-reading `_sources()` "
         "and\n# rebuilding the same 29 `_File`s measured 10.36 s of the control's "
         "10.85 s for\n# byte-identical output."
     )
+    # Verbatim from `git show aded3145d:tests/_about_call_time_census.py` lines 990-995.
+    # ⚠️ The `#9522` review measured the PREVIOUS content of this literal to be an
+    # INVENTED string carrying this very citation: no commit of that file has ever
+    # contained `8.14 s` or `25.34 s` (`git log --all -S` returns only the lanes that
+    # wrote this comment), while the real lines 990-995 are the `~2.6 s of ~17 s` block
+    # below. So the fix whose commit message calls out "an ABRIDGED PARAPHRASE labelled
+    # 'the intermediate string'" had replaced it with a fabricated QUOTATION — a
+    # quotation that is not the thing it quotes, the defect this file keeps re-learning.
+    # The blob's six lines (990-995), DE-INDENTED — that is the only transformation;
+    # nothing is re-wrapped. Pinned by line count and prefix below, because the cycle-1
+    # review measured that the abridged 4-line paraphrase this replaced returns the same
+    # `['2.6 s', '17 s']` and would pass a wording-only assertion (the "claim not
+    # executed" shape this file keeps re-learning).
     intermediate = (
-        "# ... only object identity changes. No magnitude is stated on purpose: the\n"
-        "# redundant rebuild is a fraction of this arm (a re-verifier measured "
-        "~2.6 s of\n# ~17 s on one box), and a wall-clock number pinned into a "
-        "comment is the\n# claim that rots."
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and\n"
+        "# rebuilding the same 29 `_File`s is redundant work for byte-identical output —\n"
+        "# the same `_File` values over the same `_sources().items()` order, so only object\n"
+        "# identity changes. No magnitude is stated on purpose: the redundant rebuild is a\n"
+        "# fraction of this arm (a re-verifier measured ~2.6 s of ~17 s on one box), and a\n"
+        "# wall-clock number pinned into a comment is the claim that rots."
     )
-    assert _unframed_durations(merge_base) == ["10.36 s", "10.85 s"], (
-        "the predicate must red on the MERGE BASE text (`measured 10.36 s of the "
+    # `~` is decorative — the span reported is the number and its unit, not the tilde.
+    assert _unframed_durations(intermediate) == ["2.6 s", "17 s"], (
+        "the predicate must red on the VERBATIM intermediate `~2.6 s of ~17 s` block "
+        "from `aded3145d` — it is the state the earlier round called \"pre-fix\", and "
+        f"the quoted literal must be that blob's text, not a paraphrase ({_unframed_durations(intermediate)})"
+    )
+    assert len(intermediate.splitlines()) == 6 and intermediate.startswith(
+        "# `_literal_files()` is already parsed and cached; re-reading `_sources()` and"
+    ), (
+        "the quoted intermediate must be the blob's SIX lines, de-indented — an abridged "
+        "or re-wrapped paraphrase returns the same durations and so cannot be caught by "
+        f"the duration assertion ABOVE (got {len(intermediate.splitlines())} lines)"
+    )
+    assert _unframed_durations(pre_9516_main) == ["10.36 s", "10.85 s"], (
+        "the predicate must red on the PRE-`#9516` main text (`measured 10.36 s of the "
         "control's 10.85 s`) — that is the figure this PR removes, so an arm that "
         "passes on it is vacuous: it would let the identical figure be re-introduced"
     )
-    assert _unframed_durations(intermediate), (
-        "the predicate must red on the intermediate `~2.6 s of ~17 s` sentence, "
-        "which is the state the earlier round called \"pre-fix\" — it is a commit on "
-        "this branch, never on main"
+    # ── the denial is PER OCCURRENCE and BOTH SIDES; both failures measured by the
+    # `#9522` review, one in each direction. A denial AFTER the marker used to be GREEN
+    # (`--durations=0 was never taken` — the hole the veto exists to close, one word
+    # order away); a denial somewhere else on the line used to red legitimate prose
+    # (`… whole arm, --durations=0 — no other change to the control step`).
+    assert _unframed_durations(
+        "# measured 10.36 s of the control's 10.85 s — `--durations=0` was never taken"
+    ) == ["10.36 s", "10.85 s"], (
+        "a denial written AFTER the marker must red as surely as one written before "
+        "it — the marker is named only to say it was never taken"
+    )
+    # ⚠️ The denial VOCABULARY, pinned as spellings: the cycle-2 review measured that a
+    # contraction (`wasn't taken`) or a verb the list did not know (`was skipped`,
+    # `is unavailable`) went SILENT while `was never taken` red — a one-apostrophe dodge.
+    for denied in (
+        "# 10.36 s --durations=0 wasn't taken",
+        "# 10.36 s --durations=0 was skipped",
+        "# 10.36 s --durations=0 was omitted",
+        "# 10.36 s --durations=0 is unavailable",
+        "# 10.36 s --durations=0 unmeasured",
+    ):
+        assert _unframed_durations(denied) == ["10.36 s"], (
+            f"{denied!r} denies the framing it names, so it must red "
+            f"({_unframed_durations(denied)}) — a denial spelling the list does not "
+            "know is a silent way past the guard, so each spelling is an arm here"
+        )
+    assert not _unframed_durations(
+        "# 14.4 s whole arm, --durations=0 — no other change to the control step"
+    ), (
+        "an unrelated negation on an otherwise framed line must NOT red it — the veto "
+        "is per marker occurrence, or a true comment gets reworded to pass the guard"
+    )
+    assert not _unframed_durations(
+        "# no gating change: 14.4 s whole arm, --durations=0"
+    ), (
+        "a denial in front of an unrelated clause must not veto framing stated after "
+        "it on the same line"
+    )
+    # ⚠️ A parenthesis or a bare `and` AFTER the marker is a SIDE REMARK, not a denial
+    # of it — both were RED with `_CLAUSE_BREAK` alone (cycle-3 review), i.e. a true
+    # comment would have been reworded to pass the guard. The parenthetical BEFORE the
+    # marker is the opposite case and must stay RED, which is why the after-boundary is
+    # a superset rather than one list.
+    for side_remark in (
+        "# whole arm 14.4 s (no flakes)",
+        "# 14.4 s in-suite (no failures)",
+        "# 14.4 s whole arm --durations=0 (no failures)",
+        "# 14.4 s whole arm and no flakes",
+        # a parenthetical that denies a DIFFERENT quantity: the measurement noun alone
+        # was enough to red these at the previous head (cycle-5 review), so the governing
+        # list now requires a PREDICATE after the noun
+        "# 14.4 s whole arm (no spread figure)",
+        "# 14.4 s whole arm (no per-file timing)",
+        "# whole arm 14.4 s and no figure for the per-file split",
+    ):
+        assert not _unframed_durations(side_remark), (
+            f"{side_remark!r} frames its figure and adds an unrelated parenthetical or "
+            f"coordinated negation ({_unframed_durations(side_remark)}) — a true "
+            "comment reding here is how a guard teaches an editor to reword it"
+        )
+    assert _unframed_durations("# (no --durations run): 10.36 s") == ["10.36 s"], (
+        "a negation in front of the marker governs it even inside a parenthesis — the "
+        "after-side boundary must not shield it"
+    )
+    # ⚠️ A STRONG denial AFTER the marker reaches across a parenthesis and across a
+    # coordinated `and` — the after-side boundary only ever SHORTENS the searched text,
+    # so applying it to the strong list made all of these SILENT (cycle-4 review), a
+    # fail-open with no compensating red. The weak quantifiers above stay framed.
+    for strong_denial in (
+        "# 10.36 s --durations=0 (never taken)",
+        "# 10.36 s --durations=0 (not run)",
+        "# 10.36 s --durations=0 (skipped)",
+        "# 10.36 s --durations=0 and never taken",
+        "# 10.36 s --durations=0 and wasn't taken",
+        "# 10.36 s --durations=0 and no framing was taken",
+        # a strong denial is about the marker however it is punctuated: the sentence-end
+        # window is what makes `, never taken` and `— never taken` red, and cutting at the
+        # separator made both SILENT (cycle-5 review)
+        "# 10.36 s --durations=0 — never taken",
+        "# 10.36 s --durations=0, never taken",
+        "# 10.36 s --durations=0 — no measurement was ever taken",
+        # `;` is a CLAUSE separator: including it in the sentence-end window made this
+        # silent, a one-character substitution for the hole the veto exists to close
+        "# 10.36 s --durations=0; never taken",
+        "# measured 10.36 s with --durations=0; the run was never taken",
+    ):
+        assert _unframed_durations(strong_denial) == ["10.36 s"], (
+            f"{strong_denial!r} denies the framing it names, parenthesised or "
+            f"coordinated or not ({_unframed_durations(strong_denial)}) — a strong "
+            "denial is not a side remark, so the after-side boundary must not stop it"
+        )
+    # ⚠️ The SENTENCE-END boundary the docstring STATES, executed. The `#9522` review
+    # measured a prose defect here: the docstring said `--durations=0 wasn't really
+    # used` "split across a `.`" is FRAMED while printing that example with no period,
+    # where `_DENIAL_STRONG` reads `wasn't` and the line REDS. Prose and predicate
+    # disagreed in the same sentence and no arm could tell, so the FRAMED example is now
+    # read out of the docstring itself and both sides of the boundary are run.
+    docstring_prose = " ".join((_unframed_durations.__doc__ or "").split())
+    assert "`--durations=0. wasn't really used`" in docstring_prose, (
+        "the docstring no longer states the boundary this arm executes — the FRAMED "
+        "example must carry the `.`, because the unpunctuated form is a single "
+        "sentence and reds"
+    )
+    for new_sentence in (
+        # the `.` ends the marker's sentence, so a strong denial beyond it does not
+        # reach the marker: this is the GREEN side the docstring states
+        "# 10.36 s --durations=0. wasn't really used",
+        "# 10.36 s --durations=0. never done here",
+    ):
+        assert not _unframed_durations(new_sentence), (
+            f"{new_sentence!r} states its denial in a NEW sentence, so the marker's "
+            f"own sentence frames the figure ({_unframed_durations(new_sentence)}) — "
+            "that `.` is the only reason the docstring's example is framed"
+        )
+    for one_sentence in (
+        "# 10.36 s --durations=0 wasn't really used",
+        "# 10.36 s --durations=0 never done here",
+    ):
+        assert _unframed_durations(one_sentence) == ["10.36 s"], (
+            f"{one_sentence!r} is the SAME words with the `.` dropped, so the denial "
+            f"sits in the marker's own sentence and must red "
+            f"({_unframed_durations(one_sentence)}) — otherwise the boundary the "
+            "docstring states is not the one the predicate implements"
+        )
+
+    # ── the SECOND fix this predicate claims: framing is per LINE, not whole-text.
+    # Cycle-4 review measured that no arm executed it — reverting `_framed` to a
+    # whole-`comment` test left the file green, because the only multi-line input was
+    # the `intermediate` literal, which carries no marker on any line.
+    assert _unframed_durations(
+        "# 10.36 s of the control's 10.85 s\n# the whole arm was re-run last week"
+    ) == ["10.36 s", "10.85 s"], (
+        "a marker on a DIFFERENT line must not frame this line's figure — that is the "
+        "whole-text hole the per-line window closes, and nothing else here executes it"
+    )
+    assert not _unframed_durations("# the whole arm is 14.4 s\n# nothing else"), (
+        "the same-line case must stay GREEN, or the arm above can be satisfied by "
+        "making everything red"
+    )
+    for word_form, expected in (
+        ("# the arm took 850 milliseconds", ["850 milliseconds"]),
+        ("# the arm took 850 microseconds", ["850 microseconds"]),
+        ("# the arm took 850 nanoseconds", ["850 nanoseconds"]),
+        ("# the arm took 850 msec", ["850 msec"]),
+        ("# the arm took 900 usec", ["900 usec"]),
+        ("# the arm took 900 usecs", ["900 usecs"]),
+        ("# the arm took 900 usecs of the arm", ["900 usecs"]),
+        ("# the arm took 900 µsec", ["900 µsec"]),
+        ("# the arm took 900 nsecs", ["900 nsecs"]),
+        ("# cost 1,000.5 s of the arm", ["1,000.5 s"]),
+        ("# cost 2,048.25 ms of the arm", ["2,048.25 ms"]),
+    ):
+        assert _unframed_durations(word_form) == expected, (
+            f"{word_form!r} writes a duration the unit/number list claims to cover "
+            f"({_unframed_durations(word_form)}) — a silent re-spelling is how the "
+            "guard gets retired by an editor's keyboard"
+        )
+    # ── re-spellings of the same figure: every one of these was GREEN when the number
+    # had to be a plain decimal or the unit had to be `ms|s`, and a GREEN figure here
+    # means the guard is retired by an editor's keyboard, not by a false claim.
+    for respelled, expected in (
+        ("# measured 1,000 s of the control's 2,000 s", ["1,000 s", "2,000 s"]),
+        ("# measured 10,36 s of the control's 10,85 s", ["10,36 s", "10,85 s"]),
+        ("# measured 1e3 s of the 2e3 s arm", ["1e3 s", "2e3 s"]),
+        ("# measured 10.36  s of the control's 10.85  s", ["10.36  s", "10.85  s"]),
+        ("# cost 1.5 h of the arm's 2 h", ["1.5 h", "2 h"]),
+        ("# cost 900 us of the arm", ["900 us"]),
+    ):
+        assert _unframed_durations(respelled) == expected, (
+            f"{respelled!r} must report the durations it writes, verbatim "
+            f"({_unframed_durations(respelled)}) — a re-spelt figure that goes SILENT "
+            "is worse than one quoted imperfectly: nothing ever reds again"
+        )
+    assert not _unframed_durations("# sha256s and 1,000 of them, no duration here"), (
+        "the lookbehind must still refuse a token that is not a duration — `sha256s` "
+        "and a bare count must not be reported as one"
+    )
+    assert _unframed_durations("# x1,000 s of whatever") == [], (
+        "`x1,000` is not a duration: the number must be refused from its first digit "
+        "and never reported from a fragment after the group separator — measured by "
+        "the cycle-2 review as `['000 s']`, a span that is not what was written"
+    )
+    assert _unframed_durations("# arms were 10.36s,10.85s") == ["10.36s", "10.85s"], (
+        "a comma BETWEEN two figures is not a reason to refuse the second one "
+        f"({_unframed_durations('# arms were 10.36s,10.85s')}) — measured by the "
+        "cycle-3 review, where the group-separator lookbehind silently dropped it"
     )
     assert not _unframed_durations(
         "# the arm measured 14.4 s whole arm, --durations=0, one box"
@@ -3821,6 +4138,227 @@ def test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced():
         "use — this is the arm the guard asserts, restated so a divergence between "
         "the predicate and its non-vacuity arm cannot go unnoticed"
     )
+
+
+def _figure_in_the_docstring() -> None:
+    """A duration in the position `getsource` RETURNS and the `#` filter DROPPED:
+
+    measured 10.36 s of the control's 10.85 s.
+    """
+
+
+def _figure_as_a_trailing_comment() -> None:  # measured 10.36 s of the control's 10.85 s
+    """A duration on a code line's TRAILING comment — also dropped by the filter."""
+
+
+# measured 10.36 s of the control's 10.85 s
+# (contiguous, so the backward scan has to reach past the `def`)
+def _figure_in_the_block_above_the_def() -> None:
+    """A duration in the `#` block ABOVE the `def` — `getsource` never returns it."""
+    # the mechanism line the floor looks for (a `#`-leading line IN the source)
+
+
+def test_the_gate_walk_capture_reads_every_position_a_duration_is_written():
+    """The capture is not a `#`-only projection (`#9522`).
+
+    ⚠️ **A guard over a comment is only as good as its capture, and the capture was
+    blind to three of the four places a duration can be written.** `#9516` merged the
+    comment change and left the arm reading `line.lstrip().startswith("#")`, which
+    drops the function DOCSTRING and TRAILING comments (`inspect.getsource` returns
+    both) and never sees the `#` block above the `def` (`getsource` does not return
+    it at all). Measured by splicing `measured 10.36 s of the control's 10.85 s` —
+    the exact string the `#9506` change deletes — into each position on `69390341f`:
+    all three stayed GREEN, so the guard had three documented ways past it.
+
+    The three synthetic functions below put the figure in each position THROUGH the
+    same `_prose_of` the guard uses, so "the capture reads every position" is executed
+    rather than asserted in a docstring. This arm reds on `69390341f` and greens here;
+    it is the missing half of the `#9522` fix, which changed the capture without an
+    arm that could tell the two captures apart.
+    """
+    for fn in (
+        _figure_in_the_docstring,
+        _figure_as_a_trailing_comment,
+        _figure_in_the_block_above_the_def,
+    ):
+        assert _unframed_durations(_prose_of(fn)) == ["10.36 s", "10.85 s"], (
+            f"`{fn.__name__}` writes the `#9506` figure in a position the capture "
+            "projects away, so the guard stays GREEN on the very text it exists to "
+            "delete — the capture must be the function's whole source plus the `#` "
+            "block above the `def`"
+        )
+
+    census = _call_time_census()
+    # ⚠️ `inspect.unwrap` and the plain-function contract were both UNEXECUTED — the live
+    # function is undecorated, so neither could run (cycle-5 review). A `@lru_cache`d
+    # sibling is the natural probe, and it fails on the ASSERT first (`got
+    # _lru_cache_wrapper` is not a function); only if that assert is weakened too does
+    # `inspect.getsourcefile` raise its own `TypeError` (cycle-6 review corrected this
+    # comment, which named the TypeError for a mutation that actually trips the assert).
+    unwrapped = _prose_of(census._census)
+    assert inspect.getdoc(census._census).splitlines()[0].strip() in unwrapped, (
+        "a `@lru_cache`d sibling's capture does not contain its docstring, so the "
+        "`inspect.unwrap` is not doing its job — `getsourcefile` would raise on the wrapper"
+    )
+    with pytest.raises(AssertionError, match="needs a plain function"):
+        _prose_of(len)  # type: ignore[arg-type]
+    # ⚠️ The FLOOR that the capture widening retired, executed rather than described:
+    # `_gate_walk_comment_lines` is the `#`-only projection the arms used to read, so a
+    # function with NO `#` line must come back EMPTY. Without this arm the floor in
+    # `test_the_gate_walk_comment_pins_no_wall_clock_figure` can only be checked by
+    # hand — measured by the `#9522` review deleting all five `#` lines from
+    # `_narrow_gate_walk_sites` and watching that arm stay GREEN.
+    assert _gate_walk_comment_lines(_figure_in_the_docstring) == "", (
+        "the `#`-line floor reports a `#` line for a function that carries none, so it "
+        "cannot tell a comment-less function from a commented one — it would pass on "
+        "the exact state `#9506` exists to prevent"
+    )
+    assert _gate_walk_comment_lines(_figure_in_the_block_above_the_def) == (
+        "# the mechanism line the floor looks for (a `#`-leading line IN the source)"
+    ), (
+        "the floor must still SEE a `#` line where one exists, and ONLY the ones "
+        "`getsource` returns (the block above the `def` is not in it) — otherwise the "
+        "floor is a constant and the arm above it is vacuous for the wrong reason"
+    )
+    stripped = _gate_walk_comment_lines(census._narrow_gate_walk_sites)
+    assert stripped, (
+        "the live function carries no `#` line, so the mechanism comment is gone and "
+        "the pin arm would be asserting nothing"
+    )
+    # And the capture must be MORE than that projection — otherwise the docstring and
+    # trailing-comment positions are invisible on the LIVE function too.
+    #
+    # ⚠️ **The previous version of this check could never fail** (measured by the
+    # `#9522` review): it asked whether ANY captured line differs from the projection's
+    # lines, and a capture is `inspect.getsource` at minimum, whose first line is the
+    # `def` — so the answer was `True` for every implementation of `_prose_of`, INCLUDING
+    # a deliberately BLIND one (`#` lines + the `def` line, docstring and trailing
+    # comments still invisible). The two checks below are the falsifiable pair: the
+    # DOCSTRING is derived from the function object (no literal to reword), and the
+    # capture must strictly exceed the `#`-only projection plus that one `def` line —
+    # the smallest blind shape there is.
+    doc_lines = (inspect.getdoc(census._narrow_gate_walk_sites) or "").splitlines()
+    live = _prose_of(census._narrow_gate_walk_sites)
+    assert doc_lines, (
+        "`_narrow_gate_walk_sites` carries no docstring any more, so the DOCSTRING "
+        "position cannot be checked on the live function — the arm would be asserting "
+        "the capture covers a position that no longer exists"
+    )
+    assert doc_lines[0].strip() in live, (
+        "the live capture does not contain the function's own DOCSTRING first line "
+        f"({doc_lines[0].strip()!r}), so `getsource`'s docstring position is projected "
+        "away and a figure written there is invisible to the duration scan"
+    )
+    assert len(live.splitlines()) > len(stripped.splitlines()) + 1, (
+        f"the live capture is {len(live.splitlines())} line(s) for a "
+        f"{len(stripped.splitlines())}-line `#` projection — that is the projection "
+        "plus at most a `def` line, i.e. the smallest BLIND capture, so the docstring "
+        "and trailing-comment positions are invisible to the duration scan"
+    )
+
+
+#: The last `main` commit whose `tests/_about_call_time_census.py` blob carries the
+#: pre-`#9516` figure `measured 10.36 s of the control's 10.85 s`.
+#:
+#: ⚠️ **Named by COMMIT, not by "the merge base" or by `origin/main`** (`#9522`
+#: re-review). Measured at this PR's base: `git show origin/main:tests/
+#: _about_call_time_census.py | grep -c 10.36` is `0` — `#9516` already removed the
+#: figure — so naming the base as its carrier points a re-verifier at a tree that
+#: does not say what the arms below claim it says. That is the citation-rot class
+#: `test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure` pins.
+_GATE_WALK_FIGURE_CARRIER = "fa84a473d"
+
+#: Sentences that name a TREE (the merge base) as the carrier of that figure. Both
+#: forms shipped in this file's own prose and both were false at the head that
+#: shipped them; the carrier is a COMMIT.
+_STALE_GATE_WALK_ANCHORS = ("on the merge base", "merge-base predecessor")
+
+
+def _git_blob(rev: str, path: str) -> str | None:
+    """`git show <rev>:<path>`, or None where THIS checkout cannot reach it.
+
+    ⛔ No `git fetch` fallback, deliberately: `test_the_gate_walk_anchors_…`'s
+    sibling in `tests/test_9397_about_edge_properties.py` MEASURED that
+    `git fetch --depth=N` on a full clone REWRITES it shallow (6106 commits of
+    `origin/main` cut to 120), a destructive side effect on the checkout under test
+    from an arm that runs in `core`. An unreachable rev is reported as unverified by
+    the caller instead.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(ROOT), "show", f"{rev}:{path}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover — no git binary
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def test_the_gate_walk_anchors_name_the_commit_that_carries_the_figure():
+    """The prose anchors name a tree that still has the text (`#9522`).
+
+    ⚠️ **This file's own claim labels rotted into the same false anchor twice.** §23
+    item 23 said the pre-`#9516` figure was `measured 10.36 s of the control's 10.85
+    s` "on the merge base", and the docstring of
+    `test_the_gate_walk_comment_pins_no_wall_clock_figure` called it "its merge-base
+    predecessor" — while 12 lines apart §23 names `fa84a473d:990-992` as the last main
+    commit to carry it. Both anchors cannot be true: `git show
+    origin/main:tests/_about_call_time_census.py | grep -c 10.36` is `0` at this base.
+    The sibling arm `test_the_gate_walk_comment_arm_reds_on_the_text_it_replaced` was
+    already corrected for exactly this ("the ANCHOR is named by COMMIT, not by
+    `origin/main`"); these two sentences were the ones it left behind, so a re-verifier
+    following them landed on a tree that contradicts the arm.
+
+    Three assertions, because a prose pin that can be satisfied by DELETION is not a
+    pin: (1) no carrier sentence names a tree, (2) the commit anchor IS named, and
+    (3) the named commit really carries the figure while `origin/main` does not — the
+    measurement the prose states, executed where this checkout can reach the objects.
+
+    Non-vacuity: on the pre-fix text of this file, assertion (1) reds on BOTH strings
+    (measured by re-inserting each into the module docstring). The `git` half cannot
+    red for that edit — it is the anchor's VERIFICATION, not the defect — and it
+    SKIPS (with a message saying so) where `fa84a473d` is unreachable, e.g. a shallow
+    clone, rather than being silently green.
+    """
+    prose = "\n".join(
+        (
+            __doc__ or "",
+            inspect.getdoc(test_the_gate_walk_comment_pins_no_wall_clock_figure) or "",
+        )
+    )
+    for stale in _STALE_GATE_WALK_ANCHORS:
+        assert stale not in prose, (
+            f"this file's prose names a TREE (`{stale}`) as the carrier of the "
+            "pre-`#9516` figure, and the tree does not carry it — measured at this "
+            "PR's base: `git show origin/main:tests/_about_call_time_census.py | "
+            f"grep -c 10.36` is `0`. Name the commit ({_GATE_WALK_FIGURE_CARRIER}:990-992)"
+        )
+    assert _GATE_WALK_FIGURE_CARRIER in prose, (
+        "no sentence here names the COMMIT that carries the pre-`#9516` figure any "
+        "more — the anchor was deleted rather than corrected, so the arms below and "
+        "§23 no longer tell a re-verifier where the quoted text came from"
+    )
+    carrier = _git_blob(_GATE_WALK_FIGURE_CARRIER, "tests/_about_call_time_census.py")
+    if carrier is None:
+        pytest.skip(
+            f"{_GATE_WALK_FIGURE_CARRIER} is not reachable in this checkout, so the "
+            "commit anchor above is UNVERIFIED here (a shallow clone cannot reach it "
+            "and is not rewritten to try) — the prose pin still ran"
+        )
+    assert "measured 10.36 s of the control's 10.85 s" in carrier, (
+        f"{_GATE_WALK_FIGURE_CARRIER}:tests/_about_call_time_census.py does not carry "
+        "the figure the arms below quote from it, so the anchor names a commit that "
+        "does not say what they claim"
+    )
+    base = _git_blob("origin/main", "tests/_about_call_time_census.py")
+    if base is not None:
+        assert "10.36" not in base, (
+            "`origin/main`'s census blob carries the pre-`#9516` figure again, so the "
+            "measurement this file states (`grep -c 10.36` is `0` at the base) is "
+            "stale and the anchor sentence above should be re-derived"
+        )
 
 
 def _pin_universe_to_disk(census, on_disk: set[Path]) -> None:
