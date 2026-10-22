@@ -1145,11 +1145,11 @@ def run_restore_drill(
     restore, count. It never trusts the writer's own claim about what it wrote:
     the numbers come from the two databases, not from the manifest.
 
-    The comparison is against the counts the ARTIFACT was cut with (the manifest's
-    `row_counts`, taken immediately before the dump) and is bounded above by a
-    re-count taken after the dump: the record is live, so rows committed in that
-    gap are in the artifact and not in the count, and comparing exactly would red
-    a healthy backup every day (see :func:`compare_row_counts`).
+    The comparison is against the counts read from the SOURCE DATABASE before the
+    dump (``before``) and is bounded above by a re-count taken after the dump:
+    the record is live, so rows committed in that gap are in the artifact and not
+    in the count, and comparing exactly would red a healthy backup every day (see
+    :func:`compare_row_counts`).
 
     Refusals, in the order they matter:
 
@@ -1158,6 +1158,12 @@ def run_restore_drill(
       a REFUSAL (no verdict), never a mismatch: nothing ran;
     * a scratch DSN **equal to the source** — the restore (and a
       ``reset_scratch``) would destroy the record it is supposed to protect;
+    * an artifact whose own ``row_counts`` claim **more rows than the source held
+      after the dump** cross-checked against the post-dump ceiling, never against
+      ``before`` (#9601 review cycle 2, P1): the manifest's count is read after
+      ``before``, so on a live record it is legitimately the LARGER number, and
+      comparing it against ``before`` red a healthy backup on the documented
+      daily schedule;
     * a non-empty scratch target (refused inside
       :func:`restore_record_backup`) — unless ``reset_scratch`` emptied it first.
 
@@ -1211,6 +1217,20 @@ def run_restore_drill(
     manifest = create_record_backup(
         dsn, storage, run=run, connect=connect, workdir=workdir, key=key, pg_dump=pg_dump
     )
+    # The CEILING, read as soon as the artifact is cut. Its POSITION is the fix
+    # for #9601 review cycle 2 (P1): `claimed` (the manifest's own counts) is
+    # measured *inside* `create_record_backup`, i.e. AFTER `before`, so on a live
+    # append-only record `claimed > before` is the ordinary concurrent-insert
+    # signature — most of all for `journal_event`, which gets a row on every
+    # capture turn. Comparing the later read against the earlier one therefore
+    # red a HEALTHY backup on the documented daily schedule, on a run whose
+    # restore had not started, and — because `RecordRestoreVerifyError` carries
+    # no `mismatches` here — printed `{"verdict": "MISMATCH", "mismatches": []}:
+    # a loss verdict naming no loss. What the cross-check can legitimately
+    # decide is one-sided: an artifact may not claim more rows than the source
+    # held AFTER the dump, and that disagreement is a REFUSAL (exit 2, no
+    # verdict), not a data-loss incident.
+    after = record_row_counts(dsn, connect=connect)
     if reset_scratch:
         reset_record_tables(scratch_dsn, connect=connect)
     # The source numbers are the ones READ FROM THE SOURCE DATABASE (`before`),
@@ -1227,14 +1247,16 @@ def run_restore_drill(
             "the source held no rows when they were read — a drill with nothing "
             "to compare against is not a verification"
         )
-    for table, counted in source.items():
-        if claimed and claimed.get(table) is not None and claimed[table] > counted:
-            raise RecordRestoreVerifyError(
-                f"the artifact claims {claimed[table]} {table} row(s) but the source "
-                f"held {counted} just before the dump — the artifact and the record "
-                "disagree, so the drill cannot verify anything"
+    for table in source:
+        want = None if not claimed else claimed.get(table)
+        ceiling = after.get(table)
+        if want is not None and ceiling is not None and int(want) > int(ceiling):
+            raise RecordRestoreRefused(
+                f"the artifact claims {want} {table} row(s) but the source held "
+                f"{int(ceiling)} once the dump had finished — an artifact cannot "
+                "carry rows the record never held, so the drill produced no "
+                "verdict (nothing was restored)"
             )
-    after = record_row_counts(dsn, connect=connect)
     backup_key = f"{RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{DUMP_OBJECT}"
     restored = restore_record_backup(
         storage,

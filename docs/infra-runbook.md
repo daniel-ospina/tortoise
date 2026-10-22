@@ -392,7 +392,7 @@ Exit codes (a scheduler's only signal):
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
 | `1` | the backup/restore **could not be performed** (pg_dump/pg_restore non-zero, transport). The record is NOT backed up — **retry** |
-| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, an artifact whose own `row_counts` claim **more rows than the source ever held** (checked against the post-dump ceiling, so a live record's ordinary concurrent writes can never trigger it), or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
 | `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
 
 Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
@@ -447,12 +447,20 @@ writes, and a drill that reds every day on a healthy backup removes the one fals
 for. The report names a table that moved with both bounds, e.g.
 `journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
 
+The artifact's OWN `row_counts` are a **cross-check, never the baseline**: they are read after
+`before`, so the only disagreement they can legitimately establish is one-sided — an artifact
+claiming more rows than the source held *after* the dump, which is a refusal (exit `2`, nothing
+restored), not a data-loss verdict. Comparing them against the pre-dump count was a false incident
+on every live record (#9601 review cycle 2).
+
 ### Retention
 
 A successful run prunes `record-backups/` to the newest **14** artifacts (`--keep`). The prune only
 removes objects whose manifest it could read and whose `format` it recognises; anything it cannot
 attribute is left alone, because a prune that guesses deletes the only copy of something it did not
-understand. The prune runs **after** the artifact is durable and is best-effort: a failed listing or
+understand. It deletes under the **path the manifest was read at**, never under the `backup_id` the
+file declares about itself — a hand-edited or duplicated id would otherwise redirect the deletion
+onto the artifact the policy had just decided to keep. The prune runs **after** the artifact is durable and is best-effort: a failed listing or
 delete logs a warning and the run still exits `0` (the backup happened) — a prune failure must never
 be reported as "the record is NOT backed up". It runs on exit `0` only, so a persistently red drill
 also stops retention; `--reset-scratch` is what keeps the scheduled drill on the `0` path.
@@ -476,7 +484,7 @@ backup's — a weekly drill is enough to keep the artifact proven.
 Executed end to end against a real `postgres:17`, a **real** `pg_dump`/`pg_restore`, the real
 `supabase/migrations` schema, and the real encrypt/upload/download/decrypt path (in-memory storage):
 
-```
+```text
 verdict: RESTORED            row_total: 56
 node_identity 8/8   journal_event 40/40   source 1/1   event 1/1   session 1/1
 object 1/1   subject 1/1   point 1/1   relation 2/2

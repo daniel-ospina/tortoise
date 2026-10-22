@@ -246,6 +246,50 @@ def test_the_password_never_reaches_argv_and_the_dsn_is_not_positional():
     assert kwargs["env"]["PGDATABASE"] == "postgres"
 
 
+def test_the_ambient_libpq_environment_never_reaches_the_dump(monkeypatch):
+    """#9601 review cycle 2 (P2): the allow-list is PINNED, not just described.
+
+    `_subprocess_env` was `{**os.environ, **libpq_env(dsn)}` until cycle 1, so
+    every libpq variable the DSN did not name was inherited from whatever shell
+    started the backup. `PGDATABASE` alone is enough to dump a **different
+    database than the manifest describes** — and the manifest is the map from the
+    artifact back to the database it must be compared with, so the drill would
+    verify one database's artifact against another's counts. `PGSERVICE` and
+    `PGPASSFILE` reach a different server with different credentials; a stale
+    `PGOPTIONS` silently changes the session.
+
+    `test_the_password_never_reaches_argv_...` cannot catch a revert to the old
+    shape: it only asserts the DSN's own coordinates are PRESENT, which is true
+    either way. This one sets every dangerous variable to a value the DSN does
+    NOT carry and asserts the env the DUMP passed is the DSN's — so restoring
+    `{**os.environ, ...}` reds it.
+    """
+    for ambient in (
+        "PGDATABASE", "PGUSER", "PGPASSWORD", "PGSERVICE", "PGOPTIONS",
+        "PGSSLMODE", "PGPASSFILE", "PGHOST", "PGPORT",
+    ):
+        monkeypatch.setenv(ambient, "bogus-from-the-shell")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    runner = FakeRunner()
+    db = FakeDB(SOURCE_COUNTS)
+    rb.create_record_backup(DSN, MemoryStorage(), run=runner, connect=db.connect, key=KEY)
+    _argv, kwargs = runner.calls[0]
+    env = kwargs["env"]
+    # The DSN's coordinates win, and an inherited value cannot stand in for one
+    # the DSN does not name.
+    assert env["PGHOST"] == "db.projectref.supabase.co"
+    assert env["PGPORT"] == "5432"
+    assert env["PGUSER"] == "record_user"
+    assert env["PGPASSWORD"] == "s3cr3t-pw"
+    assert env["PGDATABASE"] == "postgres"
+    for unnameable in ("PGSERVICE", "PGOPTIONS", "PGSSLMODE", "PGPASSFILE"):
+        assert unnameable not in env, (
+            f"{unnameable} was inherited from the ambient environment — a dump "
+            "must reach the database its DSN names, not the one a shell variable names")
+    # The minimum a client needs to RUN is still passed through.
+    assert env["PATH"] == "/usr/bin"
+
+
 def test_the_manifest_records_the_table_set_the_ciphertext_hash_and_no_credentials():
     manifest, storage, _runner, _db = _dump_manifest()
     assert manifest["format"] == rb.RECORD_DUMP_FORMAT
@@ -668,6 +712,78 @@ def test_the_drill_tolerates_rows_written_after_the_dump_and_names_the_window():
     assert report["tables"]["point"] == {"source": 24, "source_after": 24, "restored": 24}
 
 
+def test_the_drill_does_not_red_when_a_row_lands_between_the_two_source_reads():
+    """#9601 review cycle 2 (P1): the manifest's count is read AFTER `before`.
+
+    `run_restore_drill` reads the source at `before`, and `create_record_backup`
+    reads it again for the manifest's `row_counts` — a LATER read. On a live
+    append-only record (a row lands on every capture turn) the second read is
+    legitimately the LARGER number, so comparing `claimed` against `before` red a
+    perfectly healthy backup: exit 3, `"verdict": "MISMATCH"` with no
+    `mismatches`, on the exact schedule `docs/infra-runbook.md` documents, on a
+    run whose restore had not started. The sibling test above places the
+    concurrent row at the THIRD read, which is the one placement that never
+    exercises that guard; this one places it at the second.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    reads = {"source": 0}
+    real_connect = db.connect
+    # The row is committed BEFORE the read it precedes, so the manifest's own
+    # count (read #2, inside `create_record_backup`) already sees it — and so does
+    # the dump, and so does the post-dump ceiling (read #3).
+    artifact_counts = {**SOURCE_COUNTS, "journal_event": 515}
+
+    def connect(dsn):
+        if dsn == DSN:
+            reads["source"] += 1
+            if reads["source"] >= 2:
+                db.source = dict(artifact_counts)
+        return real_connect(dsn)
+
+    def restore():
+        db.scratch.update(artifact_counts)
+
+    report = rb.run_restore_drill(
+        DSN, MemoryStorage(), SCRATCH_DSN,
+        run=FakeRunner(on_restore=restore), connect=connect, key=KEY,
+    )
+    assert reads["source"] >= 2, "the concurrent row must land before the manifest count"
+    assert report["verdict"] == "RESTORED"
+    assert report["tables"]["journal_event"] == {
+        "source": 512, "source_after": 515, "restored": 515,
+    }
+
+
+def test_an_artifact_claiming_rows_the_source_never_held_is_a_REFUSAL(monkeypatch):
+    """The cross-check still bites — as a REFUSAL, never as a mismatch verdict.
+
+    The check is one-sided on purpose (see the test above): an artifact may not
+    claim more rows than the source held once the dump finished, because it
+    cannot carry rows that never existed. That is a disagreement between the
+    artifact and the record, so NOTHING is restored and no verdict is produced:
+    exit 2, not exit 3 — a `RecordRestoreVerifyError` here would print
+    `{"verdict": "MISMATCH", "mismatches": []}`, a loss verdict naming no loss.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    real = rb.create_record_backup
+
+    def overclaiming(*args, **kwargs):
+        manifest = real(*args, **kwargs)
+        manifest["row_counts"] = {**manifest["row_counts"], "journal_event": 10_000}
+        return manifest
+
+    monkeypatch.setattr(rb, "create_record_backup", overclaiming)
+    runner = FakeRunner(on_restore=db.populate_scratch_from_source)
+    with pytest.raises(rb.RecordRestoreRefused, match="never held") as excinfo:
+        rb.run_restore_drill(
+            DSN, MemoryStorage(), SCRATCH_DSN, run=runner, connect=db.connect, key=KEY,
+        )
+    assert not isinstance(excinfo.value, rb.RecordRestoreVerifyError)
+    # No restore ran, and the scratch target was not touched.
+    assert [argv[0] for argv, _kw in runner.calls] == ["pg_dump"]
+    assert db.scratch == dict.fromkeys(THE_RECORD_TABLES, 0)
+
+
 def test_a_lost_table_is_STILL_red_on_a_record_that_moved():
     """The tolerance is a window, not a licence: loss is still named."""
     db = FakeDB(SOURCE_COUNTS)
@@ -821,6 +937,52 @@ def test_prune_never_deletes_an_object_whose_manifest_it_cannot_read():
     # ...and the unattributable object survived it: a prune that guesses deletes
     # the only copy of something it did not understand.
     assert storage.download(stray).startswith(b"not attributable")
+
+
+def test_prune_deletes_by_the_KEY_the_manifest_was_read_at_not_its_own_id():
+    """#9601 review cycle 2 (P2): the deletion target comes from the PATH, not the file.
+
+    `base` used to be built from `manifest["backup_id"]` — the id the file
+    DECLARES about itself. A hand-edited manifest, a duplicated id from a
+    half-failed upload, or an id copied from another artifact then redirects the
+    deletion: `keep=1` deletes the objects of the artifact it just decided to
+    KEEP, and the retention policy becomes the data loss it exists to bound
+    (#2414). The sibling tests only ever exercise manifests whose `backup_id`
+    agrees with its path, so a revert to the old shape keeps them green.
+
+    Here the doomed artifact's manifest declares the SURVIVOR's id: the prune
+    must delete `<id-a>/*` (where it was read) and must leave `<id-b>/*` alone.
+    """
+    storage = MemoryStorage()
+    older = f"{rb.RECORD_BACKUP_PREFIX}20260101T000000000Z_aaaaaaaa"
+    newer = f"{rb.RECORD_BACKUP_PREFIX}20260102T000000000Z_bbbbbbbb"
+
+    def put(base: str, *, backup_id: str, created_at: str) -> None:
+        manifest = {
+            "backup_id": backup_id,
+            "format": rb.RECORD_DUMP_FORMAT,
+            "created_at": created_at,
+            "tables": list(THE_RECORD_TABLES),
+            "row_counts": dict(SOURCE_COUNTS),
+            "sha256": "0" * 64,
+        }
+        storage.upload(f"{base}/{rb.DUMP_OBJECT}", b"ciphertext")
+        storage.upload(f"{base}/{rb.MANIFEST_OBJECT}", json.dumps(manifest).encode())
+
+    # The OLDER artifact's manifest lies about its id: it names the newer one.
+    put(older, backup_id="20260102T000000000Z_bbbbbbbb", created_at="2026-01-01T00:00:00+00:00")
+    put(newer, backup_id="20260102T000000000Z_bbbbbbbb", created_at="2026-01-02T00:00:00+00:00")
+    assert [r["_manifest_key"] for r in rb.list_record_backups(storage)] == [
+        f"{older}/{rb.MANIFEST_OBJECT}", f"{newer}/{rb.MANIFEST_OBJECT}",
+    ]
+
+    deleted = rb.prune_record_backups(storage, keep=1)
+    assert deleted == [f"{older}/{rb.DUMP_OBJECT}", f"{older}/{rb.MANIFEST_OBJECT}"]
+    # The artifact the policy kept is INTACT — the deleted-object count above is
+    # what a delete-by-declared-id prune would have taken from the survivor.
+    assert storage.download(f"{newer}/{rb.DUMP_OBJECT}") == b"ciphertext"
+    assert json.loads(storage.download(f"{newer}/{rb.MANIFEST_OBJECT}"))["backup_id"] == (
+        "20260102T000000000Z_bbbbbbbb")
 
 
 def test_list_record_backups_skips_unreadable_manifests():
