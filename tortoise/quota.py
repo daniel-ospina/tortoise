@@ -566,11 +566,14 @@ def api_key_occupies_slot(org_id: str, key_id: str, sdk=None) -> bool:
 
 #: #5140: THE definition of "this `:Source` is a metered document" — the
 #: `documents` resource's predicate (#1726 slice 1, re-pointed by D10).
-#: `count_org_usage` counts with it, and the WRITE-side guard that refuses a
-#: caller demotion out of this class (`sdk._refuse_document_kind_demotion`)
-#: tests with :func:`is_metered_document_kind`. They are two halves of one
-#: rule and must be edited together — the escape in #5140 existed because the
-#: predicate had a single consumer (the counter) and no defender.
+#: `count_org_usage` counts with it, and the WRITE-side guards that refuse a
+#: caller demotion out of this class test with :func:`is_metered_document_kind`: the two `:Source`
+#: surfaces (`sdk._refuse_document_kind_demotion`) read the stored genre through
+#: :func:`stored_source_document_kinds`, and the document writers
+#: (`EventAPI.add_document`, `sdk._doc_write`) through
+#: :func:`refuse_document_writer_demotion`. They are halves of one rule and must
+#: be edited together — the escape in #5140 existed because the predicate had a
+#: single consumer (the counter) and no defender.
 DOCUMENT_METER_PREDICATE = (
     "s.documentKind IS NOT NULL AND s.documentKind <> 'transcript'"
 )
@@ -585,6 +588,101 @@ def is_metered_document_kind(kind: str | None) -> bool:
     Source — the #1726 price change D10 forbids).
     """
     return kind is not None and kind != "transcript"
+
+
+#: The ONE genre :data:`DOCUMENT_METER_PREDICATE` exempts. Named because the
+#: WRITE side needs it too: it is the only value that moves a node out of the
+#: metered class, so every defender gates on it rather than on a literal.
+DOCUMENT_KIND_TRANSCRIPT = "transcript"
+
+
+def stored_source_document_kinds(g, id_val: str):
+    """The `documentKind`s the `:Source` nodes a write for ``id_val`` would hit.
+
+    #5140: the meter's KEY has to be readable at every door that writes it,
+    and read with the SAME key discipline as the write — the primary identity
+    prop then the declared secondary (`_source_reachable_by`'s rule, #5196) —
+    or a url-only STUB hides its stored genre from the guard while staying
+    writable. That discipline lives in `tortoise.projection` (the writers' own
+    declaration), so it is imported FUNCTION-LEVEL: `quota` stays a leaf
+    module (stdlib-only at import time) and every door — `sdk.create_source`,
+    `sdk._doc_write`, `EventAPI.add_document` — reads the genre the same way.
+
+    Returns the LIST of stored kinds, because the write this guards is
+    ``MATCH (n:Source {key:$id}) SET n += $p`` — it applies to EVERY node the
+    key matches, not to one. An earlier revision returned ``rows[0][0]`` (the
+    first row of the first matching key) and the guard therefore answered about
+    a node the write might not be the relevant one: with two `:Source` nodes
+    sharing the key and the non-metered one sorting first, the guard read
+    ``None``, admitted the write, and the `SET` demoted the metered sibling out
+    of the cap (#5140 review cycle 4 — reproduced, meter 1 -> 0). Reading ALL
+    rows and refusing if ANY is metered makes the guard fail closed on the whole
+    reachable set; the empty list means "no such `:Source` — nothing stored".
+    """
+    from tortoise.projection import _ENTITY_ID_PROP, secondary_entity_id_props
+
+    keys = (_ENTITY_ID_PROP.get("Source", "id"),
+            *secondary_entity_id_props("Source"))
+    kinds: list = []
+    for key in keys:
+        rows = g.query(
+            f"MATCH (n:Source {{{key}:$id}}) RETURN n.documentKind",
+            params={"id": id_val},
+        ).result_set
+        # ⛔ NO early return: keep reading every key's rows (see the docstring).
+        kinds.extend(r[0] for r in rows)
+    return kinds
+
+
+def refuse_document_writer_demotion(g, doc_id: str, document_kind,
+                                    *, surface: str) -> None:
+    """#5140 P1 (review cycle 3): the DOCUMENT writers refuse a demotion LOUDLY.
+
+    THE RULE. `documentKind` is the meter key (`DOCUMENT_METER_PREDICATE`), so
+    the two `DocumentCreated` producers that take the genre from a TENANT —
+    `EventAPI.add_document(document_kind=...)` and
+    `sdk._doc_write(frontmatter type=..., <doc id>)` (the `/v1/index/docs`
+    re-index path) — may not move an already-metered document out of the
+    counted class. Both merge a caller-chosen/derived `:Source` url, so both
+    could demote a document one call at a time (MEASURED, 3 seeded documents:
+    meter 3 -> 2 -> 1) and free a `documents` slot per call.
+
+    WHY IT IS HERE AND NOT ONLY IN THE FOLD. The fold
+    (`entities.py::_upsert_document`) DROPS such a demotion inside its own
+    CASE clause, because that same statement is the journal REPLAY fold and a
+    rebuild must stay total — a raise there would abort `rebuild_all` on a log
+    that already holds a pre-guard record. Producers are NOT replay, so they
+    raise: a silent no-op would leave the caller believing it wrote (the
+    `raw_state`/`rawState` precedent `sdk._refuse_document_kind_demotion`
+    cites), and `/v1/index/docs` would report a document as re-indexed while
+    the graph kept its previous genre.
+
+    THE GATE IS THE VALUE, not a query: `transcript` is the only genre the
+    predicate exempts, so almost every document write returns here without
+    touching the graph (the index path writes one document per file).
+
+    NOT refused, deliberately: SETTING a genre where none is stored (that is
+    how a document is minted — the caller-controlled `transcript` MINT is the
+    remaining door recorded on #5140, where the genre vocabulary is the
+    product decision), a metered -> metered retarget (`report` -> `brief`,
+    both counted), and a write that repeats the genre already stored.
+    """
+    if document_kind != DOCUMENT_KIND_TRANSCRIPT:
+        return
+    stored_kinds = stored_source_document_kinds(g, doc_id)
+    metered = [k for k in stored_kinds if is_metered_document_kind(k)]
+    if not metered:
+        return
+    raise ValueError(
+        f"`document_kind='transcript'` would move the document {doc_id!r} out "
+        f"of the metered `documents` set (stored documentKind={metered[0]!r}; "
+        f"the `documents` cap counts `{DOCUMENT_METER_PREDICATE}`). The genre "
+        f"of an existing document is not caller-writable in the demotion "
+        f"direction through `{surface}` (#5140 — metering a node a caller can "
+        f"un-meter is not a cap). Delete the document and re-ingest it if it "
+        f"really is a transcript; to record that a source became unavailable, "
+        f"use `create_source(..., raw_state=...)`."
+    )
 
 
 def count_org_usage(org_id: str, resource: str, sdk=None) -> int:

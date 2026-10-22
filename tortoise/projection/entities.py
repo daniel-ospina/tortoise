@@ -4408,10 +4408,14 @@ class _EntityHandlers:
             # because the same statement is the REPLAY fold: a journal that
             # already holds a pre-guard demotion must re-materialise to the
             # metered genre, not abort the rebuild (a raise here would make
-            # `rebuild_all` fail on an existing log). The caller surfaces that
-            # take a genre from a TENANT (`create_source`/`update_entity`) do
-            # raise — they are not replay, and a silent no-op would leave the
-            # caller believing it wrote (`sdk._refuse_document_kind_demotion`).
+            # `rebuild_all` fail on an existing log). The PRODUCERS that take a
+            # genre from a TENANT (`EventAPI.add_document`, `_doc_write`)
+            # REFUSE BEFORE the journal append
+            # (`quota.refuse_document_writer_demotion`), and the two `:Source`
+            # surfaces (`create_source`/`update_entity`) raise
+            # (`sdk._refuse_document_kind_demotion`) — neither is replay, and a
+            # silent no-op would leave the caller believing it wrote. So a LIVE
+            # write reaches this CASE only when nothing metered is stored.
             "    s.documentKind=CASE "
             "        WHEN s.documentKind IS NOT NULL "
             "             AND s.documentKind <> 'transcript' "
