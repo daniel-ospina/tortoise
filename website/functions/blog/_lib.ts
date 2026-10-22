@@ -24,6 +24,8 @@ export interface BlogPost {
   cover_image_url: string | null;
   tags: string[];
   author: string | null;
+  // NULL = no avatar; the byline renders the NAME ALONE (see authorBylineHtml).
+  author_image_url: string | null;
   meta_title: string | null;
   meta_description: string | null;
   published_at: string | null;
@@ -41,6 +43,22 @@ export interface Env {
 }
 
 export const SITE_URL = "https://tortoise.premiselabs.co";
+
+/**
+ * The article author — ONE name, four places that must agree (#1383): this
+ * constant (the SSR renderer's fallback), the `author` column DEFAULT
+ * (migration 20261021000001), the agent API's insert default, and
+ * `DEFAULT_AUTHOR` in website/apps/blog-admin/src/lib/blog-api.ts.
+ *
+ * They must agree because a fallback that differs from the DB default prints two
+ * different names for the same post depending on which path wrote it — which is
+ * how every post shipped as the anonymous 'Tortoise team' with no way to tell.
+ */
+export const DEFAULT_AUTHOR = "Daniel Ospina";
+
+/** The shipped author avatar (website/blog/author-daniel-ospina.jpg, 400×400, 26,742 B). */
+export const DEFAULT_AUTHOR_IMAGE_URL = `${SITE_URL}/blog/author-daniel-ospina.jpg`;
+
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/; // shared with the agent API (#1795)
 export const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
@@ -122,7 +140,7 @@ function rqlHeaders(env: Env): Record<string, string> {
 }
 
 const POST_COLS =
-  "id,slug,title,body,excerpt,cover_image_url,tags,author,meta_title,meta_description,published_at,updated_at";
+  "id,slug,title,body,excerpt,cover_image_url,tags,author,author_image_url,meta_title,meta_description,published_at,updated_at";
 
 export async function fetchPublishedPosts(env: Env): Promise<BlogPost[]> {
   // Index does NOT need body — omit it (no N+1, no 100KB/post over-fetch).
@@ -855,6 +873,55 @@ export function faqPageJsonLd(entries: FaqEntry[]): unknown | null {
   };
 }
 
+// ── Author identity — byline + structured data (#1383) ─────────────────────
+/**
+ * The article byline's author fragment: a small round avatar plus the name.
+ *
+ * ⛔ NULL-SAFE BY CONTRACT. When `author_image_url` is null (or is not an
+ * absolute http(s) URL) the fragment is the name ALONE — no `<img>`, no empty
+ * circle, no leftover wrapper. That is the path that would otherwise ship a
+ * broken image: `<img src="">` renders as a broken-image icon in every browser,
+ * so the absence is decided HERE, once, instead of by CSS or by the template.
+ *
+ * The name and the URL keep the byline's existing escaping discipline, and the
+ * URL is additionally scheme-checked by `validUrl`, so a `javascript:` / `data:`
+ * / relative value in the column is dropped rather than embedded. `alt=""` is
+ * deliberate: the avatar is decorative beside the visible name.
+ */
+export function authorBylineHtml(
+  post: Pick<BlogPost, "author" | "author_image_url"> | null | undefined,
+): string {
+  const name = escapeHtml(post?.author ?? DEFAULT_AUTHOR);
+  const imageUrl = post?.author_image_url ?? null;
+  const avatar = imageUrl && validUrl(imageUrl)
+    ? `<img class="byline-avatar" src="${escapeHtml(imageUrl)}" alt="" width="22" height="22" loading="lazy">`
+    : "";
+  return `<span class="byline">${avatar}<span>By ${name}</span></span>`;
+}
+
+/**
+ * The `author` node for `BlogPosting` — a `Person` with an `image`, not an
+ * `Organization` (#1383): a named byline is a person, and `image` is the field
+ * search engines read for authorship.
+ *
+ * `image` is OMITTED (never `null`, never `""`) when there is no usable avatar —
+ * an absent property says "no image", while `image: null` claims there is one and
+ * it is empty. The name reaches the `<script>` through `jsonLd()`'s JSON
+ * escaping, never HTML escaping: `O&#39;Brien` inside valid JSON is a different
+ * author than `O'Brien`.
+ */
+export function authorJsonLd(
+  post: Pick<BlogPost, "author" | "author_image_url"> | null | undefined,
+): { "@type": "Person"; name: string; image?: string } {
+  const node: { "@type": "Person"; name: string; image?: string } = {
+    "@type": "Person",
+    name: post?.author ?? DEFAULT_AUTHOR,
+  };
+  const imageUrl = post?.author_image_url ?? null;
+  if (imageUrl && validUrl(imageUrl)) node.image = imageUrl;
+  return node;
+}
+
 /** `BlogPosting` for an article. */
 function blogPostingJsonLd(post: BlogPost, url: string): unknown {
   const description = post.meta_description ?? (post.excerpt ?? post.title);
@@ -865,7 +932,7 @@ function blogPostingJsonLd(post: BlogPost, url: string): unknown {
     description,
     url,
     image: post.cover_image_url ?? undefined,
-    author: { "@type": "Organization", name: post.author ?? "Tortoise team" },
+    author: authorJsonLd(post),
     datePublished: post.published_at,
     dateModified: post.updated_at,
   };
@@ -1056,6 +1123,8 @@ nav .links .cta{background:var(--accent);color:#04141a;padding:6px 14px;border-r
 h1.art-title{font-family:var(--serif);font-size:40px;line-height:1.2;color:#fff;font-weight:400;margin-top:16px}
 .art-meta{display:flex;align-items:center;gap:14px;margin-top:14px;color:var(--text-dim);font-size:12px;flex-wrap:wrap}
 .art-meta .dot{opacity:.4}
+.byline{display:inline-flex;align-items:center;gap:8px}
+.byline-avatar{width:22px;height:22px;border-radius:999px;object-fit:cover;border:1px solid var(--border);flex:none}
 .share-bar{display:flex;align-items:center;gap:10px;margin:20px 0;padding:14px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
 .share-bar .label{color:var(--text-dim);font-size:12px;margin-right:4px}
 .share-bar a,.share-bar button{width:34px;height:34px;border-radius:8px;border:1px solid var(--border);background:var(--bg-soft);color:var(--text-dim);display:flex;align-items:center;justify-content:center;font-size:14px;cursor:pointer}
