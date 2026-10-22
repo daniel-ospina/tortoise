@@ -534,8 +534,8 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
        progress lines before the summary (bucketed by length so a failure-dense leg is not
        quadratic);
     2. a depth-0 separator whose remainder OPENS with pytest's longrepr shape (see
-       `_LONGREPR_RE`) — the only signal that is not bracket arithmetic. Depth-0 only: an
-       in-parameter separator is refused; the guard below states the one case that costs;
+       `_LONGREPR_RE`) — the only signal that is not bracket arithmetic. Depth-0 only (see the
+       guard below);
     3. a separator whose head has never gone bracket-negative AND whose bracket delta equals the
        whole tail's (sound when the message carries no brackets: then the id's delta IS the tail's);
     4. the same delta test without the non-negative requirement;
@@ -565,15 +565,11 @@ def _short_summary_id(tail: str, known_by_len: dict[int, set[str]]) -> str:
         # merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]` -> `test_p[a`,
         # measured; publishing such an id is the defect this pass must not reintroduce).
         #
-        # ⚠️ DECLARED TRADE, stated as measured. An in-parameter separator is refused, so a
-        # bracket-unbalanced id (`test_p[a[b] - …`) falls to a later rung. With no further ` - `
-        # in the message that rung re-derives the EXACT id (`test_p[a[b] - failed: x - y` ->
-        # `test_p[a[b]`, measured) and nothing is lost. The residual is a message carrying BOTH a
-        # further ` - ` and a `]`: `test_p[a[b] - assert ']' == 'a - b'` ->
-        # `test_p[a[b] - assert ']' == 'a` (measured), so part of the message is published and the
-        # result is not a nodeid pytest reports. Bracket shape alone cannot separate that shape
-        # from the family above (measured over 70 shapes), and pre-#9134 the line was dropped
-        # entirely. Pinned as-is by
+        # Depth-0 only: a separator INSIDE a parameter is not the short-summary split, even when
+        # the remainder merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]`
+        # -> `test_p[a`) — the defect this pass must not reintroduce. The cost of refusing it is
+        # that a bracket-unbalanced id resolves at a later rung and MAY publish part of the
+        # message as part of the id. That cost is accepted and PINNED rather than described:
         # `test_a_bracket_carrying_message_is_a_declared_residual`.
         if clean and _depth == 0 and _LONGREPR_RE.match(tail[at + 1:]):
             return tail[:at]
