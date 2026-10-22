@@ -213,23 +213,45 @@ def test_generate_is_deterministic_and_bounds_history(tmp_path: Path, fake_env: 
     assert (out1 / "ci-timing.md").read_bytes() == (out3 / "ci-timing.md").read_bytes()
 
     # history accumulation: seeding the committed json (the repo docs/ path)
-    # gives a second sample → 2 rows; --max-history=1 bounds it back to 1
+    # gives a second sample → 2 rows; --max-history=1 bounds it back to 1.
+    # The second sample is a DIFFERENT run (4243): one run is one row, see the
+    # re-sample case below (#9134 review, P1).
     repo_docs = tmp_path / "repo" / "docs"
     repo_docs.mkdir(parents=True)
     shutil.copy(out1 / "ci-timing.json", repo_docs / "ci-timing.json")
     run2 = subprocess.run(  # noqa: F841
         [sys.executable, str(tools),
+         "--repo", "daniel-ospina/tortoise", "--run-id", "4243",
+         "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs)],
+        capture_output=True, text=True, check=True,
+        env=dict(os.environ, CI_TIMING_NOW="2026-08-19T00:00:00Z"),
+    )
+    seeded = json.loads((repo_docs / "ci-timing.json").read_text())['history']
+    assert [row["run_id"] for row in seeded] == ["4243", "4242"]
+
+    # A re-sample of an ALREADY-SAMPLED run SUPERSEDES its row instead of appending a
+    # second one: a run is immutable, so two rows for it could only disagree (the shipped
+    # artifact carried run 39191149586 twice with `error: 1` and `error: 0`). The newer
+    # sample keeps the run's seat in the history.
+    run4 = subprocess.run(  # noqa: F841
+        [sys.executable, str(tools),
          "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs)],
         capture_output=True, text=True, check=True,
+        env=dict(os.environ, CI_TIMING_NOW="2026-08-20T00:00:00Z"),
     )
-    assert len(json.loads((repo_docs / "ci-timing.json").read_text())["history"]) == 2
+    resampled = json.loads((repo_docs / "ci-timing.json").read_text())["history"]
+    # …and the re-sample LEADS: history is newest-first and `main()` prepends it.
+    assert [row["run_id"] for row in resampled] == ["4242", "4243"]
+    assert resampled[0]["sample_time"] == "2026-08-20T00:00:00Z"
+
     run3 = subprocess.run(  # noqa: F841
         [sys.executable, str(tools),
-         "--repo", "daniel-ospina/tortoise", "--run-id", "4242",
+         "--repo", "daniel-ospina/tortoise", "--run-id", "4244",
          "--logs-dir", str(tmp_path / "logs"), "--out-dir", str(repo_docs),
          "--max-history", "1"],
         capture_output=True, text=True, check=True,
+        env=dict(os.environ, CI_TIMING_NOW="2026-08-21T00:00:00Z"),
     )
     assert len(json.loads((repo_docs / "ci-timing.json").read_text())["history"]) == 1
 
@@ -774,7 +796,8 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     # the machine-readable capture age is written
     assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
     assert stats == {"sampled_keys": 2, "manifest_keys": 3, "added_keys": 0,
-                     "carried_forward": 1, "captured_at": "2026-09-28T00:00:00Z"}
+                     "carried_forward": 1, "kept_as_lower_bound": 0,
+                     "captured_at": "2026-09-28T00:00:00Z"}
     # the result is still valid YAML and still passes the manifest-side gate
     manifest = yaml.safe_load(text)
     assert manifest["durations"]["test_alpha.py"] == 12.3
@@ -801,14 +824,20 @@ durations:
 """
 
 
-def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) -> None:
+def test_refresh_durations_strips_a_long_form_unmeasured_marker_and_keeps_the_record(
+        tmp_path: Path) -> None:
     """#8254 review P3: the marker is a LEADING TOKEN, not the whole tail.
 
     A measured row whose preserved tail still leads with `# unmeasured` asserts
-    the opposite of its fresh value. The old rule used `re.fullmatch`, so it
-    cleared only a BARE marker and wrote the long-form provenance through — the
-    three rows this review found stale. Non-vacuity: the first assertion below
-    fails on the pre-fix code, because the tail is preserved.
+    the opposite of its fresh value, so the MARKER must go. The note behind it is
+    the row's RECORD — clearing the whole tail deleted it, which is the same
+    record-loss the held path was fixed for (#9134 review, P2: the adopted path
+    still set `tail = ""`).
+
+    Non-vacuity: on the pre-fix code the first assertion fails — either the tail
+    was preserved whole (the #8254 `fullmatch` shape) or it was cleared whole
+    (the `tail = ""` shape), and neither leaves the bare marker gone with the
+    rationale surviving.
     """
     path = _bridge_manifest(tmp_path, LONG_FORM_UNMEASURED_MANIFEST)
     text, _ = ci_timing.render_refreshed_manifest(
@@ -816,8 +845,9 @@ def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) ->
         _bridge_weights(test_alpha=12.34, test_beta=4.5, test_gamma=1.0),
         "T",
     )
-    # the measured row's stale marker is GONE — line is exactly `key: value`
-    assert "  test_alpha.py: 12.3\n" in text
+    # the measured row's stale marker is GONE, and the record behind it survives
+    assert ("  test_alpha.py: 12.3  # #3496: added after the sampled run; "
+            "refresh from CI junit.\n") in text
     assert "# unmeasured —" not in text
     # a comment that only MENTIONS the marker later is preserved verbatim ...
     assert ("  test_beta.py: 4.5  # a note that only mentions unmeasured rows "
@@ -825,6 +855,2144 @@ def test_refresh_durations_clears_a_long_form_unmeasured_tail(tmp_path: Path) ->
     # ... and so is a word that merely starts with the marker's letters (\b)
     assert "  test_gamma.py: 1.0  # unmeasuredly worded, not the marker" in text
     assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def test_an_adopted_unmeasured_row_keeps_its_record_and_appends_the_basis() -> None:
+    """#9134 review P2: an ADOPTED row whose tail leads with `# unmeasured` must
+    not lose the note that follows the marker.
+
+    The neighbouring comment promises "any OTHER trailing comment is preserved
+    verbatim" and the map's own rule is that a tool output does not delete a
+    recorded decision; the held path was fixed for exactly this, the adopted path
+    was not. The marker is falsified by the adoption (the row IS measured now, so
+    it must not survive) while the rationale it prefixes does — and the basis this
+    render used is appended, so the row states when its new value came from.
+
+    Non-vacuity: the pre-fix adopted branch set `tail = ""`, so both the rationale
+    and the appended basis assertions fail; only the marker assertions pass.
+    """
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_url_keyed.py\n"
+        "durations:\n"
+        "  test_url_keyed.py: 170.0  # unmeasured — #4649: 23 tests, live "
+        "FalkorDB, measured locally; the #2876 coverage floor needs the row to "
+        "exist before the sweep reaches it.\n",
+        {"test_url_keyed.py": 6.0},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_url_keyed.py": (23, 23)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert stats["kept_as_lower_bound"] == 0
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_url_keyed.py:"))
+    # the marker itself is falsified by the adoption and must not survive ...
+    assert not re.search(r"#\s*unmeasured\b", row)
+    # ... but the RECORD the marker prefixed does, with this render's basis on it
+    assert "#4649: 23 tests, live FalkorDB, measured locally" in row
+    assert "the #2876 coverage floor needs the row to exist" in row
+    assert row.strip().endswith(f"{_LOWER_BOUND_LABEL}; was 170.0")
+    assert yaml.safe_load(text)["durations"]["test_url_keyed.py"] == 6.0
+
+
+# ── the LOWER-BOUND guard and the re-basing rule (#9134 review, P1/P2) ──────
+#
+# The manifest's `durations:` unit is a file's CI wall time. The refresh's only
+# source is the `--durations=15` block of each job's pytest log, which prints the
+# SLOWEST 15 entries — so a file whose tests did not all land in that block is
+# measured over a SUBSET of its work, and the value it produces is a LOWER BOUND.
+# Landing one as a weight is what #9134 shipped: `test_surface_manifest.py`
+# 199.1 -> 36.0 (5.5x) from a reading that saw 2 of the file's testcases, on a RED
+# run (`--maxfail=20` truncates it further), and the map's own header names the
+# harm — an understated weight "can red `python-ci-gate` with zero test failures".
+LOWER_BOUND_MANIFEST = """\
+surfaces:
+  core:
+    - test_surface_manifest.py
+    - test_6211_ep_scale.py
+    - test_raised.py
+    - test_unchanged.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations:
+  test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7
+  # #6211: locally measured on this host, docker lane, whole-file wall time over
+  # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
+  # 3,353-claim fixture build).
+  test_6211_ep_scale.py: 19.0
+  test_raised.py: 87.4
+  test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 11.0
+"""
+
+_LOWER_BOUND_LABEL = "ci-timing top-15 2026-10-19 (run 39191149586)"
+
+
+def _rendered_lower_bound(tmp_path: Path) -> tuple[str, dict]:
+    path = _bridge_manifest(tmp_path, LOWER_BOUND_MANIFEST)
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        {
+            # 2 of the file's testcases, 36.0 s — the measured 5.5x drop
+            "test_surface_manifest.py": 36.0,
+            # 1 of 4 testcases, 3.3 s — below the note's own 10-19 s floor
+            "test_6211_ep_scale.py": 3.3,
+            # 1 of 12 testcases, and LARGER than the recorded weight
+            "test_raised.py": 108.4,
+            # the value does not move at all
+            "test_unchanged.py": 12.0,
+        },
+        "2026-10-19T05:02:37Z",
+        coverage={
+            "test_surface_manifest.py": (2, 10),
+            "test_6211_ep_scale.py": (1, 4),
+            "test_raised.py": (1, 12),
+            "test_unchanged.py": (2, 10),
+        },
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+
+
+def test_a_partial_reading_cannot_lower_a_recorded_weight(tmp_path: Path) -> None:
+    """THE #9134 P1 DEFECT. A reading that saw 2 of 10 testcases cannot show the
+    file got cheaper, so the recorded weight stands — both rows the review named
+    keep their value, and the row says what the reading actually measured.
+
+    Non-vacuity: on the pre-fix renderer `coverage=`/`sample_label=` do not exist
+    (TypeError), and with the guard removed but the parameters kept the two values
+    become 36.0 and 3.3 — i.e. this assertion is the one that goes red.
+    """
+    text, stats = _rendered_lower_bound(tmp_path)
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_surface_manifest.py"] == 199.1
+    assert durations["test_6211_ep_scale.py"] == 19.0
+    assert stats["kept_as_lower_bound"] == 2
+    # A HELD row keeps the note that records the run its surviving value came
+    # from, and the rejected reading is APPENDED — substituting the basis for the
+    # citation is how 13 held rows lost the run that produced their number
+    # (#9134 review, P2).
+    assert ("test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 "
+            "(run 39165691659); was 180.7"
+            f" — {_LOWER_BOUND_LABEL}: top-15 saw 2 of 10 testcases = 36.0s in "
+            "the largest single job (not summed across legs), a LOWER bound; "
+            "kept 199.1") in text
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def _rendered_single_test(tmp_path: Path) -> tuple[str, dict]:
+    """A file that declares ONE `def test` — the shape that is unprovable."""
+    path = _bridge_manifest(
+        tmp_path,
+        "surfaces:\n  core:\n    - test_single.py\n"
+        "durations:\n  test_single.py: 42.4  # #9017 CI-junit 2026-10-18 "
+        "(run 39165691659); was 58.1\n",
+    )
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        # a `venv` + `pip install` wheel test: its cost is fixture time, and one
+        # measured entry is all a single-test file can ever show
+        {"test_single.py": 40.6},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_single.py": (1, 1)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+
+
+def test_a_single_test_file_can_never_be_proven_fully_covered(tmp_path: Path) -> None:
+    """THE OTHER HALF OF THE #9134 P1 DEFECT. `declared == 1` makes `observed <
+    declared` unsatisfiable: ANY measured entry gives `observed >= 1`, so a
+    partial reading of a single-test file was classified fully covered and its
+    weight could be lowered — the `test_backup_e2e.py` 13.1 -> 4.8 and
+    `bench/test_smoke_embedded.py` 38.6 -> 24.3 shape.
+
+    Non-vacuity: pre-fix `kept = observed < declared and measured < previous` is
+    False here (1 < 1), so the row is adopted at 40.6 and both assertions fail.
+    """
+    text, stats = _rendered_single_test(tmp_path)
+    assert yaml.safe_load(text)["durations"]["test_single.py"] == 42.4
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_single.py:"))
+    # the note says WHY it could not be adopted, not that it saw the only test
+    assert "a single-test file cannot prove full coverage" in row
+    assert "kept 42.4" in row
+
+
+def test_an_absent_denominator_is_unknown_not_fully_covered(tmp_path: Path) -> None:
+    """A witness that DOES NOT COVER the row (no declared count: an unparsable
+    or deleted file) is UNKNOWN, and UNKNOWN must not licence a discount.
+
+    Non-vacuity: pre-fix `observed, declared = (0, 0)` made `observed < declared`
+    False, so the row was adopted at 4.0.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_unknown.py\n    - test_covered.py\n"
+        "durations:\n  test_unknown.py: 30.0  # #3554: a local estimate\n"
+        "  test_covered.py: 5.0\n",
+        {"test_unknown.py": 4.0, "test_covered.py": 4.0},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_covered.py": (5, 5)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_unknown.py"] == 30.0
+    # the row that DOES have a witness may still be adopted — the rule is about
+    # proof, not about freezing the map
+    assert durations["test_covered.py"] == 4.0
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_unknown.py:"))
+    assert "no declared testcase count" in row
+    assert "#3554: a local estimate" in row
+
+
+def test_a_held_row_states_one_basis_across_refreshes(tmp_path: Path) -> None:
+    """The map is rewritten every week: a held row must not accumulate one basis
+    sentence per refresh (nothing else prunes this file)."""
+    path = _bridge_manifest(
+        tmp_path,
+        "surfaces:\n  core:\n    - test_held.py\n"
+        "durations:\n  test_held.py: 50.0\n",
+    )
+    first, _ = ci_timing.render_refreshed_manifest(
+        path.read_text(), {"test_held.py": 10.0}, "2026-10-19T05:02:37Z",
+        coverage={"test_held.py": (1, 9)}, sample_label=_LOWER_BOUND_LABEL)
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, {"test_held.py": 11.0}, "2026-10-26T05:02:37Z",
+        coverage={"test_held.py": (1, 9)},
+        sample_label="ci-timing top-15 2026-10-26 (run 40000000000)")
+    held_row = next(ln for ln in second.split("\n")
+                    if ln.strip().startswith("test_held.py:"))
+    assert held_row.count("a LOWER bound; kept 50.0") == 1
+    assert "2026-10-19" not in held_row
+    assert "run 40000000000" in held_row
+    assert yaml.safe_load(second)["durations"]["test_held.py"] == 50.0
+
+
+def test_a_held_row_keeps_the_basis_that_produced_a_raised_value(tmp_path: Path) -> None:
+    """A raise's basis is the ONLY record of where the surviving value came from.
+
+    The renderer prunes the previous render's HELD basis so a row held week after week
+    states one basis. Applied blindly to a row whose previous render ADOPTED a raise, it
+    deleted the raise's basis too, leaving 16 shipped rows stating a weight no note in
+    the file attributes to any reading — `test_reaper.py` went 40.5 -> 61.9 and the
+    surviving note said only `kept 61.9` (#9134 review, P2).
+
+    Non-vacuity: pre-fix the second render's row reads
+    `… 2026-10-20 (run 2): … a LOWER bound; kept 61.9` with no `; was 40.5` in sight.
+    """
+    first, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_raised.py\n"
+        "durations:\n  test_raised.py: 40.5\n",
+        {"test_raised.py": 61.9}, "2026-10-19T05:02:37Z",
+        coverage={"test_raised.py": (1, 9)}, sample_label=_LOWER_BOUND_LABEL)
+    assert "; was 40.5" in first
+
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, {"test_raised.py": 56.9}, "2026-10-20T05:02:37Z",
+        coverage={"test_raised.py": (1, 9)},
+        sample_label="ci-timing top-15 2026-10-20 (run 2)")
+    row = next(ln for ln in second.split("\n")
+               if ln.strip().startswith("test_raised.py:"))
+    assert yaml.safe_load(second)["durations"]["test_raised.py"] == 61.9
+    assert "; was 40.5" in row, row  # the raise's basis survives the hold
+    assert "a LOWER bound; kept 61.9" in row  # …beside the rejected reading
+    assert "2026-10-19" in row and "run 2" in row
+
+    # …and it does NOT grow a clause per refresh: the third render prunes the PREVIOUS
+    # HELD basis only, so the row keeps one `was` and one `kept`.
+    third, _ = ci_timing.render_refreshed_manifest(
+        second, {"test_raised.py": 55.0}, "2026-10-27T05:02:37Z",
+        coverage={"test_raised.py": (1, 9)},
+        sample_label="ci-timing top-15 2026-10-27 (run 3)")
+    row = next(ln for ln in third.split("\n")
+               if ln.strip().startswith("test_raised.py:"))
+    assert row.count("; was 40.5") == 1, row
+    assert row.count("a LOWER bound; kept 61.9") == 1, row
+    assert "2026-10-20" not in row, row  # the previous HELD basis was pruned
+    assert "2026-10-27" in row, row
+
+
+def test_a_partial_reading_may_raise_a_recorded_weight(tmp_path: Path) -> None:
+    """The other direction of the same rule: a partial reading DOES prove the
+    file costs at least that much, so it may raise a weight — a guard that
+    ignored every partial reading would freeze a stale map forever."""
+    text, _ = _rendered_lower_bound(tmp_path)
+    assert yaml.safe_load(text)["durations"]["test_raised.py"] == 108.4
+    assert (f"test_raised.py: 108.4  # {_LOWER_BOUND_LABEL}; was 87.4") in text
+
+
+def test_a_full_coverage_reading_may_lower_a_recorded_weight() -> None:
+    """A reading that saw EVERY declared testcase is comparable to the recorded
+    figure, so it is adopted either way. Without this the map could only ever
+    ratchet upward and a wrong value could never be corrected."""
+    text, stats = ci_timing.render_refreshed_manifest(
+        LOWER_BOUND_MANIFEST,
+        {"test_6211_ep_scale.py": 3.3},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_6211_ep_scale.py": (4, 4)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert yaml.safe_load(text)["durations"]["test_6211_ep_scale.py"] == 3.3
+    assert stats["kept_as_lower_bound"] == 0
+
+
+def test_a_rebased_row_replaces_a_stale_provenance_tail(tmp_path: Path) -> None:
+    """#9134 P2: the row is re-derived, but the note still named the OLD run as
+    the basis, so it attested a number that run never produced (the cited run
+    reads 199.1; the committed row said 36.0). The map's own rule — "a note whose
+    cited run is not in the basis is dropped as stale provenance" — is applied by
+    the writer, and the replacement states the basis that IS.
+
+    The row's value MOVES here: a note that IS the citation has nothing that
+    survives a re-base. A HELD row is the opposite case and keeps its citation —
+    see `test_a_partial_reading_cannot_lower_a_recorded_weight`.
+
+    Non-vacuity: pre-fix every tail was preserved verbatim, so the `not in text`
+    assertions fail.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_rebased.py\n"
+        "durations:\n  test_rebased.py: 36.0  # #9017 CI-junit 2026-10-18 "
+        "(run 39165691659); was 180.7\n",
+        {"test_rebased.py": 199.1},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_rebased.py": (7, 7)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_rebased.py:"))
+    assert "run 39165691659" not in row
+    assert "CI-junit" not in row
+    assert "was 180.7" not in row
+    assert row.strip() == f"test_rebased.py: 199.1  # {_LOWER_BOUND_LABEL}; was 36.0"
+
+
+def test_a_rebased_row_keeps_a_design_note_and_appends_the_new_basis() -> None:
+    """A NON-provenance note is a record, not stale provenance: the row's own
+    reasoning is kept, and the new basis is APPENDED to it. A tool output must not
+    silently overwrite a recorded decision.
+
+    Asserted on the ROW LINE, not on the standalone block comment above it: the
+    renderer only rewrites rows matching `_DURATION_LINE_RE`, so a block-comment
+    assertion holds for a renderer that deletes every row tail (#9134 review, P3).
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_designed.py\n"
+        "durations:\n"
+        "  test_designed.py: 19.0  # #6211: locally measured, docker lane — do NOT "
+        "substitute a local timing for a CI reading.\n",
+        {"test_designed.py": 3.3},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_designed.py": (1, 4)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_designed.py:"))
+    assert row.startswith("  test_designed.py: 19.0  # #6211: locally measured")
+    assert "do NOT substitute a local timing" in row
+    assert row.strip().endswith("a LOWER bound; kept 19.0")
+    assert yaml.safe_load(text)["durations"]["test_designed.py"] == 19.0
+
+
+def test_a_rebased_row_keeps_a_rationale_note_and_appends_the_basis() -> None:
+    """The stale-provenance rule is scoped to notes that make a claim about WHICH
+    READING produced the value. A note whose subject is the row's RATIONALE (why
+    it exists, that the coverage half depends on it) is a record, not provenance:
+    it is preserved and the basis this render used is APPENDED. Over-preserving
+    leaves a visible phrase next to the true basis; deleting it would silently
+    remove a decision.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_rationale.py\n"
+        "durations:\n"
+        "  test_rationale.py: 5.6  # #2350: a file ADDED BY A PR has no CI record "
+        "of its own, so the #3400 flat default was its FIRST weight; required for "
+        "the coverage half (#4348 trap).\n",
+        {"test_rationale.py": 3.7},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_rationale.py": (2, 142)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_rationale.py:"))
+    assert "required for the coverage half (#4348 trap)" in row
+    assert row.strip().endswith("a LOWER bound; kept 5.6")
+
+
+def test_a_dated_refresh_claim_inside_a_rationale_loses_only_that_clause() -> None:
+    """…but a note that DATES the value (`this value is a CI measurement since the
+    2026-10-17 refresh`) is a claim about the reading even when it sits mid-note,
+    and a re-base makes it false — the #9134 review named this exact row. ONLY THE
+    CLAUSE is dropped: clearing the tail deleted a load-bearing `#4348 trap — do
+    not drop the row without re-deriving the floor` instruction from
+    `test_2350_validity_precision.py` (#9134 review, P2).
+
+    Non-vacuity: the pre-fix `_is_stale_provenance` branch set `tail = ""`, so the
+    `#4348` assertion below fails.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_rationale.py\n"
+        "durations:\n"
+        "  test_rationale.py: 3.7  # #2350: a file ADDED BY A PR has no CI record "
+        "of its own, so the #3400 flat default was its FIRST weight — this value "
+        "is a CI measurement since the 2026-10-17 refresh; required for the "
+        "coverage half (#4348 trap — do not drop the row without re-deriving the "
+        "floor at that head).\n",
+        {"test_rationale.py": 5.6},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_rationale.py": (2, 142)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_rationale.py:"))
+    assert "since the 2026-10-17 refresh" not in row
+    assert "#2350: a file ADDED BY A PR" in row
+    assert "(#4348 trap — do not drop the row without re-deriving the floor at that head)" in row
+    assert row.strip().endswith("was 3.7")
+    assert yaml.safe_load(text)["durations"]["test_rationale.py"] == 5.6
+
+
+def test_a_summary_less_leg_still_counts_its_failures(tmp_path: Path) -> None:
+    """`outcome.failed` must not be smaller than `failed_tests`.
+
+    A leg whose log has no pytest SUMMARY line reports 0 of everything, so without
+    the progress-line fallback its failures would vanish from `outcome.failed`
+    while still appearing in `failed_tests` — the two fields describe the same
+    work, so a truncation must not make them diverge (#9134 review, P2).
+
+    ⛔ This is NOT the explanation for a shipped artifact that reads `failed: 5`
+    beside SIX `failed_tests` entries: that gap is `FAILED(5) + ERROR(1)`, because
+    `outcome.failed` accumulates FAILED only while `failed_tests` takes FAILED *and*
+    ERROR (see the `⛔ outcome.failed is NOT the length of failed_tests` comment in
+    `aggregate_logs`). An earlier revision of this docstring blamed a truncated
+    leg; the shipped artifact at that head had 17 `log_sources` and every one had
+    `summary_seen: true`, so no truncated leg existed to blame (#9134 review, P3).
+    Folding `error` into `failed` (or the reverse) is NOT the fix — the two
+    counters are deliberately distinct.
+
+    Non-vacuity: pre-fix `total_counts["failed"]` is 1 while `failed_tests` has
+    3 entries.
+    """
+    (tmp_path / "pytest-a.log").write_text(
+        "FAILED tests/test_a.py::test_1 - AssertionError\n"
+        "= 10 passed, 1 failed in 3.00s =\n")
+    (tmp_path / "pytest-b.log").write_text(
+        "FAILED tests/test_b.py::test_2 - AssertionError\n"
+        "FAILED tests/test_b.py::test_3 - AssertionError\n")
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert len(agg["failed_tests"]) == 3
+    assert agg["total_counts"]["failed"] == 3, agg["total_counts"]
+    # a summary-less leg can only report what it saw fail — never passes.
+    assert agg["total_counts"]["passed"] == 10, agg["total_counts"]
+
+
+def test_history_dedupes_a_legacy_row_without_sampled_at() -> None:
+    """One row per SAMPLE, including a row written before `sampled_at` existed.
+
+    Keying on `sampled_at` alone gave a legacy row `None`, so it survived beside its own
+    stamped twin: the shipped artifact carried run 39191149586 twice, counted one
+    measurement as two, and the dedupe could never heal it because the two keys differed.
+    """
+    twin = {"run_id": "42", "sampled_at": "", "sample_time": "2026-08-18T00:00:00Z"}
+    twin.pop("sampled_at")
+    stamped = {"run_id": "42", "sampled_at": "2026-08-18T00:00:00Z",
+               "sample_time": "2026-08-18T00:00:00Z"}
+    older = {"run_id": "41", "sampled_at": "2026-08-17T00:00:00Z",
+             "sample_time": "2026-08-17T00:00:00Z"}
+
+    kept = ci_timing._dedupe_history([stamped, twin, older])
+
+    assert [row["run_id"] for row in kept] == ["42", "41"]
+
+
+def test_history_keeps_one_row_per_run_not_one_per_sample() -> None:
+    """⛔ A run is IMMUTABLE: a second sample of it is a re-reading, not a second event.
+
+    Keying on `(run, sample_time)` kept both, so the shipped artifact published run
+    39191149586 twice with CONTRADICTORY numbers — `error: 1` from the fixed parser at
+    2026-10-20T18:40:00Z beside the pre-fix `error: 0` at 2026-10-20T14:39:07Z, with the
+    same six `failed_tests` in both. One run cannot have two error totals, and the later
+    reading — the one produced by the fixed parser — is the one to keep (#9134 review,
+    P1).
+
+    Non-vacuity: pre-fix both rows survive (``["39191149586", "39191149586",
+    "39467226356"]``), which is exactly the contradictory pair the artifact shipped.
+    """
+    zero = {key: 0 for key in ci_timing.COUNT_KEYS}
+    failed = ["tests/test_x.py::test_a"]
+    corrected = {"run_id": "39191149586", "sample_time": "2026-10-20T18:40:00Z",
+                 "counts": dict(zero, error=1), "failed_tests": failed}
+    stale = {"run_id": "39191149586", "sample_time": "2026-10-20T14:39:07Z",
+             "sampled_at": "2026-10-20T14:39:07Z",
+             "counts": dict(zero, error=0), "failed_tests": failed}
+    other = {"run_id": "39467226356", "sample_time": "2026-10-20T18:40:00Z",
+             "counts": dict(zero, error=1), "failed_tests": []}
+
+    kept = ci_timing._dedupe_history([corrected, other, stale])
+
+    assert [row["run_id"] for row in kept] == ["39191149586", "39467226356"]
+    assert kept[0] is corrected, "the corrected reading must win over the pre-fix one"
+    assert kept[0]["counts"]["error"] == 1
+    # Position does not decide it either: a re-sample appended below its own older row
+    # still supersedes it (both rows describe the same immutable run).
+    assert ci_timing._dedupe_history([stale, corrected])[0] is corrected
+    # A row with NO identity is kept, never collapsed with every other such row: two
+    # rows nothing distinguishes are not provably one sample.
+    anonymous = [{"sample_time": "2026-10-20T00:00:00Z"},
+                 {"sample_time": "2026-10-19T00:00:00Z"}]
+    assert ci_timing._dedupe_history(anonymous) == anonymous
+
+
+def test_a_banner_less_summary_also_PARSES_its_counts(tmp_path: Path) -> None:
+    """A `-q` leg's summary must be counted, not just recognised.
+
+    `_is_summary_line` accepts the banner-less form, but the count branch required a
+    leading `=`. So a `-q` log reported `summary_seen: True` with every count ZERO — and
+    a seen summary SUPPRESSES the summary-less disclosure, so the leg's passes and
+    failures vanished with no note at all. Silent zeros are the fail-open the disclosure
+    exists to prevent (#9134 review, P2).
+    """
+    log = tmp_path / "pytest.log"
+    log.write_text(
+        "tests/test_a.py F\n"
+        "1 failed, 2 passed in 3.00s\n"
+    )
+
+    parsed = ci_timing.parse_log(log)
+
+    assert parsed["summary_seen"] is True
+    assert parsed["counts"]["failed"] == 1
+    assert parsed["counts"]["passed"] == 2
+
+
+def test_a_banner_less_count_summary_is_a_summary() -> None:
+    """pytest's `-q` form prints `10 passed in 3.02s` — no banner, no `deselected`.
+
+    Shape alone (the `in N.Ns` tail) said "summary seen"; the old predicate ALSO required a
+    banner or one of a few words, so a `-q` leg's passes were dropped and the artifact
+    published the leg as truncated (#9134 review, P3).
+    """
+    assert ci_timing._is_summary_line("10 passed in 3.02s")
+    assert ci_timing._is_summary_line("6 failed, 30697 passed in 1300.12s (0:21:40)")
+    assert not ci_timing._is_summary_line("collecting ... /repo/tests/test_a.py")
+    # ⛔ the discriminating negative: this line HAS the summary SHAPE (`in 1.23s`) and
+    # a banner, and names no outcome. Accepting it certifies a truncated leg as
+    # complete. Without it, this pin passes under a rule that accepts any banner —
+    # measured: the only other negative above lacks the shape, so it cannot see it.
+    assert not ci_timing._is_summary_line("===== warmup in 1.23s =====")
+
+
+def test_the_rendered_provenance_names_the_run_it_sampled(monkeypatch) -> None:
+    """The `selection:` line must not claim "the latest run" — it must name THIS one.
+
+    The line was a hardcoded constant, so an artifact could say "latest completed run"
+    while sampling an older run, and no reader could tell. It is rendered from the run
+    now, in the markdown AND in the JSON snapshot. This asserts the RENDERED output, not a
+    copy of the string: the earlier version of this test checked a literal and could never
+    fail.
+    """
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-18T10:00:00Z")
+    run = {"head_sha": "abc123", "created_at": "2026-08-18T09:00:00Z",
+           "conclusion": "success", "event": "push", "head_branch": "main"}
+
+    md = ci_timing.render_md(run, {}, {}, dict.fromkeys(ci_timing.COUNT_KEYS, 0), False,
+                             "4242", [], [])
+
+    assert "latest completed" not in md
+    assert "run `4242`" in md
+    assert "2026-08-18T09:00:00Z" in md
+
+
+def test_a_collection_error_leg_reports_its_error(tmp_path: Path) -> None:
+    """A summary line is `=== <n> <state>` and need not mention `passed`.
+
+    The parser required the word `passed` on the summary line, so a leg that failed to
+    COLLECT (`=== 1 error in 0.40s ===`, no progress lines at all) parsed as zero of
+    everything: the artifact reported no errors for the leg that produced nothing, and
+    the summary-less recovery could not help because there was no progress line to read
+    (#9134 review, P3).
+    """
+    (tmp_path / "pytest-collect.log").write_text(
+        "ERROR tests/test_bad.py\n"
+        "======= 1 error in 0.40s =======\n",
+        encoding="utf-8",
+    )
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert agg["total_counts"]["error"] == 1, agg["total_counts"]
+    assert agg["total_counts"]["passed"] == 0
+
+
+def test_the_artifact_names_the_legs_whose_passes_it_could_not_count(tmp_path: Path) -> None:
+    """A truncated leg's failures are counted and its passes are not.
+
+    Aggregating failures from a summary-less leg while leaving its passes out is
+    the right call — the log cannot establish them — but it makes the two columns
+    cover different legs, so `passed` is a LOWER BOUND while reading as a total.
+    The artifact must say WHICH legs that applies to: the leg (artifact dir), not
+    the basename, because 15 of the shipped sample's 17 sources are `pytest.log`
+    (#9134 review, P1/P2).
+
+    Non-vacuity: this test pins render_md's disclosure, not main()'s wiring to it.
+    With `summary_less_legs` not passed (the pre-fix call), the three POSITIVE
+    assertions red — the leg is not named, `LOWER BOUND` is absent, and the
+    no-summary label is absent. The two negative assertions (the complete leg is
+    not named; `md(None)` carries no LOWER BOUND) hold by construction and are
+    there to pin over-reach, not as mutation evidence. The wiring itself is pinned
+    by `test_main_wires_the_disclosure_into_the_artifact`.
+    """
+    (tmp_path / "pytest-log-test-a").mkdir()
+    (tmp_path / "pytest-log-test-b").mkdir()
+    (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(
+        "FAILED tests/test_a.py::test_1 - AssertionError\n"
+        "= 10 passed, 1 failed in 3.00s =\n")
+    (tmp_path / "pytest-log-test-b" / "pytest.log").write_text(
+        "FAILED tests/test_b.py::test_2 - AssertionError\n")
+    agg = ci_timing.aggregate_logs(tmp_path)
+    truncated = [s for s in agg["log_sources"] if not s["summary_seen"]]
+    assert [s["leg"] for s in truncated] == ["pytest-log-test-b"], agg["log_sources"]
+
+    def md(sources: list[dict] | None) -> str:
+        return ci_timing.render_md(
+            {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+             "conclusion": "success"},
+            {}, {}, agg["total_counts"], agg["killed_any"], "4242", [], [],
+            summary_less_legs=sources,
+        )
+
+    text = md(truncated)
+    # The leg is named; the complete leg is not.
+    assert "`pytest-log-test-b/pytest.log`" in text, text
+    assert "`pytest-log-test-a/pytest.log`" not in text, text
+    assert "LOWER BOUND" in text, text
+    # The disclosure must not claim a watchdog kill this log does not show.
+    assert "summary-less legs — no pytest summary line" in text, text
+    assert "LOWER BOUND" not in md(None)                # silent on a clean run
+
+
+def test_captured_output_cannot_close_the_disclosure(tmp_path: Path) -> None:
+    """A duration inside a FAILURES block is not a session summary.
+
+    pytest echoes a failing test's captured stdout at column 0, and a truncated log
+    (the documented SIGKILL path) can contain such a line. Treating any line
+    mentioning a duration as the summary certified the truncated leg as complete
+    and dropped its real failures — the opposite of what the disclosure is for
+    (#9134 review, P1).
+    """
+    (tmp_path / "pytest-log-test-d").mkdir()
+    (tmp_path / "pytest-log-test-d" / "pytest.log").write_text(
+        "FAILED tests/test_d.py::test_slow - Timeout\n"
+        "------------ Captured stdout call ------------\n"
+        "===== warmup in 1.23s =====\n"
+        "some output in 4.56s\n")   # log ends here: no pytest summary
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert agg["log_sources"][0]["summary_seen"] is False
+    assert agg["total_counts"]["failed"] == 1, agg["total_counts"]
+
+
+def test_generating_twice_under_one_frozen_clock_does_not_duplicate_the_sample(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The artifact's history must not publish one sample twice.
+
+    The shipped history carried the same sample as two rows (generated twice under
+    a frozen CI_TIMING_NOW), so the flake proxy compared a sample with itself
+    (#9134 review, P2)."""
+    logs = tmp_path / "logs" / "pytest-log-test-a"
+    logs.mkdir(parents=True)
+    (logs / "pytest.log").write_text("= 3 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-20T18:40:00Z")
+    for _ in range(2):
+        monkeypatch.setattr("sys.argv", ["ci_timing.py", "--repo", "o/r",
+                                         "--logs-dir", str(tmp_path / "logs"),
+                                         "--out-dir", str(out)])
+        assert ci_timing.main() == 0
+    history = json.loads((out / "ci-timing.json").read_text())["history"]
+    assert len(history) == 1, history
+
+
+def _seed_one_history_row(out: Path, run_id: str, sample_time: str,
+                          passed: int, failed_tests: list[str]) -> None:
+    """Plant a committed artifact whose history already holds a LATER sample of `run_id`."""
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "ci-timing.json").write_text(json.dumps({
+        "schema_version": ci_timing.SCHEMA_VERSION,
+        "history": [{
+            "sample_time": sample_time, "run_id": run_id, "sha": None,
+            "created_at": "2026-08-19T00:00:00Z", "conclusion": "failure",
+            "event": "push", "branch": "main",
+            "counts": {"passed": passed, "failed": len(failed_tests), "error": 0,
+                       "skipped": 0, "xfailed": 0, "xpassed": 0},
+            "killed": False, "steps_total_ms": 0, "steps_max_job_ms": 0,
+            "failed_tests": failed_tests,
+        }],
+    }))
+
+
+def _run_main_against(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                      out: Path, run_id: str = "4242") -> None:
+    monkeypatch.setattr("sys.argv", ["ci_timing.py", "--repo", "o/r",
+                                     "--run-id", run_id,
+                                     "--logs-dir", str(tmp_path / "logs"),
+                                     "--out-dir", str(out)])
+    assert ci_timing.main() == 0
+
+
+def test_a_resampled_run_publishes_one_failure_list(tmp_path: Path,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    """The header and its own history row can never name different failures.
+
+    `_dedupe_history` keeps the NEWEST sample of a run, so a committed row stamped
+    later than `CI_TIMING_NOW` displaces the fresh row — and the header was still
+    built from the fresh aggregation beside it, so ONE artifact published TWO failure
+    lists and two different pass counts for one run. The shipped `docs/ci-timing.json`
+    had exactly that at run 39467226356 (#9134 review, P1).
+    """
+    write_log(tmp_path, "pytest-log-test-a/pytest.log",
+              "FAILED tests/test_new.py::test_NEW\n= 1 failed, 2 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    _seed_one_history_row(out, "4242", "2026-08-20T00:00:00Z", 99,
+                          ["tests/test_old.py::test_OLD"])
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-19T00:00:00Z")
+    _run_main_against(tmp_path, monkeypatch, out)
+
+    artifact = json.loads((out / "ci-timing.json").read_text())
+    row = artifact["history"][0]
+    assert artifact["failed_tests"] == row["failed_tests"], artifact["failed_tests"]
+    assert artifact["outcome"]["passed"] == row["counts"]["passed"]
+    assert artifact["outcome"]["failed"] == row["counts"]["failed"]
+    # the fresh parse lost the seat, so the artifact is the COMMITTED reading, whole
+    assert row["failed_tests"] == ["tests/test_old.py::test_OLD"]
+
+
+def test_the_markdown_takes_the_resolved_sample_time(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The md must date itself from the RESOLVED instant, not from the env again.
+
+    When a committed row is newer than `CI_TIMING_NOW`, `now` is re-published from
+    that row; `render_md` re-reads `CI_TIMING_NOW` when it is given no `now`, so the
+    markdown dated the artifact a day before its own json (#9134 review, P2 — the
+    fix that added `now=now` was pinned by nothing).
+    """
+    write_log(tmp_path, "pytest-log-test-a/pytest.log", "= 3 passed in 1.00s =\n")
+    out = tmp_path / "out"
+    _seed_one_history_row(out, "4242", "2026-08-20T00:00:00Z", 99, [])
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-08-19T00:00:00Z")
+    _run_main_against(tmp_path, monkeypatch, out)
+
+    artifact = json.loads((out / "ci-timing.json").read_text())
+    resolved = artifact["sampled_run"]["sample_time"]
+    assert resolved == "2026-08-20T00:00:00Z"
+    assert f"- sample_time: `{resolved}`" in (out / "ci-timing.md").read_text()
+
+
+def test_a_quoted_summary_is_not_the_session_summary(tmp_path: Path) -> None:
+    """A FAILING assertion that quotes a summary must not be read as one.
+
+    A watchdog SIGKILL truncates the log before pytest prints its real summary. If the
+    last column-0 line quotes a summary inside an assertion message, the old rule
+    credited its counts (fabricating passes the leg never had) AND set
+    `summary_seen: True`, suppressing the truncation disclosure — a killed leg shipped
+    as a complete one (#9134 review, P2).
+    """
+    log = write_log(
+        tmp_path, "truncated.log",
+        "FAILED tests/test_x.py::test_x\n"
+        "E   AssertionError: assert '= 10 passed, 1 failed in 3.00s =' in '## Outcome'\n")
+    parsed = ci_timing.parse_log(log)
+    assert parsed["summary_seen"] is False
+    assert parsed["counts"]["passed"] == 0, parsed["counts"]
+    assert parsed["counts"]["failed"] == 0, parsed["counts"]
+
+
+def test_the_counts_rule_runs_at_exactly_one_site(tmp_path: Path) -> None:
+    """The counts are decided ONCE, after the line loop — and the comment describes that.
+
+    `parse_log` carried a SECOND, in-loop credit block (`if COUNT_RE.search(line) and
+    (line.startswith("=") or _SUMMARY_IN_RE.search(line))`) under a comment documenting a
+    "deliberately more permissive, either shape" policy. It was DEAD — the site after the
+    loop resets every key with `counts = {k: 0 …}` before it sets one, so nothing it wrote
+    survived — and a maintainer reading that comment would believe a fallback existed and
+    "fix" the wrong copy (measured pre-fix: `= 3 passed … ` then `= 4 passed … [killed]`
+    credits 3, the live rule, while the dead block claimed the second line was parsed in
+    "either shape"). Structure is what has to be pinned here, because deleting dead code
+    cannot change behaviour: the structural assertion is RED on the pre-fix source and
+    green on the single-rule source, and the behavioural assertions keep the one surviving
+    rule from being quietly widened as a "restore the fallback" (#9134 review, P3).
+    """
+    import ast as _ast
+    import inspect
+
+    func = _ast.parse(inspect.getsource(ci_timing.parse_log)).body[0]
+
+    def _counts_assignments(node: _ast.AST) -> list[int]:
+        return [sub.lineno for sub in _ast.walk(node)
+                if isinstance(sub, _ast.Assign)
+                and any(isinstance(t, _ast.Subscript) and isinstance(t.value, _ast.Name)
+                        and t.value.id == "counts" for t in sub.targets)]
+
+    line_loops = [n for n in _ast.walk(func)
+                  if isinstance(n, _ast.For) and isinstance(n.iter, _ast.Name)
+                  and n.iter.id == "lines"]
+    assert len(line_loops) == 1, "the log's line loop moved — update this pin"
+    assert _counts_assignments(line_loops[0]) == [], (
+        "a counts assignment inside the LINE loop is dead code: the site after the loop "
+        "resets every key before it sets one")
+    assert len(_counts_assignments(func)) == 1, (
+        "the counts must be credited at exactly ONE site")
+
+    # The one surviving rule, pinning the two rows the review measured: only the LAST
+    # candidate line credits, and a line carrying `[` is a parametrized id echoed into the
+    # log rather than a session summary.
+    log = write_log(tmp_path, "two-summaries.log",
+                    "= 3 passed in 1.00s =\n"
+                    "= 4 passed in 2.00s = [killed]\n")
+    assert ci_timing.parse_log(log)["counts"]["passed"] == 3
+
+
+def test_an_embedded_nodeid_is_not_a_verdict(tmp_path: Path) -> None:
+    """A parametrized id that EMBEDS another nodeid names the OUTER test, not the inner one.
+
+    `…test_p[tests/x.py::…::test_y FAILED [ 86%] …] PASSED [ 75%]` is ONE progress line for ONE
+    test: the verdict is the LAST one before the line's final `[ NN%]` marker, and the id is
+    everything before it — here the outer test's own (PASSED). Reading the FIRST verdict
+    published a failure for a test that had passed, and the up-reconcile then inflated
+    `outcome.failed` to the length of that list. Both discriminators tried before this one
+    dropped REAL failures (bracket balance: a parameter containing `[`; verdict-word counting: a
+    parameter or message that spells a verdict), which is why the rule is positional (#9134
+    review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_a.py::test_p[tests/test_x.py::test_y FAILED [ 86%] tail] PASSED [100%]\n"
+        "tests/test_a.py::test_ok PASSED [100%]\n"
+        "= 1 passed in 1.00s =\n")
+    parsed = ci_timing.parse_log(leg / "pytest.log")
+    assert parsed["outcomes"] == {
+        "tests/test_a.py::test_p[tests/test_x.py::test_y FAILED [ 86%] tail]": "PASSED",
+        "tests/test_a.py::test_ok": "PASSED",
+    }
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == set()
+    assert agg["total_counts"]["failed"] == 0
+
+
+def test_a_spaced_param_survives_a_summary_less_leg(tmp_path: Path) -> None:
+    """A progress line is the ONLY evidence on a killed leg, and a spaced id must survive it.
+
+    The short-summary capture was widened but the progress pattern kept a no-space id, so a
+    parameter containing a space was still lost from `failed_tests` AND from the count whenever
+    the log is truncated before the summary block — which is exactly the watchdog-killed shape
+    this artifact has to publish honestly (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "".join(f"tests/test_x.py::test_spaced[{p}] FAILED [ 10%]\n"
+                for p in ("server lane", "server box", "server bay")))
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_spaced[server lane]",
+        "tests/test_x.py::test_spaced[server box]",
+        "tests/test_x.py::test_spaced[server bay]",
+    }
+    assert agg["total_counts"]["failed"] == 3
+
+
+def test_a_parameter_holding_a_marker_fragment_is_not_two_tests(tmp_path: Path) -> None:
+    """`test_p[FAILED[100%]]` is ONE test, however much it looks like a marker.
+
+    Counting `VERDICT [ NN%]` markers dropped this real failure, because a parameter may contain
+    a marker fragment. The positional rule has no such case: the marker that matters is the
+    line's FINAL one (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text("tests/test_x.py::test_p[FAILED[100%]] FAILED [ 20%]\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[FAILED[100%]]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_a_reason_truncated_between_verdict_and_marker_is_still_recorded(tmp_path: Path) -> None:
+    """pytest truncates a skip reason IN PLACE, between the verdict and the marker.
+
+    `…::test_x SKIPPED (rea...) [ 37%]` — real output from the shipped sample's own logs — broke
+    a rule that required the marker immediately after the verdict, silently losing those ids from
+    the per-file census (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_skipped SKIPPED (rea...) [ 37%]\n")
+    parsed = ci_timing.parse_log(leg / "pytest.log")
+    assert parsed["outcomes"] == {"tests/test_x.py::test_skipped": "SKIPPED"}
+
+
+def test_a_verdict_line_with_trailing_output_is_still_a_verdict(tmp_path: Path) -> None:
+    """A child process that writes to stderr with no newline lands ON the verdict line.
+
+    Real output in the shipped sample: `...::test_import_deleted_team_410 PASSED [ 58%]11265:C
+    20 Oct 2026 17:50:42.598 # Fatal error, can't open config file` (three such lines across the
+    run's logs). An end-anchored `\\s*$` after the marker dropped the whole line, so on a leg
+    truncated before the summary block — the killed shape this artifact must publish honestly —
+    a real FAILED disappeared from `failed_tests` AND from the count (#9134 review, P1). The
+    line's LAST marker decides, and a tail that carries no further marker-shaped fragment is not
+    a second verdict (a tail containing `[ NN%]` is still rejected — pinned by the shapes above).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_a FAILED [ 10%]1526:C 20 Oct 2026 17:50:42.598 # Fatal error,"
+        " can't open config file\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_a"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_a_parseable_id_with_unbalanced_brackets_is_still_a_failure(tmp_path: Path) -> None:
+    """An id whose PARAMETER contains `[` is unbalanced, and is still a real failure.
+
+    pytest appends its closing `]` to the parameter verbatim, so a value containing `[` yields
+    an id with more opens than closes. Rejecting every unbalanced id — instead of the line that
+    carries two verdicts — silently DROPPED such failures from both the count and the list on a
+    summary-less leg (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text("tests/test_x.py::test_p[a[b] FAILED [100%]\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[a[b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_the_banner_is_the_measurement_and_is_not_inflated(tmp_path: Path) -> None:
+    """A banner that says five failures is the measurement; the list must not inflate it.
+
+    The up-reconcile (`failed = max(failed, FAILED ids)`) existed to mask the phantom verdict
+    read out of an embedded nodeid, and it published a failure count the run never had. It is
+    gone: when a banner disagrees with the progress lines, the BANNER wins (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "".join(f"tests/test_i.py::test_{i} FAILED [ 10%]\n" for i in range(6))
+        + "= 5 failed, 1 passed in 9.00s =\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["total_counts"]["failed"] == 5
+
+
+def test_a_verdict_word_as_a_parameter_is_not_a_second_test(tmp_path: Path) -> None:
+    """`test_handler_level[ERROR]` is ONE test whose PARAMETER spells a verdict.
+
+    The rule is POSITIONAL: the id is everything before the line's FINAL `VERDICT [ NN%]`
+    marker and the verdict is the last verdict word before it. Counting verdict WORDS dropped
+    this failure; counting markers skipped `test_p[FAILED[100%]]` as if it were two tests —
+    both were measured wrong (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text("tests/test_x.py::test_handler_level[ERROR] FAILED [ 50%]\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_handler_level[ERROR]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_a_short_summary_quoting_a_verdict_is_still_a_failure(tmp_path: Path) -> None:
+    """A failure MESSAGE that quotes a verdict word must not hide the failure."""
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_a - AssertionError: assert 'SKIPPED' in ''\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_a"}
+
+
+def test_a_spaced_param_is_not_truncated_at_the_space(tmp_path: Path) -> None:
+    """Three spaced parameters are three failures, not one truncated id.
+
+    The short-summary id capture ran to the first whitespace, so `test_spaced[server lane]` and
+    its siblings collapsed into a single nodeid that does not exist — which also made the flake
+    proxy diff names pytest never reports (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "".join(f"FAILED tests/test_x.py::test_spaced[{p}] - AssertionError: x\n"
+                for p in ("server lane", "server box", "server bay"))
+        + "= 3 failed in 1.00s =\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_spaced[server lane]",
+        "tests/test_x.py::test_spaced[server box]",
+        "tests/test_x.py::test_spaced[server bay]",
+    }
+    assert agg["total_counts"]["failed"] == 3
+
+
+def test_a_reason_containing_a_verdict_word_is_not_that_verdict(tmp_path: Path) -> None:
+    """pytest's skip/xfail reason is parenthesised and may itself SPELL a verdict.
+
+    `XFAIL (expected FAILED) [ 12%]` is one xfail. A rule that allowed arbitrary text between the
+    verdict and the marker re-anchored on the reason's own word and published
+    `('…::test_xf XFAIL (expected', 'FAILED')` — a failure for a test that never failed, and on a
+    summary-less leg a fabricated count as well (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_xf XFAIL (expected FAILED) [ 12%]\n"
+        "tests/test_x.py::test_skip SKIPPED (the ERROR case) [ 12%]\n")
+    parsed = ci_timing.parse_log(leg / "pytest.log")
+    assert parsed["outcomes"] == {
+        "tests/test_x.py::test_xf": "XFAIL",
+        "tests/test_x.py::test_skip": "SKIPPED",
+    }
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == set()
+    assert agg["total_counts"].get("failed", 0) == 0
+    assert agg["total_counts"].get("error", 0) == 0
+
+
+def test_a_param_containing_the_separator_is_not_truncated(tmp_path: Path) -> None:
+    """`test_p[a - b]` is an id; the separator is the ` - ` OUTSIDE its brackets.
+
+    Truncating at the first ` - ` published `…::test_p[a`, a nodeid pytest never reports — the
+    same harm as truncating a spaced id, for the same reason (a pattern cannot tell the id's own
+    punctuation from the format's). The split is bracket-aware.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a - b] - AssertionError: boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[a - b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_an_unbalanced_param_does_not_glue_its_message_onto_the_id(tmp_path: Path) -> None:
+    """pytest appends `]` to the parameter verbatim, so a real id can be UNBALANCED.
+
+    `test_open[a[b]` has one more `[` than `]`, so a balance test never finds a split and the id
+    was published as `<id> - <message>` — a nodeid pytest never reports, invented by the splitter
+    (#9134 review, P2). The depth scan falls through to the last separator instead, and a nodeid
+    the PROGRESS line already named wins outright: that line is unambiguous, and pytest writes the
+    progress lines before the summary.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_open[a[b] FAILED [ 50%]\n"
+        "FAILED tests/test_x.py::test_open[a[b] - AssertionError: boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_open[a[b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+    bare = tmp_path / "logs2" / "pytest-log-test-a"
+    bare.mkdir(parents=True)
+    (bare / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_open[a[b] - AssertionError: boom\n")
+    alone = ci_timing.aggregate_logs(tmp_path / "logs2")
+    assert alone["failed_tests"] == {"tests/test_x.py::test_open[a[b]"}
+
+
+def test_a_progress_line_resolves_an_id_that_contains_the_separator_and_a_bracket(
+        tmp_path: Path) -> None:
+    """`test_pb[a] - b]` cannot be split by punctuation alone — the progress line settles it.
+
+    Its first ` - ` sits at bracket depth 0 (`[a]` closes early), so a depth scan truncates it,
+    and the message may legitimately contain ` - ` too. The progress line that precedes the
+    summary carries the id verbatim, so it is the authority (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_pb[a] - b] FAILED [ 50%]\n"
+        "FAILED tests/test_x.py::test_pb[a] - b] - AssertionError: 1 - 1 != 0\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_pb[a] - b]"}
+    assert agg["total_counts"]["failed"] == 1
+
+
+def test_a_message_with_its_own_dashes_does_not_extend_the_id(tmp_path: Path) -> None:
+    """`1 - 1 != 0` is the most common assertion text, and it is not part of the id.
+
+    The splitter's last-separator fallback still published `<id> - <message prefix>` for an
+    unbalanced id whose message contains ` - ` — a nodeid pytest never reports. The head whose
+    bracket DELTA equals the whole tail's is the id: the message's brackets are what make the two
+    differ (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_open[a[b] - AssertionError: 1 - 1 != 0\n"
+        "FAILED tests/test_x.py::test_open[a[b - c] - assert 3 - 1 == 1\n"
+        "FAILED tests/test_x.py::test_pb[a] - b] - AssertionError: 1 - 1 != 0\n"
+        "FAILED tests/test_x.py::test_p[a - b] - AssertionError: 1 - 1 != 0\n"
+        "FAILED tests/test_x.py::test_a - AssertionError: 1 - 1 != 0\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_open[a[b]",
+        "tests/test_x.py::test_open[a[b - c]",
+        "tests/test_x.py::test_pb[a] - b]",
+        "tests/test_x.py::test_p[a - b]",
+        "tests/test_x.py::test_a",
+    }
+    assert agg["total_counts"]["failed"] == 5
+
+
+def test_a_named_progress_id_beats_a_shorter_named_prefix(tmp_path: Path) -> None:
+    """Two progress ids can PREFIX each other; the summary line names the longer one.
+
+    Known ids are bucketed by length and probed longest-first, so `test_a[1]` wins over `test_a`
+    without re-sorting a growing set on every summary line (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "tests/test_x.py::test_a PASSED [ 10%]\n"
+        "tests/test_x.py::test_a[1] PASSED [ 20%]\n"
+        "FAILED tests/test_x.py::test_a[1] - AssertionError: 1 - 1 != 0\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_a[1]"}
+
+
+def test_a_message_carrying_its_own_brackets_does_not_move_the_split(tmp_path: Path) -> None:
+    """The message is pytest's longrepr, and it can carry brackets of its own.
+
+    `assert '[' in ''` and `assert ']' == 'a - b'` make the tail's bracket delta differ from the
+    id's in BOTH directions, so a delta-only rule cut an id that contains ` - ` (`test_p[a - b]` →
+    `test_p[a`) and folded a message prefix into another (`test_neg - AssertionError: assert ']' == 'a`).
+    The longrepr SHAPE settles it: the remainder after the true separator opens with pytest's own
+    rendering, which is the one signal that is not bracket arithmetic (#9134 review, P1).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a - b] - AssertionError: assert '[' in ''\n"
+        "FAILED tests/test_x.py::test_p[a - c] - AssertionError: assert ']' in ''\n"
+        "FAILED tests/test_x.py::test_neg - AssertionError: assert ']' == 'a - b'\n"
+        "= 3 failed in 0.49s =\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_p[a - b]",
+        "tests/test_x.py::test_p[a - c]",
+        "tests/test_x.py::test_neg",
+    }
+    assert agg["total_counts"]["failed"] == 3
+
+
+def test_a_longrepr_that_does_not_look_like_one_still_splits(tmp_path: Path) -> None:
+    """Not every message opens with `SomethingError:`; the ladder must still find the id."""
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_a - boom\n"
+        "FAILED tests/test_x.py::test_b - \n"
+        "FAILED tests/test_x.py::test_p[a - b] - boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_a",
+        "tests/test_x.py::test_b",
+        "tests/test_x.py::test_p[a - b]",
+    }
+
+
+def test_a_longrepr_inside_a_parameter_does_not_split_the_id(tmp_path: Path) -> None:
+    """A ` - ` INSIDE a parameter is not the short-summary split, even when it opens like a repr.
+
+    The longrepr pass ran before the bracket-delta ladder, so an id-internal separator whose
+    remainder merely OPENS with a longrepr-shaped word (`test_p[a - Failed to connect]`,
+    `[a - assert b]`) won and cut the id inside its own parameter — publishing a nodeid pytest
+    never reports, on the summary-less leg this artifact exists to publish honestly (#9134
+    review, P2). The pass is depth-0 only; bracket-internal separators belong to the ladder.
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a - Failed to connect] - boom\n"
+        "FAILED tests/test_y.py::test_q[a - assert b] - boom\n"
+        "FAILED tests/test_z.py::test_r[a - AssertionError x] - boom\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {
+        "tests/test_x.py::test_p[a - Failed to connect]",
+        "tests/test_y.py::test_q[a - assert b]",
+        "tests/test_z.py::test_r[a - AssertionError x]",
+    }
+
+
+def test_a_bracket_carrying_message_is_a_declared_residual(tmp_path: Path) -> None:
+    """The one shape the depth-0 rule gives up, pinned as ACCEPTED — not as correct.
+
+    A bracket-unbalanced id whose message opens with a longrepr shape splits at the delta
+    candidate rather than at the in-parameter separator, so the published id carries part of the
+    message. It is indistinguishable by bracket shape from the family the guard protects
+    (`test_p[a - Failed to connect]`, measured over 70 shapes), where the alternative published
+    `test_p[a` — an id pytest never reports. This pins the residual so a future change cannot
+    silently move it, and so the trade is visible rather than discovered (#9134 review, P2).
+    """
+    leg = tmp_path / "logs" / "pytest-log-test-a"
+    leg.mkdir(parents=True)
+    (leg / "pytest.log").write_text(
+        "FAILED tests/test_x.py::test_p[a[b] - assert ']' == 'a - b'\n")
+    agg = ci_timing.aggregate_logs(tmp_path / "logs")
+    assert agg["failed_tests"] == {"tests/test_x.py::test_p[a[b] - assert ']' == 'a"}
+
+
+def test_an_unreadable_log_degrades_instead_of_killing_the_run(tmp_path: Path) -> None:
+    """One unreadable log must not become a KeyError for the whole artifact.
+
+    `parse_log` documents an unreadable file as a degraded entry, but its early
+    return predated the `summary_seen` key while `aggregate_logs` reads that key
+    unconditionally — so a single bad log (or a DIRECTORY named `*.log`) aborted
+    the run instead of skipping the leg (#9134 review, P2).
+    """
+    (tmp_path / "pytest-log-broken").mkdir()
+    (tmp_path / "pytest-log-broken" / "pytest.log").mkdir()   # directory, not a file
+    (tmp_path / "pytest-log-ok").mkdir()
+    (tmp_path / "pytest-log-ok" / "pytest.log").write_text("= 3 passed in 1.00s =\n")
+
+    agg = ci_timing.aggregate_logs(tmp_path)
+
+    assert agg["total_counts"]["passed"] == 3, agg["total_counts"]
+    broken = [s for s in agg["log_sources"] if s["error"]]
+    assert broken and broken[0]["summary_seen"] is False, agg["log_sources"]
+
+
+def test_each_summary_less_leg_is_labelled_by_its_own_cause() -> None:
+    """One cause must not be asserted for every leg in the list.
+
+    The first fix derived a single `why` from `any(... "killed" ...)`, so a leg that
+    was never killed was published as watchdog-killed — the same asserted-cause the
+    round was fixing, moved from per-run to per-line (#9134 review, P2).
+    """
+    text = ci_timing.render_md(
+        {"head_sha": "abc123", "created_at": "2026-01-01T00:00:00Z",
+         "conclusion": "success"},
+        {}, {}, {k: 0 for k in ci_timing.COUNT_KEYS}, True, "4242", [], [],
+        summary_less_legs=[
+            {"leg": "pytest-log-test-d", "log": "pytest.log", "killed": True},
+            {"leg": "pytest-log-test-e", "log": "pytest.log", "killed": False},
+        ],
+    )
+    line = next(cand for cand in text.split("\n") if cand.startswith("- summary-less legs"))
+    killed_part, _, plain_part = line.partition("; ")
+    assert "watchdog-killed" in killed_part and "pytest-log-test-d" in killed_part, line
+    assert "pytest-log-test-e" in plain_part, line
+    assert "watchdog-killed" not in plain_part, line
+
+
+def test_a_zero_count_summary_is_not_a_truncated_leg(tmp_path: Path) -> None:
+    """`no tests ran in 0.30s` is a SUMMARY of zeroes, not an absent summary.
+
+    Treating "all counts are zero" as truncation named an honest leg as
+    watchdog-killed and told the reader `passed` was a lower bound for a run that
+    lost nothing (#9134 review, P2).
+    """
+    (tmp_path / "pytest-log-test-a").mkdir()
+    for body in ("no tests ran in 0.30s\n",                 # -q, banner-less
+                 "===== no tests ran in 0.01s =====\n",    # -v, BANNER form
+                 "===== 2 deselected in 0.10s =====\n",    # banner, no count token
+                 "2 deselected in 0.10s\n",
+                 "1 failed, 3 passed in 0.04s\n"):   # pytest -q, no banner
+        (tmp_path / "pytest-log-test-a" / "pytest.log").write_text(body)
+        agg = ci_timing.aggregate_logs(tmp_path)
+        assert agg["log_sources"][0]["summary_seen"] is True, body
+        assert [s for s in agg["log_sources"] if not s["summary_seen"]] == [], body
+
+
+def test_main_wires_the_disclosure_into_the_artifact(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one call that puts the line in the artifact must be pinned.
+
+    Without this, the wiring in `main()` can vanish and every other test stays
+    green, because they call `render_md` directly (#9134 review, P2).
+    """
+    logs = tmp_path / "logs" / "pytest-log-test-b"
+    logs.mkdir(parents=True)
+    (logs / "pytest.log").write_text("FAILED tests/test_b.py::test_2 - AssertionError\n")
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr("sys.argv", ["ci_timing.py", "--repo", "o/r",
+                                     "--logs-dir", str(tmp_path / "logs"),
+                                     "--out-dir", str(out)])
+    assert ci_timing.main() == 0
+    md = (out / "ci-timing.md").read_text()
+    assert "summary-less legs" in md, md[:400]
+    assert "`pytest-log-test-b/pytest.log`" in md, md[:400]
+
+
+def test_a_held_row_does_not_strand_the_markers_own_separator() -> None:
+    """The restated marker must replace the WORDS only.
+
+    The map's `test_2296_document_created_journal.py` row was originally written
+    `# unmeasured — by the refresher — #2296: …`. The old restatement consumed
+    the marker's dash and re-added its own, so the row came out as
+    `… (not a full-file measurement) — by the refresher — #2296: …` — one
+    dangling fragment and a doubled dash (#9134 review, P2). The phrase was also
+    false for that row: it says the reading IS the pytest session total, i.e. a
+    full-file measurement; what is missing is the CI-measured one.
+
+    Non-vacuity: pre-fix this asserts nothing (the separator is stranded).
+    """
+    from tools.ci_timing import _restate_unmeasured_marker
+
+    restated = _restate_unmeasured_marker(
+        "  # unmeasured — by the refresher — #2296: WHAT THE NUMBER IS: the "
+        "pytest session total, NOT what the refresher computes.")
+    assert restated == (
+        "  # carried forward (not a full-file CI measurement) — by the "
+        "refresher — #2296: WHAT THE NUMBER IS: the pytest session total, NOT "
+        "what the refresher computes."), restated
+    assert restated.count("—") == 2, restated
+
+
+def test_a_held_row_restates_an_unmeasured_marker_and_keeps_the_rationale() -> None:
+    """A HELD row's value is still carried forward, so its `# unmeasured` meaning
+    must survive in a form that is true — restated, not deleted with the rationale
+    behind it (`test_2296_document_created_journal.py` lost its whole "WHAT THE
+    NUMBER IS" note that way, #9134 review P2).
+
+    Non-vacuity: pre-fix the marker branch set `tail = ""` regardless of `kept`,
+    so the rationale assertions fail.
+    """
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_journal.py\n"
+        "durations:\n"
+        "  test_journal.py: 27.0  # unmeasured by the refresher — #2296: WHAT THE "
+        "NUMBER IS: the pytest session total, NOT what the refresher computes.\n",
+        {"test_journal.py": 6.1},
+        "2026-10-19T05:02:37Z",
+        coverage={"test_journal.py": (1, 10)},
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_journal.py:"))
+    assert "WHAT THE NUMBER IS" in row
+    assert "carried forward (not a full-file CI measurement)" in row
+    # the stale marker token itself must not survive as the leading tail token:
+    # the artifact measured this file, so `# unmeasured` would be a false claim.
+    assert not re.search(r"#\s*unmeasured\b", row)
+    assert yaml.safe_load(text)["durations"]["test_journal.py"] == 27.0
+
+
+def test_an_unchanged_row_keeps_its_provenance_tail(tmp_path: Path) -> None:
+    """No churn for a row this render did not change: "a row's comment is kept
+    while the value AND its stated basis are unchanged". 845 of the map's rows are
+    carried forward on a refresh, and rewriting their notes would bury the dozen
+    that actually moved."""
+    text, _ = _rendered_lower_bound(tmp_path)
+    assert ("test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 "
+            "(run 39165691659); was 11.0") in text
+
+
+def test_a_note_that_OPENS_with_a_citation_is_not_deleted_whole() -> None:
+    """`_PURE_PROVENANCE_RE` is a PREFIX match, so "opens with a citation" must
+    not be read as "is nothing but a citation".
+
+    `# #9017 CI-junit 2026-10-18 (run 42); was 180.7 — do not drop this row` was
+    classified pure, and the re-base then cleared the whole tail — losing the
+    instruction the note exists for (#9134 review, P2). A note that is genuinely
+    only our basis strings must still classify pure, so the map does not grow a
+    sentence per refresh.
+    """
+    pure = (
+        "  # #9017 CI-junit 2026-10-18 (run 39165691659); was 42.6",
+        "  # ci-timing top-15 2026-10-19 (run 39191149586); was 11.8",
+        "  # #9017 CI-junit 2026-10-18 (run 1); was 20.3 — ci-timing top-15 "
+        "2026-10-19 (run 2): top-15 saw 2 of 15 testcases = 49.2s, a LOWER "
+        "bound; kept 49.2",
+    )
+    for tail in pure:
+        assert ci_timing._is_pure_provenance(tail), tail
+    impure = (
+        "  # #9017 CI-junit 2026-10-18 (run 42); was 180.7 — do not drop this "
+        "row; required for the #4348 floor",
+        "  # #2350: its FIRST weight — this value is a CI measurement since the "
+        "2026-10-17 refresh; required for the durations coverage half",
+    )
+    for tail in impure:
+        assert not ci_timing._is_pure_provenance(tail), tail
+
+
+def test_a_comma_bounded_stale_clause_does_not_take_the_whole_note() -> None:
+    """A clause can be separated by a COMMA.
+
+    With `_CLAUSE_SEPARATORS` holding only ` — `/`; `/`. `, the bounds of a
+    comma-bracketed claim stayed at the extremes of the note, so the head and the
+    tail were both empty and the whole note was cleared — the same record loss
+    clause-by-clause stripping exists to prevent (#9134 review, P2).
+    """
+    stripped = ci_timing._strip_stale_basis_claim(
+        "  # #2350: rationale, this value is a CI measurement since the "
+        "2026-10-17 refresh, and the #4348 trap says do not drop the row")
+    assert "#2350: rationale" in stripped, stripped
+    assert "do not drop the row" in stripped, stripped
+    assert "since the 2026-10-17 refresh" not in stripped, stripped
+
+
+def test_declared_test_counts_counts_test_functions(tmp_path: Path) -> None:
+    """The coverage witness's denominator, unit-tested: module-level, class
+    methods and `test`-prefixed helpers count; a non-test helper does not; a
+    missing or unparsable file is ABSENT (UNKNOWN) rather than 0."""
+    (tmp_path / "tests" / "sub").mkdir(parents=True)
+    (tmp_path / "tests" / "test_alpha.py").write_text(
+        "import pytest\n"
+        "def test_one():\n    pass\n"
+        "def test_two():\n    pass\n"
+        "class TestThing:\n"
+        "    def test_method(self):\n        pass\n"
+        "def helper():\n    pass\n"
+        # pytest registers a fixture-decorated `test*` def as a FIXTURE, never as
+        # a testcase — counting it made `declared > collected` and the row's
+        # floor unsatisfiable (#9134 review, P2).
+        "@pytest.fixture\ndef test_tools():\n    yield None\n"
+        # …and a def nested inside another test is not collected at all.
+        "def test_outer():\n    def test_inner():\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_beta.py").write_text(
+        "def test_x():\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests" / "test_broken.py").write_text(
+        "def test_open(:\n", encoding="utf-8")
+    counts = ci_timing.declared_test_counts(
+        ["test_alpha.py", "sub/test_beta.py", "test_broken.py", "test_gone.py"],
+        tmp_path,
+    )
+    # 4 = test_one, test_two, TestThing.test_method, test_outer. The
+    # fixture-decorated `test_tools` and the nested `test_inner` are NOT
+    # collected, and counting them is what made `declared > collected`.
+    assert counts == {"test_alpha.py": 4, "sub/test_beta.py": 1}
+
+
+def test_a_parametrised_file_has_no_denominator(tmp_path: Path) -> None:
+    """#9134 review P1: a count of `def`s is a FLOOR of the collected count.
+
+    `@pytest.mark.parametrize` turns one `def` into N testcases. Measured on a
+    2-`def` module whose first test is parametrised over 8 arms, pytest collects
+    9; a reading that saw 2 satisfied `observed >= declared` (2 >= 2) and the
+    witness licensed a 10x discount on a file it had seen a fifth of. Reachable
+    in-tree, not synthetic: a large share of the map's rows come from files
+    carrying `parametrize`, and a row can be recorded as collecting MORE
+    testcases than its `def` count for exactly this reason — one states
+    "collects 7" against 6 `def`s, the off-by-one that made the old comparison
+    pass. (No count of such rows is restated here: it moved the day after it was
+    measured, which is the same re-staling the durations rows are warned about.)
+
+    So a parametrised file is ABSENT from the denominator map: UNKNOWN is not
+    "fully covered", and the row it cannot be resolved for may be RAISED but
+    never LOWERED.
+
+    Non-vacuity: pre-fix the parametrised rows appear in `counts` (as 2), which
+    is what the `not in counts` assertions fail on — and for the class-METHOD and
+    class-BODY forms, and the unnamed `TestCase`, pre-fix they appeared with a
+    real FLOOR count (1, 1 and 0), which is the fail-open this closes.
+    """
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / "tests" / "test_param_decorator.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('x', [1, 2, 3, 4, 5, 6, 7, 8])\n"
+        "def test_one(x):\n    pass\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_module.py").write_text(
+        "import pytest\n"
+        "pytestmark = pytest.mark.parametrize('y', [1, 2])\n"
+        "def test_a(y):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_class.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('z', [1, 2, 3])\n"
+        "class TestThing:\n"
+        "    def test_m(self, z):\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_plain.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+    # The two MARKER forms that used to slip past a `tree.body`-only scan, both
+    # measured in-tree before this was closed: a `parametrize` on a method of a
+    # `Test*` class (7 declared beside 9 collected on
+    # `test_event_state_carrier_2788.py`), and a `pytestmark` inside the class
+    # body rather than on it.
+    (tmp_path / "tests" / "test_param_method.py").write_text(
+        "import pytest\n"
+        "class TestCommitPath:\n"
+        "    def test_plain(self):\n        pass\n"
+        "    @pytest.mark.parametrize('key', ['a', 'b'])\n"
+        "    def test_lane(self, key):\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_class_body.py").write_text(
+        "import pytest\n"
+        "class TestBody:\n"
+        "    pytestmark = pytest.mark.parametrize('k', [1, 2])\n"
+        "    def test_m(self, k):\n        pass\n",
+        encoding="utf-8",
+    )
+    # A `unittest.TestCase` subclass under a name that does not start with `Test`:
+    # `_collected_test_count` sees none of its methods, so the denominator would
+    # be a FLOOR. Measured in-tree at 0 declared beside 284 collected on
+    # `tests/test_collision_preflight.py`.
+    (tmp_path / "tests" / "test_unnamed_case.py").write_text(
+        "import unittest\n"
+        "class HolderGateTests(unittest.TestCase):\n"
+        "    def test_one(self):\n        pass\n"
+        "    def test_two(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    # The shapes a second review round found still counted (each measured as a
+    # real floor): a marker bound to a NAME, a parametrised FIXTURE, a
+    # `pytestmark` in a non-`=` assignment form, and a `Test*` class whose base
+    # supplies tests it inherits.
+    (tmp_path / "tests" / "test_param_alias.py").write_text(
+        "import pytest\n"
+        "CASES = pytest.mark.parametrize('x', list(range(8)))\n"
+        "@CASES\n"
+        "def test_one(x):\n    pass\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_fixture_params.py").write_text(
+        "import pytest\n"
+        "@pytest.fixture(params=['embedded', 'docker'])\n"
+        "def leg(request):\n    return request.param\n"
+        "def test_a(leg):\n    pass\n"
+        "def test_b(leg):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_param_annassign.py").write_text(
+        "import pytest\n"
+        "pytestmark: list = [pytest.mark.parametrize('k', [1, 2])]\n"
+        "def test_a(k):\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "test_inherited.py").write_text(
+        "import unittest\n"
+        "class BaseHolder(unittest.TestCase):\n"
+        "    def test_inherited(self):\n        pass\n"
+        "class HolderTests(BaseHolder):\n"
+        "    def test_own(self):\n        pass\n",
+        encoding="utf-8",
+    )
+
+    counts = ci_timing.declared_test_counts(
+        ["test_param_decorator.py", "test_param_module.py", "test_param_class.py",
+         "test_plain.py", "test_param_method.py", "test_param_class_body.py",
+         "test_unnamed_case.py", "test_param_alias.py", "test_fixture_params.py",
+         "test_param_annassign.py", "test_inherited.py"],
+        tmp_path,
+    )
+    assert "test_param_decorator.py" not in counts
+    assert "test_param_module.py" not in counts
+    assert "test_param_class.py" not in counts
+    assert "test_param_method.py" not in counts
+    assert "test_param_class_body.py" not in counts
+    assert "test_unnamed_case.py" not in counts
+    assert "test_param_alias.py" not in counts
+    assert "test_fixture_params.py" not in counts
+    assert "test_param_annassign.py" not in counts
+    assert "test_inherited.py" not in counts
+    # …and the witness still works where it IS provable, so the omission is not
+    # "stop counting anything that imports pytest".
+    assert counts == {"test_plain.py": 2}
+
+
+def test_a_flake_pair_is_ordered_by_when_the_samples_were_taken() -> None:
+    """`history` is insertion-ordered; the pair must be ordered by CAPTURE time instead.
+
+    One refresh can append a sample while an older run is re-sampled beside it, so
+    `history[i + 1]` can be the NEWER run. Comparing positionally then published a test as
+    "passing again" at an instant that precedes the failure it supposedly recovered from —
+    measured: run 39467226356 (created 2026-10-20T17:34:10Z) "passing" run 39191149586's
+    2026-10-19T02:41:31Z failure (#9134 review, P2). A pair that shares an instant cannot be
+    ordered at all, so it is skipped rather than guessed.
+    """
+    older = {"run_id": "1", "created_at": "2026-10-19T02:41:31Z",
+             "sample_time": "2026-10-20T18:40:00Z", "failed_tests": ["tests/t.py::test_x"]}
+    newer = {"run_id": "2", "created_at": "2026-10-20T17:34:10Z",
+             "sample_time": "2026-10-20T18:40:00Z", "failed_tests": []}
+    # The OLDER run is FIRST in the list — the inversion the shipped table exhibited.
+    flakes = ci_timing.candidate_flakes([older, newer])
+
+    assert flakes == []  # same instant: nothing can be ordered, so nothing is claimed
+
+    newer_instant = dict(newer, sample_time="2026-10-20T18:41:00Z")
+    flakes = ci_timing.candidate_flakes([older, newer_instant])
+
+    assert len(flakes) == 1
+    assert flakes[0]["failed_at"] == "2026-10-20T18:40:00Z"
+    assert flakes[0]["passed_at"] == "2026-10-20T18:41:00Z"
+
+
+def test_a_flake_claim_is_dropped_when_a_sample_at_that_instant_still_fails_it() -> None:
+    """`passed_at` is an INSTANT, not a run — every sample at it can refute the claim.
+
+    The pair being compared is not the whole claim. The shipped table published four
+    nodeids as "passed again at 2026-10-20T18:40:00Z" while the artifact's own sample of
+    a DIFFERENT run at exactly that instant listed all four as failed (#9134 review, P1).
+    A claim contradicted by any sample stamped at or after `passed_at` is not emitted.
+
+    Non-vacuity: pre-fix this returns one flake, `passed_at = 2026-10-20T18:40:00Z`,
+    contradicted by `row0` in the same fixture.
+    """
+    failed = ["tests/t.py::test_x"]
+    row0 = {"run_id": "1", "created_at": "2026-10-19T02:41:31Z",
+            "sample_time": "2026-10-20T18:40:00Z", "failed_tests": failed}
+    middle = {"run_id": "2", "created_at": "2026-10-20T17:34:10Z",
+              "sample_time": "2026-10-20T18:40:00Z", "failed_tests": []}
+    oldest = {"run_id": "3", "created_at": "2026-10-18T02:00:00Z",
+              "sample_time": "2026-10-20T14:39:07Z", "failed_tests": failed}
+
+    assert ci_timing.candidate_flakes([row0, middle, oldest]) == []
+
+    # The SAME pair WITHOUT the contradicting third sample is still claimed: the guard
+    # drops contradicted claims, it does not stop finding flakes.
+    flakes = ci_timing.candidate_flakes([middle, oldest])
+    assert [flake["test"] for flake in flakes] == failed
+    assert flakes[0]["passed_at"] == "2026-10-20T18:40:00Z"
+
+
+def test_the_shipped_artifact_lists_each_run_once() -> None:
+    """The committed data must be what the fixed generator produces (#9134 review, P1).
+
+    The shipped artifact carried run 39191149586 twice with `error: 1` and `error: 0` for
+    the same six `failed_tests`. A run is immutable, so one error total is not a
+    preference — and `_dedupe_history`'s behavioural test cannot protect data that was
+    committed before the fix.
+    """
+    snapshot = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    history = snapshot["history"]
+    runs = [row.get("run_id") or row.get("sha") for row in history]
+    assert len(runs) == len(set(runs)), f"a run is listed more than once: {runs}"
+    for run_id in {run for run in runs if run}:
+        totals = {row["counts"]["error"] for row in history
+                  if (row.get("run_id") or row.get("sha")) == run_id}
+        assert len(totals) == 1, (
+            f"run {run_id} carries contradictory error totals in the committed "
+            f"history: {sorted(totals)}")
+
+
+def test_the_artifact_and_the_map_cite_the_same_run() -> None:
+    """The two artifacts this tool ships must be grounded on ONE capture.
+
+    `docs/ci-timing.md`/`.json` name the sampled run; every `durations:` note names the
+    run its reading came from. The shipped pair disagreed — the artifact sampled
+    39191149586 while the map's newest notes (and its stamp) cited 39467226356 — and no
+    gate parsed one against the other, so the mismatch was silent by construction
+    (#9134 review, P1).
+
+    A refresh that moves NO row rewrites no note, so the note date cannot be required to
+    equal the artifact's sample date; the stamp (`durations_captured_at`, rewritten by
+    every refresh) is the handle for that case.
+    """
+    snapshot = json.loads((REPO_ROOT / "docs" / "ci-timing.json").read_text())
+    sampled = snapshot["sampled_run"]["run_id"]
+    sampled_date = str(snapshot["sampled_run"]["sample_time"])[:10]
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
+    assert stamp, "durations_captured_at is missing or unparseable"
+    notes = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
+    assert notes, "the map carries no capture-dated note, so this guard is vacuous"
+    newest = max(date for date, _ in notes)
+    newest_runs = {run for date, run in notes if date == newest}
+    if newest == sampled_date:
+        assert sampled in newest_runs, (
+            f"the artifact samples run {sampled} at {sampled_date}, but the map's "
+            f"{newest} notes cite {sorted(newest_runs)} — the two shipped artifacts "
+            f"are grounded on different runs")
+    else:
+        assert sampled_date == stamp.group(1), (
+            f"the map's stamp {stamp.group(1)} and the artifact's sample date "
+            f"{sampled_date} disagree, and no note records the artifact's run")
+
+
+def test_a_negated_guard_skips_the_DEAD_side(tmp_path: Path) -> None:
+    """`if not TYPE_CHECKING:` runs its body — so the `else:` is the dead side.
+
+    `_collectable_statements` skipped `body` whenever a branch was dead, which is right
+    for `if TYPE_CHECKING:` and EXACTLY INVERTED for the negated guard: it skipped the
+    live body and counted the dead `else:`, leaving a count BELOW the collected one — a
+    floor, the direction this witness exists to refuse. Measured against
+    `pytest --collect-only` on this module: 3 collected.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "h.py").write_text(
+        "import typing\n"
+        "if not typing.TYPE_CHECKING:\n"
+        "    def test_live_a(): pass\n"
+        "    def test_live_b(): pass\n"
+        "else:\n"
+        "    def test_dead(): pass\n"
+        "def test_plain(): pass\n"
+    )
+
+    counts = ci_timing.declared_test_counts(["h.py"], tmp_path)
+
+    assert counts["h.py"] == 3
+
+
+def test_tests_split_across_exclusive_branches_have_no_denominator(tmp_path: Path) -> None:
+    """A live `if`/`else` or `try`/`except` defines ONE side's tests, not both.
+
+    Both sides are descended, so their defs are SUMMED, and the count then EXCEEDS what
+    pytest collects — measured: 5 declared against 2 collected on this host for a
+    platform-guarded module. That makes `observed >= declared` unsatisfiable and holds
+    the row's weight forever with a witness naming a testcase that never exists. The
+    denominator is therefore OMITTED (UNKNOWN is raisable, never lowerable).
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "s.py").write_text(
+        "import sys\n"
+        "if sys.platform == 'win32':\n"
+        "    def test_win_a(): pass\n"
+        "    def test_win_b(): pass\n"
+        "else:\n"
+        "    def test_posix_c(): pass\n"
+        "try:\n"
+        "    import ujson  # noqa: F401\n"
+        "    def test_fast(): pass\n"
+        "except ImportError:\n"
+        "    def test_slow(): pass\n"
+    )
+
+    import ast as _ast
+
+    assert ci_timing._splits_tests_across_exclusive_sides(
+        _ast.parse((tmp_path / "tests" / "s.py").read_text())) is True
+    assert "s.py" not in ci_timing.declared_test_counts(["s.py"], tmp_path)
+
+
+def test_tests_split_across_exclusive_match_arms_have_no_denominator(tmp_path: Path) -> None:
+    """A `match` runs ONE arm, so two arms that define tests are a split, not a sum.
+
+    `_collectable_statements` descends into every `case` body (that is right for
+    counting a single-arm match), but only one arm runs — so summing two arms makes the
+    count EXCEED what pytest collects, exactly the `if`/`else` and `try`/`except` case
+    the sibling test pins. Measured pre-fix on the module below: 2 declared against 1
+    collected on any host, i.e. `observed >= declared` is UNSATISFIABLE, the row's
+    weight can only ever be raised or held, and its note publishes a witness naming a
+    testcase that cannot exist. `ast.Match` was simply missing from the exclusion scan
+    (`ast.If`, `ast.Try`, `ast.TryStar` only) — #9134 review, P3.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "m.py").write_text(
+        "import sys\n"
+        "match sys.platform:\n"
+        "    case 'linux':\n"
+        "        def test_linux(): pass\n"
+        "    case 'win32' if sys.maxsize < 0:\n"
+        "        def test_win(): pass\n"
+        "    case _:\n"
+        "        def test_other(): pass\n"
+    )
+
+    import ast as _ast
+
+    tree = _ast.parse((tmp_path / "tests" / "m.py").read_text())
+    assert ci_timing._collected_test_count(tree) == 3, "the walk still SUMS the arms"
+    assert ci_timing._splits_tests_across_exclusive_sides(tree) is True
+    assert "m.py" not in ci_timing.declared_test_counts(["m.py"], tmp_path)
+
+
+def test_a_single_collecting_match_arm_keeps_its_denominator(tmp_path: Path) -> None:
+    """The `match` exclusion is about TWO collecting arms, never about `match` itself.
+
+    Only one arm defining tests is not a split: the other arms collect nothing, so the
+    summed count IS what pytest collects. Omitting the denominator there would drop a
+    perfectly countable row (UNKNOWN is fail-closed, but freezing rows for nothing is
+    the regression the `Test*`-base rule had to walk back).
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "one.py").write_text(
+        "import sys\n"
+        "match sys.platform:\n"
+        "    case 'linux':\n"
+        "        def test_a(): pass\n"
+        "        def test_b(): pass\n"
+        "    case _:\n"
+        "        x = 1\n"
+    )
+
+    import ast as _ast
+
+    tree = _ast.parse((tmp_path / "tests" / "one.py").read_text())
+    assert ci_timing._splits_tests_across_exclusive_sides(tree) is False
+    assert ci_timing.declared_test_counts(["one.py"], tmp_path) == {"one.py": 2}
+
+
+def test_the_remaining_floor_shapes_have_no_denominator(tmp_path: Path) -> None:
+    """#9134 review P1: four ways a module collects MORE than its `def` count, and a
+    fifth that collects the same but is invisible to a `tree.body`-only walk.
+
+    Each was measured against `pytest --collect-only` on a temp tree: a `def` inside a
+    module-level `if` (3 collected vs 2 declared), `test_b = test_a` (3 vs 2),
+    `setattr(TestX, "test_two", ...)` (4 vs 3), and a `params=` fixture declared in a
+    `conftest.py` ABOVE the module (9 collected vs 3 declared for the module written
+    here, because two of its three tests consume the 4-arm fixture) — the one
+    multiplicand no per-module scan can see, because the multiplication lives in
+    another file.
+    """
+    (tmp_path / "tests" / "sub").mkdir(parents=True)
+    # The conftest gets its OWN directory: a `params=` fixture there omits every module
+    # BELOW it (that is the rule), so sharing `tests/` would omit the four shapes this
+    # test exists to check.
+    (tmp_path / "tests" / "withconf").mkdir()
+    (tmp_path / "tests" / "withconf" / "conftest.py").write_text(
+        "import pytest\n@pytest.fixture(params=['a', 'b', 'c', 'd'])\n"
+        "def legs(request):\n    return request.param\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "withconf" / "test_under_conftest.py").write_text(
+        "def test_a(legs):\n    pass\ndef test_b(legs):\n    pass\n"
+        "def test_c():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_ifblock.py").write_text(
+        "def test_a():\n    pass\nif True:\n    def test_b():\n        pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_alias.py").write_text(
+        "def test_a():\n    pass\ntest_b = test_a\n", encoding="utf-8")
+    # The same alias shape in a CLASS body and as an ATTRIBUTE target: both add a
+    # collected testcase (`TestX.test_b = TestX.test_a`) while the count sees one
+    # (measured 2 collected vs 1 declared, #9134 review P2).
+    (tmp_path / "tests" / "sub" / "test_attralias.py").write_text(
+        "class TestX:\n    def test_a(self):\n        pass\n"
+        "TestX.test_b = TestX.test_a\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_injected.py").write_text(
+        "class TestX:\n    def test_one(self):\n        pass\n"
+        "setattr(TestX, 'test_two', lambda self: None)\n",
+        encoding="utf-8",
+    )
+    # Two shapes that must NOT be omitted: a `pytestmark` that cannot parametrize, and a
+    # runner list aliasing test functions. Firing on either froze 44 exactly-counted rows
+    # in-tree — 41 by the `pytestmark` rule, 5 by the runner-list rule, two files hit by
+    # both, which is why the parts sum past the whole.
+    # A `Test*` class nested in a `Test*` class is collected at ANY depth (measured
+    # three nodeids for three levels: 2 declared was a floor), and a `TC =
+    # TYPE_CHECKING` binding is the same dead guard as the import alias.
+    (tmp_path / "tests" / "sub" / "test_nested_test_class.py").write_text(
+        "class TestA:\n    def test_a(self):\n        pass\n"
+        "    class TestB:\n        def test_b(self):\n            pass\n"
+        "        class TestC:\n            def test_c(self):\n                pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_tc_assign_alias.py").write_text(
+        "from typing import TYPE_CHECKING\nTC = TYPE_CHECKING\nif TC:\n"
+        "    def test_ghost():\n        pass\ndef test_real():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_pytestmark_skipif.py").write_text(
+        "import pytest\npytestmark = pytest.mark.skipif(False, reason='x')\n"
+        "def test_a():\n    pass\n",
+        encoding="utf-8",
+    )
+    # A CALL assigned to a `test*` name is still an alias — `functools.partial(test_c)` and
+    # `parametrize(...)(test_c)` both collect an extra nodeid (measured 3 vs 2) — while a
+    # branch that cannot execute (`if TYPE_CHECKING:`, `if False:`) binds nothing, so a
+    # `def` inside it must NOT be counted (measured 1 collected against a declared 4).
+    # The `else:` of a DEAD guard still runs at import, so a `def` there is collected —
+    # omitting the whole `if` was a floor (measured 4 collected vs 3 declared). And
+    # `test_a, test_b = f, g` defines two testcases from a tuple of references.
+    (tmp_path / "tests" / "sub" / "test_dead_else.py").write_text(
+        "from typing import TYPE_CHECKING\nif TYPE_CHECKING:\n"
+        "    def test_ghost():\n        pass\nelse:\n"
+        "    def test_late():\n        pass\ndef test_a():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_unpacked.py").write_text(
+        "def f():\n    pass\ndef g():\n    pass\ntest_a, test_b = f, g\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_call_alias.py").write_text(
+        "import functools\ndef test_a():\n    pass\n"
+        "test_b = functools.partial(test_a)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_dead_branch.py").write_text(
+        "from typing import TYPE_CHECKING, TYPE_CHECKING as TC\nif TC:\n"
+        "    def test_ghost():\n        pass\nif False:\n"
+        "    def test_ghost2():\n        pass\nif TYPE_CHECKING:\n"
+        "    def test_ghost3():\n        pass\ndef test_real():\n    pass\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_runner_list.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n"
+        "tests = [test_a, test_b]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "sub" / "test_plain.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+
+    counts = ci_timing.declared_test_counts(
+        ["withconf/test_under_conftest.py", "sub/test_ifblock.py", "sub/test_alias.py",
+         "sub/test_attralias.py", "sub/test_injected.py",
+         "sub/test_pytestmark_skipif.py", "sub/test_runner_list.py",
+         "sub/test_call_alias.py", "sub/test_dead_branch.py",
+         "sub/test_dead_else.py", "sub/test_unpacked.py",
+         "sub/test_nested_test_class.py", "sub/test_tc_assign_alias.py",
+         "sub/test_plain.py"],
+        tmp_path,
+    )
+    assert "withconf/test_under_conftest.py" not in counts
+    assert "sub/test_alias.py" not in counts
+    assert "sub/test_attralias.py" not in counts
+    assert "sub/test_injected.py" not in counts
+    # The `if` block is COUNTED, not omitted: what made it a floor was the walk, and
+    # the walk now sees the branch, so the count is exact and the row keeps its
+    # denominator instead of losing it.
+    assert counts["sub/test_ifblock.py"] == 2
+    assert "sub/test_call_alias.py" not in counts
+    assert "sub/test_unpacked.py" not in counts
+    # the dead BODY is skipped, its `else:` is counted
+    assert counts["sub/test_dead_else.py"] == 2
+    assert counts["sub/test_nested_test_class.py"] == 3
+    assert counts["sub/test_tc_assign_alias.py"] == 1
+    # The dead branches are not counted, so the denominator is exact rather than
+    # unsatisfiable — the mirror of a floor, and just as fatal to the witness.
+    assert counts["sub/test_dead_branch.py"] == 1
+    assert counts["sub/test_pytestmark_skipif.py"] == 1
+    assert counts["sub/test_runner_list.py"] == 2
+    assert counts["sub/test_plain.py"] == 2
+
+
+def test_a_partial_reading_of_a_parametrised_file_cannot_lower_a_weight(
+    tmp_path: Path,
+) -> None:
+    """The END TO END of the same defect, through the real caller shape.
+
+    The denominator omission only matters where coverage is BUILT — the caller
+    maps `declared_test_counts` into `coverage` and skips keys the map omits. A
+    parametrised file therefore arrives with no denominator, `declared` is 0, and
+    a cheaper reading is recorded as the LOWER BOUND it is instead of being
+    adopted. Its sibling `test_the_cli_wires_the_lower_bound_witness` is the
+    provable case (4 declared, 1 seen ⇒ held) and
+    `test_a_full_coverage_reading_may_lower_a_recorded_weight` is the case that
+    MUST still be allowed to correct a row downward.
+
+    Non-vacuity: pre-fix `declared_test_counts` returns 2 for this file, so
+    coverage is (2, 2), `observed >= declared` holds and the row is adopted at
+    2.0 — the assertion on 19.0 fails.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_param.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('arm', [1, 2, 3, 4, 5, 6, 7, 8])\n"
+        "def test_one(arm):\n    pass\n"
+        "def test_two():\n    pass\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 3 durations =============================
+
+0.50s setup    tests/test_param.py::test_one
+1.00s call     tests/test_param.py::test_one
+0.50s teardown tests/test_param.py::test_one
+
+============================= short test summary info =============================
+""")
+    measurements = ci_timing.collector_file_measurements(logs)
+    declared = ci_timing.declared_test_counts(measurements, repo)
+    coverage = {path: (m["tests"], declared[path])
+                for path, m in measurements.items() if path in declared}
+    # The parametrised file has NO denominator, so the caller supplies no witness
+    # for it — not a floor it could satisfy with a fifth of the file.
+    assert coverage == {}
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_param.py\n"
+        "durations:\n  test_param.py: 19.0\n",
+        {path: m["seconds"] for path, m in measurements.items()},
+        "2026-10-19T05:02:37Z",
+        coverage=coverage,
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 19.0
+    assert stats["kept_as_lower_bound"] == 1
+
+
+def test_declared_test_counts_never_attaches_a_basename_twin(tmp_path: Path) -> None:
+    """#9134 review: a key with no file under `tests/` is ABSENT (UNKNOWN).
+
+    The function used to fall back to a UNIQUE basename match, which is exactly
+    the attachment `_resolve_to_manifest_keys` refuses by rule ("a basename
+    therefore never SELECTS a key here" — #6092 F3): it would pair one file's
+    declared count with another file's measured reading.
+
+    Non-vacuity: with the fallback present `sub/test_beta.py` resolves to
+    `tests/other/test_beta.py` and the result is `{"sub/test_beta.py": 2}`.
+    """
+    (tmp_path / "tests" / "other").mkdir(parents=True)
+    (tmp_path / "tests" / "other" / "test_beta.py").write_text(
+        "def test_a():\n    pass\ndef test_b():\n    pass\n", encoding="utf-8")
+    counts = ci_timing.declared_test_counts(["sub/test_beta.py"], tmp_path)
+    assert counts == {}
+
+
+def test_parse_log_counts_distinct_testcases_not_duration_phases(tmp_path: Path) -> None:
+    """THE #9134 P1 ROOT CAUSE. A `--durations` block lists PHASES: one testcase can
+    contribute a setup, a call and a teardown line. `tests` is the COVERAGE
+    WITNESS compared against `declared_test_counts`, so counting ENTRIES let a
+    reading that saw one testcase of a four-test file report three and be
+    classified fully covered — the fail-open direction (#9134 review, P1).
+
+    Non-vacuity: `parse_log` used to add 1 per matched line, so both `tests`
+    assertions below read 3.
+    """
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    log = write_log(logs, "pytest-log-test-a.log",
+                    """============================= slowest 3 durations =============================
+
+2.00s setup    tests/test_alpha.py::test_one
+7.00s call     tests/test_alpha.py::test_one
+0.50s teardown tests/test_alpha.py::test_one
+
+============================= short test summary info =============================
+""")
+    parsed = ci_timing.parse_log(log)
+    assert parsed["files"]["test_alpha.py"]["tests"] == 1
+    assert parsed["file_paths"]["test_alpha.py"]["tests"] == 1
+    # the SECONDS still sum every phase: fixture cost is part of what the file costs
+    assert parsed["files"]["test_alpha.py"]["total_ms"] == pytest.approx(9500.0)
+
+
+def test_a_phase_only_reading_cannot_pass_itself_off_as_full_coverage(
+    tmp_path: Path,
+) -> None:
+    """The end-to-end shape of the same defect: a file declaring 4 tests, read from
+    a block carrying one testcase's setup+call+teardown, must NOT be adopted
+    downward on the strength of "3 of 4 testcases seen".
+
+    Non-vacuity: with entry counting the witness is (3, 4) -> `observed <
+    declared` is False -> the row is adopted at 2.0.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 3 durations =============================
+
+0.50s setup    tests/test_alpha.py::test_one
+1.00s call     tests/test_alpha.py::test_one
+0.50s teardown tests/test_alpha.py::test_one
+
+============================= short test summary info =============================
+""")
+    measurements = ci_timing.collector_file_measurements(logs)
+    declared = ci_timing.declared_test_counts(measurements, repo)
+    coverage = {path: (m["tests"], declared[path])
+                for path, m in measurements.items() if path in declared}
+    assert coverage == {"test_alpha.py": (1, 4)}
+    text, stats = ci_timing.render_refreshed_manifest(
+        "surfaces:\n  core:\n    - test_alpha.py\n"
+        "durations:\n  test_alpha.py: 19.0\n",
+        {path: m["seconds"] for path, m in measurements.items()},
+        "2026-10-19T05:02:37Z",
+        coverage=coverage,
+        sample_label=_LOWER_BOUND_LABEL,
+    )
+    assert stats["kept_as_lower_bound"] == 1
+    assert yaml.safe_load(text)["durations"]["test_alpha.py"] == 19.0
+
+
+def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_count(
+    tmp_path: Path,
+) -> None:
+    """The witness must describe the SAME reading as the weight it accompanies:
+    the larger of two jobs wins, and its testcase count travels with it — pairing
+    the winner's seconds with the loser's count would make a partial reading look
+    complete and re-open the under-weighting the guard exists to stop."""
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 2 durations =============================
+
+1.00s call     tests/test_alpha.py::test_one
+8.00s call     tests/test_alpha.py::test_two
+
+============================= short test summary info =============================
+""")
+    write_log(logs, "pytest-log-test-b.log",
+              """============================= slowest 3 durations =============================
+
+2.00s call     tests/test_alpha.py::test_one
+
+============================= short test summary info =============================
+""")
+    measurements = ci_timing.collector_file_measurements(logs)
+    assert measurements["test_alpha.py"] == {"seconds": pytest.approx(9.0),
+                                             "tests": 2}
+    # the long-standing weights-only view is a projection of the same reading
+    assert ci_timing.collector_file_weights(logs) == {
+        "test_alpha.py": pytest.approx(9.0)}
+
+
+def test_the_cli_wires_the_lower_bound_witness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production path is where the guard has to be, not just the library
+    API: `ci-timing.yml` calls `--refresh-durations` and nothing else, so a guard
+    the CLI does not wire is a guard the weekly refresh never applies.
+
+    Non-vacuity: pre-fix the CLI called `refresh_durations(path, weights, stamp)`
+    with no coverage and no label, so both assertions fail.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    write_log(logs, "pytest-log-test-a.log",
+              """============================= slowest 1 durations =============================
+
+3.30s call     tests/test_alpha.py::test_0
+
+============================= short test summary info =============================
+""")
+    captured: dict = {}
+
+    def fake_refresh(path, weights, captured_at, **kwargs):
+        captured.update(kwargs, path=path, weights=weights)
+        return 0
+
+    monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
+    monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-10-19T05:02:37Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--run-id", "39191149586",
+        "--logs-dir", str(logs), "--refresh-durations",
+        "--manifest", str(manifest),
+    ])
+    assert ci_timing.main() == 0
+    assert captured["coverage"] == {"test_alpha.py": (1, 4)}
+    assert captured["sample_label"] == (
+        "ci-timing top-15 2026-10-19 (run 39191149586)")
+
 
 
 # A `durations:` key carrying a directory. The rendered artifact's `files` map is
@@ -885,6 +3053,30 @@ def test_committed_map_marks_no_measured_row_unmeasured() -> None:
     assert not stale, (
         f"{len(stale)} durations row(s) still claim `# unmeasured` while the "
         f"rendered artifact shows their basename measured: {stale[:5]}"
+    )
+
+
+def test_every_capture_dated_note_agrees_with_the_capture_stamp() -> None:
+    """#9134 review P2: the machine-readable stamp and the row notes drifted apart.
+
+    A note reading `ci-timing top-15 2026-10-19 (run ...)` says which capture the
+    figure came from, and `durations_captured_at` is the same fact in machine form.
+    They were rendered by different runs (88 notes dated 2026-10-19 beside a stamp of
+    2026-10-17), which no single run of the tool can produce — the reader then cannot
+    tell whether a weight is freshly measured or inherited. One fact, so: assert it.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
+    assert stamp, "durations_captured_at is missing or unparseable"
+    dates = set(re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2})", text))
+    assert dates, "the map carries no capture-dated note, so this guard is vacuous"
+    # ⛔ `<=`, not `==`: a refresh that moves NO row rewrites no note, so it writes a new
+    # stamp beside older notes. The invariant is that no note is dated AFTER the stamp —
+    # a note can only quote a capture that already happened — which still catches the
+    # defect this guards (a stamp older than the figures it dates).
+    assert max(dates) <= stamp.group(1), (
+        f"a note is dated {max(dates)}, after durations_captured_at says "
+        f"{stamp.group(1)} — the notes quote a capture the stamp does not know about"
     )
 
 
@@ -1279,15 +3471,17 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # PyYAML is a second implementation of the same parse, so the completeness
     # check survives without a number that can go stale.
     assert set(entries_before) == set(yaml.safe_load(before)["durations"])
-    # The stamp must be FRESH: the manifest gate rejects a `captured_at` older
-    # than 21 days, so the hardcoded "2026-09-28T00:00:00Z" that used to live
-    # here turned this test red on 2026-10-19 with nothing in the tree changed
-    # (measured: integrity_problems -> "captured 21 days ago ... past the
-    # 21-day bound"). The value itself is not asserted anywhere below — only
-    # that the refresh re-stamps it with something the gate accepts.
-    captured = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # A RELATIVE stamp, not a literal date. The full `integrity_problems` gate
+    # below includes the CAPTURE-AGE term (a map captured more than 21 days ago
+    # is red), so a hardcoded `2026-09-28` was a time bomb: it passed on the day
+    # it was written and went red on its own 22nd day, with no code change at all
+    # (measured 2026-10-19, 21 days + hours on). This test is about the transform,
+    # so its stamp must not be about the calendar. The value itself is not
+    # asserted anywhere below — only that the refresh re-stamps it with something
+    # the gate accepts.
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     new_text, stats = ci_timing.render_refreshed_manifest(
-        before, {"test_bridge_table.py": 123.4}, captured)
+        before, {"test_bridge_table.py": 123.4}, stamp)
     # `manifest_keys` and `carried_forward` are BOTH computed from the INPUT
     # parse (`before`), so on their own they cannot fail when the refresh drops
     # an entry from the OUTPUT — asserting only these two is a tautology. They
@@ -1311,7 +3505,7 @@ def test_refresh_durations_on_the_real_manifest_of_record() -> None:
     # above would claim a property the test does not assert (the input manifest's
     # own stamp is already fresh, so a renderer that IGNORED ``captured_at``
     # would still satisfy every other line here).
-    assert f'durations_captured_at: "{captured}"' in new_text
+    assert f'durations_captured_at: "{stamp}"' in new_text
     assert ci_timing.validate_refreshed_manifest(new_text) == []
     # ... and the FULL `--integrity` gate, not just its duration subset: the
     # refresh must not tilt the push halves or unclassify a file (#3395).
@@ -2870,6 +5064,62 @@ def test_cli_returns_2_when_gh_returns_a_non_mapping_body(tmp_path, body: str) -
     )
     assert proc.returncode == 0, f"{body} --pick-run: rc={proc.returncode}"
     assert "::warning::" in proc.stderr, f"{body} --pick-run must warn"
+
+
+def test_refresh_warns_when_no_declared_count_resolves(tmp_path: Path) -> None:
+    """A zero-ratio is never a legitimate result — say it, do not write UNKNOWN silently.
+
+    `declared_test_counts` infers the repo root from the MANIFEST's location
+    (`manifest_path.parent.parent`), so a manifest copied outside the tree — a scratch
+    copy, which is exactly what a reviewer or a regenerator makes — resolves no
+    `tests/` directory. Every sampled row then takes the UNKNOWN branch and the refresh
+    rewrites dozens of provenance notes with a claim FALSE of the tree, while exiting 0
+    (measured: 47 rows, 44 of which had carried a concrete denominator).
+
+    Non-vacuity: with the warning removed, stderr is empty and this reds.
+    """
+    log_dir = tmp_path / "logs" / "pytest-log-test-a"
+    log_dir.mkdir(parents=True)
+    (log_dir / "pytest.log").write_text(FIXTURE_LOG)
+    manifest = tmp_path / "ci-surfaces.yml"
+    manifest.write_text("durations:\n  test_alpha.py: 12.3\n")
+    # A copy OUTSIDE the tree: `declared_test_counts` then derives a root with no
+    # `tests/` directory, which is the case under test.
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    moved = outside / "ci-surfaces.yml"
+    moved.write_text(manifest.read_text())
+
+    proc = subprocess.run(
+        [sys.executable, str(_CLI), "--repo", "o/r", "--run-id", "1",
+         "--refresh-durations", "--logs-dir", str(tmp_path / "logs"),
+         "--manifest", str(moved)],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "CI_TIMING_NOW": "2026-10-21T09:30:00Z"},
+    )
+    assert proc.returncode in (0, 2), proc.stderr[-400:]
+    assert "::warning::" in proc.stderr, (
+        "a refresh that resolves NO declared count must warn: it is about to write "
+        f"(UNKNOWN) into every note. stderr={proc.stderr[-400:]!r}")
+    assert "declared testcase count" in proc.stderr, proc.stderr[-400:]
+    # The message names the DERIVED fact (the inferred root), never a guessed cause: a
+    # manifest at the repo root or in a subdirectory is inside the tree, and telling the
+    # operator to "re-run inside the tree" would be advice that is already satisfied.
+    # Pin the VALUE and the POLARITY, not the vocabulary: a message that named a GUESSED
+    # root passed a two-substring check (measured), which is the defect this commit exists
+    # to remove. The fixture's manifest lives in <tmp>/elsewhere, so the derived root is
+    # <tmp> and it has no `tests/` — both facts are asserted, and the retired guess cannot
+    # come back.
+    root = moved.resolve().parent.parent
+    # Anchor the rendered CLAUSE: an unanchored substring also accepts a WRONG root that is a
+    # descendant of the true one, and `parent`-instead-of-grandparent is the plausible
+    # off-by-one in this very derivation (measured: that mutant stayed green).
+    assert f"resolves to {root}; that directory has NO tests/" in proc.stderr, proc.stderr[-400:]
+    assert "probably outside" not in proc.stderr, proc.stderr[-400:]
+    # The rewritten notes belong to rows the render HOLDS, not rows it re-bases: re-basing is
+    # the value-changed branch and no value moves here, so naming that class bounded the damage
+    # to an EMPTY set while 47 notes changed (measured). Pin the class the code actually takes.
+    assert "HOLDS" in proc.stderr and "RE-BASES" not in proc.stderr, proc.stderr[-400:]
 
 
 @pytest.mark.parametrize("body,label", [
