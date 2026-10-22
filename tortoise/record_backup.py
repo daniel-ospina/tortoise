@@ -363,8 +363,18 @@ def libpq_env(dsn: str) -> dict[str, str]:
     if parts.password:
         env["PGPASSWORD"] = unquote(parts.password)
     database = unquote(parts.path.lstrip("/"))
-    if database:
-        env["PGDATABASE"] = database
+    if not database:
+        # #9601 review cycle 1 (P1): the DUMP leg was the one that let a DSN
+        # without a database fall through to whatever libpq defaults to (the
+        # ambient `PGDATABASE`, else the user name) — a backup that succeeds
+        # and contains the WRONG database. `restore_record_backup` already
+        # refused this; the artifact everyone will trust did not.
+        raise RecordBackupUnavailable(
+            "the record DSN names no database — refusing to let libpq fall back "
+            "to a default (PGDATABASE, else the user name), which would back up "
+            "the wrong database"
+        )
+    env["PGDATABASE"] = database
     query = parse_qs(parts.query)
     # Only the parameters libpq reads from the environment are forwarded; an
     # unknown parameter is DROPPED rather than guessed at (a wrong sslmode is a
@@ -383,7 +393,22 @@ def libpq_env(dsn: str) -> dict[str, str]:
 
 
 def _subprocess_env(dsn: str) -> dict[str, str]:
-    return {**os.environ, **libpq_env(dsn)}
+    """The subprocess environment: libpq's coordinates, and nothing ambient.
+
+    #9601 review cycle 1 (P1): this used to be ``{**os.environ, **libpq_env(dsn)}``,
+    so any libpq variable the DSN did not name (`PGDATABASE`, `PGUSER`,
+    `PGOPTIONS`, `PGSERVICE`) was inherited from whatever shell started the
+    backup — a way for the dump to reach a different database than the manifest
+    describes. It is an ALLOW-LIST now: the coordinates ``libpq_env`` derived
+    from the DSN, plus the minimum a client needs to run (a `PATH` to find the
+    binary, `HOME` for `~/.pgpass`).
+    """
+    env = libpq_env(dsn)
+    for passthrough in ("PATH", "HOME", "LANG", "LC_ALL", "TZ"):
+        value = os.environ.get(passthrough)
+        if value:
+            env[passthrough] = value
+    return env
 
 
 def _require_table(name: str) -> str:
@@ -540,8 +565,25 @@ def dump_record(
     ]
     # The DATABASE comes from PGDATABASE in the env, not from argv: see
     # `libpq_env`. `pg_dump` with no positional database uses it.
-    proc = runner(argv, env=_subprocess_env(dsn), capture_output=True, text=True)
-    returncode = getattr(proc, "returncode", 0)
+    try:
+        proc = runner(argv, env=_subprocess_env(dsn), capture_output=True, text=True)
+    except OSError as e:
+        # #9601 review cycle 1 (P2): a missing client binary is a PERMANENT
+        # install fault, not "the backup failed, retry" — the same split
+        # `_default_connector` makes for the driver.
+        raise RecordBackupUnavailable(
+            f"{pg_dump} could not be executed ({e}) — the PostgreSQL client "
+            "binaries are not installed on this box"
+        ) from e
+    returncode = getattr(proc, "returncode", None)
+    if returncode is None:
+        # #9601 review cycle 1 (P2): defaulting a MISSING exit status to 0
+        # published "success" for an unknown verdict. A backup with no verdict
+        # is not a backup.
+        raise RecordBackupError(
+            "pg_dump returned no exit status — a backup with no verdict is not a "
+            "backup"
+        )
     if returncode != 0:
         stderr = (getattr(proc, "stderr", "") or "").strip()
         raise RecordBackupError(
@@ -753,7 +795,19 @@ def prune_record_backups(storage, *, keep: int = RECORD_BACKUP_KEEP) -> list[str
     doomed = artifacts[:-keep] if len(artifacts) > keep else []
     deleted: list[str] = []
     for manifest in doomed:
-        base = f"{RECORD_BACKUP_PREFIX}{manifest['backup_id']}"
+        # #9601 review cycle 1 (P2): the object base comes from the KEY the
+        # manifest was READ AT, never from the `backup_id` field INSIDE the file.
+        # A manifest whose id disagrees with its own path (a hand-edit, a
+        # duplicated id, a half-failed upload) would otherwise delete another
+        # artifact's objects — possibly the newest.
+        manifest_key = manifest.get("_manifest_key")
+        if not manifest_key or not str(manifest_key).endswith(f"/{MANIFEST_OBJECT}"):
+            log.warning(
+                "record-backup prune skipped an artifact with no resolvable key "
+                "(backup_id=%r) — a prune that guesses is a prune that deletes "
+                "something it did not understand", manifest.get("backup_id"))
+            continue
+        base = str(manifest_key).rsplit("/", 1)[0]
         for obj in (DUMP_OBJECT, MANIFEST_OBJECT):
             key = f"{base}/{obj}"
             try:
@@ -914,8 +968,21 @@ def restore_record_backup(
             database,
             str(dump_path),
         ]
-        proc = runner(argv, env=env, capture_output=True, text=True)
-        returncode = getattr(proc, "returncode", 0)
+        try:
+            proc = runner(argv, env=env, capture_output=True, text=True)
+        except OSError as e:
+            # #9601 review cycle 1 (P2): same class split as the dump leg — an
+            # absent `pg_restore` is an install fault, not a restore failure.
+            raise RecordBackupUnavailable(
+                f"{pg_restore} could not be executed ({e}) — the PostgreSQL "
+                "client binaries are not installed on this box"
+            ) from e
+        returncode = getattr(proc, "returncode", None)
+        if returncode is None:
+            raise RecordBackupError(
+                "pg_restore returned no exit status — a restore with no verdict "
+                "is not a verified restore"
+            )
         if returncode != 0:
             stderr = (getattr(proc, "stderr", "") or "").strip()
             raise RecordBackupError(
@@ -1093,11 +1160,40 @@ def run_restore_drill(
       ``reset_scratch``) would destroy the record it is supposed to protect;
     * a non-empty scratch target (refused inside
       :func:`restore_record_backup`) — unless ``reset_scratch`` emptied it first.
+
+    ⛔ THE ARTIFACT IS CUT BEFORE ANY RESET, and the identity test is COORDINATES,
+    not string equality (#9601 review cycle 1, P0). Both halves of the old shape
+    were a data-loss path: ``dsn == scratch_dsn`` misses every equivalent spelling
+    of one database (``postgres://`` vs ``postgresql://``, an implicit ``:5432``,
+    an added ``?sslmode=require``, a trailing ``/``), and the reset ran BEFORE
+    :func:`create_record_backup` — so a drill pointed at the live record through
+    any of those spellings TRUNCATEd it, dumped the now-empty result, verified
+    zeros against zeros, and printed ``RESTORED`` with exit 0.
     """
-    if dsn == scratch_dsn:
+    # Coordinates, never the literal string: two spellings of one database are
+    # the same database, and this is the guard whose failure destroys the record.
+    def _identity(dsn_str: str) -> dict[str, str]:
+        parts = _split_dsn(dsn_str)
+        try:
+            port = str(parts.port or 5432)
+        except ValueError as e:
+            raise RecordRestoreRefused(
+                f"a drill DSN has an unreadable port: {e}"
+            ) from e
+        return {
+            "host": (parts.hostname or "").lower(),
+            "port": port,
+            # Strip BOTH slashes, not just the leading one: `…/postgres/` names
+            # the same database as `…/postgres`, and refusing too much is the
+            # safe direction for a guard whose miss TRUNCATEs the record.
+            "database": unquote(parts.path).strip("/"),
+        }
+
+    if _identity(dsn) == _identity(scratch_dsn):
         raise RecordRestoreRefused(
-            "the drill's scratch DSN is the source DSN — a drill must not restore "
-            "over the record it is protecting"
+            "the drill's scratch DSN resolves to the SAME database as the "
+            f"source ({_identity(dsn)!r}) — a drill must not restore over, or "
+            "reset, the record it is protecting"
         )
     before = record_row_counts(dsn, connect=connect)
     if not any(before.values()):
@@ -1110,20 +1206,34 @@ def run_restore_drill(
             "database, so this drill would prove nothing. Measure against a record "
             "that holds data."
         )
-    if reset_scratch:
-        reset_record_tables(scratch_dsn, connect=connect)
+    # ⛔ CUT THE ARTIFACT FIRST. Every statement below this line mutates the
+    # SCRATCH target; nothing before it may depend on the scratch being empty.
     manifest = create_record_backup(
         dsn, storage, run=run, connect=connect, workdir=workdir, key=key, pg_dump=pg_dump
     )
-    # The artifact's own counts, taken immediately before `pg_dump` — a strictly
-    # narrower window than the vacuity count above, and the numbers the artifact
-    # actually claims to contain.
-    source = {t: int(n) for t, n in (manifest.get("row_counts") or {}).items()}
+    if reset_scratch:
+        reset_record_tables(scratch_dsn, connect=connect)
+    # The source numbers are the ones READ FROM THE SOURCE DATABASE (`before`),
+    # never the artifact's own claim about itself (#9601 review cycle 1, P2):
+    # `compare_row_counts` accepts a window `[min(source, after), max(...)]`, so a
+    # manifest whose `row_counts` were zeroed widened acceptance to `[0, after]`
+    # and a short artifact restored green — while this function's own docstring
+    # promises it "never trusts the writer's own claim about what it wrote". The
+    # manifest is a CROSS-CHECK now, not the baseline.
+    source = {t: int(n) for t, n in before.items()}
+    claimed = {t: int(n) for t, n in (manifest.get("row_counts") or {}).items()}
     if not source:
         raise RecordBackupError(
-            "the manifest carries no row_counts — a drill with nothing to compare "
-            "against is not a verification"
+            "the source held no rows when they were read — a drill with nothing "
+            "to compare against is not a verification"
         )
+    for table, counted in source.items():
+        if claimed and claimed.get(table) is not None and claimed[table] > counted:
+            raise RecordRestoreVerifyError(
+                f"the artifact claims {claimed[table]} {table} row(s) but the source "
+                f"held {counted} just before the dump — the artifact and the record "
+                "disagree, so the drill cannot verify anything"
+            )
     after = record_row_counts(dsn, connect=connect)
     backup_key = f"{RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{DUMP_OBJECT}"
     restored = restore_record_backup(

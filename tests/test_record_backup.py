@@ -568,10 +568,42 @@ def test_the_drill_restores_the_artifact_and_reports_a_measured_row_count():
 
 def test_the_drill_refuses_a_scratch_target_that_is_the_record_itself():
     db = FakeDB(SOURCE_COUNTS)
-    with pytest.raises(rb.RecordRestoreRefused, match="scratch DSN is the source DSN"):
+    with pytest.raises(rb.RecordRestoreRefused,
+                       match="resolves to the SAME database"):
         rb.run_restore_drill(
             DSN, MemoryStorage(), DSN, run=FakeRunner(), connect=db.connect, key=KEY
         )
+
+
+@pytest.mark.parametrize("spelling", [
+    # Every one of these is the SAME database as DSN, spelled differently.
+    DSN.replace("postgresql://", "postgres://"),
+    DSN.replace(":5432/", "/"),
+    DSN + "?sslmode=require",
+    DSN + "/",
+])
+def test_the_drill_refuses_an_EQUIVALENT_scratch_spelling_and_never_resets(
+        spelling):
+    """#9601 review cycle 1 (P0): the identity test is COORDINATES, not a string.
+
+    `dsn == scratch_dsn` missed every equivalent spelling of one database, and
+    the reset ran BEFORE the dump — so a drill pointed at the live record through
+    any of them TRUNCATEd it, dumped the empty result, and verified zeros against
+    zeros with exit 0. This pins both halves: the refusal fires, and NO reset and
+    NO dump reached the source (the fake records nothing it was not asked for).
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    with pytest.raises(rb.RecordRestoreRefused,
+                       match="resolves to the SAME database"):
+        rb.run_restore_drill(
+            DSN, MemoryStorage(), spelling, run=FakeRunner(),
+            connect=db.connect, key=KEY, reset_scratch=True,
+        )
+    assert db.connections == [], (
+        "the drill connected after refusing its scratch target as the source — "
+        "a reset or a dump would have followed")
+    assert db.scratch == dict.fromkeys(THE_RECORD_TABLES, 0), (
+        "the drill touched its scratch target after refusing it as the source")
 
 
 def test_the_drill_refuses_an_empty_record_because_the_pass_would_be_vacuous():
@@ -991,3 +1023,46 @@ def test_the_dumps_table_set_is_the_schema_s_table_set():
     assert declared == set(THE_RECORD_TABLES)
     assert declared <= parsed
     assert len(declared) == 9
+
+
+# ── the dump's own verdict (#9601 review cycle 1) ──────────────────────────
+
+
+def test_a_dsn_without_a_database_is_refused_and_nothing_is_dumped(tmp_path):
+    """P1: the dump leg must not let libpq default the database.
+
+    `libpq_env` refused a missing HOST for this reason and
+    `restore_record_backup` refused a missing DATABASE — but the dump, the
+    artifact everyone will trust, backed up whatever `PGDATABASE` (else the user
+    name) happened to be. A backup of the wrong database is worse than none.
+    """
+    runner = FakeRunner()
+    with pytest.raises(rb.RecordBackupUnavailable, match="names no database"):
+        rb.dump_record(
+            "postgresql://record_user:s3cr3t-pw@db.projectref.supabase.co:5432",
+            tmp_path / "out.dump",
+            run=runner,
+        )
+    assert runner.calls == [], "pg_dump ran for a DSN that names no database"
+
+
+def test_a_runner_with_no_exit_status_is_not_a_successful_backup(tmp_path):
+    """P2: a missing `returncode` used to default to 0 — 'the dump succeeded'."""
+    class _NoVerdict:
+        stderr = ""
+
+    def _run(argv, **kwargs):
+        Path(argv[argv.index("--file") + 1]).write_bytes(b"x")
+        return _NoVerdict()
+
+    with pytest.raises(rb.RecordBackupError, match="no exit status"):
+        rb.dump_record(DSN, tmp_path / "o.dump", run=_run)
+
+
+def test_a_missing_client_binary_is_UNAVAILABLE_not_a_failed_backup(tmp_path):
+    """P2: an install fault is exit 2 ('could not run'), never exit 1 ('retry')."""
+    def _run(argv, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", argv[0])
+
+    with pytest.raises(rb.RecordBackupUnavailable, match="client binaries"):
+        rb.dump_record(DSN, tmp_path / "o.dump", run=_run)
