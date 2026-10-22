@@ -3993,17 +3993,26 @@ _WORD_NUMERAL = (
 #: A percentage figure — a DIGIT or a number WORD — in every spelling the file
 #: closes. One constant serves both the word-form guard and the ratio arm's bare
 #: sweep, so a spelling cannot be closed in one and open in the other — including the
-#: numeral's CASE: the guard compiles with `re.IGNORECASE`, so the sweep must pass the
-#: same flag (it did not, and every sentence-initial `Forty percent` escaped it —
-#: `#9528` review round 3, P2).
-#: ⚠️ STATED MISSES: `_WORD_NUMERAL` is the units, the teens, the tens (hyphen or
+#: numeral's CASE and its UNIT'S PUNCTUATION.
+#: ⚠️ CASE is part of the closure: the guard compiles with `re.IGNORECASE`, so the sweep
+#: must pass the same flag (it did not, and every sentence-initial `Forty percent`
+#: escaped it — `#9528` review round 3, P2).
+#: ⚠️ PUNCTUATION too: `per-cent` and `per  cent` are the same claim as `per cent`, and a
+#: unit alternation spelled `per\s?cent` left both open in both predicates while
+#: `40-percent` was closed in the guard and open in the sweep — the "one constant serves
+#: both" claim, false by one hyphen (`#9528` review round 4).
+#: STATED MISSES: `_WORD_NUMERAL` is the units, the teens, the tens (hyphen or
 #: space) and the `hundred` forms. It does NOT carry `zero` or the thousand scale
 #: (`one thousand`, `a million`); with `%` / `per cent` / `pct` those spellings are open
 #: in both predicates, and with the `percent` noun they are caught only by the bare noun
 #: at the top of `_MAGNITUDE_WORDS`. Deliberately not chased: a numeral vocabulary wide
 #: enough to reach them starts matching ordinary prose, and the cost of the miss is one
 #: spelling a reader can already see.
-_PERCENTAGE_FIGURE = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})\s*(?:%|per\s?cent|pct)"
+#: The per/cent separator is capped at TWO characters (`?` twice rather than a counted
+#: quantifier, because this is an f-string and `{0,2}` would be eaten as a format
+#: field), so `per   cent` with three spaces stays open in both predicates — the same
+#: disposition as above.
+_PERCENTAGE_FIGURE = rf"(?:\d+(?:\.\d+)?|{_WORD_NUMERAL})[-\s]*(?:%|per[-\s]?[-\s]?cent|pct)"
 
 _MAGNITUDE_WORDS = re.compile(
     rf"\b(?P<proportion>"
@@ -4416,6 +4425,11 @@ def test_the_gate_walk_magnitude_ratios_recompute_from_the_rows_they_name():
         "- Forty percent of the arm is the re-parse.",
         "- Sixty-four percent of the arm is the re-parse.",
         "- One hundred per cent of the arm is the re-parse.",
+        # the UNIT's punctuation is the same claim: a hyphen or a doubled space must not
+        # retire the sweep while the guard reads it (`#9528` review round 4)
+        "- The rebuild is 40 per-cent of the arm.",
+        "- The rebuild is forty per  cent of the arm.",
+        "- The rebuild is 40-percent of the arm.",
     ):
         findings = _magnitude_ratio_findings(f"{prose}\n{spelled_out}\n")
         assert any("free to rot" in finding for finding in findings), (
