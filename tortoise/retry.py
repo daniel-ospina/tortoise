@@ -844,6 +844,216 @@ def explain_instance_unavailable(
     return text + _LEGIBLE_OPENER + explains
 
 
+#: The engine's own MEMORY-CEILING sentence, as served on the wire (#7357).
+#:
+#: MEASURED on the pinned engine (falkordb 4.20.6, `CONFIG SET maxmemory 1mb`
+#: + `noeviction`): a `GRAPH.QUERY` is answered
+#: ``-OOM command not allowed when used memory > 'maxmemory'.`` and the vendor
+#: parser maps the ``OOM `` half to ``redis.exceptions.OutOfMemoryError`` — so
+#: the note below normally arrives with that CLASS, and the text arm exists for
+#: the two shapes where it does not: a `ResponseError` rebuilt by hand, and the
+#: engine's variant spelling without the `OOM` prefix. Only the distinctive
+#: clause is matched (never a bare `maxmemory`, which a `CONFIG GET` reply or a
+#: caller's own message can carry).
+_MEMORY_CEILING_RE = re.compile(
+    r"command not allowed when used memory\s*>\s*['\"]?maxmemory", re.IGNORECASE)
+
+
+def is_memory_ceiling_refusal(exc: BaseException) -> bool:
+    """True when *exc* is the instance REFUSING at its dataset ceiling (#7357).
+
+    The mirror of :func:`is_instance_unavailable`, and deliberately exclusive of
+    it. A caller that confused them would either chase a container restart that
+    never happened or retry a capacity refusal forever.
+
+    ⚠️ The exclusivity is by CLASS, not by "an outage is the absence of a
+    reply" — that phrasing is FALSE and was corrected under review (#9532
+    cycle 2): the outage family also owns the ANSWERED ``BusyLoadingError``
+    (LOADING). The real discriminator is :func:`_answered_refusal`, which
+    excludes every ``ResponseError`` from the outage family: ``OutOfMemoryError``
+    IS a ``ResponseError``, and LOADING is not an ``OutOfMemoryError``. So the
+    two predicates cannot both answer True for the SAME exception object on its
+    OWN class/text.
+
+    ⚠️ That is a statement about one link, not a universal property of the pair
+    (#9532 cycle 3 P3). This function WALKS the chain below, so the two
+    predicates CAN both answer True for one exception — a transport failure
+    whose ``__cause__`` is a ceiling refusal is admitted by
+    :func:`is_instance_unavailable` (on the top link's ``TimeoutError``) and by
+    this one (on the cause). What keeps a caller-visible message to ONE suffix
+    is the ORDER in ``cypher_guard._note_instance_outage`` — the outage arm
+    first, the ceiling arm only as its fallback — plus the shared
+    ``_LEGIBLE_OPENER`` idempotency marker. Not the disjointness. Pinned by
+    ``test_the_ordering_not_the_disjointness_keeps_one_suffix`` in
+    ``tests/test_7357_memory_ceiling_legibility.py``, which reddens if the two
+    arms are ever swapped (the ceiling note would then claim "nothing was
+    applied" about a failure whose REPLY was LOST).
+
+    Class first, text second: ``OutOfMemoryError`` is the class the vendor
+    parser mints for the engine's own ``OOM …`` reply on the pinned redis, and
+    the text arm catches a `ResponseError` that reached the seam without passing
+    through that table. The text test reads the message HEAD (`.partition`), the
+    same rule :func:`is_dead_reader` follows, so an already-explained message is
+    still classified and never double-noted.
+
+    The chain is walked the way :func:`is_instance_unavailable` walks it
+    (``__cause__``, then ``__context__`` unless suppressed), because the driver
+    and this repo's own wrappers re-raise WITH a cause: measured, a
+    ``ResponseError("write failed")`` whose ``__cause__`` is the ceiling refusal
+    answered False here before the walk existed, so the illegible sentence
+    reached the caller unchanged — the exact defect #7357 closes. Every link is
+    tested with the SAME class/text rule, so a chained answer cannot smuggle a
+    non-ceiling failure into the family, and the walk is id-deduplicated so a
+    cyclic chain cannot spin.
+    """
+    import redis.exceptions as _re
+
+    def _is_ceiling(link: BaseException) -> bool:
+        oom = getattr(_re, "OutOfMemoryError", None)
+        if oom is not None and isinstance(link, oom):
+            return True
+        if isinstance(link, _re.ResponseError):
+            return bool(_MEMORY_CEILING_RE.search(
+                str(link).partition(_LEGIBLE_OPENER)[0]))
+        return False
+
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if _is_ceiling(link):
+            return True
+        # As Python reports it: an explicit ``raise ... from`` wins, a
+        # ``raise ... from None`` SUPPRESSES the context the author deliberately
+        # detached, and only then is the implicit ``__context__`` followed — the
+        # same order :func:`is_instance_unavailable` uses (#6977).
+        if link.__cause__ is not None:
+            link = link.__cause__
+        elif link.__suppress_context__:
+            link = None
+        else:
+            link = link.__context__
+    return False
+
+
+#: #2981's ownership constraint for a memory-ceiling refusal, as ONE authority.
+#:
+#: `tortoise/projection/__init__.py::_write_refusal_message` states this policy
+#: for the SAME refusal, and two messages for one refusal must not drift into
+#: opposite advice (#9532 review P2). The sentence therefore lives HERE — a
+#: stdlib-only leaf that the projection already reaches through
+#: `tortoise.cypher_guard` — and the projection composes its operator message
+#: from this constant instead of carrying a second prose copy, so a change is
+#: made once and both readers move together. It is deliberately plain text with
+#: no code-span backticks: the projection's message is plain, and a
+#: byte-identical string is what makes the binding real rather than a
+#: normalisation that silently tolerates a rewrite.
+#:
+#: The constraint is a PROHIBITION, not a remedy: `GRAPH.DELETE` cannot be
+#: undone, a name the caller cannot attribute is not theirs to delete, the
+#: production graph and its snapshots are out of scope, and `FLUSHALL` is never
+#: an option. See #2981.
+MEMORY_CEILING_OWNERSHIP_CONSTRAINT = (
+    "Do NOT hand-pick names from GRAPH.LIST to free memory instead: "
+    "GRAPH.DELETE cannot be undone, and a name you cannot attribute is not "
+    "yours to delete. Never delete the production graph tortoise or a "
+    "tortoise_restored* snapshot, and do NOT FLUSHALL."
+)
+
+
+def explain_memory_ceiling(exc: BaseException) -> str | None:
+    """Return *exc*'s message with a memory-ceiling diagnosis appended (#7357).
+
+    **The defect this closes.** #7357 is about a memory failure that
+    MISDESCRIBES itself. Its original shape was a container SIGKILLed by an
+    uncapped host, whose death reached the caller as ``Timeout reading from
+    socket`` (#9352) or ``graph was deleted or replaced`` (#8954). #9204 then
+    capped every container this repo starts and #9506 gave the lane's own
+    instance a Redis-side ``--maxmemory`` BELOW that cap with
+    ``--maxmemory-policy noeviction``, so an overshoot is an ANSWERED refusal
+    instead of a kill. That conversion is right — and it created the third
+    shape of the same misdescription:
+
+        redis.exceptions.OutOfMemoryError:
+            command not allowed when used memory > 'maxmemory'.
+
+    MEASURED on this checkout 2026-10-21 (lane container, `maxmemory 1mb`): that
+    sentence is what a caller receives, through the guarded channel as well as
+    raw. It names no cause, no next action and no owner of the limit; read at
+    face value it is indistinguishable from a broken query, a bad write or
+    graph damage — the exact failure mode this issue was filed about. Nothing
+    in the tree said "memory" (the grep for a ceiling diagnosis was empty).
+
+    **What this says, and what it refuses to claim.** Three facts, all measured:
+
+    - it is a CAPACITY refusal, answered by a HEALTHY instance — not the
+      engine's graph-swap abort, not a dead container, not data loss (the
+      ceiling and `noeviction` exist precisely so the dataset survives);
+    - the command was refused BEFORE it ran, so nothing was applied. The
+      measured command is a ``GRAPH.QUERY`` WRITE, which carries ``denyoom``
+      (measured: a refused `CREATE` left the graph at 0 nodes). That is the
+      claim the note makes — the verbs actually measured — and not the
+      absolute "every ``GRAPH.*`` verb", which no measurement in this change
+      establishes. It is why the note does not hand the caller the transport
+      arm's "OUTCOME IS UNKNOWN, read back first";
+    - re-issuing is NOT the next action. The refusal is deterministic while the
+      instance is at its ceiling, so the note names the real remedy — RAISE the
+      ceiling — instead of inviting a retry loop. It deliberately does NOT
+      advise freeing memory by deleting graphs: this seam runs on every
+      instance the SDK builds a client for (shared and production included),
+      not just a lane's own container, where "a graph this instance no longer
+      needs" is not something the caller can know. That is the same ruling the
+      repo already recorded for this refusal in
+      ``tortoise/projection/__init__.py::_write_refusal_message`` (#2981), and
+      two messages for one refusal must not advise opposite actions — a name
+      you cannot attribute is not yours to delete, ``GRAPH.DELETE`` cannot be
+      undone, and the production graph and its snapshots are out of scope. The
+      note carries that constraint VERBATIM by composing
+      :data:`MEMORY_CEILING_OWNERSHIP_CONSTRAINT`, the one constant the
+      projection's own message is built from too (#9532 review P2: a second
+      prose copy in a second module is exactly the drift #2981 forbids), and
+      names #2981 so the next reader finds the policy instead of re-deciding it.
+
+    It deliberately does NOT say "your data is at risk" or "raise `--memory`":
+    the kernel cap is the backstop, and moving it does not move the refusal —
+    only ``maxmemory`` does. Returns ``None`` for anything outside the family,
+    keeps the engine sentence at position 0, leaves the exception TYPE alone (a
+    wrapper would re-bucket it in ``_classify_db_failure``), and is idempotent
+    through :data:`_LEGIBLE_OPENER`.
+    """
+    if not is_memory_ceiling_refusal(exc):
+        return None
+    text = str(exc)
+    if _LEGIBLE_OPENER in text:
+        return None
+    explains = (
+        "the INSTANCE ANSWERED, and what it answered was a MEMORY-CEILING "
+        "refusal: it has reached its configured dataset limit (`maxmemory`) and "
+        "refused the command instead of running it. This is a CAPACITY "
+        "refusal, not the engine's 'graph was deleted or replaced' abort, not a "
+        "dead or restarting instance, and not evidence that the graph or its "
+        "data was lost — the ceiling with `noeviction` exists so an overshoot "
+        "is refused while the instance and its data stay present. Nothing was "
+        "applied: the refused command was rejected BEFORE it ran (measured on a "
+        "write: a refused GRAPH.QUERY `CREATE` left the graph at 0 nodes). "
+        "Re-issuing it now will be refused the same way — the next action is to "
+        "raise the instance's `maxmemory` ceiling (the Redis-side bound on the "
+        "DATASET), then re-issue. Where that setting lives depends on the "
+        "instance: on a container this repo starts it is the `--maxmemory` in "
+        "its `REDIS_ARGS`, and on a MANAGED instance (FalkorDB Cloud) it is the "
+        "provider's plan/console setting — there is no container there to pass "
+        "a flag to. ONLY a `tools/test_lane.py` container derives that ceiling "
+        "from `FALKORDB_CONTAINER_MEMORY` (3/4 of it); the others set it "
+        "themselves — the dev container pins 512mb and the CI provisioner "
+        "passes none — so raising `FALKORDB_CONTAINER_MEMORY` alone moves the "
+        "kernel cap and NOT this refusal. The kernel cap is the backstop, "
+        "never the ceiling. "
+        + MEMORY_CEILING_OWNERSHIP_CONSTRAINT
+        + " See #2981."
+    )
+    return text + _LEGIBLE_OPENER + explains
+
+
 class WriteStageRetriesExhausted(Exception):
     """Write-stage retry sentinel (R1, #1786/#1806).
 

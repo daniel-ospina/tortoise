@@ -8375,11 +8375,26 @@ def _graph_unavailable() -> HTTPException:
     the request may be retried. The code is body-only today — no client maps it yet (the REST
     write lane is consumed by agents/SDKs, which treat any 5xx as retryable).
 
-    #3718 (read half): the SIX read handlers now submit their per-request SDK
-    construction here too (``list_points``, ``get_point``, ``dream_health``,
-    ``list_sessions``, ``get_session_detail``, ``org_info``), so this body is
-    reachable on the READ routes as well — including the dashboard's Overview
-    reads (``GET /v1/team``, ``/v1/sessions``, ``/v1/points``). That is NOT the
+    #3718 (read half): the READ handlers now submit their per-request SDK
+    construction here too, so this body is reachable on the READ routes as well
+    — including the dashboard's Overview reads (``GET /v1/team``,
+    ``/v1/sessions``, ``/v1/points``) and the PRIMARY read path,
+    ``GET /v1/search``. Do not re-enumerate the routes here, and do not read any
+    single comment as the inventory: it goes stale on every slice (this
+    docstring itself carried a six-route count that the next batch falsified).
+    The inventory of this body's reachability is the SEAM itself — EVERY
+    ``_graph_offload`` call site (plus ``_data_sdk_offloaded``, which routes
+    through it), whatever callable it submits. ``_graph_offload`` passes
+    ``unavailable=_graph_unavailable`` unconditionally, so a quota count
+    (``_check_org_limit``), a gate resolution or a graph listing that is
+    refused emits this same body — not only ``_make_sdk`` opens. The
+    declared sets in ``tests/test_read_routes_loop_responsiveness.py`` record
+    the #3718 construction CONVERSIONS, not this pool's consumer list, and no
+    comment enumerates that list — enumerate the seam instead. The sets are
+    wrong in BOTH directions: some bodies that submit here are in none of them,
+    and some members never submit here at all. ``monitoring.py``'s block says
+    the same and disclaims ownership too.
+    That is NOT the
     "dashboard renders a 503 on the auth lane" case above: those routes now
     carry this body, and they carry it fail-CLOSED rather than degrading to
     their ``#1591`` empty shape (see ``org_info`` / ``list_sessions`` /
@@ -9717,7 +9732,25 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     _status_on = _read_status_enabled()
     _residency_on = _residency_enabled()
     status_out: dict | None = {} if (_status_on or _residency_on) else None
-    sdk = _data_sdk(org)
+    # #3718 (construction half of #4660, second batch): the SDK is BUILT off the
+    # loop, not just used off it. In embedded mode `_make_sdk` probes the
+    # keepalive anchor (`_anchor_usable`) and may eagerly connect with the
+    # socket held, so the inline construction froze the loop on this handler's
+    # FIRST statement even though the query below was already off-loaded. Same
+    # `_data_sdk_offloaded` twin the other read routes use — it returns the
+    # identical SDK, so only WHERE the call runs changes.
+    #
+    # OVERRIDES: the "a busy pool degrades like a broken store" reading — a
+    # `graph`-pool capacity refusal (bound miss / saturated backlog) is not a
+    # store condition, so it stays the hard retryable 503 `graph_unavailable`.
+    # Rendering `{"results": [], "count": 0}` because OUR pool was busy is the
+    # clean-empty-for-a-store-we-could-not-reach shape #3892 forbids. With the
+    # read-status/residency flag ON, a broken store keeps its documented
+    # `status: degraded` arm instead; with both flags off, `tortoise_fts_query`
+    # re-raises and this route's own 500 arm answers, exactly as before. A
+    # domain error from `_data_sdk` itself propagates unchanged either way.
+    # Relayed to #3718 (issuecomment-6330213773).
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
         # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
@@ -9783,7 +9816,9 @@ async def topic_summary(
     - disputed pairs: NAND-connected where both have variance > 0.02
     """
     _require_scope(org, "graphs:read", "topic_summary")
-    sdk = _data_sdk(org)
+    # #3718 (construction half of #4660, second batch): built off the loop — see
+    # the `search` handler for the full rationale and the `OVERRIDES:` line.
+    sdk = await _data_sdk_offloaded(org)
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
@@ -28282,9 +28317,19 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
     injection payload as local users.
     """
     _require_scope(org, "graphs:read", "session_context")
-    sdk = _data_sdk(org)
+    # #3718: BOTH the construction and the round trip were inline here. Building
+    # the SDK on the loop froze it on the handler's first statement (embedded
+    # `_make_sdk` probes the anchor and may eagerly connect with the socket
+    # held), and `session_context()` — a whole digest read — then ran on the
+    # loop too. `GET /v1/context` is the memory digest every HOSTED agent
+    # session-start hook reads (a local/embedded hook calls
+    # `TortoiseSDK.session_context()` directly — `tortoise/__main__.py:3013`), so
+    # that stall was on the hot path. Construction rides
+    # `_data_sdk_offloaded` (the #3773 twin); the read rides the house
+    # `asyncio.to_thread` pattern, so the error mapping below is unchanged.
+    sdk = await _data_sdk_offloaded(org)
     try:
-        return sdk.session_context()
+        return await asyncio.to_thread(sdk.session_context)
     except Exception:
         # #750.5: never leak internals to the client — log, return generic.
         logging.getLogger("tortoise.api").exception("session_context failed")
@@ -28574,9 +28619,12 @@ async def issue_insight(title: str, body: str | None = None,
     review c85) and out-of-range values 500'd instead of 422-ing.
     """
     _require_scope(org, "graphs:read", "issue_insight")
-    sdk = _data_sdk(org)
+    # #3718: same shape as `session_context` — the construction AND the
+    # `issue_insight()` read (a semantic + graph pass) were both on the loop.
+    sdk = await _data_sdk_offloaded(org)
     try:
-        return sdk.issue_insight(title=title, body=body, repo=repo, limit=limit)
+        return await asyncio.to_thread(
+            sdk.issue_insight, title=title, body=body, repo=repo, limit=limit)
     except Exception:
         logging.getLogger("tortoise.api").exception("issue_insight failed")
         raise HTTPException(status_code=500, detail="Insight unavailable")  # noqa: B904

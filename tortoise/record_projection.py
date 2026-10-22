@@ -164,10 +164,25 @@ __all__ = [
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 RECORD_MIGRATIONS: tuple[str, ...] = (
+    # THE REGISTRY, not merely the set of files that shape a column. Every
+    # `*_record_*.sql` the wheel ships must be named here — both directions are
+    # pinned by `tests/test_9231_record_migrations_trigger.py` — because the
+    # FILENAME is the only total partition of "is this the record's schema".
+    # `tests/test_record_projection.py` infers the same set from the SQL's
+    # SHAPE, which is a heuristic over spellings: a column added by a spelling
+    # it does not recognise (an `ALTER` inside a `DO` block, `ADD` without
+    # `COLUMN`) would be shipped by the wheel and read by nobody, with nothing
+    # red. An entry that contributes no column therefore still belongs here.
     "20261012000001_record_event_stream.sql",
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # The erasure RPC (#7968, PR #8179 review P2): a SECURITY DEFINER function,
+    # so it contributes NO column to `table_columns()` and no name to
+    # `refused_props_names()` (measured: both are identical with and without
+    # it). It is listed anyway, per the registry rule above — leaving it out was
+    # the 1-of-7 gap #9550 measured.
+    "20261012000005_record_org_purge_rpc.sql",
     # A FORWARD migration re-declaring a refusal. Migrations are append-only
     # history, so a later refusal (`subject.props` gains `status`, #8263)
     # arrives as `ALTER TABLE … ADD CONSTRAINT` — and the schema read below

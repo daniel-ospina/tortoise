@@ -236,6 +236,8 @@ capability because a measurement was inconvenient — the T-2 vehicle is cheap
 and exists.
 
 **One measured scope limit travels with T-1:** the bound holds for hits
-carrying `quote` / `source_turn_id`. On the product ask lane those fields are
-absent (**#8658**), where the measured cost is 12 flood slots instead of 2 —
-the instrument measures that state rather than assuming it away.
+carrying `quote` / `source_turn_id`. The product ask lane lacked those fields
+(**#8658**, since landed — the read path now carries them), where the measured
+cost was 12 flood slots instead of 2 — the instrument measures that state
+rather than assuming it away, and it remains live as the shape of a DEGRADED
+fallback read, whose lean projection still has no provenance.

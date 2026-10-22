@@ -744,10 +744,12 @@ def _enforce_mcp_tool_scope(name: str) -> None:
 
     - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
       session resolutions (scopes None) pass — existing flows unchanged.
-    - a SCOPED key is enforced: the tool's registry entry carries the declared
-      `writes` flag — a `writes=True` tool needs graphs:write, everything else
-      needs graphs:read (write implies read — graphs:write satisfies reads).
-      `WRITE_TOOL_NAMES` is the derived view of that flag (#4170).
+    - a SCOPED key is enforced: the tool's registry entry carries `risk`, from
+      which the `writes` permission is DERIVED (#4122) — `write` / `destructive` /
+      `admin` need graphs:write, `read` AND `maintenance` need only graphs:read
+      (write implies read — graphs:write satisfies reads). `maintenance` is the
+      read-through tier: a tool that refreshes stored state but is permissioned as
+      a read. `WRITE_TOOL_NAMES` is the derived view of that flag (#4170).
     - an UNRESOLVABLE name is DENIED (`AuthorizationError`), never served as a
       read. The old else-branch treated any name missing from the parallel
       write list as a read, so a writer absent from that list was reachable by
@@ -4901,8 +4903,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
     """Switch one source on or off, within the caller's own permission.
 
     Permission itself is enforced ABOVE this function, at the tool boundary:
-    `_enforce_mcp_tool_scope` requires ``graphs:write`` for a ``writes=True``
-    tool and denies an unresolvable name (#4170). Nothing here can widen that,
+    `_enforce_mcp_tool_scope` requires ``graphs:write`` for a tool whose derived
+    ``writes`` permission is true (#4122: `writes` comes from the entry's `risk`)
+    and denies an unresolvable name (#4170). Nothing here can widen that,
     and nothing here accepts a credential.
     """
     org_id = _current_org_id.get()

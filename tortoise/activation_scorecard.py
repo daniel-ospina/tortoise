@@ -146,14 +146,12 @@ SURFACE = "activation_scorecard"
 RESULT_COUNT_PROP = "result_count"
 
 # ── Stage 4: the pinned retrieval-tool allowlist ───────────────────────────
-# PINNED BY NAME — deliberately NOT derived from ``readOnlyHint`` / ``_ro()``.
-# The read-annotated set covers every ``tortoise_list_*`` and the plain status
-# tools; agents call those automatically at connect time, so deriving the set
-# from the hint would mark an org "activated" the moment it connected.
-# (#4122 retired ``_ro()`` from the registry — the count that used to be quoted
-# here was already stale, so it is not restated: the allowlist is the names
-# below, and the hint is not an input to it.) Precedent for a pinned frozenset:
-# ``tortoise/mcp_server.py`` (``_QUOTA_GATED``).
+# PINNED BY NAME — deliberately NOT derived from the read tier
+# (``risk == "read"`` / ``readOnlyHint``). That tier covers every
+# ``tortoise_list_*`` plus ``tortoise_health`` and ``tortoise_status``; agents
+# call those automatically at connect time, so deriving the set from the tier
+# would mark an org "activated" the moment it connected. Precedent for a pinned
+# frozenset: ``tortoise/mcp_server.py`` (``_QUOTA_GATED``).
 #
 # NARROW = answer-seeking retrieval: a call made to *get remembered content
 # back*. The wide set adds structural / known-id reads, which agents also make
