@@ -923,7 +923,7 @@ SOURCE_PATTERNS = {
              # #9077 (E4): the operator-receipt EVIDENCE checker. `tools/` is in
              # NON_PYTHON_PREFIXES, so without this entry a change to the
              # checker itself selects no surface of its own and its regression
-             # suite (`eval/write_path/test_write_path_operator_receipt.py`, 30
+             # suite (`eval/write_path/test_write_path_operator_receipt.py`, 62
              # dict-fixture tests) never runs on the PR that weakens the gate —
              # the same #1349/#2938/#3616 silent-drop class as the entries
              # above. The suite is registered on `eval` below.

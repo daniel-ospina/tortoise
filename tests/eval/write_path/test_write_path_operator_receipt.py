@@ -168,12 +168,15 @@ def _check(receipt: dict, **over) -> dict:
     `denominator` may NOT contradict the readable live gold (pinned by
     ``test_checker_refuses_a_bare_override_that_contradicts_the_live_gold``).
     """
-    audit = receipt.get("operator_audit", {})
+    audit = receipt.get("operator_audit")
+    audit = audit if isinstance(audit, dict) else {}
+    results = audit.get("results")
+    results = results if isinstance(results, dict) else {}
     over.setdefault("denominator", audit.get("planted"))
     over.setdefault(
         "edge_ids",
-        {eid: (row or {}).get("expected_kind")
-         for eid, row in (audit.get("results") or {}).items()},
+        {eid: (row.get("expected_kind") if isinstance(row, dict) else None)
+         for eid, row in results.items()},
     )
     return checker.check_receipt(receipt, **over)
 
@@ -830,3 +833,92 @@ def test_checker_names_a_non_string_operator_id_without_crashing():
     edge["edge_op_ids"] = [GRAPH_OP_ID, 5]
     result = _check(receipt)
     assert "E4-FORMING" in _failures(result)
+
+
+# ── the published numbers, and the shapes that must not crash ───────────────
+#
+# Every arm below deletes to green without its own test: a rule with no pin is
+# indistinguishable from no rule, and these are the guards that turn a
+# traceback into a named refusal.
+
+
+@pytest.mark.parametrize("field,published", [
+    ("edge_correct", 15),          # the lie: 15 published over 2 graded rows
+    ("content_ok", 15),
+])
+def test_checker_binds_each_published_numerator_to_the_rows(field, published):
+    """The headline number is the one a reader quotes, and nothing else in the
+    receipt is read before it. Unbound, a receipt certifies 15/15 while its own
+    rows say 2/15 — the restatement the module docstring exists to refuse."""
+    receipt = _receipt()
+    receipt["operator_audit"][field] = published
+    assert "E4-NUMERATOR" in _failures(_check(receipt))
+
+
+@pytest.mark.parametrize("published", ["2", None, True])
+def test_an_unpublished_numerator_is_refused_for_that_reason(published):
+    """A non-int numerator is refused by the MISMATCH arm too, so this pins the
+    MESSAGE, not merely a red: "does not publish a numerator the rows can be
+    bound to" is the difference between "you lied" and "you did not say". A
+    branch whose only job is that distinction has to be tested for the
+    distinction — otherwise it deletes to green (measured: it did)."""
+    receipt = _receipt()
+    receipt["operator_audit"]["edge_correct"] = published
+    result = _check(receipt)
+    details = [r["detail"] for r in result["rules"]
+               if r["rule"] == "E4-NUMERATOR" and not r["ok"]]
+    assert details, _failures(result)
+    assert any("does not publish a numerator" in d for d in details), details
+
+
+def _malformed(mutate):
+    receipt = _receipt()
+    mutate(receipt)
+    return receipt
+
+
+@pytest.mark.parametrize("label,mutate,rule", [
+    ("operator_audit not a dict",
+     lambda r: r.__setitem__("operator_audit", 5), "E4-SHAPE"),
+    ("resolved_config not a dict",
+     lambda r: r.__setitem__("resolved_config", 5), "E4-LANE"),
+    ("per-edge row not a dict",
+     lambda r: r["operator_audit"]["results"].__setitem__(
+         "wp01_quarry_debug_op_01", 5), "E4-SHAPE"),
+    ("endpoints not a dict",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     .__setitem__("endpoints", 5), "E4-REFS"),
+    ("endpoint ref not a dict",
+     lambda r: r["operator_audit"]["results"]["wp01_quarry_debug_op_01"]
+     ["endpoints"]["from"].__setitem__(0, 5), "E4-REFS"),
+    ("session_results entry not a dict",
+     lambda r: r.__setitem__("session_results", [5]), "E4-NUMERATOR"),
+])
+def test_a_malformed_shape_is_named_never_a_traceback(label, mutate, rule):
+    """`2` is reserved for an unreadable FILE; `1` must NAME the failing rule.
+    An uncaught `AttributeError`/`TypeError` prints no rule at all."""
+    assert rule in _failures(_check(_malformed(mutate))), label
+
+
+def test_checker_rejects_a_wired_edge_with_no_form():
+    """`forms_found` says what form the edge took. Empty, the receipt cannot be
+    checked against a node that was supposed to carry it."""
+    receipt = _receipt()
+    receipt["operator_audit"]["results"]["wp01_quarry_debug_op_01"]["forms_found"] = []
+    assert "E4-FORMING" in _failures(_check(receipt))
+
+
+def test_checker_rejects_a_duplicate_that_contradicts_its_graded_row():
+    """Two copies of one claim that disagree is a self-contradicting artifact
+    whichever one is right — so the duplicate is cross-checked, not trusted."""
+    receipt = _receipt()
+    receipt["session_results"] = [{
+        "session_id": "s1",
+        "planted_operators": [{
+            "id": "wp01_quarry_debug_op_01",
+            "verdict": "edge_correct",
+            "edge_correct": False,          # contradicts the graded row
+            "expected_kind": "SUPPORTS",
+        }],
+    }]
+    assert "E4-NUMERATOR" in _failures(_check(receipt))

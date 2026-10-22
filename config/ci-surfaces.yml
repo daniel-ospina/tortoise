@@ -7271,7 +7271,7 @@ durations:
   test_session_reinjection_rules.py: 0.9
   test_backups_v1_alias.py: 0.1
   eval/write_path/test_write_path_operator_lane.py: 25.0
-  eval/write_path/test_write_path_operator_receipt.py: 8.0  # #9077: 30 pure-dict tests, measured 6.2s locally; errs high deliberately
+  eval/write_path/test_write_path_operator_receipt.py: 20.0  # #9077: 62 pure-dict tests (13.6 s warm, 19.5 s cold, `-p no:cacheprovider`, carve-out env); errs high deliberately
   longmem_eval/test_temporal_admission_trace.py: 0.1
   test_2884_ep_state_journaled.py: 4.7
   test_3276_has_ep_measured.py: 4.6
