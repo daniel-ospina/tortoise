@@ -92,15 +92,24 @@ _BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
 #: can reassemble, not every spelling the regex can see. `_is_empty_pattern_read`
 #: makes the real decision on the resolved candidate, so the filter only has to
 #: be generous.
-#: The price is measured, not assumed, on today's 242-module tree: the anchored
-#: form puts 76 modules into the walk (`_files()`) and the unanchored one 211 —
-#: a strict SUPERSET, so nothing admitted before is dropped — for a
-#: BYTE-IDENTICAL derivation (24 keys / 36 site rows under BOTH gates), because
+#: The price is measured, not assumed, and the RELATION is what is pinned rather
+#: than any count: the unanchored form is a strict SUPERSET of the anchored one, so
+#: nothing admitted before is dropped, for a BYTE-IDENTICAL derivation — because
 #: Python subscripts and comparisons (`sim[i, j]`, `df[t]`, `r["created_at"]`)
-#: match too (the predicate alone admits 35 of the 242 and 210 respectively; the
-#: rest of `_files()` comes from the other three halves). That is the right trade
-#: for a filter: a spurious parse is free, a dropped module is a reader nobody
-#: can see. The type slot is deliberately NOT inspected here.
+#: match too, and the rest of `_files()` comes from the other three halves of the
+#: gate. Three arms measure that:
+#: `test_the_module_filter_is_a_strict_superset_of_the_anchored_form` (no module
+#: dropped, and the widening really does admit modules the anchored form refused),
+#: `test_the_module_filter_admits_a_split_traversal` (the derived keys / site rows,
+#: which is what "byte-identical" means, and it is re-derived rather than trusted),
+#: and `test_the_file_filter_un_sees_nothing`.
+#: ⚠️ The module COUNTS used to be written down here (and in the CHANGELOG), and
+#: they rotted inside this very PR's lifetime — a sibling merge added a module and
+#: the numerals went stale while the prose went on claiming to be measured. The
+#: arms above measure the relation, so this comment states no number that a "grep
+#: the tree" would contradict. That is the right trade for a filter: a spurious
+#: parse is free, a dropped module is a reader nobody can see. The type slot is
+#: deliberately NOT inspected here.
 _SPLIT_TRAVERSAL = re.compile(r"\[[A-Za-z_][^\]\n,\"']*\]")
 #: Is the offset inside a Cypher PATTERN COMPREHENSION? The delimiter test is
 #: exact rather than a heuristic: no other construct puts a relationship
@@ -182,12 +191,17 @@ _UNKNOWN = ""
 #: query string.** A site is keyed on `(symbol, line)`, so a second walk appended
 #: to an existing statement (a `UNION` arm beside the first walk) produces no new
 #: site and the number never moves — measured on that cut, the second walk shipped
-#: green on the first walk's fact. What catches it is the guard's per-WINDOW fact
-#: check: every walk OCCURRENCE must carry a fact inside its OWN window of the
-#: resolved query, where the window is delimited by the two boundaries a walk's
-#: bindings cannot cross — a `UNION` (an arm binds its own variables) and a
-#: top-level comma (a second pattern in one `MATCH` is a second walk). Two escapes
-#: were measured on the earlier-clause form of this rule and both shipped green:
+#: green on the first walk's fact. What catches it is the guard's per-WALK fact
+#: check: every walk OCCURRENCE must be bounded by a fact that is inside its OWN
+#: window of the resolved query — the window is delimited by the two boundaries a
+#: walk's bindings cannot cross, a `UNION` (an arm binds its own variables) and a
+#: top-level comma (a second pattern in one `MATCH` is a second walk) — AND that
+#: NAMES the walk's own relationship binding (`-[r]->` by a fact naming `r`), not
+#: one that merely sits beside it. The window alone was measured open: `MATCH
+#: (x)-[rr]->(y)` appended with no boundary in front of it, a chained hop
+#: `-[r]->(n)-[rr]->(y)`, and a comprehension in the registered walk's `WHERE` all
+#: stayed inside the registered walk's window and shipped green on the window rule.
+#: An earlier per-CLAUSE form of this rule shipped two escapes green:
 #: `, (x)-[rr]->(y)` appended to a registered `MATCH`, and a `UNION` arm that
 #: REUSED the first arm's variable name (the overlap was `n`, which the second
 #: arm's own `RETURN` happened to re-mention). The count catches the other shape —

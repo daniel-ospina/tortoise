@@ -468,6 +468,15 @@ _READ_CLAUSES = {"MATCH", "OPTIONAL MATCH"}
 _UNION_CLAUSE = re.compile(r"\bUNION\b", re.I)
 _COMMA = re.compile(r",")
 
+#: A walk's relationship SLOT, read at the offset `_walk_occurrences` reported:
+#: the bracket (`-[r]->`, `<-[r {c:$c}]-`, `-[]->`) and, for the bracket-less
+#: spelling, the whole `(node)--(node)` pattern. `_walk_binding` turns it into the
+#: token a stated fact has to NAME for the walk to be bounded.
+_WALK_SLOT = re.compile(r"[-<]\s*\[([^\]]*)\]")
+_BARE_WALK = re.compile(r"\([^()]*\)\s*(?:<-->|<--|-->|--)\s*\([^()]*\)")
+#: The Cypher name a relationship pattern binds (`r` in `[r]`, `[r {c:$c}]`).
+_REL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 #: A table row: `| 3 | `module.py::Symbol.attr` | reads for | **reach** |`.
 _ROW = re.compile(
     r"^\s*\|\s*(\d+)\s*\|\s*`([\w/]+\.py)::([\w.]+)`\s*\|(.*?)\|(.*?)\|\s*$", re.M
@@ -958,8 +967,71 @@ def _top_level_offsets(text: str, needle: re.Pattern[str]) -> list[int]:
     return hits
 
 
-def _walk_windows(query: str) -> tuple[str, ...]:
-    """One entry per WALK OCCURRENCE in one resolved query — its own WINDOW.
+def _walk_binding(query: str, start: int) -> str:
+    """What IDENTIFIES the walk at `start` — its relationship VARIABLE, or its own text.
+
+    ⚠️ **A fact that merely SITS in a walk's window is not a fact ABOUT that walk,
+    and that gap shipped a live fail-open.** With the window alone as the bound, a
+    second all-edge walk appended with no `UNION` and no top-level comma between
+    it and the registered one — `… -[r]->(n) MATCH (x)-[rr]->(y) …`, a CHAINED hop
+    `… -[r]->(n)-[rr]->(y) …`, or a comprehension in a `WHERE`
+    (`WHERE size([(x)-[rr]-(y) | rr]) > 0`) — landed in the registered walk's
+    window and inherited its fact. Measured with the pre-fix `_unbounded_walks`:
+    all three returned `[]`, i.e. green, while the register went on claiming the
+    class is closed.
+
+    The token is read straight off the text at the offset `_walk_occurrences`
+    reported, so this net can never disagree with the derivation about what a walk
+    is or where it starts:
+
+    * a bracketed walk that binds a name (`-[r]->`, `-[r {c:$c}]->`) → the name —
+      `r`. A fact bounds it by NAMING `r`, which is exactly what every recorded
+      ground does (`WHERE type(r) IN [...]`, `-[r]->(n:Point)`, ...). Reusing a
+      name inside one arm is Cypher's own way of saying *the same relationship*,
+      so it is not a second walk; a `UNION` arm re-binding the name IS one, and
+      the window boundary is what separates those two cases;
+    * a bracketed walk that binds NOTHING (`-[]->`) → its own relationship slot
+      text, since there is no name a fact could carry;
+    * a bracket-less walk (`(n)--()`) → its own `(node)…(node)` pattern text, for
+      the same reason.
+    """
+    slot = _WALK_SLOT.match(query, start)
+    if slot is not None:
+        name = _REL_NAME.match(slot.group(1).strip())
+        return name.group(0) if name is not None else slot.group(0)
+    for match in _BARE_WALK.finditer(query):
+        dashes = _call_time_census()._BARE_TRAVERSAL.search(match.group(0))
+        if dashes is not None and match.start() + dashes.start() == start:
+            return match.group(0)
+    raise AssertionError(
+        f"`_walk_occurrences` reported a walk at offset {start} of {query!r}, and "
+        "neither spelling matches there — the walk net and the derivation have "
+        "drifted apart, so every fact assertion about this query is measuring "
+        "text no walk was derived from"
+    )
+
+
+def _names_binding(fact: str, binding: str) -> bool:
+    """Does `fact` bound the walk identified by `binding` — not merely sit near it?
+
+    A NAME is matched as a whole identifier: `\br\b` by hand would read the `r` of
+    `[rr]` as a mention of `r`, which is precisely the mutation this net must
+    catch (`MATCH (x)-[rr]->(y)` beside the registered `-[r]->` walk). A walk that
+    binds no name is matched LITERALLY, because its pattern text is the only thing
+    that can identify it.
+    """
+    if not _REL_NAME.fullmatch(binding):
+        return binding in fact
+    return (
+        re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(binding)}(?![A-Za-z0-9_])", fact
+        )
+        is not None
+    )
+
+
+def _walk_windows(query: str) -> tuple[tuple[str, str], ...]:
+    """One entry per WALK OCCURRENCE in one resolved query — its WINDOW and its BINDING.
 
     ⚠️ **The unit is the window, not the query, not the clause, and not the
     statement, and each coarser unit was MEASURED to leak.** The derivation keys a
@@ -976,11 +1048,19 @@ def _walk_windows(query: str) -> tuple[str, ...]:
       pattern of the same `MATCH` (no new clause, so no new segment), and a
       `UNION` arm that REUSED a variable name from the first arm (the escape's
       overlap came from the second arm's own `RETURN type(r)`);
-    * a WINDOW — this rule. Two hard boundaries, both of them things a walk's
-      bindings cannot cross: a `UNION` (each arm binds its OWN variables, so a
-      constraint in one says nothing about the other) and a top-level COMMA (a
+    * a WINDOW — the boundaries below. Two hard boundaries, both of them things a
+      walk's bindings cannot cross: a `UNION` (each arm binds its OWN variables, so
+      a constraint in one says nothing about the other) and a top-level COMMA (a
       second pattern in one `MATCH` matches independently, exactly as the escape's
       own justification said).
+
+    ⚠️ **A window is necessary and NOT sufficient,** which is the second half of
+    this rule: a fact inside the window can still be a fact about a DIFFERENT walk
+    in it. Three boundary-free appends (`MATCH (x)-[rr]->(y)` after the
+    registered `MATCH`, a chained hop `-[r]->(n)-[rr]->(y)`, a comprehension in a
+    `WHERE`) all stayed inside the registered walk's window and shipped green on
+    that rule alone. So each occurrence also carries its BINDING
+    (`_walk_binding`), and `_unbounded_walks` demands a fact that NAMES it.
 
     The walk itself is `_walk_occurrences`, the census's positional form of
     `_is_empty_pattern_read` — the same definition the derivation uses, so the net
@@ -999,32 +1079,45 @@ def _walk_windows(query: str) -> tuple[str, ...]:
         spans.extend((bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1))
     covered = [query[low:high] for low, high in spans]
     return tuple(
-        covered[i]
+        (covered[i], _walk_binding(query, start))
         for start in census._walk_occurrences(query)
         for i, (low, high) in enumerate(spans)
         if low <= start < high
     )
 
 
-def _unbounded_walks(query: str, facts: tuple[str, ...]) -> list[str]:
-    """The walk WINDOWS of `query` that NO stated fact bounds.
+def _unbounded_walks(query: str, facts: tuple[str, ...]) -> list[tuple[str, str]]:
+    """The walk WINDOWS of `query` that NO stated fact bounds — walk by walk.
 
-    A fact bounds only the walk it is written about — the window's own text — and
-    there is deliberately NO cross-window escape: `_walk_windows` records why both
-    forms of one (statement-wide, and earlier-clause-on-variable-overlap) were
-    measured open, and a walk whose bound is written in a DIFFERENT arm or pattern
-    of the same query is a walk nobody has stated a ground for.
+    Each item is `(window, binding)` — the window the walk sits in and the token
+    that identifies the walk itself, so a failure can say WHICH walk was left
+    unstated instead of only which stretch of text it sits in.
+
+    A fact bounds a walk only when BOTH hold: the fact is inside that walk's own
+    window, and the fact NAMES that walk's own binding (`_names_binding`). The
+    first half is what stops a fact crossing a `UNION` or a comma; the second is
+    what stops a fact about one walk vouching for its NEIGHBOUR inside one window,
+    which is the shape that survived the window rule alone (`MATCH (x)-[rr]->(y)`
+    appended with no boundary in front of it). There is deliberately NO
+    cross-window escape: the two forms of one (statement-wide, and
+    earlier-clause-on-variable-overlap) were each measured open, and a walk whose
+    bound is written in a DIFFERENT arm or pattern of the same query is a walk
+    nobody has stated a ground for.
 
     This is the per-walk half of the fact check, and it exists because the
     site-oriented half cannot see a second walk written into an already-registered
     query string: the derivation keys a site on `(symbol, line)`, so such a copy
     produces no new site, and a fact found ANYWHERE in the statement excused it.
     """
-    return [
-        window
-        for window in dict.fromkeys(_walk_windows(query))
-        if not any(fact in window for fact in facts)
-    ]
+    return list(
+        dict.fromkeys(
+            (window, binding)
+            for window, binding in dict.fromkeys(_walk_windows(query))
+            if not any(
+                fact in window and _names_binding(fact, binding) for fact in facts
+            )
+        )
+    )
 
 
 def _uncarried_facts(facts: tuple[str, ...], text: str) -> list[str]:
@@ -3264,13 +3357,19 @@ def test_every_empty_pattern_entry_states_a_true_fact():
       a copy at the same `(symbol, line)` produces no new site, so the number cannot
       move, and that gap shipped a second walk on the first walk's fact;
     * the WALK net (`_unbounded_walks`) checks every walk OCCURRENCE of the site's
-      RESOLVED query inside its own window (`_walk_windows`: a `UNION` arm or a
-      top-level comma ends a window), so a walk appended INSIDE an
-      already-registered query string has to carry a fact of its own — the
-      `UNION MATCH (x)-[rr]->(y)` copy of `sdk.provenance` reds here, where the
-      number stayed quiet, and so do the two escapes the earlier per-CLAUSE form
-      left open (a comma-separated pattern beside the registered walk, and a
-      `UNION` arm that reuses a variable name from the first arm);
+      RESOLVED query against a fact that sits in the walk's OWN window
+      (`_walk_windows`: a `UNION` arm or a top-level comma ends a window) AND that
+      NAMES the walk's own relationship binding (`_walk_binding`), so a walk
+      appended INSIDE an already-registered query string has to carry a fact of
+      its own — the `UNION MATCH (x)-[rr]->(y)` copy of `sdk.provenance` reds
+      here, where the number stayed quiet, and so do the two escapes the earlier
+      per-CLAUSE form left open (a comma-separated pattern beside the registered
+      walk, and a `UNION` arm that reuses a variable name from the first arm).
+      ⚠️ Requiring only the WINDOW was itself measured open — `MATCH (x)-[rr]->(y)`
+      appended with no boundary in front of it, a chained hop
+      `-[r]->(n)-[rr]->(y)`, and a comprehension in the walk's `WHERE` all stayed
+      inside the registered walk's window and shipped green — which is why the
+      fact must NAME the walk and not merely sit beside it;
     * the UNION net (`_uncarried_facts`) requires every recorded FACT to appear in
       some site, which is the direction an any-fact-per-site loop cannot express
       and which is what a retyped `_DEGREE` anchor (`(old:Source …)` → `(old)`)
@@ -3281,9 +3380,9 @@ def test_every_empty_pattern_entry_states_a_true_fact():
     blanked (`_site_fact_text`): a fact satisfied by a comment is not a fact about
     executed code. The clause net reads the resolved query instead
     (`_site_query_texts`), because that is the text the walk actually runs, and it
-    bounds each walk OCCURRENCE inside its own window (`_walk_windows`) rather
-    than per statement or per clause — both coarser units were measured to let a
-    second walk ride on the first walk's fact.
+    bounds each walk OCCURRENCE by a fact inside its own window AND naming its own
+    binding — both coarser units (statement, clause) and the window-alone form
+    were measured to let a second walk ride on the first walk's fact.
     """
     census = _call_time_census()
     assert census.EMPTY_PATTERN, (
@@ -3331,14 +3430,15 @@ def test_every_empty_pattern_entry_states_a_true_fact():
                 windows = _walk_windows(query)
                 entry_walks += len(windows)
                 walks_checked += len(windows)
-                for window in _unbounded_walks(query, facts):
+                for window, binding in _unbounded_walks(query, facts):
                     failures.append(
-                        f"  - {key}:{line} walks in the window `{window[:90]}` "
-                        f"and NO stated fact bounds THAT window — a second walk "
-                        "written into an already-registered query string (another "
-                        "`UNION` arm, or a comma-separated pattern beside the "
-                        "registered one) is a new reader of the edge, and it is "
-                        "not covered by the fact that bounds the walk beside it"
+                        f"  - {key}:{line} walks `{binding}` in the window "
+                        f"`{window[:90]}` and NO stated fact bounds THAT walk — "
+                        "a second walk written into an already-registered query "
+                        "string (another `UNION` arm, a comma-separated pattern, "
+                        "a chained hop or a comprehension in its `WHERE`) is a "
+                        "new reader of the edge, and the fact that bounds the "
+                        "walk beside it does not NAME this one"
                     )
         if not entry_walks:
             failures.append(
@@ -3480,7 +3580,7 @@ def test_a_walk_inside_an_already_registered_statement_is_unbounded():
         "carries two — a walk added beside a registered one inside ONE query "
         "string would then be invisible, which is the fail-open this net closes"
     )
-    assert any(fact in walks[0] for fact in facts), (
+    assert any(fact in walks[0][0] for fact in facts), (
         f"the FIRST walk is not the one the fact bounds: {walks[0]!r}"
     )
     unbounded = _unbounded_walks(query, facts)
@@ -3549,10 +3649,10 @@ def test_the_walk_window_ends_at_a_union_and_at_a_comma():
         f"the second pattern of one `MATCH` produced {len(windows)} window(s) — "
         "it is a separate walk and the fact about its neighbour does not bound it"
     )
-    assert any(fact in windows[0] for fact in facts), (
+    assert any(fact in windows[0][0] for fact in facts), (
         f"the registered walk is not the first window: {windows[0]!r}"
     )
-    assert not any(fact in windows[1] for fact in facts), (
+    assert not any(fact in windows[1][0] for fact in facts), (
         f"the comma-separated walk's window carries the neighbour's fact: "
         f"{windows[1]!r} — the window boundary is not a top-level comma"
     )
@@ -3621,6 +3721,122 @@ def test_the_walk_window_ends_at_a_union_and_at_a_comma():
         f"the comma-separated walk is not unbounded through the site's RESOLVED "
         f"query ({derived_queries!r}) — the net is reading source text, or the "
         "wrong line"
+    )
+
+
+def test_a_walk_is_bounded_only_by_a_fact_that_NAMES_IT():
+    """A fact bounds the walk it was WRITTEN ABOUT — not its neighbours in a window.
+
+    ⚠️ **Measured on the per-WINDOW cut this arm was added for, and all three
+    shipped green there.** A window ends only at a `UNION` or a top-level comma, so
+    a second all-edge walk appended with neither boundary in front of it stayed
+    inside the registered walk's window and inherited its fact. Applied to
+    `tortoise/sdk.py::provenance`'s registered query, each of the three is a
+    genuine new reader of `aboutObject` (untyped, so every relationship type —
+    `aboutObject` included — is walked):
+
+    * (a) a second `MATCH` CLAUSE — `… -[r]->(n) MATCH (x)-[rr]->(y) RETURN …`;
+    * (b) a CHAINED hop on the registered pattern — `… -[r]->(n)-[rr]->(y) …`;
+    * (c) a pattern COMPREHENSION in the walk's own `WHERE` —
+      `WHERE size([(x)-[rr]-(y) | rr]) > 0`.
+
+    All three shipped green, and every other net stayed quiet too: the site count
+    cannot move (the copy is on the registered line, so it is the same
+    `(symbol, line)` site), and the census's `24 keys / 36 rows` derivation is
+    unchanged. So the fact has to NAME the walk — its own relationship variable —
+    and not merely sit beside it.
+
+    ⚠️ **The converse is deliberate, not an oversight:** REUSING a variable name is
+    not a second walk. Inside one arm, `MATCH (s)-[r]->(n) MATCH (x)-[r]->(y)` binds
+    the SAME relationship `r` again, so it traverses no new type — there is no
+    unbound reader to state a ground for. Across a `UNION` the arm binds its OWN
+    variables, so a name reused by the second arm is a NEW walk, and the window
+    boundary is what reds it (pinned below, and in
+    `test_the_walk_window_ends_at_a_union_and_at_a_comma`). Keeping both halves
+    asserted is what stops the next reader "fixing" the reuse case into a
+    false red on every real query.
+    """
+    facts = ("MATCH (s:Subject {id:$sid})-[r]->(n)",)
+    registered = "MATCH (s:Subject {id:$sid})-[r]->(n)"
+    shapes = {
+        "a": f"{registered} MATCH (x)-[rr]->(y) RETURN type(r), labels(n)[0], type(rr)",
+        "b": "MATCH (s:Subject {id:$sid})-[r]->(n)-[rr]->(y) "
+        "RETURN type(r), type(rr)",
+        "c": f"{registered} WHERE size([(x)-[rr]-(y) | rr]) > 0 RETURN type(r)",
+    }
+    for label, query in shapes.items():
+        unbounded = _unbounded_walks(query, facts)
+        assert len(unbounded) == 1, (
+            f"shape ({label}) reports {len(unbounded)} unbounded walk(s) "
+            f"({unbounded!r}) — the registered `-[r]->` walk is bounded and the "
+            "appended `-[rr]->` walk has to be the one reported. `[]` here is "
+            "the fail-open: the appended walk inherits the registered walk's "
+            "fact because both sit in ONE window"
+        )
+        window, binding = unbounded[0]
+        assert binding == "rr", (
+            f"shape ({label}) reports `{binding}` as the unstated walk — the "
+            "binding is not being read off the walk the derivation found, so the "
+            "net is comparing facts against the wrong token"
+        )
+        assert "[rr]" in window, (
+            f"shape ({label}) reports a window that does not contain the "
+            f"appended walk: {window!r} — the net is vouching for text it never "
+            "looked at"
+        )
+    # The token comparison is an IDENTIFIER comparison, not a substring one: the
+    # registered fact mentions `r`, and `r` is a substring of `rr`.
+    assert not _names_binding(f"{registered}", "rr"), (
+        "a fact stating `-[r]->` is being read as naming `rr` — the binding "
+        "match is a substring test, so `MATCH (x)-[rr]->(y)` rides on it again"
+    )
+    assert not _names_binding("MATCH (x)-[rr]->(y) RETURN type(rr)", "r"), (
+        "a fact that states the `-[rr]->` walk is being read as naming `r` — "
+        "the match is a SUBSTRING test, so a fact about a neighbour's `rr` walk "
+        "would bound every `-[r]->` walk in the same window"
+    )
+    assert _names_binding(registered, "r"), (
+        "a fact stating the registered walk does not name its own variable `r` — "
+        "then every live entry is a false red and the check is unusable"
+    )
+    assert _names_binding("WHERE type(r) IN ['IMPL','NAND']", "r"), (
+        "a TYPE-RESTRICTION ground does not name the walk it bounds — the live "
+        "`hosted_api._load_commit_graph_state` entry rests on exactly this shape, "
+        "so this red would be a false one"
+    )
+    # The bracket-less spelling binds no name, so its own pattern text is the
+    # token: that is what the live `validate_chain_integrity` ground states.
+    assert _names_binding("AND NOT (n)--()", "(n)--()"), (
+        "a fact that STATES the bracket-less walk does not bound it — the live "
+        "`orphaned_draft` entry would be a false red"
+    )
+    # Derivation half: none of the three shapes produces a new site, which is why
+    # the count net cannot see them and the walk net is the only thing that can.
+    census = _call_time_census()
+    source = (
+        "def provenance(query):\n"
+        "    box = ("
+        '"MATCH (s:Subject {id:$sid})-[r]->(n) MATCH (x)-[rr]->(y) "'
+        '"RETURN type(r), type(rr)"'
+        ")\n"
+        "    return query(box)\n"
+    )
+    file = census._File(Path("synthetic_boundary_free.py"), "synthetic.py", source)
+    sites = census._empty_pattern_sites_in(file)
+    assert len(sites) == 1 and next(iter(sites))[0] == "provenance", (
+        f"the boundary-free second `MATCH` produced {sorted(sites)} — if the "
+        "derivation DOES see it the count would catch it and this fixture's "
+        "premise (one `(symbol, line)` site for BOTH walks) is wrong"
+    )
+    site_line = next(iter(sites))[1]
+    derived_queries = _site_query_texts(file, "provenance", site_line)
+    assert derived_queries, (
+        "`_site_query_texts` resolved no query for the boundary-free site — the "
+        "walk net would then check no walk at all"
+    )
+    assert all(len(_unbounded_walks(q, facts)) == 1 for q in derived_queries), (
+        f"the boundary-free walk is vouched for through the site's RESOLVED query "
+        f"({derived_queries!r}) — the net is reading source text, or the wrong line"
     )
 
 
@@ -3746,6 +3962,69 @@ def test_a_part_assembled_walk_is_derived():
     assert "_typed" not in derived, (
         "a typed walk derived as an empty-pattern site — the fold must not "
         "swallow the half that belongs to the named class"
+    )
+
+
+#: The RETIRED anchored form of the split-traversal filter, kept ONLY as the
+#: control for the arm below: it is the predicate the widening replaced, so
+#: "nothing admitted before is dropped" is measured against the real thing rather
+#: than against a paraphrase of it.
+_RETIRED_SPLIT_TRAVERSAL = re.compile(
+    r"\[[A-Za-z_][^\]\n,\"']*\]\s*-|\[[A-Za-z_][^\]\n,\"']*\]\s*[\"']\s*\+\s*[\"']\s*-"
+)
+
+
+def test_the_module_filter_is_a_strict_superset_of_the_anchored_form():
+    """The widening drops nothing, admits something, and stays inside the walk.
+
+    ⚠️ **This arm replaces numerals that had already rotted.** The census comment
+    used to state the module counts behind the widening ("242 modules … 76 …
+    211 …"), and a sibling merge added a module inside this PR's lifetime, so the
+    numbers were wrong while the prose still called them measured. A count in a
+    comment has no falsifier; the RELATION does, so it is what is asserted here
+    and the comment states no number.
+
+    Three properties, each the one a superset claim actually needs:
+
+    * **no drops** — every module the retired anchored form admitted is still
+      admitted, which is the direction a filter cannot fail in (`_SPLIT_TRAVERSAL`
+      is deliberately unanchored, so this is the property that keeps it honest);
+    * **not vacuous** — the widening admits modules the anchored form refused, so
+      the first assertion is not the trivial "a set is a subset of itself";
+    * **inside the walk** — the predicate admits no module the gate then refuses to
+      walk, so "the filter is a superset of the derivation" cannot become a claim
+      about modules nobody parses.
+    """
+    census = _call_time_census()
+    universe = census._universe()
+    anchored = {
+        path for path, source in universe.items() if _RETIRED_SPLIT_TRAVERSAL.search(source)
+    }
+    widened = {
+        path for path, source in universe.items() if census._SPLIT_TRAVERSAL.search(source)
+    }
+    assert anchored and widened, (
+        f"the comparison is measuring an empty set ({len(anchored)} anchored / "
+        f"{len(widened)} widened over {len(universe)} modules) — a subset claim "
+        "about nothing is what this arm exists to refuse"
+    )
+    assert not anchored - widened, (
+        "the widened filter REFUSES modules the anchored form admitted: "
+        f"{sorted(str(p) for p in anchored - widened)} — a filter narrower than "
+        "the one it replaced drops a module before the derivation can see the "
+        "walk inside it, which is the one direction this predicate cannot fail in"
+    )
+    assert widened - anchored, (
+        "the widened filter admits nothing the anchored form refused, so the "
+        "subset assertion above is trivially true and the widening is "
+        "unmeasured — either the third spelling is no longer what the predicate "
+        "is for, or this control has drifted off the retired form"
+    )
+    walked = {file.path for file in census._files()}
+    assert widened <= walked, (
+        "the module filter admits modules the gate then refuses to WALK: "
+        f"{sorted(str(p) for p in widened - walked)} — admitting a module and "
+        "never parsing it makes `_files()` the narrower instrument again"
     )
 
 
