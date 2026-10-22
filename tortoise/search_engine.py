@@ -4026,7 +4026,11 @@ def get_relationships_bounded(
                             # `_beta_mean` carries that guard, and its uniform
                             # fallback (0.5) is the SAME value the sibling
                             # signal surface reports for the pair
-                            # (ranking._fetch_point_signals → NEUTRAL_CONFIDENCE).
+                            # (StateRanker._fetch_point_signals,
+                            # ranking.py:1046 → NEUTRAL_CONFIDENCE: measured
+                            # on the write-path shape, which mirrors
+                            # `confidence`; the GraphRanker sibling has no
+                            # guard and is untouched by this read).
                             # It is not the fabricated posterior above: for this
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing
