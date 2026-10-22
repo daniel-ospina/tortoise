@@ -14,6 +14,9 @@ import logging
 from . import record_writer
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
+# #5140: the `documents` METER KEY's defender for THIS producer. `quota` is a
+# leaf module (stdlib-only at import time), so this adds no cycle.
+from .quota import refuse_document_writer_demotion
 
 # #7951 §17.1: the live-write scope the journal-first doors open around the fold.
 from .projection import _live_write_scope, fold
@@ -582,6 +585,22 @@ class EventAPI:
         is the back-compat shape — the fold PRESERVES the stored hash rather
         than clearing it, so a metadata-only re-emit cannot wipe an anchor.
         """
+        # #5140 P1 (review cycle 3): the doc id IS the caller's `:Source` MERGE
+        # key, so this producer could rewrite an existing document's genre to
+        # `transcript` and drop it out of the metered `documents` set (MEASURED,
+        # 3 seeded documents: meter 3 -> 2 -> 1, one call each). The fold's CASE
+        # clause drops that value to keep REPLAY total (a rebuild must not abort
+        # on a pre-guard record), but this is a PRODUCER, not replay: a silent
+        # no-op would return the doc id as if the genre had been written. Runs
+        # BEFORE `_emit` (the commit point), so a refusal leaves no record.
+        # `getattr` — not `self.projection.g` — because projection-less lanes
+        # (the `__main__` demo, `m0.py`) and in-memory doubles have no graph to
+        # demote; there the record still journals (`_refuse_unapproved_kinds`
+        # states the same bound).
+        _g = getattr(self.projection, "g", None)
+        if _g is not None:
+            refuse_document_writer_demotion(
+                _g, doc_id, document_kind, surface="add_document")
         self._emit("DocumentCreated",
                    corrects=corrects,
                    id=doc_id,
