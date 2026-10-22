@@ -10444,11 +10444,18 @@ class FalkorProjection(
         # (tortoise/sdk.py) — `tortoise` exact and `tortoise_restored*` by
         # prefix. `is_legacy_residue` refuses a superset; that case is covered
         # by "do not hand-pick", not by enumeration.
+        # #9532 cycle 2/3 P1: the SDK's ceiling note is emitted on managed
+        # instances too (FalkorDB Cloud — no container, no `REDIS_ARGS`), so a
+        # container-only lever would prescribe an action that cannot be taken.
+        # This operator message names the same two homes the note does, because
+        # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
+        # must not disagree about the remedy either.
         return (
             "DB refused writes on open: the graph is INTACT but the server "
             f"has reached its memory ceiling ({detail}). This is NOT "
             "corruption — do NOT rebuild. Remedy: raise / relieve the "
-            "container's --maxmemory. "
+            "instance's maxmemory ceiling — the --maxmemory in a container's "
+            "REDIS_ARGS, or the provider's console on a managed instance. "
             # #9532 review P2: composed from the ONE authority in
             # `tortoise/retry.py` rather than restated here. The SDK's
             # ceiling note (`explain_memory_ceiling`) is emitted for the same

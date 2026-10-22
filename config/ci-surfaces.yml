@@ -3740,8 +3740,13 @@ surfaces:
   # the #9190 trap written up above, and the same miss the #9209 row records.
   - test_7357_transport_legibility.py
   # #7357 (ceiling half): the memory-ceiling NOTE `tortoise/retry.py::
-  # explain_memory_ceiling` and the `tortoise/cypher_guard.py:1841` fallback
-  # that reaches it. `core` and NOTHING else, on the same measured reasoning
+  # explain_memory_ceiling` and the `tortoise/cypher_guard.py::
+  # _note_instance_outage` fallback that reaches it. Cited by NAME, not by line:
+  # the line number was wrong twice in this change's own review (#9532 cycles 1
+  # and 2) — the same rule the module's own maxmemory comment records, where a
+  # sibling citation of this message is given by name "because the line number
+  # was wrong twice in this change's own review". `core` and NOTHING else, on
+  # the same measured reasoning
   # as the row above: NEITHER subject matches a `SOURCE_PATTERNS` entry
   # (`tortoise/retry.py` and `tortoise/cypher_guard.py` are both absent), so a
   # file-only diff to either selects the `core` fallback — verified by

@@ -87,12 +87,53 @@ def test_an_unrelated_refusal_is_not_the_family():
         redis_exc.ResponseError("maxmemory is set to 1610612736")) is False
 
 
+def test_a_chained_ceiling_refusal_is_still_the_family():
+    """P2 (#9532 cycle 2): the driver and our own wrappers re-raise WITH a cause.
+
+    MEASURED before the chain walk existed: a ``ResponseError("write failed")``
+    whose ``__cause__`` is the engine's ceiling refusal answered False here and
+    False to the outage predicate too — so no note was applied and the
+    illegible sentence reached the caller unchanged, which is precisely the
+    defect #7357 closes. The sibling predicate at this seam already walked the
+    chain (#6977), so this was an inconsistency, not a design choice.
+
+    The sibling's chain rules apply: an explicit ``raise ... from`` wins, a
+    ``raise ... from None`` stops the walk, and an id-deduplicated loop cannot
+    spin on a cyclic chain.
+    """
+    wrapped = redis_exc.ResponseError("write failed")
+    wrapped.__cause__ = _ceiling_error()
+    assert is_memory_ceiling_refusal(wrapped) is True
+    assert "memory-ceiling" in (explain_memory_ceiling(wrapped) or "").lower()
+    # …and it is STILL not an outage, so one message cannot carry both suffixes.
+    assert is_instance_unavailable(wrapped) is False
+    assert explain_instance_unavailable(wrapped, mutating=True) is None
+
+    # A suppressed context is still an explicit cause: `raise X from Y` with
+    # `__suppress_context__` set must be walked, because __cause__ wins.
+    explicit = redis_exc.ResponseError("write failed")
+    explicit.__cause__ = _ceiling_error()
+    explicit.__suppress_context__ = True
+    assert is_memory_ceiling_refusal(explicit) is True
+
+    # A chain that is NOT the family stays out, and a cycle terminates.
+    assert is_memory_ceiling_refusal(
+        redis_exc.ResponseError("write failed")) is False
+    cyclic = redis_exc.ResponseError("loop")
+    cyclic.__cause__ = cyclic
+    assert is_memory_ceiling_refusal(cyclic) is False
+
+
 def test_a_transport_failure_is_not_the_family_and_vice_versa():
     """EXCLUSIVITY: the two notes must never be applied to one another's case.
 
-    A ceiling refusal is an ANSWERED reply; an instance outage is the absence of
-    one. Confusing them sends a reader after a container restart that never
-    happened, or retries a capacity refusal forever.
+    A ceiling refusal is an ANSWERED reply, and the outage arm also owns one
+    ANSWERED member (LOADING), so the exclusion cannot rest on "an outage is the
+    absence of a reply" (#9532 cycle 2 P2). It is by CLASS: `_answered_refusal`
+    rejects every ``ResponseError`` from the outage family,
+    ``OutOfMemoryError`` is one, and LOADING is not. Confusing them sends a
+    reader after a container restart that never happened, or retries a capacity
+    refusal forever.
     """
     transport = redis_exc.TimeoutError("Timeout reading from socket")
     assert is_memory_ceiling_refusal(transport) is False
@@ -109,12 +150,17 @@ def test_the_nearest_neighbour_is_not_the_family_either():
     Both are replies rather than outages, so a reloading instance must not be
     told it "reached a memory limit" — the remediation (free memory, raise the
     ceiling) would turn a knob that changes nothing. MEASURED on the pinned
-    redis (7.4.1): `BusyLoadingError` is NOT a `ResponseError` — it arrives as
-    `network:BusyLoadingError` under the CONNECTION family, which is why
-    `is_instance_unavailable` needs its order-critical early return for it. So
-    the two predicates partition it deliberately: an outage (per that family) and
-    not a ceiling refusal. Both halves are pinned here, because a future redis
-    that reparented it would break the partition silently.
+    redis (7.4.1): `BusyLoadingError` is NOT a `ResponseError`. The exclusion
+    that would otherwise fire on it is `_answered_by_server` — the vendor
+    parser's own `EXCEPTION_CLASSES` maps `LOADING` to this class, so the
+    answered-refusal arm WOULD swallow it — and that is why
+    `is_instance_unavailable` needs its order-critical early return for it
+    (the same mechanism `tortoise/retry.py`'s own docstring names). P2 (#9532
+    cycle 2): this rationale used to attribute the early return to the class's
+    CONNECTION family membership, which is not what would reject it. So the two
+    predicates partition it deliberately: an outage (per that family) and not a
+    ceiling refusal. Both halves are pinned here, because a future redis that
+    reparented it would break the partition silently.
     """
     loading = redis_exc.BusyLoadingError(
         "LOADING Redis is loading the dataset in memory")
@@ -164,9 +210,16 @@ def test_the_note_does_not_invite_a_retry_and_names_the_real_remedy():
     """
     text = (explain_memory_ceiling(_ceiling_error()) or "").lower()
     assert "re-issuing it now will be refused the same way" in text
-    assert "raise the db's own ceiling" in text
-    # The Redis-side knob is the lever, and it is named as such.
-    assert "`--maxmemory` in that instance's `redis_args`" in text
+    assert "raise the instance's `maxmemory` ceiling" in text
+    # The Redis-side knob is the lever, and it is named as such — AND the note
+    # says where it lives on each instance class, because the SDK emits this on
+    # managed instances too (docs/infra-runbook.md: FalkorDB Cloud is managed,
+    # with no container and no `REDIS_ARGS`). P1 (#9532 cycle 2): a
+    # container-only lever is the same "remedy that cannot work" defect one
+    # scope out.
+    assert "`--maxmemory` in its `redis_args`" in text
+    assert "managed instance" in text and "provider" in text
+    assert "no container there" in text
     # The kernel cap is the BACKSTOP; raising it does not move the refusal, so
     # the note must not send the reader to the wrong knob alone.
     assert "only a `tools/test_lane.py` container derives that ceiling" in text
@@ -176,6 +229,44 @@ def test_the_note_does_not_invite_a_retry_and_names_the_real_remedy():
     # It must never be told "retrying is safe" the way the READ arm of the
     # transport note is (#9352): that arm's licence does not extend here.
     assert "re-issuing this statement is safe" not in text
+
+
+def test_the_remedy_claims_match_the_files_they_assert_about():
+    """P2 (#9532 cycle 2): pin the FACTS, not only the note's own wording.
+
+    The note's narrowing rests on three claims about other files: `tools/
+    test_lane.py` derives its ceiling from the env var (already pinned in
+    ``test_test_lane_tool.py``), ``graph-scripts/setup.py`` pins its own
+    ``--maxmemory 512mb``, and the CI provisioner passes no ``--maxmemory`` at
+    all. Nothing pinned the last two, so if either file ever started deriving
+    its ceiling, the note would silently become the wrong remedy again while
+    every test stayed green — the same failure this PR exists to fix.
+    """
+    from pathlib import Path
+
+    import tortoise
+
+    root = Path(tortoise.__file__).resolve().parent.parent
+
+    setup_src = (root / "graph-scripts" / "setup.py").read_text(encoding="utf-8")
+    redis_args = [line for line in setup_src.splitlines() if "REDIS_ARGS=" in line]
+    assert redis_args, "the dev container's REDIS_ARGS argv must still exist"
+    dev_args = " ".join(redis_args)
+    assert "--maxmemory 512mb" in dev_args, (
+        "the note tells a dev-container operator to raise `--maxmemory`, and "
+        "that this env var does NOT move it — if setup.py starts deriving the "
+        "ceiling, the note must change with it: " + dev_args)
+
+    provision_src = (root / ".github" / "actions" / "falkordb-provision"
+                     / "provision.sh").read_text(encoding="utf-8")
+    # The provisioner's own REDIS_ARGS default, as the comment block at the
+    # `--maxmemory` discussion records: `--requirepass falkordb --save ''`.
+    assert "--requirepass falkordb --save ''" in provision_src, (
+        "the provisioner's REDIS_ARGS default moved — re-derive the note's "
+        "\"the CI provisioner passes none\" claim")
+    assert "--maxmemory" not in provision_src.split("REDIS_ARGS")[1].split("\n")[0], (
+        "the provisioner now passes a --maxmemory; the note's claim that it "
+        "passes none is stale")
 
 
 def test_the_note_never_names_deleting_graphs_as_the_remedy():
@@ -209,6 +300,59 @@ def test_the_note_never_names_deleting_graphs_as_the_remedy():
         "lane re-decides it")
 
 
+def _ownership_constraint_holders(root):
+    """Modules under *root* that carry the #2981 constraint as PROSE.
+
+    P2 (#9532 cycle 2): the first version of this detector was line-local —
+    ``opening in file_text`` — and a second copy written in the repo's dominant
+    implicit-concatenation style (a literal split across lines, which is how
+    every message in this codebase is written) evaded it, so the "one authority"
+    property it claimed was not the property it enforced. The scan therefore
+    NORMALISES before comparing: quotes, backslashes, parentheses and all
+    whitespace are removed from both sides, so a copy split at ANY point — or
+    re-quoted, or re-indented — still matches. Order is preserved, so squashing
+    cannot join two unrelated fragments into an accidental hit.
+    """
+    import re
+
+    sq = lambda text: re.sub(r"[\s\"'()\\`]+", "", text)  # noqa: E731
+
+    from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT
+
+    needle = sq(MEMORY_CEILING_OWNERSHIP_CONSTRAINT)
+    holders = []
+    for path in sorted(root.rglob("*.py")):
+        if needle in sq(path.read_text(encoding="utf-8")):
+            holders.append(str(path.relative_to(root)))
+    return holders
+
+
+def test_the_one_authority_scanner_catches_a_split_copy(tmp_path):
+    """The detector's own self-test (#9532 cycle 2 P2).
+
+    A drift guard that cannot catch the way this repo writes messages is worse
+    than none: it reports a property it does not hold. This plants a copy split
+    across lines exactly as the codebase does it, and requires the scanner to
+    find it.
+    """
+    from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT as C
+
+    half = len(C) // 2
+    cut = C.rindex(" ", 0, half) + 1
+    planted = tmp_path / "package"
+    planted.mkdir()
+    (planted / "copy.py").write_text(
+        "MESSAGE = (\n"
+        f"    {C[:cut]!r}\n"
+        f"    {C[cut:]!r}\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    assert _ownership_constraint_holders(planted) == ["copy.py"], (
+        "a sentence split across two adjacent literals is the repo's normal "
+        "style; the scanner must still see it as a copy")
+
+
 def test_the_ownership_constraint_has_exactly_one_authority():
     """P2 (#9532 review): the #2981 constraint must not exist as TWO copies.
 
@@ -220,9 +364,10 @@ def test_the_ownership_constraint_has_exactly_one_authority():
 
     This pins the property structurally rather than by agreeing literals:
     (1) the SDK note contains the constant verbatim; (2) no SECOND Python
-    module in ``tortoise/`` contains the sentence as prose (so a future lane
-    cannot re-introduce a copy); (3) the projection's message composes the
-    constant instead of spelling it out.
+    module in ``tortoise/`` contains the sentence as prose, under the
+    normalising scan ``_ownership_constraint_holders`` — itself self-tested
+    against a split copy, so this cannot go quietly vacuous; (3) the
+    projection's message composes the constant instead of spelling it out.
     """
     from pathlib import Path
 
@@ -231,15 +376,8 @@ def test_the_ownership_constraint_has_exactly_one_authority():
 
     assert MEMORY_CEILING_OWNERSHIP_CONSTRAINT in (explain_memory_ceiling(_ceiling_error()) or "")
 
-    # The sentence's own opening is unique enough to detect a second copy. The
-    # scan is scoped to the shipped package (``tortoise/``), so this file's own
-    # literal cannot match itself.
-    opening = "Do NOT hand-pick names from GRAPH.LIST to free memory"
     root = Path(tortoise.__file__).resolve().parent
-    holders = sorted(
-        str(p.relative_to(root)) for p in root.rglob("*.py")
-        if opening in p.read_text(encoding="utf-8")
-    )
+    holders = _ownership_constraint_holders(root)
     assert holders == ["retry.py"], (
         "the #2981 ownership constraint must have ONE authority — retry.py's "
         f"MEMORY_CEILING_OWNERSHIP_CONSTRAINT — not a second prose copy: {holders}")

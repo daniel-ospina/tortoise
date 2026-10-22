@@ -863,10 +863,16 @@ def is_memory_ceiling_refusal(exc: BaseException) -> bool:
     """True when *exc* is the instance REFUSING at its dataset ceiling (#7357).
 
     The mirror of :func:`is_instance_unavailable`, and deliberately exclusive of
-    it: a ceiling refusal is an ANSWERED reply (the instance is healthy and
-    talking), while an instance outage is the absence of one. A caller that
-    confused them would either chase a container restart that never happened or
-    retry a capacity refusal forever.
+    it. A caller that confused them would either chase a container restart that
+    never happened or retry a capacity refusal forever.
+
+    ⚠️ The exclusivity is by CLASS, not by "an outage is the absence of a
+    reply" — that phrasing is FALSE and was corrected under review (#9532
+    cycle 2): the outage family also owns the ANSWERED ``BusyLoadingError``
+    (LOADING). The real discriminator is :func:`_answered_refusal`, which
+    excludes every ``ResponseError`` from the outage family: ``OutOfMemoryError``
+    IS a ``ResponseError``, and LOADING is not an ``OutOfMemoryError``. That is
+    why the two predicates cannot both answer True for one exception.
 
     Class first, text second: ``OutOfMemoryError`` is the class the vendor
     parser mints for the engine's own ``OOM …`` reply on the pinned redis, and
@@ -874,15 +880,44 @@ def is_memory_ceiling_refusal(exc: BaseException) -> bool:
     through that table. The text test reads the message HEAD (`.partition`), the
     same rule :func:`is_dead_reader` follows, so an already-explained message is
     still classified and never double-noted.
+
+    The chain is walked the way :func:`is_instance_unavailable` walks it
+    (``__cause__``, then ``__context__`` unless suppressed), because the driver
+    and this repo's own wrappers re-raise WITH a cause: measured, a
+    ``ResponseError("write failed")`` whose ``__cause__`` is the ceiling refusal
+    answered False here before the walk existed, so the illegible sentence
+    reached the caller unchanged — the exact defect #7357 closes. Every link is
+    tested with the SAME class/text rule, so a chained answer cannot smuggle a
+    non-ceiling failure into the family, and the walk is id-deduplicated so a
+    cyclic chain cannot spin.
     """
     import redis.exceptions as _re
 
-    oom = getattr(_re, "OutOfMemoryError", None)
-    if oom is not None and isinstance(exc, oom):
-        return True
-    if isinstance(exc, _re.ResponseError):
-        return bool(_MEMORY_CEILING_RE.search(
-            str(exc).partition(_LEGIBLE_OPENER)[0]))
+    def _is_ceiling(link: BaseException) -> bool:
+        oom = getattr(_re, "OutOfMemoryError", None)
+        if oom is not None and isinstance(link, oom):
+            return True
+        if isinstance(link, _re.ResponseError):
+            return bool(_MEMORY_CEILING_RE.search(
+                str(link).partition(_LEGIBLE_OPENER)[0]))
+        return False
+
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    while link is not None and id(link) not in seen:
+        seen.add(id(link))
+        if _is_ceiling(link):
+            return True
+        # As Python reports it: an explicit ``raise ... from`` wins, a
+        # ``raise ... from None`` SUPPRESSES the context the author deliberately
+        # detached, and only then is the implicit ``__context__`` followed — the
+        # same order :func:`is_instance_unavailable` uses (#6977).
+        if link.__cause__ is not None:
+            link = link.__cause__
+        elif link.__suppress_context__:
+            link = None
+        else:
+            link = link.__context__
     return False
 
 
@@ -987,13 +1022,17 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
         "applied: the refused command was rejected BEFORE it ran (measured on a "
         "write: a refused GRAPH.QUERY `CREATE` left the graph at 0 nodes). "
         "Re-issuing it now will be refused the same way — the next action is to "
-        "raise the DB's own ceiling, the `--maxmemory` in that instance's "
-        "`REDIS_ARGS` (it bounds the DATASET), then re-issue. ONLY a "
-        "`tools/test_lane.py` container derives that ceiling from "
-        "`FALKORDB_CONTAINER_MEMORY` (3/4 of it); the others set it themselves — "
-        "the dev container pins 512mb and the CI provisioner passes none — so "
-        "raising `FALKORDB_CONTAINER_MEMORY` alone moves the kernel cap and NOT "
-        "this refusal. The kernel cap is the backstop, never the ceiling. "
+        "raise the instance's `maxmemory` ceiling (the Redis-side bound on the "
+        "DATASET), then re-issue. Where that setting lives depends on the "
+        "instance: on a container this repo starts it is the `--maxmemory` in "
+        "its `REDIS_ARGS`, and on a MANAGED instance (FalkorDB Cloud) it is the "
+        "provider's plan/console setting — there is no container there to pass "
+        "a flag to. ONLY a `tools/test_lane.py` container derives that ceiling "
+        "from `FALKORDB_CONTAINER_MEMORY` (3/4 of it); the others set it "
+        "themselves — the dev container pins 512mb and the CI provisioner "
+        "passes none — so raising `FALKORDB_CONTAINER_MEMORY` alone moves the "
+        "kernel cap and NOT this refusal. The kernel cap is the backstop, "
+        "never the ceiling. "
         + MEMORY_CEILING_OWNERSHIP_CONSTRAINT
         + " See #2981."
     )
