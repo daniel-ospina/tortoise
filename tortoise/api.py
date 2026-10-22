@@ -46,7 +46,10 @@ def _refuse_invisible_point_kinds_in_payload(payload: dict) -> None:
     kind gate for exactly this reason, and it had no invisible-kind arm —
     measured at #9591's head: ``api.add_point(..., pointKind='statement
     \\u2003')`` stored the padded kind, the gate answered ``[]``, and a
-    ``require_calibration=True`` run stamped it.
+    ``require_calibration=True`` run stamped it. (The refusal is the SDK doors'
+    own rule — PRINTABLE TEXT with no surrounding whitespace and no invisible or
+    non-rendering character; emoji, CJK, accents and printable punctuation are
+    accepted, so this is not an "identifier" rule.)
 
     The input here is not always a human: ``extractor.py`` builds the kind from
     the model's JSON and passes it straight to ``add_point``, so a stray

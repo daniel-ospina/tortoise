@@ -120,7 +120,7 @@ class TestCreatePointRefuses:
     @pytest.mark.parametrize("kind", INVISIBLE_KINDS)
     def test_create_point_refuses_and_writes_nothing(self, sdk, kind):
         """Refusal BEFORE any write: the caller's graph is untouched."""
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             sdk.create_point(kind, f"kind={kind!r}", status="live")
         assert _point_ids(sdk) == []
 
@@ -145,7 +145,7 @@ class TestCreatePointRefuses:
         kind. Both mined spellings (camel + snake) are screened.
         """
         for spelling in ("pointKind", "point_kind"):
-            with pytest.raises(ValueError, match="pointKind must be an identifier"):
+            with pytest.raises(ValueError, match="cannot be part of a kind"):
                 sdk.create_point("statement", "x", status="live",
                                  **{spelling: "\u2003statement\u2003"})
         assert _point_ids(sdk) == []
@@ -156,7 +156,7 @@ class TestCreatePointRefuses:
         Nothing is created on the refusal, so a re-run cannot leave a padded
         spelling behind under a "the point already exists" branch.
         """
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             sdk.create_point("\u2003statement\u2003", "x", status="live",
                              dedup=True)
         assert _point_ids(sdk) == []
@@ -167,13 +167,13 @@ class TestUpdatePointRefuses:
 
     def test_update_point_refuses_a_padded_point_kind(self, sdk):
         p = sdk.create_point("statement", "Updatable", status="live")
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             sdk.update_point(p["id"], pointKind="\u2003observation\u2003")
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
 
     def test_update_point_refuses_the_snake_spelling(self, sdk):
         p = sdk.create_point("statement", "Updatable", status="live")
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             sdk.update_point(p["id"], point_kind="\u2003observation\u2003")
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
 
@@ -197,7 +197,7 @@ class TestUpdateEntityRefuses:
     ])
     def test_update_entity_refuses_and_writes_nothing(self, sdk, kwargs):
         p = sdk.create_point("statement", "Victim", status="live")
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             sdk.update_entity(p["id"], **kwargs)
         assert _kinds_in_graph(sdk, p["id"]) == ["statement"]
         assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
@@ -246,7 +246,7 @@ class TestTheJournalSeamRefuses:
 
     def test_add_point_refuses_a_padded_kind_and_writes_nothing(self, tmp_path):
         api = self._api(tmp_path)
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             api.add_point("claim", {"source": "test"},
                           pointKind="statement\u2003")
         assert api.log.read_all() == []
@@ -263,7 +263,7 @@ class TestTheJournalSeamRefuses:
         api = EventAPI(EventLog(tmp_path / "events.jsonl"),
                        initiated_by="extractor", agent_id="test",
                        projection=None)
-        with pytest.raises(ValueError, match="pointKind must be an identifier"):
+        with pytest.raises(ValueError, match="cannot be part of a kind"):
             api.add_point("claim", {"source": "test"},
                           pointKind="\ufeffstatement")
         assert api.log.read_all() == []
@@ -477,18 +477,38 @@ class TestTheClassIsClosed:
         committed — measured: `landed: [['clean first item', 'statement']]`.
         """
         from tortoise.exceptions import BundleValidationError
-        bundle = {"points": [
-            {"kind": "statement", "content": "clean first item"},
+        # EVERY spelling the write door reads, at the depth it reads it: the
+        # positional `kind`, a flat `pointKind`/`point_kind`, and the same names
+        # nested in `props` (which WIN over the positional kind — the spelling
+        # that actually reached the graph on `origin/main`). Screening only the
+        # positional `kind` left this issue's own shape Phase-2-only
+        # (#9591 review cycle 5).
+        offenders = [
             {"kind": "\u2003statement\u2003", "content": "padded second item"},
-        ]}
-        violations = sdk._validate_bundle(bundle)
-        assert any("pointKind must be an identifier" in v["message"]
-                   for v in violations), violations
-        with pytest.raises(BundleValidationError):
-            sdk.ingest(bundle)
-        landed = sdk._get_proj().g.query(
-            "MATCH (n:Point) RETURN n.content").result_set
-        assert landed == [], landed  # zero mutations, not a half-written graph
+            {"content": "padded props", "props": {"pointKind": "\u2003statement\u2003"}},
+            {"content": "padded flat", "point_kind": "statement\u200b"},
+        ]
+        for offender in offenders:
+            sdk._get_proj().g.query("MATCH (n:Point) DETACH DELETE n")
+            bundle = {"points": [
+                {"kind": "statement", "content": "clean first item"},
+                offender,
+            ]}
+            violations = sdk._validate_bundle(bundle)
+            assert any("cannot be part of a kind" in v["message"]
+                       for v in violations), (offender, violations)
+            with pytest.raises(BundleValidationError):
+                sdk.ingest(bundle)
+            landed = sdk._get_proj().g.query(
+                "MATCH (n:Point) RETURN n.content").result_set
+            assert landed == [], (offender, landed)  # zero mutations
+        # …and a legitimate bundle still ingests.
+        sdk._get_proj().g.query("MATCH (n:Point) DETACH DELETE n")
+        out = sdk.ingest({"points": [
+            {"kind": "statement", "content": "clean"},
+            {"content": "props kind", "props": {"pointKind": "observation"}},
+        ]})
+        assert out["created"]["points"] == 2, out
 
     def test_the_door_accepts_no_invisible_code_point(self):
         """GENERATIVE closure over the WHOLE code space (#9591 review cycle 3).

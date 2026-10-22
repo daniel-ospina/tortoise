@@ -402,10 +402,13 @@ _CALIBRATION_GATED_LABELS = ("Point",)
 #: recorded here rather than paid for on the hot path.
 #:
 #: #9287 closed the REACHABLE half of that boundary at the WRITE DOOR instead:
-#: ``create_point``/``update_point`` now REFUSE a ``pointKind`` carrying any
-#: non-identifier character (``_refuse_invisible_kind`` below), so the SDK can
-#: no longer mint a kind this filter cannot classify. Reachability of the
-#: remaining spellings is therefore an IMPORTED / hand-written row (a raw Cypher
+#: ``create_point``/``update_point``/``update_entity`` and the ``EventAPI``
+#: journal seam now REFUSE a ``pointKind`` that carries surrounding whitespace or
+#: an invisible / non-rendering character (``_refuse_invisible_kind`` below —
+#: note the rule is PRINTABLE TEXT, not "an identifier": emoji, CJK, accents and
+#: every printable punctuation mark are accepted), so the SDK can no longer mint
+#: a kind this filter cannot classify. Reachability of the remaining spellings is
+#: therefore an IMPORTED / hand-written row (a raw Cypher
 #: ``SET n.pointKind = …``), which is exactly what this filter is for: such a
 #: node IS demandable and clearable, so the gap is one of coverage, not of an
 #: unsatisfiable demand. The two halves are documented together on purpose —
@@ -606,6 +609,50 @@ def _clean_model_kind(value, *, default: str = "statement",
     return fixed
 
 
+def _kind_refusal_text(prop: str, value: str, bad: str, *, door: str) -> str:
+    """The ONE wording of an invisible-kind refusal (#9591 review cycle 5).
+
+    Shared by the write door (``_refuse_invisible_kind``, which raises it) and
+    by the bundle validator (``_check_kind``, which reports it as a Phase-1
+    violation) — a copy is how the two phases drifted one commit after the door
+    was corrected: the bundle arm kept asserting "the gate would not demand a
+    prior" for the ASCII/NBSP family, which the read path DOES fold (measured).
+
+    The rule is stated as implemented — printable text, no surrounding
+    whitespace, no invisible or non-rendering characters — never as "an
+    identifier": the door accepts emoji, CJK, accents and punctuation, and a
+    later reader who "fixes" the message into an identifier rule would start
+    refusing real kinds.
+    """
+    # The suggestion is derived from the refusal itself, never ``value.strip()``:
+    # ``strip()`` removes WHITESPACE only, so for a ``Cf`` mark it returns the
+    # value UNCHANGED and a caller who follows the message verbatim loops on the
+    # identical error. ``repr()`` is wrong for the same reason in the other
+    # direction: it ESCAPES a ``Cf`` character into its six-character backslash
+    # form — a DIFFERENT string the door would happily store.
+    suggestion = _kind_suggestion(value)
+    tail = (
+        f"Pass the kind without the {bad!r} — e.g. '{suggestion}'."
+        if suggestion
+        else "The kind is only invisible characters — supply a name."
+    )
+    # ⛔ state the reason that is TRUE for THIS character (#9591 review cycle 4).
+    reason = (
+        "the read path's own whitespace normalisation happens to fold this "
+        "spelling today, but the door — not a per-row scan — is the guarantee"
+        if bad in _KIND_WHITESPACE_CHARS
+        else "the calibration gate classifies kinds after its own normalisation, "
+             "so this spelling is a DIFFERENT kind: the gate would not demand a "
+             "prior for it while EP still consumed and stamped the node"
+    )
+    return (
+        f"{door}: {prop} {value!r} carries {bad!r} (U+{ord(bad):04X}), which "
+        "cannot be part of a kind — a kind is printable text, with no "
+        f"surrounding whitespace and no invisible or non-rendering characters. "
+        f"A kind is matched by exact membership, so {reason} (#9287). {tail}"
+    )
+
+
 def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
     """#9287: refuse a kind the calibration gate cannot classify.
 
@@ -620,7 +667,7 @@ def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
 
     Refusing is the repair the issue asks for (option 1) and it is the door's
     own posture for a value its post-write check cannot resolve: it NAMES the
-    argument and the offending code point, so the author fixes the spelling,
+    argument, the code point and the corrected spelling, so the author fixes it,
     instead of a silent rewrite of what they asked for (``pointKind`` is part of
     the dedup identity ``(pointKind, content_hash)``, so a silent canonical
     form would also move the identity behind the caller's back).
@@ -635,42 +682,7 @@ def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
     bad = _kind_invisible_char(value)
     if bad is None:
         return
-    # The suggestion is derived from the refusal itself, never ``value.strip()``:
-    # ``strip()`` removes WHITESPACE only, so for the ``Cf`` half of the family
-    # (ZWSP, BOM, soft hyphen, ZWNJ/ZWJ) it returns the value UNCHANGED and a
-    # caller who follows the message verbatim loops on the identical error
-    # (measured: ``'\ufeffstatement'.strip() == '\ufeffstatement'``).
-    suggestion = _kind_suggestion(value)
-    # ⛔ NOT ``{suggestion!r}``: ``repr`` ESCAPES a ``Cf`` character into its
-    # six-character backslash form, so the message would hand the caller a
-    # DIFFERENT string (`'\\ufeffstatement'` — literally backslash-u-…) that the
-    # door happily accepts and stores under a name they never had. The suggestion
-    # is interpolated raw, inside quotes, so it is the value itself.
-    tail = (
-        f"Pass the kind without the {bad!r} — e.g. '{suggestion}'."
-        if suggestion
-        else "The kind is only invisible characters — supply a name."
-    )
-    # ⛔ STATE THE REASON THAT IS TRUE FOR THIS CHARACTER (#9591 review cycle 4):
-    # the read path HAPPENS to normalise the ASCII/NBSP family, so claiming "the
-    # gate would not demand a prior" for those is false — measured: an imported
-    # row with `' statement'` IS demanded (pinned by
-    # `test_out_of_contract_kind_shapes_do_not_abort_the_gate`). The door is the
-    # guarantee either way; only the out-of-family half is the measured fail-open.
-    reason = (
-        "the read path's own whitespace normalisation happens to fold this "
-        "spelling today, but the door — not a per-row scan — is the guarantee, "
-        "and a kind is an identifier"
-        if bad in _KIND_WHITESPACE_CHARS
-        else "the calibration gate classifies kinds after its own normalisation, "
-             "so this spelling is a DIFFERENT kind: the gate would not demand a "
-             "prior for it while EP still consumed and stamped the node"
-    )
-    raise ValueError(
-        f"{door}: {prop} must be an identifier, but {value!r} carries "
-        f"{bad!r} (U+{ord(bad):04X}). A kind is matched by exact membership, "
-        f"so {reason} (#9287). {tail}"
-    )
+    raise ValueError(_kind_refusal_text(prop, value, bad, door=door))
 
 
 #: id types an id-equality can resolve. A hand-written array id is not one of
@@ -17208,7 +17220,8 @@ class TortoiseSDK:
         # connections: only dict-ness + the batch_id guard here — the
         # connection contract is check 4's job.
 
-    def _check_kind(self, kind: Any, index: int, violations: list[dict]) -> None:
+    def _check_kind(self, kind: Any, index: int, violations: list[dict], *,
+                    item: dict | None = None) -> None:
         """Check 2 — CYCLE-25 point-kind vocabulary (ontology v3.8).
 
         Accepts `statement` (THE extraction write kind — canonical) plus the
@@ -17220,9 +17233,12 @@ class TortoiseSDK:
         WITHOUT kind is LEGAL and defaults to `statement` — the default is
         applied by the write path, not flagged here.
         """
-        if kind is None:
-            return
-        if not isinstance(kind, str):
+        # ⛔ the POSITIONAL checks below are skipped when the item declares no
+        # ``kind`` (a legal item, defaulted to `statement` by the write path) —
+        # but the PROPS-spelling screening must still run, which is why this is
+        # not an early `return` (#9591 review cycle 5: an early return made every
+        # `props.pointKind` spelling invisible to Phase 1).
+        if kind is not None and not isinstance(kind, str):
             # REVIEW-FIX P2 (cycle-26): a non-string kind must not silently
             # write pointKind:<int> into the graph — Phase-1 violation.
             violations.append({
@@ -17238,26 +17254,34 @@ class TortoiseSDK:
                            "entity item with type:'event' and eventKind "
                            "('occurrence'/'turn') for episodic records",
             })
-        # #9287 (review cycle 4): the same refusal the Point write doors raise,
-        # reported as a PHASE-1 violation. Without it this class was
-        # Phase-2-only in `ingest()` — measured: a bundle whose second point
-        # carried a padded kind PASSED `_validate_bundle` (zero mutations) and
-        # then raised from `create_point` mid-write, with the FIRST item already
-        # committed. Every other kind rule here is collected, zero-mutation and
-        # shared by both phases (`TestPhase1Phase2Parity`); this one now is too.
-        bad = _kind_invisible_char(kind)
-        if bad is not None:
-            fix = _kind_suggestion(kind)
+        # #9287 (#9591 review cycles 4-5): the same refusal the Point write
+        # doors raise, reported as a PHASE-1 violation so an `ingest()` bundle
+        # cannot pass validation and then raise from `create_point` mid-write
+        # with earlier items already committed (measured). EVERY spelling the
+        # door reads is screened at the DOOR'S OWN DEPTH (`_item_prop_at_depth`
+        # with the points depth — `create_point` folds `props` once and
+        # `update_point` on a dedup hit folds again), never the top-level `kind`
+        # alone: a padded `props.pointKind` was the spelling that actually
+        # reached the graph on `origin/main`, so screening only `kind` left the
+        # issue's own shape Phase-2-only.
+        candidates: list[tuple[str, object]] = [("kind", kind)]
+        if isinstance(item, dict):
+            from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+            for spelling, canonical in _kind_spellings.items():
+                if canonical != "pointKind":
+                    continue
+                declares, value = _item_prop_at_depth(item, spelling,
+                                                      _POINT_ITEM_FLATTEN_DEPTH)
+                if declares:
+                    candidates.append((spelling, value))
+        for _spelling, value in candidates:
+            bad = _kind_invisible_char(value) if isinstance(value, str) else None
+            if bad is None:
+                continue
             violations.append({
                 "section": "points", "index": index,
-                "message": f"pointKind must be an identifier, but {kind!r} "
-                           f"carries {bad!r} (U+{ord(bad):04X}) — a kind is "
-                           "matched by exact membership, so this spelling is a "
-                           "different kind (#9287). "
-                           + (f"Pass the kind without the {bad!r} — e.g. "
-                              f"'{fix}'." if fix else
-                              "The kind is only invisible characters — "
-                              "supply a name."),
+                "message": _kind_refusal_text("pointKind", value, bad,
+                                              door="ingest"),
             })
 
     def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
@@ -18978,7 +19002,8 @@ class TortoiseSDK:
             for i, item in enumerate(bundle.get(section) or []):
                 self._check_item_shape(section, i, item, violations)
                 if section == "points" and isinstance(item, dict):
-                    self._check_kind(item.get("kind"), i, violations)
+                    self._check_kind(item.get("kind"), i, violations,
+                                     item=item)
         for i, conn in enumerate(bundle.get("connections") or []):
             self._check_item_shape("connections", i, conn, violations)
             self._check_connection(i, conn, violations)
