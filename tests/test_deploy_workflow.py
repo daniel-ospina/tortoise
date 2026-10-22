@@ -2228,14 +2228,54 @@ _MATRIX_ROW = re.compile(
 )
 
 
+def _drift_gate():
+    """The shipped provenance gate, imported as a module.
+
+    ONE reader per surface: `read_manifest` (the manifest) and
+    `fly_toml_env_keys` (what counts as an `[env]` ASSIGNMENT) are the gate's
+    own, so this test cannot disagree with the deploy about what a declaration
+    means. The local copy this replaced did `line.split("#", 1)[0].split()`,
+    which is the parse bug the gate documents — `REGISTRY_STREAM_KEY
+    fly-only:#661` truncated to `fly-only:` — i.e. the test meant to prove "the
+    manifest and the gate agree" used a weaker parser than the gate (#9548
+    review, non-blocking B).
+    """
+    import importlib.util
+
+    sys.path.insert(0, str(_REPO_ROOT / ".github" / "scripts"))
+    spec = importlib.util.spec_from_file_location(
+        "check_fly_secret_drift_r1", _REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def _manifest_declarations() -> dict[str, str]:
     """`{Fly variable: source token}` for every shipped manifest declaration."""
-    declared: dict[str, str] = {}
-    for line in _SECRET_MANIFEST.read_text(encoding="utf-8").splitlines():
-        parts = line.split("#", 1)[0].split()
-        if len(parts) == 2:
-            declared[parts[0]] = parts[1]
-    return declared
+    return _drift_gate().read_manifest(_SECRET_MANIFEST)
+
+
+def test_the_manifest_reader_keeps_a_fly_only_reference_intact():
+    """#9548 review B: the manifest is read with the GATE's parser, not a `#` split.
+
+    A plain `line.split("#", 1)[0]` cuts at the `#` INSIDE a `fly-only:#661`
+    reference, so `REGISTRY_STREAM_KEY` parsed to `fly-only:` — the issue number
+    silently lost, the exact spelling `check-fly-secret-drift.py` records as a
+    past bug. The reader is now the gate's own `read_manifest`, and this asserts
+    the READING (the reference keeps its `#<N>`), not merely that the name
+    appears, so a future hand-rolled copy turns this red.
+    """
+    declared = _manifest_declarations()
+    fly_only = {n: s for n, s in declared.items() if s.startswith("fly-only:")}
+    assert fly_only, "the shipped manifest declares no fly-only: name — the reader is wrong"
+    for name, source in fly_only.items():
+        assert re.fullmatch(r"fly-only:#\d+", source), (
+            f"{name} parsed as {source!r} — the `#` inside the issue reference was "
+            "read as a comment marker (read the manifest with the gate's "
+            "`read_manifest` instead of a `split('#')` copy)"
+        )
 
 
 def _matrix_rows() -> dict[str, tuple[str, str, str]]:
@@ -2247,6 +2287,81 @@ def _matrix_rows() -> dict[str, tuple[str, str, str]]:
         name: (fly.strip(), fdb.strip(), gh.strip())
         for name, fly, fdb, gh in _MATRIX_ROW.findall(body)
     }
+
+
+_RECORD_ARMING_HEADING = "### Arming the Postgres record"
+
+
+def _record_arming_section() -> str:
+    """The runbook's `Arming the Postgres record` section, verbatim.
+
+    Scoped to the section, so a `/metrics` mention elsewhere in the 2.7k-line
+    runbook (§6.9's `serve_health` discussion legitimately has one) can neither
+    satisfy nor fail these assertions by accident.
+    """
+    text = _RUNBOOK.read_text(encoding="utf-8")
+    assert _RECORD_ARMING_HEADING in text, (
+        f"docs/infra-runbook.md has no {_RECORD_ARMING_HEADING!r} section — the "
+        "operator's only arming recipe moved or was deleted"
+    )
+    body = text.split(_RECORD_ARMING_HEADING, 1)[1]
+    return body.split("\n## ", 1)[0].split("\n### ", 1)[0]
+
+
+def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
+    """#9548 review P1: the verify recipe must not read a route the app never serves.
+
+    The recipe shipped with this section was
+    `fly ssh console … -C "curl -s localhost:9090/metrics | grep record_write_failures"`,
+    and it CANNOT return a reading in any state: the hosted app's 9090 listener is
+    `monitoring.start_health_listener` → `_HealthzHandler`, which answers `/healthz`
+    and 404s every other path, and `serve_health` (the only `/metrics` server) is not
+    a `fly.toml` process. `curl -s` prints the 404 body, `grep` matches none of it,
+    and the recipe emits NOTHING — byte-identical to "0 failures", the reading the
+    next line told the operator to want. A fail-open verification step, in the
+    section that exists because the record can be silently inert.
+
+    Falsifying on the pre-fix text: `9090/metrics` and the absolute bar both appear
+    there, and neither may come back.
+    """
+    section = _record_arming_section()
+    # No PRESCRIBED command block may read the route: the section may (and does)
+    # QUOTE the broken recipe in prose to warn an operator off it, but a fenced
+    # `bash` block is a command the operator is told to run.
+    blocks = re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+    assert blocks, "the arming section prescribes no command — the reader is wrong"
+    for block in blocks:
+        assert "9090/metrics" not in block, (
+            "a prescribed arming command greps `localhost:9090/metrics`, which the "
+            "hosted app does NOT serve (`_HealthzHandler` 404s every path but "
+            "/healthz`) — it prints nothing in every state, so an empty grep reads "
+            "as a pass"
+        )
+    # ... and the check that DOES exist is named: the seam logs every non-write at
+    # WARN with its reason (`tortoise/record_writer.py`).
+    assert "the record write did not happen" in section, (
+        "the section names no read surface for a refused write — the seam logs "
+        "'the record write did not happen (<reason>)' and nothing greps it"
+    )
+    # The pass bar must state the EXPECTED non-zero baseline instead of "0":
+    # a `no_durable_journal` decline is the healthy M2 capture path, and #9264's
+    # `DatatypeMismatch` refusals are counted on `write_failed`.
+    assert "must stay **0**" not in section, (
+        "the section sets an absolute `record_write_failures == 0` bar, which a "
+        "HEALTHY armed deployment fails: #9264's DatatypeMismatch refusals are "
+        "counted on write_failed (and the R1-before-R2 ordering expects them)"
+    )
+    for expected in ("#9264", "no_durable_journal", "record_non_journal_skips"):
+        assert expected in section, (
+            f"the verify section does not name {expected!r} — an operator reading a "
+            "non-zero counter has no way to tell the documented baseline from a "
+            "real arming failure"
+        )
+
+
+def _guarded_append(name: str) -> str:
+    """The exact guard + append line an optional secret must carry (`-n`-guarded)."""
+    return f'[ -n "${name}" ] && ARGS+=({name}="${name}")'
 
 
 def test_record_arming_secret_is_staged_from_its_own_github_secret():
@@ -2280,11 +2395,22 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
         "GH_SECRETS_PRESENT — the declaration then reads as ABSENT and the "
         "deploy fails on the manifest entry instead of propagating the value"
     )
-    # Appended to the flyctl argv behind the `-n` guard every optional secret uses
-    # (an unguarded append pushes `K=` and clobbers an out-of-band value).
+    # Appended to the flyctl argv, AND guarded. Membership alone is guard-blind:
+    # `_array_pairs` scans the whole `run:` text, so it maps a guarded append and
+    # a bare one identically, and the provenance gate does not refuse the bare one
+    # either (in the all-present sample the name is `assigned`). An unguarded
+    # append pushes `TORTOISE_RECORD_DSN=` on every deploy — a silent DISARM — so
+    # the guard is asserted too, and
+    # `test_the_record_arming_append_is_guarded_not_merely_present` proves that
+    # assertion discriminates.
     assert _array_pairs(payload["run"]).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
         f"the secrets-set step never appends {_RECORD_DSN_ENV} to the flyctl "
         "array — the GitHub secret would never reach Fly"
+    )
+    assert _guarded_append(_RECORD_DSN_ENV) in payload["run"], (
+        f"the {_RECORD_DSN_ENV} append is not `-n`-guarded — an absent GitHub "
+        "secret would stage an EMPTY DSN and silently disarm the record while "
+        "every guard here stays green"
     )
     assert _manifest_declarations().get(_RECORD_DSN_ENV) == f"gh-secret:{_RECORD_DSN_ENV}", (
         f"{_RECORD_DSN_ENV} is not declared gh-secret:{_RECORD_DSN_ENV} in "
@@ -2300,6 +2426,40 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
         "the Secrets Matrix shows TORTOISE_RECORD_DSN with no GitHub Actions home, "
         "while the manifest declares it `gh-secret:` — the Fly-only rotation recipe "
         "looks correct for a name the next deploy overwrites"
+    )
+
+
+def test_the_record_arming_append_is_guarded_not_merely_present():
+    """#9548 review P2: the arming append's GUARD is asserted, not just its presence.
+
+    `_array_pairs` runs its regexes over the whole `run:` text with no awareness
+    of the enclosing shell test, so `[ -n "$X" ] && ARGS+=(X="$X")` and a bare
+    `ARGS+=(X="$X")` produce the SAME mapping. The sibling test's membership
+    assertion therefore pinned presence, not guardedness.
+
+    This is the discrimination proof for the guard assertion: the shipped text
+    satisfies it, and the SAME text with the guard stripped does not — while the
+    guard-blind membership reading is identical for both. (The global
+    `test_optional_fly_appends_are_n_guarded` covers this name too; it is pinned
+    here as well because that test's per-line scan exempts anything it cannot
+    classify, so a change there must not silently drop this one.)
+    """
+    run = _steps()[_SET_STEP]["run"]
+    guard_prefix = f'[ -n "${_RECORD_DSN_ENV}" ] && '
+    guarded = _guarded_append(_RECORD_DSN_ENV)
+    assert guard_prefix in run, (
+        f"the payload step carries no `{guard_prefix.strip()}` guard at all"
+    )
+    assert guarded in run, f"the guarded append {guarded!r} is not in the payload step"
+
+    unguarded = run.replace(guard_prefix, "", 1)
+    assert unguarded != run, "the guard this test pins was not stripped — the probe is vacuous"
+    assert guarded not in unguarded, "the stripped text still carries the guarded line"
+    # ... and the guard-blind reader cannot tell the two apart, which is exactly
+    # why the assertion above has to read the TEXT.
+    assert _array_pairs(unguarded).get(_RECORD_DSN_ENV) == _RECORD_DSN_ENV, (
+        "the guard-stripped step no longer maps the name — then `_array_pairs` "
+        "would have caught an unguarded append and this test would be redundant"
     )
 
 
@@ -2319,18 +2479,10 @@ def test_the_record_is_not_armed_single_tenant_on_the_hosted_app():
     `[env]` comment both NAME these variables precisely to forbid setting them,
     and a prose-mention test would force that warning out of the tree.
     """
-    import importlib.util
-
-    sys.path.insert(0, str(_REPO_ROOT / ".github" / "scripts"))
-    spec = importlib.util.spec_from_file_location(
-        "check_fly_secret_drift_r1", _REPO_ROOT / ".github" / "scripts" / "check-fly-secret-drift.py"
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    # The gate's OWN `[env]` parser, so this test and the deploy cannot disagree
-    # about what counts as an assignment (a comment does not).
-    env_keys = module.fly_toml_env_keys((_REPO_ROOT / "fly.toml").read_text(encoding="utf-8"))
+    # The gate's OWN parsers, so this test and the deploy cannot disagree about
+    # what counts as an assignment (a comment does not).
+    gate = _drift_gate()
+    env_keys = gate.fly_toml_env_keys((_REPO_ROOT / "fly.toml").read_text(encoding="utf-8"))
 
     declared = _manifest_declarations()
     argv_keys = _array_pairs(_steps()[_SET_STEP]["run"])

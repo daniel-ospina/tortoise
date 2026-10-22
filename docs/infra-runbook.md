@@ -2587,7 +2587,7 @@ run (#2706).
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | ⚠️ **arms the Postgres record** (epic #7879 R1) — set via GitHub secret → Fly; absent ⇒ `NOT_ARMED` and the record writes nothing | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ (Supabase pooler DSN) |
+| TORTOISE_RECORD_DSN | — (**not on Fly yet** — the secret is the operator's act; absent ⇒ `NOT_ARMED` and the record writes nothing). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ (Supabase pooler DSN) |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
@@ -2600,8 +2600,12 @@ of broken: nothing goes red, the record simply never receives a row
 (`docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md` §A8).
 
 **The value.** The project's **pooler** DSN — the same shape `.env.example`
-documents for `TORTOISE_AUDIT_DSN`:
-`postgresql://postgres.<project-ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require`.
+documents for `TORTOISE_AUDIT_DSN` (and for `TORTOISE_RECORD_DSN` itself):
+`postgresql://postgres.<project-ref>:<urlencoded-password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require&connect_timeout=5`.
+⚠️ **URL-encode the password** (`@`, `:`, `#`, `/` and `?` are DSN delimiters): a
+raw `p@ss:word` does not fail — it parses into a *different* host/user, and
+`record_dsn()` cannot catch it beyond the scheme check, so the failure surfaces as
+`circuit_open` / `write_failed` writes rather than as a configuration error.
 §4 of `docs/architecture/STORAGE-ARCHITECTURE.md` decides **one project with
 tenant-scoped rows**, so this is the existing Supabase project — *not* a second
 database per team (refused on cost grounds).
@@ -2618,24 +2622,82 @@ fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
 
 **Verify it is ARMED, not merely set** — a set variable that reaches an
 unreachable or misconfigured database is the one failure this cannot show you.
-Capture one session, then on the record project:
+
+⛔ **There is NO `/metrics` route on the hosted app — do not go looking for one.**
+The listener on **9090** is the dedicated liveness listener
+(`monitoring.start_health_listener` → `_HealthzHandler`), which answers `/healthz`
+and returns **404 for every other path** (§6.9 item 2); `serve_health` — the only
+server with a `/metrics` route — is started by the standalone
+`tortoise health-server` CLI, which is not a `fly.toml` process, and it could not
+co-bind 9090 anyway. So
+`fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:9090/metrics | grep record_write_failures"`
+prints **nothing in every state** — armed-and-writing, armed-and-refusing, and
+unarmed alike (`curl -s` prints the 404 body, `grep` matches none of it). An
+empty grep is **not** a passing reading: it is the silent `NOT_ARMED` class this
+section exists to close, one layer up. Hosted `GET /health` (8000) does not carry
+the counter either.
+
+**Two reads that DO exist on this deployment.**
+
+1. **The failure log line** — every non-write is logged at WARN with its reason
+   (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
+   `write_failed`), and this needs no auth:
+
+   ```bash
+   fly logs -a tortoise-y4mjjq | grep "the record write did not happen"
+   ```
+
+2. **The counters** — `monitoring.metrics()`, read INSIDE the process that writes
+   the rows: the authenticated MCP tool `tortoise_overview(section="health")` on
+   the app's `/mcp` mount, which serves `monitoring.metrics()` from the same
+   process that writes the rows (the retired name `tortoise_health` still answers
+   as an alias), so `record_write_failures` (a `{reason: count}` dict) and
+   `record_non_journal_skips` are the live shape. ⛔ Do **not** substitute a
+   `fly ssh console -C "python3 -c 'import tortoise.monitoring; …'"` one-liner:
+   the counters are in-process memory, so a fresh interpreter answers **0**
+   unconditionally — a worse false pass than the 404 above.
+
+**The SQL half, read honestly.** Capture one session, then on the record project:
 
 ```sql
-select count(*) from journal_event;  -- >0 after a capture
+select count(*) from journal_event;  -- >0 after a capture THAT JOURNALED one
 select count(*) from point;          -- >0 when the capture added points
 ```
 
-and read the seam's own counters (served by the 9090 health listener, §6.7):
+⚠️ A pure **`capture_session` capture can legitimately add NO row**: its extracted
+records go through the M2 lane, whose log is `_InMemoryEventLog` — *not* a journal
+by design — so the seam DECLINES the write (`durable=False`,
+`record_writer.write_live_record`) and counts it on
+`record_non_journal_skips{reason="no_durable_journal"}`, never on the failure
+counter (#9231: a decline loses nothing, so a replay owes nothing). The
+row-producing path is a **durable journal lane** — the per-graph SDK writes whose
+journal lives under `TORTOISE_EVENT_LOG_BASE_DIR=/data/events` (`fly.toml`). So a
+`0` here means *"this capture took the non-durable lane"*, not *"the record is
+broken"*; the seam reads above are what decide.
 
-```bash
-fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:9090/metrics | grep record_write_failures"
-```
+**The pass bar is NOT "the counter is 0".** Two readings are expected on a healthy
+armed deployment:
 
-`record_write_failures` must stay **0** across that capture. Non-zero is NOT
-silent by design — an armed write that did not happen is counted and logged
-(`monitoring.RECORD_WRITE_FAILURE_COUNT`) — but a *migrated-away* DSN, a
-`DatatypeMismatch` refusal (#9264), or a refused tenant
-(`no_tenant`) will land there rather than in a red deploy.
+- `record_non_journal_skips{reason="no_durable_journal"}` **grows** — that is the
+  M2 capture lane declining, by design (above).
+- `record_write_failures{reason="write_failed"}` **grows by the open #9264
+  disagreement**: a `session` record whose `capture_redactions` is an integer into
+  a `jsonb` column is refused with `DatatypeMismatch` and **counted**
+  (`08-hosted-prerequisites.md` §A8, `#9264` OPEN). While #9264 is open this is the
+  documented baseline, not an arming failure — and per that epic's ordering (R1
+  arms, R2 lands the schema) a non-zero `write_failed` is even *expected* before R2
+  lands.
+
+So the bar is: **no growth in a reason other than the documented #9264
+`write_failed` refusals, and none at all for `no_tenant` / `malformed_dsn` /
+`circuit_open`.** Those three are always a fail-and-fix:
+`no_tenant` = the request carried no tenant (or a set-but-undeclared env pair),
+`malformed_dsn` = the value is not a parseable DSN, `circuit_open` = a recent
+connect FAILED (wrong host/password, project paused, network) — i.e. the
+"set but unreachable" state this section exists to catch. All of them are logged
+(recipe 1) and counted (recipe 2), never raised — an armed write that did not
+happen lands in those two channels rather than in a red deploy, which is exactly
+why the two recipes above are the verification and the deploy status is not.
 
 ⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
 versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
