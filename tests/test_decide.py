@@ -605,6 +605,14 @@ class TestIssue6671DecideRerunIsIdempotent:
         run1 = decide.file_decision(sdk, data)
         run2 = decide.file_decision(sdk, data)
 
+        # A vacuous pass: `approx({}) == {}`, so a regression that stops
+        # producing any ranking at all (e.g. a draft-elected bridge) would leave
+        # this invariance assertion green.
+        assert run1["confidences"] and run2["confidences"], (
+            "EP produced no option confidences — the invariance assertion "
+            f"below would pass vacuously (run1={run1['confidences']}, "
+            f"run2={run2['confidences']})")
+
         # EP is an iterative solve, so two passes over the SAME graph are not
         # bit-identical (measured drift here: ~1e-8). The defect this pins is
         # six orders of magnitude larger — a second filing of the same decision
@@ -745,4 +753,39 @@ class TestIssue6671ReviewGaps:
             "MATCH (op:Point {is_operator:true}) RETURN op.id, op.status"
         ).result_set}
         assert "live" in statuses, statuses
-        assert "DRAFT operator" in capsys.readouterr().out
+        assert "NON-LIVE operator" in capsys.readouterr().out
+
+    def test_non_live_status_is_named_accurately(self, sdk, capsys):
+        """A non-live operator is not necessarily a DRAFT. `retracted` is a
+        stored status too (`POINT_STATUS_VALUES`), and calling a retracted claim
+        a "draft" would hide that the run re-asserted it at full EP weight."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        # Neither `retract_point` nor `update_point` moves an OPERATOR through
+        # its lifecycle (retraction is for statement points; update_point only
+        # promotes draft→live), so the non-live state is written directly — the
+        # shape a lifecycle writer or a legacy graph leaves behind, which is
+        # exactly what the note has to describe correctly.
+        sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) SET p.status = 'retracted'",
+            params={"i": op["id"]})
+        assert sdk.get_point(op["id"]).get("status") == "retracted"
+
+        data = {
+            "context": "issue-6671-gaps",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        result = decide.file_decision(sdk, data)
+
+        elected = [row for row in result["operators"] if row["op_type"] == "IMPL"]
+        assert elected and elected[0]["id"] != op["id"], (
+            "a retracted operator was adopted as a live bridge")
+        out = capsys.readouterr().out
+        assert "retracted" in out, (
+            "the warning does not name the operator's real status: " + out)
+        assert "DRAFT" not in out, (
+            "a retracted operator is reported as a draft: " + out)

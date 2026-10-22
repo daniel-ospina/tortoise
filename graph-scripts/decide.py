@@ -182,10 +182,15 @@ def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
         return live[0], True, None
     note = None
     if existing:
-        drafts = ", ".join(op_id for op_id, _st in existing)
-        note = (f"only DRAFT operator(s) {drafts} on this bridge — EP excludes "
-                "drafts (#780), so a LIVE operator is created; the draft copy "
-                "stays and does not participate")
+        # Report the REAL statuses: a non-live operator is not necessarily a
+        # draft — `retracted` is a stored status too (`POINT_STATUS_VALUES`), and
+        # calling a retracted claim a "draft" would hide that the run just
+        # re-asserted it at full EP weight with a live twin.
+        named = ", ".join(f"{op_id} ({status})" for op_id, status in existing)
+        note = (f"only NON-LIVE operator(s) {named} on this bridge — EP excludes "
+                "draft operators (#780) and this decision needs a live bridge, "
+                "so a LIVE operator is created; the non-live copy stays and does "
+                "not participate")
     op = sdk.create_operator(op_type, source_id, [target_id], label=label)
     cache[key] = op["id"]
     return op["id"], False, note
