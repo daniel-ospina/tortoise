@@ -1526,8 +1526,11 @@ class TortoiseEP:
             "cannot be addressed by EP (every claim is keyed on `id` for "
             "hydration, for message caching and for the posterior write-back), "
             "so it can be neither computed nor stamped, and no SDK caller can "
-            "repair it. Refused before EP runs, so no posterior is computed or "
-            "stamped (#9275). Find and repair the node(s) — ONE NEW id per "
+            "repair it. Refused before EP runs, so this pass computes and "
+            "stamps no posterior (#9275) — note a multi-batch pass "
+            "(``dream_window``/``dream_all``) writes per batch and may have "
+            "committed an EARLIER batch before this refusal. Find and repair "
+            "the node(s) — ONE NEW id per "
             "node, because a single literal would mint the duplicate-id shape "
             "#7822:\n"
             "  MATCH (n:Point) WHERE n.id IS NULL "
@@ -2394,9 +2397,10 @@ class TortoiseEP:
         # turn a graph `main` computes (measured: iterations 9, converged, both
         # posteriors stamped) into a refused one.
         if any(any(_i is None for _i in f[2]) for f in factors):
-            # A refused pass publishes no run set (the #7739 rule: a pass that
-            # never ran must not leave a selection report behind).
-            self._last_affected = set()
+            # No run set is published: `_last_affected` was reset at entry and is
+            # assigned only after this guard. (`_last_skipped_factors` keeps what
+            # the assembly just collected — those factors WERE dropped, so the
+            # diagnostic describes work that happened.)
             raise self._unaddressable_claim_error("a factor's inputs")
 
         # Apply evidence priors to graph before EP iterations.

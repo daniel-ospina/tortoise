@@ -1498,6 +1498,13 @@ def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
         sdk.compute_confidence()
     message = str(exc.value)
     assert "is NULL" in message
+    # WHICH guard fired matters: this fixture's operator IS seeded, so the
+    # affected set carries the NULL and `_affected_claims` refuses it. Pinning
+    # the message pins that guard — without it the factor-input guard would
+    # raise the same error class with "a factor's inputs" instead (measured: the
+    # two shapes overlap unless the degenerate-operator case is exercised), so a
+    # revert of the affected-set guard would otherwise be masked.
+    assert "its affected set" in message
     # Actionable, not merely loud: the repair is a graph write because the node
     # has no id to pass to set_point_baseline, and it must mint ONE id per node
     # (a single literal would create the duplicate-id shape #7822).
