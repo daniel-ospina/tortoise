@@ -91,7 +91,7 @@ SESSION_ID_NOT_STR_REFUSAL = (
 )
 
 
-def session_id_refusal(session_id: str | None) -> str | None:
+def session_id_refusal(session_id: object) -> str | None:
     """The ONE home for the capture doors' session-id rule (#9599).
 
     Returns a refusal reason, or ``None`` when the value may be used.
@@ -115,12 +115,20 @@ def session_id_refusal(session_id: str | None) -> str | None:
     match it again (the engine indexes the trimmed term but does not trim the
     seek) and the turn container's CONTAINS edge landed nothing (#9599,
     measured). A blank is not an identity; the recorded rule already says so at
-    Layer-1 (``commit_schema.CommitRecord._non_blank_session_id``, #4005), and
+    Layer-1 (``commit_schema.CommitPayload._non_blank_session_id``, #4005 — the
+    validator lives on ``CommitPayload``, not on a ``CommitRecord``: no such
+    class exists, and citing one sent a review to re-derive a third spelling), and
     this is the same sentence at the doors.
 
-    PADDED-but-REAL (``"  s1  "``) is NOT a refusal — #9553 records those as
-    legitimate identities. The engine still cannot index them; refusing them
-    would be a product-surface decision and is deliberately NOT taken here.
+    PADDED-but-REAL (``"  s1  "``) is NOT a refusal here, and NO recorded
+    decision says it should be: refusing or trimming it would re-identify an id
+    a caller chose, which is a product-surface decision, so it is an OPEN OWNER
+    QUESTION parked on #9599 (comment 6342343424) — the three candidate answers
+    are written out there. This lane lands only the BLANK half and leaves the
+    padded half exactly as it was. (An earlier revision of this line attributed
+    the padded position to #9553; #9553 is "materialise the point-property edge
+    families" and states no position on padded ids at all — a review finding,
+    corrected here rather than re-pointed at a neighbour.)
     """
     if session_id is None or (isinstance(session_id, str) and session_id == ""):
         return None
@@ -129,6 +137,28 @@ def session_id_refusal(session_id: str | None) -> str | None:
     if session_id.strip():
         return None
     return SESSION_ID_BLANK_REFUSAL
+
+
+def session_id_or_absent(value: object) -> str | None:
+    """The value if it can NAME a session, else ``None`` (ABSENT).
+
+    Every door MINTs for ``None``, so a blank reaching one is a refusal while a
+    blank reaching a MINT FALLBACK must not become one: it names no session, so
+    the fallback (a path-anchored id, a content digest) is the right answer and
+    the capture is still fileable. Three callers need that spelling — the CLI
+    writer (``__main__._spool_transcript``, ``session import``, the backlog
+    replay) and the spool WIRE (``capture_spool._normalise_session_id``) — so it
+    lives here rather than being re-typed at each, and it composes
+    :func:`session_id_refusal` so the BLANK half cannot drift from the doors.
+
+    ``""`` normalises to ``None`` for the same reason ``None`` does: both are
+    ABSENT to the doors, and a fallback must fire for both.
+    """
+    if session_id_refusal(value) is not None:
+        return None
+    if not isinstance(value, str):
+        return None
+    return value or None
 
 
 def now_iso() -> str:

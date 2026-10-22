@@ -13249,12 +13249,14 @@ class SessionRequest(BaseModel):
     # where the engine cannot serve a blank key back to an equality seek: the
     # next capture on the same id minted a DUPLICATE ``:Session`` and the turn
     # container's CONTAINS edge landed nothing, measured). The rule is
-    # Layer-1's already (``commit_schema.CommitRecord._non_blank_session_id``,
-    # #4005); this is the same predicate at the boundary — one home
-    # (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and the
-    # hosted door cannot drift apart. ``None``/absent still mints (the caller
-    # named no session), and a PADDED-but-real id stays legitimate (#9553) —
-    # the engine defect is #9599's owner question, not a reason to refuse it.
+    # Layer-1's already (``commit_schema.CommitPayload._non_blank_session_id``,
+    # #4005 — the validator lives on ``CommitPayload``; there is no
+    # ``CommitRecord`` class); this is the same predicate at the boundary — one
+    # home (``tortoise.ids.session_id_refusal``), two gates, so the SDK door and
+    # the hosted door cannot drift apart. ``None``/absent still mints (the caller
+    # named no session), and a PADDED-but-real id passes: refusing or trimming it
+    # is an OPEN OWNER QUESTION on #9599 (comment 6342343424), not this gate's
+    # decision — this PR lands only the blank half.
     @field_validator("session_id")
     @classmethod
     def _non_blank_session_id(cls, v):

@@ -502,6 +502,24 @@ export function normaliseLane(value: unknown): string | undefined {
   return typeof value === "string" && CAPTURE_LANES.has(value) ? value : undefined;
 }
 
+/** #9599: the ONE session-id normalisation for the wire — a non-blank str, else
+ *  `undefined` (omit the key and the server MINTS one).
+ *
+ *  Mirrors `tortoise.ids.session_id_or_absent` on the Python leg, and it exists
+ *  for the reason every normaliser beside it exists: this leg and the Python
+ *  leg share ONE spool directory, so the drain forwards whatever the other leg
+ *  (or a hand-edit) left on disk. A present-but-blank id (`"   "`) is TRUTHY, so
+ *  the writer's `args.session_id or <fallback>` never replaced it; the server
+ *  now refuses it with a 422 at the `SessionRequest` boundary, `classifyFailure`
+ *  returns PERMANENT for a 422, and `flushSpool` then quarantines the entry —
+ *  the capture is never filed. Normalising here makes that refusal unreachable
+ *  from this leg: the server mints a usable session instead. Padded-but-real ids
+ *  pass through unchanged (refusing/trimming those is an open owner question on
+ *  #9599, not a wire decision). */
+export function normaliseSessionId(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
 /** A usable client capture instant, or `undefined`.
  *
  *  `typeof !== "number"` already refuses `true`/`false` (a JSON bool is not a
@@ -593,7 +611,11 @@ export function buildCapturePayload(args: {
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     harness: HARNESS,
-    session_id: args.sessionId,
+    // #9599: NORMALISED at the wire, like the lane/stamp/machine_id below — a
+    // blank id from the shared spool directory would otherwise be a permanent
+    // 422 (see `normaliseSessionId`). Omitted rather than `null`, matching how
+    // `machine_id`/`capture_lane` signal absence to the server.
+    session_id: normaliseSessionId(args.sessionId),
     source: args.source,
     conversation: args.turns,
     // #8531 review: capped at the WIRE (`machine_id` ≤256, `model` ≤128 are

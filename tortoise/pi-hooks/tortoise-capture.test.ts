@@ -63,6 +63,7 @@ import {
   listSpoolEntries,
   modelLabel,
   normaliseLane,
+  normaliseSessionId,
   postInstallProbe,
   pruneSpool,
   quarantineEntry,
@@ -2377,6 +2378,44 @@ test("#7708 site 2: the drain never puts an unrecognised lane on the wire", asyn
   assert.equal(server.posts(), 1);
   assert.equal(server.sessions.get(sid)?.capture_lane, undefined,
     "an unrecognised lane reached the wire");
+});
+
+// ── #9599: a blank session id must never reach the wire ───────────────────
+//
+// The Python drain normalises a blank `session_id` to "absent" so the server
+// MINTS one; this leg posts from the SAME spool directory, and the server now
+// refuses a blank with a 422 — which `classifyFailure` reads as PERMANENT, so
+// the entry would be quarantined and the capture never filed. One wire
+// normalisation, both legs.
+
+test("#9599: a blank session id normalises to absent (the server mints one)", () => {
+  for (const blank of ["   ", "\t", "\n", " \t\n "]) {
+    assert.equal(normaliseSessionId(blank), undefined, JSON.stringify(blank));
+  }
+  assert.equal(normaliseSessionId(""), undefined);
+  assert.equal(normaliseSessionId(null), undefined);
+  assert.equal(normaliseSessionId(0), undefined);
+  // Padded-but-REAL stays: refusing/trimming it is an open owner question on
+  // #9599, not a wire decision.
+  assert.equal(normaliseSessionId("  s1  "), "  s1  ");
+  assert.equal(normaliseSessionId("s1"), "s1");
+});
+
+test("#9599: the drain files a LEGACY blank-id entry instead of quarantining it", async () => {
+  const spool = tmpSpool();
+  // A legacy on-disk entry: written before the writers refused to store a blank
+  // (the Python writer now takes its path-anchored fallback instead).
+  // MUTATION THAT REDS THIS: drop `normaliseSessionId` from
+  // `buildCapturePayload` -> the body carries "   ", the real server answers
+  // 422, `classifyFailure` says PERMANENT and the entry is never filed.
+  writeSpoolEntry(spool, snapshot("   "));
+  const server = recordingServer();
+  await flushSpool(TEST_CFG, { dir: spool, fetchImpl: server.fetchImpl, now: 1 });
+  assert.equal(server.posts(), 1);
+  const body = Array.from(server.sessions.values())[0];
+  assert.ok(!("session_id" in body),
+    `a blank id reached the wire: ${JSON.stringify(body.session_id)}`);
+  assert.deepEqual(readDiscards(spool), [], "the entry must be FILED, not discarded");
 });
 
 test("#7708 site 3: a filed entry with a falsy lane is skipped, not re-POSTed", async () => {

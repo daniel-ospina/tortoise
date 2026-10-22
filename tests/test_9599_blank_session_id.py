@@ -11,9 +11,14 @@ normalise the query side — so:
 * every CONTAINS write through ``MATCH …, MATCH … MERGE (a)-[:REL]->(b)`` binds
   no rows, so the session's turn container link is silently dropped.
 
-(The engine half is measured in the issue and cannot be fixed here; the
-padded-but-REAL case — ``"  s1  "`` — stays a legitimate identity on purpose,
-#9553, which is why refusing it is an owner question rather than this fix.)
+(The engine half is measured in the issue and cannot be fixed here. The
+padded-but-REAL case — ``"  s1  "`` — is deliberately left ALONE: refusing or
+trimming it would re-identify an id a caller chose, which is a product-surface
+decision, so it is an OPEN OWNER QUESTION parked on #9599 (comment
+6342343424). This lane lands the blank half only. An earlier revision
+attributed the padded position to #9553 — #9553 is "materialise the
+point-property edge families" and states no position on padded ids; the
+citation is corrected here rather than re-pointed at a neighbour.)
 
 What this module pins is the half that IS ours: the rule *"a blank is not an
 identity"* has ONE home (``tortoise.ids.session_id_refusal``), TWO enforcement
@@ -64,10 +69,25 @@ CONV = [
 #: Present-but-blank spellings: every one names no session.
 BLANK_IDS = ("   ", "\t", "\n", " \t\n ")
 
-#: Padded but REAL: legitimate identities (#9553's recorded position). The
-#: engine still cannot index them — that is #9599's owner question, NOT a
-#: reason to refuse them here.
+#: Padded but REAL: untouched by this fix, on purpose. No recorded decision
+#: authorises refusing or trimming them (that would re-identify an id the caller
+#: chose), so the decision is an OPEN OWNER QUESTION on #9599 (comment
+#: 6342343424) and this suite only pins that the blank half does not spill over.
 PADDED_REAL = ("  s1  ", "\ts2\t")
+
+
+@pytest.fixture(autouse=True)
+def _offline_extractor(monkeypatch):
+    """The offline MockModel seam — zero network, zero provider spend.
+
+    ⛔ The sibling module's ``autouse`` fixture does NOT travel with an imported
+    fixture (autouse is per-module), so importing ``client`` from
+    ``tests.test_hosted_api`` does not install it. Copying the comment WITHOUT
+    this fixture (an earlier revision did) stated an invariant that did not
+    hold: the first case added here that captures with a VALID id would call a
+    real provider on any machine with keys or ``TORTOISE_EXTRACT_MODEL`` set.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
 
 
 @pytest.fixture()
@@ -117,7 +137,11 @@ def test_an_absent_session_id_is_minted_not_refused(absent):
 
 @pytest.mark.parametrize("padded", PADDED_REAL)
 def test_a_padded_but_real_session_id_is_not_refused(padded):
-    """The #9553 position: surrounding whitespace around a real id is an id."""
+    """Untouched by this fix: padding around a real id is NOT the blank class.
+
+    Refusing or trimming it is the open owner question on #9599 (comment
+    6342343424); this pin only proves the blank half did not spill over.
+    """
     assert ids_mod.session_id_refusal(padded) is None
 
 
@@ -334,7 +358,7 @@ def test_the_fold_writes_no_session_for_a_blank_session_recorded(sdk, blank):
 
 
 def test_the_fold_still_replays_a_padded_real_session_id(sdk):
-    """The narrow rule must not eat a legitimate id (#9553's position)."""
+    """The narrow rule must not eat a padded id — that half is an owner question."""
     client, _ = sdk
     proj = client._get_proj()
     proj._fold_session_recorded(
@@ -366,13 +390,13 @@ def test_the_fold_writes_no_session_for_a_blank_contains_session(sdk, blank):
 
 
 def test_the_contains_carrier_still_links_a_padded_real_session(sdk):
-    """A padded real id is a legitimate identity (#9553) — it must still land.
+    """A padded real id must still land — refusing it is an owner question (#9599).
 
     ⛔ The CONTAINS edge is NOT asserted here, and that is the measured engine
     half of #9599, not an omission: the MERGE's own ``MATCH (s:Session
     {id:$sid})`` cannot see a padded key (the index stores the trimmed term, the
     seek does not trim), so the container is written and the edge is dropped.
-    Refusing padded ids is an OWNER question (#9553 records them as legitimate);
+    Refusing padded ids is an OPEN OWNER QUESTION (#9599 comment 6342343424);
     refusing a BLANK one is not — the difference between a container that
     exists-but-cannot-be-addressed and an id that names nothing at all.
     """
@@ -383,3 +407,120 @@ def test_the_contains_carrier_still_links_a_padded_real_session(sdk):
     pid = created.get("id") or created["point"]["id"]
     proj._link_session("  s1  ", pid)
     assert _session_ids(client) == ["  s1  "], _session_ids(client)
+
+
+def test_the_fold_declares_the_record_dropped_not_a_nested_skip(sdk):
+    """The replay accounting must count the container, not shrug at it (#8702).
+
+    ``_log_identity_skip``'s ``drops_record`` flag is the GRANULARITY: a nested
+    skip (a refused edge on a record that folded) must NOT claim the record
+    died, and a creation anchor — this fold's ``return 0`` — must. Without the
+    flag ``consistency`` reads the arm as nested, reports the record as
+    APPLIED and says nothing about the missing ``:Session``: a replay of a
+    pre-fix journal claims a complete restore over a dropped container, which is
+    exactly the #8702/#8840 false-recovery class.
+    """
+    from tortoise.projection.nonfolded import collect_identity_skips
+
+    client, _ = sdk
+    proj = client._get_proj()
+    with collect_identity_skips() as recorded:
+        proj._fold_session_recorded(
+            {"type": "SessionRecorded", "id": "   ", "event_id": "ev-blank"})
+    assert [e.drops_record for e in recorded] == [True], recorded
+    assert recorded[0].where == "FalkorProjection._fold_session_recorded", \
+        recorded[0].where
+    # The OTHER carrier drops an EDGE, not a record — the distinction is the
+    # whole point of the flag, and the two arms must not collapse into one.
+    with collect_identity_skips() as edge_skips:
+        proj._link_session("   ", "some-point-id")
+    assert [e.drops_record for e in edge_skips] == [False], edge_skips
+
+
+def test_an_absent_session_id_helper_answers_absent_for_a_blank():
+    """``session_id_or_absent`` — the MINT-FALLBACK spelling of the same rule."""
+    from tortoise.ids import session_id_or_absent
+
+    for blank in BLANK_IDS:
+        assert session_id_or_absent(blank) is None, blank
+    for absent in (None, ""):
+        assert session_id_or_absent(absent) is None
+    for wrong_shape in (0, False, 123, b"  ", ["   "]):
+        assert session_id_or_absent(wrong_shape) is None, wrong_shape
+    for padded in PADDED_REAL:
+        assert session_id_or_absent(padded) == padded
+    assert session_id_or_absent("s1") == "s1"
+
+
+def _write_transcript(path, turns: int) -> None:
+    """A speaker-prefixed transcript of ``turns`` user/assistant exchanges.
+
+    The shape ``_parse_transcript`` reads (``User:``/``Assistant:`` prefixes) —
+    the JSONL envelope is a different (``session import``) leg, and using it
+    here parsed to zero turns.
+    """
+    lines = []
+    for i in range(turns):
+        lines.append(f"User: turn {i}?")
+        lines.append(f"Assistant: answer {i}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_a_blank_session_id_flag_still_keeps_session_continuity(tmp_path):
+    """``--session-id "   "`` must not cost the entry its identity (#9599).
+
+    The wire normaliser turns a blank into "absent", so the server MINTS a fresh
+    id on every filing and the drain never reads it back out of the 2xx body — a
+    second filing of the same entry then lands as a SECOND session. That is the
+    duplicate-container class this issue is about, moved server-side. So the
+    blank is treated as ABSENT at the WRITER, where the path-anchored fallback
+    exists: two snapshots of one transcript address ONE entry and ONE session.
+
+    MUTATION THAT REDS THIS: restore `args.session_id or _local_session_id(...)`
+    — a blank is truthy, so the id stays `"   "` and both snapshots name
+    nothing.
+    """
+    import argparse
+
+    from tortoise.__main__ import _local_session_id, _spool_transcript
+    from tortoise.capture_spool import (
+        PostOutcome,
+        flush_spool,
+        read_spool_meta,
+        spool_dir,
+    )
+
+    transcript = tmp_path / "session.jsonl"
+    _write_transcript(transcript, 1)
+    # Under pytest `spool_dir()` is derived from the TEST ID, so it is one
+    # deterministic directory per test and never the developer's real spool.
+    root = spool_dir()
+
+    def _args():
+        return argparse.Namespace(file=str(transcript), harness="claude",
+                                  session_id="   ", model=None)
+
+    first = _spool_transcript(_args())
+    assert first["rc"] == 0, first
+    stable = _local_session_id(transcript)
+    assert first["session_id"] == stable, (
+        f"a blank --session-id must fall back to the path-anchored id, got "
+        f"{first['session_id']!r}")
+
+    # A later snapshot of the SAME transcript — the per-turn hook's shape.
+    _write_transcript(transcript, 2)
+    second = _spool_transcript(_args())
+    assert second["session_id"] == stable, second["session_id"]
+
+    # ...and the wire carries that id: NOT None, so the server cannot mint a
+    # second session for the same conversation.
+    seen = []
+
+    def _post(payload):
+        seen.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    flush_spool(root, _post, now=1000.0)
+    assert seen and seen[0]["session_id"] == stable, seen
+    assert read_spool_meta(root, stable).get("filed_key")

@@ -2691,8 +2691,18 @@ class _EntityHandlers:
         # `:Session {id:'   '}` on rebuild — an indexed key the engine cannot
         # serve back to an equality seek, so the container is invisible and
         # every later capture mints a duplicate on it.
+        # ⛔ `drops_record=True`: this `return` IS the record's death — the
+        # container is not written at all — so the replay accounting must count
+        # it as dropped. Without the flag `consistency` reads this arm as a
+        # NESTED skip on a record that folded, reports the record as APPLIED
+        # and says nothing about the missing `:Session` (#8702/#8840). The
+        # sibling `_link_session` arm below deliberately does NOT pass it: an
+        # edge is lost there, not a record.
         if _session_id_refusal(sid) is not None:
-            _log_identity_skip("Session", sid, "id (MERGE key)")
+            _log_identity_skip("Session", sid, "id (MERGE key)",
+                               event_id=ev.get("event_id"),
+                               where="FalkorProjection._fold_session_recorded",
+                               drops_record=True)
             return 0
         sets: list[str] = []
         params: dict = {"sid": sid}
