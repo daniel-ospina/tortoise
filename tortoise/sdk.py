@@ -5890,12 +5890,22 @@ class UnapprovedKindNamespace(ValueError):
         self.installed = installed
 
 
-#: #7819 — the props REFUSED on a TERMINAL claim: the valid-time window (both
-#: bounds and their precision markers, which describe the bounds) and
-#: ``expiredAt``, the transaction-time termination stamp. An end written after
-#: death is the window the temporal read surfaces answer from (`_covers` /
-#: `get_historical_knowledge`), so writing it here changes what the dead claim
-#: asserts about WHEN it held, with no CORRECTS and no lifecycle record.
+#: #7819 — the props REFUSED on a TERMINAL claim: ONTOLOGY §4.7's four
+#: caller-temporal properties — the valid-time window (both bounds and their
+#: precision markers, which describe the bounds), ``expiredAt``, the
+#: transaction-time termination stamp, and ``when``, the occurrence-time anchor.
+#: An end written after death is the window the temporal read surfaces answer
+#: from (`_covers` / `get_historical_knowledge`), so writing it here changes what
+#: the dead claim asserts about WHEN it held, with no CORRECTS and no lifecycle
+#: record. ``when`` carries the same harm on the occurrence axis, and it is not
+#: inert metadata: ``extractor_v2`` dates a supersession decision off
+#: ``existing["when"]``, so re-stamping it re-dates the dead claim for the
+#: extractor as well as for the temporal reads.
+#:
+#: (``createdAt``/``updatedAt`` complete §4.7's temporal set but are write
+#: stamps, not claims about when the assertion held: ``update_point`` stamps
+#: ``updatedAt`` itself on every call and ``createdAt`` is a create-time stamp,
+#: so neither belongs to the temporal record this guard protects.)
 #:
 #: Scoped, not blanket, because a content/metadata revision of a terminal claim
 #: is a recorded capability: a ``PointRevised`` later than a terminalization is
@@ -5920,7 +5930,7 @@ class UnapprovedKindNamespace(ValueError):
 #: markers every other reader still gates.
 _TEMPORAL_RESTAMP_PROPS = frozenset({
     "validFrom", "validTo", FROM_PRECISION_PROP, TO_PRECISION_PROP,
-    "expiredAt",
+    "expiredAt", "when",
 })
 
 

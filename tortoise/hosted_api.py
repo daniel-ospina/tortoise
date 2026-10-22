@@ -15805,10 +15805,22 @@ def _commit_response(
     """§6.1 200 response body — commit_id = client_commit_id (stable per
     logical commit); duplicate:true ⇒ zero writes, zero write-ops billed
     (PL4); held non-empty ⇒ overflow (PL3), client-side, re-commit checks
-    the 50-ceiling only. warnings[] (#405): additive, warn-first domain
-    integrity violations — the commit WRITES anyway; present (possibly
-    empty) on every 200, deterministic per payload (idempotent re-commits
-    return the same warnings)."""
+    the 50-ceiling only.
+
+    ``warnings[]`` (#405): additive, warn-first — the commit WRITES anyway;
+    present (possibly empty) on every 200. TWO kinds ride the one key, and the
+    difference is why the field is not uniform per payload:
+
+    * the payload's DOMAIN integrity warnings, derived from the payload alone
+      — deterministic per payload, so an idempotent re-commit returns the
+      same ones;
+    * WRITE-TIME advisories (``temporal_not_applied``, #7819) — observed while
+      the writes ran (a dedup fold dropped on an already-terminal claim wrote
+      NOTHING). These are present only on the response to the call that
+      PERFORMED the write; a ``duplicate:true`` replay writes nothing, so
+      nothing can be dropped, and its ``warnings[]`` is exactly the payload's
+      domain warnings (see the inline note in ``commit_session``'s write
+      phase)."""
     return {
         "session_id": payload.session_id,
         "commit_id": payload.client_commit_id,

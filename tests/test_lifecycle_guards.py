@@ -417,10 +417,10 @@ def test_duplicate_id_with_an_operator_sibling_is_refused(sdk):
 #     sdk.update_point(p, validTo="2026-06-10")  # ...accepted, window written
 #
 # The guard is scoped to `_TEMPORAL_RESTAMP_PROPS` (window bounds + their
-# precision markers + `expiredAt`) because a content/metadata revision of a
-# terminal claim is a recorded capability (#3305). Both halves are pinned here:
-# what is refused, and what keeps working. `update_entity`'s Point arms open a
-# second door onto the same window and are tracked separately as #9649.
+# precision markers + `expiredAt` + `when`) because a content/metadata revision
+# of a terminal claim is a recorded capability (#3305). Both halves are pinned
+# here: what is refused, and what keeps working. `update_entity`'s Point arms
+# open a second door onto the same window and are tracked separately as #9649.
 
 def _stored(pid, key, sdk):
     rows = sdk._get_proj().g.query(
@@ -448,14 +448,56 @@ def test_update_point_refuses_a_window_on_every_terminal_status(sdk, status):
     ("validFrom", "2026-01-01"),
     ("validTo", "2026-06-10"),
     ("expiredAt", "2026-06-10"),
+    ("when", "2026-06-10"),
+    ("when", ""),
 ])
 def test_update_point_refuses_the_whole_temporal_record(sdk, prop, value):
     """The refused set is the TEMPORAL RECORD, not just `validTo`: `expiredAt` is
-    the transaction-time termination stamp. Pre-fix each of these landed."""
+    the transaction-time termination stamp and `when` the occurrence-time anchor
+    (ONTOLOGY §4.7's temporal table). Pre-fix each of these landed — `when`
+    included, which `extractor_v2` reads to date a supersession decision, so a
+    rewrite there re-dated the dead claim for the extractor too."""
     pid = _point(sdk, status="retracted")
     with pytest.raises(ValueError, match="already terminal"):
         sdk.update_point(pid, **{prop: value})
     assert _stored(pid, prop, sdk) is None
+
+
+def test_update_point_refuses_the_occurrence_anchor(sdk):
+    """`when` alone — no window, no precision marker — is refused too.
+
+    The occurrence anchor is a temporal prop in its own right (ONTOLOGY §4.7),
+    and a partial set (window + `expiredAt`, `when` forgotten) let
+    `retract_point(p); update_point(p, when=…)` re-date a dead claim. Fails on
+    that tree: the write returned normally and stored the caller's `when`.
+    """
+    pid = _point(sdk, status="retracted")
+    before = _stored(pid, "when", sdk)
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(pid, when="2026-06-10")
+    assert _stored(pid, "when", sdk) == before
+    # ...and the anchor is still writable on a LIVE claim (the scope boundary).
+    live = _point(sdk)
+    sdk.update_point(live, when="2026-06-10")
+    assert _stored(live, "when", sdk) == "2026-06-10"
+
+
+def test_the_temporal_refusal_set_covers_ontology_4_7_temporals():
+    """Census: every caller-temporal property ONTOLOGY §4.7 declares is in the
+    refusal set.
+
+    `when` was the one left out, and nothing caught it because the set was read
+    as "the window" rather than as "§4.7's temporal record". This pins the
+    DECLARATION against the DOOR, so a future temporal prop cannot be added to
+    the ontology (or a typo re-spelled here) with the guard silently failing
+    open on it. (`createdAt`/`updatedAt` are server-owned stamps, not caller
+    props on this door.)
+    """
+    from tortoise.sdk import _TEMPORAL_RESTAMP_PROPS
+
+    ontology_temporals = {"when", "validFrom", "validTo", "expiredAt"}
+    assert ontology_temporals <= _TEMPORAL_RESTAMP_PROPS, (
+        ontology_temporals - _TEMPORAL_RESTAMP_PROPS)
 
 
 @pytest.mark.parametrize("bound,marker", [
@@ -687,6 +729,37 @@ def test_a_live_claim_still_takes_a_temporal_write(sdk):
     assert sdk.get_point(pid)["status"] == "live"
 
 
+def test_create_point_dedup_does_not_fold_a_when_onto_a_dead_claim(sdk):
+    """The dedup side covers `when` too — an occurrence-anchor-only fold.
+
+    A fold carrying `when` and NOTHING else temporal bypassed the window check
+    (`_TEMPORAL_RESTAMP_PROPS & set(props)` was empty for it), so a capture
+    re-ingested onto a retracted claim re-dated it. Fails on that tree: the
+    fold applied and the anchor moved. The advisory rides the same channel as
+    the window drop, because a silently dropped capture is the #5365 defect.
+    """
+    content = f"dedup when {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+    before_when = _stored(pid, "when", sdk)
+    before_conf = sdk.get_point(pid)["confidence"]
+    again = sdk.create_point("statement", content, dedup=True,
+                             when="2026-06-10", confidence=0.99)
+    assert again["id"] == pid, "a dedup HIT is still reported"
+    assert _stored(pid, "when", sdk) == before_when, (
+        "the occurrence anchor of a dead claim was re-stamped")
+    assert sdk.get_point(pid)["confidence"] == before_conf, (
+        "the fold is all-or-nothing — no prop may land beside the refused "
+        "anchor")
+    codes = [a.get("code") for a in (again.get("advisories") or [])]
+    assert "temporal_not_applied" in codes, again
+    # ...and the anchor still folds onto a LIVE claim (the scope boundary).
+    live_content = f"dedup when live {uuid.uuid4().hex[:8]}"
+    live = sdk.create_point("statement", live_content)["id"]
+    sdk.create_point("statement", live_content, dedup=True, when="2026-06-10")
+    assert _stored(live, "when", sdk) == "2026-06-10"
+
+
 def test_create_point_dedup_folds_a_window_onto_a_live_claim(sdk):
     """Same boundary on the dedup door: a fold carrying a window applies in
     full when the target is live — the drop is the TERMINAL case only, so a
@@ -747,6 +820,27 @@ def test_a_dropped_fold_is_reported_in_the_write_result(sdk):
     assert "terminal" in adv.get("message", ""), adv
     # TRANSIENT: it must not land on the node, so a later read cannot see it.
     assert "advisories" not in sdk.get_point(pid)
+
+
+def test_the_commit_receipt_contract_states_the_replay_exception():
+    """`_commit_response`'s docstring is the binding contract for `warnings[]`.
+
+    It claimed the field was "deterministic per payload (idempotent re-commits
+    return the same warnings)" — false since #7819 added the write-time
+    `temporal_not_applied` advisory, which by construction cannot appear on a
+    `duplicate:true` replay (nothing is written there, so nothing is dropped).
+    Pinned as a census because the defect IS the prose: `tests/
+    test_commit_endpoint.py` asserts warning shapes from this docstring, and a
+    contract that describes a behaviour the code does not have is how the next
+    caller builds on a promise nobody keeps. Fails on the pre-fix tree, whose
+    docstring stated the determinism guarantee.
+    """
+    import tortoise.hosted_api as hosted
+
+    doc = hosted._commit_response.__doc__ or ""
+    assert "deterministic per payload (idempotent re-commits" not in doc, (
+        "the blanket determinism claim is false for write-time advisories")
+    assert "duplicate:true" in doc and "temporal_not_applied" in doc, doc
 
 
 def test_hosted_commit_receipt_carries_a_dropped_fold_advisory():
