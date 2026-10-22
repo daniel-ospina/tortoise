@@ -148,6 +148,43 @@ DEFAULT_CARVE_SHARDS = 1
 # letters, and the rail's lane-parity subtracts main's names from the PR's.
 MAX_CARVE_SHARDS = 26
 
+# #9539: the SLOW pool's leg count (`config/ci-surfaces.yml::slow_shards`).
+#
+# `test-slow` is the merge ceiling, and the reason is arithmetic rather than a
+# bad split: the pool is ~37.9m of measured test time (the legs' own junit on
+# 5 main runs, 2026-10-21) and the legs run ONE serial pytest process each, so
+# the best 2 legs can do is pool/2 = ~18.9m plus ~2m of setup. The committed
+# split was already within noise of that optimum (per-file medians pack to
+# 18.52/18.52; observed medians 18.25/18.80 across runs), so rebalancing cannot
+# move it — only the LEG COUNT can, which is why this key exists.
+#
+# ABSENCE KEEPS THE HISTORICAL SHAPE (2 legs), exactly like `fast_shards`:
+# deleting the key gives the leg count back, but it is NOT by itself a complete
+# rollback — the wall guard recomputes from the map (2 legs project ~20.9m
+# against `SLOW_LEG_WALL_TARGET_MIN`), so removing the key reds
+# `test_slow_shards_are_duration_packed_and_meet_the_wall_target` as well. A real
+# rollback moves the target with it.
+# 1 is NOT legal here: an unsharded slow lane is 37.9m + setup, and a silent
+# drop to 1 would be a ceiling regression nothing else here would name.
+DEFAULT_SLOW_SHARDS = 2
+MAX_SLOW_SHARDS = 26
+
+# #9539: the wall the slow lane is held to, and the fixed cost a leg pays before
+# its first test. Both are MEASURED constants, not hopes:
+#   * `SLOW_LEG_WALL_TARGET_MIN` is the house CI guideline ("<10 min of CI" is a
+#     guideline, not an absolute target — the owner's #6792 form ruling, quoted
+#     in `docs/ONTOLOGY.md` §4.1), and it is `test-slow`'s share of it.
+#   * `SLOW_LEG_SETUP_ALLOWANCE_MIN` is the non-pytest part of a leg measured
+#     from the jobs API over 5 main runs: job wall − pytest step = 1.9–2.1 min
+#     (checkout 0.12, install-cpu-torch 0.38–0.47, `pip install -e .[test,
+#     embeddings]` 0.57–0.68, FalkorDB provision 0.15–0.27, coverage manifest
+#     0.28–0.47). Not a guess and not zero: a shard count computed without it
+#     would report a wall the job cannot hit.
+# These two are what turn "more shards" from a preference into a derivation, and
+# `slow_shard_entries()`/`slow_wall_projection()` are the only readers.
+SLOW_LEG_WALL_TARGET_MIN = 10.0
+SLOW_LEG_SETUP_ALLOWANCE_MIN = 2.0
+
 # #6135: the per-shard WATCHDOG budget. The watchdog is PER-LEG, so a smaller
 # shard needs a smaller budget — inheriting the old 55m means a hung 6.6-minute
 # shard is detected 8× later than it should be, holding the REQUIRED aggregate
@@ -1124,6 +1161,30 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # already falls through to `core`). Pinned by
              # tests/test_ci_selection.py::test_graph_census_tool_change_selects_core_not_tier1.
              "tools/graph_census.py",
+             # #9523 review P1: tools/legacy_id_normalise.py is the CLI for the
+             # legacy-id normaliser, and its guard
+             # (tests/test_8607_legacy_id_normaliser.py) is `core`-registered —
+             # but `tools/` is a flat NON_PYTHON_PREFIXES entry and no
+             # SOURCE_PATTERNS row matches the tool, so a CLI-only change was
+             # DROPPED by `_keep_changed` and took the docs-only early return:
+             # `select(["tools/legacy_id_normalise.py"])` returned
+             # surfaces=[], full=False, with the guard absent from test_files.
+             # Registering the test under `core` does not help — a name in a
+             # surface's test_files only runs when that surface is already
+             # selected — so the file whose ENTIRE content is the dry-run
+             # default, the `--apply`/`--revert`-requires-`--out` rule and the
+             # 0/1/2 exit contract (`test_cli_dry_run_writes_the_report_and_no_
+             # snapshot`, `test_cli_apply_then_revert_round_trips`,
+             # `test_cli_refusal_exits_2_and_writes_nothing`,
+             # `test_cli_usage_errors_exit_1_so_2_means_only_refused`) would run
+             # none of its own cases on the PR editing it. Same
+             # #1349/#3332/#3910 silent-drop class as
+             # tools/retype_snapshot.py and tools/graph_census.py above (both
+             # dump-transform CLIs in this family). `tortoise/legacy_ids.py`
+             # needs no entry (it matches no SOURCE_PATTERN, so a module-only
+             # change already falls through to `core`). Pinned by
+             # tests/test_ci_selection.py::test_legacy_id_normalise_tool_change_selects_core_not_tier1.
+             "tools/legacy_id_normalise.py",
              # #4495 review P2: tools/write_op_reachability.py is the CLI that
              # reports the write-op allowance's stock/flow conversion, and its
              # guard (tests/test_write_op_reachability.py) is `core`+`api`
@@ -1584,7 +1645,29 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_ci_selection.py::
              # test_the_engine_pin_guards_are_selected_on_the_files_they_pin.
              "apps/graph-viz/docker-compose.yml",
-             "docs/quickstart-selfhosted.md")
+             "docs/quickstart-selfhosted.md",
+             # #9524 review I1/I3: the SPA `overrides` record. `tests/
+             # test_spa_dependency_overrides.py` (registered `core` AND
+             # `onboarding`) reads `apps/graph-viz/` and
+             # `website/apps/dashboard/` `package.json` +
+             # `package-lock.json`. Neither app's manifest matches a
+             # SOURCE_PATTERNS row AND `apps/` + `website/` are both in
+             # NON_PYTHON_PREFIXES, so such a diff was filtered out BEFORE any
+             # surface was matched, took the docs-only early return and ran
+             # tier-1 smoke only — measured on this branch:
+             # `select(['apps/graph-viz/package.json'])` -> surfaces=[] with the
+             # guard absent, i.e. the exact dependency-manifest diff the guard
+             # exists for would never run it (the #1349/#3332/#3616 silent-drop
+             # class). Named per file, not per directory: the guard reads these
+             # two files only, and a wholesale `apps/graph-viz/` claim would
+             # pull the whole `core` set onto every source edit in that app.
+             # blog-admin needs no entry — `website/apps/blog-admin/` is already
+             # a SOURCE_PATTERNS row of `onboarding`, where the guard's other
+             # arm is registered.
+             "apps/graph-viz/package.json",
+             "apps/graph-viz/package-lock.json",
+             "website/apps/dashboard/package.json",
+             "website/apps/dashboard/package-lock.json")
 NON_PYTHON_PREFIXES = (
     "docs/", "website/", "product/", "legal/", "growth/", "engineering/",
     "finance-accounting/", "menu-bar/", "ux/", "data/", "operations/",
@@ -2707,6 +2790,120 @@ def carve_shard_issues(manifest: dict) -> list[str]:
     return []
 
 
+def slow_shard_count(manifest: dict) -> int:
+    """#9539: the configured `test-slow` leg count.
+
+    Absence keeps the historical 2. A present-but-unusable declaration is NOT
+    silently coerced into a shard count — it collapses to 2 here so a producer
+    path cannot crash, and `slow_shard_issues()` NAMES it for `--integrity`.
+    """
+    raw = manifest.get("slow_shards", DEFAULT_SLOW_SHARDS)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return DEFAULT_SLOW_SHARDS
+    if raw < 2 or raw > MAX_SLOW_SHARDS:
+        return DEFAULT_SLOW_SHARDS
+    return raw
+
+
+def slow_shard_issues(manifest: dict) -> list[str]:
+    """#9539: fail-closed validation of the `slow_shards` declaration.
+
+    >= 2 because this lane has always had two legs and a drop to one is a
+    silent ceiling regression (37.9m + setup in a single job); > MAX_SLOW_SHARDS
+    because the labels are positional letters and the merge rail's lane-parity
+    subtracts main's job names from the PR's, so the label alphabet is the
+    ceiling. Absence is 'not adopted'; an EXPLICIT null is a typo — same
+    distinction and same reason as `fast_shard_issues`.
+    """
+    if "slow_shards" not in manifest:
+        return []
+    raw = manifest.get("slow_shards")
+    if raw is None:
+        return ["slow_shards is explicitly null — remove the key to mean "
+                "'the historical 2 legs', or set an integer in [2, "
+                f"{MAX_SLOW_SHARDS}] (a null silently drops the pool to 2)"]
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return [f"slow_shards must be an integer, got {raw!r}"]
+    if raw < 2:
+        return [f"slow_shards must be >= 2 (a single leg carries the whole "
+                f"~37.9m pool plus setup, which is the ceiling this key "
+                f"exists to remove), got {raw}"]
+    if raw > MAX_SLOW_SHARDS:
+        return [f"slow_shards must be <= {MAX_SLOW_SHARDS} (the a..z label "
+                f"ceiling), got {raw}"]
+    return []
+
+
+def slow_leg_files(manifest: dict) -> list[str]:
+    """#9539: the slow lane's pool as bare names — exactly `slow_files` minus
+    `carve_out`, the set the in-workflow drift guard has always pinned.
+
+    Slow carve-out files run in the URI-unset carve-out job (epic #1647
+    E2E-4), never in a docker slow leg, so they are removed here rather than
+    filtered per leg. Sorted for determinism: the LPT pack's tie-break reads
+    the input order.
+    """
+    slow = {f[:-3] if f.endswith(".py") else f
+            for f in manifest.get("slow_files", [])}
+    carve = {f[:-3] if f.endswith(".py") else f
+             for f in carve_out_files(manifest)}
+    return sorted(slow - carve)
+
+
+def slow_shard_entries(manifest: dict) -> list[dict]:
+    """#9539: `slow_leg_files()` LPT-packed into `slow_shards` labelled legs.
+
+    Routes through `build_shard_entries` — the SAME pack the tier-2 fast lane
+    and the carve-out lane use — so the slow lane gets the established
+    mechanism and its per-leg `watchdog_minutes`/`watchdog_headroom` rather
+    than a second implementation. Those two fields stay on the ENTRY:
+    `slow_matrix_include()` publishes only `half`/`files`, so the job's 40m/60m
+    budgets are still literals (deliberate, #9539) and a reader should not
+    expect them in the matrix. Labels are positional (`a`, `b`, …), which
+    keeps the job-name set a SUPERSET of main's two legs: the merge rail's
+    lane-parity subtracts names, so an added `test-slow (c)` is fine while a
+    rename would refuse every merge.
+    """
+    files = [f"tests/{n}.py" for n in slow_leg_files(manifest)]
+    return build_shard_entries(files, _durations_map(manifest),
+                               slow_shard_count(manifest))
+
+
+def slow_matrix_include(entries: list[dict]) -> dict:
+    """#9539: the GitHub Actions matrix the `test-slow` job expands.
+
+    Emitted COMPLETE, like `fast_matrix_include`/`carve_matrix_include`: the
+    leg set is the selector's contract, never a workflow literal. `files` is
+    SPACE-JOINED (the run step's `for f in ${{ matrix.files }}` shape) and the
+    names are BARE — the workflow re-adds `tests/<name>.py`.
+    """
+    return {"include": [
+        {"half": e["name"], "files": " ".join(e["files"])}
+        for e in entries
+    ]}
+
+
+def slow_wall_projection(manifest: dict,
+                         entries: list[dict] | None = None) -> dict:
+    """#9539: the projected slow-leg wall, from the committed `durations` map.
+
+    `projected_wall_min = max(leg est) + SLOW_LEG_SETUP_ALLOWANCE_MIN`. This is
+    the number the wall guard holds to `SLOW_LEG_WALL_TARGET_MIN`; it is a
+    PROJECTION from the map (never a measurement), which is why the setup
+    allowance is a measured constant rather than an assumption inside it.
+    """
+    entries = slow_shard_entries(manifest) if entries is None else entries
+    legs = sorted(((e["est_seconds"] / 60.0) for e in entries), reverse=True)
+    pool = sum(e["est_seconds"] for e in entries) / 60.0
+    return {"legs_min": [round(x, 2) for x in legs],
+            "pool_min": round(pool, 2),
+            "max_leg_min": round(legs[0], 2) if legs else 0.0,
+            "setup_allowance_min": SLOW_LEG_SETUP_ALLOWANCE_MIN,
+            "projected_wall_min": round((legs[0] if legs else 0.0)
+                                        + SLOW_LEG_SETUP_ALLOWANCE_MIN, 2),
+            "target_min": SLOW_LEG_WALL_TARGET_MIN}
+
+
 def carve_shard_entries(manifest: dict) -> list[dict]:
     """W37: the carve-out set packed into `carve_shards` LPT bins.
 
@@ -2978,6 +3175,10 @@ def push_legs(manifest: dict) -> dict:
             # `tests/test_ci_selection.py::test_carve_out_matrix_partitions_the_leg`;
             # no check in THIS module enforces it.
             "carve_shards": carve_shard_entries(manifest),
+            # #9539: the slow pool, packed. `slow` above is KEPT because the
+            # `changes` job publishes it and existing pins read the emitted
+            # key; the matrix below is what `test-slow` expands.
+            "slow_shards": slow_shard_entries(manifest),
             # Not a push leg: emitted so leg_coverage_issues() can account for
             # the file. Nothing in python-ci.yml consumes this key — that is
             # the POINT of the lane.
@@ -3078,6 +3279,20 @@ def leg_coverage_issues(manifest: dict) -> list[str]:
     slow_leg = {f + ".py" for f in legs["slow"]}
     if slow_leg & carve_out:
         issues.append(f"carve-out file leaked into the slow legs: {sorted(slow_leg & carve_out)}")
+    # #9539: the slow SHARDS must cover the slow leg set exactly once. The pack
+    # is derived, so a packer defect (a bin dropped, or a file landing in two
+    # bins) would silently shrink the lane — and the in-workflow drift guard
+    # reads the SAME derivation, so it cannot be the independent check. This is
+    # the manifest-vs-legs one.
+    covered = [f + ".py" for s in legs["slow_shards"] for f in s["files"]]
+    if len(covered) != len(set(covered)):
+        dupes = sorted({f for f in covered if covered.count(f) > 1})
+        issues.append(f"slow shard pack runs a file twice: {dupes}")
+    if set(covered) != slow_leg:
+        issues.append(
+            f"slow shards do not cover slow_files - carve_out exactly: "
+            f"missing={sorted(slow_leg - set(covered))} "
+            f"extra={sorted(set(covered) - slow_leg)}")
     if carve_out & ENV_BROKEN_FILES:
         issues.append(f"carve-out/env-broken overlap: {sorted(carve_out & ENV_BROKEN_FILES)}")
     # ABSENT is not the same as EMPTY. A repo that has not adopted the lane
@@ -3183,6 +3398,22 @@ def workflow_matrix_issues(workflow_path: str, manifest: dict) -> list[str]:
                       "required aggregate would not observe the fast shards")
     if "ENV_BROKEN_FILES" in wf.get("env", {}):
         issues.append("workflow env re-defines ENV_BROKEN_FILES (single source is ci_selection.py)")
+    # #9539: the slow legs follow the same shape — their matrix is the
+    # selector's `slow_matrix`, never committed rows. Before this, the two
+    # hand-maintained rows were the lane's only source of truth and they rot
+    # with every `durations` refresh/ new slow file (#9017 re-cut them after a
+    # 6.4:1 drift had gone unnoticed); a literal row here is that drift class.
+    slow_job = wf.get("jobs", {}).get("test-slow", {})
+    slow_matrix = slow_job.get("strategy", {}).get("matrix")
+    slow_derived = "${{ fromJSON(needs.changes.outputs.slow_matrix) }}"
+    if slow_derived not in str(slow_matrix):
+        issues.append(
+            "the `test-slow` job matrix is not the derived slow_matrix output "
+            f"(got {slow_matrix!r}; expected {slow_derived!r}) — hand-committed "
+            "slow legs are the drift #9539 ends")
+    if isinstance(slow_matrix, dict) and slow_matrix.get("include"):
+        issues.append("the `test-slow` job matrix carries literal include rows "
+                      "(the slow legs must come from the selector, #9539)")
     return issues
 
 
@@ -3209,17 +3440,26 @@ def parse_matrix_halves(workflow_text: str) -> dict[str, list[str]]:
     """#1266: extract LEGACY literal `- half:` / `files: >-` matrix rows from
     python-ci.yml — the pre-#6135 `test`-job shape.
 
-    #6135: the `test` job carries no literal rows any more (its matrix is
-    `fromJSON(...fast_matrix)`), so the only block this regex can still match
-    is the `test-slow` job's. Both callers reach it only on the integrity
-    gate's FAILURE fallback — `ci_selection.py --integrity`, and the same
-    composition in `ci_timing.integrity_problems()` (used by
-    `--refresh-durations`) — i.e. once `workflow_matrix_issues()` has ALREADY
-    reported the workflow drifted off the derived shape; the normal path feeds
-    the derived shards from `push_legs()` instead. The halves are folded
-    scalars with bare file names (no .py) — the run step maps them to
-    `tests/<name>.py` and `bench/*`. Returns {} when the parse fails so callers
-    fail closed on "workflow changed shape" instead of silently passing.
+    #6135 left the `test` job with no literal rows (its matrix is
+    `fromJSON(...fast_matrix)`) and #9539 removed the last ones (`test-slow` is
+    `fromJSON(needs.changes.outputs.slow_matrix)` too), so on the current tree
+    this regex matches NOTHING and the parse is `{}`. That is harmless on the
+    normal path, and not merely by luck: both callers reach it only on the
+    integrity gate's FAILURE fallback — `ci_selection.py --integrity`, and the
+    same composition in `ci_timing.integrity_problems()` (used by
+    `--refresh-durations`) — i.e. only once `workflow_matrix_issues()` has
+    ALREADY reported the workflow drifted off the derived shape. The normal path
+    feeds the derived shards from `push_legs()` instead, and
+    `workflow_matrix_issues()`'s own message ("the `test-slow` job matrix is not
+    the derived slow_matrix output …") is what names WHICH job drifted. What
+    this fallback still adds is the #1266 tie checks against a RE-INTRODUCED
+    literal block in the legacy shape (`- half: [ab]` + `files: >-`); for any
+    other drift it matches nothing and the `{}` arm of `workflow_halves_issues()`
+    fails closed with "no matrix halves found in python-ci.yml (workflow parse
+    failure)" rather than passing silently. The halves are folded scalars with
+    bare file names (no .py) — the run step maps them to `tests/<name>.py` and
+    `bench/*`. Returns {} when the parse fails so callers fail closed on
+    "workflow changed shape" instead of silently passing.
     """
     halves: dict[str, list[str]] = {}
     for m in re.finditer(r"- half: ([ab])\n\s+files: >-\n\s+([^\n]+)\n", workflow_text):
@@ -4576,7 +4816,8 @@ def main() -> int:
                     help="surface for --register (default: core — the selection fallback)")
     ap.add_argument("--dry-run", action="store_true", help="preview --register without writing")
     ap.add_argument("--emit-push-matrix", action="store_true",
-                    help="#1472/#6135: print the derived push fast_matrix + shards")
+                    help="#1472/#6135: print the derived push fast_matrix + shards "
+                         "(and the derived slow_matrix, #9539)")
     ap.add_argument("--split", action="store_true",
                     help="#1473/#6135: LPT-pack the stdin JSON test-file list "
                          "into the configured number of shards")
@@ -4613,6 +4854,7 @@ def main() -> int:
         problems = missing + slow_file_issues(manifest) \
             + _manifest_contract_issues(manifest) \
             + carve_shard_issues(manifest) \
+            + slow_shard_issues(manifest) \
             + watchdog_headroom_issues(manifest)
         # #1472: the matrix must come from the selector derivation — when it
         # does, the #1266 halves-parse tie check is
@@ -4670,6 +4912,9 @@ def main() -> int:
             "shards": legs["shards"],
             "carve_out": legs["carve_out"],
             "carve_matrix": carve_matrix_include(legs["carve_shards"]),
+            # #9539: the slow lane's matrix, the same derivation shape — the
+            # `changes` job publishes it and `test-slow` expands it.
+            "slow_matrix": slow_matrix_include(legs["slow_shards"]),
         }))
         return 0
 
