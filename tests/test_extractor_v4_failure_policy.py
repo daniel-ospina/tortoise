@@ -75,6 +75,29 @@ _CODE_CITATION = re.compile(r"`?[A-Za-z0-9_./-]+\.py:\d+`?")
 #: section that holds an ordering argument and no rule at all. Bounded to one
 #: line and stopped at `)`/`|` so a wrapping paragraph cannot manufacture a hit.
 _POLICY_POINTER = re.compile(r"§\s*(4\.\d+)[^)\n|]{0,80}(fail-open|fail-closed)")
+#: §4.1 declares the canonical top-level count as **EIGHT** and forbids writing
+#: "seven" (§4.0, §4.1 and §4.2 must agree). A passage that names how many
+#: steps an inherited rule covers must therefore use the document's own number:
+#: a second count in the same file is what the drift marker exists to stop, and
+#: an ordinal derived from it ("not a seventh declaration") is wrong in the same
+#: direction. Matched against the passage with markdown emphasis stripped, so
+#: `**eight**` and `eight` are read alike.
+_NON_CANONICAL_STEP_COUNT = re.compile(
+    r"\b(?:one|two|three|four|five|six|seven|nine|ten|eleven)\s+"
+    r"(?:[A-Za-z-]+\s+)?(?:pipeline\s+)?steps?\b",
+    re.IGNORECASE,
+)
+#: An ordinal count of DECLARATIONS: with EIGHT steps in §4.4, one more rule is a
+#: NINTH declaration — not a seventh.
+_NON_CANONICAL_ORDINAL = re.compile(
+    r"\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|tenth|eleventh)"
+    r"\s+declaration\b",
+    re.IGNORECASE,
+)
+#: The canonical count, stated in the passage that cites it.
+_CANONICAL_STEP_COUNT = re.compile(
+    r"eight\s+(?:[A-Za-z-]+\s+)?(?:pipeline\s+)?steps", re.IGNORECASE
+)
 #: The section that DECLARES per-step failure policy (the pointer must name it).
 FAILURE_POLICY_SECTION = "4.4"
 #: §4.3's relocation subsection (`#5333`), bounded by the next `###` heading.
@@ -316,8 +339,9 @@ def test_the_relocation_rule_points_at_the_failure_policy_home():
     A row that cannot be positively classified is never relocated: fail-closed
     in the delete direction, which is exactly the form §4.4 declares for S3
     (`HOLD`, never asserted `new`). The passage must say so against §4.4 and
-    must keep saying it is a PROPOSAL — §4.4 declares policy for the six
-    pipeline steps, and a relocation pass is not one of them.
+    must keep saying it is a PROPOSAL — §4.4 declares policy for the EIGHT
+    pipeline steps (§4.1's canonical set), and a relocation pass is not one of
+    them.
     """
     section = _g5_destructive_half()
     assert "never relocated" in section, (
@@ -330,5 +354,74 @@ def test_the_relocation_rule_points_at_the_failure_policy_home():
     )
     assert "proposal" in section.lower(), (
         "the relocation rule must stay marked as a PROPOSAL — §4.4 declares the "
-        "six pipeline steps' policy, and a relocation pass is not one of them."
+        "eight pipeline steps' policy, and a relocation pass is not one of them."
+    )
+
+
+def test_the_relocation_rule_does_not_invent_a_second_step_count():
+    """P2 (review of #9654): §4.3 must not carry a COMPETING step count.
+
+    §4.0 declares *"EIGHT steps"*, §4.1 repeats it (*"The count is EIGHT … do
+    not write `seven`"*) and §4.4 declares policy for every one of the eight.
+    The subsection's closing sentence nonetheless read *"§4.4 declares the
+    policy for the six pipeline steps … not a seventh declaration"* — it
+    undercounted §4.4's own coverage by two steps and derived its ordinal from
+    that undercount. A second count in the same document is exactly what the
+    drift marker forbids, so a future edit that reintroduces one reds here.
+
+    Measured on the pre-fix text (the passage read *"six pipeline steps"* and
+    *"not a seventh declaration"*), this fails.
+    """
+    section = _g5_destructive_half().replace("*", "")
+    assert _CANONICAL_STEP_COUNT.search(section), (
+        "the relocation rule must state the canonical step count it inherits — "
+        "§4.4 declares the policy for the EIGHT steps of §4.1, and without the "
+        "number the 'proposal' claim has nothing to be carried over FROM "
+        "(#5333)."
+    )
+    offenders = [
+        match.group(0) for match in _NON_CANONICAL_STEP_COUNT.finditer(section)
+    ] + [match.group(0) for match in _NON_CANONICAL_ORDINAL.finditer(section)]
+    assert not offenders, (
+        "this subsection states a step count the document does not declare — "
+        "§4.0/§4.1 say EIGHT (and §4.4 covers all eight), so the carried-over "
+        f"rule is not a NINTH declaration. Offenders: {offenders!r}"
+    )
+
+
+def test_the_relocation_subsection_citations_name_their_revision_pin():
+    """P2 (review of #9654): the subsection's numbers must name their pin.
+
+    The header pins every `file.py:NNNN` to `c79ba1cf2` *except where a passage
+    names a later pin*. The subsection's citations are HEAD numbers: at the base
+    pin three of the cited files (`sdk.py`, `assembly.py`,
+    `projection/entities.py`, `projection/__init__.py`) are shorter than the
+    cited line and `tortoise/definite_description_backfill.py` does not exist at
+    all — so an unpinned passage is not a *stale* citation, it is no citation.
+    The passage pins the measurement ONCE for the whole subsection (that is its
+    shape: a measurement-scope pin, not a per-line one), and the header must
+    list that pin among its exceptions so an adopter can find it.
+
+    Measured on the pre-fix text (no pin token anywhere in the subsection), this
+    fails.
+    """
+    section = _g5_destructive_half()
+    cited = [line for line in section.splitlines() if _CODE_CITATION.search(line)]
+    assert cited, (
+        "§4.3's relocation subsection carries no `file.py:NNNN` citation, so "
+        "this guard is vacuous — re-point it at whichever passage now cites a "
+        "line number (#8600)."
+    )
+    later = _declared_later_pins()
+    assert later, (
+        "the header names no later pin — this guard would pass vacuously; the "
+        "header's pin vocabulary changed and needs re-reading (#8600)."
+    )
+    pinned = [pin for pin in later if f"`{pin}`" in section]
+    assert pinned, (
+        "§4.3's relocation subsection cites a `file.py:NNNN` but names no "
+        f"revision pin. The header reads an unnamed number against `{BASE_PIN}`, "
+        "where these numbers are wrong or out of range, so the whole passage "
+        "resolves to nothing (#8600). Name the measurement revision in the "
+        "passage AND in the header's exception list."
     )

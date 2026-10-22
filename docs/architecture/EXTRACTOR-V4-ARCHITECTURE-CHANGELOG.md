@@ -844,7 +844,7 @@ needed its own issue. Measured against the tree, that is not the state:
 
 | the claim | measured 2026-10-22 |
 |---|---|
-| no fold carries an Object relocation | `update_entity(<object>, status=…)` journals `EntityMutated`, the classifier labels it `restatus`, and replay runs the **same** `SET n += $s` on the canonical label (`sdk.py:33016`; `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS`, `:7383`) |
+| no fold carries an Object relocation | `update_entity(<object>, status=…)` journals `EntityMutated`, the classifier labels it `restatus`, and replay runs the **same** `SET n += $s` on the canonical label (`sdk.py:33029`; `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS`, `:7383`) |
 | every `Object.status` write is a Point supersession | `ObjectSuperseded` folds Objects (`projection/entities.py:4059`, rebuild sweep `projection/__init__.py:14280`) — but it requires a **visible distinct successor** (`commit_ops.py:1408`), so it is the one arm that cannot express relocation-without-successor |
 | the target needs new vocabulary | `archived` is already in `commit_ops.OBJECT_TERMINAL_STATUSES` (`:51`) and the read-exclusion alias (`:59`), routed by `search_engine._status_vocab_for`; **no first-class producer or lifecycle transition writes it** — `_ALLOWED_TRANSITIONS` (`sdk.py:2942`) declares it terminal with *"reserved — no v1 write path"* (`:2955`) **and nothing consults that map**, so it proves nothing about the Object family — while the generic unvalidated `update_entity` path **can** already place `archived` on an `:Object`, so the existing `archived` population is **UNMEASURED** and must be enumerated before any relocation pass |
 | `#3304`'s raw-`SET` tombstone gap is adjacent and open | `#3304` closed 2026-10-06; the remaining gap is narrower and is stated in the subsection — **no Object-status vocabulary guard on the write side**, and it cannot be a closed set because pack-declared lifecycles own their words |
@@ -858,3 +858,13 @@ is therefore replaced by an accurate list, and nothing in the ledger's invariant
 **Not changed, deliberately.** No producer for `archived`, no applier, no disposition rung, no Object-status
 vocabulary guard (a closed set would break pack lifecycles — stated in the subsection rather than implemented),
 and no `OVERRIDES:` marker: this is a proposal awaiting a ruling, not a departure from a recorded one.
+
+**Two record defects fixed in the same pass, neither a design change.** ⚠️ **The subsection now names its revision
+pin (`653980445`).** Its citations are HEAD numbers: read against the document's default pin (`c79ba1cf2`) three of
+the cited files are shorter than the cited line and `tortoise/definite_description_backfill.py` does not exist, so
+the header's default sent a reader to no citation on every line of the passage — the pin is stated in the passage
+and named in the header's exception list, and a guard reds if the pin is dropped. ⚠️ **The closing sentence
+counted the steps wrong** — it read *"§4.4 declares the policy for the six pipeline steps … not a seventh
+declaration"*, while §4.0/§4.1 declare **EIGHT** (and §4.4 covers all eight), so the carried-over rule is
+*"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states
+any step count other than the canonical one.
