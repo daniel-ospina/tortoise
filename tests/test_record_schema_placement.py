@@ -327,6 +327,25 @@ _CAPSTONE_TOTAL_RE = re.compile(
 #: that created the tenth record table left this row saying "9 record tables"
 #: and "no narrative/raw-text table (0)").
 _INDEX_DOC = REPO_ROOT / "docs" / "00_index.md"
+
+#: The epic's OWN "what exists" ledger — §A1 of the doc the index row above
+#: indexes, and the map every other lane routes through instead of re-deriving
+#: the record schema (#6134). Same defect class, one artefact over: the PR that
+#: created the tenth record table left this heading saying "EXISTS, 9 tables +
+#: 3 views" with a nine-row table underneath it (#9638 review P3).
+_PREREQUISITES_DOC = (
+    REPO_ROOT
+    / "docs"
+    / "epics"
+    / "2026-10-10-7879-postgres-record"
+    / "08-hosted-prerequisites.md"
+)
+#: `### A1. The record schema — **EXISTS, 10 tables + 3 views**, and it is …`
+_PREREQ_CENSUS_RE = re.compile(
+    r"^### A1\. The record schema — \*\*EXISTS, (?P<tables>\d+) tables \+ "
+    r"(?P<views>\d+) views\*\*",
+    re.M,
+)
 _INDEX_RECORD_ROW_MARKER = "**Hosted prerequisites for the Postgres record (epic #7879)**"
 #: `**10 record tables + 3 procedural views**`
 _INDEX_CENSUS_RE = re.compile(
@@ -557,6 +576,82 @@ def test_the_routing_index_census_matches_the_record_migrations():
             "the index tells a lane the home does not exist, in the file that "
             "exists to stop it re-deriving what the map already holds"
         )
+
+
+def test_the_prerequisites_a1_census_matches_the_record_migrations():
+    """The epic's §A1 ledger must state what the migrations HAVE (#9638 P3).
+
+    `08-hosted-prerequisites.md` §A1 is the record's "what EXISTS, without
+    re-deriving it" ledger — §A8 exists precisely to tell a reader how far to
+    trust A1–A7 — and `docs/00_index.md`'s #7879 row indexes it. The PR that
+    added `20261023000001_record_session_narrative.sql` corrected the index row
+    (pinned by the test above) but left this document, in the same section,
+    asserting the pre-change world: a heading of "EXISTS, 9 tables + 3 views"
+    over an exhaustive nine-row table with no `session_narrative` row, plus R7's
+    `**there is no dedicated table for it**` and a `→ 0` census command a few
+    lines above its own DECIDED block. Index and indexed disagreed, in the one
+    direction §A1 exists to prevent.
+
+    Both halves are read, because they can drift independently: the **heading**
+    count (`**EXISTS, N tables + M views**`) and the **row set** — the table
+    body's first cells, which name every table and view. Bumping the count while
+    leaving a row out is the exact shape this document had.
+
+    RED on the pre-fix text — measured: heading says 9 vs 10 derived, and
+    `session_narrative` is absent from the row set. The fix is the document's own
+    heading and table, not a change here.
+
+    Non-vacuity of the derivation: both expected values come from
+    `record_tables_and_views()`, which reads `CREATE TABLE`/`CREATE VIEW` off the
+    record migrations on disk — so dropping the narrative migration makes the
+    document WRONG in the other direction, which is why the row-set assertion is
+    equality and not containment.
+    """
+    text = _PREREQUISITES_DOC.read_text(encoding="utf-8")
+    heading = _PREREQ_CENSUS_RE.search(text)
+    assert heading, (
+        "§A1 of 08-hosted-prerequisites.md no longer states its census in the "
+        "pinned dialect (`### A1. The record schema — **EXISTS, N tables + M "
+        "views**`) — restate it rather than deleting the phrase: this pin reads "
+        "it, and without it the section's `EXISTS` claim becomes uncheckable"
+    )
+
+    tables, views = record_tables_and_views()
+    assert int(heading.group("tables")) == len(tables), (
+        f"§A1 says {heading.group('tables')} record tables, the migrations "
+        f"define {len(tables)}: {sorted(tables)}. Update the heading (and add "
+        "the missing row to the table under it — the row set is pinned too)"
+    )
+    assert int(heading.group("views")) == len(views), (
+        f"§A1 says {heading.group('views')} procedural views, the migrations "
+        f"define {len(views)}: {sorted(views)}"
+    )
+
+    # The table body. `### ` and `## ` end the section, so the row set read here
+    # is §A1's and nothing else's; each row's FIRST cell names its table(s)/
+    # view(s) in backticks (the second cell is a `file:line` path, whose dotted
+    # `20261012000001_record_event_stream.sql:52` shape the `[a-z_]+` class
+    # cannot match, so only the name cells contribute).
+    section = text.split("### A1. The record schema", 1)[1]
+    for end in ("\n### ", "\n## "):
+        section = section.split(end, 1)[0]
+    named: set[str] = set()
+    for line in section.splitlines():
+        if line.startswith("|"):
+            named.update(re.findall(r"`([a-z_]+)`", line.split("|")[1]))
+
+    missing = (set(tables) | set(views)) - named
+    extra = named - (set(tables) | set(views))
+    assert not missing, (
+        "§A1's table does not name "
+        f"{sorted(missing)} — the migrations define them and a reader routing "
+        "through this ledger would conclude they do not exist"
+    )
+    assert not extra, (
+        "§A1's table names "
+        f"{sorted(extra)}, which no record migration defines — the ledger has "
+        "gone stale in the other direction (a dropped table, or a typo)"
+    )
 
 
 def test_primary_properties_have_a_column():

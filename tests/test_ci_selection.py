@@ -2111,6 +2111,16 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # docs-only edit must select `core` too. Measured on the pre-fix head:
         # `_sel([<this path>])` -> surfaces=[], full=False, both readers ABSENT.
         "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+        # #9638 review P3: the SECOND document the same pin reads, and the one
+        # the P3 finding was about — `08-hosted-prerequisites.md` §A1 states the
+        # record's table census ("EXISTS, N tables + M views") and an exhaustive
+        # row set, and it is the epic's own "what EXISTS, without re-deriving
+        # it" ledger. Measured on the pre-fix head: `_sel([<this path>])` ->
+        # surfaces=[], full=False, both readers ABSENT — so the §A1 edit that
+        # left the census at nine tables ran no guard at all. Both halves of the
+        # pin (the heading and the row set) live in this file, so it must select
+        # `core` on its own.
+        "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md",
     ):
         r = _sel([changed])
         assert r["full"] is False, (changed, r)

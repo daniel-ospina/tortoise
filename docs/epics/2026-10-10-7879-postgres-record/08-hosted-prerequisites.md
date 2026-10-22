@@ -79,7 +79,15 @@ they are excluded as prerequisites and recorded as such:
 Measured on `8767b1c8b` (`origin/main`, 2026-10-21). Every claim below was read in the tree or run;
 the runs and their output are in **§G**.
 
-### A1. The record schema — **EXISTS, 9 tables + 3 views**, and it is the artifact §17.5 pins
+### A1. The record schema — **EXISTS, 10 tables + 3 views**, and it is the artifact §17.5 pins
+
+> **⚖️ Re-derived 2026-10-22 (#9555).** The `Measured on 8767b1c8b` stamp above scopes the
+> measurements; the census in this heading and the row set below were re-read at this head, which is
+> why the count is **10** and the tenth row (`session_narrative`) sits after `relation`. Both halves
+> are now pinned against the migrations on disk — `tests/test_record_schema_placement.py`,
+> `::test_the_prerequisites_a1_census_matches_the_record_migrations` — so neither the count nor a
+> missing row can go stale silently again (the same defect the `docs/00_index.md` pin catches one
+> artefact over).
 
 | table / view | file:line | layer |
 |---|---|---|
@@ -92,6 +100,7 @@ the runs and their output are in **§G**.
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
 | `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's envelope directive**: `CONTAINS` (`record_projection._ENVELOPE_RELATIONS` emits the `relation` row after the Point's `node_identity`). Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `session_narrative` | `supabase/migrations/20261023000001_record_session_narrative.sql:122` | — **NOT a node table** (no `node_identity` FK): §9.1's verbatim-narrative home, **#9555**/R7. Keyed `(org_id, graph_id, session_id)`, cascading from **`public.graphs`** — not from `public.session`, see R7's DECIDED block for why, and for what a live capture does and does not carry into it today (no journal carrier for `story_arc` yet ⇒ a `NULL` `narrative`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -301,15 +310,18 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 
 ### R7 — Raw text and the S1 narrative in Postgres (§9.1) · **L** · schema + code · **BLOCKER**
 
-**What:** **there is no dedicated table for it** — the text is carried as data, in the `point.content`
-column and in the layer-1 `journal_event.payload` mirror of the record that wrote it (see below) —
-`grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returns **0**; `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
+**What — as filed 2026-10-21, ⛔ superseded by the DECIDED block below (#9555, 2026-10-22):** at the
+`8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
+`point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
+(see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
+65 migrations returned **0** (at this head the same command matches
+`20261023000001_record_session_narrative.sql` on 37 lines — the table this item's DECIDED block adds);
+`public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
 text, not the extracted claim"* — measured 15.9 / 22.0 pts).
 **What it blocks:** §9.1's placement rule, the verbatim-evidence fetch path, **and the destroy-the-
-graph acceptance itself** — the record has **no narrative-first home**: a captured turn's text
+graph acceptance itself** — the record had **no narrative-first home**: a captured turn's text
 is carried as data — an episodic `point.content` row (`…03_record_epistemic.sql:56`; the §G run wrote
 4) and the `journal_event.payload` that mirrors the record, plus, since `#3947` (CLOSED), the journal
 entry a `rebuild_all` replays — so what a *record*-sourced rebuild cannot reproduce is the §9.1
@@ -607,10 +619,15 @@ cd supabase/tests/pglite && npm install && npm run validate
 grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
   docs/infra-runbook.md                                                       → (no output)
 grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
-grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0
+grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 0
 grep -rn 'rebuild_from_record(' tortoise/ | grep -v 'def '                  → 0 call sites
 grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_backup.py \
   tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
+
+⚠️ **Re-measured 2026-10-22 (#9555): the third command is no longer 0.** The block above stands as
+what was run at `8767b1c8b`; at this head the same `narrative|raw_turn|raw_text|transcript` grep
+returns **37 lines, all in `20261023000001_record_session_narrative.sql`** — R7's table, the tenth
+record table (§A1). The other six commands were re-run at this head and are still exactly as stated.

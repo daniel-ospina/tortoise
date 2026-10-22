@@ -1347,6 +1347,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # be present; the pair's #7968 comment above names both paths and is
              # false without this entry.
              "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
+             # #9555 / #9638 review P3: the SECOND document the same pin now
+             # reads. `test_record_schema_placement.py::
+             # test_the_prerequisites_a1_census_matches_the_record_migrations`
+             # pins `08-hosted-prerequisites.md` §A1 — the epic's own "what
+             # EXISTS" ledger — against the migrations on disk. That path is
+             # under `docs/` (a NON_PYTHON_PREFIXES entry) and matches no
+             # SOURCE_PATTERNS row, so without this entry a §A1-only edit took
+             # the docs-only early return and selected NO surface: the census
+             # could be left claiming nine tables on the PR that creates the
+             # tenth, with the pin that exists to catch it never running — the
+             # #1349/#3332/#3616 silent-drop class, and the exact shape of the
+             # defect it pins. Pinned by
+             # tests/test_ci_selection.py::test_record_schema_pin_runs_on_migration_or_doc_change.
+             "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md",
              # RETIRED 2026-10-19: the orchestrator harness (and therefore
              # tests/test_orchestrator_harness.py) moved to
              # agent-infra/scripts/orchestrator-harness/. This repo keeps only a pointer
