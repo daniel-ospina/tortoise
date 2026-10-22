@@ -135,10 +135,12 @@ def census_onboarding() -> None:
     for name, gate in _completion_gates():
         row("5", f"the `{name}` completion gate requires",
             ", ".join(sorted(gate)))
+    pending = state.restart_pending(['team-named', 'connection-written'])
     row("5", "`restart_pending` for the set step 5 describes "
              "(['team-named','connection-written'])",
-        f"{state.restart_pending(['team-named', 'connection-written'])} "
-        "— i.e. 'config written, harness NOT yet verified'")
+        f"{pending} "
+        + ("— i.e. 'config written, harness NOT yet verified'" if pending
+           else "— NOT the config-written/restart-pending condition"))
     row("5", "`restart_pending` once the harness has connected",
         f"{state.restart_pending(['team-named', 'connection-written', 'harness-connected'])}")
     # Steps 8/9 (which step a given write observes) are NOT restated here: a

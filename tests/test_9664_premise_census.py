@@ -234,3 +234,29 @@ def test_the_team_named_row_also_measures_the_non_agent_half(probe, monkeypatch)
     assert "state._NON_AGENT_STEPS=False" in verdict, (
         f"the row must show which clause failed, got {verdict!r}"
     )
+
+
+# ── onboarding: an interpretation is printed only for the value it explains ──
+
+
+def test_the_restart_pending_gloss_follows_the_value(probe, monkeypatch) -> None:
+    """`False` must not print the `True` interpretation.
+
+    `state.restart_pending` really can answer `False` for this set (`state.py`
+    documents `["team-named"] → False`, and the neighbouring row prints `False`
+    for the connected set), so an unconditional `"— i.e. 'config written,
+    harness NOT yet verified'"` would print a self-contradicting row in exactly
+    the flipped case the census exists to detect — the same unconditional-suffix
+    defect as the gate rows.
+    """
+    from tortoise.onboarding import state
+
+    monkeypatch.setattr(state, "restart_pending", lambda _steps: False)
+    probe.census_onboarding()
+    measured = _measured(probe, "`restart_pending` for the set step 5 describes")
+    assert measured.startswith("False"), (
+        f"the row must print the derivation's value, got {measured!r}"
+    )
+    assert "harness NOT yet verified" not in measured, (
+        f"a False derivation must not carry the True gloss: {measured!r}"
+    )
