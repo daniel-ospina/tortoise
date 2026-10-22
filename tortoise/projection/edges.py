@@ -2019,6 +2019,44 @@ class _EdgeHandlers:
         a re-link must NOT advance the recorded version, or staleness would
         silently read as current.
 
+        ⛔ NO SELF-LOOP (#5151). A source and a ``Source`` entity are the SAME
+        ``:Source`` node when their keys are equal, so the edge would be
+        ``(:Source {url:'X'})-[:references]->(:Source {url:'X'})`` — a node
+        referencing itself, which states nothing (ONTOLOGY §3.4's ``references``
+        is source→entity containment/derivation). Before D10 the two sides were
+        different LABELS and equal keys could not degenerate; D10 made a document
+        a ``:Source``, which made it reachable. The guard is HERE, not in the
+        callers, because a caller-side ``if ref and ref != did`` is defeated by
+        two things a caller cannot see:
+
+        * key RESOLUTION — ``resolve_source_key`` maps a URL variant
+          (``…/a/?utm_source=x``) onto the node stored as ``…/a``, so the raw
+          spellings differ while the RESOLVED key equals the entity id (measured:
+          the caller-side guard passes it through and the edge is a self-loop);
+        * the next caller — every new ``Source``→``Source`` writer would have to
+          re-derive the same rule, and #5140 showed what a misplaced guard costs
+          in the other direction: the *legacy* no-``source_url`` path silently
+          minted no edge at all, repaired by re-pointing ``get_provenance_chain``'s
+          reader.
+
+        SCOPE, precisely: only the ``references`` MERGE is suppressed. The
+        ``:Source`` MERGE above still runs (every property it sets, including the
+        ``sourceKind``/``canonicalUrl``/``urlAliases`` bookkeeping, is unchanged),
+        because collapsing source and entity onto one node leaves the NODE right
+        and only the EDGE degenerate — the same suppression shape as
+        ``_upsert_document``'s and ``session_source_migration``'s. Nothing is
+        dropped that a reader needs: the node IS its own provenance, which is what
+        ``get_provenance_chain`` already serves for the collapsed path, and live
+        and replay now agree (a journaled ``DocumentCreated`` whose ``source_url``
+        equals its document id no longer mints a self-loop on ``rebuild_all``).
+
+        ⚠️ Deliberately NOT narrowed to "``references`` is a Source→Source
+        predicate": its target set is legitimately ``Event`` | ``Object`` |
+        ``Source`` (docs/ONTOLOGY.md §3.4), so a Source-only declaration would
+        reject legal links. The degenerate class is SAME-NODE, not same-label —
+        which is why the guard tests identity and the ``Event``/``Object`` labels
+        (where an equal ``id`` string addresses a DIFFERENT node) are untouched.
+
         Raises:
             ValueError: if entity_label is not one of Source, Event, Object
                 (Action was dissolved in Ontology v3.0).
@@ -2073,6 +2111,21 @@ class _EdgeHandlers:
         # D10: a document is a :Source, and a Source resolves by ``url`` (not
         # ``id``) — the same identity key the label moved with.
         key_clause = "{url:$eid}" if entity_label == "Source" else "{id:$eid}"
+        # #5151: the self-loop guard, at the CHOKE POINT (read this method's
+        # docstring paragraph "NO SELF-LOOP" for why not in the caller). Both
+        # endpoints of a ``Source`` entity MATCH are ``{url: …}``-keyed, and ``url``
+        # is single-valued, so ``key == entity_id`` IS node identity here — no
+        # second read, no race. Scoped to ``Source`` because for
+        # ``Event``/``Object`` the target is matched on ``{id: …}`` under a
+        # DIFFERENT label, so an equal string addresses a distinct node and the
+        # edge is legitimate.
+        # Deliberately NOT logged: there is no link to lose (source and entity are
+        # one node), so this is the ordinary case, not a degraded one — a warning
+        # here would fire on every collapsed-provenance write and train readers to
+        # ignore it, the direction `_count_about_out`'s ``wired`` count errs away
+        # from for the same reason.
+        if entity_label == "Source" and key == entity_id:
+            return
         if _is_derivation:
             self.g.query(
                 f"MATCH (s:Source {{url:$url}}), (e:{entity_label} {key_clause}) "

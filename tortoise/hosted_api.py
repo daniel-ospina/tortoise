@@ -16543,14 +16543,22 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # last divergent copy. Guards inherited: terminal keep-first (the fold
     # never blind-overwrites), self-supersession skip, >1-name never-guess,
     # visible-successor gate, legacy id-less canonical-id synthesis. Skips
-    # surface via _logger.warning (hosted attribution) — except the helper's
-    # documented SILENT class (no warn()): entity same-successor dedup
-    # (idempotent no-op) and terminal pt_ absorbs REGARDLESS of the claimed
-    # successor (no divergence probe — the #2164 P3 asymmetry; divergent
-    # pt_ re-claims are out-of-band-only, S3 point search excludes terminal
-    # priors, #1391). The summary log therefore INFOs zero-warn applies even
-    # when applied<total — a WARNING means a record actually warned. Per-
-    # record fail-open (warn-only — never fails the commit). Same-commit
+    # surface via _logger.warning (hosted attribution) under the helper's
+    # BOUNDED #5654 contract — the first _MAX_SUPERSESSION_WARNS (20)
+    # per-record warns are logged individually, the rest are counted and
+    # reported in ONE summary WARN (emitted only when something was withheld)
+    # carrying the batch size, the true warning total and the withheld count,
+    # so past that budget a skip is SIZED but not named individually. The
+    # helper's documented SILENT class still
+    # never warns at all: entity same-successor dedup (idempotent no-op) and
+    # terminal pt_ absorbs REGARDLESS of the claimed successor (no divergence
+    # probe — the #2164 P3 asymmetry; divergent pt_ re-claims are
+    # out-of-band-only, S3 point search excludes terminal priors, #1391).
+    # The summary log therefore INFOs zero-warn applies even
+    # when applied<total, and WARNINGs once any record warned — a WARNING on
+    # that line means a record warned OR the helper closed with its summary
+    # (which also increments `warned`; see _supersession_warn). Per-record
+    # fail-open (warn-only — never fails the commit). Same-commit
     # supersession chains fold in dependency order inside apply_supersessions
     # (#2249) — emission order is irrelevant; the helper's pre-pass sorts so
     # each fold runs while its successor is still live. Cross-commit
@@ -16571,7 +16579,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # terminal pt_ absorbs never call warn()) — applied < total with
         # zero warns is a silent no-op/absorb, not an operator signal;
         # WARNING is reserved for records that actually warned (real skips:
-        # dangling/self/never-guess/keep-first conflicts, emit failures).
+        # dangling/self/never-guess/keep-first conflicts, emit failures) PLUS
+        # the helper's ONE closing summary warn, which is emitted outside the
+        # #5654 per-record budget and reaches this sink too. So `warned`
+        # over-counts records once the budget is spent — it is a log-level
+        # signal, never a tally of records (the helper's summary carries the
+        # true total).
         nonlocal warned
         warned += 1
         _logger.warning(msg, *args, **kwargs)
