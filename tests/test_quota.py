@@ -885,8 +885,7 @@ class TestDocumentsQuota:
         projection's CREATE default, #5026/D10; `'transcript'` is the capture
         genre; `None` is a kind-less provenance Source).
         """
-        from tortoise.quota import (DOCUMENT_METER_PREDICATE,
-                                    is_metered_document_kind)
+        from tortoise.quota import is_metered_document_kind
         tid, tenant = self._tenant(tmp_path, reg_sdk)
         try:
             g = tenant._get_proj().g
@@ -928,7 +927,7 @@ class TestDocumentsQuota:
         OTHER fields still update (the clamp is a genre clamp, not a skipped
         write) — so the negative arm cannot pass by the write being a no-op.
         """
-        from tortoise import hosted_api  # noqa: I001
+        from tortoise import hosted_api
         from tortoise.ids import content_hash
 
         tid, tenant = self._tenant(tmp_path, reg_sdk)

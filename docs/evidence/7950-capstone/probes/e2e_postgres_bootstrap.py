@@ -25,6 +25,10 @@ MIGRATIONS = [
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # The erasure RPC (#7968): a FUNCTION, so this Postgres gains a function and
+    # no column. Applied anyway — the list is pinned to
+    # `record_projection.RECORD_MIGRATIONS` in EQUALITY (#9550).
+    "20261012000005_record_org_purge_rpc.sql",
     "20261014000001_record_subject_props_no_derived.sql",
     # FORWARD `ALTER TABLE public.point ADD COLUMN` (#2782's money value). The
     # probe drives the SHIPPED projection, whose schema read comes from
@@ -33,6 +37,11 @@ MIGRATIONS = [
     # to it (`UndefinedColumn` on the point INSERT). `tests/
     # test_7950_capstone_probe.py` pins this list to `RECORD_MIGRATIONS`.
     "20261018000001_record_point_money_value_2782.sql",
+    # FORWARD `ALTER TABLE public.session ALTER COLUMN capture_redactions TYPE
+    # integer` (#9264). Same reason as the entry above: the probe drives the
+    # SHIPPED projection, so a schema still declaring `jsonb` keeps refusing the
+    # producer's integer count with `DatatypeMismatch` here too.
+    "20261022000001_record_session_capture_redactions_integer.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 

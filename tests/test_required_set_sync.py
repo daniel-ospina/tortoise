@@ -850,6 +850,99 @@ def test_a_matrix_value_with_a_backslash_is_not_a_replacement_template(guard, va
     }
 
 
+def _write_shard_manifest(root: Path, **counts: int) -> None:
+    """A `config/ci-surfaces.yml` whose only content is the shard counts."""
+    cfg = root / "config"
+    cfg.mkdir(parents=True, exist_ok=True)
+    (cfg / "ci-surfaces.yml").write_text(
+        "".join(f"{key}: {value}\n" for key, value in counts.items()))
+
+
+def _write_expression_matrix_workflow(guard) -> None:
+    """The `test` / `test-slow` pair: SAME `matrix.half`, DIFFERENT pools.
+
+    This is the real tree's shape (`python-ci.yml`), reduced to what the
+    resolution reads: two jobs whose `strategy.matrix` is a `fromJSON(…)`
+    expression and whose `name:` interpolates the same `matrix.<key>`.
+    """
+    guard.WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+    (guard.WORKFLOWS_DIR / "pr.yml").write_text(
+        "on:\n  pull_request:\njobs:\n"
+        "  test:\n    name: test (${{ matrix.half }})\n"
+        "    runs-on: ubuntu-latest\n"
+        "    strategy:\n"
+        "      matrix: ${{ fromJSON(needs.changes.outputs.fast_matrix) }}\n"
+        "    steps:\n      - run: 'true'\n"
+        "  test-slow:\n    name: test-slow (${{ matrix.half }})\n"
+        "    runs-on: ubuntu-latest\n"
+        "    strategy:\n"
+        "      matrix: ${{ fromJSON(needs.changes.outputs.slow_matrix) }}\n"
+        "    steps:\n      - run: 'true'\n")
+
+
+def test_a_fromjson_matrix_resolves_its_leg_count_per_job(
+        guard, tmp_guard_env, monkeypatch):
+    """#9539: `matrix.half` is `fast_shards` on `test` and `slow_shards` on `test-slow`.
+
+    Resolving the shape from the `matrix.<key>` NAME alone read the slow lane's
+    leg count off `fast_shards` (9), so `test-slow (f)`…`(i)` were reported
+    PRODUCIBLE while no such legs exist. `producible` is SUBTRACTED from the
+    required set to find deadlocked names, so fabricating four extra slow legs
+    hides exactly the deadlock this guard exists to catch — fail-OPEN, and
+    silent (nothing is required by a leg name today, so it never reds today).
+    """
+    _write_shard_manifest(tmp_guard_env, fast_shards=9, slow_shards=5, carve_shards=3)
+    monkeypatch.setattr(guard, "REPO_ROOT", tmp_guard_env)
+    _write_expression_matrix_workflow(guard)
+    names = guard.producible_on_pull_request()
+    assert names == {f"test ({c})" for c in "abcdefghi"} | {
+        f"test-slow ({c})" for c in "abcde"}, sorted(names)
+
+
+def test_a_fromjson_matrix_refuses_a_job_key_pair_that_declares_no_pool(
+        guard, tmp_guard_env, monkeypatch):
+    """An unrecognised (job, `matrix.<key>`) pair REFUSES TO MEASURE.
+
+    `matrix.half` means something only on `test` and `test-slow`. Anywhere else
+    the guard must exit 2 rather than inherit the fast band's count: a guessed
+    leg count is a fabricated name, and a fabricated name satisfies the
+    deadlock subtraction vacuously.
+    """
+    _write_shard_manifest(tmp_guard_env, fast_shards=9, slow_shards=5, carve_shards=3)
+    monkeypatch.setattr(guard, "REPO_ROOT", tmp_guard_env)
+    guard.WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
+    (guard.WORKFLOWS_DIR / "pr.yml").write_text(
+        "on:\n  pull_request:\njobs:\n"
+        "  test-slow-2:\n    name: test-slow-2 (${{ matrix.half }})\n"
+        "    runs-on: ubuntu-latest\n"
+        "    strategy:\n"
+        "      matrix: ${{ fromJSON(needs.changes.outputs.slow_matrix) }}\n"
+        "    steps:\n      - run: 'true'\n")
+    with pytest.raises(guard.CannotMeasure, match="no shard source is declared"):
+        guard.producible_on_pull_request()
+
+
+def test_the_real_slow_lane_reports_exactly_its_declared_legs(guard):
+    """The real tree: `test-slow` names must be `slow_shards` of them, not 9.
+
+    The durable pin, on the committed workflow + manifest: the slow lane's
+    matrix is `fromJSON(needs.changes.outputs.slow_matrix)` (the `slow_shards`
+    derivation, #9539) while the fast band is `fromJSON(...fast_matrix)`
+    (`fast_shards`) — one `matrix.half` key, two declarations.
+    """
+    manifest = guard.read_yaml(guard.REPO_ROOT / guard.CI_SURFACES_REL)
+    names = guard.producible_on_pull_request()
+    slow = {n for n in names if n.startswith("test-slow (")}
+    fast = {n for n in names if n.startswith("test (")}
+    letters = "abcdefghijklmnopqrstuvwxyz"
+    assert slow == {f"test-slow ({c})" for c in letters[:manifest["slow_shards"]]}, (
+        f"test-slow's producible legs must come from `slow_shards` "
+        f"({manifest['slow_shards']}), got {sorted(slow)}")
+    assert fast == {f"test ({c})" for c in letters[:manifest["fast_shards"]]}, (
+        f"test's producible legs must come from `fast_shards` "
+        f"({manifest['fast_shards']}), got {sorted(fast)}")
+
+
 @pytest.mark.parametrize("payload", [
     {"contexts": 5, "strict": False},
     {"contexts": [["a"]], "strict": False},

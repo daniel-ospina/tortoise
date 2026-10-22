@@ -804,7 +804,12 @@ def _bfs_select_operators(proj, anchors: list[str], max_hops: int | None = 1,
                 stats["op_cap"] = op_cap
             # Deterministic truncation — set iteration order is non-deterministic
             # (hash randomization); sort by ID for reproducible selection.
-            collected = set(sorted(collected)[:op_cap])
+            # #9275: `key=str` — `collected` holds operator ids the engine
+            # returned, and `_bfs_select_operators`' callers include graphs the
+            # SDK did not write (a numeric id is addressable and runnable), so a
+            # bare sort is the same mixed-type ordering crash the affected-claim
+            # path no longer has.
+            collected = set(sorted(collected, key=str)[:op_cap])
             break
 
         # Expand to new frontier points from collected operators

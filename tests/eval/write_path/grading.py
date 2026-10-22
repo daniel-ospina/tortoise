@@ -471,6 +471,109 @@ def _anchor_points(points: list[SessionPoint], anchor: str) -> list[SessionPoint
     return out
 
 
+# ── #9077 (E4): the two id spaces an operator edge crosses ───────────────────
+#
+# The commit holds operator endpoint refs in the GRAPH id space, while the
+# extractor emitted them in the PAYLOAD id space. #4716 Part 1 remaps one onto
+# the other (``commit_ops.remap_operator_endpoint_refs``); a payload id that
+# resolved to a pre-existing node under a different id names nothing after the
+# remap, and before #4716 the operator write was swallowed as "inputs
+# missing?" — the silent edge drop. The E4 receipt (#9077) must show that this
+# remap actually happened per edge, not assert it in prose.
+#
+# Both refs are observable WITHOUT instrumenting the commit: payload point ids
+# are content-addressed (``extractor_v2._content_id`` -> ``pt_<sha256>``), and
+# the committed node carries the SAME content, so the payload ref an endpoint
+# was emitted under is derivable from the content the graph holds. When the
+# commit kept the payload id the two agree; when it re-keyed onto an existing
+# node the graph id is a different (ULID) id — ``remapped`` is that difference.
+
+
+def _pre_commit_ref(content: str) -> str:
+    """The PAYLOAD-id-space ref a point with ``content`` was emitted under."""
+    from tortoise.extractor_v2 import _content_id
+
+    return _content_id("pt", content or "")
+
+
+def _endpoint_refs(points: list[SessionPoint]) -> list[dict]:
+    """The pre/post-commit ref pair for one side of a planted edge.
+
+    ``post_ref`` is the graph id the audit anchored on (it came out of the
+    graph, so it resolves by construction); ``pre_ref`` is the payload id the
+    same content was emitted under; ``remapped`` is the #4716 re-key flag.
+    Several points can carry one anchor (the paraphrase band), so this is a
+    list — the audit never picks a winner it cannot justify.
+    """
+    refs: list[dict] = []
+    for point in points:
+        post_ref = point.get("point_id")
+        pre_ref = _pre_commit_ref(point.get("content") or "")
+        refs.append({
+            "post_ref": post_ref,
+            "pre_ref": pre_ref,
+            "remapped": pre_ref != post_ref,
+            "resolves": bool(post_ref),
+        })
+    return refs
+
+
+def _miss_cause(verdict: str, planted: dict) -> str:
+    """A NAMED cause for an edge the audit did not grade ``edge_correct``.
+
+    #9077's rule: every planted edge is either wired+persisted or carries a
+    cause — an unexplained miss is a receipt defect, not a result. The verdict
+    is the mechanism; the sentence says what it means for a reader who is not
+    holding the grader source.
+    """
+    from_sid = (planted.get("from") or {}).get("session_id")
+    to_sid = (planted.get("to") or {}).get("session_id")
+    which = "from" if verdict == "from_content_missing" else "to"
+    if verdict in ("from_content_missing", "to_content_missing"):
+        sid = from_sid if which == "from" else to_sid
+        return (
+            f"{verdict}: no memory Point{f' in {sid}' if sid else ''} carries "
+            f"the {which}-anchor claim — the extractor emitted no claim for "
+            "that endpoint (content-level miss, not an edge miss)"
+        )
+    return (
+        "edge_missing: both endpoint claims are present in the memory layer "
+        f"but no qualifying {planted.get('expected_kind')} edge connects them "
+        "— the edge was never emitted, or the commit dropped it"
+    )
+
+
+def _edge_persisted(detail: dict, from_surface: dict, to_surface: dict) -> bool:
+    """Did the committed edge SURVIVE into the retrievable memory layer?
+
+    #9077 separates two things the historical 0/4 confounded: the edge being
+    ``edge_correct`` (the audit saw the right kind between the right anchors)
+    and the committed nodes being *retrievable* (eventId-stamped — the
+    ``operator_counts == {}`` silent drop #2552 closed structurally). An edge
+    is persisted when both anchored endpoints are in the eventId-keyed memory
+    layer AND every operator node that formed it is eventId-stamped. A
+    SUPERSEDE has no operator node (it rides the point-level CORRECTS), so its
+    persistence is the endpoint leg alone.
+    """
+    if not detail.get("edge_correct"):
+        return False
+    retrievable = {p.get("point_id")
+                   for p in (from_surface.get("points", [])
+                             + to_surface.get("points", []))}
+    for side in ("from", "to"):
+        refs = [r.get("post_ref")
+                for r in (detail.get("endpoints") or {}).get(side) or []]
+        if not refs or any(ref not in retrievable for ref in refs):
+            return False
+    provenanced = {n.get("point_id")
+                   for n in (from_surface.get("operator_nodes") or [])
+                   if n.get("event_id")}
+    provenanced |= {n.get("point_id")
+                    for n in (to_surface.get("operator_nodes") or [])
+                    if n.get("event_id")}
+    return all(oid in provenanced for oid in detail.get("edge_op_ids") or [])
+
+
 def operator_edge_detail(
     planted: dict,
     from_points: list[SessionPoint],
@@ -493,15 +596,34 @@ def operator_edge_detail(
     kind = planted.get("expected_kind")
     from_ids = [p.get("point_id") for p in from_points]
     to_ids = [p.get("point_id") for p in to_points]
+    # #9077: every verdict carries the id-space evidence the E4 receipt reads —
+    # ``edge_op_ids`` (the operator nodes that formed the edge) and ``matched``
+    # (the graph endpoint ids the forming edge touches). A detail without them
+    # cannot distinguish "the anchor was found" from "the edge was wired onto
+    # the right nodes".
     if not from_ids:
         return {"id": planted.get("id"), "expected_kind": kind,
-                "verdict": "from_content_missing", "edge_correct": False}
+                "verdict": "from_content_missing", "edge_correct": False,
+                "edge_op_ids": [], "matched": {"from": [], "to": []}}
     if not to_ids:
         return {"id": planted.get("id"), "expected_kind": kind,
-                "verdict": "to_content_missing", "edge_correct": False}
+                "verdict": "to_content_missing", "edge_correct": False,
+                "edge_op_ids": [], "matched": {"from": [], "to": []}}
     fset, tset = set(from_ids), set(to_ids)
     forms: list[str] = []
     direction_correct = False
+    edge_op_ids: list[str] = []
+    matched: dict[str, list[str]] = {"from": [], "to": []}
+
+    def _note(oid: str | None, endpoint_ids) -> None:
+        if oid and oid not in edge_op_ids:
+            edge_op_ids.append(oid)
+        for pid in endpoint_ids:
+            if pid in fset:
+                matched["from"].append(pid)
+            elif pid in tset:
+                matched["to"].append(pid)
+
     if kind == "SUPERSEDE":
         for edge in snapshot.get("direct_edges", []):
             if edge.get("rel_type") != "CORRECTS":
@@ -509,6 +631,7 @@ def operator_edge_detail(
             if edge.get("from_id") in fset and edge.get("to_id") in tset:
                 forms.append("CORRECTS")
                 direction_correct = True  # CORRECTS is new→old by construction
+                _note(None, [edge.get("from_id"), edge.get("to_id")])
     elif kind in ("NEGATE", "SUPPORTS"):
         want = "NAND" if kind == "NEGATE" else "IMPL"
         for edge in snapshot.get("operator_edges", []):
@@ -518,6 +641,7 @@ def operator_edge_detail(
             if not (fset & set(endpoints) and tset & set(endpoints)):
                 continue
             forms.append(want)
+            _note(edge.get("op_id"), endpoints)
             if edge.get("source_id") in fset:
                 direction_correct = True
     elif kind == "MITIGATES":
@@ -529,6 +653,7 @@ def operator_edge_detail(
             endpoints = edge.get("endpoints") or {}
             if fset & set(endpoints) and tset & set(endpoints):
                 forms.append("MITIGATES")
+                _note(edge.get("op_id"), endpoints)
                 direction_correct = True
         ops_by_id = {e.get("op_id"): e for e in snapshot.get("operator_edges", [])}
         for mit in snapshot.get("mitigations", []):
@@ -556,16 +681,21 @@ def operator_edge_detail(
                     planted.get("from", {}).get("verbatim_anchor") or "")
             if from_carries and (tset & set(endpoints)):
                 forms.append(f"mitigated_by({mit.get('point_id')})")
+                _note(mit.get("op_id"), endpoints)
                 direction_correct = True
     if forms:
         detail = {"id": planted.get("id"), "expected_kind": kind,
                   "verdict": "edge_correct", "edge_correct": True,
-                  "forms_found": forms}
+                  "forms_found": forms,
+                  "edge_op_ids": edge_op_ids,
+                  "matched": {"from": sorted(set(matched["from"])),
+                              "to": sorted(set(matched["to"]))}}
         if not direction_correct:
             detail["direction_off"] = True
         return detail
     return {"id": planted.get("id"), "expected_kind": kind,
-            "verdict": "edge_missing", "edge_correct": False}
+            "verdict": "edge_missing", "edge_correct": False,
+            "edge_op_ids": [], "matched": {"from": [], "to": []}}
 
 
 def grade_planted_operators(
@@ -587,6 +717,11 @@ def grade_planted_operators(
          "results": {edge_id: detail}, "by_session": {sid: {...}}}
 
     Pooled fractions are honest denominators (planted == 0 ⇒ empty audit).
+
+    #9077 (E4): each result additionally carries ``endpoints`` (pre/post-commit
+    refs per side), ``persisted`` and a named ``cause`` on a miss, so a receipt
+    can prove wiring + persistence + endpoint remap per edge instead of
+    restating a numerator.
     """
     results: dict[str, dict] = {}
     by_session: dict[str, dict] = {}
@@ -616,6 +751,21 @@ def grade_planted_operators(
             detail["from_session"] = from_sid
             detail["to_session"] = to_sid
             detail["owner_session"] = sid
+            # #9077 (E4): the receipt carries the per-edge evidence, never a
+            # prose assertion — the two id spaces the commit crossed, and
+            # whether the committed edge is in the retrievable memory layer.
+            detail["endpoints"] = {
+                "from": _endpoint_refs(from_points),
+                "to": _endpoint_refs(to_points),
+            }
+            detail["persisted"] = _edge_persisted(
+                detail, snapshots_by_session.get(from_sid, {}),
+                snapshots_by_session.get(to_sid, {}))
+            # The named cause is present ONLY on a miss, so a reader can tell
+            # an explained miss from a wired edge without re-deriving it.
+            detail["cause"] = (None if detail.get("edge_correct")
+                               else _miss_cause(detail.get("verdict") or "",
+                                                planted))
             results[planted.get("id", "?")] = detail
             bucket.append(detail)
         by_session[sid] = {

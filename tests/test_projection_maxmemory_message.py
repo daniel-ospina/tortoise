@@ -20,13 +20,19 @@ Revert-verified: delete the `_write_refusal_message` branch in
 goes RED (the rebuild advice reappears); make `_write_refusal_message` return
 a message for every exception and
 `test_genuine_corruption_still_advises_rebuild` goes RED.
+
+#7392 pins a THIRD direction, on the STRENGTH of the lead sentence: a refusal
+whose ceiling was never READ must not claim one. The
+`test_no_ceiling_established_*` and `test_unset_maxmemory_*` cases go RED if
+the ceiling sentence (or the ceiling-only `--maxmemory` lever) is emitted on
+the `_memory_pressure() is None` and `maxmemory == 0` branches.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from tortoise.projection import FalkorProjection
+from tortoise.projection import FalkorProjection, _fmt_bytes
 
 # The server's own wording when `maxmemory` is reached with `noeviction`.
 _MAXMEMORY_ERROR = (
@@ -101,8 +107,12 @@ def test_write_refusal_remedy_names_the_safe_path_and_claims_no_flags(monkeypatc
 
     msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
     assert msg is not None
-    # 1. The one executable lever.
-    assert "raise / relieve the container's --maxmemory" in msg, msg
+    # 1. The one executable lever — named for BOTH instance classes: the
+    #    projection message is emitted on managed instances too, where a
+    #    container flag cannot be set (#9532 cycle 3 P1).
+    assert "raise / relieve the instance's maxmemory ceiling" in msg, msg
+    assert "REDIS_ARGS" in msg, msg
+    assert "managed instance" in msg, msg
     # 2. The residue-pass lever is NOT named: that pass runs only when an
     #    operator invokes it, so naming its env lever would be advice that frees
     #    nothing.
@@ -183,6 +193,372 @@ def test_memory_pressure_unreadable_still_avoids_rebuild(monkeypatch):
     msg = str(err.value)
     assert "maxmemory" in msg, msg
     assert "python -m tortoise rebuild" not in msg, msg
+
+
+# ── #7392 — the message must not claim a ceiling it did not establish ──────
+
+#: The lead sentence that is only TRUE once a ceiling was read from the server.
+_CEILING_CLAIM = "has reached its memory ceiling"
+#: The remedy that only makes sense when that ceiling exists.
+_CEILING_LEVER = "raise / relieve the instance's maxmemory ceiling"
+
+
+def _assert_no_ceiling_claim(msg: str) -> None:
+    """Assert the message does not assert a ceiling, or prescribe raising one.
+
+    The non-corruption guarantees (#2981: intact, no rebuild, no graph
+    deletion) are asserted alongside so a fix cannot buy the absence of the
+    false claim by deleting the whole branch — the same two-directional
+    posture the module docstring describes.
+    """
+    assert _CEILING_CLAIM not in msg, (
+        "the ceiling sentence is only true once INFO memory returned one: " + msg)
+    assert _CEILING_LEVER not in msg, (
+        "the --maxmemory lever is the remedy for a ceiling that does not "
+        "exist on this branch: " + msg)
+    assert "INTACT" in msg, msg
+    assert "do NOT rebuild" in msg, msg
+    assert "python -m tortoise rebuild" not in msg, msg
+    assert "Do NOT hand-pick names from GRAPH.LIST" in msg, msg
+
+
+def test_no_ceiling_established_refusal_is_stated_as_a_memory_refusal(monkeypatch):
+    """#7392 — an UNREADABLE datum is not evidence of a ceiling.
+
+    NON-VACUOUS: pre-fix this branch emitted "the server has reached its
+    memory ceiling (server reports a maxmemory write-refusal (used_memory/
+    maxmemory unreadable))" plus the `--maxmemory` lever — so both absence
+    assertions above fail on it.
+
+    What it must say instead is what was OBSERVED: the server refused a command
+    for memory reasons. That keeps the operator away from `rebuild` (the
+    #2981 job) without inventing a ceiling to tune.
+
+    The wording must also be TRUE OF EVERY shape that reaches this branch, not
+    just a raised `INFO` call: a reply that answers WITHOUT a `maxmemory` field
+    is not an unreadable INFO. So the message says the datum could not be read,
+    and it does NOT offer the flag as an action — on this branch whether a
+    ceiling exists is exactly what is unknown (both found in review of this
+    change).
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: None  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    assert "refused a command for memory reasons" in lowered, msg
+    # …it says the DATUM was not usable, naming no failed read it cannot know…
+    assert "no usable used_memory/maxmemory reading" in lowered, msg
+    assert "info memory is unreadable" not in lowered, msg
+    # …the next action is to ESTABLISH it, so the flag is not offered as a lever.
+    assert "info memory" in lowered, msg
+    assert "--maxmemory" not in msg, msg
+
+
+def test_a_reply_missing_a_field_does_not_claim_the_info_read_failed():
+    """#7392 review — `None` has FIVE causes; the message must fit all five.
+
+    `_memory_pressure()` refuses a datum when the reply raised, was not a dict,
+    omitted `used_memory` or `maxmemory`, carried unparseable values, or
+    reported a negative ceiling. Asserting "INFO memory is unreadable" is false
+    for a reply that ANSWERED without a field, and "no maxmemory was read" is
+    false for one whose value was unusable — so this drives the REAL probe with
+    a reply missing `maxmemory` into the message and pins wording true of every
+    cause.
+
+    NON-VACUOUS for this change, not for the pre-existing code: before it, a
+    reply missing the field collapsed into the asserting branch instead (a
+    ceiling claim for a datum nobody read).
+    """
+
+    class _Conn:
+        def __init__(self, reply):
+            self._reply = reply
+
+        def info(self, section):
+            return self._reply
+
+    def _proj_with(reply):
+        proj = object.__new__(FalkorProjection)
+        proj.db = type("DB", (), {"connection": _Conn(reply)})()
+        proj._probe_error = RuntimeError("Out of memory")
+        return proj
+
+    # `maxmemory` omitted, and `used_memory` omitted: both are unanswered, and
+    # each must reach the SAME wording rather than a cause-specific guess.
+    for reply in ({"used_memory": 1024}, {"maxmemory": 2048}):
+        msg = _proj_with(reply)._write_refusal_message(RuntimeError("Out of memory"))
+        assert msg is not None, reply
+        _assert_no_ceiling_claim(msg)
+        lowered = msg.lower()
+        assert "no usable used_memory/maxmemory reading" in lowered, (reply, msg)
+        assert "info memory is unreadable" not in lowered, (reply, msg)
+
+
+def test_a_real_unset_ceiling_reaches_the_message_without_a_ceiling_claim():
+    """#7392 review — the `cap == 0` MESSAGE must see a REAL reading.
+
+    The other `cap == 0` cases stub `_memory_pressure`, so reverting its
+    contract to `(used, cap) if cap > 0 else None` was caught only by the
+    contract test — the message branch never saw a reading. This drives the
+    real probe (`INFO memory` answering `maxmemory 0`) all the way into the
+    operator message. That shape is the CI provisioner's today (its REDIS_ARGS
+    passes no --maxmemory, pinned by test_7357_memory_ceiling_legibility); it
+    was ALSO the shared container's when #7392 was filed (2026-10-04, before the
+    #9204/#9506 ceilings landed), so the branch is not hypothetical.
+    """
+
+    class _Conn:
+        def info(self, section):
+            return {"used_memory": 512 * 1024 * 1024, "maxmemory": 0}
+
+    proj = object.__new__(FalkorProjection)
+    proj.db = type("DB", (), {"connection": _Conn()})()
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    assert "no maxmemory ceiling is set" in lowered, msg
+    assert "512.0 mib" in lowered, msg
+
+
+@pytest.mark.parametrize("refusal", [
+    _MAXMEMORY_ERROR,
+    # The generic engine wording `_WRITE_REFUSAL_MARKERS` accepts — the reason
+    # this branch is reachable on a server with NO ceiling at all. Pinned so
+    # the issue's own reachability argument is exercised, not just asserted.
+    "Out of memory",
+])
+def test_unset_maxmemory_names_the_absence_without_asserting_a_locus(monkeypatch, refusal):
+    """#7392 — `maxmemory == 0` means NO ceiling; the LOCUS is not asserted.
+
+    The reading establishes one thing: `maxmemory` is not the cause. It does not
+    establish WHERE the pressure is — and the example the message gives, "a
+    per-query cap", is a limit OF the instance — so "outside the instance" would
+    contradict its own example. Pin the absence AND that non-claim.
+
+    Reachability: `maxmemory = 0` was measured on the shared container 2026-10-04
+    (before the #9204/#9506 ceilings landed); today the ceiling-less instance is
+    the CI provisioner's, whose REDIS_ARGS passes no --maxmemory.
+
+    NON-VACUOUS: `_memory_pressure()` returned `None` for this case pre-fix, so
+    the message made the same false ceiling claim as the unusable-reading one.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(refusal))
+    proj._memory_pressure = lambda: (512 * 1024 * 1024, 0)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(refusal))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    assert "no maxmemory ceiling is set" in lowered, msg
+    # The reading is still reported — it WAS readable.
+    assert "512.0 MiB" in msg, msg
+    # A candidate cause is offered AS a candidate, and the locus is NOT asserted:
+    # "outside the instance" would contradict the in-instance per-query cap.
+    assert "host" in lowered, msg
+    assert "outside the instance" not in lowered, msg
+
+
+#: The post-refusal shortfall that must NOT be read as "below the ceiling":
+#: MEASURED on falkordb 4.20.6 at a 16 MiB `noeviction` ceiling, three refused
+#: writes left the reading 3 568 / 56 552 / 16 880 bytes under the cap while the
+#: instance was still refusing at it. The implementation's tolerance is
+#: `max(64 KiB, cap // 100)`; these cases pin both sides of it.
+_CAP = 16 * 1024 * 1024
+
+
+@pytest.mark.parametrize("used", [
+    _CAP,                 # exactly at the ceiling
+    _CAP - 1,             # a byte under: the MEASURED drift, not a cause
+    _CAP - 4096,          # a page under: same
+    _CAP - (_CAP // 100), # sampled drift: same (at the tolerance boundary)
+])
+def test_a_post_refusal_shortfall_is_not_read_as_below_the_ceiling(monkeypatch, used):
+    """#7392 cycle 5 — the reading is taken AFTER the refusal, so a small
+    shortfall is the MEASUREMENT, not a different cause.
+
+    `_auto_health_recover` probes first and reads `INFO memory` afterwards, and
+    `used_memory` includes buffers that are released when the refused reply is
+    written. Measured on a real server: the refusal fires at `used > cap`, and
+    the very next reading is up to ~56 KiB under it. Treating that as "the
+    ceiling was not reached" would tell an operator not to raise a ceiling that
+    is very much being hit.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (used, _CAP)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    assert "has reached its memory ceiling" in msg, msg
+    assert "raise / relieve the instance's maxmemory ceiling" in msg, msg
+    assert "does not show the ceiling being reached" not in msg, msg
+
+
+def test_a_ratio_far_below_the_ceiling_does_not_claim_the_ceiling_was_reached(monkeypatch):
+    """#7392 — a reading well under `maxmemory` is not "reached".
+
+    The issue's proposal kept the ceiling sentence whenever the ratio could be
+    read, assuming "read" implies "reached". It does not: the generic
+    `out of memory` marker reaches this branch with a reading of
+    `used_memory 1.0 KiB of maxmemory 512.0 MiB`, and quoting "has reached its
+    memory ceiling" there would state a fact the reading contradicts.
+
+    The branch therefore reports the OBSERVATION with the shortfall, keeps the
+    cause list modal, and asks for a re-read instead of forbidding the ceiling.
+    (Naming the shortfall alone does NOT stop the two rounded figures from
+    colliding — see `test_the_ceiling_is_printed_in_bytes_...`.)
+
+    NON-VACUOUS: on the pre-fix code this message asserts the ceiling AND the
+    `--maxmemory` lever for exactly these numbers.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    cap = 512 * 1024 * 1024
+    proj = _projection(probe_error=RuntimeError("Out of memory"))
+    proj._memory_pressure = lambda: (1024, cap)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError("Out of memory"))
+    assert msg is not None
+    _assert_no_ceiling_claim(msg)
+    lowered = msg.lower()
+    # It reports the OBSERVATION, with the shortfall named…
+    assert "this instance now reports used_memory" in lowered, msg
+    assert "does not show the ceiling being reached" in lowered, msg
+    assert "512.0 mib" in lowered and "1.0 kib" in lowered, msg
+    # …the remedy is to RE-READ, not a prohibition and not the ceiling lever…
+    assert "re-read info memory" in lowered, msg
+    assert "do not raise the ceiling" not in lowered, msg
+    # …and the cause list stays modal, like the `maxmemory == 0` branch.
+    assert "may be elsewhere" in lowered, msg
+
+
+@pytest.mark.parametrize("cap", [
+    16 * 1024 * 1024,            # 16.0 MiB — the measured-drift size
+    1_095_216_660,               # 1.02 GiB: the ROUNDED forms collide (1.0 GiB)
+    2_147_483_648,               # 2.0 GiB: same collision
+])
+def test_the_ceiling_is_printed_in_bytes_so_no_two_figures_read_as_equal(cap):
+    """#7392 cycle 6 — the below-ceiling reading must not print two figures that
+    LOOK the same.
+
+    `_fmt_bytes` keeps one decimal of a unit, so at 1-5 GiB (and TiB) caps the
+    usage and the ceiling of a below-branch reading can round to the SAME string
+    — "10.5 MiB below its maxmemory ceiling of 1.0 GiB" printed beside
+    "used_memory 1.0 GiB" reads as a self-contradiction, which is the very
+    failure this branch exists to remove. Naming the shortfall does NOT prevent
+    it (294 of 401 sampled 1-5 GiB caps reproduced the collision). The branch
+    therefore prints the ceiling in EXACT BYTES.
+
+    NON-VACUOUS: this pin fails on the previous commit, whose message put the
+    ceiling through `_fmt_bytes` — the earlier version of this test compared the
+    figure WITH its `used_memory ` prefix, so it passed on every possible value.
+    """
+    # One byte past the tolerance, so this is the BELOW branch.
+    used = cap - max(64 << 10, min(cap // 100, 1 << 20)) - 1
+    proj = object.__new__(FalkorProjection)
+    proj._memory_pressure = lambda: (used, cap)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError("Out of memory"))
+    assert msg is not None
+    lowered = msg.lower()
+    assert "does not show the ceiling being reached" in lowered, msg
+    # The ceiling is exact, so it can never be confused with the rounded usage.
+    assert f"ceiling ({cap} B)" in msg, msg
+    assert f"ceiling ({_fmt_bytes(cap)})" not in msg, msg
+    # The shortfall is named, and is non-zero.
+    assert _fmt_bytes(cap - used) in msg, msg
+
+
+@pytest.mark.parametrize("used,cap,branch", [
+    (0, 100, "below"),      # 0 % of its ceiling
+    (0, 4096, "below"),     # 0 % of its ceiling
+    (1, 2048, "below"),     # 50 % of its ceiling
+    (4096, 4096, "ceiling"),
+    (2048, 2048, "ceiling"),
+])
+def test_a_tiny_cap_can_still_reach_the_below_ceiling_branch(monkeypatch, used, cap, branch):
+    """#7392 cycle 7 — the tolerance must scale DOWN with the cap.
+
+    A flat 64 KiB floor made `used + drift >= cap` true for EVERY reading when
+    the ceiling itself is small, so the below branch was unreachable and a
+    reading of 0 B of 4 KiB was reported as "has reached its memory ceiling" —
+    the over-claim this branch exists to remove, in the direction whose remedy
+    is `--maxmemory`.
+    """
+    monkeypatch.delenv("FLY_APP_NAME", raising=False)
+    proj = _projection(probe_error=RuntimeError(_MAXMEMORY_ERROR))
+    proj._memory_pressure = lambda: (used, cap)  # type: ignore[method-assign]
+
+    msg = proj._write_refusal_message(RuntimeError(_MAXMEMORY_ERROR))
+    assert msg is not None
+    if branch == "ceiling":
+        assert "has reached its memory ceiling" in msg, msg
+    else:
+        _assert_no_ceiling_claim(msg)
+        assert "does not show the ceiling being reached" in msg, msg
+
+
+def test_memory_pressure_reports_an_unset_ceiling_instead_of_hiding_it():
+    """#7392 — "no ceiling" and "could not read" are DIFFERENT answers.
+
+    `_memory_pressure()` collapsed both to `None`, which is how the message
+    came to claim a ceiling in the one case where the datum positively said
+    there is none (`maxmemory = 0`). Pin the distinction on the REAL method,
+    through both of its readings — an overriding test double would let the
+    method keep collapsing them unnoticed.
+    """
+
+    class _Conn:
+        """An `INFO memory` stand-in that RAISES on a wrong section.
+
+        Deliberately a raise and not a bare `assert`: `_memory_pressure`
+        swallows every exception, so an AssertionError here would surface as
+        the generic `None == (1024, 0)` failure instead of naming the wrong
+        section — a misleading red (found in review of this change).
+        """
+
+        def __init__(self, reply):
+            self._reply = reply
+
+        def info(self, section):
+            if section != "memory":
+                raise RuntimeError(f"wrong INFO section requested: {section!r}")
+            if isinstance(self._reply, Exception):
+                raise self._reply
+            return self._reply
+
+    def _proj_with(reply):
+        proj = object.__new__(FalkorProjection)
+        proj.db = type("DB", (), {"connection": _Conn(reply)})()
+        return proj
+
+    # An unset ceiling is a READING, not a failure to read.
+    assert _proj_with({"used_memory": 1024, "maxmemory": 0})._memory_pressure() == (1024, 0)
+    # A ceiling that exists is reported with its ratio.
+    assert _proj_with({"used_memory": 1024, "maxmemory": 2048})._memory_pressure() == (1024, 2048)
+    # Only a FAILED read is `None`.
+    assert _proj_with(RuntimeError("no INFO on this server"))._memory_pressure() is None
+    assert _proj_with("not-a-dict")._memory_pressure() is None
+    # An OMITTED maxmemory is an unanswered datum, not "no limit": the
+    # `or 0` default must not mint the positive claim the message then makes.
+    assert _proj_with({"used_memory": 1024})._memory_pressure() is None
+    # A NEGATIVE ceiling is a broken reading, not an answer (no conformant
+    # Redis reports one — `CONFIG SET maxmemory` refuses it), so it must not
+    # become a "no ceiling" claim either.
+    assert _proj_with({"used_memory": 1024, "maxmemory": -1})._memory_pressure() is None
+    # A PRESENT but unusable value is unread too — otherwise the `or 0` default
+    # mints a measured 0 and the message claims "NO maxmemory ceiling is set"
+    # for a field nobody could read (found by review, #7392).
+    assert _proj_with({"used_memory": 1024, "maxmemory": None})._memory_pressure() is None
+    assert _proj_with({"used_memory": 1024, "maxmemory": "abc"})._memory_pressure() is None
+    # A negative USAGE is as broken as a negative ceiling.
+    assert _proj_with({"used_memory": -5, "maxmemory": 2048})._memory_pressure() is None
 
 
 def test_genuine_corruption_still_advises_rebuild(monkeypatch):

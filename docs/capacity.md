@@ -229,7 +229,7 @@ curve, and one of those guards has a **measured failure threshold**.
 | EP affected-claim frontier guard (new **claims** per hop) | **200** (`_EP_GUARD_FRONTIER_CAP`) | `tortoise/ep.py` |
 | Operator-set cap on an explicit-k BFS (the ranking's operator input) | **200 operators**, truncated deterministically by id with a stderr warning — and reported in the caller's RESULT as `truncated` / `operators_seen` / `operators_used` since #6211 | `tortoise/analyze.py` |
 | EP pass query that the engine aborts on its own query timeout | raised as **`EPSubgraphHopError`** (a `ResponseError` subclass) carrying the hop index (or `None` for a pass-level query), phase and frontier size (#6211) | `tortoise/ep.py` |
-| EP id-anchored query planning | the PLAN of every id-set statement the pass emits is asserted to be a `Node By Index Scan` on the frontier, not a label scan of the graph; the one exception is the evidence pre-write's journal read, which names no label so no per-label index can anchor it, and which sits outside the pinned set (#9304). Where the shipped plan was a scan, a `WITH *` anchor barrier (`_EP_ANCHOR_BARRIER`) fixes it — the invariant is the plan, not a syntactic rule, because which sites need the barrier was decided per site by measurement (#6211, below) | `tortoise/ep.py`, `tortoise/analyze.py` |
+| EP id-anchored query planning | the PLAN of every id-set statement the pass emits is asserted to be a `Node By Index Scan` on the frontier, not a label scan of the graph — the evidence pre-write's journal read included since #9304 (it was label-free and `All Node Scan`; it is now a per-label sweep, deduped on the node key so a multi-labelled claim is still journaled once). Where the shipped plan was a scan, a `WITH *` anchor barrier (`_EP_ANCHOR_BARRIER`) fixes it — or, where no barrier can apply, a label is named so a real index anchors it — the invariant is the plan, not a syntactic rule, because which sites need which fix was decided per site by measurement (#6211, below) | `tortoise/ep.py`, `tortoise/analyze.py` |
 | EP degenerate-run guard | fires when the pass has collected **≥ 50%** of the graph's claims, on graphs of **≥ 500** claims | `tortoise/ep.py` |
 | Dreaming per-pass window budget (stale-first) | **200** operators (`TORTOISE_DREAM_WINDOW_BUDGET`) | `tortoise/dream.py` |
 | Dreaming full-mode operator cap (`dream_all`) | **200,000** (`max_total_operators`) | `tortoise/dream.py` |
@@ -293,41 +293,67 @@ single-node probes at 4 + 1 + 4: the cache's per-label node-params load (the
 lookup is the one term that moves: it probes labels in `EPISTEMIC_LABELS` order
 and breaks only when every seed has RESOLVED (`ep.py:1203-1219`), so it emits
 one statement per label up to the last epistemic label a seed uses — all four
-when a seed resolves under none. Every one of them is index-anchored. Three of
-the operator selector's OWN id-set statements in `analyze.py` are NOT counted
-here either, because this census is
-`ep.py`'s: the operator selector's operator→target leg (emitted by
-`_bfs_select_operators`, never by `TortoiseEP.run()`), its per-label draft filter
-and its forward direct-edge sweep. All three carry no barrier and all three are
-measured `Node By Index Scan` — the operator→target leg on the operator's own
-label, `analyze.py:666-671` — while the selector's four BARRIERED legs are the
-viability, incoming, backward and expansion queries, counted above. One
-further id-set statement sits OUTSIDE this census and outside the pinned set: a
-run whose journal is wired (`_emit`, i.e. an event log) and which carries
-evidence priors also re-reads them for the pre-write's journal record, and that
-read names no label — so a per-label index cannot anchor it (the label-free form
-is deliberate: a `:Point:Object` node must be journaled once, #7853). It is the
-last unanchored id-set statement of the `ep.py` pass, filed as **#9304**; the
-traversal `sdk.py` mirrors that `compute_confidence` also runs
-(`_window_closure`) are a separate, still-open leg of the same call (#9299).
+when a seed resolves under none.
 
-All eleven barriered sites and all six unbarriered ones (three traversing,
-three single-node probes) are in the pinned set: `tests/test_6211_ep_anchor.py`
+A further **4 distinct statements** (#9304) are emitted on a run whose journal is
+wired (`_emit`, i.e. an event log) and which carries evidence priors: the
+evidence pre-write's journal read, one per epistemic label. That leg's fix is
+NOT a `WITH *` barrier — a barrier helps only a traversal that has an anchored
+operand, and the shipped form here was a LABEL-FREE disjunction
+(`MATCH (n) WHERE (n:Point OR n:Subject OR n:Object OR n:Event) AND
+n.id IN $ids`) with no label for any per-`(label, property)` index to anchor on:
+measured `All Node Scan | (n)` on the 23k-node / 160k-edge fixture, i.e. the id
+predicate applied per record over the whole node set, so its cost tracked the
+GRAPH. #9304 replaced it with the same `UNWIND` + label-and-id shape the
+pre-write immediately above it uses (that one binds `$params AS p`, this one
+`$ids AS cid`; both are measured `Node By Index Scan | (n:{label})`), and it
+moved #7853's "a `:Point:Object` node must be journaled exactly ONCE" off the
+label-free form and onto a **node-keyed dedupe** of the swept rows — keyed on
+`id(n)`, not on the `id` value, per `live.EPISTEMIC_ID_KEYS`' rule that a dedupe
+key is never the coalesced value (#8879) — which is what a per-label sweep needs
+to satisfy it. So the census has no carve-out left: **every one of these
+statements is index-anchored.**
+
+Three of the operator selector's OWN id-set statements in `analyze.py` are NOT
+counted here, because this census is `ep.py`'s: the operator selector's
+operator→target leg (emitted by `_bfs_select_operators`, never by
+`TortoiseEP.run()`), its per-label draft filter and its forward direct-edge
+sweep. All three carry no barrier and all three are measured
+`Node By Index Scan` — the operator→target leg on the operator's own label,
+`analyze.py:666-671` — while the selector's four BARRIERED legs are the
+viability, incoming, backward and expansion queries, counted above. The
+traversal `sdk.py` mirrors that `compute_confidence` also runs
+(`_window_closure`) are a separate, still-open leg of the same call (#9299) —
+`sdk.py`'s, not this census's.
+
+All eleven barriered sites, all six unbarriered ones (three traversing, three
+single-node probes) and the evidence pre-write's 4-statement journal sweep are
+in the pinned set: `tests/test_6211_ep_anchor.py`
 captures the statements the pass emits and asserts the PLAN of each (`Node By
 Index Scan`, and no `Node By Label Scan`; the selector test additionally rejects
 `All Node Scan`), never their text; each is reached by the fixture
 (`_load_cache`'s sweeps and Batch 2 directly, `seed_operators` through an
-operator seed — the 300 operators hanging off the hub claim). On this file's own
+operator seed — the 300 operators hanging off the hub claim). The journal sweep
+is reached by its own `run()` capture on a 7-node fixture (a wired `emit` stub
+plus evidence priors, and the shapes it has to get right: a baseline'd id, a
+`:Point:Object` id, an id under `:Event` alone — which makes a sweep narrowed to
+a single label observable rather than green — and a second `:Event` node
+sharing one of those ids, the #8879 value-collision shape and the only way a
+dedupe keyed on the `id` value can be told from one keyed on `id(n)`), because
+the pass's shared capture never calls `run()`. On this file's own
 fixture (`_build`: ~8.6k nodes, ~8k edges — NOT the 23k/160k PROFILE fixture
-above) that assertion covers the pass's **49 distinct** id-set
-statements (95 emissions) and the operator selector's **12 distinct** (37
+above) that shared capture covers the pass's **49 distinct** id-set
+statements (95 emissions) — the journal sweep's 4 are the separate capture
+just described, so the pass totals 53 / 99 — and the operator selector's
+**12 distinct** (37
 emissions across the two seeds the assertion uses — all seven of the selector's
 id-set legs: four barriered, three not) — zero unanchored in either.
 Against the pre-#9282 tree (`8c3823b92^`) the file's six behavioural tests run `4
 failed, 2 passed` — the emitted-statement plan test, the hop's record bound, the
 OR split's statement counts and the operator selector's four legs fail, while
 the fixture guard and the OR-split row-semantics guard pass, because they pin
-properties that tree already had. (The seventh test in that file pins this
+properties that tree already had. (The manifest-row test in that file — the
+seventh then, the eighth since #9304 added the journal-read pin — pins this
 manifest row, which #9282 itself added: on that tree there is no row to pin, so
 it fails there for a different reason.) #9282 has since landed on `origin/main`,
 so `origin/main` now IS the anchored tree and every baseline in this section names

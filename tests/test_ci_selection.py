@@ -34,6 +34,10 @@ from tools.ci_selection import (  # noqa: I001
     uri_requiring_files,
     carve_matrix_include, carve_shard_issues, carve_shard_count,
     MAX_CARVE_SHARDS, DEFAULT_CARVE_SHARDS,
+    slow_matrix_include, slow_shard_issues, slow_shard_count,
+    slow_shard_entries, slow_leg_files, slow_wall_projection,
+    MAX_SLOW_SHARDS, DEFAULT_SLOW_SHARDS,
+    SLOW_LEG_WALL_TARGET_MIN, SLOW_LEG_SETUP_ALLOWANCE_MIN,
 )
 from tools import mergify_config_guard as mcg
 from tools import ci_selection as cs
@@ -65,12 +69,14 @@ def _expand(legs: dict) -> dict:
     """
     out = {}
     for k, v in legs.items():
-        if k in ("shards", "carve_shards"):
+        if k in ("shards", "carve_shards", "slow_shards"):
             # W37: `carve_shards` is the same shape as `shards` (a list of
             # {name, files, …} dicts), so it must be flattened the same way —
             # `set(v)` over dicts raises `unhashable type: 'dict'`, which is
             # how this surface announced itself rather than silently passing.
-            prefix = "" if k == "shards" else "carve_"
+            # #9539: `slow_shards` is the third member of that family.
+            prefix = {"shards": "", "carve_shards": "carve_",
+                      "slow_shards": "slow_"}[k]
             for shard in v:
                 out[prefix + shard["name"]] = set(shard["files"])
         else:
@@ -306,6 +312,53 @@ def test_public_site_surface_change_selects_onboarding_and_skips_slow():
         assert "test_website_docs_consistency.py" in r["test_files"], changed
 
 
+def test_product_root_marker_guard_runs_on_a_legal_pages_only_diff():
+    """PR #9652 review (P2): the marker guard must run on the FILE it parses.
+
+    `tests/test_website_static.py::TestProductRootMarkerContract` pins three
+    surfaces together: `website/product.html`, the `PRODUCT_ROOT_MARKER`
+    literal in `tests/e2e/test_legal_pages.py`, and the DNS preflight grep in
+    `.github/workflows/deploy-pages.yml`. Only the first selected the guard —
+    `tests/e2e/test_legal_pages.py` matched no SOURCE_PATTERNS row and fell
+    back to `core`, where `test_website_static.py` (registered `onboarding`
+    only) does not live.
+
+    So re-cutting the marker by editing ONLY the e2e constant — the file the
+    contract is named after, and the edit PR #8597 and PR #9652 each had to
+    make — ran no guard, and the workflow kept grepping the old string: the
+    preflight's `::warning::` branch then skipped the tortoise-host half green.
+    MEASURED before the entries: `_sel(["tests/e2e/test_legal_pages.py"])` ->
+    `surfaces == ["core"]` with `test_website_static.py` ABSENT.
+
+    Both halves are asserted because the fix has both: the `onboarding`
+    SOURCE_PATTERNS row selects the guard, and the `CORE_ALSO` entry keeps
+    `core` (a named-surface match REPLACES the `tests/` -> `core` fallback).
+
+    Mutation check: dropping the SOURCE_PATTERNS row fails the `onboarding`
+    assert (surfaces become `["core"]`); dropping the CORE_ALSO entry fails
+    the `core` assert (surfaces become `["onboarding"]`).
+    """
+    changed = "tests/e2e/test_legal_pages.py"
+    assert (REPO / changed).exists(), f"the marker contract's subject is gone: {changed}"
+    r = _sel([changed])
+    assert r["full"] is False, (changed, r["full"])
+    assert "onboarding" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the guard that parses its "
+        "PRODUCT_ROOT_MARKER (test_website_static.py) never runs, so a marker "
+        "move in this file merges with the deploy preflight grepping a string "
+        "the page no longer serves (#8596/#8597 class, #9652 review P2)"
+    )
+    assert "test_website_static.py" in r["test_files"], (
+        f"{changed} does not select test_website_static.py — the served-root "
+        "marker contract has no guard on the one file that defines the marker"
+    )
+    assert "core" in r["surfaces"], (
+        f"{changed} selects {r['surfaces']} — the onboarding SOURCE_PATTERNS "
+        "match replaced the `tests/` -> core fallback, so every core-registered "
+        "test silently drops off the diff (CORE_ALSO entry removed?)"
+    )
+
+
 def test_the_capacity_guards_derived_source_selects_the_guard():
     """#3329/#8492: a change to the guard's DERIVED SOURCE must select the guard.
 
@@ -378,6 +431,46 @@ def test_the_engine_pin_guards_are_selected_on_the_files_they_pin():
             f"{changed} does not select {guard} — nothing checks the engine pin "
             f"on the one diff that can revert it (selected: {r['test_files']})"
         )
+
+
+def test_the_spa_override_guard_is_selected_on_every_manifest_it_reads():
+    """#9524 review I1/I3: a dependency-manifest diff must run the override guard.
+
+    `tests/test_spa_dependency_overrides.py` reads six files — the
+    `package.json` + `package-lock.json` of the three SPAs — and two of those
+    apps' manifests match NO `SOURCE_PATTERNS` row while `apps/` and `website/`
+    are both in `NON_PYTHON_PREFIXES`. Before the `CORE_ALSO` entries, such a
+    diff filtered to `changed == []` and took the docs-only early return (tier-1
+    smoke only) — measured on the branch that fixed I1/I3:
+    `select(['apps/graph-viz/package.json'])` -> `surfaces=[]` with the guard
+    absent. That is the #1349/#3332/#3616 silent-drop class on exactly the diff
+    the guard exists for: the graph-viz arm is the one that reds when the
+    manifest loses its `nanoid`/`source-map-js` floors again.
+
+    blog-admin reaches the guard through the OTHER arm: `website/apps/blog-admin/`
+    is a `onboarding` SOURCE_PATTERNS row, where the guard is dual-registered.
+
+    Asserted per FILE, on the guard's presence, not on non-emptiness: the
+    pre-entry tree selects tier-1 smoke for these paths, which is non-empty and
+    contains no guard.
+    """
+    guard = "test_spa_dependency_overrides.py"
+    for app, surface in (("apps/graph-viz", "core"),
+                         ("website/apps/dashboard", "core"),
+                         ("website/apps/blog-admin", "onboarding")):
+        for name in ("package.json", "package-lock.json"):
+            changed = f"{app}/{name}"
+            assert (REPO / changed).exists(), f"pinned file is gone: {changed}"
+            r = _sel([changed])
+            assert surface in r["surfaces"], (
+                f"{changed} selects {r['surfaces']} — the override guard is "
+                f"registered on `{surface}` and a manifest-only diff must reach it"
+            )
+            assert guard in r["test_files"], (
+                f"{changed} does not select {guard} — a dependency override could "
+                f"lose its floor (or gain one that clears nothing) with every "
+                f"check green"
+            )
 
 
 def test_the_onboarding_copy_gate_is_wired_not_left_to_the_tier1_fallback():
@@ -919,25 +1012,154 @@ def test_every_allowlisted_root_file_actually_exists():
 # module quotes it, and this test file hard-codes the members.
 _SELF_NAMERS = frozenset({"tools/ci_selection.py", "tests/test_ci_selection.py"})
 
+# The five roots the mention census greps. `scripts/` carries a TRAILING SLASH
+# deliberately (see `_readers_of`).
+_CENSUS_ROOTS = ("tests", "tools", "scripts/", ".github", "tortoise")
+
+# The materialiser for the `scripts/` root (#9475) — named in the announcement so
+# the reader gets the REMEDY, not only the fact.
+_SCRIPTS_MATERIALISER = "tools/link_agent_infra_scripts.py"
+
+# Census losses already announced, keyed by the absent-root tuple (#9541 review round 6,
+# minor 3). `test_no_allowlisted_root_file_has_a_reader` calls `_readers_of` TWICE per
+# allowlisted name (~30 calls on a fresh clone), so an unconditional print emitted ~30
+# identical `::warning::` annotations for ONE fact. Announcing once per distinct loss keeps
+# the loss audible without burying the log; the register is per-process because a pytest
+# session is the unit that reads it.
+_CENSUS_ANNOUNCED: set[tuple[tuple[str, ...], int | None]] = set()
+
 
 def _readers_of(name: str) -> list[str]:
     """Non-self files under tests/tools/scripts/.github/tortoise naming `name`.
 
-    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a tracked
-    SYMLINK, and BSD grep does not descend a symlinked directory named without
-    one — so `grep -rlF <n> tests tools scripts .github tortoise` silently
-    searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same dir with
-    the slash). The census numbers are only reproducible with the slash.
+    ⛔ `scripts/` carries a TRAILING SLASH deliberately: `scripts` is a SYMLINK
+    (machine-local since #9475 — gitignored and materialised from
+    `$AGENT_INFRA_PATH`), and BSD grep does not descend a symlinked directory
+    named without one — so `grep -rlF <n> tests tools scripts .github tortoise`
+    silently searches NOTHING under scripts/ on macOS (0 hits vs 72 for the same
+    dir with the slash). The census numbers are only reproducible with the slash.
+
+    ⛔ AND THE ROOT CAN BE ABSENT — which is ANNOUNCED, never silent (#9541
+    review ISSUE 1). `scripts` is no longer tracked, so a fresh clone, a CI
+    runner, and a lane before its first materialisation have no such path at
+    all: grep prints `scripts/: No such file or directory` to stderr, exits 2,
+    and uses only `.stdout`. The four present roots are still censused, but the
+    `scripts/` one is MISSING, and both ratchets this feeds can only be as good
+    as what the census saw — so the loss is printed with the command that
+    restores it. Before this, the root vanished from every fresh checkout
+    without a word while the ratchets stayed green.
+
+    ⛔ ANNOUNCED ONCE per distinct loss, not once per call (#9541 review round 6,
+    minor 3): the ratchets call this twice per allowlisted name, so an
+    unconditional print emitted ~30 identical `::warning::` annotations for one
+    fact and buried it. See `_CENSUS_ANNOUNCED`.
 
     SCOPE: a LITERAL-NAME grep. It does not see a reader that finds `name` by
     GLOB or directory walk, nor one outside these five roots.
     """
-    out = subprocess.run(
-        ["grep", "-rlF", name, "tests", "tools", "scripts/", ".github",
-         "tortoise"],
-        cwd=REPO, capture_output=True, text=True).stdout.split("\n")
+    result = subprocess.run(
+        ["grep", "-rlF", name, *_CENSUS_ROOTS],
+        cwd=REPO, capture_output=True, text=True)
+    absent = [root for root in _CENSUS_ROOTS if not (REPO / root).is_dir()]
+    # grep exits 1 for "no match" (normal here) and 2 for "a root could not be
+    # read". Any other non-zero, with every root present, is a fault that must
+    # not read as "no readers" — the same silent-narrowing class as an absent root.
+    # Announced ONCE per distinct loss: the ratchets above call this twice per
+    # allowlisted name, and ~30 identical annotations for one fact is noise that buries
+    # it (#9541 review round 6, minor 3).
+    loss = (tuple(absent), result.returncode if not absent else None)
+    if (absent or result.returncode not in (0, 1)) and loss not in _CENSUS_ANNOUNCED:
+        _CENSUS_ANNOUNCED.add(loss)
+        missing = (
+            f"{', '.join(absent)} absent from this checkout — a machine-local pointer that has "
+            f"not been materialised (#9475: `scripts` is gitignored, not tracked; run `uv run "
+            f"python {_SCRIPTS_MATERIALISER}`)"
+            if absent else "every root is present"
+        )
+        print(
+            f"::warning::MENTION CENSUS INCOMPLETE for {name!r}: {missing}; "
+            f"grep exited {result.returncode}."
+            + (f" {result.stderr.strip()}" if result.stderr.strip() else "")
+            + " A reader living under a root that was not searched cannot be seen here.",
+            file=sys.stderr,
+        )
+    out = result.stdout.split("\n")
     return sorted(h for h in (x.strip() for x in out)
                   if h and h not in _SELF_NAMERS and not h.endswith(".pyc"))
+
+
+def test_the_mention_census_announces_an_unmaterialised_root(tmp_path, monkeypatch, capsys):
+    """#9541 review ISSUE 1 (P3): the narrowing must be AUDIBLE, not silent.
+
+    `scripts/` is untracked since #9475, so on a fresh clone, a runner, or a lane
+    before its first materialisation the path is ABSENT: grep prints
+    `scripts/: No such file or directory`, exits 2, and `_readers_of` kept only
+    `.stdout` — so the root vanished from the census without a word and both
+    ratchets it feeds stayed green while a reader under `scripts/` was
+    unseeable. RED before the fix: nothing was printed at all, so the assertion
+    below failed on empty stderr.
+
+    The second half is the discriminator: with every root present the same call
+    says nothing, so the message tracks the ABSENCE rather than being emitted
+    unconditionally.
+
+    The register is cleared first: the announcement is once-per-process, and an
+    earlier test may already have announced the same absent root.
+    """
+    for root in ("tests", "tools", ".github", "tortoise"):
+        (tmp_path / root).mkdir()
+    # `_readers_of` greps at `REPO`, the module global in THIS file — patch that one.
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
+    assert tmp_path == REPO, "the census must run against the throwaway tree"
+
+    # `scripts/` deliberately ABSENT — the fresh-clone / runner / new-lane state.
+    assert _readers_of("AGENTS.md") == []
+    absent_message = capsys.readouterr().err
+    assert "MENTION CENSUS INCOMPLETE" in absent_message, (
+        "the `scripts/` root is absent and the census said nothing: the two ratchets this "
+        "feeds (test_no_allowlisted_root_file_has_a_reader, test_no_content_reader) then "
+        "report a complete census over four of five roots"
+    )
+    assert "scripts/" in absent_message, absent_message
+    # The reader gets the REMEDY, not just the fact (the materialiser this PR ships).
+    assert "tools/link_agent_infra_scripts.py" in absent_message, absent_message
+
+    # Control: the pointer materialised — nothing to announce.
+    (tmp_path / "scripts").mkdir()
+    _readers_of("AGENTS.md")
+    assert capsys.readouterr().err == ""
+
+
+def test_the_mention_census_announces_an_absent_root_ONCE(tmp_path, monkeypatch, capsys):
+    """#9541 review round 6, minor 3: the announcement must not repeat per call.
+
+    `test_no_allowlisted_root_file_has_a_reader` calls `_readers_of` twice for each
+    allowlisted root file, so on a fresh clone / runner the unconditional print emitted
+    ~30 identical `::warning::MENTION CENSUS INCOMPLETE` annotations for ONE absent root
+    — the signal buried in its own repetitions, which is how an announcement stops being
+    read. RED before the fix: the second call printed the message again.
+    """
+    for root in ("tests", "tools", ".github", "tortoise"):
+        (tmp_path / root).mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "REPO", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "_CENSUS_ANNOUNCED", set())
+
+    _readers_of("AGENTS.md")
+    first = capsys.readouterr().err
+    assert "MENTION CENSUS INCOMPLETE" in first, first
+
+    _readers_of("AGENTS.md")
+    assert capsys.readouterr().err == "", (
+        "the absent-root announcement repeated on a second call — the ratchets call this "
+        "twice per allowlisted name (~30 identical ::warning:: lines for one fact)"
+    )
+    # A DIFFERENT loss is still announced: dedupe must not mute a new fact.
+    (tmp_path / "tests").rmdir()
+    _readers_of("AGENTS.md")
+    assert "MENTION CENSUS INCOMPLETE" in capsys.readouterr().err, (
+        "a newly-absent root was not announced — the dedupe keyed on the wrong thing"
+    )
 
 
 def test_no_allowlisted_root_file_has_a_reader():
@@ -1082,8 +1304,10 @@ def test_subdirectory_markdown_is_unaffected():
 _READ_CALLS = frozenset({"open", "read_text", "read_bytes", "read",
                          "readlines", "load", "loads", "loadtxt"})
 
-# The CI roots the selector's surface map is built on. `scripts/` is a tracked
-# SYMLINK, so it must be walked on disk, not read from `git ls-files`.
+# The CI roots the selector's surface map is built on. `scripts/` is a SYMLINK to
+# an agent-infra checkout outside this repo — gitignored and materialised per
+# machine since #9475, not tracked — so it must be walked on disk, not read from
+# `git ls-files`.
 _NON_CODE_DOC_ROOTS = ("tests", "tools", "scripts", ".github", "tortoise")
 
 # A shell read operation. `read\b` deliberately does NOT match "reads" (word
@@ -1153,19 +1377,23 @@ def _content_readers_of(path: str) -> list[str]:
     """Files under the five CI roots that READ `path`'s content.
 
     ⛔ The roots are WALKED on disk, not read from `git ls-files`: `scripts/` is
-    a tracked SYMLINK, so the listing returns the link itself and the ~70 files
-    behind it are never scanned — the same gap #6787 cycle 4 P3 found in the
-    sibling mention census. Shell files use a line-level read-op pattern, never
-    `ast.parse` (which returns False on every `.sh`).
+    a SYMLINK to a checkout OUTSIDE this repository, so a listing returns the
+    link itself (before #9475 it returned the tracked 120000 blob; now the path
+    is gitignored and untracked, so a listing returns nothing at all) and the
+    ~70 files behind it are never scanned — the same gap #6787 cycle 4 P3 found
+    in the sibling mention census. Shell files use a line-level read-op pattern,
+    never `ast.parse` (which returns False on every `.sh`).
 
     ⚠️ SCOPE, stated rather than overclaimed (cycle-2 review P2): `scripts/` is
-    a symlink to an ABSOLUTE machine-local path, so it DANGLES on the Ubuntu CI
-    runner (`python-ci.yml` / `ci.yml` say so) and this walk silently skips that
-    root there — the root is reached only where the symlink resolves. That is
-    the SAME CI limitation the sibling `_readers_of` grep has, and it is not
-    closable from inside the repo. A future member whose ONLY reader lives under
-    `scripts/` cannot rely on this ratchet on CI: grep the whole tree before
-    adding one.
+    a symlink to an ABSOLUTE machine-local target materialised from
+    `$AGENT_INFRA_PATH` (#9475), so on a fresh clone — the Ubuntu CI runner, a
+    lane before its first commit — the path is simply ABSENT and this walk
+    skips that root there; the root is reached only where the pointer has been
+    materialised (`uv run python tools/link_agent_infra_scripts.py`). That is
+    the SAME limitation the sibling `_readers_of` grep has (which now ANNOUNCES
+    the absent root), and it is not closable from inside the repo. A future
+    member whose ONLY reader lives under `scripts/` cannot rely on this ratchet
+    on CI: grep the whole tree before adding one.
     """
     name = path.rsplit("/", 1)[-1]
     out: list[str] = []
@@ -1865,6 +2093,12 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
         # `test_record_schema_placement.py` pins the record schema against the
         # placement table.
         "supabase/migrations/20261018000001_record_point_money_value_2782.sql",
+        # #9264: the FORWARD migration that NARROWS
+        # `public.session.capture_redactions` from `jsonb` to `integer`. Same gap
+        # as the two entries above: it sorts outside the `2026101200000`
+        # CORE_ALSO prefix, so without its own entry a change to this file alone
+        # selects NO surface and neither reader runs on it.
+        "supabase/migrations/20261022000001_record_session_capture_redactions_integer.sql",
         "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
     ):
         r = _sel([changed])
@@ -2008,6 +2242,32 @@ def test_graph_census_tool_change_selects_core_not_tier1():
     r = _sel(["tools/graph_census.py"])
     assert "core" in r["surfaces"], r
     assert "test_graph_census_8882.py" in r["test_files"], r
+    assert r["full"] is False, r
+
+
+def test_legacy_id_normalise_tool_change_selects_core_not_tier1():
+    # #9523 review P1: tools/legacy_id_normalise.py is the CLI for the legacy-id
+    # normaliser and owns tests/test_8607_legacy_id_normaliser.py, registered
+    # `core`.
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row
+    # matches the tool, so a CLI-only diff came back with `changed == []` and
+    # took the docs-only early return: `select()` returned NO surface, and the
+    # file whose entire content is the dry-run default, the
+    # `--apply`/`--revert`-requires-`--out` rule and the 0/1/2 exit contract ran
+    # none of its own cases. Registering the test under `core` does not help — a
+    # name in a surface's test_files only runs when that surface is already
+    # selected.
+    #
+    # Measured before the CORE_ALSO entry: `_sel(["tools/legacy_id_normalise.py"])`
+    # -> surfaces=[], full=False, test_8607_legacy_id_normaliser.py absent.
+    # CORE_ALSO (not TOOL_CARVEOUTS) is the deliberate choice: the suite is
+    # hermetic (pure functions over a dict — no graph, no Postgres), so selecting
+    # `core` runs it at the lowest CI cost.
+    # Mutation check: removing the CORE_ALSO entry fails assert 2 below.
+    r = _sel(["tools/legacy_id_normalise.py"])
+    assert "core" in r["surfaces"], r
+    assert "test_8607_legacy_id_normaliser.py" in r["test_files"], r
     assert r["full"] is False, r
 
 
@@ -2239,6 +2499,63 @@ def test_the_capstone_census_pin_runs_on_a_main_py_change():
     assert r["full"] is False, r
 
 
+def test_the_capture_receipt_key_registry_pin_runs_for_every_surface_that_owns_it():
+    # PR #9668 review P1: `tests/test_5051_capture_receipt_key_registry.py` was
+    # registered in `core` ALONE, and `core` is a FALLBACK surface in
+    # `select()` (`if not matched: matched.add("core")`) — a named-surface match
+    # REPLACES it. Every subject the pin guards is a named-surface match:
+    #
+    #   * `tortoise/hosted_api.py` owns BOTH derivations the pin exists to hold
+    #     to the formatter — `_capture_receipt_buckets` (the delete path's orphan
+    #     sweep) and `_capture_server_owned_keys` (the client-write-refusal set
+    #     #3681 closed) — and is an EXACT `api` source pattern AND an EXACT
+    #     `onboarding` one;
+    #   * `website/apps/dashboard/src/captureStatus.js` is the JS reader pin
+    #     and matches `onboarding`;
+    #   * `tortoise/capture_receipts.py` — the ONLY intended change direction (a
+    #     FORMAT change) — falls through to `core`, which is what the original
+    #     row covers.
+    #
+    # So the pin fired only for a change that also moved the formatter: BOTH
+    # mutations #9668 used as its own evidence are `hosted_api.py`-only edits
+    # (a stale reconcile-bucket prefix; `hermes` dropped from the server-owned
+    # derivation), and a hosted_api.py-only diff selected `api`+`onboarding`
+    # with the pin ABSENT — the drift landed green. Same #1349/#2938/#3154
+    # silent-drop class (and same remedy: dual-registration) as
+    # `test_the_capstone_census_pin_runs_on_a_main_py_change` above and the
+    # #7809 / #8693 / #9068 `api` arms.
+    #
+    # Measured before the `api`/`onboarding` arms (2026-10-17, `select()`
+    # in-process): hosted_api.py -> surfaces=['api','onboarding'], pin ABSENT;
+    # captureStatus.js -> surfaces=['onboarding'], pin ABSENT;
+    # capture_receipts.py -> surfaces=['core'], pin PRESENT.
+    # Mutation check: removing either arm fails the assert below.
+    for source, surface in (
+        ("tortoise/hosted_api.py", "api"),
+        ("tortoise/hosted_api.py", "onboarding"),
+        ("website/apps/dashboard/src/captureStatus.js", "onboarding"),
+        ("tortoise/capture_receipts.py", "core"),
+    ):
+        r = _sel([source])
+        assert surface in r["surfaces"], (source, surface, r["surfaces"])
+        assert r["full"] is False, (source, r)
+        assert "test_5051_capture_receipt_key_registry.py" in r["test_files"], (
+            f"{source} selects {r['surfaces']} but does NOT run the #5051 "
+            "receipt-key pin — a re-spelled key at that site (or a moved "
+            "format) would merge green and only surface on the next full "
+            "run (#1349/#2938/#3154 silent-drop class)"
+        )
+
+    # The `onboarding` arm covers the `website/apps/dashboard/src/` PREFIX, not
+    # the dashboard root: its `package.json` / `package-lock.json` match no
+    # `onboarding` pattern and fall back to `core` (the #9524 note in
+    # `config/ci-surfaces.yml`). Pinned because the #9668 comment on that arm
+    # said `website/apps/dashboard/` was the pattern — a claim that would read
+    # as "a dashboard MANIFEST dependency is already covered" long after it
+    # stopped being true.
+    assert _sel(["website/apps/dashboard/package.json"])["surfaces"] == ["core"]
+
+
 def test_supabase_config_change_selects_core_not_tier1():
     # supabase/config.toml is the committed LOCAL-stack config and resolves its
     # providers by `env(NAME)` substitution, so each of those names is required
@@ -2442,6 +2759,50 @@ def test_source_currency_tool_change_selects_core_not_tier1():
     assert r["full"] is False, r
     assert "core" in r["surfaces"], r
     assert "test_source_currency_5581.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_link_agent_infra_scripts_tool_change_selects_core_not_tier1():
+    # PR #9541 review P1: tools/link_agent_infra_scripts.py is the only executor
+    # of #9475's fix (it decides whether the repo-root `scripts` pointer exists at
+    # all), and its guard tests/test_link_agent_infra_scripts.py is `core`-
+    # registered. Without the CORE_ALSO entry the flat "tools/"
+    # NON_PYTHON_PREFIXES entry swallowed the path, so a MATERIALISER-only change
+    # selected NO surface and took the docs-only early return — the 14 cases
+    # pinning that the pointer stays gitignored, that a dangling link is repaired,
+    # that a RELATIVE --infra still writes a RESOLVING target (the #9475 symptom
+    # reinstated by its own fix) and that an explicit --infra is never silently
+    # discarded would not have run on the one PR that can break them. Measured
+    # before the entry: `--changed-files tools/link_agent_infra_scripts.py
+    # --event pull_request` -> surfaces=[], full=False, guard ABSENT — while
+    # `--integrity` stayed green, because the TEST file is classified. Same
+    # #1349/#3332/#3616 silent-drop class as #5084/#6138/#4174 above.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/link_agent_infra_scripts.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_link_agent_infra_scripts.py" in r["test_files"], r
+    assert set(r["test_files"]) != _tier1()
+
+
+def test_agent_infra_drift_check_tool_change_selects_core_not_tier1():
+    # PR #9541 review (round 6 P1): tools/agent_infra_drift_check.py is the single
+    # quote-free command ci.yml's drift-check job passes as `check-command` — it
+    # materialises the machine-local `scripts` pointer and then runs agent-infra's
+    # checker. If its quoting breaks, the reusable workflow's textual `${{ }}`
+    # interpolation makes the step die at PARSE time and the gate reds forever with
+    # "produced NO result" while verifying nothing; if its exit contract breaks, the
+    # gate can read green over a pointer that was never written. Same silent-drop
+    # seam as the materialiser entry above: `tools/` is swallowed by
+    # NON_PYTHON_PREFIXES, so a WRAPPER-ONLY change selected NO surface and took the
+    # docs-only early return, and the cases pinning it would not run on the one PR
+    # that can break them — while `--integrity` stayed green, because the TEST file
+    # is classified.
+    # Mutation check: removing the CORE_ALSO entry fails the asserts below.
+    r = _sel(["tools/agent_infra_drift_check.py"])
+    assert r["full"] is False, r
+    assert "core" in r["surfaces"], r
+    assert "test_link_agent_infra_scripts.py" in r["test_files"], r
     assert set(r["test_files"]) != _tier1()
 
 
@@ -2775,7 +3136,7 @@ def test_session_retrofit_audit_tool_change_fails_closed_to_full():
 
 def test_work_claim_tool_change_fails_closed_to_full():
     # #5052/#9487 review P1: tools/work_claim.py owns tests/test_work_claim.py — the
-    # dispatch-time claim gate, whose 55 hermetic arms pin every fail-closed refusal the
+    # dispatch-time claim gate, whose 87 hermetic arms pin every fail-closed refusal the
     # tool exists for. Same #3261/#4256 silent-drop class as the collision_preflight and
     # who_is_on carve-outs above: `tools/` is a flat NON_PYTHON_PREFIXES entry, so without
     # this TOOL_CARVEOUTS entry a claim-tool-only change came back as `changed=[]`,
@@ -2791,6 +3152,16 @@ def test_work_claim_tool_change_fails_closed_to_full():
     assert r["full"] is True, r
     assert r["test_files"] == "ALL", r
     assert "core" in r["surfaces"], r
+    # ... and the carve-out is a PREFIX, not one exact filename (review of #9487 P2). The
+    # exact-path entry failed closed for `tools/work_claim.py` alone: a rename, or the store
+    # split into `tools/work_claim_store.py`, re-opened the same silent drop with nothing
+    # failing (measured: `tools/work_claim_extra.py` → surfaces=[], full=False, tier-1).
+    # The store seam is the half whose breakage must never ship unreviewed.
+    for sibling in ("tools/work_claim_store.py", "tools/work_claim_extra.py"):
+        r = _sel([sibling])
+        assert r["full"] is True, (sibling, r)
+        assert r["test_files"] == "ALL", (sibling, r)
+        assert "core" in r["surfaces"], (sibling, r)
 
 
 def test_session_schema_guard_runs_on_every_declared_writer_surface():
@@ -4671,12 +5042,12 @@ def test_test_slow_job_carries_junitxml_manifest_guard():
     assert '-s "${RUNNER_TEMP:-/tmp}/pytest-files"' in grun
     assert "--manifest /tmp/expected-nodeids.txt" in grun
     # the slow legs no longer carry carve-out files (E2E-4 owns them)
-    leg_files = " ".join(i.get("files", "") for i in
-                         wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"])
+    # #9539: read the DERIVED legs — the workflow holds no literal rows.
+    leg_files = slow_leg_files(load_manifest())
     for carved in ("test_reaper", "test_flip_gate", "test_migrate_db",
                    "test_projection_lifecycle", "test_embedded_concurrency",
                    "test_hosted_backup"):
-        assert carved not in leg_files.split(), \
+        assert carved not in leg_files, \
             f"slow carve-out file {carved} must not ride the docker slow legs"
 
 
@@ -5003,9 +5374,12 @@ def test_slow_leg_bounds_clear_the_committed_work():
     assert watchdog < cap, (
         f"the in-step watchdog ({watchdog}m) must stay BELOW the outer cap "
         f"({cap}m) so a killed leg still prints its counts (#798)")
-    for row in job["strategy"]["matrix"]["include"]:
-        files = row["files"].split()
-        assert files, f"test-slow leg {row['half']!r} is empty"
+    # #9539: the legs are DERIVED (slow_shard_entries) — there are no committed
+    # rows left to iterate. This keeps the same floor assertion, applied to each
+    # leg the selector actually emits at the committed leg count.
+    for row in slow_shard_entries(load_manifest()):
+        files = row["files"]
+        assert files, f"test-slow leg {row['name']!r} is empty"
         # FAIL CLOSED on an unmeasured leg file. `durations.get(f, 0.0)` would
         # weigh it ZERO, so the estimate this guard asserts against could sit
         # arbitrarily below the leg's real work and the budget could rot past
@@ -5016,14 +5390,14 @@ def test_slow_leg_bounds_clear_the_committed_work():
         # reading the map at all.
         unmeasured = [f for f in files if f + ".py" not in durations]
         assert not unmeasured, (
-            f"test-slow leg {row['half']!r} has {len(unmeasured)} file(s) with "
+            f"test-slow leg {row['name']!r} has {len(unmeasured)} file(s) with "
             f"no `durations` row: {unmeasured[:5]} — an unmeasured file weighs "
             f"0.0 here, so the leg's estimate is not a lower bound on its work "
             f"and this guard cannot see the budget rot it exists to catch. "
             f"Register it in config/ci-surfaces.yml `durations`.")
         committed = sum(_duration_weight(durations[f + ".py"]) for f in files) / 60.0
         assert watchdog >= WATCHDOG_HEADROOM * committed, (
-            f"test-slow leg {row['half']!r}: the in-step watchdog "
+            f"test-slow leg {row['name']!r}: the in-step watchdog "
             f"({watchdog}m) no longer clears its committed estimate "
             f"({committed:.2f}m) by WATCHDOG_HEADROOM ({WATCHDOG_HEADROOM}x) — "
             f"the leg is killed mid-suite and the gate reds before pytest can "
@@ -5031,21 +5405,240 @@ def test_slow_leg_bounds_clear_the_committed_work():
             f"the committed `durations` map.")
 
 
+def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
+    """#9539: the slow legs must be a complete, duration-balanced partition AND
+    the wall their pack projects must stay inside the CI guideline.
+
+    This is the guard the lane did not have. The old committed rows could rot
+    without ANY test noticing: #9017 found the halves at 6.4:1 because the eval
+    file had grown from its declared 855 s to a measured 24.4 min and nothing
+    re-derived the split. Here the properties are recomputed from the committed
+    `durations` map on every run, so a slow file that grows reds THIS instead of
+    silently restoring the merge ceiling:
+
+      * coverage — the legs partition `slow_files - carve_out` exactly, once
+        each (no gap, no duplicate);
+      * balance — no leg exceeds its fair share by more than the house
+        `HALF_DURATION_IMBALANCE_RATIO` band (an LPT pack normally lands
+        within 0.1%, so 1.25 is deliberately loose enough for a coarse map);
+      * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
+        guideline. A new slow file big enough to break it reds here, and the
+        remedy is a reviewed `slow_shards` bump, not a quieter number.
+
+    The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
+    over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
+    would claim a wall the job cannot hit.
+    """
+    m = load_manifest()
+    count = slow_shard_count(m)
+    entries = slow_shard_entries(m)
+    assert len(entries) == count, (
+        f"slow_shards declares {count} legs but the pack emitted {len(entries)} "
+        f"— a short pack means the pool cannot be sharded that widely")
+    assert count >= 2
+    # coverage: exactly once each
+    flat = [f for e in entries for f in e["files"]]
+    assert len(flat) == len(set(flat)), (
+        f"a slow file rides more than one leg: "
+        f"{sorted({f for f in flat if flat.count(f) > 1})}")
+    assert set(flat) == set(slow_leg_files(m)), (
+        "the slow legs must cover slow_files - carve_out exactly: "
+        f"missing={sorted(set(slow_leg_files(m)) - set(flat))} "
+        f"extra={sorted(set(flat) - set(slow_leg_files(m)))}")
+    # balance: no leg above its fair share by more than the house band
+    proj = slow_wall_projection(m, entries)
+    pool = proj["pool_min"]
+    fair = pool / count
+    assert proj["max_leg_min"] <= fair * cs.HALF_DURATION_IMBALANCE_RATIO, (
+        f"slow legs are duration-imbalanced: {proj['legs_min']} min against a "
+        f"{fair:.2f}m fair share (band {cs.HALF_DURATION_IMBALANCE_RATIO}x) — "
+        f"the LPT pack regressed; re-cut from the `durations` map")
+    # the bound itself
+    assert proj["projected_wall_min"] <= SLOW_LEG_WALL_TARGET_MIN, (
+        f"the slow lane no longer meets its wall target: {proj['legs_min']} min "
+        f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
+        f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
+        f"{proj['projected_wall_min']:.2f}m — over the "
+        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. Raise "
+        f"`config/ci-surfaces.yml::slow_shards` (reviewed) instead of letting "
+        f"this lane become the merge ceiling again")
+    # the emitted matrix is what the job expands, and every leg is non-empty
+    inc = slow_matrix_include(entries)["include"]
+    assert [r["half"] for r in inc] == [e["name"] for e in entries]
+    assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
+
+
+def test_slow_shards_declaration_is_fail_closed():
+    """#9539: a malformed `slow_shards` is an ERROR, never a silent default.
+
+    Same polarity as `fast_shard_issues`/`carve_shard_issues`: absence is 'not
+    adopted' (the historical 2 legs) and is fine; an explicit null, a string, a
+    bool, a float or a count that deletes or over-extends the lane is a typo
+    that `--integrity` must NAME — otherwise the workflow runs a leg count
+    nobody chose and the merge rail's lane-parity (a job-NAME subtraction) sees
+    a set that was never reviewed."""
+    ok = load_manifest()
+    assert slow_shard_issues(ok) == [], slow_shard_issues(ok)
+    assert slow_shard_count(ok) >= 2, (
+        "this repo exists to shard the slow lane; a count of 1 means the key "
+        "was removed and the wall guard below is what will red")
+    for bad, why in ((None, "explicit null"), ("5", "a string"),
+                     (True, "a bool"), (5.5, "a float"), (1, "one leg"),
+                     (0, "zero"), (-1, "negative"),
+                     (MAX_SLOW_SHARDS + 1, "above the a..z ceiling")):
+        m = dict(ok, slow_shards=bad)
+        assert slow_shard_issues(m), f"{why} ({bad!r}) must be an error"
+        assert slow_shard_count(m) == DEFAULT_SLOW_SHARDS == 2, (
+            f"{why} must fail SAFE to the historical two legs, not to a number "
+            f"nobody chose")
+    # Absence is NOT an error — it is 'not adopted', and it must give back the
+    # historical two-leg shape.
+    m = {k: v for k, v in ok.items() if k != "slow_shards"}
+    assert slow_shard_issues(m) == []
+    assert slow_shard_count(m) == 2
+    assert len(slow_shard_entries(m)) == 2
+    assert set(f for e in slow_shard_entries(m) for f in e["files"]) == \
+        set(slow_leg_files(m))
+
+
+def test_removing_slow_shards_reverts_the_leg_count_but_is_not_a_complete_rollback():
+    """#9539: absence gives back 2 legs — and the wall guard then REDS.
+
+    `config/ci-surfaces.yml` and `ci_selection` used to say deleting the key
+    'is a complete rollback', which is the wording `carve_shards` can use (that
+    lane has no wall guard). It is false here: the wall-target guard recomputes
+    from the `durations` map, and two legs project ~20.9m against the 10m
+    guideline — so an operator taking the documented rollback lands on a FAILING
+    suite, not on main's shape. The comments say so now; this pins the FACT they
+    describe, so neither comment can drift back to claiming otherwise.
+    """
+    m = {k: v for k, v in load_manifest().items() if k != "slow_shards"}
+    assert len(slow_shard_entries(m)) == 2, (
+        "absence must revert the leg count to the historical 2")
+    proj = slow_wall_projection(m)
+    assert proj["projected_wall_min"] > SLOW_LEG_WALL_TARGET_MIN, (
+        f"deleting `slow_shards` is documented as NOT a complete rollback because "
+        f"the wall guard reds on 2 legs; it no longer does "
+        f"({proj['projected_wall_min']}m <= {SLOW_LEG_WALL_TARGET_MIN}m) — update "
+        f"that comment in config/ci-surfaces.yml and tools/ci_selection.py")
+
+
+def test_the_selector_offers_no_unwired_slow_matrix_flag():
+    """#9539 review: `--emit-slow-matrix` was dead surface with a false rationale.
+
+    Its comment claimed the run-time drift guard would call it 'so the guard
+    compares the EXPANDED matrix against the config pool without a second
+    implementation'. The drift guard imports `ci_selection` and calls
+    `slow_leg_files()` itself, and nothing anywhere called the flag — a second,
+    unexercised derivation plus a comment asserting it is load-bearing. It was
+    removed rather than wired: `--emit-push-matrix` already publishes
+    `slow_matrix` for the `changes` job, which is what CI actually consumes.
+    """
+    selector = Path(__file__).resolve().parents[1] / "tools" / "ci_selection.py"
+    proc = subprocess.run([sys.executable, str(selector), "--emit-slow-matrix"],
+                          capture_output=True, text=True, cwd=str(selector.parent))
+    assert proc.returncode == 2, (
+        f"`--emit-slow-matrix` must be gone (argparse rejects unknown flags with "
+        f"exit 2), got rc={proc.returncode}: {proc.stdout}{proc.stderr}")
+    emit = subprocess.run([sys.executable, str(selector), "--emit-push-matrix"],
+                          capture_output=True, text=True, cwd=str(selector.parent),
+                          check=True).stdout
+    assert json.loads(emit)["slow_matrix"]["include"], (
+        "the surviving entry point must still publish the slow matrix")
+
+
+def test_9017_block_states_the_derived_split_not_the_2_leg_era():
+    """#9539 review: the `#9017` block is a DATED 2-leg measurement — say so.
+
+    Its per-file table is still a valid measurement (run 39165691659) but the
+    SPLIT narrative wrapped around it is not: #9539 replaced the committed pair
+    with legs DERIVED from that same map (`slow_files - carve_out` LPT-packed
+    into `slow_shards` = 5). In the present tense, "the LPT pack of that map into
+    two legs of 18.945m / 18.933m" and "2.11x the heavier leg" both contradict
+    the lane the reader is about to configure — including the number the per-leg
+    `matrix.watchdog_minutes` follow-up would size the 40m literal against (the
+    heavier DERIVED leg is 7.58m, 5.3x, not 18.95m at the 2.0x floor). This is
+    exactly the rotation the durations header asks for, and the same failure this
+    block's own history records ("they rot on every re-cut, and this comment has
+    now been wrong twice for that reason").
+    """
+    text = (REPO / "config" / "ci-surfaces.yml").read_text(encoding="utf-8")
+    assert "into two legs of 18.945m" not in text, (
+        "the `#9017` block still states the 2-leg split as current fact — #9539 "
+        "derives 5 legs from the same map")
+    assert "2.11x the heavier leg" not in text, (
+        "the `#9017` block still quotes the 2-leg-era watchdog headroom as "
+        "current (the heavier derived leg is 7.58m, i.e. 5.3x)")
+    marker = next(ln for ln in text.splitlines() if "THE SPLIT" in ln)
+    assert "HISTORICAL" in marker, (
+        "the 2-leg-era split must be marked as history, the way the aggregate's "
+        f"pre-#9539 table is; got {marker!r}")
+    # …and the CURRENT shape must be stated in that block: the derived leg count,
+    # the heavier leg's weight, and the headroom figure the literal is sized from.
+    split_block = text[text.index(marker):]
+    split_block = split_block[:split_block.index("# #2008 review")]
+    for want, why in (("slow_shards", "the derived leg count it now uses"),
+                      ("7.58m", "the heavier DERIVED leg's weight"),
+                      ("5.3x", "the 40m literal's headroom over that leg")):
+        assert want in split_block, (
+            f"the `#9017` block must state {why} ({want!r}) — it is the only "
+            f"place a reader sizing the 40m watchdog looks")
+
+
+def test_parse_matrix_halves_matches_no_literal_block_on_the_current_workflow():
+    """#9539 review: the legacy regex matches NOTHING now — the docstring said
+    the `test-slow` job's block was still there to match.
+
+    #6135 left `test` derived; #9539 left `test-slow` derived too, so no literal
+    `- half:` / `files: >-` block remains in python-ci.yml and
+    `parse_matrix_halves()` returns {}. That stays fail-CLOSED rather than hollow:
+    the normal path never reaches the fallback (`workflow_matrix_issues()` is
+    empty), the drift case reports the drifted job by name there, and the `{}`
+    arm of `workflow_halves_issues()` reports "workflow parse failure" instead of
+    returning `[]` and passing. A RE-INTRODUCED legacy block still parses, so the
+    #1266 tie checks against it are still live.
+    """
+    m = load_manifest()
+    assert cs.parse_matrix_halves(cs.WORKFLOW.read_text(encoding="utf-8")) == {}, (
+        "python-ci.yml carries a literal legacy matrix block again — the parse "
+        "and `parse_matrix_halves`'s docstring disagree (#9539)")
+    assert cs.workflow_matrix_issues(cs.WORKFLOW, m) == [], (
+        "the empty parse must not be reached on the normal path: a drift here "
+        "means `workflow_matrix_issues` should have named it")
+    issues = cs.workflow_halves_issues(m, {})
+    assert issues and "parse failure" in issues[0], (
+        f"an empty parse must fail CLOSED, not pass — got {issues!r}")
+    doc = cs.parse_matrix_halves.__doc__ or ""
+    assert "the only block this regex can still match" not in doc, (
+        "the docstring still claims a literal block is left to match")
+    legacy = ("- half: a\n          files: >-\n            test_a test_b\n"
+              "- half: b\n          files: >-\n            test_c\n")
+    assert cs.parse_matrix_halves(legacy) == {
+        "a": ["test_a", "test_b"], "b": ["test_c"]}, (
+        "a re-introduced legacy block must still be parsed — that is the only "
+        "reason this fallback exists")
+
+
 CI_RUNNER_GATE = Path(__file__).resolve().parents[1] / "scripts" / "ci_runner_gate.sh"
-#: The tracked `scripts` symlink itself, WITHOUT following it: a dangling link is the
-#: runner case (no agent-infra checkout), and it is the ONLY case that may skip.
+#: The machine-local `scripts` pointer itself, WITHOUT following it. Since #9475 it is
+#: GITIGNORED and NOT tracked (a git symlink blob cannot hold `$AGENT_INFRA_PATH`), so the
+#: runner case that may skip is "it was never materialised here" — an absent path, not a
+#: dangling committed link.
 SCRIPTS_LINK = Path(__file__).resolve().parents[1] / "scripts"
 CI_RUNNER_GATE_ABSENT = (
     f"PREMISE CROSS-CHECK NOT RUN: agent-infra's ci_runner_gate.sh is not "
-    f"reachable at {CI_RUNNER_GATE} (the tracked `scripts` symlink dangles where "
-    f"$AGENT_INFRA_PATH is unset, as on a runner). The repo-side half of the "
+    f"reachable at {CI_RUNNER_GATE} (the machine-local `scripts` pointer is "
+    f"missing or does not resolve — #9475: it is gitignored, not tracked, so a "
+    f"fresh clone or lane has none until `uv run python "
+    f"tools/link_agent_infra_scripts.py` materialises it from $AGENT_INFRA_PATH, "
+    f"as on a runner where that variable is unset). The repo-side half of the "
     f"guard — test-slow's label is VERSION-PINNED — ran and passed. The premise "
     f"half is HOST-ONLY AND UNTESTED BY CI: it is a cross-repo fact (the labels "
     f"agent-infra's gate attaches to the self-hosted pool) that no runner checks "
     f"out, so a green CI run says nothing about it. Run this module on a host "
-    f"with $AGENT_INFRA_PATH set to verify that the gate still attaches only "
-    f"`ubuntu-latest`. Same shape and same limit as RAIL_ABSENT_REASON in "
-    f"tests/test_pytest_attribution.py."
+    f"with $AGENT_INFRA_PATH set (and the pointer materialised) to verify that "
+    f"the gate still attaches only `ubuntu-latest`. Same shape and same limit as "
+    f"RAIL_ABSENT_REASON in tests/test_pytest_attribution.py."
 )
 
 
@@ -5087,12 +5680,14 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         f"pool claims puts this leg back on the class that cannot finish it.")
 
     if not SCRIPTS_LINK.is_dir():
-        # The tracked `scripts` symlink DANGLES (no agent-infra checkout here), which
-        # is every CI runner: the link is a host convenience, not a repo dependency
-        # (`python-ci.yml` is self-contained by decision, fix #555). Announced, never
-        # silent, and the message says out loud that the premise half is untested by
-        # CI — a bare `skipped` would let a green run read as "the pool's labels were
-        # verified", which is the vacuous pass this guard exists to prevent.
+        # The machine-local `scripts` pointer is ABSENT or does not resolve, which is
+        # every CI runner and every fresh clone/lane: since #9475 it is gitignored and
+        # not tracked, so nothing creates it until
+        # `tools/link_agent_infra_scripts.py` runs. It is a host convenience, not a repo
+        # dependency (`python-ci.yml` is self-contained by decision, fix #555).
+        # Announced, never silent, and the message says out loud that the premise half
+        # is untested by CI — a bare `skipped` would let a green run read as "the pool's
+        # labels were verified", which is the vacuous pass this guard exists to prevent.
         print(CI_RUNNER_GATE_ABSENT)
         pytest.skip(CI_RUNNER_GATE_ABSENT)
     # The link RESOLVED, so agent-infra IS checked out at $AGENT_INFRA_PATH: a missing
@@ -5108,7 +5703,9 @@ def test_slow_legs_are_pinned_off_the_ambiguous_runner_label():
         f"rather than letting this guard drift out of reach")
     gate = CI_RUNNER_GATE.read_text()
     # The premise this pin rests on lives in ANOTHER repo's script, reached here
-    # through the tracked `scripts` symlink. Pinning a literal against an external,
+    # through the machine-local `scripts` pointer (#9475 — gitignored, not tracked;
+    # materialised per machine from $AGENT_INFRA_PATH, absent until then). Pinning a
+    # literal against an external,
     # changeable fact with nothing asserting that fact is the "comment nobody
     # re-reads" failure this test criticises: harden the gate to attach a
     # VERSION-PINNED label instead of `ubuntu-latest` and this test would stay green
@@ -5424,10 +6021,12 @@ def test_diff_gated_jobs_consume_changes_outputs():
     test-slow + test-carve-out gate their runs on the changes job's
     slow_run / carve_out_run outputs (docs/config-only PRs skip both legs);
     the changes job emits + echoes the diff-gate outputs; test-slow's
-    manifest + run steps intersect the committed leg rows with
+    manifest + run steps intersect the DERIVED leg rows with
     slow_selected on the tier-2 shape (full == false) so only the matched
-    surfaces' slow files run. The committed matrix rows stay literal (the
-    in-workflow drift-guard step pins their union to slow_files - carve_out)."""
+    surfaces' slow files run. test-slow's matrix is the selector's
+    `${{ fromJSON(needs.changes.outputs.slow_matrix) }}` — there are NO
+    literal rows to keep in sync; the in-workflow drift-guard step pins the
+    union of the EXPANDED legs to slow_files - carve_out (#9539)."""
     wf = _load_python_ci()
     # job-level gates
     assert wf["jobs"]["test-slow"]["if"] == \
@@ -5453,35 +6052,54 @@ def test_diff_gated_jobs_consume_changes_outputs():
             f"test-slow '{want}' must consume slow_selected (tier-2 scoping)"
         assert 'case " $SLOW_SEL " in' in run, \
             f"test-slow '{want}' must intersect with slow_selected"
-    # committed matrix rows remain literal file lists (drift-guard pinned)
-    rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
-    assert len(rows) == 2
+    # #9539: the slow legs are the DERIVED matrix (`fromJSON(...slow_matrix)`),
+    # not committed rows — the same shape `test`/`test-carve-out` use. What the
+    # pin still checks is what mattered about the old rows: every leg entry
+    # exists and is declared in `slow_files` (a dead or unclassified entry is
+    # the #1260/#1270 drift class), the union is the whole pool minus the
+    # carve-out set, and no file rides two legs.
+    matrix = wf["jobs"]["test-slow"]["strategy"]["matrix"]
+    assert matrix == "${{ fromJSON(needs.changes.outputs.slow_matrix) }}", (
+        "test-slow's matrix must be the selector's slow_matrix (no literal rows, "
+        f"#9539), got {matrix!r}")
+    assert "slow_matrix" in outs, "changes job must publish slow_matrix (#9539)"
+    push_step = next(s for s in wf["jobs"]["changes"]["steps"]
+                     if s.get("id") == "push-matrix")
+    assert "slow_matrix=" in push_step["run"], (
+        "the push-matrix step must echo slow_matrix (#9539)")
+    inc = slow_matrix_include(slow_shard_entries(load_manifest()))["include"]
+    assert len(inc) == slow_shard_count(load_manifest()) >= 2
     from tools.ci_selection import TESTS_DIR
     _slow = set(load_manifest()["slow_files"])
-    for row in rows:
+    seen: set[str] = set()
+    for row in inc:
         tokens = row["files"].split()
-        assert tokens, "test-slow leg row must be a literal file list (#1471)"
+        assert tokens, "a derived slow leg must never be empty"
         for token in tokens:
             rel = f"{token}.py"
             assert (TESTS_DIR / rel).exists(), \
-                f"test-slow leg entry {rel} does not exist under tests/"
+                f"slow leg entry {rel} does not exist under tests/"
             assert rel in _slow, \
-                f"test-slow leg entry {rel} is not declared in slow_files"
+                f"slow leg entry {rel} is not declared in slow_files"
+            assert rel not in seen, f"slow leg entry {rel} rides two legs"
+            seen.add(rel)
+    assert seen == {f + ".py" for f in slow_leg_files(load_manifest())}, (
+        "the legs must cover slow_files - carve_out exactly (no gap, no dup)")
 
 
 def test_slow_selected_echo_transform_roundtrips_into_legs():
     """#2159 review P2-1: the changes job's slow_selected echo strips the
     .py suffix and space-joins BARE names; test-slow's tier-2 shape then
-    case-matches them against the committed leg rows (matrix.files). This
+    case-matches them against the DERIVED leg rows (matrix.files, #9539). This
     pin reproduces the echo transform for every selection shape and asserts
     the round-trip holds — a strip/join format drift (suffix leak, JSON,
-    newline) would silently empty BOTH legs to a green gate, and this
+    newline) would silently empty EVERY leg to a green gate, and this
     tier-2 partial shape never runs in CI outside a real tier-2 PR."""
     m = load_manifest()
-    wf = _load_python_ci()
-    legs = set()
-    for i in wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]:
-        legs.update(i["files"].split())
+    # #9539: the legs are the DERIVED matrix — the same set the run step
+    # expands from `changes.outputs.slow_matrix` — so the round-trip is checked
+    # against what will actually run rather than against committed rows.
+    legs = set(slow_leg_files(m))
     shapes = [
         ([], "push"),
         ([], "schedule"),

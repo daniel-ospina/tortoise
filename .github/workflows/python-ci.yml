@@ -146,8 +146,12 @@ env:
   # Excluded from the `test` job and run in parallel in `test-slow`
   # (#798, tracked slow files: #647). #1371: the SLOW_FILES env var is gone —
   # the single source of truth is config/ci-surfaces.yml `slow_files:`;
-  # #1471: test-slow's legs are committed duration-balanced lists, pinned to
-  # that config by a fail-closed drift guard (union check). The push matrix
+  # #9539: test-slow's legs are DERIVED from that config — LPT-packed into
+  # `slow_shards` legs from the same `durations` map the fast band uses — and
+  # published as `changes.outputs.slow_matrix`, so there is no committed leg
+  # list to rot. `slow_file_issues`/`leg_coverage_issues` pin the pool and
+  # `slow_shard_issues` pins the declaration; the drift guard in the job pins
+  # the expanded legs to `slow_files - carve_out` at run time. The push matrix
   # and env-broken exclusions are derived by the selector (#1472).
   # Env-broken in this job (tests/e2e needs browsers; test_agent_signup needs
   # a live redis on 6379) — single source is tools/ci_selection.py.
@@ -218,6 +222,13 @@ jobs:
       # carve-out set is diff-GATED (`carve_out_run`) but never diff-SIZED, so
       # every run that enters this job runs exactly its three shards.
       carve_matrix: ${{ steps.push-matrix.outputs.carve_matrix }}
+      # #9539: the slow pool's leg matrix. Read by `test-slow` directly
+      # (`fromJSON`), so the leg count and the file partition are the selector's
+      # contract, never a workflow literal — the same rule `fast_matrix` and
+      # `carve_matrix` follow. The set is diff-GATED (`slow_run`) and, on
+      # tier-2, diff-SCOPED (`slow_selected` intersected per leg) but never
+      # diff-SIZED: every run that enters the job runs the same leg count.
+      slow_matrix: ${{ steps.push-matrix.outputs.slow_matrix }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -285,20 +296,25 @@ jobs:
           echo "carve_out_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["carve_out_run"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "slow_selected=$(echo "$SEL" | python3 -c 'import json,sys; print(" ".join(x[:-3] if x.endswith(".py") else x for x in json.load(sys.stdin)["slow_selected"]))')" >> "$GITHUB_OUTPUT"
           # #2159 review P2-1: the tier-2 slow legs case-match slow_selected's
-          # BARE names against the committed leg rows (matrix.files format),
+          # BARE names against the derived leg rows (matrix.files format),
           # and this tier-2 partial shape had never run in CI when #2148
           # landed — a strip/join format drift (suffix leak, JSON array,
-          # newline) would silently empty BOTH legs to a green gate. Fail the
+          # newline) would silently empty EVERY leg to a green gate. Fail the
           # changes job (red, not silent-green) if slow_run=true with an
           # empty or non-leg slow_selected.
+          #
+          # #9539: the leg set is the DERIVED pool (`slow_files - carve_out`),
+          # not the workflow's old committed rows — it is the same set the
+          # run step's per-leg intersection can match against, and it is read
+          # from the selector rather than parsed out of the workflow, so the
+          # check cannot drift when the leg count changes.
           python3 - "$SEL" <<'EOF'
-          import json, sys, yaml
+          import json, sys
+          sys.path.insert(0, "tools")
+          import ci_selection as cs
           sel = json.loads(sys.argv[1])
           if sel["slow_run"]:
-              wf = yaml.safe_load(open('.github/workflows/python-ci.yml'))
-              legs = set()
-              for i in wf['jobs']['test-slow']['strategy']['matrix']['include']:
-                  legs.update(i['files'].split())
+              legs = set(cs.slow_leg_files(cs.load_manifest()))
               entries = {f[:-3] if f.endswith(".py") else f for f in sel["slow_selected"]}
               bad = sorted(entries - legs)
               if bad or not entries:
@@ -338,6 +354,10 @@ jobs:
           # same way as `fast_matrix` (one JSON GITHUB_OUTPUT line, so the
           # template-context toString hazard above applies identically).
           echo "carve_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["carve_matrix"]))')" >> "$GITHUB_OUTPUT"
+          # #9539: the slow pool's matrix — `slow_files - carve_out` packed into
+          # `config/ci-surfaces.yml::slow_shards` LPT bins by the same `durations`
+          # map the fast band uses. Emitted like the two above (one JSON line).
+          echo "slow_matrix=$(echo "$MATRIX" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_matrix"]))')" >> "$GITHUB_OUTPUT"
       - name: Tier-2 duration split (#1473)
         # #1473/#6135: LPT-pack the tier-2 selected files across the configured
         # shard count by measured duration (config/ci-surfaces.yml durations)
@@ -1504,9 +1524,11 @@ jobs:
     # 1 failure. The pin removes THIS leg's kill and the critical-path inflation it
     # caused; it does not turn that run green.
     #
-    # Why ROUTING and not a raised timeout: the 40m budget is 2.11x the leg's
-    # committed weight, i.e. already at the `WATCHDOG_HEADROOM` policy floor (2.0x).
-    # Sizing it for the pool instead would need >=79m (2 x 39.6m), past
+    # Why ROUTING and not a raised timeout: the 40m budget clears the heavier
+    # DERIVED leg (7.58m, #9539 — see the job header below) by 5.3x, i.e. 2.6x the
+    # `WATCHDOG_HEADROOM` policy floor (2.0x, a 15.2m minimum). The literal is not
+    # the constraint here; the RUNNER CLASS is. Sizing the budget for the pool
+    # instead would need >=79m (2 x 39.6m), past
     # `WATCHDOG_CEILING_MIN` (55m) and past this job's own 60m outer cap — and a
     # budget built for the slowest class would also let a genuinely hung HOSTED leg
     # hold the REQUIRED aggregate red for 55m, the regression #6135/#6145 exists to
@@ -1533,120 +1555,68 @@ jobs:
     # #6897 instead.
     # Do NOT change it back to `ubuntu-latest`, and never to `self-hosted`.
     runs-on: ubuntu-24.04
-    # #1471: two parallel duration-balanced legs (matrix), mirroring the `test`
+    # #1471: parallel duration-balanced legs (matrix), mirroring the `test`
     # job's #880 pattern. Serial pytest was 37:44 (run 32241846147, 2026-08-19)
     # — the true critical path of every main push (last python-ci job to
-    # finish). Split measured 2026-08-19 (CI --durations=15 data + header-
-    # verified facts + test-count calibration): leg a ≈ 18.5m, leg b ≈ 18.3m
-    # of pytest time vs ~38m serial — main-push wall-clock drops to
-    # ~max(leg) ≈ 23-24m incl. setup (~40-50% cut). Separate runners = zero
-    # hermeticity risk (slow files share no state across processes).
+    # finish). Two legs cut it to ~max(leg) ≈ 23-24m incl. setup, and #9539
+    # takes the same split further by DERIVING the leg count: the pool is
+    # 37.9m of measured test time and the legs run one serial pytest process
+    # each, so `max(leg)` ≈ pool/legs, and `config/ci-surfaces.yml::slow_shards`
+    # is the lever that holds the projection under the 10m CI guideline.
+    # Separate runners = zero hermeticity risk (slow files share no state
+    # across processes).
     # Each leg keeps the 40m watchdog + 5-min heartbeat + guaranteed-summary
-    # tail (#798/#964); the drift-guard step pins the union of both legs to
-    # config/ci-surfaces.yml `slow_files:` MINUS the epic #1647 carve-out
-    # (Task 9 Step 5: the slow carve-out files — the members of
+    # tail (#798/#964); the drift-guard step pins the union of the EXPANDED
+    # legs to config/ci-surfaces.yml `slow_files:` MINUS the epic #1647
+    # carve-out (Task 9 Step 5: the slow carve-out files — the members of
     # `slow_files` that are also in `carve_out` — run in the URI-unset
-    # carve-out job, never the docker slow legs) — a new slow file can never silently
-    # drop out of CI. Epic #1647 Task 9 Step 5 (cycle-6 P2-8): the slow legs
-    # flip to DOCKER — job-level URI (full==true only) + junitxml manifest +
-    # skip-guard, mirroring the fast job's Task 6 mechanics exactly.
+    # carve-out job, never the docker slow legs) — a new slow file can never
+    # silently drop out of CI. Epic #1647 Task 9 Step 5 (cycle-6 P2-8): the
+    # slow legs flip to DOCKER — job-level URI (full==true only) + junitxml
+    # manifest + skip-guard, mirroring the fast job's Task 6 mechanics exactly.
     strategy:
       fail-fast: false
-      matrix:
-        half: [a, b]
-        include:
-          # Rebalanced by MEASURED duration, and the on-demand lane file
-          # removed. Two defects were fixed here at once:
-          #
-          #   1. `eval/retrieval/test_integration` moved to the `on_demand:`
-          #      lane, so leaving it in this committed list would break the
-          #      union drift guard (#1471) that pins these legs to slow_files.
-          #   2. The halves had drifted to **6.4:1** (a 4.2 min / b 26.8 min)
-          #      — not by a bad split but by the eval file GROWING from its
-          #      declared 855s to a measured 24.4 min while the split stayed a
-          #      hand-maintained artifact. The old a/b lists were balanced when
-          #      written (#4711) and were never rechecked.
-          #
-          # #9017 re-cut both rows from the CI's OWN per-test junit (2026-10-18,
-          # run 39165691659): the committed map had rotted — 28 of the 64 leg
-          # files of that measurement (29 of today's 65) carried an `# unmeasured`
-          # placeholder — so a first pass re-measured
-          # locally and got the wrong answer, because this repo's host runs a
-          # fleet and local CPU seconds inflate non-uniformly under that load
-          # (`test_index_cli` measured 338s of local CPU for 25s of CI time).
-          # The junit column is authoritative and is what the rows now carry. The
-          # full method and the per-file numbers are in config/ci-surfaces.yml, in
-          # the #9017 block before `slow_files:`.
-          # WHAT IT BOUGHT, stated as the measurement rather than the hope: the
-          # legs this replaces measure 17.06m / 20.82m on the same junit, so the
-          # re-cut takes the critical leg 20.82m -> 18.95m (-1.88m, -9.0%); the pair
-          # that stood BEFORE #9035 was 17.98m / 19.90m, i.e. -4.8% against that.
-          # The ceiling is arithmetic: a perfect split of the 37.88m pool is
-          # 18.94m, and the pre#9017 split was already within 0.97m of it — so the
-          # remaining lever is the POOL, not the cut.
-          # These are the LPT legs of `slow_files - carve_out` on the committed
-          # `durations` map — 33 and 32 files at 18.945m / 18.933m; each row is a
-          # partition of the set. RECOMPUTE them from `durations` before quoting
-          # them: they rot on every re-cut, and this comment has now been wrong
-          # twice for that reason. (History, condensed: the first cut packed 43
-          # files / 16.21m, eight dual-registered files returned to the fast pool
-          # so #6137 re-cut them to 13.82m, #5285 re-cut twice around its
-          # fail-loud suite, #2125 added `test_framework_middleware`.)
-          # The in-step watchdog below is sized from the heavier leg
-          # (`test_slow_leg_bounds_clear_the_committed_work` pins it), because
-          # a leg that outruns its watchdog is killed mid-suite and reports a
-          # red — the trap the #3239 budget was written for when these legs'
-          # committed weight was 2.84 min rather than the 18.95 min it is now.
-          #
-          # That drift is why these lists should be COMPUTED, not committed —
-          # `push_legs()` already LPT-packs the fast halves from `durations`.
-          # Until then, a rebalance must be redone whenever a file in this list
-          # grows; `test_slow_leg_bounds_clear_the_committed_work` reds when the
-          # watchdog no longer clears the committed weight. Deriving the slow
-          # legs is #6137's design decision and is not pre-empted here.
-          - half: a
-            files: >-
-              test_surface_manifest test_hosted_api test_capture_session
-              test_platform_seams eval/why_suite/test_why_suite_benchmark
-              eval/harness/test_harness_benchmark test_commit_endpoint
-              test_relationships_bounded test_skip_guard test_embedded_evidence
-              test_epic903_scheduler test_mcp_http eval/retrieval/test_gate_1349
-              test_ingest_v2_consolidation test_import_endpoint test_ep_selector
-              test_extractor_v2 test_abuse_integration test_hosted_volunteer_context
-              test_projection test_ep_sources test_ingest_mode test_event_provenance
-              test_cli_context test_control_plane test_write_verb test_ingest_validation
-              test_about_edges test_enumeration_surfaces test_framework_middleware
-              test_operator_idempotency_4971 test_indexes
-              test_graphcopy_boolean_index_3154
-          - half: b
-            files: >-
-              test_ci_selection test_battery_setup eval/write_path/test_write_path_runner
-              test_source_inheritance_own eval/retrieval/test_run test_epic903_warmstart
-              test_pack_shipping_wheel test_monitoring test_battery_r1_seed test_billing
-              test_dr_endpoints test_epic903_modes test_graph_diagnostics
-              test_epic903_fixtures test_index_cli test_sdk test_index_directory
-              test_client_surface test_ingest_bundle test_oauth_mcp
-              test_rebuild_parity_fail_loud_3585 test_consistency_divergence_5011
-              test_dream test_markers test_ingest test_expand_relationships_6976
-              test_unjournaled_mutation_class test_sdk_group3 test_search_engine_gaps
-              test_3311_multilabel_status_vocab test_mcp_route_challenge
-              test_backfill_sources
+      # #9539: the legs are DERIVED, not committed. `changes` publishes
+      # `slow_matrix` (tools/ci_selection.slow_matrix_include) and this job
+      # expands it, exactly like `test`'s `fast_matrix` and `test-carve-out`'s
+      # `carve_matrix` — so the leg count is `config/ci-surfaces.yml::slow_shards`
+      # and the partition is an LPT pack of `slow_files - carve_out` off the
+      # committed `durations` map. Nothing here counts legs or lists files.
+      #
+      # WHY THE COUNT, MEASURED (5 newest completed main runs, 2026-10-21: ids
+      # 39689444666, 39681820673, 39677764388, 39669581544, 39660153113). The
+      # pool is 37.05m of test time from the legs' own junit (37.88m on the
+      # map), run as ONE serial pytest process per leg. The two legs were
+      # already LPT-optimal — per-file medians pack to 18.52/18.52, observed
+      # medians 18.25 (a) / 18.80 (b), and the per-run imbalance FLIPS SIGN
+      # (run 39689444666: a 12.29m vs b 20.40m; run 39681820673: a 19.79m vs
+      # b 16.30m) — so rebalancing is not the lever, and setup is only 1.9–2.1m
+      # of a ~20.5m leg. 2 legs cannot fit a 37.9m pool in 10m at ANY split:
+      # the best a split can do is pool/2 = 18.9m. 5 legs = ceil(37.88 / (10m
+      # guideline - 2m setup)), i.e. 7.58m of test + ~2.0m setup = 9.58m
+      # projected wall. `test_slow_shards_are_duration_packed_and_meet_the_wall_target`
+      # reds when the projection leaves the guideline, and
+      # `test_slow_shards_declaration_is_fail_closed` pins the config contract.
+      matrix: ${{ fromJSON(needs.changes.outputs.slow_matrix) }}
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
     # is the one that PRINTS the pass/fail counts (#798); a runner-level cap
-    # that fires first cancels the step and loses them. #6137 moved 43 files
-    # into these legs, taking their committed `durations` weight from 2.84m to
-    # 16.21m (13.82m after the eight dual-registered files returned to the
-    # fast pool), so
-    # the #3239 literal budget no longer cleared the work: #6137 raised the
-    # watchdog to 35m (2.53x the 13.82m heavier leg) and this cap to 60m.
-    # #5285 then added the fail-loud rebuild suite to `slow_files` and re-cut
-    # BOTH rows by LPT off the committed map; #2125 added
-    # `test_framework_middleware` to leg a. #9017 re-cut both rows again from a
-    # MEASURED map: the rows now carry 18.95m / 18.93m (CI junit), so the watchdog
-    # holds at 40m (2.11x the heavier leg) against a 37.89m floor. The literals did NOT move
-    # with the re-cut — 40m already cleared the measured heavier leg — which is
-    # the guard working, not a coincidence to rely on.
+    # that fires first cancels the step and loses them. The LITERALS here and
+    # below are deliberately unchanged by #9539: the leg count moved from 2 to
+    # 5, so the heavier leg fell from 18.95m to 7.58m (DERIVED — the figures on
+    # this header are the derivation, nothing below restates them), and 40m/60m
+    # still clear it (5.3x / 7.9x — the `WATCHDOG_HEADROOM` floor is 2.0x).
+    # Tightening them to the derived per-leg budget is a failure-path change,
+    # not the wall change this PR makes; it stays with the same follow-up that
+    # owns the per-leg `matrix.watchdog_minutes` wiring the fast and carve-out
+    # bands already use (both of those ARE derived, so this asymmetry is
+    # visible here rather than implied).
+    #
+    # The two literals were sized for the OLDER, heavier legs and the guard has
+    # re-derived them twice: #6137 moved 43 files into these legs (2.84m →
+    # 16.21m committed), and #9017 re-cut the rows from a MEASURED map (18.95m /
+    # 18.93m) after a 6.4:1 split drift. That drift is the reason #9539 replaces
+    # both committed rows with a derivation instead of another manual re-cut.
     #
     # #798 is an ORDER constraint, not just a magnitude: the in-step watchdog is
     # started INSIDE the job, after the off-watchdog pre-phase, while this cap is
@@ -1752,29 +1722,49 @@ jobs:
         timeout-minutes: 10
         run: |
           exec python3 tools/embedder_provision.py --attempts 5 --backoff 10
-      - name: Drift guard — legs cover slow_files minus carve-out (#1471)
-        # #1471: the committed leg lists MUST stay the full slow-file set — a
-        # new slow file added to config/ci-surfaces.yml `slow_files:` that
-        # lands in neither leg silently drops coverage (the #1260/#1270 drift
-        # class). Parses the workflow's own matrix include + the config and
-        # fails closed. Epic #1647 Task 9 Step 5: the slow carve-out files
-        # are excluded from the expected union (they run in the URI-unset
-        # carve-out job). Runs in both legs (<1s, yaml proven on the runner —
-        # the changes job uses it on every event).
+      - name: Drift guard — the expanded legs cover slow_files minus carve-out (#1471/#9539)
+        # #1471: the legs MUST cover the full slow-file set — a new slow file
+        # added to config/ci-surfaces.yml `slow_files:` that lands in no leg
+        # silently drops coverage (the #1260/#1270 drift class). Epic #1647 Task
+        # 9 Step 5: the slow carve-out files are excluded from the expected set
+        # (they run in the URI-unset carve-out job).
+        #
+        # #9539: the check now reads the MATRIX THIS RUN ACTUALLY EXPANDED
+        # (`needs.changes.outputs.slow_matrix`, the derived artifact) instead of
+        # parsing committed rows out of the workflow — there are no rows to
+        # parse any more. That keeps the check pointed at what runs: a producer
+        # that emitted a shard set diverging from the config pool (a packer
+        # regression, a dropped bin, a duplicate) still reds here, and it reds
+        # on the artifact rather than on a second derivation of the same thing.
         run: |
-          python3 - <<'EOF'
-          import yaml
-          wf = yaml.safe_load(open('.github/workflows/python-ci.yml'))
-          inc = wf['jobs']['test-slow']['strategy']['matrix']['include']
-          legs = {i['half']: set(i['files'].split()) for i in inc}
-          cfg = {f[:-3] if f.endswith('.py') else f for f in yaml.safe_load(open('config/ci-surfaces.yml'))['slow_files']}
-          carve = {f[:-3] if f.endswith('.py') else f for f in yaml.safe_load(open('config/ci-surfaces.yml'))['carve_out']}
-          union = set().union(*legs.values())
-          expected = cfg - carve  # slow carve-out files run in the carve-out job
+          MATRIX='${{ needs.changes.outputs.slow_matrix }}' python3 - <<'EOF'
+          import json, os, sys
+          sys.path.insert(0, "tools")
+          import ci_selection as cs
+          raw = os.environ.get("MATRIX", "").strip()
+          if not raw:
+              # The `changes` job publishes this on every event; an empty value
+              # means the derivation step failed or the output was dropped. Say
+              # so by name instead of dying inside json.loads (#9539).
+              print("❌ test-slow leg drift: changes.outputs.slow_matrix is EMPTY "
+                    "— the selector's derivation did not publish a leg set")
+              raise SystemExit(1)
+          inc = json.loads(raw)["include"]
+          legs = {i["half"]: i["files"].split() for i in inc}
+          if not inc or not all(legs.values()):
+              print(f"❌ test-slow leg drift: empty leg set {legs}")
+              raise SystemExit(1)
+          flat = [f for fs in legs.values() for f in fs]
+          union, expected = set(flat), set(cs.slow_leg_files(cs.load_manifest()))
+          dupes = sorted({f for f in flat if flat.count(f) > 1})
+          if dupes:
+              print(f"❌ test-slow leg drift: file(s) in more than one leg: {dupes}")
+              raise SystemExit(1)
           if union != expected:
               print(f"❌ test-slow leg drift: missing={sorted(expected - union)} extra={sorted(union - expected)}")
               raise SystemExit(1)
-          print(f"legs cover exactly {len(expected)} slow files (union == slow_files - carve_out)")
+          print(f"{len(legs)} legs cover exactly {len(expected)} slow files "
+                f"(union == slow_files - carve_out, no duplicates)")
           EOF
       - name: Provision FalkorDB services on ephemeral host ports (#6673)
         # #6673: replaced this job's `services:` block — same mechanics as the
@@ -1809,15 +1799,15 @@ jobs:
           echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
-        # pytest step (off the 40m watchdog), using each leg's committed
-        # the matrix.files expression x --collect-only
+        # pytest step (off the 40m watchdog), using each leg's DERIVED
+        # `matrix.files` expression x --collect-only
         # -m 'not track_b and not live and not integration' (#4750) (the same
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
         run: |
           FILES=""
           # #2148 tier-2 (slow_run == true, full == false): run only the
           # surface-matched slow files (changes.outputs.slow_selected),
-          # intersected with this leg's committed list so the duration-
+          # intersected with this leg's DERIVED list (#9539) so the duration-
           # balanced partition holds. Full selections run the whole leg.
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
             for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
@@ -1857,12 +1847,13 @@ jobs:
         # progress to the live job log every 5 min.
         run: |
           set +e
-          # #1471: this leg's committed duration-balanced file list (measured
-          # 2026-08-19, see job header); the drift guard above pins the union
-          # of both legs to slow_files minus the epic #1647 carve-out.
+          # #9539: this leg's DERIVED duration-balanced file list — the
+          # `slow_matrix` row `changes` published (LPT off the committed
+          # `durations` map); the drift guard above pins the union of the
+          # expanded legs to slow_files minus the epic #1647 carve-out.
           # #2148 tier-2: same construction as the manifest step — surface-
           # matched slow files only (full == false); full runs keep the whole
-          # committed leg. The two constructions must stay identical (the
+          # leg. The two constructions must stay identical (the
           # manifest's expected nodeids reconcile against this run's junitxml).
           FILES=""
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
@@ -1907,15 +1898,16 @@ jobs:
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
           # #3239: the in-step watchdog must CLEAR the leg's committed weight
           # by tools/ci_selection.WATCHDOG_HEADROOM — the same floor the fast
-          # shards derive their budget from. The heavier leg carries 18.95m
-          # (#9017 re-cut both rows from the CI junit — see
-          # config/ci-surfaces.yml's #9017 block; the rows before it carried
-          # 14.808m / 14.443m off a stale map, and the legs that map produced
-          # measure 17.98m / 19.90m against CI's own per-test junit) and this
-          # literal is 40m, i.e. 2.11x the 2.0x minimum
-          # the headroom floor requires (37.89m); it was 10m
-          # when the legs' committed weight was 2.84m (the measured pytest step
-          # was 4.70m, which does not enter the headroom arithmetic). Re-deriving
+          # shards derive their budget from. Since #9539 the legs are DERIVED
+          # (`slow_files - carve_out` LPT-packed into `slow_shards` = 5), so the
+          # heavier leg carries 7.58m — the DERIVED weight, not a committed row;
+          # the header on this job carries the derivation and the per-leg numbers.
+          # This literal 40m is 5.3x that weight, i.e. 2.6x the 2.0x minimum the
+          # headroom floor requires (15.2m); it was 10m
+          # when the committed weight was 2.84m (the measured pytest step
+          # was 4.70m, which does not enter the headroom arithmetic). The 40m/60m
+          # pair is deliberately NOT derived from the leg weight — tightening it
+          # belongs with the per-leg `matrix.watchdog_minutes` follow-up. Re-deriving
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
@@ -3256,6 +3248,11 @@ jobs:
   # These are what the reversal above is weighed against: they are why #5017
   # removed the three >15m legs, and why re-adding them costs ~30m of
   # merge-path latency.
+  # ⚠️ That table is the PRE-#9539 shape. Re-measured on 5 completed main runs
+  # (2026-10-21, ids in `test-slow`'s matrix comment): test-slow was 14.2–23.0m
+  # across its two legs and is the pole now that the fast band is split nine
+  # ways; #9539 packs the same 37.9m pool into 5 derived legs (~9.6m
+  # projected). Do not re-read the two `test-slow` rows as today's numbers.
   #
   # THE LONG LEGS ARE NOT DELETED, AND NOT PUSH-ONLY — they run on both lanes:
   #   * pre-merge on every PR whose diff selects them, now back INSIDE this
@@ -3318,10 +3315,12 @@ jobs:
     # YAML-level parsers, which never evaluate expressions at all.
     #
     # The pinned actionlint image is invoked directly and deliberately NOT via
-    # scripts/check-workflow-actionlint.sh: `scripts` is a tracked symlink
-    # (git mode 120000) pointing outside this repository, so that file does not
-    # exist in a CI checkout, and its default scope also names a templates/
-    # tree this repository does not have (it exits 3 at the glob).
+    # scripts/check-workflow-actionlint.sh: `scripts` is a MACHINE-LOCAL pointer,
+    # gitignored and NOT tracked since #9475 (it is materialised per machine from
+    # $AGENT_INFRA_PATH by tools/link_agent_infra_scripts.py — a git symlink blob
+    # cannot hold a variable), so that file does not exist in a CI checkout, and its
+    # default scope also names a templates/ tree this repository does not have (it
+    # exits 3 at the glob).
     #
     # Both extensions are linted: GitHub loads either `.yml` or `.yaml`, so a
     # `*.yml`-only glob would silently skip a `.yaml` workflow.

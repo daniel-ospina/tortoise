@@ -1656,10 +1656,56 @@ def run_benchmark(
         "quote_spans_total": quote_spans_total,
         "operator_audit": operator_audit,
         "graph_census": graph_census_report,
+        "extractor_identity": extractor_identity(),
         "semantic_judge": semantic_block,
         "session_results": session_results,
         "notes": notes,
         "log": log,
+    }
+
+
+def extractor_identity() -> dict:
+    """Which extractor the run actually used — the #9077 anti-monkeypatch leg.
+
+    The module docstring of ``test_write_path_operator_lane`` states the limit
+    that makes this necessary: that lane **monkeypatches ``extract_session_v2``**
+    with a gold-derived emission, so its 15/15 grades the WIRE and says nothing
+    about whether the extractor FORMS the edges. A receipt produced that way
+    would publish a wire result as a product number.
+
+    ``resolved_config.extractor_posture`` cannot tell the difference — a patched
+    run is still ``llm``. The identity below can: ``sdk._extract_session_v2``
+    imports the symbol from ``tortoise.extractor_v2`` at CALL time, so the
+    module attribute IS the object that ran. ``real`` is true only for the
+    shipped function, and ``tools/operator_receipt_check.py`` rejects a receipt
+    whose ``real`` is false or absent.
+    """
+    import inspect
+
+    try:
+        import tortoise.extractor_v2 as ev2
+    except Exception as exc:  # pragma: no cover - import-time failure
+        return {"module": None, "qualname": None, "source_file": None,
+                "real": False, "error": f"{type(exc).__name__}: {exc}"}
+    fn = getattr(ev2, "extract_session_v2", None)
+    module = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    try:
+        source_file = inspect.getsourcefile(fn) if fn is not None else None
+    except (TypeError, OSError):  # pragma: no cover - closures/frozen modules
+        source_file = None
+    return {
+        "module": module,
+        "qualname": qualname,
+        "source_file": source_file,
+        # The shipped function lives in ``tortoise/extractor_v2.py`` and is a
+        # module-level def; a test seam is a closure or a wrapper defined
+        # elsewhere, so BOTH checks must hold.
+        "real": bool(
+            module == "tortoise.extractor_v2"
+            and qualname == "extract_session_v2"
+            and (source_file or "").endswith("tortoise/extractor_v2.py")
+        ),
     }
 
 
@@ -1975,6 +2021,29 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             # retrievable memory layer (eventId-stamped).
             "operators_total": audit.get("operators_total"),
             "operators_provenanced": audit.get("operators_provenanced"),
+            # #9077 (E4): the PER-EDGE evidence the epic's closing rule asks
+            # for — every planted edge either wired+persisted or carrying a
+            # named cause, each wired edge carrying its pre/post-commit
+            # endpoint refs. A numerator alone restates the structural lane and
+            # is exactly the gap the issue exists to close.
+            "results": {
+                eid: {
+                    "id": d.get("id"),
+                    "expected_kind": d.get("expected_kind"),
+                    "verdict": d.get("verdict"),
+                    "edge_correct": d.get("edge_correct"),
+                    "cause": d.get("cause"),
+                    "forms_found": d.get("forms_found") or [],
+                    "edge_op_ids": d.get("edge_op_ids") or [],
+                    "endpoints": d.get("endpoints") or {"from": [], "to": []},
+                    "persisted": d.get("persisted"),
+                    "from_session": d.get("from_session"),
+                    "to_session": d.get("to_session"),
+                    "owner_session": d.get("owner_session"),
+                }
+                for eid, d in (audit.get("results") or {}).items()
+                if isinstance(d, dict)
+            },
         }
     # #8444 additive graph census (a completed-run dimension only): the E1
     # object-composition and E3 edge-anchor numbers a `#7949` row reads. NOT a
@@ -1982,6 +2051,11 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
     census = report.get("graph_census")
     if census is not None:
         receipt["graph_census"] = census
+    # #9077 (E4): the extractor that actually ran. ``extractor_posture`` is
+    # lane-level (llm | m2) and a monkeypatched seam reads as ``llm`` too, so
+    # the identity is what lets the receipt check reject a wire-only number.
+    if report.get("extractor_identity") is not None:
+        receipt["extractor"] = report["extractor_identity"]
     # #5085 additive banded semantic judge block.  Added ONLY when the arm ran
     # (``--judge semantic``), so a mechanical-lane receipt is byte-identical to
     # the pre-#5085 runner's — the gated ``metrics``/``judge_pin`` surface is
@@ -2045,6 +2119,20 @@ def validate_receipt(receipt: dict) -> list[str]:
     semantic = receipt.get("semantic_judge")
     if semantic is not None:
         issues.extend(_validate_semantic_block(semantic, receipt))
+    # #9077 (E4) additive extractor identity — validated only when present, for
+    # the same back-compat reason. SHAPE only: whether the extractor being the
+    # real one is a PASS/FAIL verdict, and that belongs to
+    # ``tools/operator_receipt_check.py``, not to shape validation (a wire-lane
+    # receipt is legitimately shape-valid and legitimately not an E4 number).
+    extractor = receipt.get("extractor")
+    if extractor is not None:
+        if not isinstance(extractor, dict):
+            issues.append("receipt.extractor: expected an object")
+        elif not isinstance(extractor.get("real"), bool):
+            issues.append(
+                "receipt.extractor.real: expected a bool, got "
+                f"{extractor.get('real')!r}"
+            )
     return issues
 
 

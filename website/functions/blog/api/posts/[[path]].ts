@@ -28,9 +28,21 @@
 //   - slug immutable; archived posts reject all PATCHes AND DELETEs (409/400 terminal).
 //   - Rate limit: 120 req/min + 2,000 req/day per key (in-memory counter —
 //     per-isolate; unit-tested at lowered thresholds).
+//
+// Author identity (#1383 — part of the same v1 contract, additive):
+//   - `author?: string` (≤100 chars) is the byline NAME. Omitted →
+//     `DEFAULT_AUTHOR` ('Daniel Ospina', the shipped author), never the retired
+//     anonymous 'Tortoise team'.
+//   - `author_image_url?: string` is the byline AVATAR and must be an absolute
+//     http(s) URL (a relative/`javascript:`/`data:` value is 400). On CREATE,
+//     omitting it inherits the shipped avatar when the post is by the shipped
+//     author (so an agent-written post and an editor-written post render the
+//     SAME byline) and NULL otherwise; an explicit `""` clears it to NULL, which
+//     renders the name alone. On PATCH, `""` clears it and omission leaves it
+//     untouched (a partial update).
 
 import {
-  type Env, validUrl, SITE_URL,
+  type Env, validUrl, SITE_URL, DEFAULT_AUTHOR, DEFAULT_AUTHOR_IMAGE_URL,
 } from "../../_lib.ts";
 import {
   META_TITLE_MAX, META_DESCRIPTION_MAX, EXCERPT_MAX, TAGS_MAX, TAG_LEN_MAX,
@@ -98,6 +110,7 @@ interface PostInput {
   meta_title?: unknown;
   meta_description?: unknown;
   author?: unknown;
+  author_image_url?: unknown;
   hold_for_review?: unknown;
   status?: unknown;
 }
@@ -151,6 +164,9 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
   const author = str(input.author);
   if (author && author.length > 100) errors.author = "author max 100 chars";
 
+  const authorImage = str(input.author_image_url);
+  if (authorImage && !validUrl(authorImage)) errors.author_image_url = "author_image_url must be an absolute https/http URL";
+
   if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
 
   if (input.tags !== undefined && input.tags !== null) {
@@ -176,6 +192,7 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
       meta_title: metaTitle ?? null,
       meta_description: metaDesc ?? null,
       author: author ?? null,
+      author_image_url: authorImage ?? null,
       hold_for_review: typeof input.hold_for_review === "boolean" ? input.hold_for_review : false,
       status,
     },
@@ -192,6 +209,7 @@ interface CreateValues {
   meta_title: string | null;
   meta_description: string | null;
   author: string | null;
+  author_image_url: string | null;
   hold_for_review: boolean;
   status: PostStatus;
 }
@@ -199,7 +217,7 @@ interface CreateValues {
 function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
   const value: PatchValues = {};
-  const stringKeys = ["title", "body", "excerpt", "cover_image_url", "meta_title", "meta_description", "author"] as const;
+  const stringKeys = ["title", "body", "excerpt", "cover_image_url", "meta_title", "meta_description", "author", "author_image_url"] as const;
   for (const k of stringKeys) {
     if (input[k] !== undefined && input[k] !== null && typeof input[k] !== "string") {
       errors[k] = "must be a string";
@@ -234,6 +252,15 @@ function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { o
     if (cover === "") value.cover_image_url = null;
     else if (!validUrl(cover)) errors.cover_image_url = "cover_image_url must be an absolute https/http URL";
     else value.cover_image_url = cover;
+  }
+
+  // `""` clears the avatar to NULL, which is what makes the byline fall back to
+  // the name alone — never `''`, which is not nullish and would emit <img src="">.
+  const authorImage = str(input.author_image_url);
+  if (authorImage !== null) {
+    if (authorImage === "") value.author_image_url = null;
+    else if (!validUrl(authorImage)) errors.author_image_url = "author_image_url must be an absolute https/http URL";
+    else value.author_image_url = authorImage;
   }
 
   if (input.tags !== undefined) {
@@ -283,6 +310,7 @@ interface PatchValues {
   meta_title?: string | null;
   meta_description?: string | null;
   author?: string | null;
+  author_image_url?: string | null;
   hold_for_review?: boolean;
   status?: PostStatus;
 }
@@ -327,6 +355,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
 
   const now = new Date().toISOString();
   const isDirect = v.value.status === "published";
+  const author = v.value.author ?? DEFAULT_AUTHOR;
   const row = {
     slug,
     title: v.value.title,
@@ -336,7 +365,22 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     tags: v.value.tags,
     meta_title: v.value.meta_title,
     meta_description: v.value.meta_description,
-    author: v.value.author ?? "Tortoise team",
+    author,
+    // The avatar default follows the NAME default, and the two cases are
+    // deliberately different (#1383):
+    //  * OMITTED (`null` here) → the shipped avatar when the post is by the
+    //    shipped author, exactly as the editor prefills it. The admin path and
+    //    the agent path must not produce different bylines for the same author
+    //    ("an avatar on 4 posts and none on 2"), which is the defect class this
+    //    change removes for the name — so it must not be reintroduced for the
+    //    image. A post by ANY OTHER author gets NULL (name-alone byline).
+    //  * EXPLICIT `""` → NULL, never '': '' is not nullish, so storing it would
+    //    emit <img src=""> on the byline. An explicit empty value is an explicit
+    //    "no avatar" (the PATCH path does the same, so the write paths agree).
+    author_image_url:
+      v.value.author_image_url === null
+        ? (author === DEFAULT_AUTHOR ? DEFAULT_AUTHOR_IMAGE_URL : null)
+        : v.value.author_image_url || null,
     status: v.value.status,
     hold_for_review: v.value.hold_for_review,
     created_by: agent.agentName,

@@ -162,10 +162,25 @@ __all__ = [
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 RECORD_MIGRATIONS: tuple[str, ...] = (
+    # THE REGISTRY, not merely the set of files that shape a column. Every
+    # `*_record_*.sql` the wheel ships must be named here — both directions are
+    # pinned by `tests/test_9231_record_migrations_trigger.py` — because the
+    # FILENAME is the only total partition of "is this the record's schema".
+    # `tests/test_record_projection.py` infers the same set from the SQL's
+    # SHAPE, which is a heuristic over spellings: a column added by a spelling
+    # it does not recognise (an `ALTER` inside a `DO` block, `ADD` without
+    # `COLUMN`) would be shipped by the wheel and read by nobody, with nothing
+    # red. An entry that contributes no column therefore still belongs here.
     "20261012000001_record_event_stream.sql",
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # The erasure RPC (#7968, PR #8179 review P2): a SECURITY DEFINER function,
+    # so it contributes NO column to `table_columns()` and no name to
+    # `refused_props_names()` (measured: both are identical with and without
+    # it). It is listed anyway, per the registry rule above — leaving it out was
+    # the 1-of-7 gap #9550 measured.
+    "20261012000005_record_org_purge_rpc.sql",
     # A FORWARD migration re-declaring a refusal. Migrations are append-only
     # history, so a later refusal (`subject.props` gains `status`, #8263)
     # arrives as `ALTER TABLE … ADD CONSTRAINT` — and the schema read below
@@ -177,6 +192,14 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # the pre-ALTER schema, so `_split_properties` would leave an amount in the
     # `props` tail and `cache_projection` would not project it.
     "20261018000001_record_point_money_value_2782.sql",
+    # A FORWARD migration NARROWING a column's TYPE (`ALTER TABLE public.session
+    # ALTER COLUMN capture_redactions TYPE integer`, #9264). The readers do not
+    # parse this form, and deliberately: the projection hands a non-`dict`/
+    # `list` value through unchanged, so the column's declared type was the only
+    # thing disagreeing with the producer's integer count. It is registered so
+    # the schema read and the placement pin still see one authoritative file
+    # list — an unregistered migration is invisible to every reader.
+    "20261022000001_record_session_capture_redactions_integer.sql",
 )
 
 #: Where the schema lives when this module is INSTALLED rather than checked out.
@@ -987,6 +1010,15 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # `cache_projection` copies back onto the node verbatim. Same class as the
     # sibling `contains_session` above.
     "_stub_completion",
+    # #9451: the sibling discriminator on the same record — "this record's
+    # `ingestedAt` is the instant the live write STORED", which selects
+    # `_upsert_source`'s ON MATCH behaviour. Same three homes as `_stub_completion`
+    # above (`projection/entities.py::_META_KEYS`, `sdk._sanitize_props` /
+    # `sdk.create_source`, MCP `_SERVER_MANAGED_PROPS`); the RECORD layer is the
+    # fourth, and without it the key would fall into the `source.props` jsonb
+    # tail that `cache_projection._props_from_row` copies back onto the node
+    # verbatim.
+    "_ingestedAtStored",
     # Creating-record embedding identity (a DESCRIPTION of the record, never a
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",
@@ -1529,6 +1561,158 @@ def _nested_node_carrier(record: Mapping[str, Any],
     return None
 
 
+#: `(record type, envelope key, rel type, source label, target label)` — the
+#: edges a record carries as a *structural directive on its envelope* rather
+#: than as a node property, so no `NodeSnapshot` column can hold them.
+#:
+#: `contains_session` (#3947) is the capture turn loop's
+#: `(:Session)-[:CONTAINS]->(:Point)` link: the SDK/hosted writer MERGEs the
+#: edge live and journals the session id on the `PointAdded`/`OperatorAdded`
+#: ENVELOPE (`sdk.py::_write_capture_turns`), deliberately NOT in the point
+#: payload, because a Point property of that name would let a caller forge a
+#: container link on replay.
+#:
+#: ⛔ THE GAP THIS CLOSES (R5 / #9553, class 2). `_RECORD_ONLY_KEYS` drops
+#: `contains_session` — correctly, it must never become a node prop — and that
+#: drop ALSO dropped the EDGE: the record materialized the turn Point and no
+#: `relation` row, so a **journal** rebuild restored the CONTAINS link (its fold
+#: reads the same envelope key, `projection/__init__.py` →
+#: `_upsert_point_edges(contains_session=…)`) while a **record-sourced** rebuild
+#: did not. A capture therefore landed `relation` rows = 0 and lost the whole
+#: session container on the S3/S9 route.
+#:
+#: The set is keyed on the RECORD TYPE, not on the node label, because the fold
+#: honours the key for exactly `PointAdded`/`OperatorAdded`
+#: (`projection/__init__.py::apply`). A label-keyed rule would let a stray
+#: `contains_session` on any other Point record mint a `relation` row the graph
+#: never wrote — the record richer than the graph, which is the one direction
+#: Interface A forbids.
+#:
+#: ⛔ NOT covered here, named so the next reader does not infer it: the other
+#: three R5 classes stay missing. Point-PROPERTY edges (`extractedFrom`,
+#: `about*`, `mitigated_by`, `tags`) are derived by the graph fold from the
+#: Point's snapshot and have no record carrier yet (class 1); operator
+#: `IMPL`/`NAND`/`INPUT` sit in `point.props` and are not journaled as edges
+#: (class 3); the structural predicates `ownedBy`/`hasPart`/`dependsOn`/
+#: `references` and friends have a working `DirectEdgeCreated` fold and NO
+#: producer (class 4 — a producer-side change, not a projection one).
+_ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
+    ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
+    ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
+)
+
+
+def _writable_endpoint_id(value: Any) -> bool:
+    """True when the FOLD would key a node on `value` — `_writable_container_id`.
+
+    ⛔ The fold is the authority. `_upsert_point_edges` gates a
+    `contains_session` on truthiness (`isinstance(contains_session, str) and
+    contains_session`) and then hands it to `_link_session`, whose gate is
+    `projection._writable_container_id` — `_writable_id` (rejects a non-str, the
+    empty string, a NUL and a lone surrogate) PLUS the BLANK refusal. This
+    predicate must stay value-for-value equal to it; a stricter rule here would
+    make the record POORER than the graph and a looser one would make it
+    RICHER, and both are rebuild-lane divergences.
+
+    The BLANK refusal is measured, not stylistic, and it is why an earlier draft
+    of this module could not simply call `_writable_id` (#9553 review P2): on an
+    indexed graph (`_ensure_indexes` creates `CREATE INDEX FOR (s:Session) ON
+    (s.id)`) FalkorDB's equality filter does not match a whitespace-only string
+    (#9599) — `MATCH (s:Session) RETURN s.id` lists `'   '` while `MATCH
+    (s:Session {id:'   '})` returns 0 — so `_link_session` re-MERGEs a DUPLICATE
+    `:Session` and then lands NO edge, while Postgres (no such quirk) would
+    happily hold the row. Streaming the row anyway would rebuild a relation the
+    graph never wrote, so the refusal lives in `_writable_container_id` and BOTH
+    folds use it.
+
+    Restated rather than imported because this module is loaded STANDALONE —
+    the PGlite harness `spec_from_file_location`s it, so a package-relative
+    import raises there. The two are pinned EQUAL over a value table by
+    `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`,
+    so a drift in either one is a red.
+
+    The NUL / lone-surrogate refusals are not cosmetic on THIS side either:
+    Postgres refuses a NUL in `text` and the driver cannot encode a lone
+    surrogate, so admitting either would turn a fold SKIP into a failed
+    replay.
+    """
+    if not isinstance(value, str) or not value or not value.strip():
+        return False
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False  # lone surrogate
+    return True
+
+
+def _envelope_relation_statements(
+    org_id: str,
+    graph_id: str,
+    record: Mapping[str, Any],
+    record_type: Any,
+    target_key: str,
+    columns: Mapping[str, frozenset[str]],
+    refused: Mapping[str, frozenset[str]],
+) -> list[Statement]:
+    """The `relation` rows a record's ENVELOPE directs, as upserts.
+
+    Returned AFTER the node upsert by the caller so the target endpoint's
+    `node_identity` row exists before the insert — `relation.src_key`/`tgt_key`
+    are composite FKs into it, and an FK violation here lands on
+    `record_write_failures`, invisible without #9551 (the ordering half of
+    G4).
+
+    The SOURCE endpoint is resolved, never minted (`_endpoint_resolution`), so a
+    session the record does not hold produces ZERO rows instead of a phantom
+    identity — the fold's own `"absent"` verdict. That is the honest answer for
+    a pre-#3664 journal (no `SessionRecorded`, so no `session` row) and it
+    matches the fold only partially: `_link_session` MINTs a minimal
+    `:Session` stub on that path. The record does NOT copy that fallback —
+    minting a node from an edge directive would materialize a `session` row no
+    record created, which is the divergence class #9078 review refused.
+
+    An endpoint id is admitted by `_writable_endpoint_id` — the fold's own
+    rule (`projection._writable_container_id`), NOT a stricter one. A
+    non-string, an EMPTY or BLANK string, a NUL or a lone surrogate emits
+    nothing; the blank case is the one that LOOKS like a divergence and is not
+    (see that predicate's docstring: an indexed graph cannot match a
+    whitespace-only key, so the fold lands no edge for it either).
+
+    A SAME-ID pair (`contains_session == the Point's id`) is NOT refused. The
+    fold's `_link_session` MATCHes `(s:Session {id:$sid})` and
+    `(t:Point {id:$tid})` as two separate BOUND variables, so with `sid == tid`
+    the differing labels still bind two distinct nodes and the MERGE writes the
+    edge. `relation` holds it just as well — `node_identity` (and the composite
+    FK behind both endpoint columns) is keyed on `(label, key)`, so
+    `(Session, x)` and `(Point, x)` are two identities, not one. An earlier
+    draft refused this pair on the false premise that "one node cannot be both
+    ends"; the producer cannot emit it today (`_capture_turn_id` suffixes the
+    session id) but the record's job is to mirror the fold, not to encode
+    today's producer.
+    """
+    statements: list[Statement] = []
+    for rel_type_of, env_key, rel_type, src_label, tgt_label in _ENVELOPE_RELATIONS:
+        if rel_type_of != record_type or tgt_label != "Point":
+            continue
+        source = record.get(env_key)
+        if not _writable_endpoint_id(source):
+            continue
+        statements.extend(_relation_upsert_statement(
+            org_id, graph_id, RelationUpsert(),
+            {
+                "edge_type": rel_type,
+                "src": source,
+                "tgt": target_key,
+                "source_label": src_label,
+                "target_label": tgt_label,
+            },
+            columns=columns, refused=refused,
+        ))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -1614,6 +1798,10 @@ def mutations_for(
         return [
             _identity_statement(org_id, graph_id, node, key),
             _upsert_statement(org_id, graph_id, node, key, col_values, tail),
+            # AFTER the identity + node upsert: an edge endpoint must already
+            # be in `node_identity` or the composite FK refuses the insert.
+            *_envelope_relation_statements(
+                org_id, graph_id, record, record_type, key, columns, refused),
         ]
     if isinstance(effect, NodePatch):
         node = effect.node

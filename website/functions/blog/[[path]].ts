@@ -12,7 +12,7 @@ import {
   type Env, fetchPublishedPosts, fetchPostBySlug, renderMarkdown,
   headHtml, htmlPage, navHtml, formatDate, shareBarHtml, validCoverUrl,
   ok, notFound, upstreamError, SITE_URL, escapeHtml, SLUG_RE,
-  articleJsonLd,
+  articleJsonLd, authorBylineHtml,
 } from "./_lib.ts";
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
@@ -151,7 +151,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
   <div class="crumb"><a href="/blog">Blog</a><span class="sep">/</span><span>${escapeHtml(post.title)}</span></div>
   <h1 class="art-title">${escapeHtml(post.title)}</h1>
   <div class="art-meta">
-    <span>By ${escapeHtml(post.author ?? "Tortoise team")}</span><span class="dot">·</span><span>${published}</span>
+    ${authorBylineHtml(post)}<span class="dot">·</span><span>${published}</span>
     ${updated && updated !== published ? `<span class="dot">·</span><span>Updated ${updated}</span>` : ""}
     ${tags ? `<span class="dot">·</span>${tags}` : ""}
   </div>

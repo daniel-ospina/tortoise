@@ -57,12 +57,18 @@ MIGRATIONS = [
     "20261012000002_record_semantic.sql",
     "20261012000003_record_epistemic.sql",
     "20261012000004_record_procedural.sql",
+    # The erasure RPC (#7968): a FUNCTION, no column — applied so this list stays
+    # EQUAL to `record_projection.RECORD_MIGRATIONS` (#9550).
+    "20261012000005_record_org_purge_rpc.sql",
     "20261014000001_record_subject_props_no_derived.sql",
     # FORWARD `ALTER TABLE public.point ADD COLUMN` (#2782's money value): the
     # row width this probe measures is the SHIPPED schema's, and a list behind
     # `record_projection.RECORD_MIGRATIONS` would measure five columns short.
     # Pinned by `tests/test_7950_capstone_probe.py`.
     "20261018000001_record_point_money_value_2782.sql",
+    # #9264's forward migration (the narrowed count column). The row width this
+    # probe measures is the SHIPPED schema's, so the list must match.
+    "20261022000001_record_session_capture_redactions_integer.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and
