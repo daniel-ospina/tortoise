@@ -48,6 +48,29 @@ _PROBE_PATH = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "probes"
                / "e1_e2_probe.py")
 _CORPUS_DIR = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "corpus"
 _CORPUS = _CORPUS_DIR / "e1e2_corpus.json"
+#: #9507's committed record — the artifact a REAL `--prereg` is handed. Read from
+#: disk so a pin about its floors cannot drift away from the record it describes.
+_PREREG_ARTIFACT = (_REPO_ROOT / "docs" / "evidence" / "7949-capstone"
+                    / "preregistration.json")
+
+#: The run's corpus, repo-relative — what a REAL pre-registration must pin before
+#: its bar can be scored over this population (#9076). The artifact shape is
+#: #9507's ``capstone-preregistration/v1``; the pins here are the ones the probe
+#: compares, and the floor is set under the corpus's 25 Objects so the helper is
+#: about binding, not about the floor (a below-floor case is its own test).
+_CORPUS_REL = "docs/evidence/7949-capstone/corpus/e1e2_corpus.json"
+
+
+def _bound_artifact(threshold: float = 0.05) -> dict:
+    """A pre-registration that is BOUND to this run: corpus pin + a floor it meets.
+
+    Every scored-run pin below builds its artifact through this helper, because a
+    threshold with no corpus pin is not a bar for this population (#9076) — the
+    pre-fix shape scored it anyway.
+    """
+    return {"e1": {"min_share_reduction": threshold},
+            "corpus": {"path": _CORPUS_REL},
+            "denominator_floors": {"e1_objects": 20}}
 _LOG = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
 
 sys.path.insert(0, str(_REPO_ROOT))
@@ -481,6 +504,8 @@ def _scored(text: str) -> str:
     green scored log is what `--require-green` passes, so it is the one that must
     not be allowed to hide a loss.
     """
+    import re
+
     out = text
     for old, new in (("prereg=UNPREREGISTERED", "prereg=deadbeef"),
                      ("prereg_e1_threshold=n/a", "prereg_e1_threshold=0.0"),
@@ -490,7 +515,20 @@ def _scored(text: str) -> str:
                      ("exit=3", "exit=0")):
         assert old in out, old
         out = out.replace(old, new)
-    return out
+    # A SCORED log must carry the bar's binding (#9076): the corpus it measured
+    # is the corpus line's own sha, so a synthetic scored log has to say so or it
+    # is exactly the fail-open V15 refuses.
+    sha = re.search(r"corpus_sha256=([0-9a-f]{64})", text).group(1)
+    lines = out.splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("prereg="))
+    lines[at + 1:at + 1] = [
+        "prereg_declared=deadbeef",
+        f"prereg-binding status=MATCHED corpus=e1e2_corpus.json "
+        f"corpus_sha256={sha} declared_path=docs/evidence/7949-capstone/corpus/"
+        f"e1e2_corpus.json declared_sha256=n/a declared_floor=20 objects=25 "
+        f"reason=n/a",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def test_a_green_scored_log_cannot_hide_a_lost_state_value_table(log_text):
@@ -977,12 +1015,16 @@ def test_a_malformed_preregistration_measures_and_never_scores(artifact, monkeyp
 
 
 def test_a_valid_preregistration_is_read_once_into_a_numeric_bar(monkeypatch):
-    """The accepted shape still scores — validation must not refuse a good bar."""
+    """The accepted shape still scores — validation must not refuse a good bar.
+
+    "Good" now includes the corpus pin (#9076): a threshold alone is not a bar
+    for THIS population, which is what `_bound_artifact` supplies here.
+    """
     import io
     from contextlib import redirect_stdout
 
     monkeypatch.setattr(probe, "load_prereg",
-                        lambda sha: {"e1": {"min_share_reduction": 0.05},
+                        lambda sha: {**_bound_artifact(0.05),
                                      "e2": {"min_recall": 1.0}})
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -997,7 +1039,7 @@ def test_a_valid_preregistration_is_read_once_into_a_numeric_bar(monkeypatch):
 def test_scoring_uses_the_frozen_threshold_and_can_be_red(monkeypatch):
     """With a threshold the measured 0.0 reduction cannot meet, the run is RED."""
     monkeypatch.setattr(probe, "load_prereg",
-                        lambda sha: {"e1": {"min_share_reduction": 0.05}})
+                        lambda sha: _bound_artifact(0.05))
     import io
     from contextlib import redirect_stdout
 
@@ -1023,7 +1065,7 @@ def test_a_zero_threshold_greens_the_arm_but_the_observation_still_says_no(
     that the share did NOT move.
     """
     monkeypatch.setattr(probe, "load_prereg",
-                        lambda sha: {"e1": {"min_share_reduction": 0.0}})
+                        lambda sha: _bound_artifact(0.0))
     import io
     from contextlib import redirect_stdout
 
@@ -1072,7 +1114,7 @@ def test_a_red_control_keeps_a_scoring_run_red(monkeypatch):
 
     monkeypatch.setattr(probe, "run_arm", run_arm_dropping_one_planted_fact)
     monkeypatch.setattr(probe, "load_prereg",
-                        lambda sha: {"e1": {"min_share_reduction": 0.0}})
+                        lambda sha: _bound_artifact(0.0))
     buf = io.StringIO()
     with redirect_stdout(buf):
         code = probe.main(["--prereg", "deadbeef" * 5])
@@ -1091,7 +1133,7 @@ def test_a_red_control_keeps_a_scoring_run_red(monkeypatch):
 def test_the_threshold_used_must_be_the_one_the_artifact_froze(monkeypatch):
     """A log that names a pre-registration and scores against its OWN bar fails."""
     monkeypatch.setattr(probe, "load_prereg",
-                        lambda sha: {"e1": {"min_share_reduction": 0.05}})
+                        lambda sha: _bound_artifact(0.05))
     import io
     from contextlib import redirect_stdout
 
@@ -1155,7 +1197,479 @@ def test_a_prereg_commit_without_the_artifact_stays_unpreregistered(monkeypatch)
     assert "result=UNPREREGISTERED" in text
 
 
-# ── 6. the probe must not touch PROCESS-global logging ────────────���───────
+# ── 5b. the bar must be bound to the population it was argued for ─────────
+
+
+def _run_with_prereg(monkeypatch, artifact):
+    """Run the probe against a synthetic artifact through the `load_prereg` seam."""
+    import io
+    from contextlib import redirect_stdout
+
+    monkeypatch.setattr(probe, "load_prereg", lambda sha: artifact)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = probe.main(["--prereg", "deadbeef" * 5])
+    return code, buf.getvalue()
+
+
+def test_a_preregistration_for_another_corpus_never_scores(monkeypatch):
+    """#9076: a parseable bar pinned to a DIFFERENT corpus must not score.
+
+    The pre-fix probe consumed `e1.min_share_reduction` and never read
+    `corpus.path`, so this artifact — a bar argued over `tests/eval/write_path` —
+    scored the 25-Object `e1e2_corpus.json` run and printed `prereg=<sha>` with
+    `result=RED`. That is a verdict on a number whose denominator the bar never
+    saw: the numerator/denominator mismatch the issue refuses one level up.
+    Measured pre-fix exit 1, post-fix exit 3, and the log names which corpus.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "corpus": {"path": "tests/eval/write_path"}})
+    assert code == 3, text
+    assert "prereg-binding status=MISMATCH" in text, text
+    assert "reason=corpus-path" in text, text
+    assert "declared_path=tests/eval/write_path" in text, text
+    assert "prereg=UNPREREGISTERED" in text, text
+    assert "verdict=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, state = check.check(text)
+    assert findings == [], findings
+    assert state["prereg_binding"]["status"] == "MISMATCH"
+
+
+def test_a_preregistration_with_no_corpus_pin_never_scores(monkeypatch):
+    """A threshold with no corpus cannot say which population its bar covers.
+
+    The pre-fix shape is exactly this dict, and it scored: `_bound_artifact`'s
+    pins are what make a bar scoreable at all. Absent is not a pass.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {"e1": {"min_share_reduction": 0.05}})
+    assert code == 3, text
+    assert "prereg-binding status=UNPINNED" in text, text
+    assert "reason=corpus-unpinned" in text, text
+    assert "verdict=UNPREREGISTERED" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_denominator_below_the_frozen_floor_is_refused_not_failed(monkeypatch):
+    """`below_floor: REFUSED, which is neither a pass nor a fail` — measured.
+
+    #9507's record freezes a 30-Object floor for E1 and this corpus has 25, so a
+    re-run of E1/E2 over it can be reported neither RED (a missed bar) nor GREEN.
+    The pre-fix probe had no floor at all and would have said one or the other.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": 30}})
+    assert code == 3, text
+    assert "prereg-binding status=BELOW_FLOOR" in text, text
+    assert "declared_floor=30 objects=25" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("floor", ["30", 30.0, True, [30]])
+def test_a_declared_but_unreadable_floor_is_refused_not_read_as_absent(
+        monkeypatch, floor):
+    """A floor the probe cannot read is a floor it cannot honour (#9513 review P2).
+
+    `_declared_floor` used to return `None` for ANY non-int value, so an artifact
+    that declared the floor as `"30"` (a JSON typo), `30.0`, or `true` lost the
+    gate silently: the binding came back MATCHED, the threshold parsed, and the
+    25-Object run scored RED/GREEN against a bar whose author had refused it —
+    the same mismatch #9076 exists to refuse, through the one field read
+    permissively. "Absent" and "present but unreadable" are different states.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": floor}})
+    assert code == 3, text
+    assert "prereg-binding status=UNREADABLE" in text, text
+    assert "reason=floor-unreadable" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_declared_floor_that_is_met_still_scores(monkeypatch):
+    """The refusal is about non-INTEGER floors, not about declaring one."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "status=MATCHED" in binding and binding.endswith("reason=n/a"), binding
+    assert "declared_floor=20 objects=25" in binding, binding
+
+
+def test_checker_refuses_a_matched_binding_carrying_a_reason(monkeypatch):
+    """A MATCHED binding with a refusal reason beside it is a contradiction."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    tampered = text.replace(
+        "objects=25 floor_unconsumed=n/a reason=n/a",
+        "objects=25 floor_unconsumed=n/a reason=floor-unreadable", 1)
+    assert "reason=floor-unreadable" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "nothing to refuse" in f for f in findings), findings
+
+
+def test_checker_refuses_an_unreadable_binding_with_no_attribution(monkeypatch):
+    """`UNREADABLE` must say which declared value it could not read."""
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": "30"}})
+    assert code == 3, text
+    tampered = text.replace("reason=floor-unreadable", "reason=n/a", 1)
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "could not be read" in f for f in findings), findings
+
+
+@pytest.mark.parametrize("artifact", [None, [], "", 0, False])
+def test_a_non_object_artifact_is_reported_as_malformed(monkeypatch, artifact):
+    """A committed `null` must not read as "no --prereg was given".
+
+    This pin holds the MERGE-BASE behaviour, not a pre-fix hole: at `8afd83a53`
+    the validation call (`prereg_threshold`) sat INSIDE the `try` that reports
+    `prereg-error=`, so `json.loads("null")` -> `None` already produced
+    `prereg-error=TypeError: ... not an object`, `result=UNPREREGISTERED`, exit 3
+    — so this case does NOT discriminate against the merge-base. The refactor in
+    this PR moved `load_prereg` out of that `try`, which would have let a
+    non-object artifact skip the binding, the threshold AND the `prereg-error=`
+    line, leaving an operator who passed `--prereg <sha>` with a bare
+    UNPREREGISTERED indistinguishable from passing nothing. The pin keeps the
+    refactor honest: the module docstring promises the unconsumable case is
+    reported, and every non-object shape must keep saying so.
+    """
+    code, text = _run_with_prereg(monkeypatch, artifact)
+    assert code == 3, text
+    assert "prereg-error=TypeError:" in text, text
+    assert "not an object" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "prereg-binding" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_corpus_pin_with_an_embedded_nul_is_refused_not_crashed(monkeypatch):
+    """A malformed pin must refuse (exit 3), never crash (#9513 review P3).
+
+    Valid JSON can carry a NUL (`"path": "...\u0000x"`), and `Path.resolve()`
+    raises ValueError — not OSError — on it, so the pre-fix arm let the exception
+    escape: the probe died with a traceback and exit 1, the code a runner reads as
+    RED, while the docstring promises the unconsumable case on `prereg-error=`.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "corpus": {"path": _CORPUS_REL + "\u0000x"}})
+    assert code == 3, text
+    assert "prereg-binding status=MISMATCH" in text, text
+    assert "reason=corpus-path" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_matched_corpus_with_an_unreadable_bar_is_not_named_as_preregistered(
+        monkeypatch):
+    """A bound corpus does not make a malformed BAR a scored bar (#9513 review P2).
+
+    `prereg=` used to key off the binding, so this artifact produced
+    `prereg=<sha>` beside `prereg_e1_threshold=n/a` and `prereg-error=` — a log
+    the checker's V9 calls unsound. The probe must not emit a log its own gate
+    rejects, and `prereg=` must never claim a run scored against a bar it could
+    not read.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {"e1": {"min_share_reduction": "5%"},
+                      "corpus": {"path": _CORPUS_REL},
+                      "denominator_floors": {"e1_objects": 20}})
+    assert code == 3, text
+    assert "prereg=UNPREREGISTERED" in text, text
+    assert "prereg-binding status=MATCHED" in text, text
+    assert "prereg-error=" in text, text
+    assert "prereg_e1_threshold=n/a" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_the_unreadable_floor_refusal_names_the_value_it_could_not_read(
+        monkeypatch):
+    """`floor-unreadable` without the declared value is not auditable (P3)."""
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": "30"}})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert 'declared_floor="30"' in binding, binding
+    assert "reason=floor-unreadable" in binding, binding
+
+
+def test_checker_refuses_a_binding_denominator_the_run_did_not_produce(monkeypatch):
+    """`objects=` must be the scored arm's own denominator (P2, tamper-facing)."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    # dodge the floor by inflating the binding's denominator only: the arm still
+    # prints denominator=25, so the two no longer agree.
+    tampered = text.replace("declared_floor=20 objects=25",
+                            "declared_floor=30 objects=30", 1)
+    assert "declared_floor=30 objects=30" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "did not produce" in f for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_that_names_no_pin(log_text):
+    """A MATCHED bar that names NO pin is the UNPINNED case relabelled (P2).
+
+    The probe's `prereg_binding` contract is `MATCHED` only when a pin exists,
+    it agrees, and no floor is violated; the absence of a pin is `UNPINNED`.
+    V15 used to read only `reason` and `objects`/`declared_floor` in its MATCHED
+    branch, so `declared_path=n/a declared_sha256=n/a` — an unbound bar with the
+    right status word — passed every rule: the status is in the tuple, the sha
+    reconciles with `corpus=`, `reason=n/a` is what a MATCHED line says, and the
+    denominator meets the floor. That is a relabel, not an absent line.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    tampered = scored.replace(f"declared_path={_CORPUS_REL}",
+                              "declared_path=n/a")
+    assert "declared_path=n/a declared_sha256=n/a" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "names no pin" in f for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_with_an_unreadable_floor(log_text):
+    """`declared_floor=30.0` must not SKIP the arithmetic (P2).
+
+    The floor comparison was gated on `isdigit()`, so a non-integer floor made it
+    fall through as acceptable while the same value under `BELOW_FLOOR` was a
+    finding — one log judged differently depending on the word its own line
+    claimed. That is the permissive read the probe's `_declared_floor` was fixed
+    to refuse ("present but unreadable is not absent"), applied one level up.
+    """
+    scored = _scored(log_text)
+    assert "declared_floor=20" in scored
+    tampered = scored.replace("declared_floor=20", "declared_floor=30.0", 1)
+    assert "declared_floor=30.0" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "unreadable is not absent" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_with_an_unreadable_denominator(
+        log_text):
+    """`objects=25.0` is a denominator the gate cannot read — refused (P2)."""
+    scored = _scored(log_text)
+    tampered = scored.replace("objects=25 reason=n/a", "objects=25.0 reason=n/a", 1)
+    assert "objects=25.0 reason=n/a" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "not a plain integer" in f
+               for f in findings), findings
+
+
+def test_a_matched_binding_with_no_declared_floor_still_passes(monkeypatch):
+    """ABSENT is not unreadable: no `denominator_floors` is a legal MATCHED run.
+
+    Pins the boundary of the refusal above — an artifact that pins its corpus and
+    states no floor yields `declared_floor=n/a`, which must keep scoring.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {"e1": {"min_share_reduction": 0.0},
+                      "corpus": {"path": _CORPUS_REL}})
+    assert code == 0, text
+    assert "prereg-binding status=MATCHED" in text, text
+    assert "declared_floor=n/a" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_corpus_sha_pin_that_is_not_this_corpus_never_scores(monkeypatch):
+    """An exact-bytes pin is the stronger identity, and a wrong one is refused."""
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "corpus": {"path": _CORPUS_REL,
+                                 "sha256": "sha256:" + "de" * 32}})
+    assert code == 3, text
+    assert "prereg-binding status=MISMATCH" in text, text
+    assert "reason=corpus-sha256" in text, text
+    assert "declared_sha256=" + "de" * 32 in text, text
+
+
+def test_a_matching_corpus_sha_pin_binds_without_a_path(monkeypatch):
+    """The pin that matters is the bytes; a matching sha256 alone is a binding."""
+    import hashlib
+
+    sha = hashlib.sha256(_CORPUS.read_bytes()).hexdigest()
+    code, text = _run_with_prereg(
+        monkeypatch, {"e1": {"min_share_reduction": 0.05},
+                      "corpus": {"sha256": sha}})
+    assert code == 1, text
+    assert "prereg-binding status=MATCHED" in text, text
+    assert "prereg=" + "deadbeef" * 5 in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
+        monkeypatch):
+    """#9507's artifact, read from DISK: every refusal AND the four floors it drops.
+
+    Pre-fix this run printed only `prereg-error=TypeError: e1 is absent`, which
+    blames a malformed artifact and says nothing about the reasons it cannot be
+    this run's bar (a different corpus, a 30-Object floor against 25, and the four
+    `denominator_floors` keys this binding cannot evaluate). The artifact is the
+    COMMITTED `preregistration.json`, not a hand-reduced copy: a copy that kept only
+    `e1_objects` could not see the drop this test exists to catch, and a copy cannot
+    notice the record changing (#9513 review P2).
+    """
+    artifact = json.loads(_PREREG_ARTIFACT.read_text(encoding="utf-8"))
+    # The floors are what this pin is about; if the record grows a key the probe
+    # CAN read, or drops one, this is the line that says so.
+    assert sorted(artifact["denominator_floors"]) == [
+        "e1_min_before_share", "e1_objects", "e2b_surviving_units",
+        "e3_derived_nodes", "e5_rate_min_sentences"], artifact["denominator_floors"]
+    assert artifact["corpus"]["path"] == "tests/eval/write_path"
+    code, text = _run_with_prereg(monkeypatch, artifact)
+    assert code == 3, text
+    assert "declared_path=tests/eval/write_path" in text, text
+    assert "declared_floor=30 objects=25" in text, text
+    assert "corpus-path" in text and "below-floor" in text, text
+    assert ("floor_unconsumed=e1_min_before_share,e2b_surviving_units,"
+            "e3_derived_nodes,e5_rate_min_sentences") in text, text
+    assert "prereg-error=" in text, text    # the prose bar is not consumable
+    assert "result=UNPREREGISTERED" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("floors", [
+    {"e1_objects": 20, "e1_min_before_share": 0.2},   # 1 of 5 floors consumed
+    {"e1_min_before_share": 0.2},                      # `e1_objects` absent
+])
+def test_a_floor_the_probe_cannot_evaluate_is_refused_not_dropped(
+        monkeypatch, floors):
+    """A floor on a key the binding cannot check must REFUSE (#9513 review P2).
+
+    `_declared_floor` consumed only `denominator_floors.e1_objects`, so the real
+    `capstone-preregistration/v1` record — five floors, including
+    `e1_min_before_share: 0.2`, an ANTI-GAMING floor on a number this probe
+    measures and prints (`e1 before_share=0.600000`) — bound as `MATCHED` with four
+    floors silently dropped: a run whose before-share reduction was 0.06 met
+    `e1_objects` and scored with the registration's own floor violated. The second
+    shape is the same drop from the key side: "no `e1_objects` in a NON-EMPTY
+    mapping" used to read as "this artifact states no floor", which is the silent
+    drop the integer check closed one field over. Both shapes used to score; both
+    now exit 3 naming the floors they refused.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05), "denominator_floors": floors})
+    assert code == 3, text
+    assert "prereg-binding status=MISMATCH" in text, text
+    assert "reason=floor-unconsumed" in text, text
+    assert "floor_unconsumed=e1_min_before_share" in text, text
+    assert "prereg=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_checker_refuses_a_scored_log_with_no_binding_line(monkeypatch):
+    """A scored log must show the bar's corpus was compared to the measured one."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+    stripped = "\n".join(
+        ln for ln in text.splitlines()
+        if not ln.startswith(("prereg-binding ", "prereg_declared="))) + "\n"
+    findings, _ = check.check(stripped)
+    assert any("[V15]" in f and "no prereg-binding" in f for f in findings), findings
+
+
+def test_checker_refuses_a_binding_about_another_corpus(monkeypatch):
+    """The binding must describe the corpus this log MEASURED, not assert one."""
+    import re
+
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    measured = re.search(r"corpus_sha256=([0-9a-f]{64})", text)
+    assert measured, text
+    out = []
+    for ln in text.splitlines():
+        if ln.startswith("prereg-binding "):
+            ln = ln.replace(measured.group(1), "0" * 64)
+        out.append(ln)
+    findings, _ = check.check("\n".join(out) + "\n")
+    assert any("[V15]" in f and "did not run" in f for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_whose_declared_sha_is_not_the_measured(
+        log_text):
+    """A MATCHED pin that names OTHER bytes is not this run's bar (P2).
+
+    `declared_path`/`declared_sha256` were parsed into the binding and read only
+    for EMPTINESS, so a MATCHED line pinning a different corpus's bytes passed
+    every rule: `corpus_sha256` reconciles with `corpus=`, `reason=n/a`, the
+    denominator meets the floor. The probe's own contract is the opposite —
+    MATCHED means the pin AGREES, and a declared sha is compared ALONE — so a
+    MATCHED line implies `declared_sha256 ∈ {n/a, corpus_sha256}`, and the gate
+    accepted the complement ("/#9513 review P2").
+
+    The boundary stays green: a sha-ONLY pin whose declared sha IS the measured
+    bytes still scores (`test_a_matching_corpus_sha_pin_binds_without_a_path`), and
+    a path-only pin prints `declared_sha256=n/a`, which is exempt.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    other = "ab" * 32
+    tampered = scored.replace("declared_sha256=n/a", f"declared_sha256={other}")
+    assert f"declared_sha256={other}" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "not the corpus this log" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_binding_that_names_floors_it_did_not_evaluate(
+        log_text):
+    """`floor_unconsumed=` and `reason=` must agree in BOTH directions (P2).
+
+    The probe refuses a `denominator_floors` key it cannot evaluate
+    (`floor-unconsumed`) and prints the keys on `floor_unconsumed=`. A gate that
+    accepted either half alone would let the refusal read as audited when it named
+    nothing, or let a line name dropped floors while claiming `reason=n/a` — the
+    same silent-drop shape one field over from the floor VALUE checks.
+    """
+    scored = _scored(log_text)
+    assert "reason=n/a" in scored
+    # (a) floors named as dropped while the line claims nothing was refused
+    tampered = scored.replace(
+        "reason=n/a", "floor_unconsumed=e1_min_before_share reason=n/a", 1)
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "did not evaluate" in f for f in findings), findings
+    # (b) a floor-unconsumed refusal that does not say WHICH floor it dropped
+    silent = scored.replace(
+        "reason=n/a", "reason=floor-unconsumed floor_unconsumed=n/a", 1)
+    findings, _ = check.check(silent)
+    assert any("[V15]" in f and "names no floor it dropped" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_under_the_frozen_floor(monkeypatch):
+    """A MATCHED binding under its own floor is a contradiction in one line."""
+    code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
+    assert code == 0, text
+    tampered = text.replace("declared_floor=20", "declared_floor=30", 1)
+    assert "declared_floor=30" in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "bound-ready" in f for f in findings), findings
+
+
+# ── 6. the probe must not touch PROCESS-global logging ──────────────────
 
 
 def test_importing_the_probe_leaves_process_logging_enabled(caplog):
