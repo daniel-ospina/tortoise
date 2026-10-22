@@ -28,13 +28,17 @@ lane reason (`_handle_only_write_scope` → `_RAW_QUERY_CLOSED_DEPTH`), so it
 travels with the scope stack; `test_a_lane_nested_inside_the_window_cannot_reopen_the_raw_lane`
 is the pin for that, and it is the test the window-only shape failed.
 
-⛔ THE INSTRUMENT IS THE REAL DOOR, not a copy of its predicate. Every test EXCEPT
-the declaration pin (`test_the_narrowing_is_declared_and_named_by_the_scope`,
-which reads constants and is labelled as such) issues a real statement through
-`FalkorProjection.query` (the raw lane) or `proj.g.query` (the write handle) on a
-journal-armed projection and reads whether it LANDED, and the handle tests flip
-the REAL switch (`_HANDLE_GUARD_ENFORCES`) so "inside the window the handle still
-works" is measured against a REFUSING door rather than a measuring one.
+⛔ THE INSTRUMENT IS THE REAL DOOR, not a copy of its predicate. Seven of the nine
+tests issue a real statement through `FalkorProjection.query` (the raw lane) or
+`proj.g.query` (the write handle) on a journal-armed projection and read whether
+it LANDED, and the handle tests flip the REAL switch (`_HANDLE_GUARD_ENFORCES`)
+so "inside the window the handle still works" is measured against a REFUSING door
+rather than a measuring one. The other TWO are STRUCTURAL and say so in their own
+docstrings: `test_the_narrowing_is_declared_and_named_by_the_scope` (reads the
+constants and `_lane_of`) and
+`test_a_second_replay_declaration_site_carries_the_closure` (reads
+`reestablish_watermark`'s source, because its window is internal and cannot be
+entered from a test).
 
 MUTATION — measured on the landed code, and stated for what it is. There are TWO
 mechanisms and they are pinned SEPARATELY, which is the point of the next

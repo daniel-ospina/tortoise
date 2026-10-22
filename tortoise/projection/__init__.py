@@ -3608,12 +3608,18 @@ class DirectCacheWriteRefused(RuntimeError):
     for the census to name and cannot be recorded as an undeclared write.
 
     ⛔ THE CLASSES DO NOT SHARE ONE AUTHORIZATION RULE, and this docstring
-    is where a caller looks before writing a `with` block, so stated apart: the
-    fold, the raw-query lane, a handle STATEMENT and `GRAPH.DELETE` are
-    refused OUTSIDE a sanctioned scope (so declaring one authorizes them);
-    `FLUSHALL` / `FLUSHDB` and every KEY-SPACE command are refused on any
-    projection this handle fronts, scope or NOT — a declaration says "this
-    write is a projection of the journal", and none of those can say that.
+    is where a caller looks before writing a `with` block, so stated apart —
+    THREE rules, not two. (1) SCOPE-DEPENDENT: the fold, a handle STATEMENT and
+    `GRAPH.DELETE` are refused OUTSIDE a sanctioned scope, so declaring one
+    authorizes them. (2) LANE-DEPENDENT (`#9391`): the public raw-query lane is
+    refused unless the open permit also covers THAT lane — it reads
+    `_raw_query_lane_permit()`, not this var, and `_HANDLE_ONLY_WRITE_LANES`
+    names the lanes that do not (the replay window is one, for its whole
+    duration INCLUDING any lane nested inside it), so `with _replay_write_scope():`
+    does NOT authorize a `FalkorProjection.query` write. (3) NEVER: `FLUSHALL` /
+    `FLUSHDB` and every KEY-SPACE command are refused on any projection this
+    handle fronts, scope or NOT — a declaration says "this write is a
+    projection of the journal", and none of those can say that.
     """
 
 
@@ -3783,9 +3789,12 @@ def _cache_write_authorized(reason: str):
     """Declare the enclosed writes a sanctioned projection of the journal.
 
     ``reason`` is the value a test reads back at the write handle to prove the
-    door declared itself. It is NOT rendered into a refusal: a refusal fires
-    precisely when this var is ``None`` (`FalkorProjection.apply`, and the
-    public raw-query lane), so there is no reason in flight to print. Entry is
+    door declared itself. It is NOT rendered into a refusal: at the FOLD and at
+    the HANDLE doors a refusal fires precisely when this var is ``None``, so
+    there is no reason in flight to print. ⚠️ The public raw-query lane is the
+    exception (`#9391`): it reads `_raw_query_lane_permit()`, which ALSO refuses
+    under a handle-only lane, so a non-``None`` var is not by itself a permit
+    there. Entry is
     always paired with a ``reset`` in a ``finally``, so a raising fold can
     never leave the scope armed over the caller's next write.
     """
