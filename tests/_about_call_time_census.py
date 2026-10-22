@@ -80,19 +80,28 @@ _BARE_TRAVERSAL = re.compile(r"(?<=\))\s*(?:<-->|<--|-->|--)\s*(?=\()")
 #: never ran, even though `_resolve()` folds `ast.BinOp/Add` and WOULD have
 #: derived the site. Latent on today's corpus, which is exactly why
 #: `test_the_file_filter_un_sees_nothing` cannot see it.
-#: ⚠️ This is a FILTER, so a false positive costs one unused parse and is free
-#: — but the SOURCE of a false positive is not free: the shape is anchored on a
-#: bracket that OPENS WITH A NAME and carries no comma or quote (a relationship
-#: variable, with or without a property map or a `*` range), followed by the `-`
-#: that every Cypher traversal puts immediately after its `]` (or by a literal
-#: boundary and then that `-`). Without the anchor, Python subscripts and
-#: comparisons matched — `sim[i, j] >= t`, `if df[t] > 0`, `r["created_at"] >`
-#: — and the gate admitted 61 extra modules (102 walked, 79 gate-true) instead
-#: of 17 (76 walked, 35 gate-true) for a byte-identical derivation. The type
-#: slot is deliberately NOT inspected here.
-_SPLIT_TRAVERSAL = re.compile(
-    r"\[[A-Za-z_][^\]\n,\"']*\]\s*-|[\[][A-Za-z_][^\]\n,\"']*\]\s*[\"']\s*\+\s*[\"']\s*-"
-)
+#: ⚠️ This is a FILTER, so a false positive costs one unused parse and is free;
+#: a false NEGATIVE drops a module before the derivation — which can see the walk
+#: — ever runs. So the test is deliberately UNANCHORED: any `[` + a name + `]`
+#: with no comma or quote inside. The `-` adjacency the first cut required is not
+#: a property the resolver has — `_A = "-[r]"` beside `"MATCH (n)" + _A + "->(m)"`
+#: puts the bracket in one literal and the dash in another, and `_resolve()`
+#: reassembles it while that regex saw no `-` after the `]`, so the module was
+#: dropped while the resolver could see it. The module's own docstring states
+#: the principle the anchor missed: a SUPERSET needs every spelling the resolver
+#: can reassemble, not every spelling the regex can see. `_is_empty_pattern_read`
+#: makes the real decision on the resolved candidate, so the filter only has to
+#: be generous.
+#: The price is measured, not assumed, on today's 242-module tree: the anchored
+#: form puts 76 modules into the walk (`_files()`) and the unanchored one 211 —
+#: a strict SUPERSET, so nothing admitted before is dropped — for a
+#: BYTE-IDENTICAL derivation (24 keys / 36 site rows under BOTH gates), because
+#: Python subscripts and comparisons (`sim[i, j]`, `df[t]`, `r["created_at"]`)
+#: match too (the predicate alone admits 35 of the 242 and 210 respectively; the
+#: rest of `_files()` comes from the other three halves). That is the right trade
+#: for a filter: a spurious parse is free, a dropped module is a reader nobody
+#: can see. The type slot is deliberately NOT inspected here.
+_SPLIT_TRAVERSAL = re.compile(r"\[[A-Za-z_][^\]\n,\"']*\]")
 #: Is the offset inside a Cypher PATTERN COMPREHENSION? The delimiter test is
 #: exact rather than a heuristic: no other construct puts a relationship
 #: bracket inside an unclosed `[` of the same query string — `[(n)-[r]->(m) |
@@ -137,7 +146,8 @@ _UNKNOWN = ""
 #: silently: `test_the_empty_pattern_class_is_derived_and_declared` derives the class from
 #: the pattern's shape and requires every member to be either a §13 row or an
 #: entry here. Each entry is
-#: `(filename, symbol, why it is not an about read, the code facts that earn it)`.
+#: `(filename, symbol, why it is not an about read, the code facts that earn it,
+#: how many SITES of the derivation the entry covers)`.
 #:
 #: ⚠️ **A site that owns a §13 ROW is not carried here (#9493).** A row says the
 #: reader IS enumerated; an entry says the walk cannot observe the edge — both on
@@ -151,14 +161,23 @@ _UNKNOWN = ""
 #: ⚠️ **The PROSE is the register's only record of WHY, so it is checked too.**
 #: Each entry carries a fourth element: the literal source fragments that express
 #: the ground, asserted by `test_every_empty_pattern_entry_states_a_true_fact`
-#: inside the symbol's own span (plus the body of any module-level constant that
-#: span NAMES, because a query constant is where the walk lives for its consumer).
-#: Without it the reason was unverifiable prose: retype one anchor —
+#: inside the STATEMENT of each derived site (plus the body of any module-level
+#: constant that statement NAMES, because a query constant is where the walk lives
+#: for its consumer). Without it the reason was unverifiable prose: retype one
+#: anchor —
 #: `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to `(old)`,
 #: or `sdk.provenance` off `:Subject` — and the walk starts observing an
 #: `aboutObject` edge while every arm stays green, because all of them read only
 #: `(file, symbol)`. That is the exact fail-open direction this class exists to
 #: close, one level up from the read itself.
+#:
+#: ⚠️ **The facts are bound PER SITE, and the fifth element is the site COUNT.** A
+#: symbol-keyed fact check owns any walk added inside that symbol later — measured
+#: on the first cut: one unconstrained all-edge walk appended to `sdk.provenance`
+#: (`MATCH (x)-[rr]->(y) RETURN count(rr)`) left all 43 arms green, because the
+#: entry's KEY already matched. The key is a symbol; the derivation is a site. The
+#: count is the cheap second net: a copy carrying the same fact still reds on the
+#: number.
 #:
 #: Three grounds are legal, and each entry names the one it rests on:
 #:
@@ -177,7 +196,7 @@ _UNKNOWN = ""
 #: `session_link.ENTITY_LINKED_TRIPLES`), and the conclusions happened to hold
 #: either way. A ground a future exclusion copies has to be the fact the schema
 #: actually carries.
-EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...], int], ...] = (
     (
         "tortoise/domain_validators.py",
         "validate_chain_integrity",
@@ -189,6 +208,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "spelling is also why the class walk had to cover both spellings: it was "
         "live and invisible while only the bracketed form derived",
         ("AND NOT (n)--()",),
+        1,
     ),
     (
         "tortoise/hosted_api.py",
@@ -200,6 +220,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "MEMORY (nothing written here)`, so it does not rewire the edge it "
         "cannot see",
         ("WHERE type(r) IN ['IMPL','NAND']",),
+        1,
     ),
     (
         "tortoise/mining.py",
@@ -209,6 +230,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "`aboutObject` triple's target is `:Object`, so neither walk can return "
         "the edge; it asserts a shape, not a referent",
         ("-[r]->(n:Point)", "-[r]->(s:Point)"),
+        2,
     ),
     (
         "tortoise/projection/entities.py",
@@ -222,6 +244,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "size([(old)-[x]-(y) | x]) AS deg",
             "MATCH (old:Source)-[r:references]->(e:Event",
         ),
+        1,
     ),
     (
         "tortoise/sdk.py",
@@ -232,6 +255,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "edge cannot be returned; the TYPE is deliberately left unbound, which "
         "is what makes the shape derive at all",
         ("-[r1]->(a:Point)", "MATCH (a:Point)-[r]-(b:Point)"),
+        2,
     ),
     (
         "tortoise/sdk.py",
@@ -241,6 +265,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
         "{id:$sid})-[r]->(n)`); no `aboutObject` triple has a `:Subject` source "
         "(`ENTITY_LINKED_TRIPLES`: `Point`/`Event`/`Session` → `Object`)",
         ("MATCH (s:Subject {id:$sid})-[r]->(n)",),
+        1,
     ),
     (
         "tortoise/session_source_migration.py",
@@ -252,6 +277,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "MATCH (old:Source {url:$u}) ",
             "size([(old)-[x]-(y) | x]) AS deg",
         ),
+        1,
     ),
     (
         "tortoise/session_source_migration.py",
@@ -264,6 +290,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "size([(old)-[x]-(y) | x]) AS deg",
             "DETACH DELETE old",
         ),
+        1,
     ),
     (
         "tortoise/session_source_migration.py",
@@ -276,6 +303,7 @@ EMPTY_PATTERN: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
             "MATCH (old:Source {url:$u})-[r]->(t) ",
             "MATCH (n)-[r]->(old:Source {url:$u}) ",
         ),
+        2,
     ),
 )
 
@@ -711,11 +739,12 @@ def _may_traverse_every_type(source: str) -> bool:
 
     ⚠️ **A SUPERSET needs every spelling the resolver can reassemble, not every
     spelling the regex can see.** The pattern may be built from parts
-    (`"MATCH (n)-" + "[r]->(m)"`, `"MATCH (n)-[r]" + "->(m)"`), and the two
-    detectors above require the dash and the bracket to be adjacent in the SAME
-    literal. `_resolve()` folds `ast.BinOp/Add`, so the derivation would find the
-    site — but the file never reaches it. Those spellings are admitted by
-    `_SPLIT_TRAVERSAL`.
+    (`"MATCH (n)-" + "[r]->(m)"`, `"MATCH (n)-[r]" + "->(m)"`), and a third
+    spelling puts the bracket and the dash in DIFFERENT constants (`_A = "-[r]"`
+    beside `"MATCH (n)" + _A + "->(m)"`). `_resolve()` folds `ast.BinOp/Add`, so
+    the derivation finds every one of them — but the file never reaches it. So
+    `_SPLIT_TRAVERSAL` requires no dash adjacency at all: any `[` + a name + `]`
+    inside the text admits the module, and the resolved candidate decides.
     """
     if any(_type_slot(m.group(1)) is None for m in _EMPTY_TRAVERSAL.finditer(source)):
         return True

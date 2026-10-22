@@ -257,6 +257,24 @@ WHAT THIS PINS
    the intermediate string RED, a duration carrying its framing stays GREEN, and a
    duration with only "one box" for company (hardware is not framing) REDs.
 
+24. `test_a_stated_fact_cannot_be_satisfied_by_prose` — the fact check reads
+   source with comments and docstrings BLANKED (`_code_lines`), because a fact
+   in a comment is not a fact about executed code. Measured: weaken
+   `sdk.provenance`'s query to `MATCH (s)-[r]->(n)` and leave the old
+   `MATCH (s:Subject {id:$sid})-[r]->(n)` in a comment above it, and on raw
+   source the arm stays GREEN while the walk observes `aboutObject` with no
+   `:Subject` bound. The stripper is column-exact on comments (a trailing
+   comment must not take its code line with it) and blanks a whole bare-string
+   statement.
+25. `test_a_stated_fact_is_bound_to_one_site_not_to_its_symbol` — the register
+   key is `(file, symbol)` and the derivation is per-SITE, so a symbol-wide
+   fact span lets one walk's ground vouch for its neighbour AND for anything
+   appended later. Measured: one unconstrained all-edge walk added inside
+   `sdk.provenance` (`MATCH (x)-[rr]->(y) RETURN count(rr)`) kept every arm
+   green, while `origin/main`'s per-walk guard reded on it. `mining.verify_no_
+   auto_wire`'s two walks are the live fixture: each site must carry a fact,
+   and the two must not resolve to the SAME fact set.
+
 ⚠️ **What this deliberately does NOT claim.** The LITERAL census is a LOWER
 BOUND: it sees a relationship pattern naming the edge, so a reader that
 computes or carries the name (`_neighbors`, `_hop_query`,
@@ -281,7 +299,9 @@ from __future__ import annotations
 import ast
 import functools
 import inspect
+import io
 import re
+import tokenize
 from pathlib import Path
 
 import pytest
@@ -651,49 +671,100 @@ def _span(tree: ast.Module, dotted: str) -> tuple[int, int] | None:
     return None
 
 
-def _owning_span(tree: ast.Module, symbol: str) -> tuple[int, int] | None:
-    """`_span`, plus one CLASS level down for a bare method name.
+@functools.cache
+def _code_lines(path: Path) -> tuple[str, ...]:
+    """The module's source with COMMENTS and PROSE STRINGS blanked out.
 
-    The census attributes a read to the innermost `def`, so a register entry may
-    name `_materialize_connector_source` without its class — `_span` only
-    resolves that spelling when the entry writes `Class.attr`. The register does
-    not, and a fact check that silently found NO span would be checking nothing.
+    ⚠️ **A fact check over raw source is satisfiable by text that never runs, and
+    that is measured, not hypothetical.** Leaving the old query in a comment
+    above a weakened one — `# MATCH (s:Subject {id:$sid})-[r]->(n)` over
+    `MATCH (s)-[r]->(n)` — keeps every substring assertion green while the walk
+    observes `aboutObject`, which is the exact fail-open this arm exists to
+    close, one edit away. A docstring is the same hole: it is prose (item 18 of
+    this file's map pins that rule for the literal census, and the fact check
+    must not be the one place that forgot it).
+
+    Comments are cut by `tokenize`, which is the only thing that knows where a
+    `#` is inside a string and where it is not, and the cut is COLUMN-EXACT so
+    code sharing a line with a trailing comment survives. A bare string
+    statement is any `ast.Expr` wrapping a `Constant` str — docstrings are only
+    its first-statement special case — and its lines are blanked whole. Line
+    count and line numbers are preserved, so every span below is still a span
+    into the file the AST came from.
     """
-    found = _span(tree, symbol)
-    if found is not None:
-        return found
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef):
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type != tokenize.COMMENT:
             continue
-        for inner in node.body:
-            if _bound_name(inner) == symbol:
-                return (inner.lineno, inner.end_lineno or inner.lineno)
-    return None
+        row, start, end = token.start[0], token.start[1], token.end[1]
+        line = lines[row - 1]
+        lines[row - 1] = line[:start] + " " * (end - start) + line[end:]
+    for node in ast.walk(_module_tree(path)):
+        if not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        for row in range(node.lineno, (node.end_lineno or node.lineno) + 1):
+            lines[row - 1] = ""
+    return tuple(lines)
 
 
-def _symbol_fact_text(rel: str, symbol: str) -> str:
-    """The source a stated exclusion FACT must appear in, or raise.
+def _statement_span(tree: ast.Module, line: int) -> tuple[int, int] | None:
+    """The span of the STATEMENT the given line belongs to — innermost, exact.
 
-    The symbol's own span, plus — ONE level, no recursion — the body of every
+    `ast.stmt` nodes nest (`For` → `Expr` → the call), so the innermost one
+    containing the line is the statement the walk is written in. Equal spans are
+    indistinguishable (the same lines are the same text), so the tie-break only
+    has to be deterministic.
+    """
+    best: tuple[int, int] | None = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.stmt):
+            continue
+        low, high = node.lineno, node.end_lineno or node.lineno
+        if not low <= line <= high:
+            continue
+        if best is None or high - low < best[1] - best[0] or low > best[0]:
+            best = (low, high)
+    return best
+
+
+def _site_fact_text(rel: str, line: int) -> str:
+    """The source ONE stated exclusion FACT must appear in, or raise.
+
+    ⚠️ **The span is the SITE's statement, never the whole registered symbol, and
+    that is the difference between a register and a voucher.** The register key
+    is `(file, symbol)` while the derivation is per-SITE, so a symbol-keyed fact
+    check silently owns every FUTURE walk added beside a registered one: measured
+    on the pre-fix arm, adding one fully unconstrained all-edge walk to
+    `sdk.provenance` (`MATCH (x)-[rr]->(y) RETURN count(rr)`) kept the whole file
+    green, while `origin/main`'s per-walk guard reded on it. `#9493` replaced
+    that guard's per-walk bound with a per-symbol one, which is strictly weaker.
+
+    The statement span, plus — ONE level, no recursion — the body of every
     module-level constant that span NAMES. The second half is load-bearing and
-    was measured, not assumed: three of the nine entries have no Cypher in their
-    own span at all, because the walk lives in a query CONSTANT their body
-    executes (`session_source_migration._DEGREE` behind `_degree`,
-    `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`). Without it the arm would have
-    had to weaken those facts to the constant's NAME — a check that the entry
-    still mentions a symbol, which is the unread claim it exists to replace.
+    was measured, not assumed: three of the nine entries keep their Cypher in a
+    query CONSTANT their statement executes (`session_source_migration._DEGREE`
+    behind `_degree`, `_OUT_TYPES`/`_IN_TYPES` behind `_rel_types`), and the
+    derived SITE for those is the constant's own line. Without it the arm would
+    have had to weaken those facts to the constant's NAME — a check that the
+    entry still mentions a symbol, which is the unread claim it replaces.
 
     `rel` is spelled from the REPO root (`tortoise/projection/entities.py`,
     as the register writes it), while a §13 row spells it from the package
     (`projection/entities.py`); both forms resolve here.
     """
     path = PKG / rel.removeprefix("tortoise/")
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = _code_lines(path)
     tree = _module_tree(path)
-    span = _owning_span(tree, symbol)
+    span = _statement_span(tree, line)
     assert span is not None, (
-        f"`{rel}::{symbol}` — the register names a symbol this module does not "
-        "bind, so its stated exclusion cannot be checked against any code"
+        f"`{rel}:{line}` — the derivation attributed a site to a line this module "
+        "has no statement at, so its stated exclusion cannot be checked against "
+        "any code"
     )
     text = "\n".join(lines[span[0] - 1 : span[1]])
     for node in tree.body:
@@ -2734,7 +2805,8 @@ def _derived(keys: dict[tuple[str, str], tuple[int, ...]]) -> dict[str, tuple[in
 
 def _register_keys(entries) -> set[str]:
     # `EMPTY_PATTERN` entries carry a fourth element (the code facts their reason
-    # rests on), `CALL_TIME_REL` entries do not — both key the same way.
+    # rests on) and a fifth (the site count), `CALL_TIME_REL` entries carry
+    # neither — both key the same way.
     return {_site_key(rel, symbol) for rel, symbol, *_rest in entries}
 
 
@@ -2901,42 +2973,73 @@ def test_no_empty_pattern_entry_is_also_a_row():
 
 
 def test_every_empty_pattern_entry_states_a_true_fact():
-    """Each entry's REASON is checked against the code it claims to describe.
+    """Each entry's REASON is checked against EVERY site it claims to describe.
 
     ⚠️ **This arm restores the half the `#9493` fold deleted, and its absence was
     a fail-open in the direction this class exists to close.** An entry is
-    `(file, symbol, why, facts)`; the other three arms read only `(file, symbol)`,
-    so the prose — the register's ONLY record of *why* a walk is out — was never
-    checked against anything. Measured on the pre-arm tree: retyping
+    `(file, symbol, why, facts, sites)`; the other three arms read only
+    `(file, symbol)`, so the prose — the register's ONLY record of *why* a walk is
+    out — was never checked against anything. Measured on the pre-arm tree: retyping
     `session_source_migration._OUT_TYPES` from `(old:Source {url:$u})` to
     `(old)`, or dropping `:Subject` from `sdk.provenance`, makes the walk start
     observing an `aboutObject` edge while EVERY arm stays green — the entry goes
     on excusing it, and §13's two legal grounds no longer hold for that site.
 
-    The facts are asserted as plain substrings of the symbol's own span plus the
-    module-level constants that span names (`_symbol_fact_text`), so a fact
-    cannot be satisfied by an unrelated reader elsewhere in the file — which is
-    what the old guard's cross-clause formatter existed for, and what a
-    package-wide `grep` would have broken.
+    ⚠️ **The check is per SITE, and the first cut of this arm was per SYMBOL — which
+    is a voucher, not a register.** The register key is `(file, symbol)` while the
+    derivation is per-site, so a symbol-keyed fact check owns anything added
+    inside that symbol later. Measured on that cut: adding one fully unconstrained
+    all-edge walk to `sdk.provenance` (`MATCH (x)-[rr]->(y) RETURN count(rr)`) left
+    all 43 arms green, while `origin/main`'s per-walk guard reded on it — a new
+    un-excluded reader of `aboutObject` shipped with the register vouching for it,
+    falsifying `_about_call_time_census.py`'s *"a NEW member of the class cannot
+    appear silently"*. So each derived `(rel, symbol, line)` of a registered key
+    must carry a stated fact inside ITS OWN statement (`_site_fact_text`), and the
+    entry's `sites` count must equal the derivation's — the second is the cheap
+    net that catches a duplicated site even when the copy carries the fact.
+
+    The facts are asserted as plain substrings of that statement plus the
+    module-level constants it names, over source with COMMENTS and PROSE STRINGS
+    blanked: a fact satisfied by a comment is not a fact about executed code.
     """
     census = _call_time_census()
     assert census.EMPTY_PATTERN, (
         "the `EMPTY_PATTERN` register is empty — this arm would then assert "
         "nothing, which is how an unread prose reason ships green"
     )
+    derived = census._empty_pattern_sites()
     checked = 0
+    sites_checked = 0
     failures: list[str] = []
-    for rel, symbol, _why, facts in census.EMPTY_PATTERN:
+    for rel, symbol, _why, facts, sites in census.EMPTY_PATTERN:
+        key = _site_key(rel, symbol)
         assert facts, (
-            f"`{_site_key(rel, symbol)}` carries no code fact — its reason is "
-            "prose nothing can falsify, so weakening the walk would leave it "
-            "excusing a site that now reads the edge"
+            f"`{key}` carries no code fact — its reason is prose nothing can "
+            "falsify, so weakening the walk would leave it excusing a site that "
+            "now reads the edge"
         )
-        text = _symbol_fact_text(rel, symbol)
-        for fact in facts:
-            checked += 1
-            if fact not in text:
-                failures.append(f"  - {_site_key(rel, symbol)} no longer states `{fact}`")
+        lines = derived.get((rel, symbol), ())
+        if len(lines) != sites:
+            failures.append(
+                f"  - {key} declares {sites} site(s) and the derivation finds "
+                f"{len(lines)} at lines {list(lines)} — a site was added beside "
+                "the registered ones, and the entry cannot vouch for a walk it "
+                "was not written about"
+            )
+            continue
+        for line in lines:
+            sites_checked += 1
+            text = _site_fact_text(rel, line)
+            for fact in facts:
+                checked += 1
+                if fact in text:
+                    break
+            else:
+                failures.append(
+                    f"  - {key}:{line} states none of `{'` / `'.join(facts)}` — "
+                    "its symbol is excluded, but THIS walk carries none of the "
+                    "facts that exclusion rests on"
+                )
     assert not failures, (
         "these `EMPTY_PATTERN` entries excuse a walk on a fact their code no "
         "longer carries, so the walk may now be observing an `aboutObject` edge "
@@ -2947,10 +3050,95 @@ def test_every_empty_pattern_entry_states_a_true_fact():
         "`aboutObject` triple, or a degree/existence count that returns no "
         "edge), or move the site to a §13 row."
     )
-    assert checked >= len(census.EMPTY_PATTERN), (
-        f"{len(census.EMPTY_PATTERN)} entries produced only {checked} fact "
-        "assertions — every entry must carry at least one, or the register's "
+    assert sites_checked == sum(entry[4] for entry in census.EMPTY_PATTERN), (
+        f"the register declares {sum(entry[4] for entry in census.EMPTY_PATTERN)} "
+        f"sites and {sites_checked} were checked — the arm stopped at the first "
+        "site of a symbol again, which is the per-symbol shape that vouched for "
+        "a walk nobody described"
+    )
+    assert checked >= sites_checked, (
+        f"{sites_checked} sites produced only {checked} fact assertions — every "
+        "site must be checked against at least one fact, or the register's "
         "reasons are unverified again"
+    )
+
+def test_a_stated_fact_cannot_be_satisfied_by_prose(tmp_path):
+    """A comment or a docstring is not code, so a fact there is not a fact.
+
+    ⚠️ **Measured on the first cut, which read RAW source.** Weakening
+    `sdk.provenance`'s query to `MATCH (s)-[r]->(n)` and leaving
+    `MATCH (s:Subject {id:$sid})-[r]->(n)` in a comment above it kept the arm
+    GREEN: the walk observes `aboutObject`, the ground is false, and a plain
+    substring test cannot tell prose from code. No live fact depended on it (all
+    sixteen resolve to real code), so it was defeatable-by-future-edit rather
+    than false — which is exactly the shape a fixture has to close, because the
+    edit that exploits it is the same edit that weakens a walk.
+
+    A synthetic file, because the property is about the READER and not about any
+    one entry: the same query in the body must survive, and the same query as a
+    docstring or a comment must not.
+    """
+    path = tmp_path / "prose.py"
+    path.write_text(
+        "def _walk(query):\n"
+        '    """The docstring copy: MATCH (s:Subject {id:$sid})-[r]->(n)."""\n'
+        "    # the comment copy: MATCH (s:Subject {id:$sid})-[r]->(n)\n"
+        '    unused = 1  # a trailing copy: MATCH (s:Subject {id:$sid})-[r]->(n)\n'
+        '    return query("MATCH (s)-[r]->(n)")\n',
+        encoding="utf-8",
+    )
+    text = "\n".join(_code_lines(path))
+    assert 'return query("MATCH (s)-[r]->(n)")' in text, (
+        "the stripper removed EXECUTED code — every fact assertion would then be "
+        "measured against a file it did not read, which is a green with no subject"
+    )
+    assert "unused = 1" in text, (
+        "a code line sharing a line with a trailing comment went with the "
+        "comment — the cut must be column-exact, not whole-line"
+    )
+    assert "Subject" not in text, (
+        "the fact survives in a COMMENT or a DOCSTRING, so a weakened walk can be "
+        "excused by prose that never runs — the exact mutation that kept this "
+        "check green before the stripper existed"
+    )
+
+
+def test_a_stated_fact_is_bound_to_one_site_not_to_its_symbol():
+    """A registered symbol may own TWO walks, and each is bound to its OWN statement.
+
+    ⚠️ **This is the shape P1 reported, asserted where it lives.** The register key
+    is `(file, symbol)`; the derivation is per-SITE. A fact check over the whole
+    symbol therefore lets ONE walk's ground vouch for its neighbour — and by
+    extension for anything appended later, which is how an unconstrained all-edge
+    walk added to `sdk.provenance` shipped green.
+
+    `mining.verify_no_auto_wire` is the live two-site fixture, and no line number
+    is written down: its walks are taken from the derivation, and the two site
+    texts must each carry a fact and must NOT carry the same one — a symbol-wide
+    span collapses them into the same set and reds here.
+    """
+    census = _call_time_census()
+    entry = next(e for e in census.EMPTY_PATTERN if e[1] == "verify_no_auto_wire")
+    rel, symbol, _why, facts, sites = entry
+    lines = census._empty_pattern_sites()[(rel, symbol)]
+    assert len(lines) == sites == 2, (
+        f"`{_site_key(rel, symbol)}` derives {len(lines)} site(s) against {sites} "
+        "declared — the two-site fixture this arm rests on has moved, so the "
+        "assertion below would compare nothing"
+    )
+    carried = [
+        [fact for fact in facts if fact in _site_fact_text(rel, line)]
+        for line in lines
+    ]
+    assert all(carried), (
+        "a site of `verify_no_auto_wire` carries NONE of the entry's facts: "
+        f"{carried} — the walk is no longer bounded by the ground the register "
+        "records for it"
+    )
+    assert carried[0] != carried[1], (
+        f"both sites resolve to the same fact set ({carried[0]}) — the fact text "
+        "spans the whole SYMBOL again, so one walk's ground vouches for the "
+        "other and for any walk added beside them"
     )
 
 
@@ -2995,30 +3183,55 @@ def test_a_part_assembled_walk_is_derived():
 
 
 def test_the_module_filter_admits_a_split_traversal():
-    """The file gate must admit a walk whose dash is outside the bracket literal.
+    """The file gate must admit every walk the RESOLVER can reassemble.
 
     ⚠️ Measured on the pre-fix filter: both assembled spellings returned `False`
     while the one-literal spelling returned `True`, so a module holding only the
     assembled form was dropped before the derivation — which can see it — ran.
     `test_the_file_filter_un_sees_nothing` cannot catch this: the corpus holds no
     such file today, so the difference it compares stays empty either way. The
-    assertion is therefore synthetic, on the two shapes a `+` concatenation
+    assertion is therefore synthetic, on the shapes a `+` concatenation
     produces.
+
+    ⚠️ **The first cut of this arm measured the two spellings the CHANGELOG names
+    and still missed the third:** with the bracket in one constant and the dash in
+    another (`_A = "-[r]"`, `_B = "->"`, `"MATCH (n)" + _A + _B + "(m)"`) the
+    resolver reassembles the walk and derives it, while a regex demanding the `-`
+    right after the `]` refused the module — the gate narrower than the thing it
+    gates, which is the one direction a filter cannot fail in. So the filter no
+    longer requires dash adjacency, and the derivation count below pins that the
+    widening changed nothing it derives.
     """
     census = _call_time_census()
     cases = {
         'q("MATCH (n)-" + "[r]->(m)")': "the bracket is its own literal",
         'q("MATCH (n)-[r]" + "->(m)")': "the dash is its own literal",
+        '_A = "-[r]"\n_B = "->"\nq("MATCH (n)" + _A + _B + "(m)")': (
+            "the bracket and the dash are in DIFFERENT constants"
+        ),
     }
     for source, shape in cases.items():
         assert census._may_traverse_every_type(source), (
             f"the module filter refuses the assembled spelling ({shape}): "
-            f"{source} — the file is never walked, so the walk inside it is "
+            f"{source!r} — the file is never walked, so the walk inside it is "
             "invisible however good the resolver is"
         )
     assert not census._may_traverse_every_type("no cypher here at all"), (
         "the filter admits a module with no traversal in it — as a filter that "
         "is free, but it also means the assertions above measure nothing"
+    )
+    # The widening is only safe if it is DERIVATION-NEUTRAL: the unanchored form
+    # admits more modules (Python subscripts match too), and the count below is
+    # what proves none of them contributed a site — a module admitted and then
+    # deriving nothing costs a parse, not a false claim.
+    sites = census._empty_pattern_sites()
+    assert (len(sites), sum(len(lines) for lines in sites.values())) == (24, 36), (
+        "the empty-pattern derivation moved off 24 symbol keys / 36 site rows "
+        f"({len(sites)} keys, "
+        f"{sum(len(lines) for lines in sites.values())} rows). The register's "
+        "`sites` counts and BOTH completeness directions are stated against "
+        "those numbers, so a move is a corpus change to re-derive — never a "
+        "number to retype"
     )
 
 
