@@ -45,9 +45,19 @@ projection write and ``_upsert_source``'s ON MATCH arm had no ``ingestedAt``
 clause — same unjournaled-writer class, one writer upstream). #9451 closed it:
 the record carries the instant the write STORED (``#398`` never-overwrite — the
 earlier writer's when the stub pre-existed) and the ON MATCH arm applies it under
-the ``$stub_completion`` gate, so the whole-bag comparison below includes the key
-again (``REPLAY_RESIDUAL_KEYS`` is empty, and the named constant is kept so a
-future residual cannot slip in unremarked). Also outside this slice: the ``references`` (Source→Event) and
+a DOUBLE gate — ``$stub_completion`` AND ``$ingested_at_stored``, the second
+being the marker that says "this ``ingestedAt`` was READ BACK from the node" —
+so the whole-bag comparison below includes the key again
+(``REPLAY_RESIDUAL_KEYS`` is empty, and the named constant is kept so a future
+residual cannot slip in unremarked). The second gate is not decoration: a
+capture record written BEFORE #9451 carries ``_stub_completion`` too but states
+the capture's ``now``, which the live write never stored on a pre-existing stub,
+so applying it would make THIS fold create a divergence where the pre-fix tree
+was faithful (a journalled ``create_source`` node + a legacy capture over it).
+Without the marker such a record stays the no-op it always was, i.e. legacy
+journals replay exactly as they did before — pinned by
+``tests/test_9451_pre_existing_stub_ingest_instant.py::
+test_a_legacy_capture_record_over_a_journalled_source_stays_faithful``. Also outside this slice: the ``references`` (Source→Event) and
 ``CONTAINS`` (Session→derived Point) edges, which have no journal carrier at
 all (the "no carrier for edges" class the unjournaled-mutation suite cites and
 does not close).
@@ -58,14 +68,17 @@ the fold's hash-diff ``s.validFrom = $vf`` cannot REMOVE a window) and its
 record declares itself a STUB COMPLETION (``_stub_completion``), which
 suppresses the ON CREATE creator-only defaults (``id``/``version``/
 ``externalId``) and gates the ON MATCH ``version + 1`` — the live write never
-touches ``version`` on either arm, so neither may a replay. That discriminator
-is server-managed: it is refused by ``create_source``'s ``**props`` guard, by
+touches ``version`` on either arm, so neither may a replay. The same record also
+declares ``_ingested_at_stored`` (#9451), the "its ``ingestedAt`` was read back
+from the node" marker that keeps a PRE-#9451 line a no-op on the ``ingestedAt``
+fold. Both discriminators are server-managed: they are refused by
+``create_source``'s ``**props`` guard, by
 ``_sanitize_props`` and by the MCP ``_SERVER_MANAGED_PROPS`` boundary, so the
-capture writer is its only producer (a caller-settable one forged capture
-provenance AND stripped a tenant node's identity props). It is dropped from the
-RECORD layer too: ``record_projection._RECORD_ONLY_KEYS`` keeps it out of the
-``source.props`` jsonb tail that ``cache_projection`` copies back onto the node
-(pinned in ``tests/test_record_projection.py`` — the third home of a
+capture writer is their only producer (a caller-settable one forged capture
+provenance AND stripped a tenant node's identity props). Both are dropped from
+the RECORD layer too: ``record_projection._RECORD_ONLY_KEYS`` keeps them out of
+the ``source.props`` jsonb tail that ``cache_projection`` copies back onto the
+node (pinned in ``tests/test_record_projection.py`` — the third home of a
 ``_META_KEYS`` transport key, next to ``contains_session``).
 
 Offline: ``TORTOISE_SESSION_LLM_MOCK=1`` installs the deterministic MockModel

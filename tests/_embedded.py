@@ -446,6 +446,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # two are one set in two homes; tests/test_ci_selection.py pins the
     # equality).
     "test_5097_capture_source_replay",
+    # #9451: same shape as the #5097 entry directly above — the fixture builds
+    # `TortoiseSDK(<tmpfile>)` and drives BOTH replay engines (`rebuild()` and
+    # `rebuild_all()`, destructive) against that embedded store, so a URI-set
+    # lane would redirect the construction to the server and run the destructive
+    # replays there. Registered with the `carve_out:` list in
+    # config/ci-surfaces.yml (the two are one set in two homes;
+    # tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems
+    # pins the equality).
+    "test_9451_pre_existing_stub_ingest_instant",
     # #9350: the capture provenance stamp's journal carrier. The fixtures build
     # `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines (`rebuild()` and
     # `rebuild_all()`) against that embedded store, so a URI-set lane would

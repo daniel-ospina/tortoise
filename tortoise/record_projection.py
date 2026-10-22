@@ -987,6 +987,15 @@ _RECORD_ONLY_KEYS: frozenset[str] = frozenset({
     # `cache_projection` copies back onto the node verbatim. Same class as the
     # sibling `contains_session` above.
     "_stub_completion",
+    # #9451 (code review ISSUE 2): its sibling on the same record — the "this
+    # `ingestedAt` was READ BACK from the node" discriminator that keeps a
+    # PRE-change capture record a no-op on `_upsert_source`'s ON MATCH arm. Same
+    # class and the same three homes as `_stub_completion` above: it selects fold
+    # behaviour, it is in `_META_KEYS` so it never reaches a `:Source`, and
+    # without this entry it would ride the record's flat payload into the
+    # `source.props` jsonb tail that `cache_projection` copies back onto the node
+    # verbatim (a record-sourced rebuild would then write it).
+    "_ingested_at_stored",
     # Creating-record embedding identity (a DESCRIPTION of the record, never a
     # node property — the fold's `_POINT_HANDLED` drops them too).
     "embedding_model", "embedding_revision", "embedding_text_hash",

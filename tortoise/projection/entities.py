@@ -1170,6 +1170,12 @@ class _EntityHandlers:
         # reason `_stub` (the Event stub discriminator) is in `_SUBJECT_HANDLED`
         # / `_OBJECT_HANDLED`, and it is not a declared node prop.
         "_stub_completion",
+        # #9451 (code review ISSUE 2): the sibling discriminator on the SAME
+        # record — "this record's `ingestedAt` is the instant the write READ BACK
+        # from the node, not a reconstruction". `_upsert_source` reads it as part
+        # of the `ingestedAt` ON MATCH gate; it is never a node property, so it
+        # sits here for the same reason as `_stub_completion` above.
+        "_ingested_at_stored",
         # journal meta keys (epic #900 T3, §4.2 cycle-16/17): the SDK's
         # _emit_event style-3 lines carry event_id/ts/initiated_by (+agent_id
         # on api._emit) + corrects — structural, never node properties. One
@@ -5628,10 +5634,34 @@ class _EntityHandlers:
             # the node's first instant) OVERWRITE it, i.e. trade one
             # live≠replay divergence for another. `coalesce($ingestedAt, …)` keeps
             # a legacy/foreign capture record without the key a no-op.
+            #
+            # ⛔ AND ON `$ingested_at_stored` — A SECOND GATE, BECAUSE
+            # `$stub_completion` ALONE IS NOT ENOUGH (#9451 code review ISSUE 2).
+            # `_stub_completion` is present on EVERY capture-completion record,
+            # including the ones written BEFORE this change — and those state the
+            # capture's `now`, which the live write never stored on a pre-existing
+            # stub. Applying them would make this clause CREATE a divergence where
+            # the pre-fix fold was FAITHFUL: a journalled node
+            # (`create_source("session:S1", …)` → node at `T0`, its own record
+            # carrying `T0`) followed by a pre-#9451 capture over it (live keeps
+            # `T0` by `coalesce`; the record states `T_capture`) used to fold to
+            # `T0` on BOTH engines — with `$stub_completion` alone it folds to
+            # `T_capture` ≠ live. `_ingested_at_stored` is emitted only by the
+            # post-change writer, which states the instant it READ BACK, so a
+            # legacy record stays the no-op it is today and its replay is
+            # byte-identical to the pre-#9451 tree (faithful where an earlier
+            # `SourceCreated` journalled the instant; the replay clock where the
+            # stub's mint was the UNJOURNALED writer — the residual
+            # `sdk._materialize_session_source` states engine by engine).
+            # Pinned by `tests/test_9451_pre_existing_stub_ingest_instant.py::
+            # test_a_legacy_capture_record_over_a_journalled_source_stays_faithful`
+            # (red on the `$stub_completion`-only gate).
+            #
             # `ingestedAt` does not test `s.contentHash`, so its position inside
             # this clause is free of the #8870/#7362 write-order rule (only items
             # that READ the hash must precede the guarded write, which stays LAST).
             "           s.ingestedAt = CASE WHEN $stub_completion "
+            "                                  AND $ingested_at_stored "
             "                             THEN coalesce($ingestedAt, s.ingestedAt) "
             "                             ELSE s.ingestedAt END, "
             "           s.sourcePath = coalesce($sp, s.sourcePath), "
@@ -5725,6 +5755,13 @@ class _EntityHandlers:
                 # `_SOURCE_CAPTURE_REPLAY_PROPS`). Read as a parameter, never
                 # persisted — `_META_KEYS` keeps it off the node.
                 "stub_completion": bool(ev.get("_stub_completion")),
+                # #9451 (code review ISSUE 2): the SECOND half of the
+                # `ingestedAt` ON MATCH gate — "this record states the instant the
+                # write STORED". Absent on every record written before that
+                # change, which is exactly what keeps those records the no-op
+                # they were (their `ingestedAt` is a reconstruction, not a
+                # read-back). Read as a parameter, never persisted.
+                "ingested_at_stored": bool(ev.get("_ingested_at_stored")),
                 "ext": ev.get("externalId", ""),
                 "fmt": ev.get("format"),
                 "sp": ev.get("source_path"),

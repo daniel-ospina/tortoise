@@ -2643,6 +2643,22 @@ surfaces:
   # `TORTOISE_TEST_CARVE_OUT=1` verified green — NOT carve_out-registered, like
   # `test_source_version_extractedfrom_5038.py` above.
   - test_8501_capture_path_anchor.py
+  # #9451: the capture's ingest instant over a PRE-EXISTING `session:<id>` stub
+  # — the live SET keeps the earlier writer's value (#398) while the
+  # `SourceCreated` payload now states the instant the write READ BACK, so
+  # `derived == replay(journal)` holds for the field on BOTH replay engines.
+  # `core` is the home because the two files it guards are the capture writer
+  # (`tortoise/sdk.py`, a SHARED_MODULE → also selected by `api`/`sdk`) and the
+  # `:Source` fold's ON MATCH clause (`projection/entities.py`, a `core`-only
+  # fallback) — the entities.py-only diff is the one this row exists for.
+  # CARVE-OUT: the fixture builds an EMBEDDED store by db path and drives
+  # `rebuild_all()` AND `rebuild()`, exactly like `test_5097_capture_source_replay`
+  # / `test_9350_capture_provenance_journalled`, so it is registered in
+  # `carve_out:` below and in `tests/_embedded.py`. Deliberately NOT the
+  # #8501 shape (surface-only): that file's fixture is embedded too, but it does
+  # not run destructive replays, so a URI-set lane redirect is survivable there
+  # and is not here.
+  - test_9451_pre_existing_stub_ingest_instant.py
   # #8444 (for epic #7949 E1/E3): the runner's report-only graph census — the
   # `:Object` count and `^the <X>` share E1 names, and the anchored/total counts
   # of the capture's derivation edges E3 names. Registered `core` because the
@@ -5884,6 +5900,15 @@ carve_out:
 # registries are one set in two homes
 # (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
 - test_5097_capture_source_replay.py
+# #9451: same shape and same reason as the #5097 row directly above — the
+# fixture builds `TortoiseSDK(<tmpfile>)` and drives BOTH replay engines
+# (`rebuild()` and `rebuild_all()`) with `confirm_destructive=True`, so a URI-set
+# lane would redirect the construction to the shared server AND run the
+# destructive replays there. Mirror of the
+# `test_9451_pre_existing_stub_ingest_instant.py` row in the `core` surface
+# above; the two registries are one set in two homes
+# (tests/test_ci_selection.py::test_carve_out_mirrors_test_no_redirect_stems).
+- test_9451_pre_existing_stub_ingest_instant.py
 # #9350: the capture provenance stamp's journal carrier. The fixtures build
 # `TortoiseSDK(<tmpfile>)` and drive BOTH replay engines against that embedded
 # store, so a URI-set lane would redirect the construction and the embedded
@@ -7625,6 +7650,7 @@ durations:
   test_9079_record_replay_declared.py: 9.0  # unmeasured — #9079 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), and an absent row packs it at the flat 2.0s default. Four tests, each one `rebuild_from_record` round trip in an embedded SDK with NO `create_point` (so the once-per-leg embedding-model load the `test_9079_ep_epoch_declared.py` row above pays is NOT part of this weight); local readings are recorded on the `#9079` PR. Refresh from the first post-merge run that includes it.
   test_9206_apply_first_lane.py: 20.0  # unmeasured — #9206 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so an absent row packs it at the flat 2.0s default AND drops `duration_coverage_issues()` under the 90% floor (measured this turn: WITHOUT the two #9206 rows the manifest sits at 866/963 = 89.9%). Local embedded-lane reading 16.2 s for the 16 tests on a box with the embedder warm: 11 build their own journal-backed SDK and drive REAL doors (capture_session alone issues a full capture + journal), the other 5 are pure unit/AST pins with no SDK. ⚠️ Do NOT "refresh" this row from a cold box: those same 16 tests measured 138–151 s here, ~123 s of it the FIRST `create_point`'s once-per-process embedding-model load blocked in huggingface_hub's HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` row above discloses at 134 s), not the battery. Declared above the quiet reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_8501_capture_path_anchor.py: 8.0  # unmeasured — #8501 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the row is declared from a local reading and marked for the first post-merge sweep. Local embedded-lane reading: 10 tests, `testcase/@time` sum ~7 s on a warm box (per-test bodies 0.50-1.00 s: five drive a REAL `capture_session` + journal, three run a full `rebuild_all()`); whole-file wall 10-14 s. ⚠️ Do NOT "refresh" this row from a cold box: the same file measured 191.6 s here, 185.5 s of it the FIRST test paying the once-per-process embedding-model load in huggingface_hub HTTP backoff (this box has no HF egress — the same one-time load the `test_9079_ep_epoch_declared.py` and `test_9206_apply_first_lane.py` rows above disclose), which is paid once per leg and is not what this weight packs. Required on BOTH halves: the `core` surface row alone is classification, not a durations weight (#4348).
+  test_9451_pre_existing_stub_ingest_instant.py: 8.0  # unmeasured — #9451 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so the row is declared from a LOCAL reading and marked for the first post-merge sweep. 7 tests on the embedded carve-out lane; six build their own journal-backed SDK and drive a real `create_point`/`capture_session` plus one or two destructive replays (3 `rebuild_all()`, 3 `rebuild()`, two of them on both engines). MEASURED without this row: `duration_coverage_issues()` stays above the floor (90.1 %), so the row is not a gate fixer — it is the declared weight the flat 2.0 s default would otherwise mis-pack. ⚠️ The FIRST `create_point` in a process pays the once-per-leg embedding-model load the `test_8501`/`test_9206` rows above disclose (that cost is attributed to no file); do not "refresh" this row from a cold box. Refresh from the first post-merge run that includes it.
   test_graph_census_7949.py: 10.0  # unmeasured — #8444 (for epic #7949 E1/E3) (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only), so the row is declared from a LOCAL reading. Measured this turn on the private docker lane: 19 tests, `testcase/@time` sum 9.74 s (max 3.79 s), whole-file wall 10.0 s; 15 of the 19 take the `captured` fixture and drive a real `capture_session` on the embedded lane, none needs a provider key. Weight 10.0 = the wall reading, the same rule the neighbouring #8501 row states; refresh on the first post-merge sweep.
   test_9206_derived_recompute_lane.py: 4.0  # unmeasured — #9206 (#3400 trap), same class as the row above. Local embedded-lane reading 2.9 s for 5 tests (the resolver's adopt-on-touch plus the journal-bytes assertion); declared above the reading so a cold leg cannot under-pack. Refresh from the first post-merge run that includes it.
   test_audit_fallback_home_isolation.py: 2.4

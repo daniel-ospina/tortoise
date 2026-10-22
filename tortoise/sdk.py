@@ -3840,6 +3840,17 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'_stub_completion' is a server-managed capture-completion "
             "discriminator and cannot be set via props."
         )
+    # #9451 (code review ISSUE 2): the sibling key on the same record. It is
+    # INERT without `_stub_completion` (the ON MATCH gate requires both), so it
+    # cannot forge a write on its own — refused here anyway, for the same reason
+    # as the key above: a payload key that SELECTS REPLAY BEHAVIOUR is
+    # server-managed, and a blocklist that stops one spelling of a pair invites
+    # the next spelling through.
+    if "_ingested_at_stored" in props:
+        raise ValueError(
+            "'_ingested_at_stored' is a server-managed capture-replay "
+            "discriminator and cannot be set via props."
+        )
     # #7951 (review round 5): `credibility` is NOT a generic prop — it is the
     # author's declared WORD, a documented input of `create_point` /
     # `mitigate_operator`, which validate it and run the authored-assertion
@@ -11895,6 +11906,17 @@ class TortoiseSDK:
             validFrom=prior_valid_from,
             is_episodic=prior_is_episodic,
             _stub_completion=True,
+            # #9451 (code review ISSUE 2): "the `ingestedAt` above is the instant
+            # this write READ BACK from the node, not a reconstruction". It is the
+            # second half of `_upsert_source`'s ON MATCH gate, and it exists so a
+            # record written BEFORE this change — whose `ingestedAt` is the
+            # capture's `now`, a value the live write never stored on a
+            # pre-existing stub — keeps folding as the no-op it always was
+            # instead of OVERWRITING a faithfully-journalled instant with it.
+            # Server-managed like `_stub_completion`: there is no caller intent
+            # that could set it (`_sanitize_props`, `create_source`'s `**props`
+            # guard and the MCP `_SERVER_MANAGED_PROPS` boundary all refuse it).
+            _ingested_at_stored=True,
             **{SOURCE_SEARCH_TEXT_FIELD: search_text},
             sessionId=session_id,
             capturedAt=now,
@@ -11973,30 +11995,43 @@ class TortoiseSDK:
         #     record stating `now` journals a value the write never wrote (#9451).
         #     `_upsert_source`'s ON CREATE arm reads the recorded value (#5024)
         #     and its ON MATCH arm now applies it under the `$stub_completion`
-        #     gate, so for a record written BY THIS VERSION both replay engines
-        #     reproduce the node's value on both arms — pinned by
+        #     AND `$ingested_at_stored` gate (the record carries both), so for a
+        #     record written BY THIS VERSION both replay engines reproduce the
+        #     node's value on both arms — pinned by
         #     `tests/test_9451_pre_existing_stub_ingest_instant.py` (whole-bag live
         #     vs after `rebuild_all()` AND after `rebuild()`, mutation-measured red
         #     on the pre-#9451 tree).
         #
         #     ⛔ THE RESIDUAL THAT REMAINS, stated rather than implied and
-        #     engine by engine (#9451 review rounds 3-4): a `SourceCreated` line
-        #     written BEFORE this change states `now`, which the live write never
-        #     stored on a pre-existing stub — and no record can correct that,
-        #     because the instant the mint chose was never journaled. On
-        #     `rebuild_all()` the ON CREATE arm already applied that recorded
-        #     `now` (pass 1b folds the record before the stub mint); on
-        #     `rebuild()` the stub was re-minted at the REPLAY clock and the fold
-        #     left it there, and this change makes the ON MATCH arm apply the
-        #     recorded `now` on that engine too. Either way the rebuilt node is
-        #     still not the LIVE node's value for those legacy lines: convergence
-        #     needs a MIGRATION or a fresh faithful record — NOT a plain
-        #     re-capture, because `capture_session` short-circuits an
-        #     already-captured session ("session already captured (same
-        #     session_id) — no new extraction") and journals no `SourceCreated`
-        #     for it at all. What #9451 closes is the DOOR: every capture that
-        #     REACHES this writer from this version onward journals the instant it
-        #     stored, on either arm.
+        #     engine by engine (#9451 review rounds 3-4, scoped by the code
+        #     review's ISSUE 2). A `SourceCreated` line written BEFORE this change
+        #     states the capture's `now` and carries NO `_ingested_at_stored`, so
+        #     the ON MATCH clause above DOES NOT FIRE on it — a legacy line replays
+        #     exactly as it did on the pre-#9451 tree, which is the point: this
+        #     change must not turn a faithful recovery into a divergence. What
+        #     that leaves behind, by shape:
+        #
+        #       * the stub's instant WAS journalled (an earlier `SourceCreated`/
+        #         `SourceVersioned` for the same url, e.g. the hosted commit path's
+        #         `create_source`) → faithful on both engines, before and after.
+        #         The legacy capture line folds as a no-op and the node keeps the
+        #         earlier record's instant, which is the live value.
+        #       * the stub was minted by the UNJOURNALED writer (`_link_source` /
+        #         `_mint_source_stub` via `create_point(session_id=…)`, the #4125
+        #         reconciler) → the instant the mint chose was never journaled, so
+        #         nobody can correct it: `rebuild_all()` applies the legacy
+        #         record's `now` (pass 1b folds the record before the stub mint)
+        #         and `rebuild()` leaves the REPLAY clock the re-mint stamped
+        #         (the fold does not fire). Neither equals the live node's value.
+        #         Convergence needs a MIGRATION or a fresh faithful record — NOT a
+        #         plain re-capture, because `capture_session` short-circuits an
+        #         already-captured session ("session already captured (same
+        #         session_id) — no new extraction") and journals no
+        #         `SourceCreated` for it at all.
+        #
+        #     What #9451 closes is the DOOR: every capture that REACHES this
+        #     writer from this version onward journals the instant it stored, on
+        #     either arm, and both engines reproduce it.
 
     # ── Update / Delete consolidation (epic #888 W2, PR #912) ─────────
     # One update()/delete() for Points AND entities. The legacy methods
@@ -36120,6 +36155,17 @@ class TortoiseSDK:
                 "'_stub_completion' is a server-managed capture-completion "
                 "discriminator and cannot be set via props — it is set only "
                 "by the session-capture writer (#5097)."
+            )
+        # #9451 (code review ISSUE 2): its sibling, and the same class — it
+        # selects the `ingestedAt` ON MATCH fold (together with
+        # `_stub_completion`, which is refused just above, so it is inert
+        # alone). Refused for the same reason: `_skip_sanitize=True` means an
+        # unlisted key rides straight into `ev` and the journal.
+        if "_ingested_at_stored" in props:
+            raise ValueError(
+                "'_ingested_at_stored' is a server-managed capture-replay "
+                "discriminator and cannot be set via props — it is set only "
+                "by the session-capture writer (#9451)."
             )
         # #3998 (D30): the LOUD half of the payload guard. The guarantee itself
         # is the CLOSED :Source property surface in `projection/entities.py`

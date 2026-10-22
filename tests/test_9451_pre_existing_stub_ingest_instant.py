@@ -253,6 +253,106 @@ def test_two_captures_over_one_stub_replay_in_journal_order(prov):
     assert live["ingestedAt"] == stub_ingested_at
 
 
+def test_a_legacy_capture_record_over_a_journalled_source_stays_faithful(prov):
+    """Code review ISSUE 2: a PRE-#9451 capture record must stay a NO-OP.
+
+    The shape is the one the issue itself names as production-reachable: a
+    ``session:<id>`` Source created by a Journalled door (``create_source`` — its
+    own ``SourceCreated`` carries the instant ``T0`` it stored), followed by a
+    capture written by the PRE-#9451 writer (``_stub_completion=True`` and
+    ``ingestedAt = T_capture``, no ``_ingested_at_stored``).
+
+    Live keeps ``T0`` (the SET is a ``coalesce``, #398), the earlier record
+    recreates ``T0`` on replay, and the capture record folds ON MATCH. Pre-#9451
+    that arm had no ``ingestedAt`` clause at all, so both engines reproduced
+    ``T0`` — i.e. this shape was FAITHFUL before the fix and must stay faithful
+    after it. A gate on ``$stub_completion`` ALONE turns it into a divergence
+    (the record's ``T_capture`` overwrites ``T0``), which is what this test pins.
+
+    FAILS ON A `$stub_completion`-ONLY GATE (measured: rebuilt ingestedAt becomes
+    ``T_capture``, live stays ``T0``, on BOTH engines).
+    """
+    sdk, events, log_path = prov
+    url = "session:LEGACY"
+    legacy_capture_clock = LATER_NOW
+    # A JOURNALED creator: the instant it stored rides its own record.
+    sdk.create_source(url, "agentSession")
+    created = _bag(sdk, url)
+    journalled_instant = created["ingestedAt"]
+    assert journalled_instant and journalled_instant != legacy_capture_clock
+
+    # ... and a capture record in the PRE-#9451 spelling: `ingestedAt = now`,
+    # `_stub_completion=True`, and NO `_ingested_at_stored` marker.
+    sdk._emit_event(
+        "SourceCreated", id=url,
+        url=url, sourceKind="agentSession", contentHash=None, title=None,
+        ingestedAt=legacy_capture_clock, updatedAt=legacy_capture_clock,
+        validFrom=None, is_episodic=None,
+        _stub_completion=True,
+        sessionId="LEGACY", capturedAt=legacy_capture_clock,
+    )
+    legacy = [r for r in _capture_records(events)
+              if r.get("url") == url and r.get("_stub_completion") is True]
+    assert legacy, "the hand-appended legacy record is not in the journal"
+    assert "_ingested_at_stored" not in legacy[-1], (
+        "guard: this fixture must write the PRE-#9451 spelling")
+
+    live = _bag(sdk, url)
+    assert live["ingestedAt"] == journalled_instant, (
+        "guard: the live coalesce must keep the journalled instant — "
+        f"{live['ingestedAt']!r} vs {journalled_instant!r}")
+
+    sdk._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
+    assert _bag(sdk, url)["ingestedAt"] == journalled_instant, (
+        "a PRE-#9451 capture record over a JOURNALLED source no longer replays "
+        "faithfully — the fold applied the record's capture clock over the "
+        "instant the journal already held: "
+        f"{_bag(sdk, url)['ingestedAt']!r} != {journalled_instant!r} (rebuild())")
+
+    sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+    assert _bag(sdk, url)["ingestedAt"] == journalled_instant, (
+        "same shape on the rebuild_all() engine: "
+        f"{_bag(sdk, url)['ingestedAt']!r} != {journalled_instant!r}")
+
+
+def test_the_capture_record_declares_its_ingest_instant_was_read_back(prov):
+    """...and the record says so, which is what keeps the gate above safe.
+
+    ``_ingested_at_stored`` is the marker the ON MATCH clause reads. It must be
+    on the record THIS writer emits (otherwise the fix's ON MATCH half is dead)
+    and absent from the legacy spelling (otherwise legacy lines re-diverge).
+    Server-managed: the three caller boundaries refuse it.
+    """
+    sdk, events, _log = prov
+    session_id = "S6"
+    url, _stub_ingested_at = _mint_stub_via_create_point(sdk, session_id)
+    res = sdk.capture_session(CONV, session_id=session_id)
+    assert res["ok"] is True, res
+
+    records = [r for r in _capture_records(events)
+               if r.get("url") == url and r.get("_stub_completion") is True]
+    assert records, "the capture emitted no SourceCreated record"
+    assert records[-1].get("_ingested_at_stored") is True, (
+        "the record does not declare that its ingestedAt was read back, so the "
+        f"ON MATCH half of the fix cannot fire: {records[-1]!r}")
+
+    from tortoise import mcp_server, record_projection
+    from tortoise.projection.entities import _EntityHandlers
+
+    assert "_ingested_at_stored" in mcp_server._SERVER_MANAGED_PROPS
+    assert "_ingested_at_stored" in _EntityHandlers._META_KEYS
+    assert "_ingested_at_stored" in record_projection._RECORD_ONLY_KEYS, (
+        "the record layer must drop the marker from the props tail, or a "
+        "record-sourced rebuild writes it onto the node")
+    assert "_ingested_at_stored" not in _bag(sdk, url), (
+        "the marker is a RECORD key, never a :Source property")
+    with pytest.raises(ValueError, match="_ingested_at_stored"):
+        sdk.create_source("session:forged", "agentSession",
+                          _ingested_at_stored=True)
+    with pytest.raises(ValueError, match="_ingested_at_stored"):
+        sdk.create_point("observation", "forged", _ingested_at_stored=True)
+
+
 def test_a_blank_stored_instant_is_journaled_as_blank_not_as_the_capture_clock(prov):
     """Review round 2, P2: the read-back must distinguish FALSY from NULL.
 

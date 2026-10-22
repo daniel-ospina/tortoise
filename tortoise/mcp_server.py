@@ -2053,6 +2053,14 @@ _SERVER_MANAGED_PROPS = frozenset({  # #3947: envelope capture directive (not a 
     # the write is attempted; `sdk.create_source` refuses it in its own
     # `**props` guard and `sdk._sanitize_props` is the direct-SDK backstop.
     "_stub_completion",
+    # #9451 (code review ISSUE 2): its sibling on the same `SourceCreated`
+    # record — "this `ingestedAt` was READ BACK from the node". Inert alone (the
+    # `_upsert_source` ON MATCH gate requires `_stub_completion` too, which is
+    # refused just above), refused here anyway so the pair has ONE boundary and
+    # the next spelling of "a key that decides replay behaviour" is not the one
+    # that gets through. `sdk.create_source` and `sdk._sanitize_props` refuse it
+    # on the same three homes as the key above.
+    "_ingested_at_stored",
 })
 
 
