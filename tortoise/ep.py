@@ -1556,10 +1556,14 @@ class TortoiseEP:
         writes source→target while `bwd` writes target→source — so only a NULL on
         an enabled SENDING end can move a named claim. A receive-only NULL is
         exempt (measured: it leaves every named posterior identical to the `-`
-        case). The n-ary arm is deliberately CONSERVATIVE (any flow ⇒ refuse):
-        `_update_nary_factor` fans a source out over its targets with
-        `scale = 1/(n-1)`, and rather than re-derive its per-endpoint semantics
-        in a guard, an unnameable participant in an n-ary star is refused.
+        case). The n-ary arm is deliberately CONSERVATIVE *once a NULL is
+        present*: `_update_nary_factor` fans a source out over its targets with
+        `scale = 1/(n-1)`, and rather than re-derive its per-endpoint sender
+        semantics in a guard, ANY NULL among an n-ary star's inputs is refused.
+        An n-ary factor with no NULL is an ordinary 3+-input operator and is not
+        refused — this function answers "is a NULL input here able to send?", so
+        it must first find one (round 7 shipped that arm without the search and
+        refused every 3+-input operator outright).
         """
         _op_id, _op_type, input_ids, _weight, _label, direction = factor
         if len(input_ids) < 2:
@@ -1568,7 +1572,9 @@ class TortoiseEP:
         if not (fwd or bwd):
             return False          # `-`: no confidence transfers at all
         if len(input_ids) > 2:
-            return True           # n-ary: conservative, see docstring
+            # n-ary: conservative on WHICH end sends, never on WHETHER a NULL
+            # exists (see docstring).
+            return any(_i is None for _i in input_ids)
         id_a, id_b = input_ids
         return (fwd and id_a is None) or (bwd and id_b is None)
 
@@ -2429,7 +2435,9 @@ class TortoiseEP:
         # inputs, so such a node cannot change any belief; refusing on it would
         # turn a graph `main` computes (measured: iterations 9, converged, both
         # posteriors stamped) into a refused one.
-        # GATED ON WHETHER THE NULL CAN SEND, not on "any flow". A factor only
+        # GATED ON WHETHER THE NULL CAN SEND, not on "any flow". (Only a factor
+        # that HAS a NULL input can reach this: `_null_input_sends` returns False
+        # when there is none, including for an ordinary 3+-input operator.) A factor only
         # moves a NAMED claim when the NULL endpoint is a SENDER on an enabled
         # direction (`_update_factor`'s `if fwd:` writes source→target, `if
         # bwd:` target→source; a `-` factor returns before writing anything).

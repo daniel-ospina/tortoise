@@ -1847,3 +1847,35 @@ def test_a_null_input_that_sends_still_refuses_the_run(sdk):
     assert ep._null_input_sends(factor) is True
     with pytest.raises(UnaddressableClaimError):
         sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+
+
+def test_an_nary_operator_with_every_id_present_does_not_refuse(sdk):
+    """#9275 (review round 7): a 3-input operator is NOT a refusal trigger.
+
+    The n-ary arm of `_null_input_sends` is conservative about WHICH end sends,
+    never about WHETHER a NULL exists: this fixture has three fully addressed,
+    calibrated claims and no id-less node at all, and round 7 briefly shipped an
+    arm that refused it (and, with it, every EP surface for every 3+-input
+    operator). The refusal is conditioned on a NULL, so the NULL must be found
+    first.
+    """
+    proj = sdk._get_proj()
+    a = sdk.create_point("statement", "NaryA", status="live")
+    b = sdk.create_point("statement", "NaryB", status="live")
+    c = sdk.create_point("statement", "NaryC", status="live")
+    for p in (a, b, c):
+        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk.create_operator("IMPL", a["id"], [b["id"], c["id"]])
+
+    ep = sdk._get_ep()
+    factors = ep._affected_factors(ep._affected_claims([a["id"]], 2))
+    nary = [f for f in factors if len(f[2]) > 2]
+    assert nary, f"no n-ary factor assembled: {factors}"
+    assert all(ep._null_input_sends(f) is False for f in nary)
+
+    out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    assert out["converged"] is True
+    stamped = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND n.posterior_alpha IS NOT NULL "
+        "RETURN count(n)", params={"ids": [a["id"], b["id"], c["id"]]}).result_set
+    assert stamped[0][0] == 3
