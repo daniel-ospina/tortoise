@@ -1,9 +1,12 @@
 name: CI
 # Mixed CI: repo-local checks (self-contained, #555) + agent-infra reusable
-# workflows pinned to semver tags (#303, #387). The `scripts/` symlink stays
-# repo-local-independent (machine-local path, unverifiable on the runner) —
-# the agent-infra node-ci script-validate/skill-lint gates are therefore
-# skipped here (python-ci.yml carries the stack gates instead).
+# workflows pinned to semver tags (#303, #387). The repo-root `scripts` pointer is
+# MACHINE-LOCAL and not tracked at all (#9475: gitignored, materialised per machine by
+# tools/link_agent_infra_scripts.py from $AGENT_INFRA_PATH — a git symlink blob cannot
+# hold a variable, so tracking it made it dangle everywhere but the author's machine).
+# It is therefore absent on a runner, which is why the agent-infra node-ci
+# script-validate/skill-lint gates are skipped here (python-ci.yml carries the stack
+# gates instead).
 
 on:
   pull_request:
@@ -59,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       migrations: ${{ steps.gate.outputs.migrations }}
+      pglite: ${{ steps.gate.outputs.pglite }}
       dashboard: ${{ steps.gate.outputs.dashboard }}
       dashboard_e2e: ${{ steps.gate.outputs.dashboard_e2e }}
       uv_lock: ${{ steps.gate.outputs.uv_lock }}
@@ -102,7 +106,7 @@ jobs:
           # always-on required jobs run, so every gated surface is explicitly
           # false. (`MAIN_HEALTH` is empty on a `pull_request` event.)
           if [ "$MAIN_HEALTH" = "true" ]; then
-            for key in migrations dashboard dashboard_e2e uv_lock entrypoints \
+            for key in migrations pglite dashboard dashboard_e2e uv_lock entrypoints \
                        client packaging website hosted flip python drift \
                        driver_scripts ai_review_gate watchdog_scripts \
                        orphan_bound_scripts; do
@@ -157,6 +161,31 @@ jobs:
               "migrations": any_file(
                   startswith("supabase/migrations/"),
                   startswith(".github/scripts/check-migration-"),
+              ),
+              # schema-drill's PGlite harness (#9553 review P2). It used to be
+              # gated on `migrations` ALONE, and that was wrong in the
+              # fail-open direction: the harness is the DB-level half of the
+              # record projection's guard (`validate.mjs` replays the journal
+              # through `tortoise/record_projection.py`, which it spawns as
+              # PROJECTION_PY, and reads the SHIPPED journal fixture), so a
+              # projection-only change — the exact shape of #9553 — skipped
+              # the job and its legs could only fail where a human ran them.
+              # Name the inputs it reads, not the surface they happen to look
+              # like: the assertion suites + the harness dir it walks
+              # (`supabase/tests/` whole — `validate.mjs` reads
+              # `TESTS_DIR = supabase/tests` for every entry of its explicit
+              # `suites` list AND for `C1_SUITE`, so a suite-only edit is an
+              # input too), the module it executes, the fixture it replays. A
+              # migration change still reaches the job through `migrations`
+              # (schema-drill's `if:` ORs the two).
+              # (#9553 review P2: the first entry was `supabase/tests/pglite/`
+              # alone, so a `supabase/tests/*.sql`-only edit set BOTH outputs
+              # false and skipped the only job that executes those suites.)
+              "pglite": any_file(
+                  startswith("supabase/tests/"),
+                  isfile("tortoise/record_projection.py"),
+                  isfile("supabase/tests/fixtures/"
+                         "record_projection_journal.jsonl"),
               ),
               # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard).
               # #3775: the suite BUILDS the bundle before testing it, and
@@ -336,6 +365,9 @@ jobs:
               # drift-check (agent-infra check --ci: version pin, workflow
               # refs, symlinks, templates, AGENTS.md/.mcp.json/.husky)
               "drift": any_file(
+                  # a path named `scripts` can only appear in a diff via `git add -f`
+                  # since #9475 untracked it — which is exactly the regression this
+                  # gate must re-run on (the pointer is machine-local and gitignored)
                   isfile(".agent-infra-version", "AGENTS.md", ".mcp.json", "scripts"),
                   startswith(".github/workflows/"),
                   startswith(".husky/"),
@@ -563,10 +595,13 @@ jobs:
   # round trip (apply → rollback → re-apply) for the multi-graph migration:
   # drop graphs + the api_keys graph columns restores the pre-C1 shape, and
   # re-applying migration 20260901000001 restores the invariants (verified
-  # by re-running its assertion suite). Runs whenever a migration changes.
+  # by re-running its assertion suite). Runs whenever a migration changes,
+  # and — #9553 review P2 — whenever the harness or the record projection it
+  # replays changes, which `migrations` alone never covered (a
+  # projection-only PR left this guard unrunnable in CI).
   schema-drill:
     needs: changes
-    if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
+    if: needs.changes.outputs.migrations == 'true' || needs.changes.outputs.pglite == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1370,11 +1405,12 @@ jobs:
     # negative were extensionless `.github/scripts/` entries a `*.sh` filter read as
     # clean. It costs about a second, so it runs on every change.
     #
-    # The guard lives in agent-infra, reached locally through the committed `scripts/`
-    # symlink — an absolute MACHINE-LOCAL path, so it dangles on a runner (see the
-    # workflow header). Agent-infra is public, so check it out alongside and run the
-    # SAME guard: a vendored copy would be a second source of truth free to drift from
-    # the one that owns the idiom (#863's "guard nobody runs").
+    # The guard lives in agent-infra, reached locally through the machine-local
+    # `scripts` pointer (#9475: gitignored, NOT tracked, materialised from
+    # $AGENT_INFRA_PATH by tools/link_agent_infra_scripts.py), so it is ABSENT on a runner
+    # rather than dangling (see the workflow header). Agent-infra is public, so check it
+    # out alongside and run the SAME guard: a vendored copy would be a second source of
+    # truth free to drift from the one that owns the idiom (#863's "guard nobody runs").
     #
     # ORDERING — SATISFIED: `--dirs` shipped in agent-infra#1643, merged to agent-infra
     # `main` as `ffa8751ac9afbd0acbfeb32d0619d2208b89217a` and PINNED below. Before that
@@ -2359,4 +2395,31 @@ jobs:
     # symlinks, missing templates, workflow refs vs manifest.check.ci.ref)
     # fails CI; content drift warns. Runs tiered via agent-infra check --ci.
     uses: daniel-ospina/agent-infra/.github/workflows/drift-check.yml@main
+    with:
+      # #9475: `scripts` is a MACHINE-LOCAL pointer now — gitignored, untracked,
+      # materialised per machine from $AGENT_INFRA_PATH — so a CI checkout has none and
+      # agent-infra's `check --ci` reports `❌ scripts/ — not symlinked` (tier: fail) on
+      # every drift-gated PR. Measured on this PR's head: the drift job failed with
+      # exactly that line, `status: FAIL`, `exempted surfaces: (none)`.
+      #
+      # That red is not drift, it is the deliberate shape of the fix, so materialise the
+      # pointer FIRST and then run the check UNCHANGED — the gate still verifies the link
+      # (and every other surface) instead of being bypassed or exempted. The reusable
+      # workflow sets AGENT_INFRA_PATH to its own checkout ($GITHUB_WORKSPACE/.agent-infra),
+      # which is precisely what the check expects the pointer to point at, so a materialised
+      # pointer reads `✅ scripts/`. If materialisation fails the check still runs and fails
+      # on the same line, so a broken setup cannot read as green.
+      #
+      # ⛔ ONE quote-free command, on ONE line, and NOT the script inline (#9541 review,
+      # round 6 P1). The reusable workflow consumes this input as
+      # `cmd="${{ inputs.check-command }}"` then `bash -c "$cmd"` — `${{ }}` substitution is
+      # textual and escapes nothing, so a `"`, `(`, `)` or backtick anywhere in the override
+      # closes the assignment early and dies at PARSE time (`syntax error near unexpected
+      # token '('`), before `drift_exit` is recorded: the gate then reds forever with "the
+      # drift check produced NO result", for every drift-gated PR, while verifying nothing.
+      # The wrapper holds the quoting-needing logic and re-states the reusable workflow's own
+      # default invocation (`node <infra>/bin/agent-infra.js check . --ci`); if that default
+      # changes, follow it in tools/agent_infra_drift_check.py. Pinned by
+      # tests/test_link_agent_infra_scripts.py::test_check_command_survives_the_reusable_workflows_interpolation.
+      check-command: python3 tools/agent_infra_drift_check.py
     secrets: inherit
