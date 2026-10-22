@@ -106,6 +106,7 @@ and ``test_workflow_secret_interpolation.py``.
 from __future__ import annotations
 
 import re
+import shlex
 import tomllib
 from copy import deepcopy
 from pathlib import Path
@@ -1383,6 +1384,47 @@ def _dev_ruff_pin() -> str:
     return pins.pop()
 
 
+# Flags that change only how ruff REPORTS, never which rules run or what the exit
+# code is. An allow-list, not a deny-list: `--select`/`--ignore`/`--config` narrow
+# or replace the rule surface, `--exit-zero` makes every run green, and `--fix`
+# would rewrite the tree the guard is measuring.
+_RUFF_PRESENTATION_FLAGS = ("--no-cache", "--no-fix", "--quiet", "-q")
+_RUFF_ARGV = ["ruff", "check", "."]
+_INSTALL_PIN = re.compile(r"(?:uv )?pip install ruff==([^\s]+)")
+
+
+def _ruff_argv_problem(command: str) -> str | None:
+    """Why ``command`` is not a full-tree, still-failing ``ruff check .``, or ``None``.
+
+    Tokenised, not substring-matched: `ruff check . || true`, `; true`, a pipe
+    and a `$(...)` all satisfy a membership test while making a REAL failure
+    report green (the exact-invocation precedent in ``test_merge_throughput.py``).
+    """
+    tokens = shlex.split(command, comments=True)
+    if not tokens or tokens[:3] != _RUFF_ARGV:
+        return (
+            "the invocation is not literally `ruff check .` as its first three tokens "
+            "— a shell escape (`|| true`, `; true`, a pipe) or a different command "
+            "satisfies a substring test while making a real failure report green"
+        )
+    for token in tokens[3:]:
+        if token in _RUFF_PRESENTATION_FLAGS or token.startswith("--output-format="):
+            continue
+        return (
+            f"it passes {token!r}, which is not a presentation-only flag — "
+            "`--select`/`--ignore`/`--extend-ignore`/`--config` narrow or replace the "
+            "rule surface, `--exit-zero` makes every run green, and `--fix` rewrites "
+            "the tree the guard measures. Presentation flags allowed: "
+            f"{['--output-format=<fmt>', *_RUFF_PRESENTATION_FLAGS]}"
+        )
+    return None
+
+
+def _installs_pinned_ruff(command: str, pin: str) -> bool:
+    """True when ``command`` installs exactly ``ruff==<pin>`` (a `uv` prefix is fine)."""
+    return any(m.group(1) == pin for m in _INSTALL_PIN.finditer(command))
+
+
 def _merged_tree_guard_problem(doc: dict) -> str | None:
     """Why ``doc`` is not a guard that RUNS (and still FAILS) on every merged tree.
 
@@ -1437,6 +1479,18 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "looks keyed. Key the group on the pushed sha: one group per tree, "
             "nothing to cancel."
         )
+    # `defaults.run` rewrites EVERY `run:` in scope — a job-level
+    # `defaults: {run: {shell: echo}}` turns `ruff check .` into an echo that
+    # exits 0, and `defaults: {run: {working-directory: docs}}` lints one
+    # directory. Checked at BOTH levels because either one defuses the guard
+    # while every other property here stays correct.
+    if "defaults" in doc:
+        return (
+            "it declares workflow-level `defaults:` — `defaults.run.shell` / "
+            "`defaults.run.working-directory` rewrite every `run:` in the workflow, "
+            "so the ruff step can become an echo (exit 0 forever) or scan one "
+            "directory while reading exactly like `ruff check .`"
+        )
     ruff_steps = [
         (job_id, job, step)
         for job_id, job in (doc.get("jobs") or {}).items()
@@ -1453,13 +1507,11 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
             "the rule surface on main unguarded while the check stays green"
         )
     for job_id, job, step in ruff_steps:
-        if step["run"].strip() != "ruff check .":
+        argv_problem = _ruff_argv_problem(step["run"])
+        if argv_problem is not None:
             return (
                 f"step {step.get('name') or step.get('id') or job_id!r} runs "
-                f"{step['run'].strip()!r}, not exactly `ruff check .`. A shell escape "
-                "(`|| true`, `; true`, a pipe) or a narrowed selection satisfies a "
-                "membership test while making a REAL failure report green (#1503's "
-                "baseline is the whole repo's rule surface)"
+                f"{step['run'].strip()!r}: {argv_problem}"
             )
         extra = sorted(set(step) - _RUFF_STEP_KEYS)
         if extra:
@@ -1469,22 +1521,28 @@ def _merged_tree_guard_problem(doc: dict) -> str | None:
                 "fails the job, and `shell:`/`working-directory:`/`env:` run "
                 "something other than the repo's config on the merged tree"
             )
-        if "if" in job or job.get("continue-on-error"):
+        if "defaults" in job or "if" in job or job.get("continue-on-error"):
             return (
                 f"the job owning the ruff step ({job_id!r}) carries "
-                f"{sorted(k for k in ('if', 'continue-on-error') if k in job)} — a "
-                "job-level condition or `continue-on-error` skips or silences the "
-                "guard exactly as a step-level one does"
+                f"{sorted(k for k in ('defaults', 'if', 'continue-on-error') if k in job)}"
+                " — a job-level condition, `continue-on-error` or `defaults.run` skips,"
+                " silences or rewrites the guard exactly as the step-level form does"
+            )
+        if "concurrency" in job:
+            return (
+                f"the job owning the ruff step ({job_id!r}) declares its own "
+                "`concurrency:` — job groups share the SAME repo-global namespace as "
+                "workflow groups, so a constant job group is starved by the next push "
+                "to main exactly like the workflow-level one this pin rejects, while "
+                "the per-sha workflow group above still looks correct"
             )
     commands = _run_commands(doc)
     pin = _dev_ruff_pin()
-    if not any(
-        re.search(r"pip install ruff==" + re.escape(pin) + r"(?=\s|$)", c) for c in commands
-    ):
+    if not any(_installs_pinned_ruff(c, pin) for c in commands):
         return (
-            f"it does not install the pinned ruff (`pip install ruff=={pin}`), so "
-            "main lints with whatever a bare install resolves to — the #1685/#2150 "
-            "drift class, one direction or the other"
+            f"it does not install the pinned ruff (`pip install ruff=={pin}`, `uv` "
+            "prefix allowed), so main lints with whatever a bare install resolves "
+            "to — the #1685/#2150 drift class, one direction or the other"
         )
     return None
 
@@ -1611,7 +1669,7 @@ def test_the_pr_and_main_lint_pins_agree() -> None:
     ci = _load(WORKFLOW_DIR / "ci.yml")
     job = (ci.get("jobs") or {}).get("agent-infra-ci") or {}
     command = str((job.get("with") or {}).get("lint-command", ""))
-    assert re.search(r"pip install ruff==" + re.escape(pin) + r"(?=\s|$)", command), (
+    assert _installs_pinned_ruff(command, pin), (
         f"ci.yml's `agent-infra-ci.with.lint-command` is {command!r} and does not "
         f"install the pyproject pin `ruff=={pin}` — PR lint would then run a "
         "different ruff than main lint and than `uv sync` (#1685)"
@@ -1666,6 +1724,38 @@ def _set_unpinned_ruff(doc: dict) -> None:
                 step["run"] = "pip install ruff"
 
 
+def _set_exit_zero(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check . --exit-zero"
+
+
+def _set_selected_rules(doc: dict) -> None:
+    _ruff_step(doc)["run"] = "ruff check . --select E9"
+
+
+def _set_output_format(doc: dict) -> None:
+    """A NON-narrowing edit: inline annotations are the standard CI presentation."""
+    _ruff_step(doc)["run"] = "ruff check . --output-format=github"
+
+
+def _set_workflow_defaults(doc: dict) -> None:
+    doc["defaults"] = {"run": {"shell": "echo"}}
+
+
+def _set_shell_default(doc: dict) -> None:
+    for job in doc["jobs"].values():
+        job["defaults"] = {"run": {"shell": "echo"}}
+
+
+def _set_working_directory_default(doc: dict) -> None:
+    for job in doc["jobs"].values():
+        job["defaults"] = {"run": {"working-directory": "docs"}}
+
+
+def _set_job_concurrency(doc: dict) -> None:
+    for job in doc["jobs"].values():
+        job["concurrency"] = {"group": "main-lint-shared", "cancel-in-progress": True}
+
+
 _STARVED_SHAPES = [
     # ── does not RUN on every merged tree ──
     # The measured defect: the guard inside its former host's constant group.
@@ -1705,6 +1795,13 @@ _STARVED_SHAPES = [
     ("continue-on-error on the ruff step", _set_continue_on_error),
     ("a step `if:` that never fires", _set_step_never_runs),
     ("a job `if:` that never fires", _set_job_skips),
+    ("a job-level concurrency group", _set_job_concurrency),
+    ("a workflow-level `defaults:` block", _set_workflow_defaults),
+    ("a job-level `defaults.run.shell`", _set_shell_default),
+    ("a job-level `defaults.run.working-directory`", _set_working_directory_default),
+    # ── runs, but reports green ──
+    ("`--exit-zero`", _set_exit_zero),
+    ("a narrowed `--select` after the path", _set_selected_rules),
     ("an unpinned ruff install", _set_unpinned_ruff),
 ]
 
@@ -1751,3 +1848,32 @@ def test_the_merged_tree_guard_check_accepts_an_unstarveable_group(group: str) -
     doc = _main_lint_mutant(lambda d: d["concurrency"].__setitem__("group", group))
     problem = _merged_tree_guard_problem(doc)
     assert problem is None, f"{group!r} is unstarveable; the check said: {problem}"
+
+
+def test_the_merged_tree_guard_check_accepts_presentation_only_edits() -> None:
+    """Honest, non-narrowing edits must stay green.
+
+    `--output-format=github` (inline annotations) and `uv pip install` are forms
+    this repo already uses; a pin that reds them gets deleted by the next
+    maintainer, and then it guards nothing. The rule surface and the exit code
+    are what this pin is about — not the presentation.
+    """
+    doc = _main_lint_mutant(_set_output_format)
+    assert _merged_tree_guard_problem(doc) is None, (
+        "`--output-format=github` changes presentation only; the pin must accept it"
+    )
+    pin = _dev_ruff_pin()
+    doc = _main_lint_mutant(
+        lambda d: d["jobs"]["lint"].__setitem__(
+            "steps",
+            [
+                {**step, "run": f"uv pip install ruff=={pin}"}
+                if isinstance(step.get("run"), str) and "pip install ruff==" in step["run"]
+                else step
+                for step in d["jobs"]["lint"]["steps"]
+            ],
+        )
+    )
+    assert _merged_tree_guard_problem(doc) is None, (
+        "`uv pip install ruff==<pin>` installs exactly the pin; the pin must accept it"
+    )
