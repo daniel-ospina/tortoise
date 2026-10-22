@@ -471,13 +471,25 @@ _COMMA = re.compile(r",")
 #: A SCOPE boundary — the third way a NAME stops meaning the same relationship. A
 #: `WITH` re-projects the variables in scope: a name it does not carry is GONE, so a
 #: later `MATCH` re-binding that name binds a FRESH relationship and walks a fresh
-#: set of types. A `CALL { … }` subquery imports nothing it is not given, so the
-#: outer bindings are not in scope inside it either.
-_SCOPE_BOUNDARY = re.compile(r"\bWITH\b|\bCALL\s*\{", re.I)
-#: Where a `WITH`'s projection list ends — the next clause keyword.
+#: set of types. ⚠️ `WITH` is the ONLY scope boundary in Cypher's subquery story: a
+#: `CALL { … }` block IMPORTS the outer bindings (that is how state is passed in),
+#: so the block itself ends nothing — what ends the identity is a `WITH` INSIDE it,
+#: which is what `_scope_boundary_offsets` descends to find. An earlier revision
+#: made the block a blanket barrier on the inverted premise ("imports nothing it
+#: is not given"); see `_scope_boundary_offsets` for why no valid query can exhibit
+#: that shape and what the barrier cost instead.
+_SCOPE_BOUNDARY = re.compile(r"\bWITH\b", re.I)
+#: A `CALL { … }` subquery OPENER. Its body is descended into by
+#: `_scope_boundary_offsets`, never refused wholesale: `_top_level_offsets` cannot
+#: see a `WITH` at brace depth 1.
+_CALL_SUBQUERY = re.compile(r"\bCALL\s*\{", re.I)
+#: Where a `WITH`'s projection list ends — the next clause keyword of its OWN block.
+#: `CALL` is a clause too, so `WITH n CALL { … }` ends its projection at the `CALL`;
+#: without it the projection ran on into the subquery body and every such query read
+#: as a barrier (#9544 review P2).
 _PROJECTION_END = re.compile(
     r"\b(OPTIONAL\s+MATCH|MATCH|MERGE|CREATE|SET|DELETE|DETACH|WHERE|WITH|UNWIND|"
-    r"RETURN|ORDER\s+BY|SKIP|LIMIT|UNION)\b",
+    r"RETURN|ORDER\s+BY|SKIP|LIMIT|UNION|CALL)\b",
     re.I,
 )
 #: `WITH *` carries EVERY name into the next scope, so it is not a barrier. It is
@@ -487,11 +499,13 @@ _PROJECTION_END = re.compile(
 _PROJECTS_EVERYTHING = "*"
 
 #: A walk's relationship SLOT, read at the offset `_walk_occurrences` reported:
-#: the bracket (`-[r]->`, `<-[r {c:$c}]-`, `-[]->`) and, for the bracket-less
-#: spelling, the whole `(node)--(node)` pattern. `_walk_binding` turns it into the
-#: token a stated fact has to NAME for the walk to be bounded.
+#: the bracket (`-[r]->`, `<-[r {c:$c}]-`, `-[]->`). The bracket-less spelling is
+#: read from the census's own `_BARE_TRAVERSAL` match spans rather than by a second
+#: pattern here: a CONSUMING `(node)--(node)` pattern cannot see the second hop of a
+#: chained `(a)--(b)--(c)` (it eats `(b)` and resumes after it), which is how
+#: `_walk_binding` came to raise "the walk net and the derivation have drifted
+#: apart" over a shape with no drift in it (#9544 review P3).
 _WALK_SLOT = re.compile(r"[-<]\s*\[([^\]]*)\]")
-_BARE_WALK = re.compile(r"\([^()]*\)\s*(?:<-->|<--|-->|--)\s*\([^()]*\)")
 #: The Cypher name a relationship pattern binds (`r` in `[r]`, `[r {c:$c}]`).
 _REL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -986,7 +1000,7 @@ def _top_level_offsets(text: str, needle: re.Pattern[str]) -> list[int]:
 
 
 def _walk_binding(query: str, start: int) -> str:
-    """What IDENTIFIES the walk at `start` — its relationship VARIABLE, or its own text.
+    r"""What IDENTIFIES the walk at `start` — its relationship VARIABLE, or its own text.
 
     ⚠️ **A fact that merely SITS in a walk's window is not a fact ABOUT that walk,
     and that gap shipped a live fail-open.** With the window alone as the bound, a
@@ -1018,17 +1032,26 @@ def _walk_binding(query: str, start: int) -> str:
       those stay green;
     * a bracketed walk that binds NOTHING (`-[]->`) → its own relationship slot
       text, since there is no name a fact could carry;
-    * a bracket-less walk (`(n)--()`) → its own `(node)…(node)` pattern text, for
-      the same reason.
+    * a bracket-less walk (`(n)--()`, and each hop of a chained
+      `(a)--(b)--(c)`) → its own `(node)…(node)` pattern text, for the same
+      reason. The extent comes from the census's `_BARE_TRAVERSAL` match at the
+      reported offset — the SAME match the derivation reported, so the two cannot
+      disagree about where the hop ends — and never from a consuming re-scan of
+      the query (a `\(node\)--\(node\)` pattern eats the middle node of a chain,
+      so its next `finditer` step starts past the second hop and finds nothing).
     """
     slot = _WALK_SLOT.match(query, start)
     if slot is not None:
         name = _REL_NAME.match(slot.group(1).strip())
         return name.group(0) if name is not None else slot.group(0)
-    for match in _BARE_WALK.finditer(query):
-        dashes = _call_time_census()._BARE_TRAVERSAL.search(match.group(0))
-        if dashes is not None and match.start() + dashes.start() == start:
-            return match.group(0)
+    dashes = _call_time_census()._BARE_TRAVERSAL.match(query, start)
+    if dashes is not None and start > 0 and query[start - 1] == ")":
+        # A node in this class carries no brackets of its own (`[^()]*`), so the
+        # nearest `(` before the hop and the nearest `)` after it are its ends.
+        left = query.rfind("(", 0, start)
+        right = query.find(")", dashes.end())
+        if left != -1 and right != -1:
+            return query[left : right + 1]
     raise AssertionError(
         f"`_walk_occurrences` reported a walk at offset {start} of {query!r}, and "
         "neither spelling matches there — the walk net and the derivation have "
@@ -1150,22 +1173,96 @@ def _scope_survives(query: str, fact_at: int, walk_at: int, binding: str) -> boo
     `WITH *` carry it → not a barrier, so that shape stays green. A rename or a
     derivation (`WITH r AS rel`, `WITH type(r) AS t`, `WITH r.id AS rid`) and an
     aggregate that drops the grouping variables (`WITH count(*) AS c`) are all
-    barriers: the relationship itself does not survive them. A `CALL { … }`
-    subquery imports nothing it is not given, so it is a barrier outright.
+    barriers: the relationship itself does not survive them.
+
+    ⚠️ **A `CALL { … }` block is NOT a barrier — a `WITH` inside it is.** An
+    earlier revision refused every walk inside a subquery on the premise that a
+    subquery "imports nothing it is not given"; Cypher says the opposite (the
+    block imports every binding in scope, which is how state is passed in, and
+    the one thing it refuses is a RE-declaration). That inverts the rule: the
+    shape the blanket barrier claimed to catch cannot be written as a valid
+    query at all, while a `WITH` inside the body — which really does end the
+    identity — was out of reach, because it sits at brace depth 1 where
+    `_top_level_offsets` does not look. `_scope_boundary_offsets` descends into
+    the body instead, so the same projection reader decides the subquery case and
+    the top-level one.
     """
     low, high = sorted((fact_at, walk_at))
-    for at in _top_level_offsets(query, _SCOPE_BOUNDARY):
+    for at in _scope_boundary_offsets(query):
         if not low < at < high:
             continue
         word = _SCOPE_BOUNDARY.match(query, at)
         assert word is not None, f"`_SCOPE_BOUNDARY` matched nothing at {at}"
-        if word.group(0).upper().startswith("CALL"):
-            return False
         projection = query[word.end() : _projection_end(query, at, high)]
         if _projection_carries(projection, binding):
             continue
         return False
     return True
+
+
+def _block_span(query: str, at: int) -> tuple[int, int]:
+    """The span of the innermost `CALL { … }` BODY containing `at`, else the whole query.
+
+    A `WITH`'s projection list ends where the next clause OF ITS OWN BLOCK begins.
+    Clause keywords inside a subquery body sit at brace depth 1, so
+    `_top_level_offsets` cannot see them — a projection read on block bounds would
+    run past the body and out into the outer query. `{}` is the only brace Cypher
+    has here (a property map cannot contain a clause keyword), so the innermost
+    enclosing pair is the block.
+    """
+    opens: list[int] = []
+    quote = ""
+    index = 0
+    while index < len(query):
+        char = query[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                quote = ""
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "{":
+            opens.append(index)
+        elif char == "}" and opens:
+            opened = opens.pop()
+            if opened < at < index:
+                return opened + 1, index
+        index += 1
+    return 0, len(query)
+
+
+def _scope_boundary_offsets(query: str) -> list[int]:
+    """Every `WITH` that can END a relationship's identity — subquery bodies included.
+
+    Two readers, one rule: `_top_level_offsets` finds the block-level `WITH`s, and
+    each `CALL { … }` body is descended into with the body's OWN text so a `WITH`
+    inside it is found by the same reader (recursively, so a nested subquery is
+    covered by the same descent rather than by a second rule).
+
+    ⚠️ **The descent is what makes the subquery case pinnable, and the blanket
+    barrier it replaces was not.** A `WITH` inside the body is a real, valid query
+    (`CALL { WITH s MATCH (x)-[r]->(y) RETURN y }` drops `r` by projecting only
+    `s`, so the inner `[r]` is a FRESH relationship) and the walk inside it binds
+    the SAME name the fact names — so `_scope_survives` is genuinely consulted and
+    the arm in `test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk` can
+    tell this rule from its absence. A subquery WITHOUT a `WITH` re-binding a name
+    is a redeclaration, which Cypher rejects, so there is no valid query to pin
+    the opposite direction with — which is exactly why the barrier could never be
+    pinned and had to go (#9544 review P2).
+    """
+    offsets = _top_level_offsets(query, _SCOPE_BOUNDARY)
+    for match in _CALL_SUBQUERY.finditer(query):
+        low, high = _block_span(query, match.end())
+        if not low <= match.end() < high:
+            continue
+        offsets.extend(
+            low + offset for offset in _scope_boundary_offsets(query[low:high])
+        )
+    return sorted(offsets)
 
 
 def _projection_items(projection: str) -> tuple[str, ...]:
@@ -1221,13 +1318,21 @@ def _projection_carries(projection: str, binding: str) -> bool:
 
 
 def _projection_end(query: str, at: int, limit: int) -> int:
-    """Where the `WITH` projection starting at `at` ends — the next clause keyword.
+    """Where the `WITH` projection starting at `at` ends — the next clause of its BLOCK.
 
-    Bounded by `limit` (the walk's own window end) so a projection is never read
-    into a clause that belongs to another window: the question is only what THIS
-    `WITH` carried forward.
+    Bounded on BOTH sides. Below by the enclosing block's span (`_block_span`),
+    because a clause inside a `CALL { … }` body sits at brace depth 1 and
+    `_top_level_offsets` would run the projection past the body and out into the
+    outer query. Above by `limit` (the walk's own window end) so a projection is
+    never read into a clause that belongs to another window: the question is only
+    what THIS `WITH` carried forward.
     """
-    ends = [off for off in _top_level_offsets(query, _PROJECTION_END) if off > at]
+    low, high = _block_span(query, at)
+    ends = [
+        low + offset
+        for offset in _top_level_offsets(query[low:high], _PROJECTION_END)
+        if low + offset > at
+    ]
     return min([*[off for off in ends if off <= limit], limit])
 
 
@@ -4096,18 +4201,31 @@ def test_a_walk_rebinding_a_name_a_with_dropped_is_a_FRESH_walk():
             f"({reported!r}); an empty list here is the fail-open"
         )
 
-    # A `CALL { … }` subquery sees nothing it is not given, so it is a barrier
-    # outright — no projection to inspect.
+    # ⚠️ A `CALL { … }` block IMPORTS the outer bindings, so the block is NOT a
+    # barrier — a `WITH` INSIDE it is, and that `WITH` sits at brace depth 1 where
+    # `_top_level_offsets` cannot look. The arm is therefore written with `[r]`,
+    # the SAME name the fact names: a `[rr]` fixture would never consult the scope
+    # check at all (`_names_binding(fact, "rr")` is False, so the binding rule
+    # alone refuses it) — that is how the previous revision of this arm passed
+    # while pinning nothing (#9544 review P2).
     subquery = (
         "MATCH (s:Subject {id:$sid})-[r]->(n) "
-        "CALL { MATCH (x)-[rr]->(y) RETURN y } RETURN type(r)"
+        "CALL { WITH s MATCH (x)-[r]->(y) RETURN y } RETURN type(r)"
     )
-    assert [binding for _window, binding in _unbounded_walks(subquery, facts)] == [
-        "rr"
-    ], (
-        "the walk inside a `CALL { … }` subquery is not reported unbounded "
-        f"({_unbounded_walks(subquery, facts)!r}) — a subquery imports no "
-        "outer binding, so `rr` is a fresh all-edge walk"
+    assert _names_binding(facts[0], "r"), (
+        "the subquery fixture's inner walk must bind the name the fact NAMES, or "
+        "the binding rule decides it and the scope rule is never consulted"
+    )
+    assert pre_fix(subquery, facts) == [], (
+        "the window-and-binding rule already reports the subquery walk — then "
+        "this fixture is not measuring the subquery scope escape"
+    )
+    reported_subquery = _unbounded_walks(subquery, facts)
+    assert len(reported_subquery) == 1 and reported_subquery[0][1] == "r", (
+        "the `WITH s` INSIDE a `CALL { … }` body drops `r`, so the inner "
+        "`MATCH (x)-[r]->(y)` binds a FRESH all-edge walk and must be reported "
+        f"({reported_subquery!r}) — an empty list here is the fail-open, and it "
+        "is what the previous blanket-`CALL`-barrier arm could not tell apart"
     )
 
     # The derivation half: the copy is on the registered line, so the SITE COUNT
@@ -4556,6 +4674,38 @@ def test_the_bracket_less_spelling_is_inside_the_walk():
     assert not census._BARE_TRAVERSAL.search("MATCH (n)-[r]->(m)"), (
         "the bracket-less detector also matches the bracketed spelling, so it is "
         "not measuring the shape it claims"
+    )
+
+
+def test_a_chained_bracket_less_walk_binds_its_OWN_hop():
+    """A chain `(a)--(b)--(c)` is TWO walks, and each binds its own hop.
+
+    ⚠️ **The second hop used to crash the net instead of answering it** (#9544
+    review P3). `_walk_occurrences` reports both `--` offsets, but `_walk_binding`
+    re-matched the query with a CONSUMING `(node)--(node)` pattern: it ate
+    `(a)--(b)` and resumed after `(b)`, so it could never see the second dash pair
+    and raised "the walk net and the derivation have drifted apart" — a diagnosis
+    of drift, over a shape with no drift in it, greeting the first person to
+    register a chained bracket-less site. The extent is now read from the same
+    `_BARE_TRAVERSAL` match the derivation reported, so a chain answers.
+    """
+    census = _call_time_census()
+    chain = "MATCH (a)--(b)--(c) RETURN a"
+    assert census._walk_occurrences(chain) == (9, 14), (
+        f"the derivation reports {census._walk_occurrences(chain)!r} for a chain, "
+        "not the two dash pairs this arm is written about"
+    )
+    bound = [_walk_binding(chain, start) for start in census._walk_occurrences(chain)]
+    assert bound == ["(a)--(b)", "(b)--(c)"], (
+        f"a chained bracket-less walk binds {bound!r} — each hop must carry its "
+        "OWN `(node)…(node)` text, or a fact about one hop vouches for the other"
+    )
+    # The point of the token: a fact naming ONE hop does not bound the other.
+    assert _unbounded_walks(chain, ("MATCH (a)--(b)",)) == [
+        ("MATCH (a)--(b)--(c) RETURN a", "(b)--(c)")
+    ], (
+        "a chained walk inherits its neighbour's fact — the binding token is not "
+        "per-hop, so the second hop is silently covered by a ground about the first"
     )
 
 def test_the_derived_aliases_are_grounded():
