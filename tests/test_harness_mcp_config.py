@@ -1062,37 +1062,79 @@ class TestDocsPageAndSkillConfig:
         # Developer-Mode path this issue exists for.
         #
         # Both graph claims are owned by CODE, and both are exercised here:
-        #   * the DESTINATION: the graph_id-less (org-wide) arm of the resolver
-        #     returns the caller's default namespace — the arm an OAuth /
-        #     connector credential lands on (mcp_auth reads graph scope FROM the
-        #     credential and leaves `_current_graph_id` unset when it has none,
-        #     so `_get_org_sdk` builds `TortoiseSDK(namespace=org_id)`);
-        #     `cp=None` because that branch returns before any control-plane read;
-        #   * the ABSENCE of a control: no active tool takes a graph-selecting
-        #     parameter, so there is no per-call selection for a card to imply.
-        from tortoise.supabase_control import _graph_namespace_for
-        assert _graph_namespace_for(None, "org_abc", None, "org_abc") == "org_abc", (
-            "an org-wide (graph_id-less) credential must resolve to the default "
-            "graph namespace — the row's 'every write lands in the default "
-            "graph' is only true while that holds (#9340)")
-        # Read from the LIVE registry + the SDK signatures rather than pinning a
-        # line of prose: a tool that grows a graph selector makes the row's
-        # "not available to a connector today" false the day it lands, which is
-        # precisely the change #9340 will make.
+        #   * the DESTINATION: with no graph scope on the request (the shape a
+        #     session / legacy / OAuth connector credential has), `_get_org_sdk`
+        #     binds the org's DEFAULT graph; only a credential that carries a
+        #     graph scope is bound to another one. That is what makes "every
+        #     write lands in the default graph" true of a connector rather than
+        #     of callers in general — so both branches are driven, and the
+        #     default branch is the one the row describes;
+        #   * the ABSENCE of a per-call control: no WRITE tool takes a
+        #     graph-selecting parameter (the three that do are read-only, or the
+        #     admin recording flag — named explicitly below, so a new one fails).
+        from tortoise import mcp_auth
+        mcp_auth._current_org_id.set("org_9660_probe")
+        mcp_auth._current_graph_id.set(None)
+        mcp_auth._current_graph_namespace.set(None)
+        default_sdk = mcp_auth._get_org_sdk()
+        assert default_sdk._graph_name is None, (
+            "a credential with NO graph scope must open the org's default graph "
+            f"(no explicit graph name), got {default_sdk._graph_name!r} — the "
+            "row's 'every write lands in the default graph' (#9340)")
+        assert default_sdk._namespace, (
+            "the default-graph SDK must still be org-scoped")
+        mcp_auth._current_graph_id.set("g-9660")
+        mcp_auth._current_graph_namespace.set("org_9660_probe__other")
+        assert mcp_auth._get_org_sdk()._graph_name == "org_9660_probe__other", (
+            "a graph-BOUND credential must open ITS graph — that is the only "
+            "way a request leaves the default graph, and a connector has none")
+        # Reset the request ContextVars: they are process-wide on this thread, and
+        # a later test must not inherit this probe's org/graph scope.
+        mcp_auth._current_org_id.set(None)
+        mcp_auth._current_graph_id.set(None)
+        mcp_auth._current_graph_namespace.set(None)
+        # …and the per-call control is absent from the SURFACE. Enumerated from
+        # the live registry through BOTH dispatch shapes (an `sdk_method`, or a
+        # handler in mcp_server — the shape a new graph-aware tool is most likely
+        # to use), so a write tool that grows a graph selector fails here the day
+        # it lands, which is precisely the change #9340 will make.
         import inspect
 
+        from tortoise import mcp_server as _mcp
         from tortoise.sdk import TortoiseSDK
-        graph_params = {"graph", "graph_id", "graph_name", "namespace"}
-        selectors = sorted(
-            f"{t.name}->{t.sdk_method}({p})"
-            for t in active.values()
-            if (method := getattr(TortoiseSDK, t.sdk_method, None)) is not None
-            for p in inspect.signature(method).parameters
-            if p in graph_params
-        )
-        assert not selectors, (
-            "no active MCP tool may take a graph-selecting parameter while the "
-            f"row says per-call graph selection is unavailable (#9340): {selectors}")
+
+        def _graph_params(entry):
+            found = set()
+            for fn in (getattr(TortoiseSDK, entry.sdk_method, None)
+                       if entry.sdk_method else None,
+                       entry.handler_override,
+                       getattr(_mcp, entry.name, None)):
+                if fn is None:
+                    continue
+                try:
+                    found |= {p for p in inspect.signature(fn).parameters
+                              if p in {"graph", "graph_id", "graph_name", "namespace"}}
+                except (TypeError, ValueError):
+                    continue
+            return found
+
+        graph_aware = {name: _graph_params(t) for name, t in active.items()}
+        graph_aware = {n: p for n, p in graph_aware.items() if p}
+        # The exceptions are named, with their risk, so each one is a DECISION
+        # rather than a hole: two READ tools render another graph's contents, and
+        # one ADMIN tool toggles that graph's recording flag. None of them moves
+        # where a connector's writes land.
+        assert {n: active[n].risk for n in graph_aware} == {
+            "tortoise_entity_profile": "read",
+            "tortoise_traverse": "read",
+            "tortoise_graph_set_recording": "admin",
+        }, (
+            "the row says per-call graph selection is not available to a "
+            "connector; exactly these three tools take a graph selector and none "
+            "is a write — a new one (a WRITE tool gaining one would move a "
+            "connector's writes, #9340) must be argued here, not slipped in: "
+            f"{ {n: (active[n].risk, sorted(p)) for n, p in graph_aware.items()} }")
+        assert "destructive" not in {active[n].risk for n in graph_aware}
         mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
         assert mcp_src.count('graph_name = f"org_{_current_org_id.get()}"') >= 2, (
             "#236: HTTP mode must keep overwriting a caller-supplied graph_name "
@@ -1120,10 +1162,14 @@ class TestDocsPageAndSkillConfig:
         # So "never been configured, therefore the full catalog applies" is false
         # for the very graph the row's preceding step sends the user's writes to,
         # and it would have told that user their default graph recognises every
-        # domain — the odd-extraction surprise #9660 exists to remove. The row
-        # must therefore name the starters as the default-graph set, scope the
-        # catalog fallback to "no pack records", and carry its disable clause
-        # from `packs.js::PACK_CONSEQUENCE` (the module that owns that sentence).
+        # domain — the odd-extraction surprise #9660 exists to remove. Nor may the
+        # row tell the user the set is unknowable in the chat: `tortoise_packs_list`
+        # reads exactly it, on the HTTP surface. The row must therefore name the
+        # starters as the default-graph set, name that read tool, scope the
+        # catalog fallback to "no pack records" (including the read-path seeding
+        # that narrows such a graph the first time anyone looks), and carry its
+        # disable clause from `packs.js::PACK_CONSEQUENCE` (the module that owns
+        # that sentence).
         packs_src = self.PACKS_JS.read_text(encoding="utf-8")
         disable = self._copy_norm(
             self._js_object_string(packs_src, "PACK_CONSEQUENCE", "disable"))
@@ -1148,29 +1194,66 @@ class TestDocsPageAndSkillConfig:
             assert f"<code>{ns}</code>" in steps, (
                 f"the row must name the starter pack {ns!r}: a new organization's "
                 "default graph holds pack_state.DEFAULT_STARTER_PACKS (#318)")
-        # …and the seeding is what keeps that true. If provisioning stops
-        # activating the starter set, the default graph's vocabulary becomes the
-        # catalog union and THIS SENTENCE (not the test) is wrong.
-        hosted_src = (REPO_ROOT / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
-        assert hosted_src.count("ensure_tenant_packs(_make_sdk") >= 2, (
-            "the row says a new organization's default graph HOLDS the starter "
-            "packs; both provisioning paths (tenant_provision and register) must "
-            "keep seeding them (#318) or the sentence is false")
-        # The catalog-wide fallback is real — but only for a graph with NO pack
-        # records, so the row must scope it there and must not claim catalog-wide
-        # coverage for an unconfigured graph that holds starter records.
-        assert "falls back to the entire catalog" in row_norm, (
-            "the row must keep the catalog-union fallback, scoped to its real "
-            "predicate (#2714 indicator 3)")
+        # …and the seeding is what keeps that true. Each provisioning path is
+        # named, because the HOSTED deployment provisions through the Supabase
+        # control plane: if `hosted_api` stops seeding, or the control-plane hook
+        # in `supabase_control` stops seeding, the row's sentence is false for
+        # every new organization — while a test that read only one file stays
+        # green.
+        for name, needle in (
+            ("hosted_api.py", "ensure_tenant_packs(_make_sdk"),
+            ("supabase_control.py", "ensure_tenant_packs(_ha._make_sdk"),
+        ):
+            src = (REPO_ROOT / "tortoise" / name).read_text(encoding="utf-8")
+            assert src.count(needle) >= 1, (
+                f"the row says a new organization's default graph HOLDS the "
+                f"starter packs; {name} must keep seeding them (#318) or the "
+                "sentence is false")
+        assert (REPO_ROOT / "tortoise" / "hosted_api.py").read_text(
+            encoding="utf-8").count("ensure_tenant_packs(_make_sdk") >= 2, (
+            "both hosted_api provisioning paths (tenant_provision, register) "
+            "seed the starter set (#318)")
+        # The fallback is real — but only for a graph with NO pack records, and
+        # reading the set on such a graph SEEDS the starters (the self-heal in
+        # `get_tenant_packs`), so a row that said "no records, therefore the whole
+        # catalog" without that caveat would describe a state its own instruction
+        # ends. Both halves are read from `pack_state` so the row cannot outlive
+        # them.
+        pack_src = (REPO_ROOT / "tortoise" / "pack_state.py").read_text(encoding="utf-8")
+        assert "ensure_tenant_packs(sdk, graph_name=graph_name)" in pack_src, (
+            "the row says opening Configured packs seeds the five starters on a "
+            "record-less graph; that is `get_tenant_packs`'s self-heal")
+        assert "_read_selection(g) is None" in pack_src
+        assert "entire catalog" in row_norm, (
+            "the row must keep the catalog-union fallback (#2714 indicator 3), "
+            "scoped to its real predicate")
         assert "no pack records" in row_norm, (
             "the catalog fallback applies to a graph with NO :PackInstall "
             "records; the row must state that predicate rather than "
             "'unconfigured'")
+        assert "seeds the five starters" in row_norm, (
+            "the row points the user at Configured packs, and READING a "
+            "record-less graph's set seeds the starters into it "
+            "(pack_state.get_tenant_packs self-heal) — a silent narrowing the "
+            "row must not leave out")
         assert "full pack catalog" not in row_norm, (
             "the row must not say an unconfigured graph uses the full pack "
             "catalog: a hosted default graph is seeded with the five starters, "
             "so `configured: false` and 'the whole catalog' do not co-occur "
             "there (measured: catalog − resolved = {'venture'})")
+        # Nor may it call the set unknowable in the chat: the read tool exists,
+        # on the HTTP surface, and the row names it — so it must stay active,
+        # un-retired and http-exposed, or the card prescribes a call that cannot
+        # be made (the #3883 class this suite already guards for other tools).
+        assert "tortoise_packs_list" in steps, (
+            "the row must name the pack read tool instead of telling the user "
+            "the set is invisible from ChatGPT")
+        assert "tortoise_packs_list" in active, (
+            "the row names tortoise_packs_list, so it must stay in tools/list")
+        assert "tortoise_packs_list" not in retired
+        assert active["tortoise_packs_list"].http_policy is True, (
+            "a connector reaches tools over HTTP; a packs read that is not "
+            "http-exposed cannot answer the card's instruction")
         assert "does not choose packs" in row_norm, (
             "the row must state that creating a graph does not choose its packs "
             "— scoped to the dashboard form, which posts {org_id, name}; the "
