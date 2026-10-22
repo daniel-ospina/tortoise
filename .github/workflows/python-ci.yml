@@ -3244,6 +3244,11 @@ jobs:
   # These are what the reversal above is weighed against: they are why #5017
   # removed the three >15m legs, and why re-adding them costs ~30m of
   # merge-path latency.
+  # ⚠️ That table is the PRE-#9539 shape. Re-measured on 5 completed main runs
+  # (2026-10-21, ids in `test-slow`'s matrix comment): test-slow was 14.2–23.0m
+  # across its two legs and is the pole now that the fast band is split nine
+  # ways; #9539 packs the same 37.9m pool into 5 derived legs (~9.6m
+  # projected). Do not re-read the two `test-slow` rows as today's numbers.
   #
   # THE LONG LEGS ARE NOT DELETED, AND NOT PUSH-ONLY — they run on both lanes:
   #   * pre-merge on every PR whose diff selects them, now back INSIDE this
