@@ -736,6 +736,61 @@ def test_spoofed_wipe_is_refused_by_the_guard(statement):
 # the statement of the widening, and the three halves the pin demanded: the
 # bulk case, the targeting constructs that must NOT be refused, and the
 # lookalikes that must not invent a clause.
+#
+# #8256 round 2: a statement may carry MORE THAN ONE ``DELETE`` clause, and the
+# classifier read only the LEFTMOST one. That made ``DELETE p ... DETACH DELETE
+# m`` a REGRESSION (the pre-#8256 ``DETACH``-anchored pattern refused it; the
+# widened bare pattern matched ``DELETE p`` first and dispatched it) and left
+# ``DELETE p ... DELETE m`` — the issue's own hole, one clause later. The tests
+# below pin both: a wipe in ANY clause is a wipe, and the multi-clause statement
+# the repo actually ships is still allowed.
+
+@pytest.mark.parametrize("statement", [
+    # The issue's acceptance, on a statement with two DELETE clauses: the first
+    # is fully scoped, the SECOND deletes every node.
+    "MATCH (p:Point {id:$id}) DELETE p WITH p MATCH (m) DELETE m",
+    # The same statement spelled with ``DETACH`` in the later clause. This is the
+    # REGRESSION case: pre-#8256 the clause pattern anchored HERE and refused;
+    # the first round of the widening anchored on the scoped ``DELETE p`` and
+    # dispatched the whole-graph wipe.
+    "MATCH (p:Point {id:$id}) DELETE p WITH p MATCH (m) DETACH DELETE m",
+    # Both clauses scoped, but a THIRD target list left unscoped.
+    "MATCH (a:Point {id:$a}) DELETE a WITH a MATCH (n) DELETE n",
+    # A later clause with an EMPTY target list cannot borrow the first one's
+    # scoping and stays fail-closed.
+    "MATCH (a:Point {id:$a}) DELETE a WITH a DELETE",
+])
+def test_a_wipe_in_a_LATER_DELETE_clause_is_still_a_wipe(statement):
+    """#8256 round 2: the verdict is taken over EVERY ``DELETE`` clause.
+
+    MUTATION: read only the leftmost clause (``_DELETE_CLAUSE_RE.search`` over a
+    greedy ``(.*)$`` pattern, the round-1 shape) and all four read False — a
+    later clause's whole-graph wipe dispatches on a production server graph
+    with no name check and no token.
+    """
+    from tortoise.projection import _is_bulk_wipe
+
+    assert _is_bulk_wipe(statement) is True, statement
+
+
+@pytest.mark.parametrize("statement", [
+    "MATCH (p:Point {id:$id}) DELETE p WITH p MATCH (m) DELETE m",
+    "MATCH (p:Point {id:$id}) DELETE p WITH p MATCH (m) DETACH DELETE m",
+])
+def test_a_wipe_in_a_LATER_clause_is_refused_by_BOTH_L2_call_sites(statement):
+    """The regression, end-to-end: neither L2 call site dispatches it.
+
+    MUTATION: read only the leftmost clause and both ``proj.query`` and
+    ``proj.g.query`` execute the whole-graph wipe on ``prod_tortoise``.
+    """
+    proj = _bare_projection(graph_name="prod_tortoise", embedded=False)
+    proj.g = _GuardedGraph(_RecordingGraph(), proj)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.query(statement)
+    with pytest.raises(RuntimeError, match="non-test graph"):
+        proj.g.query(statement)
+    assert proj.g.wipes() == [], "a refused wipe must not reach the graph"
+
 
 @pytest.mark.parametrize("statement", [
     "MATCH (n) DELETE n",                                    # the plain wipe
@@ -785,6 +840,14 @@ def test_a_bare_DELETE_is_a_bulk_wipe(statement):
     "MATCH (p:Point)-[r:`extractedFrom`]->(old:Source {url:$u}) "
     "WHERE coalesce(p.session_id, p.sessionId) = $sid DELETE r",
     "MATCH (n:`Point` {id:$id}) DELETE n",
+    # #8256 round 2's no-over-refusal half: the TWO-clause statement this repo
+    # actually ships (``projection/entities.py``'s superseded-Source sweep).
+    # Both clauses are label-scoped, so reading every clause must NOT refuse it.
+    "MATCH (old:Source)-[r:references]->(e:Event {eventId:$eid}) "
+    "WHERE old.url <> $url MATCH (s:Source {url:$url}) "
+    "WITH old, r, s, size([(old)-[x]-(y) | x]) AS deg DELETE r "
+    "WITH old, s, deg WHERE deg = 1 SET s.title = coalesce(s.title, old.title) "
+    "DELETE old",
 ])
 def test_a_bare_DELETE_keeps_every_targeting_construct(statement):
     """#8256 keeps the #3007/#3037/#8215 exemptions intact for the bare spelling.

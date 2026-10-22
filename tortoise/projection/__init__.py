@@ -776,8 +776,18 @@ def _strip_call_subqueries(statement: str) -> str:
 #     after ``.`` (a property ``n.delete``) or ``:`` (a label ``:DELETE``);
 #   * ``(?!\s*:)`` — a map KEY (``{delete: true}``) is followed by ``:``, a
 #     deleted variable never is.
-_DELETE_CLAUSE_RE = re.compile(
-    r"(?<![\w.$:])(?:DETACH\s+)?DELETE\b(?!\s*:)(.*)$", re.IGNORECASE | re.S
+#
+# #8256 round 2: this matches the clause HEAD only — the target list is read
+# from the text AFTER the match, bounded by ``_CLAUSE_STOP_RE``. A pattern that
+# swallowed the tail (``(.*)$``) could match at most ONCE per statement, so a
+# statement carrying two ``DELETE`` clauses (a legal shape —
+# ``... DELETE r WITH old ... DELETE old``, shipped by
+# ``tortoise/projection/entities.py``) was classified from its FIRST clause
+# alone. Both a regression (``DELETE p ... DETACH DELETE m`` read as targeted)
+# and the hole itself (``DELETE p ... DELETE m`` was still unclassified) followed
+# from that: every clause must be read, and ``_delete_clauses`` below does.
+_DELETE_HEAD_RE = re.compile(
+    r"(?<![\w.$:])(?:DETACH\s+)?DELETE\b(?!\s*:)", re.IGNORECASE
 )
 #: Clause keywords that TERMINATE a DELETE target list (and must never be read
 #: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
@@ -808,22 +818,36 @@ _VAR_LABEL_RE = (
 _WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
 
 
-def _delete_targets(text: str) -> tuple[list[str], int]:
-    """(deleted variable names, index of the DELETE clause, or -1).
+def _delete_clauses(text: str) -> list[tuple[list[str], int]]:
+    """EVERY ``DELETE`` clause as ``(deleted variable names, clause index)``.
 
     Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
     string/comment cannot become a variable name (#3037). #8256: a bare
     ``DELETE`` is a clause here too — ``DETACH`` is the prefix FalkorDB applies
     for you, not a different statement.
+
+    #8256 round 2: a statement may carry MORE THAN ONE ``DELETE`` clause
+    (``... DELETE r WITH old ... DELETE old``), and each deletes its own
+    targets. Returning only the leftmost clause let the first one's targets
+    speak for the whole statement — ``MATCH (p:Point {id:$id}) DELETE p WITH p
+    MATCH (m) DETACH DELETE m`` read as a scoped delete and dispatched, where
+    the pre-#8256 ``DETACH``-anchored pattern refused it. Every clause is
+    therefore returned; the verdict is taken over all of them.
+
+    The clause HEAD is matched, and its target list is the text after it
+    bounded by ``_CLAUSE_STOP_RE`` — which lists ``DETACH``/``DELETE``, so one
+    clause's targets can never run into the next clause's. An empty list (a
+    ``DELETE`` with nothing after it) is a real reading, not an absence: the
+    caller treats it as unscoped, so it stays fail-closed.
     """
-    m = _DELETE_CLAUSE_RE.search(text)
-    if m is None:
-        return [], -1
-    tail = m.group(1)
-    stop = _CLAUSE_STOP_RE.search(tail)
-    if stop is not None:
-        tail = tail[: stop.start()]
-    return _VAR_NAME_RE.findall(tail), m.start()
+    clauses: list[tuple[list[str], int]] = []
+    for m in _DELETE_HEAD_RE.finditer(text):
+        tail = text[m.end() :]
+        stop = _CLAUSE_STOP_RE.search(tail)
+        if stop is not None:
+            tail = tail[: stop.start()]
+        clauses.append((_VAR_NAME_RE.findall(tail), m.start()))
+    return clauses
 
 
 #: ``WITH <ident> AS <ident>`` — a re-binding that carries a variable's
@@ -973,6 +997,11 @@ def _is_bulk_wipe(cypher: str) -> bool:
     WITH n MATCH (m) DETACH DELETE m`` therefore read as "targeted" and, on the
     raw-query lane where L2 is the only layer, executed a whole-graph wipe on a
     production server graph with no name check and no token.
+
+    #8256 round 2: the per-target rule applies to EVERY ``DELETE`` clause, not
+    to the first one. A statement may carry several (``... DELETE r WITH old
+    ... DELETE old`` is a legal Cypher shape this repo ships), and reading only
+    the leftmost let a scoped first clause vouch for an unscoped second one.
     """
     # Fast path: the overwhelming majority of statements are reads. A DELETE
     # clause cannot be MASKED INTO existence (masking only removes text), so a
@@ -987,7 +1016,7 @@ def _is_bulk_wipe(cypher: str) -> bool:
     # CALL subqueries blanked, so a brace or WHERE clause that lives inside a
     # read-subquery cannot exempt a wipe that sits outside it.
     masked = _mask_cypher_text(cypher)
-    if _DELETE_CLAUSE_RE.search(masked) is None:
+    if _DELETE_HEAD_RE.search(masked) is None:
         return False
     # #3037: masking removes only TERMINATED literals/comments. A malformed
     # statement keeps its quote, and a brace after it would still look like a
@@ -1003,8 +1032,15 @@ def _is_bulk_wipe(cypher: str) -> bool:
     # test is exactly the #8215 defect: a property map (or WHERE reference) on a
     # pattern that binds something OTHER than the deleted variable says nothing
     # about what the DELETE removes.
-    targets, delete_at = _delete_targets(text)
-    if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
+    # #8256 round 2: EVERY clause's every target must be scoped — a later
+    # clause is a delete too, so a wipe there is still a whole-graph wipe. An
+    # empty target list (``DELETE`` followed by a clause keyword) is unscoped,
+    # so it stays fail-closed.
+    clauses = _delete_clauses(text)
+    if clauses and all(  # noqa: SIM103
+        targets and all(_var_is_scoped(text, v, delete_at) for v in targets)
+        for targets, delete_at in clauses
+    ):
         return False
     return True
 
@@ -5142,13 +5178,14 @@ class _GuardedGraph:
     self.g itself, not FalkorProjection.query(). Restored in #49 Phase 2 after
     the v3.0 rewrite (0f9e6a2) dropped it from this live module.
 
-    Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
+    Intercepts a bulk DELETE — with or without the ``DETACH`` prefix (#8256), and
+    with no property map and no real WHERE on the deleted variable — and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
     This is L2 of the two-layer guard (see the module comment above): it is
     unconditional — there is deliberately NO bypass attribute. It is also the
     ONLY layer on the raw-query lane (``proj.g.query`` / ``query``), where a
-    bulk DETACH DELETE on an embedded or test-named graph is allowed through
+    bulk DELETE on an embedded or test-named graph is allowed through
     without a token. The rebuild lane additionally requires L1 —
     ``FalkorProjection._wipe_all_nodes()`` asserts the caller's explicit
     per-call opt-in BEFORE reaching here.
