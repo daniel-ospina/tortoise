@@ -503,8 +503,19 @@ def _write_exec(path: Path, body: str) -> Path:
     return path
 
 
+#: The cause `load_registry` records for the real #9392 incident: the roster was
+#: never written in that cell. Module-level so both test classes model the SAME
+#: cause text the tool actually prints.
+ABSENT_ROSTER = (
+    "FileNotFoundError: [Errno 2] No such file or directory: "
+    "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'"
+)
+
+
 def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
-                       github_measured=True, reconciliation=True,
+                       registry_error="", github_measured=True,
+                       reconciliation=True,
+                       registry_rows=None, workspaces_count=None,
                        generated_at=None, repo=SLUG,
                        liveness_unmeasured=False,
                        open_issues_truncated=False) -> dict:
@@ -552,12 +563,21 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
     if reconciliation:
         state["reconciliation"] = {
             "registry_measured": bool(registry_measured),
+            # The cause TEXT `load_registry` records, so a test can model the two
+            # shapes #9392 must tell apart (#9392).
+            "registry_error": str(registry_error),
             "github_measured": bool(github_measured),
             # #8175: was the OPEN-ISSUE window wide enough to prove a negative?
             "open_issues_truncated": bool(open_issues_truncated),
             "open_issues_read": 989,
             "open_issues_limit": 2000,
         }
+        # The roster SIZE, only when a test asks for it: a board from an older
+        # writer carries no counts, and `None` here models exactly that (#9392).
+        for key, value in (("registry_rows", registry_rows),
+                           ("workspaces_count", workspaces_count)):
+            if value is not None:
+                state["reconciliation"][key] = value
     for number, entries in (issues or {}).items():
         state["index"]["issues"][str(number)] = {
             "lanes": [label for label, _ in entries],
@@ -935,6 +955,36 @@ class CollisionPreflightTest(unittest.TestCase):
         self.assertNotIn("VERDICT: INCOMPLETE", out)
         self.assert_all_surface_rows(out)
         self.assertIn("worktree(s) enumerated (untruncated)", out)
+
+    def test_an_unprovisioned_roster_end_to_end(self):
+        """The reported symptom, on the real tool, end to end (#9392).
+
+        The board is written unanswerable and NO roster exists under the
+        redirected HOME, so the tool rebuilds through the real
+        `fleet_state.build_state`, meets the real `FileNotFoundError`, and must
+        end with the PROVISIONING remedy — not the rebuild that just failed.
+        """
+        self.fleet_board(registry_measured=False,
+                         registry_error=ABSENT_ROSTER)
+        rc, out = self.run_tool()
+        self.assertEqual(rc, 2, out)
+        verdict = self._verdict_line(out)
+        self.assertIn("LANE ROSTER is UNKNOWN", verdict)
+        self.assertIn("lane-registry.tsv", verdict)
+        self.assertIn("NEVER PROVISIONED", verdict)
+        self.assertIn("CANNOT create it", verdict)
+        self.assertIn("PROVISIONING", verdict)
+        # Neither dead end is offered for THIS surface's cause…
+        self.assertNotIn("fix gh auth/network", verdict)
+        self.assertNotIn("rebuild the fleet board", verdict.lower())
+        # …and the surface row above the verdict gives the SAME answer (both
+        # take it from `fleet_state.registry_remedy`), so a lane reading either
+        # one is not misled — the loop this issue files.
+        rows = [ln for ln in out.splitlines()
+                if ln.startswith("  [issue assignee/holder]")]
+        self.assertEqual(len(rows), 1, out)
+        self.assertIn("lane-registry.tsv", rows[0])
+        self.assertIn("PROVISIONING", rows[0])
 
     # ── one stubbed/real hit per hit-capable surface ────────────────────────
 
@@ -7615,6 +7665,94 @@ class HolderGateTests(unittest.TestCase):
             holders=(self.cp.Holder("L", "e", self.cp.HOLDER_UNMEASURED,
                                     "why"),)))
         self.assertIn("1 liveness unmeasured", note)
+
+    # ── #9392: an unprovisioned lane roster is a PROVISIONING gap ───────────
+
+    def _roster_surface(self, error: str = ABSENT_ROSTER):
+        """The claim-gate surface as the real run builds it, note included."""
+        surface = self.cp.Surface("issue assignee/holder")
+        surface.incomplete(self.cp._board_can_answer(
+            _fleet_board_state(registry_measured=False, registry_error=error)))
+        return surface
+
+    def test_the_roster_marker_is_the_note_the_gate_emits(self):
+        """The remedy partitions on this marker, so the two must be ONE string.
+
+        A remedy keyed on prose that the note no longer contains would silently
+        fall through to the generic arm — the defect itself, restored by a
+        harmless-looking reword (#9392).
+        """
+        self.assertIn(self.cp._LANE_ROSTER_NOTE,
+                      self._roster_surface().note)
+
+    def test_an_unprovisioned_roster_remedy_names_provisioning_not_a_rebuild(self):
+        """#9392: the exit-2 remedy must name the cause's owner.
+
+        Measured pre-fix on the real tool (fresh HOME, no roster): the verdict
+        line read `fix gh auth/network (or rebuild the fleet board) and re-run`
+        — while `gh auth` answered every other surface in the same run and
+        `fleet_state.py build` refused on the SAME read. Both remedies are dead
+        ends for this cause, so the reader looped.
+        """
+        remedy = self.cp._incomplete_remedy([self._roster_surface()])
+        self.assertIn("LANE ROSTER is UNKNOWN", remedy)
+        self.assertIn("lane-registry.tsv", remedy)
+        self.assertIn("NEVER PROVISIONED", remedy)
+        self.assertIn("CANNOT create it", remedy)
+        self.assertIn("PROVISIONING", remedy)
+        self.assertIn("CELL step", remedy)
+        # …and the two dead ends are NOT offered.
+        self.assertNotIn("fix gh auth/network", remedy)
+        self.assertNotIn("rebuild the fleet board", remedy.lower())
+
+    def test_an_unreadable_roster_is_not_called_unprovisioned(self):
+        """The second cause gets its own sentence: the file is there and the
+        READ failed, so the fix is the file, not the cell (#9392)."""
+        remedy = self.cp._incomplete_remedy([self._roster_surface(
+            "PermissionError: [Errno 13] Permission denied: "
+            "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'")])
+        self.assertIn("EXISTS but could not be read", remedy)
+        self.assertNotIn("NEVER PROVISIONED", remedy)
+        self.assertNotIn("fix gh auth/network", remedy)
+
+    def test_a_mixed_run_keeps_the_roster_cause_and_the_other_remedy(self):
+        """Partitioned, not replaced: a run whose roster AND a list are
+        unreadable must name BOTH, or the reader fixes one and returns (#9392)."""
+        other = self.cp.Surface("open PRs")
+        other.mark_truncated("the list was capped", widen=True)
+        remedy = self.cp._incomplete_remedy([self._roster_surface(), other])
+        self.assertIn("LANE ROSTER is UNKNOWN", remedy)
+        self.assertIn("TRUNCATED list", remedy)
+
+    def test_the_holder_gate_note_publishes_the_roster_size(self):
+        """#9392's silent half. `board source` is the READ's provenance, never
+        its coverage: a hand-written ONE-ROW roster printed exactly like a full
+        one, so 11 live lanes went invisible and an INCOMPLETE flipped to CLEAN
+        with no code change, silently. Publishing the counts makes a roster of
+        one visibly a roster of one — disclosure, not a dismissal switch: the
+        verdict still keys on `registry_measured`."""
+        note = self.cp._holder_gate_note(self.cp.HolderRead(
+            True, "cache", roster_rows=1, workspaces_count=11))
+        self.assertIn("lane roster: 1 row(s) vs 11 live workspace(s)", note)
+        # An OLDER board publishes no counts. Absent is not zero: saying
+        # "0 row(s)" would report an unmeasured roster as an empty one.
+        self.assertNotIn("lane roster:",
+                         self.cp._holder_gate_note(self.cp.HolderRead(True, "cache")))
+        self.assertIsNone(self.cp._board_count({}, "registry_rows"))
+        for bad in (True, -1, "3", 3.0, None):
+            with self.subTest(value=bad):
+                self.assertIsNone(
+                    self.cp._board_count({"registry_rows": bad}, "registry_rows"))
+
+    def test_read_holders_threads_the_roster_size_from_the_board(self):
+        _write_board(self.board, _fleet_board_state(registry_rows=1,
+                                                    workspaces_count=11))
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured)
+        self.assertEqual((read.roster_rows, read.workspaces_count), (1, 11))
+        # An unmeasured board never carries a count to print.
+        self.assertIsNone(self.cp.HolderRead(False, "unmeasured").roster_rows)
+
 
     def test_the_claim_gate_never_clobbers_an_existing_incomplete_reason(self):
         # `scan_issue_surface` APPENDS to an existing INCOMPLETE note rather than

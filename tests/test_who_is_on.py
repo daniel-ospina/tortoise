@@ -171,7 +171,8 @@ class WhoIsOnTest(unittest.TestCase):
 
     # ── helpers ──────────────────────────────────────────────────────────────
 
-    def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG) -> Path:
+    def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG,
+                           registry_measured=True, registry_error="") -> Path:
         """Write the claim gate's board at `$HOME/.pi/agent/state`.
 
         Only the fields `collision_preflight._read_board` / `_holders_from_board`
@@ -191,7 +192,10 @@ class WhoIsOnTest(unittest.TestCase):
             # always writes it, and an empty list is what a readable live-session
             # store produces.
             "orphans": [],
-            "reconciliation": {"registry_measured": True,
+            "reconciliation": {"registry_measured": bool(registry_measured),
+                               # The cause text `load_registry` records, so a
+                               # test can model an UNPROVISIONED roster (#9392).
+                               "registry_error": str(registry_error),
                                "github_measured": True,
                                # The board must also stamp its OPEN-ISSUE coverage:
                                # `_board_can_answer` refuses an unstamped board
@@ -845,6 +849,33 @@ exit 0
         self.assertEqual(rc, 0, out)
         self.assertIn("ANSWER: 1 holder(s)", out)
         self.assertIn("lane-live", out)
+
+    def test_an_unprovisioned_roster_names_provisioning_not_a_rebuild(self):
+        """#9392, on THIS verb: the two renders must agree.
+
+        `who-is-on` prints the claim gate's surface note, and the gate's
+        INCOMPLETE verdict line prints the remedy — both now take their sentence
+        from `fleet_state.registry_remedy`, so a lane that asks "who is on #N?"
+        and the lane that runs the pre-flight are told the SAME thing: the roster
+        was never provisioned, and a rebuild cannot help. Before the fix this
+        verb could only report "the lane registry could not be read" while the
+        gate told the reader to rebuild the board.
+        """
+        self._write_fleet_board(
+            registry_measured=False,
+            registry_error=(
+                "FileNotFoundError: [Errno 2] No such file or directory: "
+                f"'{self.tmp}/.pi/agent/state/lane-registry.tsv'"),
+        )
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 2, out)
+        self.assertIn("ANSWER INCOMPLETE", out)
+        self.assertNotIn("ANSWER: nobody", out)
+        self.assertIn("lane-registry.tsv", out)
+        self.assertIn("NEVER PROVISIONED", out)
+        self.assertIn("CANNOT create it", out)
+        self.assertIn("PROVISIONING", out)
+        self.assertNotIn("rebuild the fleet board", out.lower())
 
     def test_an_unmeasured_holder_makes_the_answer_incomplete(self):
         """A lane the board attributed but could not measure is NOT "nobody": the

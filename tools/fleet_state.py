@@ -945,7 +945,7 @@ def registry_never_provisioned(error: str) -> bool:
     """
     lowered = str(error or "").lower()
     return (
-        "filenotfounderror" in lowered
+        "filenotfound" in lowered
         or "no such file or directory" in lowered
         # A bare errno 2 with the exception's name stripped (a caller that
         # rebuilt the message from ``exc.strerror``).

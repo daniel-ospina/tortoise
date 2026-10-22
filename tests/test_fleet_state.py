@@ -1501,6 +1501,113 @@ def test_build_refuses_to_cache_a_state_with_an_unreadable_registry(tmp_path, mo
     assert "NOT CACHED" in err and "lane registry" in err
 
 
+# ---------------------------------------------------------------------------
+# #9392 — an ABSENT lane roster is a PROVISIONING gap, not a failed read
+# ---------------------------------------------------------------------------
+
+_ABSENT_ROSTER = (
+    "FileNotFoundError: [Errno 2] No such file or directory: "
+    "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'"
+)
+_UNREADABLE_ROSTER = (
+    "PermissionError: [Errno 13] Permission denied: "
+    "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'"
+)
+
+
+def test_an_absent_roster_names_provisioning_and_not_a_rebuild(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """#9392: the refusal must name the cause's real OWNER.
+
+    Measured before the fix, in a cell whose roster was never provisioned:
+    `fleet_state.py build` printed only "NOT CACHED: the lane registry could not
+    be read" — while `collision_preflight.py` spent the same run telling the
+    reader to rebuild the board, which fails on this very read. A reader was
+    sent in a loop, so the sentence has to distinguish NEVER PROVISIONED from a
+    file that exists and could not be read, and say that a rebuild cannot help.
+    """
+    fake = _unread_registry_state()
+    fake["reconciliation"]["registry_error"] = _ABSENT_ROSTER
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    assert fs.cmd_build(
+        argparse.Namespace(out=str(out), state=str(out), json=False)) == 2
+    assert not out.exists(), "a failed read must never be written as fact"
+    err = capsys.readouterr().err
+    assert "NOT CACHED" in err and "lane registry" in err
+    # …the actionable cause and its owner.
+    assert "NEVER PROVISIONED" in err
+    assert "lane-registry.tsv" in err
+    assert "CANNOT create it" in err, "a rebuild must be named as no remedy"
+    assert "PROVISIONING" in err and "CELL step" in err
+    assert fs.REGISTRY_ROW_FORMAT in err, "name the format a row has to be in"
+    # …and never the self-row shortcut the false-CLEAN class comes from.
+    assert "Do NOT write a row for this lane alone" in err
+
+
+def test_a_present_but_unreadable_roster_is_not_called_unprovisioned(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Two causes, two sentences. Sending a reader to "provision" a file whose
+    real problem is its MODE would be the same defect one cause over (#9392)."""
+    fake = _unread_registry_state()
+    fake["reconciliation"]["registry_error"] = _UNREADABLE_ROSTER
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    assert fs.cmd_build(
+        argparse.Namespace(out=str(out), state=str(out), json=False)) == 2
+    err = capsys.readouterr().err
+    assert "EXISTS but could not be read" in err
+    assert "permissions/encoding" in err
+    assert "NEVER PROVISIONED" not in err
+
+
+def test_registry_remedy_has_three_arms_and_never_lists_the_rebuild() -> None:
+    """No recorded cause must not be guessed at — and NO arm may suggest the
+    rebuild that fails on the same read (#9392)."""
+    absent = fs.registry_remedy(_ABSENT_ROSTER)
+    assert "NEVER PROVISIONED" in absent
+    assert fs.registry_never_provisioned(_ABSENT_ROSTER) is True
+    for text in ("FileNotFoundError", "No such file or directory", "FileNotFound"):
+        assert fs.registry_never_provisioned(text) is True, text
+    for other in (_UNREADABLE_ROSTER, "", "cause not recorded"):
+        assert fs.registry_never_provisioned(other) is False, other
+        assert "NEVER PROVISIONED" not in fs.registry_remedy(other)
+    assert "not recorded" in fs.registry_remedy("")
+    for error in (_ABSENT_ROSTER, _UNREADABLE_ROSTER, ""):
+        assert "rebuild the fleet board" not in fs.registry_remedy(error).lower()
+
+
+def test_the_board_publishes_the_roster_size_beside_its_provenance(monkeypatch) -> None:
+    """#9392's silent half: a ONE-ROW roster is indistinguishable from a full one.
+
+    The measured incident: a hand-written self-row turned 11 live lanes
+    invisible and flipped an INCOMPLETE into a CLEAN with no code change, because
+    `board source: rebuilt` describes the READ, never its coverage. The board now
+    carries the counts, so a reader can print "roster rows: 1".
+    """
+    monkeypatch.setattr(fs, "load_registry",
+                        lambda: [("cell-t3", "WS-A", "")])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {f"WS-{n}": {"cwd": f"/tmp/w{n}"} for n in range(3)}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    rec = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                         sample_s=0.0, do_pane=False)["reconciliation"]
+    assert rec["registry_rows"] == 1, "the roster of one is visible as one"
+    assert rec["workspaces_count"] == 3
+
+
+
 def test_cmd_build_refuses_to_cache_an_unread_board(tmp_path, monkeypatch, capsys) -> None:
     """#7957 H5: a failed read is never CACHED. Writing it would replace the last good
     state with an empty fleet and free every lane into capacity on the next read."""
