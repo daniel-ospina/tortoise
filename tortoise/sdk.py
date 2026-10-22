@@ -5867,6 +5867,33 @@ class UnapprovedKindNamespace(ValueError):
         self.installed = installed
 
 
+#: #7819 — the props REFUSED on a TERMINAL claim: the valid-time window (both
+#: bounds and their precision markers, which describe the bounds) and
+#: ``expiredAt``, the transaction-time termination stamp. An end written after
+#: death is the window the temporal read surfaces answer from (`_covers` /
+#: `get_historical_knowledge`), so writing it here changes what the dead claim
+#: asserts about WHEN it held, with no CORRECTS and no lifecycle record.
+#:
+#: Scoped, not blanket, because a content/metadata revision of a terminal claim
+#: is a recorded capability: a ``PointRevised`` later than a terminalization is
+#: the newer same-id writer and the replay fold handles it (``skip_updated_at``
+#: via ``max_inline_seq``, #3305), pinned by
+#: ``test_pointinvalidated_rebuild.py::test_revise_after_invalidate_skip_
+#: updated_at`` and ``test_pointsuperseded_rebuild.py::test_supersede_then_
+#: revision_does_not_end_at_the_supersede_ts``.
+#:
+#: ``outdated`` is absent because ``_sanitize_props`` already refuses it as a
+#: server-managed lifecycle flag.
+#:
+#: #9649 covers the separate door ``update_entity`` opens onto the same window
+#: (its Point arms write caller props and ``status`` with a vocabulary check and
+#: no lifecycle guard, so they can also flip a ``retracted`` Point to ``live``).
+_TEMPORAL_RESTAMP_PROPS = frozenset({
+    "validFrom", "validTo", "validFromPrecision", "validToPrecision",
+    "expiredAt",
+})
+
+
 def _refuse_inverted_point_window(g, props: dict, *,
                                   point_id: str | None = None) -> None:
     """#5359: refuse an INVERTED validity window at a Point write boundary.
@@ -8459,6 +8486,49 @@ class TortoiseSDK:
                     len(_key_hits), _supplied_key, kind, _key_hits, _key_hits[0])
             if existing_id:
                 pid = existing_id
+                # ── #7819: a dedup hit must not RE-STAMP a dead claim ───────
+                # The check sits at the TOP of this branch because the fold has
+                # two write legs and only one of them is `update_point`: the
+                # authored-word leg (`set_point_baseline` +
+                # `_stamp_authored_word`) writes server-owned baseline props
+                # directly.
+                #
+                # It is scoped to `_TEMPORAL_RESTAMP_PROPS` — the reason is
+                # stated ONCE on that constant — so a fold that carries no
+                # temporal prop keeps applying, exactly like any other revision
+                # of a dead claim (#3305). What must not happen is a fold that
+                # writes the window: it is all-or-nothing, so the WHOLE fold is
+                # dropped rather than applied-minus-the-window.
+                #
+                # Why not "just let the guard raise": the hosted commit path
+                # re-keys a successor onto an already-dead node when the
+                # successor's content address exists as one, and a committed
+                # `when` puts a window on that fold —
+                # `hosted_api._execute_commit_writes` sets `validFrom` from
+                # `pr.point.when` (cited by symbol: this branch's own census file
+                # forbids `file:line` pointers, which drift) — so a raise
+                # there is the deterministic fail-closed 500 #3366 exists to
+                # prevent.
+                #
+                # A dropped fold WARNS (#5365's posture, never a silent skip):
+                # the caller keeps the honest outcome — the dedup HIT is still
+                # reported and the point is still terminal — and is told the
+                # window was not written. The operation for "replace what this
+                # claim said, from a different time" is the retroactive
+                # correction, which is DESIGN ONLY and not shipped in this tree
+                # (`supersede_retroactively` has no SDK method and no registry
+                # row; #5362 waits on surface approval).
+                _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
+                if _temporal:
+                    _terminal = self._lifecycle_terminal_marker(pid)
+                    if _terminal is not None:
+                        _logger.warning(
+                            "create_point: dedup resolved to point %s, which "
+                            "is already terminal (%s) — the fold would "
+                            "re-stamp its temporal record (%s), so NOTHING "
+                            "was applied (#7819).",
+                            pid, _terminal, sorted(_temporal))
+                        return self.get_point(pid)
                 if _has_key:
                     # One read serves BOTH #6110 audits below.
                     _existing = self.get_point(pid)
@@ -12391,6 +12461,44 @@ class TortoiseSDK:
                 # below apply them (never silently discard caller data).
                 props.pop('status')
 
+        # ── #7819: a TERMINAL claim's temporal record is refused here ───────────
+        # Measured on the pre-change tree: `retract_point(p)` followed by
+        # `update_point(p, validTo="2026-06-10")` was accepted and stored the
+        # window, as it was on a point carrying the legacy `outdated=true` flag.
+        # `supersede_point` / `invalidate_point` / `retract_point` consult the
+        # shared guard for their lifecycle writes; this verb did not, and it
+        # writes the same window the temporal read surfaces answer from.
+        #
+        # THE GATE IS SCOPED to `_TEMPORAL_RESTAMP_PROPS` (see that constant for
+        # why a blanket refusal is wrong here: #3305's post-terminalization
+        # revisions are a recorded capability). A call with no temporal prop in
+        # it does not reach this guard at all, so:
+        #   * a status-carrying call keeps the promote path unchanged —
+        #     `update_point(terminal, status='live')` still raises the #432
+        #     "Illegal status transition", and an already-LIVE node is still the
+        #     #1088 idempotent no-op;
+        #   * `missing_ok=True` keeps the absent-id contract: this verb returns
+        #     `{}` for a missing id (measured on both trees);
+        #   * `allow_operator=True` keeps operator points writable: this verb is
+        #     what `annotate_operator` delegates to, and a caller may pass a
+        #     window for an operator. A TERMINAL operator is still refused, pinned
+        #     by `test_update_point_refuses_a_terminal_operator_record` (without
+        #     the flag the operator verdict would mask the terminal one).
+        # It runs after the inverted-window and validity-precision refusals (so
+        # those are reported as themselves, not as terminal), and before the
+        # journal append and every write, so a refused call journals nothing and
+        # writes nothing.
+        #
+        # Residual, unchanged by this fix: the promote arm's
+        # `WHERE (n.status IS NULL OR n.status = 'draft')` does not read the
+        # legacy `outdated=true` flag, so a flag-dead point with a NULL status
+        # can still be given `status='live'` (the flag keeps it terminal for
+        # readers, and the status then contradicts it). That predates this
+        # change; the promote contract and its message are #432's.
+        if _TEMPORAL_RESTAMP_PROPS & set(props):
+            self._assert_lifecycle_guard(id, method="update", missing_ok=True,
+                                         allow_operator=True)
+
         # Check if node carries :Object label (entity node with version tracking)
         has_object = proj.g.query(
             "MATCH (n:Point:Object {id:$id}) RETURN count(n) > 0",
@@ -13372,7 +13480,8 @@ class TortoiseSDK:
 
     def _assert_lifecycle_guard(self, point_id: str, *, method: str,
                                 role: str = "point",
-                                missing_ok: bool = False) -> dict | None:
+                                missing_ok: bool = False,
+                                allow_operator: bool = False) -> dict | None:
         """Single authoritative terminal/operator guard for point lifecycle
         transitions (#2498).
 
@@ -13396,6 +13505,15 @@ class TortoiseSDK:
         ``invalidate_point``'s retry-friendly contract — then returns
         ``None``), an operator node, or an already-terminal claim.
 
+        ``allow_operator`` (#7819) is passed by ``update_point``, which writes
+        operator points (``annotate_operator`` re-enters it, and a caller may
+        supply a window for one): on that door an operator verdict is not a
+        refusal by itself, while a TERMINAL one still is. The classifier
+        checks the operator verdict before terminal
+        (``live.classify_lifecycle_fanout``), so on that branch ``status`` /
+        ``outdated`` describe the operator node and not terminality; the same
+        fan-out rows are then scanned for a terminal node.
+
         #7822: the verdict is over EVERY node carrying the id, not ``row[0]``.
         The writer's stamp MATCHes and writes EVERY node with that id (point
         ids are not unique), so a first-row-only read made the terminal /
@@ -13414,18 +13532,71 @@ class TortoiseSDK:
             if missing_ok:
                 return None
             raise ValueError(f"No point {point_id!r}")
-        if kind == "operator":
+        if kind == "operator" and not allow_operator:
             raise ValueError(
                 f"Point {point_id!r} is an operator — {method} is for "
                 f"statement points")
-        if kind == "terminal":
-            marker = ("outdated" if outdated
-                      and status not in TERMINAL_EXCLUDED_STATUSES
-                      else (status or "live"))
+        # #7819: operator-ness is writable on the doors that pass
+        # `allow_operator` (`update_point`, whose body `annotate_operator`
+        # re-enters); TERMINALITY is not. The marker is read off the same rows,
+        # once — the operator branch of the classifier outranks terminal, so
+        # its `status`/`outdated` are not the terminality answer.
+        marker = self._lifecycle_terminal_marker(point_id, rows)
+        if marker is not None:
+            # Neither verb of the two families (#7819): ``update_point``
+            # re-stamps a prop/window without terminalizing, while
+            # ``retract_point`` / ``supersede_point`` / ``invalidate_point``
+            # terminalize, so the refusal names what the dead claim FORBIDS
+            # instead of assuming the caller's shape.
             raise ValueError(
                 f"Point {point_id!r} is already terminal ({marker}) — "
-                f"{method} cannot terminalize a dead {role}")
+                f"{method} cannot re-stamp or terminalize a dead {role} "
+                f"(#2498: terminalization is one-way)")
         return {"id": point_id, "status": status, "outdated": outdated}
+
+    def _lifecycle_terminal_marker(self, point_id: str, rows=None) -> str | None:
+        """The terminal marker for an id's whole fan-out, or ``None``.
+
+        Shared by the two callers that need the verdict (#7819):
+        ``_assert_lifecycle_guard`` (which raises on a marker) and
+        ``create_point``'s dedup fold (which drops a fold that would write the
+        window onto a dead claim). The fold writes through more than one route
+        — ``update_point`` and the server-owned baseline writers — which is why
+        the check is not placed beside any single write.
+
+        Covers BOTH shapes the shared classifier can report a terminal node
+        under: ``kind == "terminal"``, and ``kind == "operator"`` — the
+        classifier ranks the operator verdict ABOVE terminal, so on that branch
+        its ``status``/``outdated`` describe the operator node and say nothing
+        about terminality. The rows are scanned with the same shared predicate
+        rather than re-queried (#7822).
+
+        ``rows`` lets a caller that already ran ``LIFECYCLE_FANOUT_QUERY`` pass
+        its result in, so the guard's verdict is over the SAME read it just
+        classified.
+        """
+        if rows is None:
+            rows = self._get_proj().g.query(
+                LIFECYCLE_FANOUT_QUERY, params={"id": point_id},
+            ).result_set
+        kind, status, outdated = classify_lifecycle_fanout(rows)
+        if kind == "operator":
+            # Picked by the classifier's OWN stable key, never by position:
+            # `classify_lifecycle_fanout` sorts a copy, so the rows here are
+            # still in server order, and this value reaches both the refusal
+            # message and the dedup WARNING.
+            hit = min(((st, od) for _op, st, od in rows
+                       if is_terminal_status(st, od)),
+                      key=lambda r: (str(r[0] or ""), bool(r[1])),
+                      default=None)
+            if hit is None:
+                return None
+            status, outdated = hit
+        elif kind != "terminal":
+            return None
+        return ("outdated" if outdated
+                and status not in TERMINAL_EXCLUDED_STATUSES
+                else (status or "live"))
 
     def _assert_window_start_not_inverted(self, point_id: str, now: str) -> None:
         """#5358: refuse an INVERTED predecessor window BEFORE any mutation.

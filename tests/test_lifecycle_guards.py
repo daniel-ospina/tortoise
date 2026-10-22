@@ -406,3 +406,308 @@ def test_duplicate_id_with_an_operator_sibling_is_refused(sdk):
     assert bool(pre[-1][0]), pre
     with pytest.raises(ValueError, match="operator"):
         sdk.retract_point(dup)
+
+
+# ── #7819: `update_point` re-stamped a DEAD claim's temporal record ───────
+#
+# `update_point` never consulted the shared `_assert_lifecycle_guard`, so a
+# TERMINAL claim's validity window could be rewritten through it:
+#
+#     sdk.retract_point(p)                       # p is now TERMINAL
+#     sdk.update_point(p, validTo="2026-06-10")  # ...accepted, window written
+#
+# The guard is scoped to `_TEMPORAL_RESTAMP_PROPS` (window bounds + their
+# precision markers + `expiredAt`) because a content/metadata revision of a
+# terminal claim is a recorded capability (#3305). Both halves are pinned here:
+# what is refused, and what keeps working. `update_entity`'s Point arms open a
+# second door onto the same window and are tracked separately as #9649.
+
+def _stored(pid, key, sdk):
+    rows = sdk._get_proj().g.query(
+        f"MATCH (n:Point {{id:$id}}) RETURN n.{key}",
+        params={"id": pid}).result_set
+    return rows[0][0] if rows else None
+
+
+@pytest.mark.parametrize("status", _TERMINAL_STATUSES)
+def test_update_point_refuses_a_window_on_every_terminal_status(sdk, status):
+    """The #7819 hole: a dead claim's window is not writable.
+
+    Fails on the pre-fix tree — `update_point` returned normally and stored the
+    caller's `validTo` on a `retracted`/`superseded`/`outdated`/`archived`/
+    `deprecated` point.
+    """
+    pid = _point(sdk, status=status)
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(pid, validTo="2026-06-10")
+    assert _stored(pid, "validTo", sdk) is None, (
+        f"the refused write still landed a window on a {status} point")
+
+
+@pytest.mark.parametrize("prop,value", [
+    ("validFrom", "2026-01-01"),
+    ("validTo", "2026-06-10"),
+    ("expiredAt", "2026-06-10"),
+])
+def test_update_point_refuses_the_whole_temporal_record(sdk, prop, value):
+    """The refused set is the TEMPORAL RECORD, not just `validTo`: `expiredAt` is
+    the transaction-time termination stamp. Pre-fix each of these landed."""
+    pid = _point(sdk, status="retracted")
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(pid, **{prop: value})
+    assert _stored(pid, prop, sdk) is None
+
+
+@pytest.mark.parametrize("bound,marker", [
+    ("validFrom", "validFromPrecision"),
+    ("validTo", "validToPrecision"),
+])
+def test_update_point_refuses_a_precision_marker_on_a_dead_claim(
+        sdk, bound, marker):
+    """A precision marker describes a BOUND, so it is part of the temporal
+    record and is refused with it.
+
+    Exercised RIDING its bound (the realistic caller shape). Supplied alone, the
+    #2350 precision validator refuses it whenever the point stores no bound of
+    its own — a different and equally correct refusal, which is why the guard
+    sits after the inverted-window and precision checks.
+    """
+    pid = _point(sdk, status="retracted")
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(pid, **{bound: "2026-06-10", marker: "day"})
+    assert _stored(pid, bound, sdk) is None
+    assert _stored(pid, marker, sdk) is None
+
+
+def test_update_point_refuses_the_legacy_outdated_flag(sdk):
+    """The legacy ``outdated=true`` flag is terminal for this door too — the
+    shared predicate, never a locally hardcoded status list."""
+    pid = _point(sdk, outdated=True)
+    with pytest.raises(ValueError, match=r"already terminal \(outdated\)"):
+        sdk.update_point(pid, validTo="2026-06-10")
+    assert _stored(pid, "validTo", sdk) is None
+
+
+def test_a_dead_claim_still_accepts_a_content_and_metadata_revision(sdk):
+    """The OTHER half, and the reason the guard is scoped (#3305).
+
+    A revision that arrives after a terminalization is the NEWER same-id writer
+    and the replay fold models it (`skip_updated_at` via `max_inline_seq`) —
+    pinned by
+    `test_pointinvalidated_rebuild.py::test_revise_after_invalidate_skip_
+    updated_at` and
+    `test_pointsuperseded_rebuild.py::test_supersede_then_revision_does_not_
+    end_at_the_supersede_ts`, both of which revise a terminal point THROUGH
+    this door. A blanket refusal would redden both. Content, tags and ordinary
+    metadata therefore stay writable; only the temporal record is refused.
+    """
+    pid = _point(sdk, status="superseded")
+    sdk.update_point(pid, content="revised after supersede")
+    assert _stored(pid, "content", sdk) == "revised after supersede"
+    sdk.update_point(pid, note="revised metadata", tags=["after-death"])
+    assert _stored(pid, "note", sdk) == "revised metadata"
+    assert _stored(pid, "status", sdk) == "superseded", "no resurrection"
+    # ...and the temporal record is STILL refused after those revisions.
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(pid, validTo="2026-06-10")
+
+
+def test_a_refused_temporal_write_leaves_the_point_byte_identical(sdk):
+    """Fail-closed: status, window and props are untouched, so a caller that
+    catches the ValueError is not left with a half-applied edit."""
+    pid = _point(sdk, status="superseded")
+    keys = ("status", "validFrom", "validTo", "validToPrecision", "expiredAt",
+            "content", "confidence", "updatedAt")
+    before = tuple(_stored(pid, k, sdk) for k in keys)
+    for props in ({"validTo": "2026-06-10"},
+                  {"validFrom": "2026-01-01"},
+                  {"validTo": "2026-06-10", "confidence": 0.9},
+                  {"validFrom": "2026-01-01", "content": "rewritten"}):
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.update_point(pid, **props)
+    assert tuple(_stored(pid, k, sdk) for k in keys) == before
+
+
+def test_a_refused_temporal_write_journals_no_revision(tmp_path):
+    """No record may precede a write the guard refuses.
+
+    The non-promote arm appends its ``PointRevised`` BEFORE the write (#7951
+    outbox ordering), so a guard placed after the append would leave the
+    journal claiming a revision the graph never took — and a rebuild would
+    apply it.
+    """
+    from tortoise.log import EventLog
+    from tortoise.sdk import TortoiseSDK
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "g7819.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = sdk.create_point("statement", "dead before revision")["id"]
+        sdk.retract_point(pid)
+        path = events / "events.jsonl"
+        before = [e for e in EventLog(str(path)).read_all()
+                  if e.get("type") == "PointRevised"
+                  and e.get("id") == pid]
+        with pytest.raises(ValueError, match="already terminal"):
+            sdk.update_point(pid, validTo="2026-06-10")
+        after = [e for e in EventLog(str(path)).read_all()
+                 if e.get("type") == "PointRevised"
+                 and e.get("id") == pid]
+        assert after == before, "a refused update must journal nothing"
+    finally:
+        sdk.close()
+
+
+def test_update_point_keeps_the_absent_id_contract(sdk):
+    """``missing_ok=True``: a missing id still returns ``{}`` (measured at HEAD
+    before this change) — the guard must not turn it into a raise."""
+    assert sdk.update_point("missing-7819", validTo="2026-06-10") == {}
+
+
+def test_update_point_still_writes_a_live_operator(sdk):
+    """``allow_operator=True``: ``annotate_operator``'s body IS this verb, so
+    operator points must stay writable — closing the hole must not break the
+    annotate path."""
+    src, dst = _point(sdk), _point(sdk)
+    op = sdk.create_operator("IMPL", src, [dst])["id"]
+    sdk.annotate_operator(op, 0.1, 0.9, 0.9, 0.9)
+    assert _stored(op, "annotator_precision", sdk) == 0.9
+    # ...and a generic prop on a live operator is still an ordinary write.
+    sdk.update_point(op, note="carried")
+    assert _stored(op, "note", sdk) == "carried"
+
+
+def test_update_point_refuses_a_terminal_operator_record(sdk):
+    """The other half of ``allow_operator``: operator-ness is writable here,
+    the TEMPORAL record is not — ``live.classify_lifecycle_fanout`` ranks the
+    operator verdict ABOVE terminal, so this case is only refused if the guard
+    scans the same fan-out for terminality instead of trusting the operator
+    branch."""
+    src, dst = _point(sdk), _point(sdk)
+    op = sdk.create_operator("IMPL", src, [dst])["id"]
+    # ``retract_point`` refuses operators by design (retraction is for
+    # statement points), so the terminal operator is written directly — the
+    # guard must handle any state the graph can hold, not just creatable ones
+    # (same reason ``_point`` writes status directly).
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) SET n.status = 'retracted'",
+        params={"id": op})
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(op, validTo="2026-06-10")
+    assert _stored(op, "validTo", sdk) is None
+
+
+def test_update_point_refuses_a_duplicate_id_with_a_dead_sibling(sdk):
+    """#7822's fan-out rule reaches this door too: the write MATCHes EVERY node
+    carrying the id, so ONE dead sibling refuses the whole id."""
+    dup = f"pt_dup_{uuid.uuid4().hex[:8]}"
+    pre = _duplicate_with_dead_sibling(sdk, dup)
+    assert not is_terminal_status(pre[0][1], bool(pre[0][2])), pre
+    assert is_terminal_status(pre[-1][1], bool(pre[-1][2])), pre
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(dup, validTo="2026-06-10")
+    after = {tuple(r) for r in sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.is_operator, n.status, "
+        "coalesce(n.outdated, false)", params={"id": dup}).result_set}
+    assert after == {tuple(r) for r in pre}, after
+
+
+def test_update_point_refuses_a_duplicate_id_with_a_DEAD_OPERATOR_sibling(sdk):
+    """A terminal OPERATOR sibling on a duplicated id.
+
+    The classifier answers ``operator`` for this fan-out, so a guard that
+    treated "operator" as "allowed" on this door would still let the write
+    land on the dead node — the exact shape ``allow_operator`` must NOT turn
+    into a hole.
+    """
+    dup = f"pt_dup_{uuid.uuid4().hex[:8]}"
+    _duplicate_with_dead_sibling(sdk, dup, dead_is_operator=True)
+    # make the operator sibling TERMINAL as well (operator outranks terminal in
+    # the classifier, so the two verdicts are now carried by ONE node).
+    sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) WHERE n.is_operator = true "
+        "SET n.status = 'retracted'", params={"id": dup})
+    with pytest.raises(ValueError, match="already terminal"):
+        sdk.update_point(dup, validTo="2026-06-10")
+
+
+def test_update_point_routes_through_the_shared_guard():
+    """Census pin: `update_point`'s terminal refusal goes through the shared
+    guard, and its scope is a named set rather than an inline literal."""
+    src = inspect.getsource(TortoiseSDK.update_point)
+    assert "_assert_lifecycle_guard" in src
+    assert "allow_operator=True" in src
+    assert "missing_ok=True" in src
+    assert "_TEMPORAL_RESTAMP_PROPS" in src, (
+        "the scoping must be a named set, not an inline literal")
+
+
+def test_create_point_dedup_does_not_fold_a_window_onto_a_dead_claim(
+        sdk, caplog):
+    """#7819, the dedup side: a fold that carries a window is all-or-nothing.
+
+    The fold writes through more than one route (``update_point``, and the
+    authored-word leg's ``set_point_baseline`` / ``_stamp_authored_word``), so
+    the check sits at the top of the branch rather than beside any single write,
+    and the WHOLE fold is dropped rather than applied-minus-the-window. The
+    drop is a WARNING with the dedup HIT still reported — never a silent
+    skip (#5365) and never a raise, which is the fail-closed-500 class #3366
+    exists to prevent on the hosted commit path.
+    """
+    content = f"dedup onto dead {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+    before = sdk.get_point(pid)
+    with caplog.at_level("WARNING"):
+        again = sdk.create_point("statement", content, validFrom="2026-01-01",
+                                 confidence=0.99, dedup=True)
+    assert again["id"] == pid, "a dedup HIT is still reported as the same point"
+    after = sdk.get_point(pid)
+    assert after["status"] == "retracted"
+    assert _stored(pid, "validFrom", sdk) is None
+    assert after["confidence"] == before["confidence"], (
+        "the fold is all-or-nothing — no prop may land beside the refused "
+        "window")
+    assert any("re-stamp its temporal record" in r.getMessage()
+               for r in caplog.records), (
+        "the dropped fold must WARN — a silent drop is the #5365 defect")
+
+
+def test_a_live_claim_still_takes_a_temporal_write(sdk):
+    """The scope boundary from the ALLOW side: the guard is over the TARGET's
+    lifecycle, not over the props, so a live claim must still accept a window.
+    Without this mirror a blanket refusal (or a marker returned for every
+    point) would leave the rest of this block green."""
+    pid = _point(sdk)
+    sdk.update_point(pid, validTo="2026-06-10", confidence=0.93)
+    assert _stored(pid, "validTo", sdk) == "2026-06-10"
+    assert _stored(pid, "confidence", sdk) == pytest.approx(0.93)
+    assert sdk.get_point(pid)["status"] == "live"
+
+
+def test_create_point_dedup_folds_a_window_onto_a_live_claim(sdk):
+    """Same boundary on the dedup door: a fold carrying a window applies in
+    full when the target is live — the drop is the TERMINAL case only, so a
+    blanket drop would be caught here."""
+    content = f"dedup window {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content)["id"]
+    again = sdk.create_point("statement", content, dedup=True,
+                             validFrom="2026-01-01", confidence=0.97)
+    assert again["id"] == pid
+    assert _stored(pid, "validFrom", sdk) == "2026-01-01"
+    assert _stored(pid, "confidence", sdk) == pytest.approx(0.97)
+
+
+def test_create_point_dedup_without_a_window_still_folds(sdk):
+    """The boundary: a fold with NO temporal prop keeps applying, dead target or
+    not — the same rule as any other revision of a dead claim (#3305)."""
+    content = f"dedup metadata {uuid.uuid4().hex[:8]}"
+    pid = sdk.create_point("statement", content)["id"]
+    sdk.retract_point(pid)
+    again = sdk.create_point("statement", content, confidence=0.99,
+                             dedup=True)
+    assert again["id"] == pid
+    assert sdk.get_point(pid)["confidence"] == pytest.approx(0.99)
+    assert sdk.get_point(pid)["status"] == "retracted"
