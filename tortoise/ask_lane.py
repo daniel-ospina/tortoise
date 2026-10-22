@@ -387,14 +387,20 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         already ordered by hit type** (D3 #9092: statement → turn →
         chunk). A pool mixing those types is REGROUPED by tier — never by
         the value mark, which only breaks ties inside a tier.
-        ⚠️ **On THIS lane the own-source leg is currently INERT (#8658):**
-        the product search path does not put ``quote`` / ``source_turn_id``
-        on a hit, so pass 2 (a point's own source chunks/turns) never
-        fires and only pass 1 (cross-item near-dupe statements) does —
-        measured cost: 12 window slots for one flooded fact instead of 2
+        ⚠️ **#8658 LANDED — this leg is no longer inert on the product lane:**
+        the search point fetch now reads ``quote`` / ``source_turn_id`` /
+        ``span_start`` / ``span_end`` and emits them present-only, so pass 2 (a
+        point's own source chunks/turns) fires on real graphs. Residual: the
+        two DEGRADED fallback tiers still carry none (their projections are
+        deliberately lean — see the ``#3804 KNOWN LIMITATION`` note in
+        ``sdk.py``). What is inert on that tier is pass 2's OWN-SOURCE-INTO-ANCHOR
+        collapse; pass 2's standalone same-session verbatim dedup (containment /
+        byte-identity, which keys on neither ``quote`` nor ``source_turn_id``) and
+        all of pass 1 still fire. Pre-#8658 measured cost of the inert leg: 12
+        window slots for one flooded fact instead of 2
         (docs/runbook/8043-slice-a-t-gate.md §2, arm
         ``provenance_free_assembly``). The no-dupe byte-identity above is
-        unaffected — do not read the collapse claims here as fully active.
+        unaffected.
 
     Returns the 13-field response shape: ``{answer, abstained,
     question_type, question_date, evidence, context_tokens, model,
@@ -537,9 +543,10 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         # ON path is byte-identical to OFF when no near-duplicates exist
         # AND the pool is already tier-ordered — D3 #9092 regroups a pool
         # that mixes hit types: statements first, then turn Points, then
-        # raw chunks). ⚠️ This lane's own-source leg is inert today (#8658) —
+        # raw chunks). #8658 landed, so the own-source leg is live on the
+        # product lane (a degraded fallback read still carries no provenance) —
         # see the arm's docstring above and
-        # docs/runbook/8043-slice-a-t-gate.md §2 for the measured cost.
+        # docs/runbook/8043-slice-a-t-gate.md §2 for the pre-fix measured cost.
         # mark_for=None = the stored-``has_answer`` fallback
         # (source-session class only) — product graphs carry zero value
         # marks, so the package is pure collapse + D3 hit-type ordering on
