@@ -787,6 +787,122 @@ def _cmd_record_reconcile(args):
     return exit_code_for(result)
 
 
+def _cmd_record_backup(args):
+    """#9557 (R9) — the record's backup, and the drill that proves it restores.
+
+    The record (Postgres) is the system of record, so the durability obligation
+    is Postgres's own backup — and until this verb, **no module of ours held
+    it**: every archiving module in the tree copies the GRAPH. The mechanism is
+    ``tortoise/record_backup.py``; this verb is what gives it a caller that is
+    neither a test nor an evidence probe, and what a scheduler can run.
+
+    Two modes, one code path:
+
+    * **backup** (``--scratch-dsn`` absent) — dump → encrypt → upload to the
+      existing R2 bucket, then prune to ``--keep``.
+    * **drill** (``--scratch-dsn`` given) — the same backup, then download →
+      decrypt → restore into the SCRATCH record → compare per-table row counts
+      against the live source. This is the executed restore the posture
+      requires; a restore that has never been run is not a restore.
+
+    Exit codes, because a scheduler's only signal is the code:
+      ``0`` backup published (and, in drill mode, the restore VERIFIED)
+      ``1`` the backup/restore could not be performed (pg_dump/pg_restore
+          non-zero, a transport failure) — the record is NOT backed up
+      ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
+          a pooler DSN, a populated scratch target, an empty record to drill, an
+          artifact whose integrity or shape pin does not verify (no verdict
+          was produced — and NOT a green one)
+      ``3`` the drill RAN and the restored record DISAGREES with its source
+
+    ``2`` also covers a USAGE error, exactly as ``record-reconcile`` documents:
+    argparse's own ``error()`` exits ``2``. The two are not separated on purpose
+    — a scheduler must read ``2`` as *no verdict*, never as a green one.
+    """
+    import json as _json
+
+    from tortoise.record_backup import (
+        RECORD_BACKUP_KEEP,
+        RecordBackupError,
+        RecordRestoreRefused,
+        RecordRestoreVerifyError,
+        create_record_backup,
+        prune_record_backups,
+        run_restore_drill,
+    )
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    # The DSN is resolved by the module that DECLARES the arming surface —
+    # never re-spelled here, so this verb cannot drift from the writer's notion
+    # of "armed" and a non-Postgres value is reported as the MISCONFIGURATION it
+    # is rather than as an unreadable record (an outage).
+    try:
+        dsn = record_dsn(args.record_dsn)
+    except RecordWriteError as e:
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
+        return 2
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn or set "
+              "TORTOISE_RECORD_DSN. Nothing was backed up, and no restore was "
+              "proven.", file=sys.stderr)
+        return 2
+
+    # The bucket is the SAME one the graph archives use: a deployment that can
+    # sweep graphs needs no new credential for the record.
+    from tortoise.hosted_backup import R2Storage
+
+    try:
+        storage = R2Storage()
+        storage.head_bucket()
+    except Exception as e:
+        print(f"Error: the backup bucket is unreachable or unconfigured ({e}) — "
+              f"the record was NOT backed up.", file=sys.stderr)
+        return 2
+
+    keep = args.keep if args.keep is not None else RECORD_BACKUP_KEEP
+    try:
+        if args.scratch_dsn:
+            report = run_restore_drill(dsn, storage, args.scratch_dsn,
+                                       workdir=args.workdir)
+        else:
+            report = create_record_backup(dsn, storage, workdir=args.workdir)
+    except RecordRestoreVerifyError as e:
+        print(f"✗ RESTORE DRILL RED: {e}", file=sys.stderr)
+        if args.json:
+            print(_json.dumps({"verdict": "MISMATCH",
+                               "mismatches": e.mismatches}, indent=2))
+        return 3
+    except RecordRestoreRefused as e:
+        # Not a verdict: the drill did not run. `2` says so, and a scheduler
+        # must not read it as "the record is backed up".
+        print(f"Error: {e} — no verdict was produced.", file=sys.stderr)
+        return 2
+    except RecordBackupError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    deleted = prune_record_backups(storage, keep=keep)
+    if args.json:
+        print(_json.dumps({**report, "pruned": deleted}, indent=2, sort_keys=True))
+        return 0
+    if args.scratch_dsn:
+        print(f"✓ RESTORED — record backup {report['backup_id']} restored into "
+              f"scratch and matched its source "
+              f"({report['row_total']} rows across {len(report['tables'])} table(s))")
+        for table, counts in report["tables"].items():
+            print(f"  {table}: source={counts['source']} restored={counts['restored']}")
+    else:
+        total = sum(report.get("row_counts", {}).values())
+        print(f"✓ record backup {report['backup_id']} published "
+              f"({total} rows, {report['bytes']} bytes, "
+              f"{len(report['tables'])} table(s))")
+        print("  ⚠ NOT PROVEN RESTORABLE — a backup without a drill is a claim. "
+              "Run with --scratch-dsn to restore it and compare row counts.")
+    if deleted:
+        print(f"  pruned {len(deleted)} object(s), keeping {keep} artifact(s)")
+    return 0
+
+
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
     import json as _json  # noqa: I001
@@ -11131,6 +11247,37 @@ def main(argv: list[str] | None = None) -> int:
                          "— it never returns a partial answer")
     rr.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
+    # #9557 (R9): the RECORD's backup. Deliberately not `backup` (that verb
+    # copies a local embedded graph + its events.jsonl) and deliberately not on
+    # the capture turn: a scheduled, off-box artifact plus an executed restore.
+    rb = sp.add_parser(
+        "record-backup",
+        help="Dump the Postgres record, encrypt and upload it off-box; with "
+             "--scratch-dsn, restore it into a scratch record and prove the row "
+             "counts match. Exit 0 backed up+verified / 3 drill RED / 2 could "
+             "not run / 1 backup failed")
+    rb.add_argument("--record-dsn", default=None,
+                    help="Postgres record DSN (default: $TORTOISE_RECORD_DSN). "
+                         "Must be the DIRECT connection, not the pooler: a "
+                         "dump/restore session through a transaction pooler can "
+                         "be silently short, so a pooler DSN is refused (exit 2)")
+    rb.add_argument("--scratch-dsn", default=None,
+                    help="Drill mode: an EMPTY scratch Postgres DSN to restore "
+                         "the artifact into and compare row counts against the "
+                         "live record. It must not be the record itself — a "
+                         "restore into a populated record is refused. Without "
+                         "this flag the verb backs up only, and says the "
+                         "artifact is NOT proven restorable")
+    rb.add_argument("--keep", type=int, default=None,
+                    help="Artifacts to retain after a successful run "
+                         "(default: 14). `--keep 0` is refused: a prune that "
+                         "keeps nothing is data loss")
+    rb.add_argument("--workdir", default=None,
+                    help="Directory for the plaintext dump while it is being "
+                         "encrypted/restored (default: the system temp dir; the "
+                         "file is 0600 and removed on every path)")
+    rb.add_argument("--json", action="store_true",
+                    help="Machine-readable JSON output")
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
     bk.add_argument("--db", required=True, help="Path to database file")
     bk.add_argument("--events", default="events.jsonl", help="Path to event log")
@@ -11720,6 +11867,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reconcile(args)
     elif args.cmd == "record-reconcile":
         return _cmd_record_reconcile(args)
+    elif args.cmd == "record-backup":
+        return _cmd_record_backup(args)
     elif args.cmd == "backfill":
         _cmd_backfill(args)
         return 0

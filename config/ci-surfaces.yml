@@ -142,6 +142,8 @@ surfaces:
   # instead. Pinned by
   # tests/test_ci_selection.py::test_the_capstone_census_pin_runs_on_a_main_py_change.
   - test_7950_capstone_probe.py
+  # #9557 (R9): the record's BACKUP and the drill that proves it restores (`tortoise/record_backup.py` + the `record-backup` CLI verb). DUAL-REGISTERED with `core`, and THIS arm is the one that carries a verb-only diff: `tortoise/__main__.py` is an EXACT `api` SOURCE_PATTERN that REPLACES the `core` fallback in `select()`, so a diff that changes the verb alone selects `api` and a `core`-only entry would never run the file pinning the verb's exit codes — the #1349/#2938/#3154 silent-drop class, the same argument as the `test_record_reconcile_trigger.py` rows above. `record_backup.py` itself matches no SOURCE_PATTERN, so a mechanism-only diff takes `core`. DB-free (pg_dump/pg_restore and the row counts are injected), so it is deliberately NOT carve_out-registered.
+  - test_record_backup.py
   # #7809: DUAL-REGISTERED with `core` AND `eval` — without this `api` arm the
   # guard is SKIPPED on the exact change it exists to guard. The pre-warm it
   # pins lives in `tortoise/hosted_api.py`, an EXACT `api` SOURCE_PATTERNS match
@@ -3963,6 +3965,8 @@ surfaces:
   # falls through to `core` — the same placement argument as the #7952 block
   # above.
   - test_7950_capstone_probe.py
+  # #9557 (R9): the record's backup (`tortoise/record_backup.py`) and the `record-backup` verb. `core` is the arm for a `record_backup.py`-only diff (the module matches no SOURCE_PATTERN and falls through here); DUAL registration with `api` is required because `tortoise/__main__.py` — the verb — is an EXACT `api` pattern that REPLACES this fallback.
+  - test_record_backup.py
   - test_stop_writes.py
   - test_structural_leg_r4.py
   - test_subjectadded_journal.py        # #2295 SubjectAdded journaling (docker lane)
@@ -6371,6 +6375,7 @@ durations:
   # Both are measured locally under the same `# unmeasured` convention; refresh from
   # the first post-merge run that includes them.
   test_7936_reference_fold_label_rekey.py: 8.0  # #7936 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). The row is added for the HEADROOM the gate no longer has — main sits just above the 90% floor, so one more unmeasured fast file can tip `duration_coverage_issues()`, and an absent row is also what reds `tests/test_ci_timing.py`'s `validate_refreshed_manifest` assertions. Local embedded-lane reading 7.0-10.1 s (15 tests; `FalkorProjection(path=…)` graphs, plus one SDK live-build case). Refresh from the first post-merge run that includes it.
+  test_record_backup.py: 2.0  # #9557 (#3400/#4348 trap): a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it takes the flat 2.0s default — and the row is required for the DURATIONS half as well as the surface half, because an unregistered new test file reds `integrity_problems`. Local reading on this host (embedded carve-out lane, DB-free, 27 tests after the last revision): "27 passed in 10.1s" — the session total, which the #3400 method attributes to no file, so it is NOT substituted for a CI weight. Refresh from the first post-merge run that includes it; do not drop the row without re-deriving the coverage floor at that head.
   eval/retrieval/test_integration.py: 1523.4
   # #3553: this file is NEW on this branch, so main's sweep has no junit measurement for it.
   # It is NOT presented as a measurement — it carries the branch's local reading under the

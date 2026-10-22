@@ -370,6 +370,103 @@ fly releases -a tortoise-y4mjjq
 fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageRef') -a tortoise-y4mjjq
 ```
 
+## 3.5 The record's backup, and the drill that proves it restores (#9557 / R9)
+
+**The Postgres record is the system of record**, so its durability is Postgres's own backup.
+`docs/durability-posture.md` owns the *posture*; this section is the *procedure*. The mechanism is
+`tortoise/record_backup.py` and its one trigger is the `record-backup` verb — the graph sweeps
+(`backup_sweep.py`, `hosted_backup.py`, `selfhost_backup.py`) copy the **graph** and are not this.
+
+```bash
+# backup only — dump -> encrypt -> upload to R2 under record-backups/
+python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN"
+
+# backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
+python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" \
+    --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN"
+```
+
+Exit codes (a scheduler's only signal):
+
+| code | meaning |
+|---|---|
+| `0` | backup published — and in drill mode, the restore **verified** against the source |
+| `1` | the backup/restore **could not be performed** (pg_dump/pg_restore non-zero, transport). The record is NOT backed up |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a populated scratch target, an **empty** record to drill. No verdict was produced — never read as green |
+| `3` | the drill **ran** and the restored record disagrees with its source (or the artifact failed integrity/shape verification) |
+
+⚠️ **A `0` in backup-only mode is not a durability claim.** The verb prints
+`NOT PROVEN RESTORABLE` in that mode on purpose: the posture asks for *"a backup whose artifact is
+proven restorable"*, and only the drill mode proves it. Run the drill on a schedule of its own.
+
+### Preconditions (each one is a measured failure, not a preference)
+
+1. **The DIRECT connection string, not the pooler.** A transaction-mode pooler discards session
+   state between transactions; a dump through it can be silently short. The verb refuses a pooler
+   host or port 6543 (exit 2) rather than producing an artifact nobody can trust.
+2. **R2 + `TORTOISE_BACKUP_KEY`**, the same credentials the graph sweep uses — one bucket, one key,
+   so a deployment that backs up graphs needs nothing new.
+3. **The drill's scratch target carries the record's schema** (apply `supabase/migrations`). The
+   artifact is **data-only** on purpose: the schema's one home is the migrations, and a
+   schema-carrying artifact cannot restore into a migrated target at all (`pg_restore` refuses
+   `relation "node_identity" already exists` — measured 2026-10-22).
+4. **The scratch target carries the tenancy rows the record's foreign keys reference** —
+   `organizations(id)`, and `graphs(org_id, id)`. These are the control plane, not the record. A
+   target without them is refused by the FK, which is the correct direction: a record dangling from
+   missing tenancy is not a record. (Do **not** work around it with
+   `session_replication_role = replica`.)
+5. **The scratch target's record tables are EMPTY.** A restore into a populated record is refused —
+   it is not a drill, and `pg_restore` would either fail halfway on a duplicate key or overwrite
+   live data.
+
+### Retention
+
+A successful run prunes `record-backups/` to the newest **14** artifacts (`--keep`). The prune only
+removes objects whose manifest it could read and whose `format` it recognises; anything it cannot
+attribute is left alone, because a prune that guesses deletes the only copy of something it did not
+understand.
+
+### Schedule — NOT YET DEPLOYED, and that is the current loss window
+
+The verb is the caller; no cron currently invokes it, so **the record has no automatic archive yet**
+and its loss window is whatever an operator's manual run makes it (i.e. unbounded). The line to add
+is one job, alongside the graph sweep's `registry-backup-cron.yml`:
+
+```cron
+17 3 * * *   python -m tortoise record-backup --record-dsn "$TORTOISE_RECORD_DSN" --scratch-dsn "$TORTOISE_RECORD_SCRATCH_DSN"
+```
+
+Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
+restate the record's loss window as anything smaller. The drill's own cadence can be slower than the
+backup's — a weekly drill is enough to keep the artifact proven.
+
+### Measured drill (2026-10-22) — what actually ran
+
+Executed end to end against a real `postgres:17`, a **real** `pg_dump`/`pg_restore`, the real
+`supabase/migrations` schema, and the real encrypt/upload/download/decrypt path (in-memory storage):
+
+```
+verdict: RESTORED            row_total: 56
+node_identity 8/8   journal_event 40/40   source 1/1   event 1/1   session 1/1
+object 1/1   subject 1/1   point 1/1   relation 2/2
+```
+
+Falsifiers observed **red** in the same session (a green drill that cannot red proves nothing):
+
+| falsifier | observed |
+|---|---|
+| `journal_event` forced short | `the restored record does not match its source: journal_event (source 40 → restored 0)` |
+| one byte flipped in the stored artifact | `artifact integrity check failed (sha256 mismatch)` — **before** `pg_restore` ran |
+| restore target already populated | `the target record is NOT empty (event=1, journal_event=40, …)` |
+| drill over an EMPTY record | `the record is EMPTY — every count would match an empty scratch database` |
+| a schema-carrying dump restored into a migrated target | `pg_restore: error: … relation "node_identity" already exists` — the measured reason the artifact is data-only |
+| a target without the tenancy parents | `violates foreign key constraint "node_identity_org_id_fkey"` — the fail-closed direction |
+
+⚠️ **Not yet run against the hosted Supabase record.** That drill needs a scratch Supabase project
+and the project's direct DSN; it is the remaining operational step, and until it is done this row's
+claim is *"the artifact restores into Postgres, verified per table"*, not *"the hosted record has
+been restored"*.
+
 ## 4. Health Check
 
 ```bash
