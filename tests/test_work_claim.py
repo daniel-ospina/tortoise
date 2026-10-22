@@ -1091,10 +1091,12 @@ def _probe_key(body: str | None = None) -> str:
     # CANONICAL at the MINT (review round 4). `acquire` canonicalises `record.key` IN PLACE
     # (`record.key = canonical_key(record.key)`), and `canonical_key` collapses an all-digit
     # body (`issue-012345678901` → `issue-12345678901`) — which a 12-hex body hits in ~1 run in
-    # 2.8k. Returning the minted spelling left the legs below comparing it against the
-    # CANONICAL spelling the store holds, so `[…].count(key) == 1` redded for a reason that had
-    # nothing to do with the code under test: the exact class this file's comment above already
-    # records. The `body` seam makes that deterministic to pin without drawing a UUID.
+    # 280 (the figure `canonical_key`'s own comment states; an earlier version of this comment
+    # said 2.8k, off by 10× — review of PR #9537). Returning the minted spelling left the legs
+    # below comparing it against the CANONICAL spelling the store holds, so `[…].count(key) == 1`
+    # redded for a reason that had nothing to do with the code under test: the exact class this
+    # file's comment above already records. The `body` seam makes that deterministic to pin
+    # without drawing a UUID.
     return wc.canonical_key(f"issue-{body if body is not None else uuid.uuid4().hex[:12]}")
 
 
