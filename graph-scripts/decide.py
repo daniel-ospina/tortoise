@@ -387,6 +387,23 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
                   f"{label + ' ' if label else ''}bridge on this triple — "
                   "nothing damped (a relevance edge never mints a claim)")
             continue
+        # #6671 review: a bridge with ``targets > 1`` also claims OTHER pairs,
+        # so damping it here would weaken claims this edge never named — the
+        # exact hazard ``_resolve_or_create_operator`` refuses to create. The
+        # two arms must state ONE rule, so the exclusion is applied here too
+        # instead of being asserted only in the ``edges`` arm's prose.
+        shared = [row for row in found if row["targets"] != 1]
+        if shared:
+            named = ", ".join(
+                f'{row["id"]} ({row["targets"]} targets)' for row in shared)
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {named} also "
+                  "claim other pairs — not damped (it would weaken claims "
+                  "this edge did not name)")
+        found = [row for row in found if row["targets"] == 1]
+        if not found:
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: every bridge "
+                  "on this triple is shared with other pairs — nothing damped")
+            continue
         if label is not None:
             targets = [row["id"] for row in found]
         elif any(row["label"] == "" for row in found):

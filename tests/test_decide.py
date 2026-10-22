@@ -190,26 +190,84 @@ class TestDecideWiring:
         assert clamp(0.80) == 0.50
 
     def test_relevance_edge_reuses_existing_operator(self, sdk):
-        """A (src, op_type, tgt) in both edges and relevance_edges must NOT
-        create a duplicate operator — it reuses the one from edges."""
-        crit = sdk.create_point("criterion", "Enterprise readiness")
-        opt = sdk.create_point("option", "Option A")
+        """A (src, op_type, tgt) in both ``edges`` and ``relevance_edges`` must
+        NOT create a duplicate operator — the relevance edge damps the bridge
+        the ``edges`` arm already wrote.
 
-        # Simulate decide wiring: create the edge, then mitigate the SAME operator
-        op1 = sdk.create_operator("NAND", crit["id"], [opt["id"]])
-        sdk.mitigate_operator(op1["id"], "Not relevant", 0.20)
+        Drives ``file_decision`` itself (not bare SDK primitives): the earlier
+        version of this test called only ``create_operator``/``mitigate_operator``
+        and was therefore invariant under EVERY version of ``graph-scripts/
+        decide.py`` — it could not have failed if #6671 came back (#6671 review).
+        """
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Enterprise readiness {_mk()}")
+        opt = sdk.create_point("option", f"Option A {_mk()}")
 
-        # The decide layer reuses op1 (tracked by (src, op_type, tgt)) rather
-        # than creating op2. Verify only ONE operator connects crit→opt.
+        data = {
+            "context": f"issue-6671-relevance-{_mk()}",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [],
+            "relevance_edges": [{"source": crit["id"], "op_type": "IMPL",
+                                 "target": opt["id"], "reason": "weak",
+                                 "strength": 0.20}],
+        }
+        run = decide.file_decision(sdk, data)
+
         proj = sdk._get_proj()
         rows = proj.g.query(
             "MATCH (op:Point {is_operator:true})-[r:IMPL|NAND]->(t:Point) "
             "WHERE t.id = $tid RETURN count(op)",
             params={"tid": opt["id"]},
         ).result_set
-        # Exactly one: the decide layer reuses the operator instead of adding
-        # a second bridge (#6671). A `>= 1` here could never fail.
-        assert rows[0][0] == 1
+        assert rows[0][0] == 1, (
+            "the relevance edge minted a second operator on a triple the "
+            f"edges arm already wired (#6671): {_operator_census(sdk)}")
+        census = _operator_census(sdk)
+        assert census["_mitigations"] == 1, (
+            "the relevance edge did not damp the single bridge, or damped a "
+            "duplicate: " + str(census))
+        reused_rows = [row for row in run["operators"]
+                       if row["op_type"] == "IMPL" and row["reused"] is True]
+        assert reused_rows, (
+            "the relevance edge did not resolve to the reused bridge: "
+            + str(run["operators"]))
+
+    def test_relevance_edge_never_damps_a_shared_bridge(self, sdk, capsys):
+        """A bridge with several targets also claims OTHER pairs, so damping it
+        would silently weaken claims this edge never named — the hazard
+        ``_resolve_or_create_operator`` refuses to create for the ``edges`` arm
+        (decide.py ``targets > 1``). The relevance arm must apply the same rule
+        and SAY it declined (#6671 review).
+        """
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Shared criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        multi = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+
+        data = {
+            "context": f"issue-6671-shared-{_mk()}",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [], "truth_edges": [],
+            "relevance_edges": [{"source": crit["id"], "op_type": "IMPL",
+                                 "target": a["id"], "reason": "weak",
+                                 "strength": 0.20}],
+        }
+        decide.file_decision(sdk, data)
+
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (op:Point)-[r:mitigated_by]->(m) WHERE op.id = $oid "
+            "RETURN count(r)", params={"oid": multi["id"]},
+        ).result_set
+        assert rows[0][0] == 0, (
+            "a relevance edge damped a multi-target bridge, weakening a pair "
+            "the caller never named (#6671 review): " + str(_operator_census(sdk)))
+        out = capsys.readouterr().out
+        assert "also claim other pairs" in out, (
+            "the decline was silent — the caller cannot tell nothing was "
+            f"damped. Output was:\n{out}")
 
     def test_compute_confidence_with_anchors(self, sdk):
         """EP computes confidence for points via anchors-based selection."""
