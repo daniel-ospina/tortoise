@@ -28,6 +28,9 @@
 //   - slug immutable; archived posts reject all PATCHes AND DELETEs (409/400 terminal).
 //   - Rate limit: 120 req/min + 2,000 req/day per key (in-memory counter —
 //     per-isolate; unit-tested at lowered thresholds).
+//   - IndexNow (#9680): the PATCH that moves a post to published submits its
+//     canonical URL once, in the background, fail-soft. It reaches Bing / Yandex
+//     / Seznam / Naver / Amazon — NOT Google, which does not consume IndexNow.
 //
 // Author identity (#1383 — part of the same v1 contract, additive):
 //   - `author?: string` (≤100 chars) is the byline NAME. Omitted →
@@ -49,6 +52,10 @@ import {
 } from "../../_shared/meta-contract.ts";
 import { SLUG_MAX, SLUG_RE } from "../../_shared/slug.ts";
 import { purgeUrl } from "../../_shared/cloudflare-purge.ts";
+// IndexNow notification on the publish transition (#9680). ⛔ It reaches Bing /
+// Yandex / Seznam / Naver / Amazon — NOT Google, which does not consume the
+// protocol. See _shared/indexnow.ts for the verified vendor contract.
+import { notifyPublished } from "../../_shared/indexnow.ts";
 // Agent-key auth + rate limiting are shared with the AI SEO generator (#8293)
 // so the key check exists ONCE — two copies drift, and a drifted key check is a
 // fail-open waiting for a maintenance edit.
@@ -519,6 +526,27 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
     return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
   }
   if (updated.length === 0) return err(409, "archived", "post was archived concurrently");
+
+  // #9680: IndexNow — submit the canonical URL when, and only when, THIS patch is
+  // the draft→published transition. The transition predicate IS the trigger: an
+  // edit that leaves the post published (both sides published), a draft write and
+  // an unpublish all fail it and submit nothing. The once-per-24h window that
+  // covers publish → unpublish → re-publish the same day lives in
+  // notifyPublished, backed by blog_posts.indexnow_submitted_at.
+  //
+  // waitUntil, so the response does not wait on the vendor: the post is live
+  // either way, a submission failure must not fail the publish, and there is no
+  // retry in this path — the failure is logged with its status instead.
+  if (resultStatus === "published" && post.status !== "published") {
+    waitUntil(
+      notifyPublished({
+        env,
+        id: post.id,
+        url: `${SITE_URL}/blog/${slug}`,
+        nowMs: Date.parse(now),
+      }),
+    );
+  }
 
   // #1865: unpublish (resulting status = draft on a previously published post)
   // → purge the article URL from the edge cache (best-effort, fail-open). The

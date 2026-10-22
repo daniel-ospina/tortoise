@@ -188,6 +188,69 @@ transcript separately rather than pasting it into the article.
 
 ---
 
+## IndexNow notifications (Bing, Yandex and the other IndexNow engines)
+
+Publishing an article notifies **IndexNow**, which passes the URL to the search engines that
+implement it: **Bing, Yandex, Seznam, Naver, Amazon**.
+
+⚠️ **Google does not consume IndexNow.** This has no effect on Google's index and does not shorten
+Google's crawl latency — Google's equivalent is Search Console's request-indexing, which is a
+separate, authenticated API that is not wired up. Do not report this feature as "indexing on
+Google".
+
+**What fires it.** Only the transition to published through the agent API
+(`PATCH /blog/api/posts/:slug` with `status: "published"`). It submits **one** URL — the article's
+canonical URL — in the background, so the publish never waits for it.
+
+**What never fires it:** writing a draft, editing an article that is already published, unpublishing,
+and re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
+attempt). Bulk submission is deliberately *not* part of the publish path.
+
+**When it fails.** The publish still succeeds — the article is live either way — and there is no
+retry. The failure is logged instead: filter the Pages/Cloudflare logs for `[indexnow]` and you will
+see the status code and the URL (`submitted (status 200|202)`, `submit failed (status 403)`, or
+`submit failed (no status — timeout/network)`). 202 is a success: it means "received, key validation
+pending" and is the normal answer to a key's first submission.
+
+⚠️ **A publish from the admin console is not submitted.** The console writes the status change
+directly to Supabase and never reaches the agent API that fires the notification.
+
+### The key file
+
+The key is a public value, checked in rather than a secret: the endpoint proves we own the host by
+fetching `https://tortoise.premiselabs.co/<key>.txt`, so the file must be readable by anyone. It is
+committed at `website/<key>.txt` (that directory is the deploy root) and its only content is the key.
+After a deploy, this must answer 200 with the key alone:
+
+```bash
+curl -sS -D- https://tortoise.premiselabs.co/$(grep -o 'INDEXNOW_KEY = "[a-f0-9]*"' \
+  website/functions/blog/_shared/indexnow.ts | cut -d'"' -f2).txt
+```
+
+### Backfilling the articles published before this existed
+
+Backfill is a **deliberate, one-off operator act** — one request, by hand, once the key file above is
+verified live. The publish handler has no bulk path on purpose: a loop there is a submission flood
+waiting for a retry.
+
+```bash
+KEY=<the key from website/functions/blog/_shared/indexnow.ts>
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://api.indexnow.org/indexnow \
+  -H 'Content-Type: application/json; charset=utf-8' \
+  -d "{\"host\":\"tortoise.premiselabs.co\",\"key\":\"$KEY\",
+       \"keyLocation\":\"https://tortoise.premiselabs.co/$KEY.txt\",
+       \"urlList\":[\"https://tortoise.premiselabs.co/blog\",
+         \"https://tortoise.premiselabs.co/blog/state-of-agentic-memory-2026\",
+         \"https://tortoise.premiselabs.co/blog/agent-memory-software-engineering-bottleneck\",
+         \"https://tortoise.premiselabs.co/blog/types-of-agent-memory\",
+         \"https://tortoise.premiselabs.co/blog/agents-dont-need-more-memory-they-need-a-world-model\"]}"
+```
+
+A `200` or `202` means accepted. A `403` means the key file was not found at the host root (deploy it
+first); a `422` means a URL does not belong to the host.
+
+---
+
 ## What is *not* supported
 
 - Raw HTML — escaped, publishes as text.
