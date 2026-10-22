@@ -522,7 +522,7 @@ point.embedding type → jsonb                              ← A5 (no pgvector)
 ```
 
 ⚠️ The `capture_redactions` row above is what that run **measured**, kept as measured. After
-#9264's forward migration the column is `integer`, so a re-run writes the count instead of NULL.
+\#9264's forward migration the column is `integer`, so a re-run writes the count instead of NULL.
 
 **Run 3 — the DB-level proof on real Postgres (PGlite):**
 
