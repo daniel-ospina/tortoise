@@ -2519,9 +2519,15 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
     * the payload step must BIND and APPEND it (from its own same-named GitHub
       secret) — otherwise the value stays on GitHub and the app keeps answering
       `NOT_ARMED`;
-    * the provenance gate must PROBE it into `GH_SECRETS_PRESENT` — a `gh-secret:`
-      declaration with no probe line reads as ABSENT and hard-fails the deploy, so
-      the three have to move together;
+    * the provenance gate must PROBE it into `GH_SECRETS_PRESENT` — the fleet's
+      `probed == declared_gh` lockstep derives that from the manifest
+      (`test_fly_secret_drift.py`). ⚠️ **Do not write "the deploy hard-fails
+      without the probe" as a present-tense fact (#9585 review P3, measured).**
+      With the probe removed and the name absent from Fly, the gate still exits
+      **0**: rule (3)'s `UNSOURCED` fires only when the name is already ON Fly
+      (`check-fly-secret-drift.py`), so before the secret is provisioned nothing
+      deploy-time holds the probe in place — the lockstep guard and the assertion
+      below are the whole pin. Once the value is provisioned it is load-bearing.
     * the manifest must DECLARE it and the runbook's Secrets Matrix must show the
       GitHub home — a declaration the runbook contradicts is how an operator gets
       told to rotate Fly-only, which the next deploy then silently reverts
@@ -2560,8 +2566,10 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
         )
     assert f'[ -n "${_RECORD_DSN_ENV}" ] && GH_PRESENT="$GH_PRESENT {_RECORD_DSN_ENV}"' in gate["run"], (
         "the provenance gate does not probe TORTOISE_RECORD_DSN into "
-        "GH_SECRETS_PRESENT — the declaration then reads as ABSENT and the "
-        "deploy fails on the manifest entry instead of propagating the value"
+        "GH_SECRETS_PRESENT — the manifest's `gh-secret:` declaration then has no "
+        "probe beside it, and ONLY the lockstep guard catches that: the gate itself "
+        "exits 0 until the name is also on Fly, so do not claim a deploy-time "
+        "failure that does not exist before provisioning"
     )
     # Appended to the flyctl argv, AND guarded. Membership alone is guard-blind:
     # `_array_pairs` scans the whole `run:` text, so it maps a guarded append and
@@ -2739,6 +2747,91 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "the note blames #9556/R8 for a runbook line that is not there — the "
         "census hit it explains has no referent"
     )
+    # Claim 4 — the COUNT, and it is where this note was wrong last time (#9585
+    # review P2): it said "1 line", while at the merge base it is 3 (#9600's two
+    # documentation hits arrived on top of #9556/R8's invocation). The stated
+    # number and the enumerated hits must be ONE measurement, or a later lane
+    # re-runs the census and gets a different answer than the record of record.
+    stated = re.search(r"the pre-#9548 reading is\s+\*\*(\d+) lines?\*\*", note)
+    assert stated, (
+        "the note no longer states how many lines the pre-#9548 census returned, "
+        "so `NOT empty` is all it claims and the count can drift to any number"
+    )
+    count = int(stated.group(1))
+    cites = re.findall(r"docs/infra-runbook\.md:(\d{4,5})", note)
+    assert len(cites) == count, (
+        f"the note states {count} line(s) but enumerates {len(cites)} "
+        f"({', '.join(cites)}) — the number and the enumerated hits are then two "
+        "different measurements of the same census"
+    )
+    # ... and every enumerated hit is REAL in the tree it describes, by the snippet
+    # the item names rather than by its line number (the numbers move as the
+    # runbook grows; the mentions do not).
+    runbook_text = (_REPO_ROOT / "docs" / "infra-runbook.md").read_text(encoding="utf-8")
+    for snippet in (
+        "export TORTOISE_RECORD_DSN=",
+        "| TORTOISE_RECORD_DSN |",
+        "TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.",
+    ):
+        assert snippet in note, (
+            f"the note does not enumerate the census hit {snippet!r} — a hit that "
+            "predates #9548 is then invisible to whoever re-runs the census"
+        )
+        assert runbook_text.count(snippet) == 1, (
+            f"{snippet!r} occurs {runbook_text.count(snippet)} times in the runbook, "
+            "not the 1 hit the note's baseline attributes to it"
+        )
+    # The two documentation hits arrived with #9600, and that attribution is what
+    # separates them from #9556/R8's operator invocation (#9585 review P2).
+    assert "#9600" in note, (
+        "the note does not attribute the two documentation hits to #9600, so a "
+        "reader cannot tell them apart from a `record-restore` invocation"
+    )
+    # Claim 5 — a count is only meaningful with its TREE: the same path set reads 0
+    # at this branch's start point, 1 after #9556/R8 and 3 after #9600, so pinning
+    # one number to no commit is the stale-flag class this note exists to close.
+    for sha in ("c5cbcbb4f", "d5c71a470", "7761252f"):
+        assert sha in note, (
+            f"the note does not pin the tree {sha!r} its count is measured at — a "
+            "count without a tree is exactly the stale flag; a migration or a "
+            "doc landing elsewhere silently re-numbers it"
+        )
+
+
+def test_the_census_migration_denominator_agrees_with_the_docs_own_head_count():
+    """#9585 review P2: `over all 70 migrations` contradicted the same document's 71.
+
+    The §A5 pgvector census says the grep "over all N migrations" returns 0, so N is
+    the DENOMINATOR of a measurement. When main landed a migration it became 71 while
+    the note still said 70 — and §A7 of this same document already said 71, so the
+    document contradicted itself and the number that was read depended on which line
+    the reader hit.
+
+    Asserted as SELF-CONSISTENCY on purpose: a pin against the tree's live count would
+    red every unrelated PR that adds a migration and does not touch this epic's record,
+    which is friction, not correctness. What must not happen is the two current-day
+    figures in the document disagreeing.
+
+    Falsified on the pre-fix text: §A5 says 70, §A7 says 71.
+    """
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    a5 = re.search(r"`grep -riE 'pgvector\|vector\\\('` over all\s+(\d+)\s+migrations", text)
+    assert a5, (
+        "the epic's §A5 pgvector census no longer states a migration denominator — "
+        "the measurement then has no scope that can be checked"
+    )
+    at_head = re.findall(r"at this head, (\d+) migrations", text)
+    assert at_head, (
+        "the epic states no `at this head, N migrations` figure, so there is no "
+        "second, dated denominator for §A5 to agree with"
+    )
+    for other in at_head:
+        assert a5.group(1) == other, (
+            f"the epic contradicts itself about the migration count: §A5's pgvector "
+            f"census is scoped to {a5.group(1)} migrations while the same document "
+            f"states {other} at this head — the pgvector denominator is then stale "
+            "(#9600's R6 migration is the 71st; #9585 review P2)"
+        )
 
 
 def _census_block() -> str:

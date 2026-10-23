@@ -2968,7 +2968,7 @@ not put them in this section, where they would rot.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | — (**not on Fly yet** — the secret is the operator's act; absent ⇒ `NOT_ARMED` and the record writes nothing). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ (Supabase pooler DSN) |
+| TORTOISE_RECORD_DSN | — (**not on Fly yet** — the secret is the operator's act; absent ⇒ `NOT_ARMED` and the record writes nothing). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **declared, value NOT created yet** — the operator act is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) (no such GitHub secret exists today; the ✅ is the *home* the deploy reads, not a provisioned value) |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
@@ -3029,10 +3029,15 @@ the counter either.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **Two readings are NOT in this
-   grep**: the `no_durable_journal` decline is logged at **DEBUG** (it is the
-   healthy M2 path, not a failure), and the `no_journal` / `seam_unimportable`
-   reasons are emitted by the SDK (`tortoise/sdk.py`), not by `record_writer.py`:
+   `write_failed`), and this needs no auth. ⚠️ **Exactly ONE reading is not in
+   this grep**: the `no_durable_journal` decline — logged at **DEBUG**, under a
+   *different* prefix (`the record write was declined (no_durable_journal)`,
+   `record_writer.py`), because it is the healthy M2 path and not a failure.
+   ⛔ **`no_journal` and `seam_unimportable` ARE in it**, so do not dismiss them
+   as "the SDK, not the seam": `tortoise/sdk.py::_record_write_failure` emits the
+   **identical** prefix (`the record write did not happen (%s)`) — an armed
+   deployment that logs one wrote **nothing**, and a reader told to skip those
+   lines would skip the signal this section exists to expose:
 
    ```bash
    fly logs -a tortoise-y4mjjq | grep "the record write did not happen"
@@ -3169,8 +3174,13 @@ wrong organisation, which nothing downstream can detect.
 is R2 (`supabase-deploy.yml`, `workflow_dispatch` only); the two
 schema↔producer disagreements are R4 — #9264's is **fixed in the tree**
 (`20261022000001`, live on the project once R2 applies it) and the one remaining
-tolerance is `point.search_keys` — and **no module of ours backs
-the record up** — that is R9's owner decision, not a claim this section makes.
+tolerance is `point.search_keys` — and **the record's own backup is
+`record-backup`** (R9, §3.5): it reads this **same** `TORTOISE_RECORD_DSN` but
+**refuses a pooler host** (`record_backup.require_direct_dsn`, exit 2), because a
+dump/restore session loses its session state through a transaction pooler and the
+artifact can come out silently short — so invoke it with
+`--record-dsn <direct DSN>` (`db.<project-ref>.supabase.co:5432`), never the
+pooler value §"The value" prescribes for the app.
 
 ### The record's connecting role (R6 decision, 2026-10-22, #9554)
 
@@ -3268,7 +3278,10 @@ never reach the *empty source* refusal (`refuse_unrestorable_source`, exit 3) or
 verdict (exit 3): those are what a correctly-roled but EMPTY record would produce. Read the
 exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
 DSN); a driver `OperationalError` in the same message is a transient outage.
-⚠️ Note `-m tortoise record-restore`, a read-only restore, behaves as described here; the
+⚠️ Note `-m tortoise record-restore` behaves as described here, and "read-only" here means
+**read-only with respect to the RECORD**: the verb never writes the record — it reads it through
+`read_record_view` — but it **REBUILDS the cache graph** from what it read, so on a graph it is the
+destructive operation the guard above is about. The
 R8 drill's `--limit` and `--allow-empty` flags apply to a run that HAS read a record.
 
 ### Runtime Config (non-secret)
