@@ -160,16 +160,49 @@ def test_the_shaped_input_is_not_in_the_affected_set(sdk):
     assert a in affected and b in affected
     assert shaped not in affected
 
-    # The neighbourhood arm, seeded from a PLAIN point (hop 0): the shaped node
-    # is the other input of an operator whose input IS the seed.
+    # The seed-neighbourhood arm (hop 0), seeded from a PLAIN point: the shaped
+    # node is the other input of an operator whose input IS the seed.
     hop0 = ep._affected_claims([a], 2)
-    assert b in hop0  # positive control: the hop ran and admitted a neighbour
+    assert b in hop0  # positive control: the arm ran and admitted a SIBLING
     assert shaped not in hop0
-    # …and the BFS bridge arm (hop 1+), seeded from the operator's other input
-    # with the depth that reaches it.
-    bridge = ep._affected_claims([b], None)
-    assert a in bridge  # positive control: the bridge hop ran
-    assert shaped not in bridge
+    # The same arm seeded from the other input — same predicate, second spelling
+    # of the seed set (the shape `_affected_claims` batches per label).
+    hop0b = ep._affected_claims([b], None)
+    assert a in hop0b  # positive control: a sibling was admitted here too
+    assert shaped not in hop0b
+
+
+def test_the_bridge_hop_arm_does_not_admit_the_shaped_node(sdk):
+    """The BFS bridge hop (hop 1+) is a THIRD site, and needs its own control.
+
+    `_live_neighbors_many` covers the seed neighbourhood (hop 0) and admits the
+    seed's operator SIBLINGS; the loop's `operator_bridge` hop is the one that
+    admits a far endpoint reached only through an affected node, so a hop-0
+    assertion cannot exercise it. The chain below makes the depth observable:
+
+        e --op1--> [f, shaped]      op1's input e is the SEED
+        f --op2--> [g, shaped]      reached at hop 1 from f
+
+    `g` is admitted ONLY by the BFS hop (its positive control), and the shaped
+    node is admitted at neither depth — pre-fix it arrives with `g` through op2's
+    bridge, which is why this fails on `origin/main`.
+    """
+    shaped = _shaped_point(sdk, "shaped-9269-bridge", "true")
+    e = sdk.create_point("statement", "Seed E", status="live")
+    f = sdk.create_point("statement", "Middle F", status="live")
+    g = sdk.create_point("statement", "Far G", status="live")
+    sdk.create_operator("IMPL", e["id"], [f["id"], shaped])
+    sdk.create_operator("IMPL", f["id"], [g["id"], shaped])
+    ep = sdk._get_ep()
+
+    # max_hops=0 = the seed-neighbourhood arm only (the pre-BFS expansion).
+    hop0 = ep._affected_claims([e["id"]], 0)
+    assert f["id"] in hop0  # positive control: the sibling was admitted
+    assert g["id"] not in hop0  # …and the BFS has not run at all
+
+    hop1 = ep._affected_claims([e["id"]], 1)
+    assert g["id"] in hop1  # positive control: THE BRIDGE HOP RAN
+    assert shaped not in hop1
 
 
 def test_legacy_absent_is_operator_input_is_still_consumed(sdk):

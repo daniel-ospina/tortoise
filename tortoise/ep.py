@@ -1254,8 +1254,8 @@ class TortoiseEP:
         factor is SKIPPED — recorded as `degenerate`, or as `source_stripped`
         when the shaped input held the NON-bidirectional source slot — and
         reported through `_last_skipped_factors` (#6105). A bidirectional
-        operator that merely DEGRADES (3+ inputs → 2) leaves no record at all,
-        only a log line: it still runs, on the surviving inputs.
+        operator that merely DEGRADES (3+ inputs → 2) leaves no record and no log
+        line: it still runs, on the surviving inputs.
         ⚠️ What the surviving claim then reads is NOT necessarily Beta(1,1): a
         skipped factor does not zero the messages a PREVIOUS run persisted on
         its input edges, and `_load_cache` loads every `(o)-[r:IMPL|NAND]->(c)`
