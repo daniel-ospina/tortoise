@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import inspect
 import os
+import pathlib
+import re
 import sys
 import uuid
 
@@ -482,22 +484,117 @@ def test_update_point_refuses_the_occurrence_anchor(sdk):
     assert _stored(live, "when", sdk) == "2026-06-10"
 
 
+#: The §4.7 per-type matrix rows whose Point cell is NOT a caller temporal this
+#: door refuses. Every OTHER row is refused BY DEFAULT, so a temporal slot added
+#: to the matrix is a census failure until the door covers it — the fail-closed
+#: direction, which is the whole point of the census.
+#:   * `txn start` — `createdAt` is the graph-write clock the create path stamps,
+#:     not a caller claim about when the assertion held (`_TEMPORAL_RESTAMP_PROPS`'
+#:     own docstring states the same exclusion, and `update_point` stamps
+#:     `updatedAt` itself);
+#:   * `supersession` — this row's Point cell is `status='superseded'`, a
+#:     lifecycle fact, not a temporal property of the window.
+_NON_REFUSED_MATRIX_SLOTS = frozenset({"txn start", "supersession"})
+
+#: The per-type presence matrix's header row, used to LOCATE the table (the
+#: cross-entity field map below it also has a `Point` column).
+_TEMPORAL_MATRIX_HEADER = "| Slot | Point | Subject | Object | Event | Source |"
+
+
+def _ontology_4_7_slice() -> str:
+    """The committed ``docs/ONTOLOGY.md`` §4.7 slice, cut at the next heading.
+
+    Located by its unique heading and cut at the next one — the shape
+    ``tests/test_7818_ontology_record.py`` uses — so a declaration MOVED out of
+    §4.7 is not silently still counted.
+    """
+    repo = pathlib.Path(__file__).resolve().parent.parent
+    doc = (repo / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
+    start = doc.index("### §4.7 Temporal Model")
+    ends = [e for e in (doc.find(m, start + 1) for m in ("\n### ", "\n## "))
+            if e != -1]
+    return doc[start:min(ends)] if ends else doc[start:]
+
+
+def _point_temporals_declared_by_4_7() -> set[str]:
+    """The temporal props §4.7 declares for Point — READ, never re-typed.
+
+    Derived from the committed section itself: the Point cells of the matrix's
+    valid-time and transaction-END rows, the precision layer §4.7 declares for
+    the valid-time bounds, and the occurrence-date spelling with which §4.7
+    maps a Point's `when` onto `validFrom` ("one slot under two spellings").
+    """
+    section = _ontology_4_7_slice()
+    lines = section.splitlines()
+    try:
+        start = next(i for i, ln in enumerate(lines)
+                     if ln.strip().startswith(_TEMPORAL_MATRIX_HEADER))
+    except StopIteration:  # pragma: no cover - a doc-shape change, reported below
+        raise AssertionError(
+            "§4.7's per-type presence matrix is not where this census reads it; "
+            "update _TEMPORAL_MATRIX_HEADER rather than letting the census pass "
+            "vacuously") from None
+    declared: set[str] = set()
+    rows = 0
+    for line in lines[start + 1:]:
+        if not line.lstrip().startswith("|"):
+            break
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or set(cells[0]) <= {"-", ":", " "}:
+            continue  # the header's `|---|---|` separator
+        rows += 1
+        if cells[0] in _NON_REFUSED_MATRIX_SLOTS:
+            continue
+        slot = re.search(r"`([A-Za-z][A-Za-z0-9]*)`", cells[1])
+        if slot:
+            declared.add(slot.group(1))
+    assert rows >= 4, (
+        f"the §4.7 matrix parsed as {rows} row(s) — the census would pass vacuously")
+    declared.update(re.findall(r"`([A-Za-z]+Precision)`", section))
+    declared.update(re.findall(r"`(when)`", section))
+    return declared
+
+
 def test_the_temporal_refusal_set_covers_ontology_4_7_temporals():
-    """Census: every caller-temporal property ONTOLOGY §4.7 declares is in the
-    refusal set.
+    """Census: the DOOR and §4.7's DECLARATION name the same Point temporals.
 
     `when` was the one left out, and nothing caught it because the set was read
-    as "the window" rather than as "§4.7's temporal record". This pins the
-    DECLARATION against the DOOR, so a future temporal prop cannot be added to
-    the ontology (or a typo re-spelled here) with the guard silently failing
-    open on it. (`createdAt`/`updatedAt` are server-owned stamps, not caller
-    props on this door.)
+    as "the window" rather than as "§4.7's temporal record". The expected set is
+    READ from the committed §4.7 (its per-type matrix's Point cells for the
+    valid-time and transaction-END rows, its precision layer, and the `when`
+    alias) — not re-typed here — so a temporal prop ADDED to the ontology lands
+    in `declared` and reds this census instead of the guard silently failing
+    open on it, and a re-spelled name moves both sides at once. A prop the door
+    refuses but §4.7 never declares reds too: the declaration is the canonical
+    list, so that is a doc gap to close, not a spelling to keep.
+
+    `createdAt` is the one matrix row deliberately excluded (see
+    `_NON_REFUSED_MATRIX_SLOTS`) alongside `updatedAt`: server-owned write stamps,
+    not caller claims about when the assertion held.
+
+    LIMIT, stated so it is not over-read: the derivation reads the §4.7 SLICE,
+    so a temporal prop that reaches the door from somewhere other than §4.7
+    (e.g. a name declared only in §4.1's prose) is still not caught here. This
+    pins the canonical declaration against the door — not the whole document.
     """
     from tortoise.sdk import _TEMPORAL_RESTAMP_PROPS
 
-    ontology_temporals = {"when", "validFrom", "validTo", "expiredAt"}
-    assert ontology_temporals <= _TEMPORAL_RESTAMP_PROPS, (
-        ontology_temporals - _TEMPORAL_RESTAMP_PROPS)
+    declared = _point_temporals_declared_by_4_7()
+    assert declared, (
+        "§4.7 declared no Point temporals at all — the derivation is broken, so "
+        "this census would pass vacuously")
+    failing_open = declared - set(_TEMPORAL_RESTAMP_PROPS)
+    assert not failing_open, (
+        f"ONTOLOGY §4.7 declares {sorted(failing_open)} as Point temporals and "
+        f"the terminal-claim guard does not refuse them "
+        f"({sorted(_TEMPORAL_RESTAMP_PROPS)}): a caller could re-stamp them on a "
+        "dead claim")
+    undeclared = set(_TEMPORAL_RESTAMP_PROPS) - declared
+    assert not undeclared, (
+        f"the terminal-claim guard refuses {sorted(undeclared)} and ONTOLOGY §4.7 "
+        "does not declare them: either the declaration is missing (add it to the "
+        "§4.7 temporal matrix, which is canonical) or the door carries a stale "
+        "spelling")
 
 
 @pytest.mark.parametrize("bound,marker", [

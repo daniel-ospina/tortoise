@@ -2072,19 +2072,29 @@ def test_recorded_response_field_is_rendered_in_the_list():
 
 
 def test_every_recorded_response_field_row_is_rendered_verbatim_from_the_manifest():
-    """The response-field table is GENERATED: every cell must come from the manifest.
+    """Every recorded row must appear VERBATIM in the rendered table — a diagnostic.
 
-    `test_recorded_response_field_is_rendered_in_the_list` above only checks that the
-    field NAME appears, which a hand-written row satisfies — so the table could drift
-    from its source and every in-repo test stayed green while the `surface-guard` CI job
-    (render + `git diff --exit-code`) went red. That is what happened on #9658: the
-    `temporal_not_applied` sentence was written into `docs/product/mcp-sdk-surface.md`
-    and never into `config/surface-manifest.yml`, and it took a reviewer rebuilding the
-    rows by hand to notice.
+    This table is GENERATED (`tools/surface_manifest.py` → `docs/product/mcp-sdk-
+    surface.md`), and the drift is already caught in-repo by
+    `test_the_render_is_identical_with_no_machine_local_call_log` above, which
+    renders the REAL manifest and asserts BYTE equality with the committed
+    document: a hand-edited row is a byte difference there. (At the #9658 head
+    that wrote the `temporal_not_applied` sentence into the document and not into
+    `config/surface-manifest.yml`, that byte test was red.)
 
-    Fails on that pre-fix head (the committed row is the pre-#7819 manifest's), so it is
-    not vacuous. The rows come from the renderer's own `response_field_rows`, not a
-    copy of its normalisation, so the two cannot disagree.
+    What this adds is a FAILURE MESSAGE, not coverage: the byte test reports
+    "the render produced different bytes" over the whole document, while this
+    names the drifted rows. Stated precisely so the next reader does not read
+    this as the only in-repo guard, which it is not.
+
+    One-directional and that is deliberate: a row hand-ADDED to the document is
+    not caught here (it is absent from the manifest, so it appears in no rendered
+    row). The byte-equality test above covers that direction.
+
+    Discrimination: it reds when a manifest row is absent from the document. On
+    the pre-fix head it errored rather than asserted (`response_field_rows` did
+    not exist yet, so this is an `AttributeError`), which is why the docstring
+    names the mechanism instead of claiming a pre-fix red.
     """
     sys.path.insert(0, str(ROOT / "tools"))
     import surface_manifest

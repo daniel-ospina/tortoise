@@ -16061,6 +16061,18 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     - a freshly-minted successor's payload ``when`` (``create_point`` writes
       ``validFrom`` only for a truthy ``when``).
 
+    ⚠️ The first bullet holds for a NON-TERMINAL dedup target only. When the
+    target is a terminal claim, ``create_point`` DROPS the fold whole (#7819):
+    a payload carrying any ``_TEMPORAL_RESTAMP_PROPS`` member writes nothing, so
+    the re-keyed node's stored start is NOT overwritten. ``payload_when`` is
+    still this mirror's input in that case, which makes the check CONSERVATIVE —
+    it can compare an end against a start the writer will never write. Because
+    ``_succ_state``'s terminal pre-check then skips ``supersede_point`` anyway,
+    no inverted window can result (nothing is written, so nothing is refused
+    late); the residual is an over-refusal — a ``supersede_window_inverted`` 422
+    for an inversion that exists only in the mirror's model — and it is
+    deterministic, so it must be repaired in the payload, not retried.
+
     When the resolution would instead fall through to a clock this check cannot
     read before the write (a fresh node's future ``createdAt``, or
     ``supersede_point``'s own ``now``), NOTHING is refused here and the ``[5]``
@@ -16086,9 +16098,13 @@ def _prevalidate_supersede_window(sdk, pr, *, now: str) -> None:
     # sibling loops + the MCP preview's identical read).
     old_vfs = [r[0] for r in old_rows]
     # Mirror `create_point(dedup=True)`'s successor resolution AT THIS POINT in
-    # the write sequence. A match re-keys the write onto that node (and, with a
-    # truthy payload `when`, `update_point` overwrites its stored start); no
-    # match mints the content-addressed `supersede_id` with the payload `when`.
+    # the write sequence. A match re-keys the write onto that node and — for a
+    # NON-TERMINAL target — a truthy payload `when` overwrites its stored start
+    # through the dedup fold's `update_point` (#7819 DROPS that fold whole when
+    # the target is a terminal claim, so `payload_when` is then the mirror's
+    # model of a write that will not happen: conservative, never fail-open —
+    # `_succ_state` skips the supersede itself). No match mints the
+    # content-addressed `supersede_id` with the payload `when`.
     existing_id = sdk._find_point_by_content(
         pr.point.content, pointKind=pr.point.pointKind)
     payload_when = pr.point.when or None
