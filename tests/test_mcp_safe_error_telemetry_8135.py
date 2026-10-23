@@ -216,8 +216,10 @@ async def test_a_plain_dict_payload_is_still_recorded_ok_at_the_seam(
     belongs where the tool author chooses the payload shape. If a producer is
     ever added that answers a refusal with a plain dict, THIS is the test that
     explains why it reads ``ok`` — and
-    ``tests/test_mcp_refusal_telemetry_9084.py::test_no_tool_body_returns_a_plain_dict_refusal``
-    is the gate that refuses one.
+    ``tests/test_mcp_refusal_telemetry_9084.py::test_no_served_tool_body_returns_a_plain_dict_refusal``
+    is the gate that refuses one (it walks the SERVED surface, live AND retired, and
+    follows `return helper(...)`, so a refusal the gate cannot see is not possible to
+    write without failing it).
     """
     def plain_dict_tool() -> dict:
         return {"mode": "bogus",

@@ -41,13 +41,18 @@ WHAT IS PINNED HERE
    the first sweep could not see. This is the gate that keeps the converted
    sites from growing another: a new refusal written any of the old ways fails
    here rather than silently re-opening the defect.
-2. **The behaviour, per producer** — the real tools (`tortoise_recall`,
+2. **The vocabulary** — the emitter's `error_kind == "safe_error"` definition
+   names BOTH producer families (`_safe`'s caught failure and the tool-body
+   refusal), because #9084 widened the kind without moving the telemetry code.
+3. **The behaviour, per producer** — the real tools (`tortoise_recall`,
    `tortoise_create_point`, `tortoise_query`, `tortoise_file_decision`,
-   `tortoise_graph_set_recording`) answer their refusal with a non-``ok``
-   status and a named `error_kind`.
-3. **No wire change** — the refusal's payload is byte-identical to the plain
+   `tortoise_graph_set_recording`) AND the five helpers the first sweep could
+   not reach (`_overview_section`, `_onboarding_state`, `tortoise_get`,
+   `_set_source_state`, `_http_excluded_error`) answer their refusal with a
+   non-``ok`` status and a named `error_kind`.
+4. **No wire change** — the refusal's payload is byte-identical to the plain
    dict it replaced.
-4. **No re-classification of successes** — the #3926 boundary (a success whose
+5. **No re-classification of successes** — the #3926 boundary (a success whose
    props carry an ``error`` key) still reads ``ok``, and the "recovered from a
    secondary `_safe` failure" shape still reads ``ok``.
 
@@ -317,7 +322,46 @@ def test_every_declared_domain_answer_exemption_is_still_needed():
             "DOMAIN_ANSWER_PRODUCERS is stale cover; remove it")
 
 
-# ── 2. The behaviour, per producer ────────────────────────────────────────
+# ── 2. The vocabulary ──────────────────────────────────────────────────────
+
+def _flatten(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_the_emitter_vocabulary_names_BOTH_producer_families():
+    """#9084 widened ``error_kind == "safe_error"``; the definition must say so.
+
+    The emitter's docstring calls itself "the single emission point" and states
+    the vocabulary HERE. Before #9084 it defined the kind as "a dispatch whose
+    failure `_safe` ANSWERED with a dict" — after this fix the majority of that
+    family is a TOOL-BODY refusal the SDK was never called for (`_safe` never
+    runs), so the old definition now describes a strictly narrower set than the
+    data. A reader would derive the pre-#9084 scope from it, which is exactly
+    the misreading the runbook clause exists to prevent.
+
+    Pinned as BOTH halves plus the stale half's ABSENCE, so "fix the docstring"
+    cannot regress into "rename it and move on".
+    """
+    flat = _flatten(ms._emit_mcp_tool_call_telemetry.__doc__ or "")
+
+    assert "a dispatch whose failure `_safe` ANSWERED with a dict" not in flat, (
+        "the emitter still defines `safe_error` as `_safe`-produced only — after "
+        "#9084 the tool bodies are the other producer"
+    )
+    assert "TWO producers write that kind" in flat, (
+        "the vocabulary must state that two producer families share "
+        "`error_kind = 'safe_error'` (#8135 `_safe`, #9084 tool body)"
+    )
+    assert "a failure `_safe` CAUGHT" in flat, (
+        "the `_safe` half of the family must still be named (#8135)"
+    )
+    assert "a TOOL-BODY refusal the SDK was never called for" in flat, (
+        "the #9084 half of the family must be named — that is this fix's "
+        "whole point"
+    )
+
+
+# ── 3. The behaviour, per producer ────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_recall_bad_mode_is_recorded_as_a_failure(events, hosted):
@@ -547,7 +591,7 @@ async def test_manage_sources_unreadable_projection_is_recorded_as_a_failure(
     assert row["error_kind"] == "safe_error", row
 
 
-# ── 3. No wire change ─────────────────────────────────────────────────────
+# ── 4. No wire change ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_the_refusal_wire_shape_is_the_plain_dict_it_replaced(
@@ -598,7 +642,7 @@ async def test_the_constructed_refusal_is_recorded_even_through_a_spread(
     assert row["error_kind"] == "safe_error", row
 
 
-# ── 4. The false positives that must NOT move ─────────────────────────────
+# ── 5. The false positives that must NOT move ─────────────────────────────
 
 @pytest.mark.asyncio
 async def test_a_successful_write_carrying_a_user_error_prop_stays_ok(
