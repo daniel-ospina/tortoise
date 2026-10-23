@@ -241,6 +241,12 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #:   FABRICATE the wrong kind on every session Source, so the value is not one
 #:   this table can hold; it needs the prefix rule (or a record column that
 #:   states it). Tracked in #9710.
+#: * `Source.is_episodic` (`s.is_episodic=$ep`, TRUE only for a `session:` ref)
+#:   — the same prefix-conditional shape as `sourceKind`, and the flag
+#:   `graph-scripts/backfill_is_episodic.py` reads to exclude a session Source
+#:   from its one-time backfill. `source.is_episodic` is placed PRIMARY and
+#:   NULLABLE, so a silent row loses it exactly like the kinds. Tracked in
+#:   #9710.
 #: * `Source.title = coalesce($title, $url)` and the other copies in the same
 #:   clauses (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt`, and
 #:   `id = coalesce($id, $url)`) — not CONSTANTS: a copy of another record
@@ -266,8 +272,8 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: (seven, for an event whose optional columns are NULL) — including the
 #: ONTOLOGY §4.5-REQUIRED `eventKind` when a producer omits it. Also undeclared:
 #: the other `:Source` create clauses (`_materialize_connector_source`,
-#: `_document`, `_mint_source_stub`) and the `_stub` adoption marker the fold
-#: clears. Filed as #9721, as its own change, for two shapes this table cannot
+#: `_upsert_document`, `_mint_source_stub`) and the `_stub` adoption marker the
+#: fold clears. Filed as #9721, as its own change, for two shapes this table cannot
 #: express: `participants` is a LIST (a mutable default per node) and `id` is a
 #: key-ish copy of `eventId`.
 #:
@@ -678,12 +684,15 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # so it is projected under its own name as well as being the MERGE key.
     props.setdefault(key_prop, raw)
     # The fold's `ON CREATE` constants, applied where the record is SILENT
-    # (#9634). `setdefault` on purpose, in that order: a NULL column was already
-    # dropped above (so the default fills the gap the fold fills), and a value
-    # from the `props` tail — the open-set surface — still wins, because the
-    # record saying a kind outranks a fallback.
+    # (#9634). `None` counts as silence, not as a value: the fold COALESCEs on
+    # null (`coalesce($ok, 'other')`), so an explicit null — which is what a
+    # `props`-tail key holding None produces here, `_props_from_row` keeps the
+    # tail verbatim — must fall back exactly as an absent column does. Anything
+    # else (a named kind, from the column or the tail) is the record speaking
+    # and is never replaced.
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
-        props.setdefault(prop, default)
+        if props.get(prop) is None:
+            props[prop] = default
     return RecordNode(label=label, key=raw, props=props)
 
 

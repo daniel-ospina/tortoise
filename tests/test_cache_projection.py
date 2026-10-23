@@ -406,6 +406,12 @@ def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
     from_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
                                   "props": {"subjectKind": "role"}})
     assert from_tail.props["subjectKind"] == "role"
+    # A tail NULL is SILENCE, not a value: the fold coalesces on null, so the
+    # default must still fill it (an explicit null left in place would write a
+    # null property the live fold never writes).
+    null_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
+                                  "props": {"subjectKind": None}})
+    assert null_tail.props["subjectKind"] == "other"
     named_obj = _node("Object", {"name": "acme", "object_kind": "org",
                                  "title": "Acme"})
     assert (named_obj.props["objectKind"], named_obj.props["title"]) == (
@@ -476,6 +482,13 @@ def test_the_declared_fold_defaults_are_the_folds_own_constants():
         "`_mint_subject_stub` in projection/edges.py no longer writes the same "
         "`subjectKind='other'` literal this table transcribes for Subject — the "
         "stub-minted half of the constant drifted. Re-derive, do not guess."
+    )
+    # The Object twin: `_event_plain_merge` writes `o.objectKind='other'` for the
+    # stub Object an event's mechanism link mints.
+    assert re.search(r"o\.objectKind='other'", fold), (
+        "the Object stub path (`_event_plain_merge` in projection/entities.py) "
+        "no longer writes the same `objectKind='other'` literal this table "
+        "transcribes — the stub-minted half of the constant drifted."
     )
     # The values the patterns above force, asserted so the table cannot drift
     # while the patterns still match (they pin the CONSTRUCTION, not the literal).
