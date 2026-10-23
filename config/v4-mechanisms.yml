@@ -67,6 +67,16 @@
 # so the enumeration is only as complete as the reader who writes it — the
 # residual the gate's own docstring states.
 #
+# ⭐ WHAT "MARKED" ACTUALLY BUYS. The gate compares MARKERS, so what it
+# enforces is: every declared mechanism the registry knows about carries its
+# marker in EACH scanned document its row names, and no scanned document marks a
+# mechanism its row omits. Position inside the document is a CONVENTION the gate
+# cannot check — prose cannot be parsed for "this paragraph declares the
+# mechanism" — so a marker moved away from its declaration while the passage is
+# deleted keeps the gate green. Every cited section below carries its marker AT
+# the site (re-checked when a row is added or a document is restructured); that
+# is a discipline, not a verdict.
+#
 # ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven of these rows came from
 # #5064's own O/I/T indicator (1); `state_value_carve_out` came from the
 # enumeration #5064's Scope section names as its first deliverable ("enumerate
@@ -74,15 +84,16 @@
 # E2 comment — *"mark the omission explicit in the registry this issue builds"*.
 # ⚠️ That is the whole point of the exercise: a hand-written list cannot prove it
 # is complete, which is how a declared mechanism (this one) stayed unregistered
-# while the seven-entry gate stayed green. So every declaration in
-# `docs/architecture/**/*.md` (recursive) carries a `<!-- v4-mechanism: <id> -->`
-# marker at the
-# declaration site, and `membership_errors()` in the gate fails closed in BOTH
-# directions — a marker with no row, and a row with no marker — AND holds each
-# row to its OWN declared documents: every scanned document a row names must
-# carry its marker (a marker elsewhere does not stand in for it), and a row that
-# names none is refused outright. See the gate's docstring for the rule and its
-# stated limits.
+# while the seven-entry gate stayed green. So every mechanism this registry knows
+# about carries a `<!-- v4-mechanism: <id> -->` marker in each scanned document
+# (`docs/architecture/**/*.md`, recursive) that its row names, and
+# `membership_errors()` in the gate fails closed in BOTH directions — a marker
+# with no row, and a row with no marker — AND holds each row to its OWN declared
+# documents: every scanned document a row names must carry its marker (a marker
+# elsewhere does not stand in for it), a marker in a document the row omits is
+# refused, and a row that names none is refused outright. Placement INSIDE the
+# document is the convention described above, which the gate cannot read. See the
+# gate's docstring for the rule and its stated limits.
 #
 # ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
 # here rather than assumed covered: `packs/dev/manifest.yaml` (`embed_gate`'s
