@@ -42,9 +42,11 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 prove it is COMPLETE — and that is how `state_value_carve_out` (the verbatim
 state/operational-value carve-out, #2453) stayed unregistered while this gate
 stayed green: a hand-written list of seven cannot notice an eighth mechanism the
-design declares in prose. So every declaration in `docs/architecture/**/*.md`
-carries a `<!-- v4-mechanism: <id> -->` marker AT THE DECLARATION SITE, and
-`membership_errors` fails closed on ALL THREE shapes:
+design declares in prose. So every mechanism the registry knows about carries a
+`<!-- v4-mechanism: <id> -->` marker in EACH `docs/architecture/**/*.md` document
+its row names — the convention is to place it at the declaration site, and that
+placement is a DISCIPLINE, not something this gate can read (see the stated
+limits) — and `membership_errors` fails closed on ALL THREE shapes:
 
   * a marker in `docs/architecture/**/*.md` whose id has NO registry row — the
     declared-and-absent shape this whole issue exists to kill;
@@ -72,6 +74,13 @@ carries a `<!-- v4-mechanism: <id> -->` marker AT THE DECLARATION SITE, and
     backfill, not a property the gate can derive. What IS closed is every MARKED
     case: a marker in a document the row omits is refused, so the registry's
     enumeration cannot silently shrink;
+  * a marker DETACHED from what it declares is not detected: the marker's
+    position inside a document is a convention, so moving it to the file's end
+    and deleting the passage it marked leaves the gate green (measured — a
+    pristine copy with §13.8's fan-out row removed and the marker appended at
+    the end of the file passed every v4 guard). Prose cannot be parsed for
+    "this paragraph declares the mechanism", so this is a permanent limit of a
+    marker comparison, not a missing rule;
   * a `declared_in:` entry the marker scan cannot read — `embed_gate`'s
     `packs/dev/manifest.yaml` is the live case — is NOT marker-checked: the
     convention is a markdown-comment convention, so the scan is `.md` files under
@@ -357,8 +366,13 @@ def _declaring_paths(row: dict) -> list[str]:
     `gate_errors` owns the field's SHAPE (a non-list, a non-string entry, an
     escaping path are all its verdicts). This only has to answer "WHICH
     documents does the row say declare it" for the attribution and coverage
-    rules, so it accepts the entries it can use and ignores the rest — the shape
-    defect is reported once, by the gate that owns it.
+    rules, so it accepts the entries it can use and ignores the rest.
+
+    An EMPTY answer is not this function's verdict to report either: the caller
+    skips a row that names nothing, because `gate_errors` already says
+    "declares no declaring document" and the membership rule already says
+    UNMARKED — a coverage error on top of those two is a THIRD message for one
+    defect, which is the noise this docstring exists to refuse (review P2).
     """
     declared = row.get("declared_in")
     if not isinstance(declared, list):
@@ -424,11 +438,14 @@ def membership_errors(
         markers left the suite green (review cycle 1, P2) while the registry kept
         claiming both documents declare it — the same declared-implies-present
         shape one level down;
-      * a row naming NO document inside the scanned surface at all -> its
-        declaration site is unreachable, so the marker convention cannot confirm
-        it, and an unverifiable row must not read as a marked one (#9778 review
-        P2). The rules above would pass it vacuously: with no scanned declaring
-        document there is no per-document check to fail.
+      * a row whose `declared_in:` entries ALL lie outside the scanned surface
+        -> its declaration site is unreachable, so the marker convention cannot
+        confirm it, and an unverifiable row must not read as a marked one (#9778
+        review P2). The rules above would pass it vacuously: with no scanned
+        declaring document there is no per-document check to fail. A row with an
+        EMPTY `declared_in:` is excluded from this bullet on purpose — it names
+        nothing to reason about, and the shape defect is `gate_errors`' verdict,
+        not a second one here.
 
     Kept SEPARATE from `gate_errors` on purpose: `gate_errors` is also the
     per-row mutation surface, and folding a repository-wide scan into it would
@@ -481,6 +498,8 @@ def membership_errors(
     # silently required nor silently accepted, and the coverage rule below
     # refuses a row that relies on such an entry ALONE.
     for mid, entries in sorted(declared_docs.items()):
+        if not entries:
+            continue  # `gate_errors` owns "declares nothing" (see _declaring_paths)
         scanned_targets = _scanned_targets(entries, docs_dir)
         if not scanned_targets:
             errors.append(
@@ -1416,6 +1435,26 @@ def test_membership_accepts_a_row_naming_every_marking_document(tmp_path) -> Non
     row = _row("x")
     row["declared_in"] = ["docs/architecture/a.md", "docs/architecture/b.md"]
     assert membership_errors([row], docs) == []
+
+
+def test_an_empty_declared_in_is_the_gates_verdict_not_memberships(tmp_path) -> None:
+    """One defect, one message, from the function that owns it (review P2).
+
+    A row with `declared_in: []` used to draw THREE messages: `gate_errors`'
+    own "declares no declaring document", the UNMARKED rule where the marker was
+    absent, and — noise — the coverage rule firing on the empty list. That rule
+    exists for a row whose named documents are ALL outside the scanned surface;
+    when the row names nothing there is no set to reason about, and the shape
+    defect is the gate's to report. Membership is therefore SILENT here, and
+    this test pins both halves: the silence is deliberate, and the red still
+    exists one function over.
+    """
+    docs = _docs(tmp_path, a__md="a <!-- v4-mechanism: x -->\n")
+    row = _row("x")
+    row["declared_in"] = []
+    assert membership_errors([row], docs) == []
+    gate = gate_errors([row], tmp_path)
+    assert any("declares no declaring document" in e for e in gate), gate
 
 
 #: `declared_in:` entries the gate cannot scan. `embed_gate` really carries one

@@ -1261,7 +1261,7 @@ Every system above embeds **name + description/summary**. Our `:Object` carries 
 
 **The published fix:** *"TierMem then writes back **verified findings as new summary units linked to their raw sources**."*
 
-**⚠️ This is the mechanism we do not have, and it is the difference between a tiering scheme that gets cheaper over time and one that does not.** The published failure list names its absence directly as **"no attribution loop."** **⛔ The write-back must respect extractor §2.4.2: a finding written back to Tier 1 carries the SPAN, and the raw fact behind it stays immutable.** Anything else turns the summary tier into a system that quietly overwrites its own evidence.
+**⚠️ This is the mechanism we do not have, and it is the difference between a tiering scheme that gets cheaper over time and one that does not.** <!-- v4-mechanism: sufficiency_router --> The published failure list names its absence directly as **"no attribution loop."** **⛔ The write-back must respect extractor §2.4.2: a finding written back to Tier 1 carries the SPAN, and the raw fact behind it stays immutable.** Anything else turns the summary tier into a system that quietly overwrites its own evidence.
 
 ### 12.5a ✅ The decision layer — what landed, and what it deliberately does not do
 
