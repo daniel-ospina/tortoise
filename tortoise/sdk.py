@@ -12825,6 +12825,25 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
+        # #2351 (review P1): ``claimClass`` is a CLOSED vocabulary whose write
+        # invariant is "the property exists ONLY for ``derived``; absence IS
+        # ``asserted``". The generic props passthrough must not carry it —
+        # ``create_point`` pops it for exactly this reason. Left open, this door
+        # accepts an unknown third state (which the writer refuses everywhere
+        # else) and an explicit clear silently re-labels a DERIVED claim as
+        # AUTHORED, which defeats the override guard at both the write surfaces
+        # and the EP backstop with no warning. ``validate`` raises on a junk
+        # value and maps ``None`` to the default, so the stored shape stays the
+        # one spelling (``SET n += {claimClass: null}`` removes the property).
+        for _class_key in ('claimClass', 'claim_class'):
+            if _class_key in props:
+                _upd_class = props.pop(_class_key)
+                props[_claim_class.PROP] = (
+                    _claim_class.DERIVED
+                    if _claim_class.validate(_upd_class) == _claim_class.DERIVED
+                    else None
+                )
+
         # #432 plan-review P1: update_point is non-status except the draft→live
         # promote (matches the create_operator promote). Any other status value
         # is rejected BEFORE the query — lifecycle transitions go through
@@ -16193,10 +16212,10 @@ class TortoiseSDK:
         # NOT epistemic cascades (they transfer no belief) and are not guarded.
         # Raised BEFORE the operator node exists and before any edge is
         # written, so a refused call leaves the graph untouched.
-        if op_type in ("IMPL", "NAND") and _claim_class.blocks_override(
+        if op_type in ("IMPL", "NAND") and target_ids and _claim_class.blocks_override(
                 endpoint_classes.get(source_id),
                 set().union(*(endpoint_classes.get(t, set())
-                             for t in target_ids)) if target_ids else None):
+                             for t in target_ids))):
             raise ValueError(_claim_class.override_refusal(
                 source_id=source_id, target_ids=list(target_ids),
                 surface=f"create_operator({op_type})"))

@@ -379,6 +379,71 @@ def test_read_without_the_param_is_unchanged(lane):
         assert "claim_class" not in row, "None must not emit the annotation"
 
 
+def test_operator_with_no_targets_is_not_a_derived_override(lane):
+    """An EMPTY target list is not "an asserted target" (#2351 review P2).
+
+    ``any_asserted()`` returns True for an empty class set on purpose (one id
+    whose node carries no marker IS asserted), but that must not be reused for
+    an empty COLLECTION of targets — a derived source with nothing to override
+    is a legal call.
+    """
+    pid = lane.create_point("statement", "computed",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", pid, [])
+    assert op["id"]
+
+
+def test_update_point_refuses_a_junk_class_and_never_stores_it(lane):
+    """The UPDATE door enforces the same closed vocabulary as CREATE (#2351).
+
+    ``update_point`` passes unknown props straight to ``SET n += $props``, so
+    without the normalization this door accepts an unknown third state — which
+    ``validate()`` promises is never persisted — and an explicit clear
+    re-labels a DERIVED claim as AUTHORED, defeating the override guard.
+    """
+    pid = lane.create_point("statement", "computed",
+                            claim_class="derived")["id"]
+    with pytest.raises(ValueError, match="Unknown claim_class"):
+        lane.update_point(pid, claimClass="junk")
+    assert _props(lane, pid).get(cc.PROP) == "derived", (
+        "a refused update must not change the stored class")
+
+    # Clearing is an explicit act, and it must be stored as ABSENCE — never as
+    # a second spelling of the default class.
+    lane.update_point(pid, claimClass="asserted")
+    assert cc.PROP not in _props(lane, pid), (
+        "absence IS asserted; the string 'asserted' must never be stored")
+    lane.update_point(pid, claimClass="derived")
+    assert _props(lane, pid).get(cc.PROP) == "derived"
+
+
+def test_degraded_fallback_tier_honours_the_class_filter(lane, monkeypatch):
+    """A class-filtered read on a SICK store must not return excluded rows.
+
+    The fallback tiers return BEFORE the primary filter block, so the filter
+    and annotation are applied to the corpus by hand there. Without that, a
+    degraded read silently hands back the claims the caller asked to exclude —
+    the one failure mode a filter must never have.
+    """
+    from tortoise import search_engine
+
+    derived = lane.create_point("statement", "zebra derived claim",
+                                claim_class="derived")["id"]
+    asserted = lane.create_point("statement", "zebra asserted claim")["id"]
+
+    def _all_legs_failed(*_a, **_k):
+        return {}  # every strategy failed ⇒ the in-memory TF-IDF tier
+
+    monkeypatch.setattr(search_engine, "degradation_chain", _all_legs_failed)
+    rows = lane.tortoise_fts_query("zebra", claim_class="derived")
+    ids = {r.get("id") for r in rows}
+    assert ids and ids == {derived}, (
+        f"the degraded tier must still exclude the asserted claim, got {ids!r}")
+    assert asserted not in ids
+    assert all(r.get("claim_class") == "derived" for r in rows), (
+        f"the tier must annotate its rows, got {rows!r}")
+
+
 def test_read_surface_is_a_param_not_a_new_tool():
     """Indicator 3 is +0 MCP tools: the seam is a kwarg on an existing read."""
     assert "claim_class" in inspect.signature(

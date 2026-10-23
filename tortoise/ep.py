@@ -2109,7 +2109,7 @@ class TortoiseEP:
                         "operator_id": op_id,
                         "op_type": op_type,
                         "reason": "derived_over_asserted",
-                        "participating_inputs": 0,
+                        "participating_inputs": len(input_ids),
                         "inputs": [
                             {"id": cid, "status": st}
                             for cid, st in zip(

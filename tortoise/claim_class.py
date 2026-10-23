@@ -42,6 +42,22 @@ with any asserted claim — i.e. it would make the class a degradation rather th
 a provenance marker. Only the leg that would let the computed claim push belief
 INTO the authored one is blocked.
 
+⚠️ The narrowing is WHOLE-FACTOR, not per pair. ``factor_direction`` returns a
+direction TOKEN, and ``_update_nary_factor`` derives ``mutual = fwd and bwd``
+from it — so narrowing a ``<->`` to ``<-`` turns a mutual NAND's ``C(n,2)``
+clique into a star and changes the conservation scale, and the whole forward leg
+is blocked even into targets that are themselves ``derived``. That is wider than
+the sentence above, deliberately accepted (a per-pair guard is a bigger change
+to the update path than #2351 justifies) and recorded here so the next reader
+does not read the rule as per-leg.
+
+⚠️ The read-side parameter is named ``claim_class``, which is a HOMONYM of
+``sufficiency_router``'s ``claim_class`` (``semantic`` | ``episodic``). The two
+closed vocabularies are unrelated and neither is a superset of the other; they
+live on different surfaces (this module's is the Point provenance marker,
+``claimClass``). A caller mixing them gets a loud ``ValueError`` naming the
+Point vocabulary, not a silent wrong answer.
+
 ⚠️ KNOWN RESIDUAL — narrowing does not CLEAR previously persisted messages.
 ``_update_factor`` writes only the legs a direction flows and never zeroes the
 blocked one, and graph-mode ``_update_claim_posterior`` sums every persisted
