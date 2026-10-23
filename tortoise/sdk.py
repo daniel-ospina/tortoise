@@ -62,6 +62,12 @@ from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import entity_name_id as _entity_name_id
 from .ids import ulid
+# #2817: the S5 money derivation (prose → typed value). Module scope because the
+# capture seam's `warn_on` narrowing below is derived from the CLOSED
+# `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
+# instead of silently muting a warning. `value_normalizer` imports only
+# `tortoise.money` (no cycle; `money` is already loaded via the projection).
+from .value_normalizer import DROP_REASONS, normalize_money_props
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     EMBEDDING_PROPERTY,
     clear_embedding,
@@ -1229,6 +1235,58 @@ _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
                               # E4 (#5007): the verbatim span pointer
                               "span_start", "span_end")
 _CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
+
+#: #2817 route (2) — the drop reasons the CAPTURE WRITE SEAM does NOT report.
+#: This partition is the one recorded on #2817 (comment `6359826543`):
+#: `not_an_iso4217_code` is the noisy one in business prose (`"ISO 9001"`,
+#: `"SOC 2"`, `"Q3 target 30 KPI"`) and `no_candidate` fires on every sentence
+#: with no number at all. Every other reason means "a number was here and it
+#: was NOT safely typed" and stays reported — including `no_currency_anchor`.
+#: `refused_by_layer1` is reported too: a value the store cannot hold is exactly
+#: the abstention a reader must see (the #2817 review's over-range amount).
+#:
+#: ⚠️ Measured residual (2026-10-23): the vocabulary conflates a NON-money bare
+#: number (`"Sprint 14 closed on time"` → `no_currency_anchor`) with a
+#: money-shaped amount in an unsupported currency (`"800 BTC"` →
+#: `not_an_iso4217_code`, so silent here). That partition is a decision's, not
+#: this lane's — a reason-level split is the fix, filed against #2817.
+_CAPTURE_MONEY_WARN_SILENT: frozenset[str] = frozenset({
+    "no_candidate", "not_an_iso4217_code"})
+# Import-time truth of the comment above: a RENAMED reason in the silent set
+# must fail here, never silently re-partition the warning policy. An explicit
+# `raise`, not an `assert`: `python -O` strips asserts, and a guard a runtime
+# flag can delete is not a guard (the shape `extractor_v2.py:5155` states).
+if not _CAPTURE_MONEY_WARN_SILENT <= DROP_REASONS:
+    raise RuntimeError(
+        "capture money warn policy names a reason outside DROP_REASONS: "
+        f"{sorted(_CAPTURE_MONEY_WARN_SILENT - DROP_REASONS)!r}")
+_CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - _CAPTURE_MONEY_WARN_SILENT
+
+#: #2817 (review F1) — the capture seam reports its money abstentions ONCE per
+#: capture, aggregated by reason, never one line per point. The bound is
+#: structural: one entry per call, with at most one bucket per closed-set
+#: reason (``DROP_REASONS``), so no point count can lengthen the receipt. This
+#: is the same shape as the #5654 bounded supersession channel in the same
+#: function — the difference is that this channel needs no withheld count,
+#: because the summary reports the TRUE total it counts.
+_CAPTURE_MONEY_DROP_SUMMARY_PREFIX = (
+    "value-normalizer: {total} point(s) carried an amount that was not "
+    "typed — ")
+
+
+def _capture_money_drop_summary(drops: dict[str, int]) -> str:
+    """ONE bounded receipt entry for a capture's money abstentions.
+
+    Deterministic (reasons sorted) so two captures of byte-identical content
+    produce a byte-identical receipt — including a create and a dedup hit,
+    which is what #2817 review F1's create/dedup asymmetry was about.
+    """
+    reasons = ", ".join(f"{reason} \u00d7{count}"
+                        for reason, count in sorted(drops.items()))
+    return (_CAPTURE_MONEY_DROP_SUMMARY_PREFIX.format(
+                total=sum(drops.values()))
+            + reasons
+            + " (prose only — each value is a drop, never a guess)")
 
 
 def _capture_passthrough_read_fields() -> str:
@@ -11787,6 +11845,13 @@ class TortoiseSDK:
         # `_stream_to_payload` already enforces (#1272) — this restores it on
         # the v2 capture path.
         capture_point_id_map: dict[str, str] = {}
+        #: #2817 (review F1): the money abstentions of THIS capture, counted by
+        #: drop reason — the aggregating sink, not the per-line `warnings` one,
+        #: so a receipt gains one summary entry (`_capture_money_drop_summary`)
+        #: however many points mentioned a number. Filled for EVERY payload
+        #: point, created or resolved: a dedup hit writes nothing but must not
+        #: report differently from the create that preceded it.
+        money_drops: dict[str, int] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
@@ -11794,7 +11859,43 @@ class TortoiseSDK:
                 skipped += 1
                 continue
             payload_id = pid
+            # #2817 (route 2 of the two the issue records as legal): derive the
+            # money value HERE, at the capture write seam, from the point's own
+            # `content` — the FULL stored claim (bounded by the extractor's
+            # `_MAX_CONTENT`), never the 200-char `quote`. The quote is the
+            # wrong source twice over: a value straddling its cut types the
+            # truncated prefix (a 100x understatement whose `verbatim` is still
+            # a byte-exact substring, so traceability would PASS on a wrong
+            # reading), and a quote is an excerpt OF the claim — the value must
+            # agree with the sentence the graph stores.
+            #
+            # Derived BEFORE the resolution below, i.e. on every payload point
+            # and not only on the create branch (#2817 review F1): derivation
+            # is deterministic and content-addressed, so it writes nothing on a
+            # dedup hit, but counting the abstention there too is what makes
+            # the RECEIPT symmetric — byte-identical content reported one way
+            # on a first capture and another way once a canonical exists was
+            # the asymmetry the review named.
+            #
+            # The call sits INSIDE the per-point `try` below (never above it):
+            # a derivation failure must stay POINT-local — skipped, counted in
+            # `errors`, the capture still answered — exactly as it was when the
+            # call lived in the create branch. Outside the guard it would
+            # escape the whole points loop after the session and its turns were
+            # already written: no receipt, no `errors` entry, the partial-write
+            # shape the #2817 P1 fix removed.
+            #
+            # The derived fields are NOT added to
+            # `_CAPTURE_PASSTHROUGH_PROPS`: that set is the public capture
+            # RESPONSE surface (and `validFrom`'s note below is the standing
+            # reason not to widen it). A money value is a graph structural
+            # field read back with `money.read_money_value` (design §7.1:
+            # server-written, not a client field), so the response shape is
+            # untouched — symmetric between a create (stores, does not
+            # advertise) and a dedup hit (writes nothing).
             try:
+                money = normalize_money_props(
+                    content, warn_on=_CAPTURE_MONEY_WARN_ON, drops=money_drops)
                 # 1) in-capture fold: same content minted earlier this seam
                 #    run (extractor payload assembly normally folds these;
                 #    the seam is the backstop).
@@ -11880,6 +11981,12 @@ class TortoiseSDK:
                     create_props = props
                     if props.get("when"):
                         create_props = {**props, "validFrom": props["when"]}
+                    # #2817: the value derived at the top of this loop rides
+                    # the CREATE only — a dedup hit writes no props at all
+                    # (first-writer), and its abstention has already been
+                    # counted for the receipt.
+                    if money:
+                        create_props = {**create_props, **money}
                     _created = self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
@@ -12036,6 +12143,11 @@ class TortoiseSDK:
                     f"{type(e).__name__}: point write failed for {pid}: {e}")
         if skipped:
             warnings.append(f"{skipped} extracted point(s) failed to write")
+        # #2817 (review F1): the money abstentions of this capture, reported
+        # ONCE and bounded — replacing the per-point append that made the
+        # receipt a function of how many claims happened to mention a number.
+        if money_drops:
+            warnings.append(_capture_money_drop_summary(money_drops))
 
         # W5 Phase D (#2104): surface the extractor's consolidation noops —
         # claims the S3/FTS fold resolved to an EXISTING node were
