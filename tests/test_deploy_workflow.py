@@ -2526,6 +2526,27 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
       GitHub home — a declaration the runbook contradicts is how an operator gets
       told to rotate Fly-only, which the next deploy then silently reverts
       (#8614).
+
+    ⚠️ **Ownership (#9585 review P2), because a duplicated pin is process weight.**
+    The bind / probe / declaration / append assertions below are BELT-AND-BRACES.
+    Their owner is `tests/test_fly_secret_drift.py`, which DERIVES each of them
+    from the shipped manifest (`_declared_gh_names(REAL_MANIFEST)`), so it covers
+    a newly declared `gh-secret:` name with no edit:
+
+    * `::test_gh_secret_declarations_are_bound_from_their_own_github_secret` —
+      both steps bind `secrets.<name>` (same two steps);
+    * `::test_probe_block_and_manifest_gh_secret_names_are_in_lockstep` —
+      `probed == declared_gh` and every probe env-bound to its own secret;
+    * `::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt` — the
+      gate's own state machine over the real artifacts (`STALE` / `UNDECLARED`);
+    * `::test_secrets_matrix_github_column_agrees_with_the_manifest` — the ✅ cell.
+
+    They are kept here because the failure they name is cheap to read next to the
+    workflow, not because they are its only pin — and the closing block asserts
+    those owners still exist under those names, so this note cannot rot into a
+    pointer at a renamed test. What this test ALONE owns is the matrix **row's
+    existence**: the derived matrix guard only inspects rows that exist, so a
+    `gh-secret:` declaration landing with no row is unpinned there.
     """
     gate = _steps()[_PROVENANCE_STEP]
     payload = _steps()[_SET_STEP]
@@ -2574,6 +2595,24 @@ def test_record_arming_secret_is_staged_from_its_own_github_secret():
         "while the manifest declares it `gh-secret:` — the Fly-only rotation recipe "
         "looks correct for a name the next deploy overwrites"
     )
+    # The belt-and-braces note in the docstring names four owners; assert they
+    # still exist under those names, so a rename or a deletion reds HERE rather
+    # than leaving this test's pointer aimed at nothing (#9585 review P2).
+    owners = (_REPO_ROOT / "tests" / "test_fly_secret_drift.py").read_text(
+        encoding="utf-8"
+    )
+    for owner in (
+        "test_gh_secret_declarations_are_bound_from_their_own_github_secret",
+        "test_probe_block_and_manifest_gh_secret_names_are_in_lockstep",
+        "test_shipped_manifest_matches_the_real_workflow_and_recorded_debt",
+        "test_secrets_matrix_github_column_agrees_with_the_manifest",
+    ):
+        assert f"def {owner}(" in owners, (
+            f"tests/test_fly_secret_drift.py no longer defines {owner!r} — that is "
+            "the manifest-derived owner of an assertion kept here for local "
+            "readability, so this test's belt-and-braces claim is now false and "
+            "the invariant may have lost its only deriving reader"
+        )
 
 
 def _superseded_census_note() -> str:
@@ -2699,6 +2738,92 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     assert re.search(r"export TORTOISE_RECORD_DSN=", runbook), (
         "the note blames #9556/R8 for a runbook line that is not there — the "
         "census hit it explains has no referent"
+    )
+
+
+def _census_block() -> str:
+    """The epic doc's `Census commands` block, verbatim (through its fence)."""
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    assert "Census commands" in text, (
+        "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md no "
+        "longer carries the census block — the provenance record is gone"
+    )
+    return text.split("Census commands", 1)[1].split("```text", 1)[1].split("```", 1)[0]
+
+
+def test_the_census_freshness_claim_is_scoped_to_the_lines_it_actually_re_measured():
+    """#9585 review P2: a "re-measured and unchanged" claim must not cover a line
+    the same document corrects — and every corrected line must carry its ⚠️.
+
+    The epic's note said *"The other six lines were re-measured 2026-10-23 and are
+    unchanged"* while, two paragraphs below, the same document states the
+    `narrative|raw_turn|raw_text|transcript` line is **no longer 0** — and since
+    #9554 landed the tenant GUC the `app.current_org_id` line is no longer 0
+    either. That sentence is the one a later lane trusts before re-running the
+    census, so an unscoped "unchanged" over a line that moved is the stale-flag
+    class, not wording: it re-certifies the pre-#9555 / pre-R6 zeros.
+
+    Falsified on the pre-fix text: it carries the unscoped sentence, and the
+    `app.current_org_id` line carries no marker at all.
+    """
+    block = _census_block()
+    text = _EPIC_DOC.read_text(encoding="utf-8")
+    # 1. No UNIVERSAL freshness claim. Both spellings measured in review — the
+    # note above the fence and the one under the #9555 correction — said "the
+    # other six", which is exactly the set that contains a corrected line.
+    universal = re.findall(
+        r"The other six (?:lines|commands)[^.]*?(?:unchanged|exactly as stated)[^.]*\.", text
+    )
+    assert not universal, (
+        "the census note claims EVERY other line was re-measured and is unchanged, "
+        "while two of them have moved (the `narrative|…` grep since #9555, the "
+        "`app.current_org_id` setter count since #9554):\n  "
+        + "\n  ".join(universal)
+    )
+    # 2. The scoped replacement exists and names BOTH exceptions, so the reader
+    # is not left to discover them 40 lines apart.
+    scoped = re.search(
+        r"The remaining census\s+lines were re-measured at this head(.*?)(?:\n\n|$)",
+        text,
+        re.S,
+    )
+    assert scoped, (
+        "the note no longer states which lines were re-measured at this head — the "
+        "scoping is the fix, and deleting it silently restores the universal claim"
+    )
+    for issue in ("#9555", "#9554"):
+        assert issue in scoped.group(1), (
+            f"the scoped freshness sentence does not name {issue} as an exception, so "
+            "a later lane reads the block's pre-correction count as live"
+        )
+    # 3. Each line that moved carries its own marker IN the block: a correction
+    # that lives only in prose below is invisible to whoever copies the command.
+    for needle in ("narrative|raw_turn", "app.current_org_id"):
+        line = [ln for ln in block.splitlines() if needle in ln]
+        assert len(line) == 1, f"the census block has {len(line)} lines for {needle!r}"
+        assert "⚠️" in line[0], (
+            f"the census line for {needle!r} carries no ⚠️ marker although it no "
+            "longer returns the count beside it — the block reads as a current "
+            "measurement"
+        )
+    # 4. The markers are TRUE of this tree (so the ⚠️ is not an invented
+    # exception): the GUC the note blames really is shipped, and the narrative
+    # migration the #9555 note blames really exists.
+    projection = (_REPO_ROOT / "tortoise" / "record_projection.py").read_text(encoding="utf-8")
+    assert "TENANT_GUC = \"app.current_org_id\"" in projection, (
+        "the note attributes the census delta to a shipped `app.current_org_id` "
+        "setter that `tortoise/record_projection.py` does not carry"
+    )
+    assert "set_config('app.current_org_id'" in projection, (
+        "the note names a transaction-local `set_config('app.current_org_id', …)` "
+        "that the record projection does not install"
+    )
+    assert (
+        _REPO_ROOT / "supabase" / "migrations"
+        / "20261023000001_record_session_narrative.sql"
+    ).is_file(), (
+        "the #9555 note blames a narrative migration that is not in the tree — the "
+        "count it corrects has no referent"
     )
 
 
