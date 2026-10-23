@@ -50,7 +50,12 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    a silent drop.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
-   set equals the record's field set exactly (never a superset).
+   set equals the record view's field set exactly (never a superset). ⚠️ One
+   declared, named exception: the properties in
+   :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the fold, not the
+   record — a record row that is silent about a kind materializes the same
+   constant the live fold would have written (#9634). The test that pins the
+   exactness reads the view, so the two cannot disagree.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -95,6 +100,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
     "RELATION_TABLE",
@@ -178,6 +184,56 @@ def bookkeeping_columns(table: str) -> frozenset[str]:
 ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
     "point": {"baseline_alpha": "baseline_alpha", "baseline_beta": "baseline_beta"},
     "subject": {"superseded_by": "supersededBy", "superseded_at": "supersededAt"},
+}
+
+#: The **fold's** `ON CREATE` constants, per label — the properties whose DEFAULT
+#: is the fold's, not the record's (#9634).
+#:
+#: WHY THIS TABLE EXISTS. A bare write journals NO discriminator (#9572 removed
+#: the fabricated `subjectKind`/`objectKind` default from every write door, which
+#: is correct: the record must not state a kind nobody named), while the fold
+#: still supplies one under `ON CREATE` — `projection/entities.py`'s
+#: `_upsert_subject` writes `s.subjectKind=$sk` with the parameter defaulting to
+#: `"other"`, and `_upsert_object` writes both
+#: `o.objectKind=coalesce($ok, 'other')` and `o.title=coalesce($title, '')`.
+#: `public.subject.subject_kind` / `public.object.title` are NULLABLE, and
+#: `_props_from_row` drops a NULL column (#7971 property 3 — no fabricated
+#: authority reaches the cache), so a **record-sourced** rebuild materialised a
+#: `:Subject` with NO `subjectKind` at all: a property ONTOLOGY §4.1/§4.2 lists as
+#: REQUIRED, and the one `subject_binding.is_subject_kind` keys on. `rebuild_all`
+#: (journal replay, which runs the fold) was never affected — so live ≠ record.
+#:
+#: The fix is NOT to write the default back into the record (that is the
+#: fabrication #9572 deleted) and NOT to invent one here: it is to apply the
+#: FOLD's own `ON CREATE` constant on the way into the cache, so a record-sourced
+#: node is the node the live fold would have built. `subjectKind`/`objectKind`
+#: and `Object.title` are therefore **fold-derived defaults**: the record carries
+#: a kind when one was NAMED (the `EntityMutated` state map does), and this table
+#: supplies the same fallback the fold supplies when none was.
+#:
+#: EXCLUDED, with the reason — the fold's other `ON CREATE` defaults are NOT
+#: constants this loader may apply:
+#:
+#: * `status` (`'live'` on Subject/Object) — PROJECTION-OWNED CACHE (§2.6/
+#:   `record_projection.OpDispatch.never_store`); the schema has no column for it,
+#:   so nothing a record row carries could contradict this table, and the cache
+#:   seeds it through the fold.
+#: * `createdAt` (`coalesce($ca, $now)`) — not a constant: the default is the
+#:   REBUILD INSTANT, so there is nothing for a table to pin.
+#: * `Source.title` (`s.title=$url`) and its siblings in the same clause
+#:   (`canonicalUrl`, `urlAliases=[$raw_url]`, `ingestedAt=$now`) — not CONSTANTS:
+#:   a copy of another record column, or the write instant. A table of constants
+#:   cannot express them, and `public.source` carries each as its own nullable
+#:   column; the loader's inability to reproduce a NULL one is tracked as #9710,
+#:   the residual of this fix, not silently absorbed here.
+#:
+#: `tests/test_cache_projection.py` pins this table against the fold's own
+#: clauses (source-parsed, as the repo does for other cross-module contracts), so
+#: a change to the fold's constant reds the pin instead of silently re-opening
+#: the divergence.
+FOLD_ON_CREATE_DEFAULTS: dict[str, dict[str, Any]] = {
+    "Subject": {"subjectKind": "other"},
+    "Object": {"objectKind": "other", "title": ""},
 }
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
@@ -572,6 +628,13 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # The key column is a graph property too (`id`, `name`, `url`, `eventId`),
     # so it is projected under its own name as well as being the MERGE key.
     props.setdefault(key_prop, raw)
+    # The fold's `ON CREATE` constants, applied where the record is SILENT
+    # (#9634). `setdefault` on purpose, in that order: a NULL column was already
+    # dropped above (so the default fills the gap the fold fills), and a value
+    # from the `props` tail — the open-set surface — still wins, because the
+    # record saying a kind outranks a fallback.
+    for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
+        props.setdefault(prop, default)
     return RecordNode(label=label, key=raw, props=props)
 
 

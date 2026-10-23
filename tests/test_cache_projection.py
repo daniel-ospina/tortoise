@@ -332,6 +332,96 @@ def test_the_props_tail_keeps_its_verbatim_property_names():
     assert got.props["another_one"] == "x"
 
 
+# ── 2b. the fold's ON CREATE defaults (#9634) ──────────────────────────────
+#
+# `public.subject.subject_kind` and `public.object.object_kind`/`title` are
+# NULLABLE, and a bare write journals no discriminator at all (#9572 deleted the
+# fabricated default from every write door — correctly: the record must not
+# state a kind nobody named). The FOLD still supplies one under `ON CREATE`.
+# `_props_from_row` drops a NULL column, so without the defaults below a
+# record-sourced rebuild materialized a `:Subject` with no `subjectKind` — a
+# property ONTOLOGY §4.1/§4.2 lists as REQUIRED — while `rebuild_all` (journal
+# replay, which runs the fold) wrote `'other'`. Live ≠ record, for that property.
+
+
+def test_a_record_row_silent_about_the_kind_gets_the_folds_own_default():
+    """A NULL discriminator materializes the constant the FOLD would write.
+
+    This is the measured residual of #9572: the record is silent (NULL column,
+    no tail key), so the cache must fall back to the fold's own `ON CREATE`
+    constant rather than materializing the node with the property MISSING.
+    """
+    subject = _node("Subject", {"name": "Probe", "subject_kind": None})
+    assert subject.props["subjectKind"] == "other", (
+        "a record-sourced :Subject lost the discriminator the live fold writes"
+    )
+    obj = _node("Object", {"name": "acme", "object_kind": None, "title": None})
+    assert obj.props["objectKind"] == "other"
+    assert obj.props["title"] == ""
+
+
+def test_a_named_kind_and_a_tail_kind_are_never_overwritten_by_the_default():
+    """The default is a FALLBACK, not a write — a named kind wins, wherever it rode."""
+    named = _node("Subject", {"name": "Probe", "subject_kind": "team"})
+    assert named.props["subjectKind"] == "team"
+    # The open-set tail is the record speaking too: it outranks the fallback.
+    from_tail = _node("Subject", {"name": "Probe", "subject_kind": None,
+                                  "props": {"subjectKind": "role"}})
+    assert from_tail.props["subjectKind"] == "role"
+    named_obj = _node("Object", {"name": "acme", "object_kind": "org",
+                                 "title": "Acme"})
+    assert (named_obj.props["objectKind"], named_obj.props["title"]) == (
+        "org", "Acme")
+
+
+def test_the_declared_fold_defaults_are_the_folds_own_constants():
+    """PIN the declaration against the fold's clauses, so drift reds HERE.
+
+    A second declaration is only safe when something fails if it goes stale.
+    `FOLD_ON_CREATE_DEFAULTS` restates three constants the fold owns
+    (`_upsert_subject`'s `subjectKind` parameter default and `_upsert_object`'s
+    two `coalesce` fallbacks); if the fold changes one, this test reds with the
+    constant named, rather than silently re-opening the live ≠ record gap.
+
+    Source-parsed on purpose: the alternative is a live graph, and a pin that
+    only runs where an engine is reachable cannot guard the ordinary lane. The
+    live half of the same claim is
+    `tests/test_cache_projection_live.py::test_a_record_sourced_subject_matches_the_fold`.
+    """
+    fold = (REPO_ROOT / "tortoise" / "projection" / "entities.py").read_text()
+    antecedents = {
+        ("Subject", "subjectKind"):
+            r'"sk":\s*ev\.get\("subject_kind",\s*"other"\)',
+        ("Object", "objectKind"):
+            r"o\.objectKind=coalesce\(\$ok, 'other'\)",
+        ("Object", "title"):
+            r"o\.title=coalesce\(\$title, ''\)",
+    }
+    declared = {
+        (label, prop): value
+        for label, props in cp.FOLD_ON_CREATE_DEFAULTS.items()
+        for prop, value in props.items()
+    }
+    assert set(declared) == set(antecedents), (
+        "the declared fold defaults and the pinned fold clauses disagree — a "
+        f"default was added or removed: declared-only "
+        f"{sorted(set(declared) - set(antecedents))}, pinned-only "
+        f"{sorted(set(antecedents) - set(declared))}"
+    )
+    for key, pattern in antecedents.items():
+        assert re.search(pattern, fold), (
+            f"the fold clause that supplies {key[0]}.{key[1]}'s default is gone "
+            f"or changed (/{pattern}/ not found in projection/entities.py) — "
+            "re-derive FOLD_ON_CREATE_DEFAULTS from the fold, do not guess. "
+            "A NEW constant the fold owns is the same finding: this table is "
+            "the record→cache side of it."
+        )
+    # And the VALUES, read back from the fold's text rather than restated.
+    assert declared[("Subject", "subjectKind")] == "other"
+    assert declared[("Object", "objectKind")] == "other"
+    assert declared[("Object", "title")] == ""
+
+
 # ── 3. one-way by construction ──────────────────────────────────────────────
 
 
