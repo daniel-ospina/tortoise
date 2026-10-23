@@ -267,9 +267,12 @@ uv run python tools/batch_review.py record  --manifest .batch-review/manifest.js
 ```
 
 Tests: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_review.py -q`
-(37 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
+(39 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
 result never invalidates a sibling, and a record is never minted for a PR that fell
-out or whose digest is not the manifest's).
+out or whose digest is not the manifest's). The two digest cases are host-free by
+construction: the real normalizer is host state (the CI runners carry no
+`scripts/lib/`), so one case INJECTS a stub normalizer to assert the `index` line is
+not content, and the other pins the raw-sha256 fallback that a runner takes.
 
 ## 8. Honest limits of this measurement
 

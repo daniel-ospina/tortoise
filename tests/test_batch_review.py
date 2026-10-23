@@ -330,13 +330,16 @@ def test_plan_records_refuses_a_pr_that_fell_out():
 
 
 def test_plan_records_does_not_use_the_head_from_the_outcome_if_it_drifted():
-    skewed = {**_ok(1), "head_sha": HEAD_A}
+    # ONLY the head can refuse this one: the outcome carries the MANIFEST digest, so
+    # a plan that lost the head-equality guard (and substituted the manifest head
+    # for the drifted one) would emit a record instead of refusing.
+    skewed = {**_ok(1), "head_sha": HEAD_A, "diff_sha256": DIFF_B}
     m = manifest((1, HEAD_B, DIFF_B))
     # The manifest head governs; the plan must not emit a record at all here
     # because the outcome's head is not the manifest's (defence in depth: the
     # validator already refuses this, the plan must not reintroduce it).
     plan = br.plan_records(m, [skewed], {1: "comment:42"})
-    assert plan == [] or plan[0][2] == HEAD_B
+    assert plan == []
 
 
 # ── diff digest: the ONE shared normalizer, and the empty-body refusal ─────
@@ -347,14 +350,57 @@ def test_empty_or_non_diff_body_carries_no_digest():
     assert br.normalized_diff_sha256(b"Not Found") == ""
 
 
+RAW_DIFF = (
+    b"diff --git a/x b/x\nindex 1111111..2222222 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+)
+RAW_DIFF_INDEX_MOVED = (
+    b"diff --git a/x b/x\nindex 3333333..4444444 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+)
+
+
 def test_digest_is_stable_for_the_same_bytes():
-    raw = b"diff --git a/x b/x\nindex 1111111..2222222 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-    d1 = br.normalized_diff_sha256(raw)
-    d2 = br.normalized_diff_sha256(raw)
+    d1 = br.normalized_diff_sha256(RAW_DIFF)
+    d2 = br.normalized_diff_sha256(RAW_DIFF)
     assert d1 == d2 and len(d1) == 64
+
+
+def _stub_normalizer(tmp_path):
+    """A stand-in for agent-infra's `scripts/lib/diff-normalize.py`.
+
+    The real normalizer is HOST STATE: the CI runners carry no `scripts/lib/`
+    (the workflow is self-contained on purpose, and `scripts/` is gitignored
+    since #9475), so `find_normalizer()` returns None there and the digest falls
+    back to the raw sha256. A digest assertion must therefore INJECT the
+    normalizer rather than depend on whether this machine happens to resolve one.
+    """
+    norm = tmp_path / "diff-normalize.py"
+    norm.write_text(
+        "import sys\n"
+        "for line in sys.stdin.buffer.read().splitlines(keepends=True):\n"
+        "    if not line.startswith(b'index '):\n"
+        "        sys.stdout.buffer.write(line)\n",
+        encoding="utf-8",
+    )
+    return norm
+
+
+def test_digest_drops_the_derived_index_line_through_the_normalizer(tmp_path):
+    norm = _stub_normalizer(tmp_path)
+    d1 = br.normalized_diff_sha256(RAW_DIFF, normalizer=norm)
+    # The stub actually ran — a fallback to the raw sha256 would move with `index`.
+    assert d1 != br.sha256_bytes(RAW_DIFF)
     # The index line is derived rendering: dropping it must not move the digest.
-    raw2 = b"diff --git a/x b/x\nindex 3333333..4444444 100644\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-    assert br.normalized_diff_sha256(raw2) == d1
+    assert br.normalized_diff_sha256(RAW_DIFF_INDEX_MOVED, normalizer=norm) == d1
+
+
+def test_digest_falls_back_to_the_raw_sha_when_no_normalizer_resolves(monkeypatch):
+    # The documented fallback (`normalized_diff_sha256` says it matches
+    # `record-review.sh`): with no normalizer the digest IS the raw sha256, so the
+    # derived `index` line DOES move it. Pinned deterministically, because this is
+    # exactly the branch a CI runner takes.
+    monkeypatch.setattr(br, "find_normalizer", lambda: None)
+    assert br.normalized_diff_sha256(RAW_DIFF) == br.sha256_bytes(RAW_DIFF)
+    assert br.normalized_diff_sha256(RAW_DIFF_INDEX_MOVED) != br.normalized_diff_sha256(RAW_DIFF)
 
 
 # ── end-to-end prepare with a stub gh (hermetic, no network) ───────────────
