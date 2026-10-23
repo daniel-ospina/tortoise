@@ -4,7 +4,7 @@ type: plan
 domain: engineering
 doc_status: draft
 created: 2026-10-21
-updated: 2026-10-21
+updated: 2026-10-23
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
 aboutObjects: "epic #7879, issue #9553, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
@@ -184,7 +184,7 @@ idempotent, total, and stores no EP scalar`.
 | thing that looks live | its actual state | evidence |
 |---|---|---|
 | **the record, in the hosted deployment** | ⛔ **NOT ARMED.** `TORTOISE_RECORD_DSN` appears **nowhere** in `fly.toml`, `entrypoint.sh`, `.github/workflows/deploy-hosted.yml`, or the runbook's Secrets Matrix. Unset ⇒ `NOT_ARMED` ⇒ *"zero statements, no connection attempt"* — the record path is inert on the deployment, so its behaviour is unchanged. | `grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ docs/infra-runbook.md` → empty |
-| **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
+| **the end-to-end proof, in CI** | ✅ **ARMED by #9551** (PR #9772). The dedicated `test-record-postgres` job provisions a throwaway `postgres:16` on an ephemeral loopback port (`.github/actions/postgres-provision`), sets `TEST_RECORD_DB_URI`, installs the `[postgres]` extra and asserts **zero** skips from the junit XML — so the two Postgres legs run instead of skipping, and an armed-but-skipping job cannot read as green. It is a REQUIRED leg of `python-ci-gate`. | measured on the arming tree (the collection is **70** — 61 record legs + the 9 CI-leg tests this change adds): unarmed → `68 passed, 2 skipped`; armed → **`70 passed, 0 skipped`**, the record migrations applied inside that run |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — `_SCHEMA_DISAGREEMENTS` now carries `search_keys` only, which is the remaining half of R4. | migration `20261022000001`; `tests/test_9078_record_written_by_production_path.py` `_SCHEMA_DISAGREEMENTS = {"search_keys": …}` |
 | **rebuild the graph from the record** | ✅ **The operator half exists now** — `python -m tortoise record-restore` (`tortoise/record_restore.py`, #9556/R8), with `docs/infra-runbook.md` §9 and its drill table (the drill's *armed-record* row is still **NOT MEASURED**, #9548/#9551). ⛔ **The production door is still blocked**: the wipe runs #2944's L2 name guard and the disposable-graph registry that would admit `org_*` graphs is not landed, so today only a `test_`-named graph can be restored. | `grep -rn 'rebuild_from_record' tortoise/__main__.py` → 1 (the verb's docstring); `grep -rn 'rebuild_from_record(' tortoise/ \| grep -v 'def '` → 1 (`record_restore.py`, the verb's caller) |
@@ -229,14 +229,17 @@ image until its name is added there; and `deploy-hosted.yml` deliberately does *
 **What it blocks:** any write at all; and a schema change that silently no-ops in the image.
 **Decision needed:** none.
 
-### R3 — CI proof: arm `TEST_RECORD_DB_URI` and the `[postgres]` extra · **S** · code/ops · **BLOCKER**
+### R3 — CI proof: arm `TEST_RECORD_DB_URI` and the `[postgres]` extra · **S** · code/ops · **BLOCKER** · ✅ LANDED (#9551 / PR #9772)
 
-**What:** a Postgres service container in CI, `TEST_RECORD_DB_URI` pointed at it, and the `postgres`
-extra in the test env.
+**What:** a throwaway Postgres in CI — LANDED as `.github/actions/postgres-provision`, an ephemeral
+loopback-bound container (`tests/test_runner_ports_6673.py` forbids a `services:` block in this
+workflow) — `TEST_RECORD_DB_URI` pointed at it, and the `postgres` extra in the test env.
 **What it blocks:** every item below **regressing silently**. This is not hypothetical — it is the
-mechanism by which a **new** #9264-class schema↔producer disagreement would hide: the leg that would
-catch it **skips**, twice over (§G run 1 vs run 2). ⚠️ What survives there now is *one* tolerated pin, `point.search_keys` (`_SCHEMA_DISAGREEMENTS`, A8) — #9264's own entry is deleted — so arming this leg does not turn that one red; **R4** deletes the remainder.
-**Cheapest item in the list, and it is the one that makes the rest verifiable.** Land it early.
+mechanism by which a **new** #9264-class schema↔producer disagreement would hide: until #9551 armed it,
+the leg that would catch it **skipped**, twice over (§G run 1 vs run 2). ⚠️ What survives there now is *one* tolerated pin, `point.search_keys` (`_SCHEMA_DISAGREEMENTS`, A8) — #9264's own entry is deleted — so arming this leg does not turn that one red; **R4** deletes the remainder.
+**Was the cheapest item in the list, and the one that made the rest verifiable** — armed by #9551
+(PR #9772): `test-record-postgres` provisions the database, installs the extra, and asserts zero
+skips, as a required leg of `python-ci-gate`.
 
 ### R4 — Fix the two schema↔producer disagreements (#9264) · **M** · schema or code + decision · **HALF DONE**
 
@@ -666,7 +669,8 @@ uv run pytest tests/test_9078_record_written_by_production_path.py -q   # TEST_R
 
 ⚠️ **The 2 skips are the two Postgres legs, and they skipped with a database available** — `psycopg2`
 is not in the default env (`ModuleNotFoundError`), so `pytest.importorskip("psycopg2")` fires. This is
-R3.
+what **R3** was about. #9551 (PR #9772) armed the leg **in CI only** — the job supplies the DSN and the
+extra — so a LOCAL default-env run still reports these 2 skips, exactly as this run does.
 
 **Run 2 — the same suite with the `[postgres]` extra:**
 
