@@ -17585,7 +17585,7 @@ class TortoiseSDK:
 
     def _check_connection(self, index: int, conn: Any,
                           violations: list[dict],
-                          effective_route: str | None = None) -> None:
+                          effective_route: str | None) -> None:
         """Check 4 — the connection contract (pure of its own graph access;
         the endpoint-kind answer, when one is needed, is handed IN).
 
@@ -17606,9 +17606,12 @@ class TortoiseSDK:
         the operator route fans out). It is passed in rather than probed here
         so the caller keeps its one graph read per bundle/connection — and
         because Phase 2 has the resolved ids and no bundle to read refs from.
-        ``None`` falls back to the request, which is what a caller with no
-        endpoints available can express — and judging a REQUEST is exactly the
-        defect this parameter closes (#8623, #9173).
+        The parameter is REQUIRED (no default) on purpose: a default of
+        ``None`` would silently restore the pre-#9173 behaviour for any caller
+        that forgot it, and judging a REQUEST is exactly the defect it closes
+        (#8623, #9173). ``None`` is still accepted, and means "the caller has no
+        endpoints at all, so the request is all there is" — the route it yields
+        is the request, never a guess.
         """
         if not isinstance(conn, dict):
             return  # dict-ness already reported by check 1
@@ -18146,15 +18149,19 @@ class TortoiseSDK:
         (#8623's residual class, #9173).
 
         ⛔ CONSEQUENCE, stated so a future reader is not misled: after #9173 the
-        legs below that key on a **bundle-local point item** (the dedup-hit
-        guard and the by-name/declared-status point arms) are unreachable BY
-        CONSTRUCTION — a `points` ref makes the pair Point-bearing, so its
-        effective route is always ``operator``. They are retained, not deleted:
-        each is a prediction about ``create_direct_edge``, and narrowing the
-        endpoint-kind gate (#8499) is the only change that would make them live
-        again. The ENTITY legs are still reachable (an Object/Subject/Event pair
-        keeps the direct route), and that is what the direct-edge terminal
-        guard now governs.
+        **bundle-local dedup-hit guard** (the ``content_hash``/``content+kind``
+        leg at the bottom of this check, which resolves a ``points`` item ref)
+        is unreachable BY CONSTRUCTION — a `points` ref makes the pair
+        Point-bearing, so its effective route is always ``operator``. It is
+        retained, not deleted: it is a prediction about
+        ``create_direct_edge``, and narrowing the endpoint-kind gate (#8499) is
+        the only change that would make it live again.
+
+        The by-name / declared-status arms in the item loop are NOT that: they
+        are the ENTITY legs (``section == "entities"``), an Object/Subject/Event
+        pair keeps the direct route, and they stay live — they are what the
+        direct-edge terminal guard now governs, and they are pinned by
+        ``tests/test_ingest_event_endpoint.py``.
 
         #7925: the label set is the SAME on the operator route
         (reify/mitigation/part-whole → create_operator) and the direct route,
@@ -19014,12 +19021,23 @@ class TortoiseSDK:
         endpoint-kind gate (:meth:`_point_mediated_route`, owner ruling
         2026-10-13, #8499) forbids the operator-less shape for these ids.
 
-        ONE declaration of that composition, read by the write loop (step 4),
-        :meth:`_effective_connection_routes` (the bundle-level spelling Phase 1
-        needs, which can also see bundle-local refs the graph cannot) and the
-        Phase-2 checks — so no two of them can disagree about the shape a
-        connection takes. ``node_ids`` may hold non-strings (a shape violation
-        another check owns); they are simply not probed.
+        The shared declaration is the PROBE (:meth:`_point_bearing_ids`), so the
+        boolean question here and the per-id answer
+        :meth:`_effective_connection_routes` needs cannot drift apart. The
+        composition itself has two spellings, and BOTH must be kept in step:
+
+        - this one, for callers that hold resolved ids — the write loop (step 4),
+          ``_check_endpoint_race``, and ``_check_connection``'s Phase-2 call;
+        - :meth:`_effective_connection_routes`, for Phase 1, which must ALSO
+          resolve bundle-local refs (they have no node yet, so no graph probe can
+          see them, but step 2 mints each as a plain ``:Point``).
+
+        A divergence between the two is the failure mode that produces a Phase-2
+        raise on an already-partially-mutated graph, so a change to the gate
+        belongs in both.
+
+        ``node_ids`` may hold non-strings (a shape violation another check
+        owns); they are simply not probed.
         """
         route = self._connection_route(conn)
         if route == "direct":

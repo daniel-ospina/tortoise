@@ -171,7 +171,8 @@ Key points:
   2026-10-13, tortoise #8499): an operator-less edge carries no operator node,
   so it can be neither mitigated nor annotated, and it cannot carry the
   epistemic weighting a Point's relations claim. The direct shape is reserved
-  for `Object↔Object`, where no such weighting is claimed. Pass `reify: true`
+  for non-Point pairs (`:Object`/`:Subject`/`:Event` — `Object↔Object` is the
+  common case), where no such weighting is claimed. Pass `reify: true`
   to state the operator route explicitly; a plain spelling that gets re-routed
   is reported as the `point_mediated_route` warning
   ([§3.2](#32-warnings--the-twelve-keys)).
@@ -270,7 +271,7 @@ enumeration** — a warning key outside this table is a divergence; report it.
 | 9 | `label_dropped_resubmit` | A resubmission omitted a label its run-1 operator carried; strict matching treated it as a NEW operator (naming both). | Re-add the label to dedup, or supersede the extra operator. |
 | 10 | `direction_dropped_resubmit` | A resubmission omitted a direction its run-1 operator carried; strict matching created a second operator (naming both). | Re-add the direction, or accept the extraction default (see [§12](#12-authoring-guidance-cycle-25)). |
 | 11 | `direction_changed_resubmit` | The declared direction changed vs the stored operator on the same pair — a distinct semantic, committed as separate. | Confirm intent; supersede the stale direction variant if not wanted. |
-| 12 | `point_mediated_route` | A plain `IMPL`/`NAND` connection whose endpoints include a plain `:Point` was **reified into an operator** rather than written as an operator-less direct edge (#8499, owner ruling 2026-10-13: Point↔Point relations are operator-mediated; the direct shape is reserved for Object↔Object). Names both endpoints and the operator type. | None if you wanted the contracted route. To say it explicitly, write `reify: true`. ⚠️ If you read `ids["connections"]` positionally, the entry is now the **operator-id string**, not the `{direct_edge, from, to}` descriptor — that descriptor is still what an `Object↔Object` direct edge returns. |
+| 12 | `point_mediated_route` | A plain `IMPL`/`NAND` connection whose endpoints include a plain `:Point` was **reified into an operator** rather than written as an operator-less direct edge (#8499, owner ruling 2026-10-13: Point↔Point relations are operator-mediated; the direct shape is reserved for non-Point pairs — `Object↔Object` is the common case, not the only one, since only `:Point` triggers the gate). Names both endpoints and the operator type. | None if you wanted the contracted route. To say it explicitly, write `reify: true`. ⚠️ If you read `ids["connections"]` positionally, the entry is now the **operator-id string**, not the `{direct_edge, from, to}` descriptor — that descriptor is still what an `Object↔Object` direct edge returns. |
 
 > A12 note: this table is the conformance anchor for the warning contract —
 > every key in the closed set must appear here, and no key outside it is
@@ -640,7 +641,8 @@ flip to `gated`, the response additions (`batch_id`, `warnings`), and
 `:Point` endpoints is now **operator-mediated** (a plain spelling is reified
 and reported as the `point_mediated_route` warning,
 [§2.2](#22-bulk--gated-the-default--expected-response)); the operator-less
-direct edge is reserved for `Object↔Object`. Operator Points are still
+direct edge is reserved for non-Point pairs (`:Object`/`:Subject`/`:Event`;
+`Object↔Object` is the common case). Operator Points are still
 created for `mitigation`/`reify:true`/part-whole, and now also for any
 Point-bearing pair.
 

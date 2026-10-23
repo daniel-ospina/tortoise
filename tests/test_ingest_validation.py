@@ -753,7 +753,8 @@ class TestTerminalStatusGuard:
         res = sdk.ingest(bundle)
         assert res["created"]["connections"] == 1
 
-    def test_bundle_local_point_hitting_terminal_dedup_rejected(self, sdk):
+    def test_bundle_local_point_hitting_terminal_dedup_routed_via_operator(
+            self, sdk):
         # cycle-17/18: a bundle-local point item whose (content_hash, kind)
         # dedup-hits an EXISTING terminal point.
         #
@@ -793,14 +794,19 @@ class TestTerminalStatusGuard:
         # `_upsert_point_props` RE-DERIVE the hash from the replayed content,
         # so a rebuilt graph keeps its hashes.) With the hash absent, the
         # content-hash MATCH the guard used missed that point and the
-        # cycle-17/18 guard silently stopped matching it. The bundle is then
+        # cycle-17/18 guard silently stopped matching it; the bundle was then
         # rejected only at Phase-2 `_check_endpoint_race` — a mid-write raise
-        # AFTER earlier bundle items committed (verified: point count 1 -> 2,
-        # an orphan left behind), the exact partial-mutation class the Phase-1
-        # guard exists to prevent. Simulate the hash-less state directly
-        # (clear the terminal point's `content_hash`) and assert the guard
-        # rejects the direct edge in Phase 1 via the hash-less content+kind
-        # fallback.
+        # AFTER earlier bundle items committed (verified pre-#2971: point count
+        # 1 -> 2, an orphan left behind), the exact partial-mutation class the
+        # Phase-1 guard exists to prevent. The helper's primary content-hash
+        # MATCH is what #2971 fixed.
+        #
+        # ⛔ #9173: what this test now pins is MATCH + ACCEPTED (operator route),
+        # not MATCH + refused. A bundle-local `points` ref is Point-bearing, so
+        # the endpoint-kind gate (#8499) reifies the connection and
+        # `create_direct_edge` — the primitive the old refusal predicted — is
+        # never reached. The `content_hash = NULL` precondition is still
+        # asserted FIRST so a hash-preserving regression cannot pass vacuously.
         #
         # Scope note: this simulates the TERMINAL-STATUS state (`status=
         # 'superseded'`, `outdated` unset) — the shape a direct status write
@@ -976,15 +982,24 @@ class TestEffectiveRouteScope9173:
 
     def test_multi_item_to_on_object_pair_still_rejected(self, sdk):
         # Coverage is NOT lost: Object↔Object keeps the direct shape (#8499),
-        # so multi-item `to` is still a Phase-1 violation there — and Phase 2
-        # still refuses it (message parity).
+        # so multi-item `to` is still a Phase-1 violation there.
         bundle = _object_triple() | {"connections": [
             {"from": "oA", "to": ["oB", "oC"], "operator": "IMPL"}]}
         viols = sdk._validate_bundle(bundle)
         assert any("multi-item 'to'" in v["message"] for v in viols), viols
-        with pytest.raises(ValueError) as exc:
+        with pytest.raises(ValueError):
             sdk.ingest(bundle)
-        assert str(exc.value) == viols[0]["message"]
+        # ⛔ review cycle 2: `ingest` raises the Phase-1 `BundleValidationError`
+        # BEFORE Phase 2 runs, so an equality assertion here would pin nothing
+        # about the Phase-2 arm (it cannot fail). Exercise the arm — and the
+        # parameter that scopes it — directly instead.
+        conn = bundle["connections"][0]
+        direct: list[dict] = []
+        sdk._check_connection(0, conn, direct, "direct")
+        assert any("multi-item 'to'" in v["message"] for v in direct), direct
+        via_operator: list[dict] = []
+        sdk._check_connection(0, conn, via_operator, "operator")
+        assert via_operator == [], via_operator
 
     def test_terminal_endpoint_on_point_bearing_pair_accepted_and_commits(self, sdk):
         # The measured shape B: a plain IMPL to an existing TERMINAL point.
