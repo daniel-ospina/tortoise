@@ -70,6 +70,7 @@ import sys
 import tomllib
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, quote, urlencode, urlsplit, urlunsplit
 
 import pytest
 
@@ -1703,6 +1704,60 @@ def test_a_malformed_dsn_on_the_journal_less_lane_is_counted(
 # ════════════════════════════════════════════════════════════════════════════
 
 
+#: The record's APPLICATION role (R6, #9554). The record's write path may only
+#: connect as this role: `record_projection.scope_connection()` REFUSES a
+#: connection whose `current_user` is a superuser, is `BYPASSRLS`, is a member of
+#: either, or owns a record table — and `TEST_RECORD_DB_URI` is provisioned as the
+#: database's own SUPERUSER (`postgres-provision/provision.sh`), which is all four
+#: at once. The leg therefore connects the WORLD that writes as the app role,
+#: exactly as production does, while this module's own `_record_db()` stays the
+#: provisioning superuser for seeding and assertions (it must see every tenant).
+#: Without this the armed leg is not "unarmed" — it is RED on every PR, because
+#: the gate refuses every write (#9600 review cycle 7).
+RECORD_APP_ROLE = "tortoise_record_app"
+
+
+def _app_role_dsn(dsn: str) -> str:
+    """`dsn`, but connecting as :data:`RECORD_APP_ROLE`.
+
+    `options=-c role=<name>` is libpq's connect-time spelling of `SET ROLE`, so
+    the session opens with `current_user` set to the application role — which is
+    the role the gate checks. A QUERY PARAMETER rather than a rewritten user,
+    because the provisioned credentials belong to the superuser and must keep
+    working for the seeding and assertion connection.
+    """
+    parts = urlsplit(dsn)
+    query = parse_qs(parts.query)
+    query["options"] = [f"-c role={RECORD_APP_ROLE}"]
+    # `quote_via=quote` so a space is `%20`, never `+`: libpq's URI parser does
+    # NOT decode `+` as a space, so `urlencode`'s default would hand the backend
+    # the literal `-c+role=...` and the CONNECT itself would fail (measured: the
+    # write path tripped its circuit breaker, #9600 review cycle 7).
+    return urlunsplit(parts._replace(query=urlencode(query, doseq=True, quote_via=quote)))
+
+
+def _record_replay_db():
+    """The connection the RESIDUE replays on: the app role, inside a transaction.
+
+    Two properties the residue loop needs and `_record_db()` does not have:
+
+    * the APPLICATION role — `replay()` refuses a connection whose `current_user`
+      can bypass RLS, and the provisioning superuser is all four bypasses at
+      once (R6, #9554);
+    * NOT autocommit — the tenant GUC is set transaction-locally and read back
+      before the plan, and on an autocommit connection each statement is its own
+      transaction, so the local set is gone by the read-back and the replay is
+      refused. `replay()` states that the CALLER owns the transaction, so a
+      non-autocommit connection is its supported shape.
+    """
+    dsn = os.environ.get(RECORD_DB_ENV)
+    if not dsn:
+        pytest.skip(f"{RECORD_DB_ENV} not set — no Postgres for the four-layer proof")
+    psycopg2 = pytest.importorskip("psycopg2",
+                                   reason="psycopg2-binary is the record's driver")
+    return psycopg2.connect(_app_role_dsn(dsn))
+
+
 def _record_db():
     """A connection to a Postgres carrying the record migrations, or skip."""
     dsn = os.environ.get(RECORD_DB_ENV)
@@ -1843,7 +1898,10 @@ def _journal_records(journal_path: Path) -> list[dict]:
 def _capture(capture_sdk, monkeypatch,
              tenant: tuple[str, str]) -> tuple[object, Path, int]:
     """Seed, arm, capture through the PUBLIC API, return (sdk, journal, losses)."""
-    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, os.environ[RECORD_DB_ENV])
+    # The WRITER connects as the app role (the gate refuses the provisioning
+    # superuser); `_record_db()` keeps the superuser for seeding/assertions.
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV,
+                       _app_role_dsn(os.environ[RECORD_DB_ENV]))
     # ⛔ The extraction leg must be HERMETIC (#3695/#5477 class). The semantic-
     # layer claim below is asserted against the objects a capture EMITS, and on a
     # box with no provider key the capture SKIPS extraction by design (#3892) —
@@ -1954,15 +2012,20 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
                 "the procedural layer's view returns fewer rows than the "
                 "objects the record holds")
 
-        # 4. the residue, per record
+        # 4. the residue, per record — on the APP-ROLE connection, inside a
+        #    transaction. `replay()` gates the connecting role and verifies the
+        #    tenant GUC before the plan, so the superuser/autocommit handle this
+        #    loop used to borrow is refused before a single statement (#9600
+        #    review cycle 7).
         refused = 0
+        replay_conn = _record_replay_db()
         for record in records:
             try:
-                record_projection.replay([record], conn, org_id=tenant[0],
+                record_projection.replay([record], replay_conn, org_id=tenant[0],
                                          graph_id=tenant[1], position=False)
-                conn.commit()
+                replay_conn.commit()
             except Exception as exc:
-                conn.rollback()
+                replay_conn.rollback()
                 message = str(exc)
                 if _engine_refusal(message) is not None:
                     # A pre-existing fold refusal: the record never reached
@@ -1987,6 +2050,7 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
                     "it from _SCHEMA_DISAGREEMENTS. A pin that outlives its "
                     "defect hides the next one."
                 )
+        replay_conn.close()
         # 5. the capture lost exactly those records and nothing else
         assert lost == refused, (
             f"the capture counted {lost} lost record(s); replaying the journal "

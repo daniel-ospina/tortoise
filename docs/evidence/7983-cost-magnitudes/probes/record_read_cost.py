@@ -73,6 +73,12 @@ MIGRATIONS = [
     # probe measures walks the record's tables, and the shipped projection now
     # writes this one. Pinned by `tests/test_7950_capstone_probe.py`.
     "20261023000001_record_session_narrative.sql",
+    # The TENANCY POSTURE (#9554, epic #7879): the app role, its grants (and
+    # `relation_id_seq`'s USAGE) and the `*_app_tenant` policies, one per record
+    # table (ten, since #9555's `session_narrative`). No column
+    # — applied so this list stays EQUAL to `RECORD_MIGRATIONS` (#9550), which
+    # keeps the measured row width the SHIPPED schema's.
+    "20261025000001_record_tenancy_role_and_guc.sql",
 ]
 
 #: §17.4.1's published rates, restated so the arithmetic below is auditable and

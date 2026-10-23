@@ -2583,6 +2583,14 @@ whole reason this path exists.
 # 1. Arm and read the record scope FIRST — a restore writes what the record
 #    holds for exactly this (org_id, graph_id), so read it before you wipe:
 #      export TORTOISE_RECORD_DSN='postgresql://…'          # or --record-dsn
+#    ⛔ That DSN is the APP ROLE (`tortoise_record_app`), not `postgres`: this verb
+#    READS the record through the read door, which refuses a bypassing role. A
+#    `postgres`/`service_role` DSN here exits 2 (UNAVAILABLE — no verdict, and
+#    nothing written) with "the record is unreadable (RecordProjectionError)".
+#    That message names no role and is the SAME text as a real outage, so read
+#    the exception TYPE as the discriminator: `RecordProjectionError` is a
+#    refusal (fix the DSN), a driver `OperationalError` is an outage (see
+#    "The record's connecting role").
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \
@@ -2771,6 +2779,106 @@ not put them in this section, where they would rot.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
+| TORTOISE_RECORD_DSN | — **NOT SET on the app** (R1 has not happened: it is in no `fly.toml`, `entrypoint.sh` or deploy workflow — do not read this row as provisioned). Required **when the record is armed**; its **user must be `tortoise_record_app`**, never `postgres`/`service_role` (see below) | — | — |
+
+### The record's connecting role (R6 decision, 2026-10-22, #9554)
+
+The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
+application path connects as a role that does not bypass it. The role, the policies and the reason
+are decided in
+[`docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md`](epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md);
+this section is the **operator procedure** that goes with it.
+
+**The split.** Migration `20261025000001_record_tenancy_role_and_guc.sql` creates the role
+(`NOLOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`) and grants it the record tables'
+`SELECT/INSERT/UPDATE/DELETE` — except the append-only `public.journal_event`, which is
+`SELECT`/`INSERT` **only, by design** (the audit trail's single deletion path is a GUC the boundary
+role must not be able to reach; the posture suite pins the narrow grant) — `USAGE` on
+`public.relation_id_seq` (the IDENTITY sequence — a table
+`INSERT` grant does **not** confer `nextval`, and without it every `relation` insert raises
+`permission denied for sequence relation_id_seq` and aborts the whole replay transaction), plus a
+`*_app_tenant` policy on each. It ships **no password** — a credential in a migration is a secret
+in git, re-minted on every deploy.
+
+**1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
+keeps the plaintext out of the statement and off the logs):
+
+```sql
+ALTER ROLE tortoise_record_app LOGIN;
+\password tortoise_record_app      -- psql; or set it from the dashboard/your password manager
+```
+
+**2. Arm the DSN** (R1) with that role — for the shared pooler this is
+`<role>.<project-ref>` as the user:
+
+```text
+TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+**Why not `postgres`.** The `postgres` user is the **table owner**: owners bypass RLS (unless
+`FORCE ROW LEVEL SECURITY` is set) and a superuser bypasses it regardless, so that DSN would make
+§4's *"rows scoped by tenant via row-level security"* false for the only path that writes customer
+data — while every RLS artifact stayed in place looking true. `service_role` is `BYPASSRLS` for the
+same reason. Both remain correct for what needs them: schema, the **database-level** backup/restore
+(R9 — `pg_dump`/`pg_restore` of the Postgres record, which must use the **direct** connection, never
+the pooler), and the org-erasure RPC. ⚠️ **Not `tortoise record-restore` (R8)**: that verb is not a
+`pg_dump` — it *reads* the record through the read door (`cache_projection.read_record_view()`), so
+the role gate refuses a bypassing DSN exactly as it does for the write path. Its DSN is the app
+role; see §9.
+
+**3. Pooler mode does not change the answer.** Port `5432` is the shared pooler in **session** mode,
+`6543` is **transaction** mode. `record_projection.replay()` sets the tenant GUC
+**transaction-locally** (`set_config('app.current_org_id', $1, true)`) as the first statement of the
+write, so it never depends on a session surviving a pooler: moving the DSN between modes needs no
+code change. ⚠️ A **session** `SET` would be wrong in both directions — dropped between transactions
+on `6543` (a silent zero-row read) and carried onto a pooled connection reused by the next tenant on
+`5432` (another tenant's rows).
+
+**If a record read ever returns nothing**, check `current_setting('app.current_org_id')` first: a
+missing GUC reads as **zero rows and no error**, while an unscoped **write** raises `42501`. The
+asymmetry is deliberate and pinned in
+`supabase/tests/20261022000001_record_tenancy_posture.sql`. `record_projection.replay()` now also
+**reads the GUC back** immediately after setting it and refuses the replay on a mismatch (#9600
+review cycle 1), so a connection whose transaction-local set did nothing cannot report a successful
+write: without that read-back a patch/delete-only plan would simply affect zero rows. The **read
+door** (`cache_projection.read_record_view()`, i.e. `tortoise record-reconcile`) installs the same
+scope before its first `SELECT` (#9600 review cycle 2) — before that an ARMED reconciler would have read zero rows under the
+app-role DSN and reported every cache key `extra_in_cache` with `missing_in_cache = 0` — the
+chokepoint-violation / second-writer signature, not a projection lag — i.e. `exit 3` on a
+coherent pair.
+
+**⛔ NEVER GRANT `tortoise_record_app` MEMBERSHIP IN `service_role`, `postgres`, or any role that
+carries a permissive policy.** Policy applicability follows `has_privs_of_role`, so membership makes
+that role's policies apply to this one — including `service_role`'s `*_service_role_all USING (true)`
+— measured on `postgres:16.15`: after `GRANT svc TO app` (the default `WITH INHERIT TRUE`) the app
+role saw 2 rows across 2 tenants while `rolbypassrls` still read `false`. Setting `NOINHERIT` on the
+role, or granting `WITH INHERIT FALSE`, does stop that policy from applying — which is exactly why
+the guard asserts `pg_has_role(…, 'USAGE')` rather than `'MEMBER'` — but neither is something to rely
+on, because `INHERIT` is the default on both sides. The boundary is therefore the grants **and** the absence of membership; a role that was
+flipped or granted membership must be corrected as an operator, and the migration fails closed when
+the applying role cannot re-assert the attributes.
+
+**The code checks all four bypasses on both record doors' connections, and refuses.**
+`record_projection.scope_connection()` is what both record doors (the write path and
+`tortoise record-reconcile`) call. ⚠️ One reader is outside them and is NOT gated:
+`tortoise/record_read.py` takes a caller-supplied connection and installs no scope (#9555's
+outstanding read arm), so it is neither refused nor tenant-scoped under this migration. On each connection it sets the tenant GUC transaction-locally,
+reads it back, and — on the same statement — refuses the connection when `current_user` is a
+superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table. So a DSN naming
+`postgres` or `service_role` (or `tortoise_record_app` after a mistaken `GRANT`) does not silently
+write and read across tenants with the policies unevaluated: the first write or read raises, and
+the operator fixes the DSN.
+The same refusal covers BOTH read verbs — `tortoise record-reconcile` and `tortoise
+record-restore` (R8) — because both read through `read_record_view`. Both fail the SAME way on a
+wrong-role DSN, and it is the FIRST thing they do: `scope_connection` raises inside the read, the
+verb wraps it as `RestoreUnavailable`/its reconcile equivalent, and both exit **2** (UNAVAILABLE
+— no verdict, nothing written) with `the record is unreadable (RecordProjectionError)`. ⚠️ They
+never reach the *empty source* refusal (`refuse_unrestorable_source`, exit 3) or the divergence
+verdict (exit 3): those are what a correctly-roled but EMPTY record would produce. Read the
+exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
+DSN); a driver `OperationalError` in the same message is a transient outage.
+⚠️ Note `-m tortoise record-restore`, a read-only restore, behaves as described here; the
+R8 drill's `--limit` and `--allow-empty` flags apply to a run that HAS read a record.
 
 ### Runtime Config (non-secret)
 

@@ -14,6 +14,15 @@ Requires:  a Postgres with the record migrations applied
            (started by docs/evidence/7950-capstone/probes/e2e_postgres_bootstrap.py)
            and TORTOISE_DB_URI pointing at a FalkorDB.
 
+The probe CONNECTS as `postgres` (that is who the bootstrap applies the
+migrations as, so it owns every record table) and then `SET ROLE`s into
+`tortoise_record_app` before it touches a record door. Both record doors refuse
+a bypassing role — superuser, `BYPASSRLS`, a member of either, or a table OWNER
+— because RLS is the record's tenancy boundary (R6, #9554): as `postgres` the
+probe is refused before its first plan statement (#9600 review, Finding 1).
+`SET ROLE` is the available route because the app role is `NOLOGIN` until ops
+grants LOGIN (R1, docs/infra-runbook.md) and `postgres` is its creator.
+
 Run:
   TORTOISE_DB_URI=... uv run --with psycopg2-binary \
     python docs/evidence/7950-capstone/probes/e2e_chain_probe.py
@@ -53,11 +62,77 @@ RECORD_MIGRATIONS = [
     # must carry the table it writes to. Pinned by
     # `tests/test_7950_capstone_probe.py`.
     "20261023000001_record_session_narrative.sql",
+    # The TENANCY POSTURE (#9554, epic #7879): the app role, its grants (and
+    # `relation_id_seq`'s USAGE) and the `*_app_tenant` policies, one per record
+    # table (ten, since #9555's `session_narrative`). No column
+    # — kept in step with `e2e_postgres_bootstrap.py` for the same reason.
+    "20261025000001_record_tenancy_role_and_guc.sql",
 ]
 DSN = os.environ.get(
     "CAPSTONE_PG_DSN", "postgresql://postgres:cap@127.0.0.1:15499/capstone")
+
+#: The record's APPLICATION role (R6, epic #7879) — the only role
+#: `record_projection.scope_connection()` admits. It is pinned to the role the
+#: tenancy migration creates by `tests/test_7950_capstone_probe.py`, so a rename
+#: on either side reds instead of leaving this probe dead.
+APP_ROLE = "tortoise_record_app"
+
+#: The record tables this probe counts after the replay (all of them the
+#: projection writes, minus the narrative home it does not exercise).
+COUNTED_TABLES = ("journal_event", "source", "event", "session", "object",
+                  "subject", "point", "relation", "node_identity")
+
 ORG, GRAPH = "cap7950-org", "cap7950-graph"
 CACHE_GRAPH = "test_cap7950_e2e"
+
+
+def record_connection(psycopg2_mod, dsn: str = DSN):
+    """Connect, then take on :data:`APP_ROLE` — the only way the doors open.
+
+    ⛔ THE ROLE IS A SESSION-SCOPED `SET ROLE`; THE TENANT IS A TRANSACTION-LOCAL GUC.
+    They answer different questions and neither substitutes for the other: the
+    role decides whether the record policies are EVALUATED at all (a bypassing
+    role skips them, which `scope_connection()` refuses), the GUC decides which
+    TENANT they admit (and is re-installed inside every transaction by
+    `scope_connection()`, because `set_config(..., true)` does not survive a
+    commit — see :func:`record_row_counts`).
+
+    The commit is deliberate: `SET ROLE` is undone by a ROLLBACK, so taking it
+    outside a transaction is what makes it stick for the whole session. A
+    failure leaves no half-scoped connection behind.
+    """
+    conn = psycopg2_mod.connect(dsn)
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SET ROLE {APP_ROLE}")
+        conn.commit()
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+def record_row_counts(conn, org_id: str = ORG, graph_id: str = GRAPH) -> dict:
+    """Per-table row counts for one tenant, READ UNDER THE TENANT SCOPE.
+
+    ⛔ AN UNSCOPED COUNT IS NOT AN ERROR, IT IS ZERO ROWS (#9600 review).
+    `replay()`'s prologue is transaction-LOCAL, so the caller's `commit()` ends
+    it; under the app role the policies then see a NULL GUC and `SELECT
+    count(*)` returns 0 for a record the replay just filled. The probe would
+    print `CHAIN STOP: the record holds no nodes` on a COMPLETE chain — a
+    harness defect wearing the verdict's clothes. `scope_connection()` is the
+    same prologue the shipped doors install, so the count is read exactly the
+    way the record is read.
+    """
+    from tortoise import record_projection as rp
+
+    cursor = rp.scope_connection(conn, org_id)
+    counts: dict = {}
+    for table in COUNTED_TABLES:
+        cursor.execute(f"SELECT count(*) FROM public.{table} "
+                       "WHERE org_id = %s AND graph_id = %s", (org_id, graph_id))
+        counts[table] = cursor.fetchone()[0]
+    return counts
 
 
 def record_key_map(view: RecordView) -> dict[str, dict]:
@@ -222,7 +297,10 @@ def s1_report_text(proj) -> tuple[bool, str]:
 
 def main() -> int:
     import psycopg2  # the optional `postgres` extra; the probe runs with it
-    conn = psycopg2.connect(DSN)
+    # ⛔ NOT a bare `psycopg2.connect`: this DSN is `postgres`, the owner of every
+    # record table, which both shipped doors refuse (R6, #9554). See
+    # `record_connection`.
+    conn = record_connection(psycopg2)
     try:
         # ── 1. journal -> Postgres ─────────────────────────────────────────
         records = [json.loads(ln) for ln in FIXTURE.read_text().splitlines() if ln.strip()]
@@ -233,13 +311,7 @@ def main() -> int:
         conn.commit()
         print(f"record projection: {report}")
 
-        cur = conn.cursor()
-        counts = {}
-        for table in ("journal_event", "source", "event", "session", "object",
-                      "subject", "point", "relation", "node_identity"):
-            cur.execute(f"SELECT count(*) FROM public.{table} "
-                        "WHERE org_id = %s AND graph_id = %s", (ORG, GRAPH))
-            counts[table] = cur.fetchone()[0]
+        counts = record_row_counts(conn)
         print(f"record row counts: {counts}")
         if counts["point"] == 0 and counts["object"] == 0:
             print("CHAIN STOP: the record holds no nodes; nothing to project")
@@ -298,7 +370,9 @@ def main() -> int:
         from tortoise.reconciliation import reconcile
 
         def _record_keys() -> dict:
-            c2 = psycopg2.connect(DSN)
+            # A fresh connection is a fresh session, so it needs the role again;
+            # `read_record_view` installs the tenant scope itself.
+            c2 = record_connection(psycopg2)
             try:
                 v = cp.read_record_view(c2, org_id=ORG, graph_id=GRAPH)
                 return record_key_map(v)
