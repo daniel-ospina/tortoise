@@ -426,7 +426,7 @@ exactly this question and the tree cannot answer it today.
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 70 migrations, the same command matches it on 43 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
+65 migrations returned **0** (at this head, 71 migrations, the same command matches it on 43 lines — 7 in `20261025000001_record_tenancy_role_and_guc.sql` (R6's grants and
 tenant policy for that very table) and 36 in `20261023000001_record_session_narrative.sql` — the table this
 item's DECIDED block adds);
 `public.session` carries `turn_count` and **no turns**. §9.1 is explicit

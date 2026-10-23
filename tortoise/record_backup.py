@@ -140,6 +140,7 @@ from pathlib import Path
 from typing import Any, Callable  # noqa: UP035
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .config import parse_uri_userinfo
 from .hosted_backup import decrypt_backup_with_rotation, encrypt_backup
 from .record_projection import THE_RECORD_TABLES
 
@@ -451,10 +452,16 @@ def libpq_env(dsn: str) -> dict[str, str]:
             env["PGPORT"] = str(parts.port)
     except ValueError as e:
         raise RecordBackupUnavailable(f"the record DSN has an unreadable port: {e}") from e
-    if parts.username:
-        env["PGUSER"] = unquote(parts.username)
-    if parts.password:
-        env["PGPASSWORD"] = unquote(parts.password)
+    # #3039: the ONE decoding rule for URI credentials — never a raw
+    # `parts.username`/`parts.password` read, which `urlparse` leaves
+    # percent-ENCODED while `redis.from_url` (and libpq's own DSN parser) decode
+    # it. The raw read shipped a literal `%40`-style password to libpq, so a
+    # backup of a record whose password needed encoding failed to authenticate.
+    user, password = parse_uri_userinfo(dsn)
+    if user:
+        env["PGUSER"] = user
+    if password:
+        env["PGPASSWORD"] = password
     database = unquote(parts.path.lstrip("/"))
     if not database:
         # #9601 review cycle 1 (P1): the DUMP leg was the one that let a DSN
@@ -865,7 +872,9 @@ def _coordinates_for_message(dsn: str) -> str:
         except ValueError:
             port = None
         database = unquote(parts.path.lstrip("/")) or "<no database>"
-        user = unquote(parts.username) if parts.username else "<no user>"
+        # #3039: decoded through the single rule, so the sentence names the
+        # identity the client actually authenticated as.
+        user = parse_uri_userinfo(dsn)[0] or "<no user>"
         return f"{user}@{host}:{port or 5432}/{database}"
     except Exception:  # pragma: no cover - a DSN that cannot be read at all
         return "the DSN the run was given"
@@ -1100,8 +1109,10 @@ def _source_of(dsn: str) -> dict[str, str]:
     database = unquote(parts.path.lstrip("/"))
     if database:
         out["database"] = database
-    if parts.username:
-        out["user"] = unquote(parts.username)
+    # #3039: decoded through the single rule (see `libpq_env`).
+    user = parse_uri_userinfo(dsn)[0]
+    if user:
+        out["user"] = user
     return out
 
 
