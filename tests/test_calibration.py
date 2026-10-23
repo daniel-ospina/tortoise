@@ -1206,10 +1206,10 @@ def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     rows = {row["id"]: row for row in sdk.calibrate_summary()}
     assert None not in rows
     # …and its remedy for the numeric id must be the numeric id, not its repr as
-    # a quoted string: ``set_point_baseline('42', …)`` names no node, takes the
-    # #9262 phantom-success path, and leaves the gate refusing forever — the
-    # same "advice that cannot resolve" loop this PR closed for source-linked
-    # points.
+    # a quoted string: ``set_point_baseline('42', …)`` names no node, so since
+    # #9262 the writer REFUSES it (before that it returned the phantom-success
+    # dict) and either way the gate keeps refusing — the same "advice that
+    # cannot resolve" loop this PR closed for source-linked points.
     assert "set_point_baseline(42," in rows[42]["suggestion"]
     sdk.set_point_baseline(42, 3.0, 1.0)
     assert 42 not in sdk._uncalibrated_ep_participants(None)
@@ -1232,6 +1232,106 @@ def test_set_point_baseline_refuses_a_non_epistemic_node(sdk):
     with pytest.raises(ValueError, match=r":Source"):
         sdk.set_point_baseline("https://example.org/9063", 4.0, 2.0)
     assert "https://example.org/9063" not in sdk._evidence
+
+
+def test_set_point_baseline_refuses_an_id_that_names_no_node(sdk):
+    """#9262: an id naming NO node is refused, never reported as a stored prior.
+
+    ``MATCH (n:Point {id:$id}) SET …`` matches zero rows on an id that names
+    nothing, yet the method returned the success dict AND planted the prior in
+    ``self._evidence`` — which ``_hydrate_evidence`` only reloads from
+    ``baseline_set = true`` rows, so the phantom dies on restart and a run's
+    belief state depended on which process set it (#1163's request-scoped SDK
+    is exactly that multi-process case). Same "false PASS" class #9063 closed
+    for a node on a label the writer does not address, one step further: here
+    there is no node at all.
+    """
+    with pytest.raises(ValueError, match=r"no node with id 'ghost-9262'"):
+        sdk.set_point_baseline("ghost-9262", 5.0, 2.0)
+    # No phantom seat: the in-memory map is a mirror of the graph, and the
+    # graph holds nothing (#9063's rule, applied to the absent-id path).
+    assert "ghost-9262" not in sdk._evidence
+    assert sdk._get_proj().g.query(
+        "MATCH (n) WHERE n.id = 'ghost-9262' RETURN n.id").result_set == []
+    # …and the refusal did not silence the writer: the same call on a point
+    # that exists still stores, so the refusal cannot become a gate that can
+    # never be satisfied.
+    p = sdk.create_point("statement", "Real claim", status="live")
+    assert sdk.set_point_baseline(p["id"], 5.0, 2.0)["claim_id"] == p["id"]
+    assert sdk._evidence[p["id"]] == (5.0, 2.0)
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.baseline_set, n.ep_alpha",
+        params={"id": p["id"]}).result_set == [[True, 5.0]]
+
+
+def test_compute_confidence_survives_an_unaddressable_id(sdk):
+    """#9262: the refusal must not reach the INTERNAL derivation path.
+
+    ``_apply_source_inheritance`` derives a baseline for every point that has an
+    eligible source, and its key comes from a graph read — so a hand-written /
+    imported ``:Point`` with ``id IS NULL`` arrives as ``pid=None``. Before this
+    guard the derivation called ``set_point_baseline(None, …)``, which matched
+    no row: on ``origin/main`` that planted ``_evidence == {None: (5.0, 1.0)}``
+    and the run completed; with #9262's refusal alone it ABORTED
+    ``compute_confidence`` on a graph the repo otherwise handles (#9275).
+    Measured both directions — the guard makes it complete again, with no
+    phantom.
+
+    The ADDRESSABLE companion is the other half: a guard that skipped every
+    point (not just the unresolvable id) would keep the assertions above green
+    while silently disabling source inheritance, so its derived baseline is
+    pinned too.
+    """
+    g = sdk._get_proj().g
+    for url, tier in (("https://example.org/9262-idless", "T1"),
+                      ("https://example.org/9262-addressable", "T1")):
+        g.query("CREATE (s:Source {url:$u, credibilityTier:$t, "
+                "sourceKind:'web'})", params={"u": url, "t": tier})
+    g.query("MATCH (s:Source {url:'https://example.org/9262-idless'}) "
+            "CREATE (n:Point {pointKind:'statement', status:'live', "
+            "content:'id-less claim'})-[:extractedFrom]->(s)")
+    real = sdk.create_point("statement", "addressable claim", status="live")
+    g.query("MATCH (n:Point {id:$id}), (s:Source {url:'https://example.org/"
+            "9262-addressable'}) CREATE (n)-[:extractedFrom]->(s)",
+            params={"id": real["id"]})
+
+    result = sdk.compute_confidence(require_calibration=False)
+    assert result["converged"] is True
+    assert None not in sdk._evidence
+    # …and the derivation did not invent a baseline for the id-less point…
+    assert g.query(
+        "MATCH (n:Point) WHERE n.id IS NULL "
+        "RETURN n.baseline_set").result_set == [[None]]
+    # …while the ADDRESSABLE point still inherited from its T1 source.
+    assert g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.ep_alpha",
+        params={"id": real["id"]}).result_set[0][0] == "inherited-from-source"
+
+
+def test_mitigate_operator_survives_an_idless_mitigation(sdk):
+    """#9262: the refusal must not reach ``mitigate_operator`` either.
+
+    The re-mitigation branch reads the existing mitigation's id from the graph
+    (``… RETURN m.id``), so a hand-written id-less mitigation Point yields
+    ``mid=None`` and every write in the branch is id-keyed. Measured on
+    ``origin/main``: the call returns ``{}`` (a pre-existing false PASS, filed
+    as #9754) and the run continues; with #9262's refusal alone it
+    RAISED ``no node with id None`` — aborting a call whose caller named the
+    OPERATOR, and mid-loop for ``commit_ops``. The guard keeps the historical
+    outcome instead of turning a broken path into an abort.
+    """
+    g = sdk._get_proj().g
+    op = sdk.create_point("statement", "operator claim", status="live",
+                          is_operator=True, op_type="IMPL")
+    g.query("MATCH (op:Point {id:$id}) CREATE (m:Point {pointKind:'statement', "
+            "content:'[MITIGATION] legacy', status:'live', is_operator:false})"
+            "-[:IMPL]->(op), (op)-[:mitigated_by]->(m)", params={"id": op["id"]})
+    assert g.query(
+        "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.id",
+        params={"id": op["id"]}).result_set == [[None]]
+
+    assert not sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+    assert None not in sdk._evidence
 
 
 def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
@@ -1415,8 +1515,10 @@ def test_refusal_never_claims_a_point_is_not_a_point(sdk):
     unlabelled probe hits it), which made the new guard raise "'' is a :Point,
     not a :Point" — a false diagnosis no caller can act on, on a node whose
     label is exactly the one the writer targets. That path keeps the historical
-    no-op of a write that bound nothing (#9262's family); the guard fires only
-    on a label that genuinely cannot carry a :Point baseline.
+    no-op of a write that bound nothing BECAUSE a node was found (an id the
+    labelled equality misses, not an absent id — the absent case is #9262's
+    refusal); the guard fires only on a label that genuinely cannot carry a
+    :Point baseline.
     """
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:'', pointKind:'statement', status:'live'})")
