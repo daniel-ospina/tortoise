@@ -504,3 +504,35 @@ def test_a_breadth_byte_refusal_is_reported_as_the_byte_cap():
     assert stats["dropped_by_breadth_byte_cap"] == 1
     assert stats["dropped_by_breadth_token_cap"] == 0
     assert stats["stopped_by"] == "byte_cap", stats
+
+
+def test_a_breadth_refusal_that_depth_recovers_is_not_a_drop():
+    """The breadth phase is capped at `breadth_share`, so it refuses routinely —
+    and depth then re-admits those hits from the same session blocks. A census
+    that counted the phase-1 refusal reported `stopped_by="token_cap"` on a
+    window where the whole pool was admitted and the budget never bound.
+
+    The fixture MUST make breadth actually refuse (several hits per session, so
+    depth has something to recover): one hit per session refuses nothing and the
+    test would pass on the unfixed code.
+    """
+    pool = [_hit(s, f"sid-{s}", "alpha beta gamma delta " * 3, idx=i)
+            for i in range(5) for s in range(4)]
+    stats: dict = {}
+    out = assemble_session_context(pool, max_context_tokens=600,
+                                   breadth_share=0.2, stats=stats)
+    # breadth refused the tail of every session …
+    assert stats["breadth_items"] < len(pool), stats
+    # … and depth put every one of those hits back, so nothing was dropped
+    assert len(out) == len(pool), (len(out), stats)
+    assert stats["dropped_by_breadth_bound"] == 0, stats
+    assert stats["stopped_by"] is None, stats
+
+    # CONTROL: tighten the budget so depth cannot recover the refusals — now the
+    # budget really did drop material and the census must say so.
+    tight: dict = {}
+    out2 = assemble_session_context(pool, max_context_tokens=400,
+                                    breadth_share=0.1, stats=tight)
+    assert len(out2) < len(pool)
+    assert tight["dropped_by_breadth_bound"] > 0, tight
+    assert tight["stopped_by"] == "token_cap", tight

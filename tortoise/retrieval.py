@@ -1714,8 +1714,15 @@ def assemble_session_context(
         return ""
 
     # ── phase 1: BREADTH (rank order, the historical window, extended) ──
-    breadth_dropped_by_token_cap = 0
-    breadth_dropped_by_byte_cap = 0
+    # A breadth refusal is recorded with the bound that refused it, but it is
+    # only a DROP if the depth pass does not put the hit back: the breadth phase
+    # is deliberately capped at ``breadth_share``, so it refuses routinely and
+    # depth then re-admits those hits from the same session blocks. Counting the
+    # refusal at phase-1 time reported ``stopped_by="token_cap"`` on windows
+    # where the budget never bound (depth recovered everything) — the false
+    # positive this census exists to prevent. The counters are DERIVED from the
+    # final selection, below.
+    breadth_refused: list[tuple[str, object]] = []
     breadth_admitted = 0
     breadth_item_cap_cut = False
     for h in pool:
@@ -1727,10 +1734,8 @@ def assemble_session_context(
         refusal = _try_admit(h, budget=breadth_budget)
         if not refusal:
             breadth_admitted += 1
-        elif refusal == "token_cap":
-            breadth_dropped_by_token_cap += 1
-        elif refusal == "byte_cap":
-            breadth_dropped_by_byte_cap += 1
+        elif refusal in ("token_cap", "byte_cap"):
+            breadth_refused.append((refusal, _tok(h)))
     # ── phase 2: DEPTH (complete the sessions breadth touched, whole-or-skip) ──
     # The session MEMBERSHIP comes from :func:`session_blocks` (ONE grouping
     # implementation, so the assembler and the tested primitive cannot drift),
@@ -1809,6 +1814,14 @@ def assemble_session_context(
                                      index_key=index_key)
         if last_breadth_index.get(key) == i and key in depth_by_session:
             ordered.extend(depth_by_session[key])
+    # A breadth refusal that depth did NOT put back is a real drop (derived
+    # here, after the depth pass, so a recovered hit is never counted).
+    breadth_dropped_by_token_cap = sum(
+        1 for cls, tok in breadth_refused
+        if cls == "token_cap" and tok not in selected_ids)
+    breadth_dropped_by_byte_cap = sum(
+        1 for cls, tok in breadth_refused
+        if cls == "byte_cap" and tok not in selected_ids)
     if stats is not None:
         # `stopped_by` names the bound that ACTUALLY dropped a block, and each
         # drop class keeps its own counter: reporting an item-cap drop as a
