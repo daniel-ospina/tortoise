@@ -1,0 +1,411 @@
+---
+title: "Capstone evidence — #7949 / #9080 extractor-v4 E1–E5 verdict table"
+type: evidence
+domain: platform
+doc_status: final
+created: 2026-10-19
+subjects.team: epistemic-team
+aboutSubjects: Tortoise extractor v4
+aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9073, #9116, #5199, #5333, #7947, #8503, #9596, #9736, #9737, #9738, #9775, EXTRACTOR-V4-ARCHITECTURE.md"
+---
+
+# Capstone evidence — `#7949` / `#9080` (extractor-v4, E1–E5)
+
+**Measured at:** `027c8c1ab` on branch `feat/9080-tm` (2026-10-20, after merging `origin/main` at `78ef670d3`) — that
+is the stamp of the shipped REFUSAL log (`capstone.log`), and it is kept because the file is
+kept. The SCORED run below is stamped separately (**Scored at** `cf98e15f1`), because it is a
+different artifact from a different program (`probes/capstone_measure.py`).
+
+**Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
+COUNT is deliberately not restated here — it changed twice while this was open, and a stale
+integer in the one paragraph a reviewer bounds the PR by is worse than no integer):
+the bundle itself (`docs/evidence/7949-capstone/**`, `tools/capstone_verdict_check.py`,
+`tests/test_7949_capstone_verdict_check.py`, `tests/test_7949_capstone_measure.py`) **and the
+ordering gate that judges it** (`tools/capstone_preregistration_check.py` +
+`tests/test_capstone_preregistration_9075.py`, added in the `#9089` review round: the gate
+exempts this bundle's REFUSAL log on its CONTENT, so a reviewer who bounds this PR by its own
+reading must see it); its registration (`config/ci-surfaces.yml` `core`/`tier1`/`durations`
+arms, `docs/00_index.md`); the selection edits `tools/ci_selection.py` +
+`tests/test_ci_selection.py` **remove** a `CORE_ALSO` row this branch had added and could not
+justify (the bundle prefix `docs/evidence/7949-capstone/`, landed by #9076, already selects
+`core` for a PROBE-ONLY diff — measured, not assumed), and **add** one for the gate source
+(`tools/capstone_verdict_check.py`), because a GATE-ONLY diff selected no surface at all while
+the bundle prefix covers only the probe/evidence paths (pinned by
+`tests/test_ci_selection.py::test_the_capstone_change_selects_core_not_tier1`) — and add a pin
+that no `CORE_ALSO` row is shadowed by a parent prefix; the surface re-cut the new caller forces
+(`config/surface-manifest.yml`, `docs/product/mcp-sdk-surface.md`); and two test-side edits —
+`tests/test_ci_check_repair.py` (the `gh` launcher stub) and
+`tests/test_uri_env_mutations_declared.py` (this suite's `TORTOISE_DB_URI` env-control
+declaration, plus the removal of a dead duplicate row).
+**Nothing under `tortoise/` changes behaviour and nothing instruments the extractor** — this
+bundle installs no wrapper, spy or step-composition anywhere in the measured path, so the E4
+row's "no monkeypatch" clause holds on the fact that matters. The `sdk.py`/`extractor_v2.py`
+lines this bundle cites are read, not changed.
+
+**Decision being proved:** the epic's own closing rule — *"Close this epic only when
+E1–E5 all have evidence attached to this issue — not when the children close. A child
+closing is a claim; this epic is where the claim is checked against the pipeline
+running end to end."*
+
+> **Verdict: 0/5 rows green. THREE rows are RED with measured numbers, TWO are BLOCKED
+> because the frozen metric cannot be scored on the artifact that exists. The epic is NOT
+> closeable, and this bundle says so mechanically:**
+>
+> | row | frozen bar | measured | verdict |
+> |---|---|---|---|
+> | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.600000**, after **0.600000** over **25** Objects → below the floor, so **REFUSED** (the arithmetic would fail: the bound is 0.300000) | ⛔ **BLOCKED** |
+> | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator is carried by **no committed artifact** (the artifact counts 42 value literals, before = after); E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (E2a unmeasured) |
+> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **126 / 412 = 0.3058** — `Point` 126/311 anchored, `:Object` **0/60**, `:Event` **0/41** | ⛔ **RED** |
+> | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
+> | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
+>
+> E1's and E2's proxies are printed rather than dropped (E1b 90/90 real facts; E2b 1/114) — and
+> neither proxy is allowed to become the verdict. A refused measurement is **neither a pass nor
+> a fail**; the pre-registration says so in its own words (`below_floor`), and the table's
+> `BLOCKED` is that word. Writing RED there would report a verdict the population is not
+> entitled to; writing GREEN would be worse.
+
+---
+
+## The measured run
+
+```bash
+export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
+uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
+    --prereg "$(git rev-parse HEAD)"
+# G0 pre-registration cf98e15f1… READ (schema capstone-preregistration/v1)
+# G1 corpus sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc MATCHES the frozen pin
+# → docs/evidence/7949-capstone/capstone-measured-cf98e15f.log
+```
+
+`probes/capstone_measure.py` is the instrument this row needed and PR #9089 did not have.
+`capstone_run.py` drives the real entry point and then reads four step witnesses off a receipt
+that carries none (#9116), so it refuses at G5 for **every** input and its table is 0/5
+`BLOCKED` with no numbers (#9737). The measurement probe keeps that refusal contract intact and
+measures the other way round: G0 reads the frozen record out of the **commit**
+(`git show <sha>:docs/evidence/7949-capstone/preregistration.json`), G1 compares this checkout's
+`fixtures_hash` with the frozen pin (the freeze the record actually made — `capstone_run.py`'s
+G1 wants a corpus file's sha, which the record does not freeze, so it refuses one gate later),
+every bar is **parsed out of the record** by `parse_bars` (none is typed in the probe), and then
+one pass over the seven pre-registered sessions runs through
+`TortoiseSDK(graph_name=<fresh disposable graph>).capture_session(turns, session_id=<sid>)`.
+
+| session | ok | mode | extracted | edus | points | operators | search |
+|---|---|---|---|---|---|---|---|
+| `wp01_quarry_debug` | ✅ | `llm:deepseek-direct` | 24 | 26 | 24 | 2 | 15 queries, not degraded |
+| `wp02_lumen_refactor` | ✅ | `llm:deepseek-direct` | 16 | 22 | 16 | 0 | 15, not degraded |
+| `wp03_ember_design` | ✅ | `llm:deepseek-direct` | 20 | 24 | 20 | 7 | 15, not degraded |
+| `wp04_aurora_perf` | ✅ | `llm:deepseek-direct` | 19 | 20 | 19 | 4 | 15, not degraded |
+| `wp05_retro_writeup` | ✅ | `llm:deepseek-direct` | 13 | 23 | 13 | 3 | 15, not degraded |
+| `wp06_quarry_rollout` | ✅ | `llm:deepseek-direct` | 23 | 22 | 23 | 7 | 15, not degraded |
+| `wp07_bluepeak_followup` | ✅ | `llm:deepseek-direct` | 11 | 22 | 11 | 5 | 15, not degraded |
+
+Seven of seven sessions returned `ok=True` with **zero errors**; 126 claims and 412 derived nodes
+were written to one fresh graph. The arm runs with `TORTOISE_VET=1` and
+`TORTOISE_CLASSIFY_LATER=1` **forced ON** (the deployed config leaves both OFF), the same
+convention #9076's E1/E2 arms used, so S2.2 and S2.3 are on-path for the pass even though the
+receipt cannot witness them.
+
+## The eight steps — 6 witnessed, 2 not, and why
+
+| step | witnessed? | witness |
+|---|---|---|
+| S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
+| S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
+| S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=82 events=34 points=126` |
+| S2.2 VET | ❌ **#9116** | the pass RAN (`TORTOISE_VET=1`), but `capture_session`'s receipt carries no VET surface — `extract_session_v2` builds `result["stats"]` at `tortoise/extractor_v2.py:7543-7558` (`+:8340-8360`) and `_run_vet_pass`'s stats (`:8001`, `:8123`) are stack locals. Measured: the receipt's `stats` has 20 keys and `vet` is not one of them |
+| S2.3 CLASSIFY | ❌ **#9116** | same construction: `_apply_classify_kinds` (`:8017`, `:8149`) writes into the embed list; `s2_classify_stats` never reaches `stats` |
+| S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
+| S5 CONNECT | ✅ | the graph write: 412 derived nodes (`Point` 311, `Object` 60, `Event` 41); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=39 INPUT=38 NAND=6` |
+| S6 COMMIT | ✅ | 311 `:Point` nodes persisted, 145 carrying the commit's `eventId` stamp, 304 `:GraphEvent`s |
+
+**6 of 8.** The two that are missing are missing from the INSTRUMENT, not from the pipeline:
+the passes run, the receipt does not say so. Working around that by reading a wrapper's state is
+exactly the instrumentation E4's row forbids, so the honest output is `UNOBSERVED` with its cause
+and file:line — and any table the probe emits records `steps_observed` **and**
+`steps_unobserved` so the count cannot be read as 8.
+
+## E3 — the census, and the contradiction it measures
+
+The anchor is a property of the **derivation link**, not of the node
+(`tortoise/projection/edges.py:494-503` `_anchor_on_create` / `_DERIVATION_ANCHOR_SET`), and the
+derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:467`: `Event`,
+`Document`). So the rule applied — printed in the log, applied by one Cypher query per label — is:
+
+> a derived node carries a version anchor **iff** it is the SOURCE of at least one
+> `extractedFrom|references` relationship whose `sourceVersion` is a non-empty string.
+
+| label | nodes written | anchored | unanchored |
+|---|---|---|---|
+| `Point` | 311 | 126 | 185 |
+| `Object` | 60 | **0** | 60 |
+| `Event` | 41 | **0** | 41 |
+| **total** | **412** | **126** | **286** |
+
+Relationship-level: `extractedFrom` **126/126** anchored, `references` **7/7**, and
+`aboutObject` **0/192**, `mitigated_by` 0/7, `CONTAINS` 0/285 (those are not derivation links).
+
+⇒ **E3 = 0.3058, RED — and the RED is the decision, not a defect.** `:Object` mention links are
+identity links that carry no `sourceVersion` **by design** (owner-approved option A, 2026-09-25,
+#5199), so the frozen denominator — which counts `:Object` — makes `= 1.000` unreachable **as
+registered**. #9736 owns the choice: re-register the denominator as the classes the model treats
+as derivations, or reopen the model. A lane cannot pick, and this bundle does not.
+
+**E3's floor is met** (412 ≥ 30), so this is a scored measurement and not a refusal. Note also
+that a repeat run of the same probe wrote 437 derived nodes with 142 anchored (0.3249) — the
+*numbers* move with LLM non-determinism, the *verdict* does not.
+
+## E4 — the committed operator receipt, read verbatim
+
+`tests/eval/write_path/receipts/w2b-operator-2026-10-19.json`:
+
+```text
+operator_audit: planted=15  edge_correct=2  content_ok=8  operators_total=27  operators_provenanced=27
+run_id=w2b-cef50160a1e2  date=2026-10-19T01:39:26Z  commit=6164c683c
+corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324
+judge_pin=w2-write-path-mechanical-v2  verdict=regression  failure_origin=gate_regression
+```
+
+⇒ **E4 = 2/15, RED.** Two provenance facts a reader needs, both stated in the log rather than
+smoothed over: the FILE postdates the pre-registration (added 2026-10-22) but the MEASUREMENT
+does not (`date=2026-10-19T01:39:26Z`), and its `corpus_hash` is **not** the frozen
+`fixtures_hash`. The row is therefore a non-green measurement on **its own** corpus revision,
+and the gate (V7) requires that digest to appear in the cited artifact — a declaration the
+artifact does not record is a finding. The mechanism is #8503 (the planted edges are not formed
+at all); the receipt's retrievability rate is unmeasured (#9596).
+
+## E5 — the falsifier, re-scored against this commit's gold
+
+```bash
+uv run python -m tests.eval.write_path.score_qualifiers \
+    --sessions wp01_quarry_debug wp02_lumen_refactor wp03_ember_design wp04_aurora_perf \
+               wp05_retro_writeup wp06_quarry_rollout wp07_bluepeak_followup \
+    --arms-dir tests/eval/write_path/receipts/7947-arms-2026-10-18 \
+    --out docs/evidence/7949-capstone/e5-rescore.json
+```
+
+```text
+raw        loss 13/25 = 0.520000  recovery 0.480000  recall 71/90 = 78.9%
+narrative  loss 12/25 = 0.480000  recovery 0.520000  recall 73/90 = 81.1%
+ratio 0.520000/0.480000 = 1.0833   (bar >= 0.90 — PASSES)
+raw absolute             0.4800    (bar >= 0.80 — FAILS)
+⛔ INCOMPLETE RECEIPTS IN THE HOLDOUT: wp07_bluepeak_followup:raw  partial=True
+```
+
+⇒ **E5 = RED**, on the record's own second bar — and this is exactly why the record required
+two: the ratio alone reads GREEN here while the narrative arm keeps half the qualifiers the raw
+arm loses. The re-score grades the 2026-10-18 arm receipts against **this** commit's gold (the
+gold is inside `fixtures_hash`); the receipts themselves are older, which is disclosed in the
+row's note. #9738 is the row's blocker and carries the rest: §10's prior measurement was visible
+when the record said none was, and the 25-bound (this instrument) vs 29-marker-sentence (the
+record) populations must be reconciled before either number is called final.
+
+## E1 / E2 — why the two rows are BLOCKED, not RED
+
+`e1-e2.log` is the only E1/E2 artifact, and it says what it is:
+
+```text
+e1 before_share=0.600000 after_share=0.600000 reduction=-0.000000 threshold=n/a observed=NO_REDUCTION verdict=UNPREREGISTERED
+e1-control before_real_facts=90 after_real_facts=90
+e2-state before=42 after=42
+e2-atomic before=114 after=114 fused_after=1
+prereg=UNPREREGISTERED corpus=e1e2_corpus.json corpus_sha256=e78d306c…
+result=UNPREREGISTERED
+```
+
+Three independent reasons the E1 number cannot become a verdict:
+
+1. **Its denominator is 25 Objects**, under the frozen floor of **30** (`arm=before
+   metric=objects total=25`). The record's own rule for that is `below_floor: "REFUSED, which is
+   neither a pass nor a fail"`. The arithmetic would fail (0.600000 > the 0.300000 bound), and
+   the bundle prints exactly that — but a refused measurement is not a scored one.
+2. **Its population is not the criterion's.** The 25 names are the owner-labelled audit set
+   (`tests/eval/write_path/salience_labels.jsonl`), not "all `:Object` nodes written by the run".
+3. **Its corpus is not the frozen corpus** (`e78d306c…` ≠ `dd7e85…`), and the artifact declares
+   itself `UNPREREGISTERED` — the record's `interface_note` says a run handed a different corpus
+   must be refused, never scored.
+
+E2's composite is E2a (14 value-bearing planted units strictly surviving) **and** E2b (fused
+share). E2b measures **1/114 = 0.008772**, comfortably inside `<= 0.05` — printed, and NOT used
+to green the row, because the artifact counts atomic *Points*, not surviving planted units. E2a's
+frozen denominator is the **14 value-bearing units** derived by §3.3's rule ("`verbatim_anchor`
+contains a digit" minus two named exclusions) — and **no committed artifact counts it**. The
+artifact's no-loss control (42/42 value literals, 90/90 real facts) is consistent with E2a but
+does not compute it. #9775 records that the state-value carve-out is absent on one render path.
+
+**What E1 would take, precisely.** The measurement run DOES produce a pre-registered-corpus
+population large enough to score E1 — **60 `:Object` nodes** (12 of them `^the <X>`, share
+0.200), against the E1b proxy 90/90. What it does not produce is a **before** arm: E1's criterion
+is a *ratio between two arms*, and two independent captures would confound the gate with LLM
+non-determinism (the same probe wrote 64 Objects and 15 bare-definite names on the previous run
+and 60/12 on this one). So E1 needs the controlled design #9076 built — one extraction, both arms
+applied to the SAME candidate population (`assert_one_gate_population`) — pointed at
+`tests/eval/write_path` and made to persist. That is work, and it is recorded here rather than
+approximated by a ratio of two runs that nobody controlled. The mechanism that must move the
+share is an owner ruling on removal/relocation (**#5333**).
+
+## Two artifacts, and why `capstone.log` is not overwritten
+
+| file | what it is |
+|---|---|
+| `capstone.log` | the shipped REFUSAL record (`capstone_run.py`, stamped `027c8c1ab`): G0 refused before any model call, 5 rows, no numbers |
+| `capstone-measured-cf98e15f.log` | the SCORED run (`capstone_measure.py`, stamped `cf98e15f1`): 3 RED + 2 BLOCKED, every row carrying its artifact |
+| `e5-rescore.json` | the E5 re-score artifact the E5 row cites (written by the probe) |
+
+⛔ **A scored table must NOT be written into `capstone.log`**, and this is mechanical, not a
+preference: `tools/capstone_preregistration_check.py::_log_declares_no_measurement` exempts a log
+from the ordering rule only while it carries **no** `numerator`/`denominator` **and** its
+`run.status != "COMPLETED"`. `capstone.log`'s add-commit predates the pre-registration, so the
+moment it carries a number it fails the ordering comparison — permanently, because the rule reads
+the file's OLDEST add-commit and that never moves. The new name is a new path, added after the
+record, and it passes. (Verified: `tools/capstone_preregistration_check.py --dir
+docs/evidence/7949-capstone` → `OK — … the ordering holds`, three evidence logs.)
+
+## The gate: two questions, two exits
+
+```bash
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-cf98e15f.log
+# → capstone-verdict-check: … GREEN=0, RED=3, BLOCKED=2, UNPREREGISTERED=0
+# → ✅ verdict table is structurally sound  (exit 0)
+
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-cf98e15f.log --require-green
+# → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
+```
+
+*Is the table honest?* yes, 0 findings. *Can the epic close?* no, V9. A single exit code would
+force the second answer to be read as the first — which is the exact inference the epic exists to
+stop.
+
+**One gate change shipped with this run, and it only ever ADDS a check.** V7 used to require every
+measured row's `corpus_sha256` to equal the log's corpus. This table cannot satisfy that honestly:
+E1/E2 cite #9076's arm run and E4 cites an operator receipt, and both measured *other* corpus
+revisions — their records say so. Refusing those rows would hide the only numbers they have;
+accepting them on the row's word would let any red row name any corpus. So a **non-green** row may
+declare `artifact_corpus_sha256`, and V7 then requires (a) it equals the row's own
+`corpus_sha256`, (b) that digest **appears in the cited artifact's text**, and (c) the row's note
+says so. A **GREEN** row never takes that path: it must still equal the log's corpus exactly. The
+arms are pinned in `tests/test_7949_capstone_verdict_check.py`
+(`test_a_non_green_row_on_another_corpus_must_declare_that_revision`,
+`test_a_declared_corpus_the_artifact_never_records_is_refused`,
+`test_the_declaration_arm_never_relaxes_GREEN`).
+
+## Why the steps are observed, never wrapped
+
+E4's row *"fails if … the extractor was monkeypatched"*. A wrapper installed to watch the
+pipeline is the same evidence-destroying move the row is guarding against, so both probes read the
+pipeline's OWN returned surface. The consequence is stated rather than hidden: a step the surface
+cannot witness is reported **unobserved** (with its cause and file:line), and the count of
+witnessed steps is printed — an honest finding for `#7949`, never a guess.
+
+## What this bundle does NOT establish
+
+- **No E1 or E2a number.** Their frozen populations (all Objects with a before arm; the 14
+  value-bearing units) are not carried by any committed artifact, and E1's only artifact is below
+  its floor on a different corpus. Both rows are `BLOCKED` with their proxies printed.
+- **No evidence that E3's `= 1.000` bar is reachable as registered.** It is not: `:Object`
+  mention links are unanchored by design (#5199 → #9736 owns the choice).
+- **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
+  (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
+  relationships (IMPL 39 / INPUT 38 / NAND 6) are a *step witness*, not the 15-edge gold.
+- **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
+  the record's denominator is 29 marker-bearing sentences. #9738 owns that, and this bundle says
+  so instead of calling the numbers final.
+- **The gate cannot detect a fabricated evidence file** with a plausible sha. Its stated limit: it
+  closes *inference* (green rows with no artifact), not forgery.
+- **Nothing about the five dependencies beyond their state** — the states above are a fresh read
+  (2026-10-23), but *why* each is open is the issue body's decomposition, not re-derived.
+- **The two unwitnessed steps stay unwitnessed.** `capture_session`'s receipt carries no step
+  surface (#9116), so S2.2/S2.3 are `UNOBSERVED` for every input this probe can be handed.
+
+## Reproduce
+
+```bash
+# the gate's own tests + the measurement probe's pure contract (DB-free, pure):
+TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
+    tests/test_7949_capstone_verdict_check.py tests/test_7949_capstone_measure.py \
+    -q -p no:cacheprovider
+
+# THE MEASURED RUN — a provider key and a searchable backend are required, and
+# #9116 still bounds the OBSERVATION (S2.2/S2.3/S3/S6 have no receipt witness for
+# capstone_run.py; the measurement probe recovers S3/S6 from the live graph and
+# reports S2.2/S2.3 unobserved). It writes its own file — never over capstone.log:
+export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
+uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
+    --prereg "$(git rev-parse HEAD)"
+uv run python tools/capstone_verdict_check.py \
+    docs/evidence/7949-capstone/capstone-measured-<head8>.log --require-green
+
+# the REFUSAL probe (unchanged contract, its own gate): G0 refuses before any
+# model call at a commit that carries no pre-registration record.
+python docs/evidence/7949-capstone/probes/capstone_run.py \
+    --prereg <pre-registration commit> --corpus <pre-registered corpus> \
+    --out docs/evidence/7949-capstone/capstone-<sha>.log
+python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-<sha>.log
+```
+
+⛔ **Not over `capstone.log`**: that file is the pre-landing REFUSAL record and its add-commit
+predates the pre-registration, so a scored run written into it reds the ordering check
+permanently (see the section above for the mechanism). `capstone_run.py`'s rows cite the path it
+was actually told to write (`--out`), so a refusal written elsewhere cites that file.
+
+`--head <sha>` on `capstone_run.py` (optional) **re-stamps** the run at another commit of the SAME
+TREE — a re-run against a tag, or the same tree checked out elsewhere. It is validated, not
+trusted: 7-40 lowercase hex digits that resolve to a commit in this repo, AND whose `^{tree}` is
+byte-identical to the worktree's `HEAD^{tree}`; refused before G0 otherwise. A commit with a
+DIFFERENT tree is a different program, so measuring it is not an override — check that revision
+out and run there. Every row is stamped with the value and the gate resolves the
+pre-registration's ancestry against it, so an unusable value cannot reach a shipped log.
+`capstone_measure.py` has no `--head` on purpose: it re-measures the current tree, and the head it
+stamps is `git rev-parse HEAD`.
+
+A checkout with no resolvable `HEAD` commit (unborn HEAD, or not a git repo) is refused the same
+way: a table whose rows carry the literal string `HEAD` is red by this repo's own `V3` rule.
+
+## The entry point the run drives (and the receipt that hides four steps)
+
+The pipeline's OWN path is `TortoiseSDK.capture_session` →
+`sdk._extract_session_v2` (`sdk.py:11472`; called at `:10509`) →
+`extractor_v2.extract_session_v2` (`extractor_v2.py:7804`), which calls, in one pass (line
+numbers re-derived at the merge-up of `origin/main` `ce581e9c5`; the symbol is authoritative and
+the line is a convenience, which is why `tests/test_7949_capstone_verdict_check.py` re-resolves
+them against the tree on every run):
+
+| step | call site | witness the probe reads | on the receipt? |
+|---|---|---|---|
+| S0 READ | `_edus_from_conversation` `:7915` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+| S1 NARRATE | `run_s1` `:7948` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:7972` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:8001` | `result["vet"]` | ❌ **#9116** |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:8017` | `result["classify_later"]` | ❌ **#9116** |
+| S3 RESOLVE | `search_graph` `:8033` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
+| S5 CONNECT | `execute_embed` `:8253` (+ `run_s4` `:8054` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S6 COMMIT | `execute_embed` payload | `result["payload"]` | ❌ **#9116** — the committed `:Point` nodes and their `eventId` stamps in the live graph are the witness `capstone_measure.py` uses |
+
+`capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself, which
+carries none of `result["vet"]`, `result["classify_later"]`, `result["search"]`,
+`result["payload"]` — so it reports those steps unobserved and refuses at G5 for EVERY input.
+That is a property of the caller's receipt, not of §4.4 or of the pipeline: the steps RUN, the
+surface the probe is handed does not say so. `capstone_measure.py` witnesses four of them from
+`stats` and the live graph and reports the remaining two as unobserved with their file:line,
+which is why the SCORED table exists at all while the WITNESS of two steps does not.
+
+## Dependency state (fresh read, 2026-10-23)
+
+| issue | state |
+|---|---|
+| `#9075` pre-register the corpus/split/scoring | **CLOSED COMPLETED** — landed `a6085af84` (#9507); the record is in this directory and G0 reads it |
+| `#9076` E1+E2 on one run | **CLOSED COMPLETED** — its artifact is `e1-e2.log`, and the rows above show why it is not scorable against the frozen bars |
+| `#9077` E4 on the real extraction leg | **CLOSED COMPLETED** — its receipt is cited by E4 (`2/15`) |
+| `#5199` the version anchor stops at Points | **CLOSED COMPLETED** — the anchor is on the derivation link by design; #9736 owns the metric contradiction that leaves behind |
+| `#7947` the raw-vs-narrative measurement | **CLOSED COMPLETED** — E5 re-scores its arms |
+| `#9116` the receipt carries no step surface | **OPEN** — the run's own blocker: 2 of 8 steps cannot be witnessed |
+| `#9736` E3's denominator vs the owner-approved model | **OPEN** — E3's blocker |
+| `#9738` E5's disclosure and population reconciliation | **OPEN** — E5's blocker |
+| `#5333` may any pass remove/relocate an Object (owner ruling) | **OPEN** — E1's blocker (the mechanism that must move the share) |
+| `#9775` the state-value carve-out on one render path | **OPEN** — E2's blocker |
+| `#8503` the planted operator edges are not formed | **OPEN** — E4's blocker |
+| `#9596` the operator receipt's retrievability is unmeasured | **OPEN** — the E4 artifact's own caveat |
+
+A row moves to a different verdict only by RE-RUNNING the probe, never by reading an issue's
+state — which is why E1/E2 stay `BLOCKED` even though #9076 closed, and why E3/E4/E5 are `RED`
+rather than "blocked by a closed child".

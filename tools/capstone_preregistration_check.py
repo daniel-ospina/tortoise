@@ -173,6 +173,18 @@ EXIT_KEY = re.compile(r"(?<!\w)exit\s*=\s*(\S+)", re.MULTILINE | re.IGNORECASE)
 #: Punctuation a value may be glued to at end-of-token (``result=UNPREREGISTERED,``).
 VALUE_TRAILING = ",;."
 
+#: The capstone verdict bundle's machine record, as the log carries it. Read from the LOG's own
+#: bytes — never from a pin — so a log edited into a scored one cannot keep riding an exemption.
+#: ⛔ The markers are matched as COUNTS first: `capstone_verdict_check.extract_block` refuses a log
+#: carrying more than one block ("`capstone_run.py | tee -a capstone.log` is enough" to make two),
+#: and a reader that took the FIRST block would exempt a log whose SECOND block carries the number.
+CAPSTONE_BEGIN = "=== CAPSTONE-VERDICT-BEGIN ==="
+CAPSTONE_END = "=== CAPSTONE-VERDICT-END ==="
+CAPSTONE_RECORD = re.compile(
+    re.escape(CAPSTONE_BEGIN) + r"\s*(\{.*?\})\s*" + re.escape(CAPSTONE_END),
+    re.DOTALL,
+)
+
 #: Every pinned corpus quantity the machine record restates and is cross-checked against. A REQUIRED
 #: set: a pins block missing one of these is a failure, never a silently-skipped comparison.
 CROSS_CHECKED_CORPUS_KEYS = (
@@ -542,6 +554,11 @@ def _log_declares_unscored(log: Path) -> tuple[bool, str]:
         text = log.read_text()
     except OSError as exc:
         return False, f"cannot be read ({exc})"
+    except UnicodeDecodeError as exc:
+        # #9089 review cycle 6: this one read without the errors="replace" the sibling predicate
+        # uses, so a non-UTF-8 log raised past every CheckError handler and surfaced as exit 1 —
+        # the code reserved for FINDINGS — on a log the tool never read.
+        return False, f"cannot be read as UTF-8 ({exc})"
     declared = ""
     for line in text.splitlines():
         if line.startswith("prereg="):
@@ -642,8 +659,201 @@ def _pins_mapping(pins: dict, key: str) -> dict:
     return _mapping(pins, key, "pins")
 
 
-def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> list[str]:
+def _measured_locations(record: dict) -> list[str]:
+    """Every place the machine record carries a MEASUREMENT, as human-readable labels.
+
+    WHY IT WALKS THE WHOLE RECORD (#9089 review P1): the exemption asks "did this log produce a
+    number AT ALL", and a number is not confined to ``rows``. The E4 receipt is written to
+    ``run.e4_receipt`` on the completed path, so a REFUSED run never carries one — a log that
+    carries both a REFUSED status and receipt numbers is claiming a measurement its own run says
+    it never took, and reading only ``rows`` exempted exactly that document. A hand-editable
+    artifact can put a number in any container, so the predicate asks the document instead of the
+    one field it happens to know about.
+
+    ⛔ TWO CONTAINER NAMES, NOT "ANY NUMBER ANYWHERE" (#9089 review P2). The receipt's counts are
+    not all called ``numerator``/``denominator`` — ``e4_receipt`` carries ``s4_items``,
+    ``merged_items``, ``corrected_by_s4``, ``verbatim_reemissions`` and ``added_by_s4`` too — so a
+    two-key match exempted a record carrying five other numbers. It cannot be widened to "any
+    number in the document": the shipped log legitimately carries ``run.gate_failed: 2``, and a
+    blanket rule would over-block the very artifact this exemption exists for. So the two named
+    measurement keys are honoured wherever they sit, and the ``e4_receipt`` container's numeric
+    leaves count as measurements. A boolean is never a count (``True`` is an ``int`` in Python and
+    the gate refuses booleans as denominators — the same rule here).
+    """
+    found: list[str] = []
+    stack: list[tuple[str, object]] = [("record", record)]
+    while stack:
+        where, node = stack.pop()
+        if isinstance(node, dict):
+            label = str(node.get("criterion") or where)
+            for key, item in node.items():
+                if key in ("numerator", "denominator") and item is not None:
+                    found.append(label)
+                elif key == "e4_receipt" and _carries_number(item):
+                    found.append(f"{where}.{key}")
+                else:
+                    stack.append((f"{where}.{key}", item))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                stack.append((f"{where}[{index}]", item))
+    return found
+
+
+def _carries_number(node: object) -> bool:
+    """Does this container hold a numeric leaf? Iterative, so a hostile document cannot recurse."""
+    stack = [node]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, (int, float)):
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    return False
+
+
+def _log_declares_no_measurement(log: Path) -> tuple[bool, str]:
+    """Does the LOG ITSELF prove it produced NO measurement? Returns (ok, reason).
+
+    The ordering rule exists so a number cannot be scored against thresholds written
+    afterwards. A log that carries no number AT ALL has nothing to launder — and its own machine
+    record says so, in two independent conditions this predicate requires together:
+
+      * no row carries a ``numerator`` or a ``denominator`` (a measurement is *absent*, not
+        merely unverdicted);
+      * ``run.status`` is not ``COMPLETED`` — the run did not finish, so it did not measure.
+
+    ``prereg.status`` is REQUIRED to be present, and carries NO exemption weight (see the
+    measured over-block at the end of this docstring).
+
+    ⛔ THE VOCABULARY IS THE PRODUCER'S, NOT AN INVENTED ONE (#9089 review P1). This arm used to
+    test ``prereg.status == "PRESENT"`` and to read numbers out of ``rows`` only. ``PRESENT`` is a
+    value ``capstone_run.py::refuse`` NEVER writes (it records ``ABSENT``, ``OK`` or ``UNREAD``),
+    so that condition was INERT, and the measurement test missed the E4 receipt because it read
+    only ``rows``. The measurement test now walks the WHOLE machine record, so a number in any
+    container this artifact can produce is a refusal.
+
+    ⛔ AND THE PREREG STATUS IS NOT AN EXEMPTION CONDITION AT ALL (#9089 review cycle 4,
+    MEASURED). A revision of this arm required ``prereg.status == "ABSENT"``; the bundle's own
+    documented re-run refutes that, measured at this head: ``capstone_run.py --prereg <sha>
+    --corpus battery/config/corpus.json`` passes G0 (the artifact is committed) and refuses at G1
+    (the registration freezes no corpus sha), emitting ``prereg.status=OK``,
+    ``run.status=REFUSED``, and every numerator/denominator null — a log that PROVES it measured
+    nothing. Refusing to exempt it turns the bundle's own acceptance command into an ordering
+    violation and a repo-wide red. The question here is what the log MEASURED, which the two arms
+    above answer exactly; the prereg status records what the run READ, and cannot by itself make
+    laundering possible (a log with no number has nothing to launder, whichever registration it
+    claims to have seen).
+
+    ⛔ WHY THIS IS NOT A PINNED EXEMPTION (#9089). `pre_existing_unscored_logs` grandfathers a
+    FILE and therefore has to prove, forever, that the file was never edited into a scored one.
+    This predicate asks its question of the log's CONTENT on EVERY run, so it is self-healing: the
+    moment a row gains a number, or the run completes, the log falls back into the ordered class
+    and this gate reds again. It is fail-closed in the same
+    direction — an unreadable log, a missing machine record, a non-JSON block, no rows, or a
+    missing status is a REFUSAL to exempt, never a pass.
+    """
+    try:
+        text = log.read_text(errors="replace")
+    except OSError as exc:
+        return False, f"cannot be read ({exc})"
+    begins, ends = text.count(CAPSTONE_BEGIN), text.count(CAPSTONE_END)
+    if (begins, ends) != (1, 1):
+        return False, (
+            f"carries {begins} BEGIN and {ends} END verdict markers — a log with more than one "
+            "block can hide a number in the block this reader did not take, so an ambiguous "
+            "record is a refusal (the same rule `capstone_verdict_check.extract_block` applies)"
+        )
+    match = CAPSTONE_RECORD.search(text)
+    if not match:
+        return False, "carries no capstone machine record, so it cannot prove it measured nothing"
+    try:
+        record = json.loads(match.group(1))
+    except json.JSONDecodeError as exc:
+        return False, f"its machine record is not JSON ({exc})"
+    except RecursionError:
+        # #9089 review P2: a document nested past the parser's limit raised RecursionError, which
+        # is NOT a JSONDecodeError — it escaped this predicate and surfaced as exit 1, the code
+        # this tool reserves for FINDINGS, on a document it never read. An unreadable shape is a
+        # refusal (exit 2 via the caller's CheckError path is a reader problem, but the exemption
+        # question has a safe answer here: do not exempt).
+        return False, (
+            "its machine record nests too deeply to parse — a shape this predicate cannot read "
+            "is a refusal, not an exemption"
+        )
+    if not isinstance(record, dict):
+        return False, "its machine record is not an object"
+    # ⛔ The schema is PINNED, not inferred. Without it the whole "self-healing" argument is bounded
+    # by a shape nothing validated: a `capstone-verdict-v2` that relocated the number (a `value`
+    # or `ratio` field) would be exempted rather than refused. An unrecognised schema is a shape
+    # this predicate cannot read, so it is a refusal.
+    # Resolved BOTH ways on purpose: this module is imported as `tools.capstone_preregistration_check`
+    # in tests and run as a SCRIPT in CI (invoked by path, which puts `tools/` on sys.path[0] and
+    # knows no package). Either spelling must find the sibling — and a sibling that cannot be
+    # found is a refusal, never a pass. (The CI step's form is spelled the way the entry-point
+    # guard requires: `uv run python <path>`, never a bare `python3 <path>` in prose —
+    # tests/test_entry_point_python_guard.py::test_no_doc_or_usage_advertises_the_form_the_guard_refuses
+    # reads comments, not just docs, and redded a first version of this note.)
+    try:
+        import capstone_verdict_check as _cvc  # script invocation
+    except ImportError:
+        try:
+            from tools import capstone_verdict_check as _cvc  # package invocation
+        except Exception:
+            return False, (
+                "the capstone verdict check could not be imported, so its schema is unknown")
+    expected_schema = _cvc.SCHEMA
+    if record.get("schema") != expected_schema:
+        return False, (
+            f"its machine record declares schema {record.get('schema')!r}, not {expected_schema!r} "
+            "— a shape this predicate cannot read is a refusal, not an exemption"
+        )
+    rows = record.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return False, "its machine record carries no rows"
+    measured = sorted(set(_measured_locations(record)))
+    if measured:
+        return False, (
+            f"it carries a measurement for {', '.join(measured)} — a number in the log is exactly "
+            "what the ordering rule protects"
+        )
+    run = record.get("run") if isinstance(record.get("run"), dict) else {}
+    status = str(run.get("status") or "")
+    if not status:
+        return False, "its machine record declares no run.status"
+    if status == "COMPLETED":
+        return False, "it declares run.status=COMPLETED, so the run did measure"
+    prereg = record.get("prereg") if isinstance(record.get("prereg"), dict) else {}
+    prereg_status = str(prereg.get("status") or "")
+    if not prereg_status:
+        return False, "its machine record declares no prereg.status"
+    # ⛔ NO PREREG-STATUS CONDITION (#9089 review cycle 4, MEASURED). An earlier revision exempted
+    # only on `ABSENT` and refused `OK`/`UNREAD`. The bundle's OWN documented re-run contradicts
+    # that: `capstone_run.py --prereg <sha> --corpus battery/config/corpus.json | tee
+    # docs/evidence/7949-capstone/capstone.log` passes G0 and refuses at G1, so it emits
+    # `prereg.status=OK`, `run.status=REFUSED` and every numerator/denominator null — a log that
+    # proves it measured nothing — and the ABSENT-only arm refused it, which turns the acceptance
+    # command into an ordering violation (and a repo-wide red) the moment that log is committed.
+    # The question this predicate actually asks is "did this log produce a number", and the two
+    # arms above answer it exactly: no number anywhere (including inside the E4 receipt), and a
+    # run that did not complete. The prereg status says what the run READ, not what it MEASURED,
+    # so it cannot on its own make laundering possible — a log with no number has nothing to
+    # launder whatever registration it claims to have seen. The status is still REQUIRED (a
+    # record that does not state it is a shape this predicate does not understand).
+    return True, ""
+
+
+def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None,
+                   exempted: list[str] | None = None) -> list[str]:
     """``[]`` when every log is either after the registration or provably unscored.
+
+    ``exempted``, when given, is APPENDED with the name of every log the content arm exempted
+    (#9089). It is not decoration: an ordering violation that was WAIVED must be visible, or the
+    green line reads exactly like a log that was ordered — the silent-green shape this tool exists
+    to refuse (see the ``--no-git``/``--no-corpus`` rule ninety lines below).
 
     Raises ``HistoryUnavailable`` (a ``CheckError``) when this checkout is shallow: with a grafted
     tip the comparison cannot be evaluated at all, and a wrong verdict is worse than no verdict.
@@ -719,10 +929,19 @@ def check_ordering(prereg: Path, logs: list[Path], pins: dict | None = None) -> 
                 )
             continue
         if log_epoch <= prereg_epoch:
+            ok, why = _log_declares_no_measurement(log)
+            if ok:
+                # A log that provably produced NO number cannot have been scored against
+                # thresholds chosen after it was read. Re-asked of the content on every run, so
+                # the moment it gains a number this gate reds it again (#9089).
+                if exempted is not None:
+                    exempted.append(log.name)
+                continue
             failures.append(
                 f"{log.name}: added at {log_epoch} which is not strictly after the "
                 f"pre-registration's add-commit {prereg_epoch} — the log may have been scored "
-                "against thresholds chosen after it was read"
+                f"against thresholds chosen after it was read, and it does not prove it measured "
+                f"nothing ({why})"
             )
     return failures
 
@@ -735,8 +954,12 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
         return [f"no {MACHINE_RECORD} beside {PREREG_NAME} — the evidence probe reads the "
                 "machine record, so a document alone is not a registration it can consume"]
     try:
-        record = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
+        raw = path.read_text()
+    except UnicodeDecodeError as exc:
+        return [f"{MACHINE_RECORD} is not valid UTF-8: {exc}"]
+    try:
+        record = json.loads(raw)
+    except (json.JSONDecodeError, RecursionError) as exc:
         return [f"{MACHINE_RECORD} is not JSON: {exc}"]
     if record.get("schema") != PREREG_SCHEMA:
         failures.append(
@@ -865,12 +1088,17 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
     if missing:
         failures.append(f"{MACHINE_RECORD} omits criteria rows {missing}")
 
-    for match in FOUR_EDGE_RATE.finditer(path.read_text()):
+    for match in FOUR_EDGE_RATE.finditer(raw):
         failures.append(
             f"{MACHINE_RECORD}: four-edge denominator rate {match.group(0)!r} — the record is "
             "frozen by the run probe, so the forbidden denominator may not appear here either"
         )
 
+    # ⚠️ This field is the PINNED class only (`pre_existing_unscored_logs`): it is frozen with the
+    # record, and a log the ordering check exempts on its CONTENT (see
+    # `_log_declares_no_measurement`) structurally cannot join it — the pins' own bounds require a
+    # `prereg=UNPREREGISTERED` vocabulary and no post-registration touch. The content-exempted set is
+    # reported per run instead (`ordering_exempt`), never restated into this frozen record (#9089).
     exempt = sorted(_pins_mapping(pins, "pre_existing_unscored_logs"))
     if sorted(_list(record, "unscored_runs_before_this_registration", MACHINE_RECORD)) != exempt:
         failures.append(
@@ -1032,7 +1260,18 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     prereg = directory / PREREG_NAME
     if not prereg.is_file():
         raise CheckError(f"no {PREREG_NAME} in {directory}")
-    text = prereg.read_text()
+    try:
+        text = prereg.read_text()
+    except UnicodeDecodeError as exc:
+        # #9089 review cycle 6: 
+        # "a check that cannot read its subject must never report success" — and it must not
+        # report a VERDICT either. A non-UTF-8 document raised UnicodeDecodeError, which is not a
+        # CheckError, so `main` exited 1 (the code for findings) on a document it never read.
+        # Exit 2 is the documented answer for an unreadable subject.
+        raise CheckError(
+            f"{PREREG_NAME} is not valid UTF-8 ({exc}) — an unreadable document is a check "
+            "that could not be performed, never a finding about its content"
+        ) from exc
     rows = parse_criteria_rows(text)
     pins = parse_pins(text)
 
@@ -1050,7 +1289,9 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
     report["evidence_logs"] = [p.name for p in logs]
     if use_git:
         try:
-            failures += check_ordering(prereg, logs, pins)
+            content_exempt: list[str] = []
+            failures += check_ordering(prereg, logs, pins, content_exempt)
+            report["ordering_exempt"] = sorted(content_exempt)
             ordering = "verified"
         except HistoryUnavailable as exc:
             # The THIRD outcome: neither a pass nor an ordering failure. Folding it into either is
@@ -1166,7 +1407,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL — {len(report['failures'])} problem(s):")
             for f in report["failures"]:
                 print(f"  - {f}")
-        print(f"machine record run-order claim: {report['run_order_claim']}")
+        exempt_note = ""
+        if report.get("ordering_exempt"):
+            exempt_note = (f" (exempt by CONTENT, measured nothing: "
+                           f"{', '.join(report['ordering_exempt'])})")
+        print(f"machine record run-order claim: {report['run_order_claim']}{exempt_note}")
     return 0 if report["ok"] else 1
 
 
