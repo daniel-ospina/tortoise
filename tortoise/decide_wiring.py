@@ -129,11 +129,19 @@ def direction_note(row: dict, requested: str | None) -> str | None:
     re-running a decision with a different ``--direction`` cannot change it —
     the alternative (filing a second operator) is the irreversible duplication
     this module exists to prevent. A silent mismatch would be worse than either.
+
+    An EMPTY stored direction is its own case, not a non-case: operators written
+    before #7852 carry no ``direction`` property at all, so on any older graph
+    the requested direction is dropped for the most common shape there is.
     """
-    if requested is None or not row.get("direction"):
+    if requested is None:
         return None
     from tortoise.live import direction_spellings
 
+    if not row.get("direction"):
+        return (f"elected operator {row['id']} records NO direction — the "
+                f"requested {requested!r} is NOT applied in place (a second "
+                "operator would duplicate the bridge, #6671)")
     if row["direction"] in direction_spellings(requested):
         return None
     return (f"elected operator {row['id']} keeps its stored direction "
@@ -226,21 +234,14 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
     """Which operators a relevance edge may damp — the ONE relevance-arm rule.
 
     A relevance edge is a MITIGATION, not a claim of its own, so this function
-    never writes anything. It returns::
+    never writes anything. It returns the FACTS; which of them licenses a mint is
+    stated once, in ``may_mint_damped_bridge``::
 
-        {"targets": [operator ids...],      # every dampable copy on the triple
-         "notes": ["...", ...],             # why it declined / what it scoped
-         "bridges": int}                    # how many bridges exist at all
-
-    ``bridges == 0`` is the caller's decision: the script refuses to mint a
-    claim ("a relevance edge never mints a claim"), while the `tortoise decide`
-    CLI documents minting the damped operator. Anything else — including a
-    triple whose every bridge is shared with other pairs, or one that carries a
-    bridge under a DIFFERENT label than the edge names — must never mint, or the
-    twin duplicated the very claim this module guards. That is why ``bridges``
-    counts what sits on the TRIPLE (any label), not what the label-scoped
-    lookup returned: a label-scoped miss on a labelled triple is not an empty
-    triple.
+        {"targets": [ids...],          # every dampable copy on the triple
+         "notes": ["...", ...],        # why it declined / what it scoped
+         "singles": [ids...],          # single-pair bridges in the LABEL SCOPE
+         "other_singles": [ids...],    # single-pair bridges under ANOTHER label
+         "bridges": int}               # how many bridges sit on the triple
 
     ``label`` scopes the dampening when the caller names one (two labels over
     one triple are two claims — damping a `refutes` bridge on behalf of a
@@ -266,7 +267,10 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
             notes.append(
                 f"the triple carries {present} under a DIFFERENT label — not "
                 "damped (a relevance edge damps only the claim it names)")
-        return {"targets": [], "bridges": len(others), "notes": notes}
+        return {"targets": [], "bridges": len(others), "singles": [],
+                "other_singles": [row["id"] for row in others
+                                  if row["targets"] == 1],
+                "notes": notes}
     notes: list[str] = []
     # #6671 review: a bridge with ``targets > 1`` also claims OTHER pairs, so
     # damping it here would weaken claims this edge never named — the exact
@@ -283,7 +287,8 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
     if not found:
         notes.append("every bridge on this triple is shared with other pairs — "
                      "nothing damped")
-        return {"targets": [], "bridges": len(shared), "notes": notes}
+        return {"targets": [], "bridges": len(shared), "singles": [],
+                "other_singles": [], "notes": notes}
     if label is not None:
         targets = [row["id"] for row in found]
     elif any(row["label"] == "" for row in found):
@@ -295,5 +300,49 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
         notes.append(f"this triple carries {len(labels)} distinct labels "
                      f"{labels} and the edge names none — nothing damped")
         targets = []
+    # `singles` is what the mint gate reads: a triple whose bridges are ALL
+    # shared with other pairs has no single-pair bridge to damp, which is the
+    # same state the `edges` arm writes its way out of — so the CLI mints there
+    # too, and stays consistent with `resolve_or_create_operator`.
     return {"targets": targets, "bridges": len(found) + len(shared),
-            "notes": notes}
+            "singles": [row["id"] for row in found],
+            "other_singles": [], "notes": notes}
+
+
+def may_mint_damped_bridge(pick: dict) -> bool:
+    """May the caller WRITE an operator for a relevance edge it cannot damp?
+
+    The `tortoise decide` CLI documents minting the operator a relevance edge
+    damps; `graph-scripts/decide.py` refuses ("a relevance edge never mints a
+    claim"). That is the only difference between them, and it is stated HERE so
+    the two entry points cannot drift into different answers:
+
+    * no single-pair bridge in the label scope, and no single-pair bridge under
+      ANOTHER label → mint. Either the triple is empty, or every bridge on it is
+      shared with other pairs — the same state `resolve_or_create_operator`
+      writes a single-pair bridge out of for the `edges` arm. Minting here is
+      that rule, not a twin.
+    * a single-pair bridge exists in scope → NEVER mint: that is the twin, and
+      the relevance edge had something to damp (including the ambiguous
+      several-labels case, which refuses rather than guesses).
+    * the only bridge is under a DIFFERENT label → NEVER mint: the caller named
+      a claim that does not exist, and filing it would add an unreported claim.
+    """
+    return not pick["singles"] and not pick["other_singles"]
+
+
+def damped_factor_ids(pick: dict) -> list[str]:
+    """The operators a relevance edge damped, for an explicit factor list.
+
+    EVERY damped copy belongs in the list, not just the first: a polluted triple
+    (duplicates of one bridge) has all its copies damped, and leaving one out
+    makes the factor list disagree with the graph — and with the OTHER entry
+    point, which is the drift this module exists to prevent. Deduped, because a
+    factor list must not carry the same operator twice: EP would count one
+    bridge as two.
+    """
+    seen: list[str] = []
+    for op_id in pick["targets"]:
+        if op_id not in seen:
+            seen.append(op_id)
+    return seen

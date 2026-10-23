@@ -10505,6 +10505,8 @@ def _cmd_decide(args) -> int:
         # (#9631, measured on the 2-edge fixture below: 3 → 6 operators,
         # 1 → 2 mitigations, opt:a 0.6592 → 0.6756).
         from tortoise.decide_wiring import (
+            damped_factor_ids,
+            may_mint_damped_bridge,
             resolve_or_create_operator,
             select_damp_targets,
         )
@@ -10589,16 +10591,14 @@ def _cmd_decide(args) -> int:
                                            _resolve(tgt), label)
                 targets = pick["targets"]
                 if not targets:
-                    if pick["bridges"]:
-                        # Bridges exist but none may be damped — minting one
-                        # here would file the twin #6671 refuses.
-                        for note in pick["notes"]:
-                            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
-                                  f"{note}")
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                    # This command's documented semantics are to wire the
+                    # operator it damps; WHICH cases licence that is stated once
+                    # in `may_mint_damped_bridge` (the script never mints).
+                    if not may_mint_damped_bridge(pick):
                         continue
-                    # No bridge at all: this command's documented semantics are
-                    # to wire the operator it damps (the script refuses — a
-                    # relevance edge there never mints a claim).
                     op_id, reused, note = _elect(src, op_type, tgt, label)
                     if op_id is None:
                         print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
@@ -10608,12 +10608,17 @@ def _cmd_decide(args) -> int:
                         print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
                               f"{note}")
                     targets = [op_id]
-                for target_id in targets:
-                    # A damped bridge that is not in the factor list drops out of
-                    # the ranking, and on a re-run the relevance-only triples
-                    # would silently stop being counted — the "ranking depends
-                    # on the run count" defect in its other direction (the
-                    # script has always appended these; #9631 review).
+                elif pick["notes"]:
+                    for note in pick["notes"]:
+                        print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
+                              f"{note}")
+                # Every damped copy belongs in the factor list — a damped bridge
+                # that is missing from it drops out of the ranking, which is the
+                # "ranking depends on the run count" defect in its other
+                # direction (#9631 review). The rule lives in
+                # `damped_factor_ids` so both entry points agree.
+                for target_id in damped_factor_ids(
+                        {"targets": targets, **pick}):
                     if target_id not in all_operator_ids:
                         all_operator_ids.append(target_id)
                 for target_id in targets:

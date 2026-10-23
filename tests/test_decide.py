@@ -1171,7 +1171,7 @@ class TestIssue9631CliDecideRerunIsIdempotent:
         monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
         return str(tmp_path / f"cli9631_{_mk()}.db")
 
-    def _run_cli(self, db_path: str, data: dict) -> int:
+    def _run_cli(self, db_path: str, data: dict, *, direction=None) -> int:
         """One real `tortoise decide` run against ``db_path``."""
         import json
         from unittest import mock
@@ -1183,7 +1183,7 @@ class TestIssue9631CliDecideRerunIsIdempotent:
             json.dump(data, fh)
         return m._cmd_decide(mock.Mock(
             input=path, options=None, criteria=None, findings=None, edges=None,
-            db=db_path, direction=None))
+            db=db_path, direction=direction))
 
     def _census(self, db_path: str) -> dict[str, int]:
         from tortoise.__main__ import _projection_for
@@ -1281,6 +1281,109 @@ class TestIssue9631CliDecideRerunIsIdempotent:
             assert abs(run2[name] - value) <= 1e-4, (
                 f"run1={run1} run2={run2}")
 
+    def test_relevance_edge_wires_a_single_pair_bridge_next_to_a_shared_one(
+            self, tmp_path, monkeypatch, capsys):
+        """A triple whose only bridge is SHARED with other pairs has no
+        single-pair bridge to damp — the same state the `edges` arm writes its
+        way out of. Gating the mint on `bridges == 0` (instead of "no
+        single-pair bridge") made this input damp NOTHING, a regression against
+        the pre-#9631 CLI, which wired and damped an operator here (#9631
+        review)."""
+        from tortoise.__main__ import _projection_for
+        from tortoise.sdk import TortoiseSDK
+
+        db = self._db(tmp_path, monkeypatch)
+        crit_text, a_text, b_text = (f"Criterion {_mk()}", f"Option A {_mk()}",
+                                     f"Option B {_mk()}")
+        writer = TortoiseSDK()
+        writer._proj = _projection_for(db)
+        try:
+            crit = writer.create_point("criterion", crit_text)
+            a = writer.create_point("option", a_text)
+            b = writer.create_point("option", b_text)
+            shared = writer.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+        finally:
+            writer._proj.close()
+
+        # Same content → `create_point(dedup=True)` resolves the CLI's keys onto
+        # the points seeded above, so the relevance edge names the seeded pair.
+        data = {
+            "options": {"opt:a": a_text, "opt:b": b_text},
+            "criteria": {"crit:1": crit_text},
+            "findings": {},
+            "edges": [],
+            "truth_edges": [],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        assert first.get("IMPL") == 2, (
+            "the relevance edge damped nothing and wired nothing — a shared "
+            f"bridge is not a reason to skip the pair: {first}")
+        assert first.get("_mitigations") == 1, (
+            f"the single-pair bridge was not damped: {first}")
+        probe = _projection_for(db)
+        try:
+            rows = probe.g.query(
+                "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m) "
+                "RETURN op.id").result_set
+        finally:
+            probe.close()
+        assert {row[0] for row in rows} != {shared["id"]}, (
+            "the SHARED bridge was damped — that weakens pairs this edge never "
+            "named")
+
+        assert self._run_cli(db, data) == 0
+        assert self._census(db) == first, (
+            "the re-run did not settle on the single-pair bridge: "
+            f"{first} -> {self._census(db)}")
+
+    def test_direction_is_reported_when_the_stored_bridge_has_none(
+            self, tmp_path, monkeypatch, capsys):
+        """Operators written before #7852 carry no `direction` property at all,
+        so `direction_note`'s empty-stored early return silently dropped the
+        requested direction on the most common shape there is (#9631 review).
+        The request cannot be applied in place (a second operator is the
+        irreversible duplication), so it must be SAID."""
+        from tortoise.__main__ import _projection_for
+        from tortoise.sdk import TortoiseSDK
+
+        db = self._db(tmp_path, monkeypatch)
+        crit_text, opt_text = f"Criterion {_mk()}", f"Option {_mk()}"
+        writer = TortoiseSDK()
+        writer._proj = _projection_for(db)
+        try:
+            crit = writer.create_point("criterion", crit_text)
+            opt = writer.create_point("option", opt_text)
+            op_id = writer.create_operator(
+                "NAND", crit["id"], [opt["id"]])["id"]
+            # The pre-#7852 shape: the operator exists, `direction` does not.
+            writer._proj.g.query(
+                "MATCH (p:Point {id:$i}) REMOVE p.direction",
+                params={"i": op_id})
+        finally:
+            writer._proj.close()
+
+        data = {
+            "options": {"opt:a": opt_text},
+            "criteria": {"crit:1": crit_text},
+            "findings": {},
+            "edges": [["crit:1", "NAND", "opt:a"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        assert self._run_cli(db, data, direction="<-") == 0
+        out = capsys.readouterr().out
+        assert "records NO direction" in out, (
+            "the requested direction was silently dropped on a stored bridge "
+            f"that carries none: {out}")
+        assert self._census(db).get("NAND") == 1, (
+            "the unapplied direction filed a second operator: "
+            f"{self._census(db)}")
+
     def test_labelled_relevance_edge_never_mints_on_an_unlabelled_triple(
             self, tmp_path, monkeypatch, capsys):
         """A label is part of the operator identity, so a relevance edge naming
@@ -1366,3 +1469,58 @@ class TestIssue9631CliDecideRerunIsIdempotent:
 
         assert first.get("IMPL") == 1, first
         assert second == first, f"Subject→Point edge duplicated on re-run: {second}"
+
+
+class TestIssue9631SharedWiringRulesAreStatedOnce:
+    """The two rules BOTH entry points obey live in `tortoise/decide_wiring.py`
+    so they cannot drift: `damped_factor_ids` (every damped copy enters the
+    explicit factor list, deduped) and `may_mint_damped_bridge` (only the CLI
+    mints, and only where nothing single-pair sits on the triple)."""
+
+    def test_damped_factor_ids_returns_every_copy_deduped(self):
+        from tortoise.decide_wiring import damped_factor_ids
+
+        assert damped_factor_ids({"targets": ["a", "b", "a"]}) == ["a", "b"]
+        assert damped_factor_ids({"targets": []}) == []
+
+    def test_mint_gate_licenses_the_empty_and_shared_triple_only(self):
+        from tortoise.decide_wiring import may_mint_damped_bridge
+
+        empty = {"targets": [], "singles": [], "other_singles": []}
+        shared_only = {"targets": [], "singles": [], "other_singles": []}
+        has_single = {"targets": ["op"], "singles": ["op"],
+                      "other_singles": []}
+        other_label = {"targets": [], "singles": [], "other_singles": ["op2"]}
+
+        assert may_mint_damped_bridge(empty) is True
+        assert may_mint_damped_bridge(shared_only) is True
+        assert may_mint_damped_bridge(has_single) is False
+        assert may_mint_damped_bridge(other_label) is False
+
+    def test_different_label_bridge_is_named_not_silently_twinned(self, sdk,
+                                                                 capsys):
+        """The label is part of the operator identity, so a labelled `edges`
+        entry over a triple that already carries a DIFFERENT label files a
+        second claim. That is correct — and must be SAID, or an existing
+        decision file whose label used to be ignored grows an unreported twin
+        (#9631 review: this note was unpinned)."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
+
+        data = {
+            "context": "issue-9631-label-note",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"], "supports"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census.get("IMPL") == 2, (
+            f"two labelled claims collapsed or duplicated: {census}")
+        out = capsys.readouterr().out
+        assert "DIFFERENT label" in out, (
+            "a second claim was filed silently — the caller cannot tell the "
+            f"existing bridge was not reused: {out}")

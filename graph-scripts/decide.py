@@ -110,6 +110,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tortoise.decide_wiring import (  # noqa: E402
+    damped_factor_ids,
     resolve_or_create_operator,
     select_damp_targets,
 )
@@ -243,9 +244,13 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         if not targets:
             continue
         # Record the damped bridges as this run's edges too (they are the
-        # bridges the ranking reads).
-        if targets[0] not in all_operator_ids:
-            all_operator_ids.append(targets[0])
+        # bridges the ranking reads). EVERY damped copy, via the rule both entry
+        # points share — the CLI appends all of them too (#9631 review: the two
+        # callers had forked this leg, so a polluted triple produced different
+        # factor lists per entry point).
+        for damped_id in damped_factor_ids(pick):
+            if damped_id not in all_operator_ids:
+                all_operator_ids.append(damped_id)
         operator_rows.append({
             "source": src, "op_type": op_type, "target": tgt,
             "label": label, "id": targets[0], "reused": True,
