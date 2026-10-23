@@ -2870,6 +2870,14 @@ surfaces:
   # Registered beside its sibling capture tests; `tortoise/sdk.py` is a
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
+  # #5064: the declared-mechanism gate. `core` is its classification home and
+  # the lane for a code diff; `tier1` is REQUIRED because the gate's subject is
+  # now half DOCUMENT — `membership_errors()` reads the
+  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/*.md`, and
+  # `docs/` is in NON_PYTHON_PREFIXES, so a docs-only diff takes `select()`'s
+  # early return and would delete or rename a marker with this gate absent (the
+  # #5092 class, and every sibling v4 doc-subject guard is dual-registered for
+  # exactly this reason).
   - test_v4_declared_mechanisms.py
   # #4495: `pricing.allowance_reachability` — cap vs allowance quantised at the
   # node boundary — lives in tortoise/pricing.py, which matches no SOURCE_PATTERNS
@@ -5848,6 +5856,11 @@ tier1:
 # `ast`-only shape, and the same docs-only PR is exactly the change that can
 # falsify a claim it pins (or tidy the marker away).
 - test_extractor_v4_s4_stage_claims.py
+# #5064: the declared-mechanism gate (`core` above) — its membership half scans
+# `docs/architecture/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
+# exactly the change that can delete, rename or forge one with the gate absent
+# from the tier-1 arm. Same no-DB, doc/`ast` shape as the guards above.
+- test_v4_declared_mechanisms.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.

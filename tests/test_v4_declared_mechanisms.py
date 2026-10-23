@@ -128,10 +128,25 @@ DECLARED_IDS = (
 #: `docs/architecture/*.md` on purpose: the two documents that declare the v4
 #: write path live there, and widening the scan to every `.md` would make an
 #: unrelated doc's prose able to red (or silently satisfy) the gate.
+#:
+#: ⚠️ A marker must be a WHOLE HTML comment (`<!-- v4-mechanism: <id> -->`, the id
+#: lowercase, digits and underscores). The token appearing in ordinary prose —
+#: even in backticks, documenting the convention — is not a declaration and is
+#: ignored: a scan that counted bare token occurrences reported a malformed
+#: marker for a sentence that mentioned one (review cycle 1, P2), which is a
+#: false verdict from a gate whose verdicts are meant to be actionable.
 ARCH_DOCS = ROOT / "docs" / "architecture"
 MARKER_TOKEN = "v4-mechanism:"
-MECHANISM_MARKER = re.compile(r"<!--\s*v4-mechanism:\s*(\S+)\s*-->")
-
+MARKER_COMMENT = re.compile(r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s*$")
+HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
+#: Code is not a declaration site. A design document legitimately SHOWS the
+#: marker syntax inside a fenced block or an inline code span when explaining the
+#: convention, and that must not read as a marker (review cycle 1, P2) — nor may
+#: it silently satisfy one. Both shapes are removed before the scan; a marker
+#: that only exists inside code then surfaces as an UNMARKED row, which is the
+#: fail-closed direction.
+FENCED_CODE = re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE)
+INLINE_CODE = re.compile(r"`[^`\n]*`")
 IMPLEMENTED = "implemented"
 NOT_IMPLEMENTED = "not-implemented"
 
@@ -206,6 +221,18 @@ def load_registry(path: Path = REGISTRY) -> dict:
     return doc
 
 
+def _prose_only(text: str) -> str:
+    """The document with fenced blocks and inline code spans removed.
+
+    Code is where a document SHOWS the marker syntax; it is not where a
+    declaration lives (:data:`FENCED_CODE`, :data:`INLINE_CODE`). Removal is
+    one-way on purpose — a marker that survives only inside code is invisible to
+    the scan, which surfaces it as an unmarked row (fail closed) rather than as a
+    declaration nobody meant.
+    """
+    return INLINE_CODE.sub("", FENCED_CODE.sub("", text))
+
+
 def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]], list[str]]:
     """``{mechanism id: [doc name, ...]}`` from the design docs' own markers.
 
@@ -215,13 +242,15 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     (`span_link`, `state_value_carve_out`) — that is a declaration, not a
     duplicate defect, so repeats are collected rather than refused.
 
-    FAIL CLOSED on the shapes that would otherwise be silent: a `v4-mechanism:`
-    TOKEN that does not complete a marker (`<!-- v4-mechanism: -->` with no id,
-    an unterminated comment) is reported rather than skipped — a malformed
-    declaration is not an absent one, and treating it as absent is how a marker
-    gets neutered by a typo. A missing documents directory is reported too: an
-    unreadable surface is a verdict, not an empty set (the same polarity as
-    `_defined_names` returning ``None``).
+    FAIL CLOSED on the shapes that would otherwise be silent: an HTML COMMENT
+    that carries the token but does not name a mechanism id
+    (`<!-- v4-mechanism: -->`, or a placeholder like `<id>`) is reported rather
+    than skipped — a malformed declaration is not an absent one, and treating it
+    as absent is how a marker gets neutered by a typo. An UNTERMINATED comment
+    opener is reported too, for the same reason. The token in ordinary PROSE is
+    deliberately not a declaration (see :data:`MARKER_COMMENT`). A missing
+    documents directory is reported: an unreadable surface is a verdict, not an
+    empty set (the same polarity as `_defined_names` returning ``None``).
 
     The second return value is the violation list, so one caller can report the
     malformed shapes and the membership verdicts together.
@@ -244,18 +273,27 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
                 f"compared, which is not the same as having none"
             )
             continue
-        found = MECHANISM_MARKER.findall(text)
-        for mid in found:
-            markers.setdefault(mid, []).append(doc.name)
-        # Every complete marker contains the token exactly once, so a token count
-        # above the match count means at least one occurrence is MALFORMED. It is
-        # reported, never skipped: a declaration the reader cannot parse must not
-        # read as "no declaration here".
-        if text.count(MARKER_TOKEN) > len(found):
+        comments = HTML_COMMENT.findall(_prose_only(text))
+        for body in comments:
+            if MARKER_TOKEN not in body:
+                continue
+            match = MARKER_COMMENT.match(body)
+            if match is None:
+                errors.append(
+                    f"{doc.name}: a `{MARKER_TOKEN}` comment does not name a "
+                    f"mechanism id (expected `<!-- v4-mechanism: "
+                    f"<lowercase_id> -->`, got `{body.strip()[:60]}`) — a "
+                    f"malformed declaration is a violation, not an absence"
+                )
+                continue
+            markers.setdefault(match.group(1), []).append(doc.name)
+        # An opener with no closer is not a comment at all, so its marker (if it
+        # carries one) is invisible to the scan above — the fail-OPEN direction.
+        if _prose_only(text).count("<!--") > len(comments):
             errors.append(
-                f"{doc.name}: a `{MARKER_TOKEN}` occurrence does not complete a "
-                f"marker (`<!-- v4-mechanism: <id> -->`) — a malformed "
-                f"declaration is a violation, not an absence"
+                f"{doc.name}: an unterminated HTML comment (`<!--` with no "
+                f"`-->`) — a marker inside it cannot be read, which must not "
+                f"read as 'no declaration here'"
             )
     return markers, errors
 
@@ -274,7 +312,13 @@ def membership_errors(
       * a marker id with no registry row -> the declaration has no verdict, i.e.
         a declared mechanism that reads exactly like a shipped one (the root);
       * a registry row with no marker -> a row whose declaration cannot be found,
-        which #5064's refactor direction rules out by name ("no unmarked row").
+        which #5064's refactor direction rules out by name ("no unmarked row");
+      * a row's own `declared_in:` document inside the scanned surface that does
+        NOT carry that row's marker -> half of a bi-document declaration rotted
+        away. The composite rule above compares `id` SETS, so deleting ONE of two
+        markers left the suite green (review cycle 1, P2) while the registry kept
+        claiming both documents declare it — the same declared-implies-present
+        shape one level down.
 
     Kept SEPARATE from `gate_errors` on purpose: `gate_errors` is also the
     per-row mutation surface, and folding a repository-wide scan into it would
@@ -285,12 +329,17 @@ def membership_errors(
     """
     markers, errors = declaration_markers(docs_dir)
     ids: set[str] = set()
+    declared_docs: dict[str, list[str]] = {}
     for row in mechanisms:
         if not isinstance(row, dict):
             continue
         row_id = row.get("id")
-        if isinstance(row_id, str) and row_id:
-            ids.add(row_id)
+        if not (isinstance(row_id, str) and row_id):
+            continue
+        ids.add(row_id)
+        entries = row.get("declared_in")
+        if isinstance(entries, list):
+            declared_docs[row_id] = [e for e in entries if isinstance(e, str)]
 
     for mid in sorted(set(markers) - ids):
         where = ", ".join(sorted(set(markers[mid])))
@@ -309,6 +358,29 @@ def membership_errors(
             f"an UNMARKED row, and #5064's refactor direction allows none: put "
             f"the marker at the site that declares the mechanism, or drop the row"
         )
+    # A row that names SEVERAL documents in `declared_in:` must be marked in
+    # EVERY one of them that lies inside the scanned surface. Only entries under
+    # `docs_dir` are checkable here (a pack manifest is cited as a policy source
+    # and carries no marker); an entry outside it is not silently required, and
+    # is not silently satisfied either — the id-set rule above still needs ONE
+    # marker somewhere.
+    scanned = {doc.resolve() for doc in docs_dir.glob("*.md")}
+    for mid, entries in sorted(declared_docs.items()):
+        for entry in entries:
+            try:
+                resolved = (docs_dir.parent.parent / entry).resolve()
+            except (OSError, ValueError, RuntimeError):
+                continue
+            if resolved not in scanned:
+                continue
+            if mid not in markers or resolved.name not in markers[mid]:
+                errors.append(
+                    f"{mid}: `declared_in:` names {resolved.name}, but that "
+                    f"document carries no `{MARKER_TOKEN} {mid}` marker — half "
+                    f"of a multi-document declaration has rotted away, and a "
+                    f"reader of {resolved.name} would not meet the mechanism's "
+                    f"verdict where it is declared"
+                )
     return errors
 
 
@@ -825,6 +897,31 @@ def test_the_state_value_carve_out_is_registered_and_marked_absent() -> None:
     assert "_render_master_compact" in row["note"], row["note"]
 
 
+def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
+    """The row's one ABSENCE claim is pinned to the code, not to its own prose.
+
+    Without this, the probe that would falsify it is a grep of the note: if a
+    later change appends the carve-out to `_render_master_compact` (the first
+    closing option in #9775) the registry would keep claiming an omission that
+    no longer exists and nothing would red. So the render is exercised: the
+    carve-out must be present where the row says it is, and ABSENT from the
+    compact render — the shape `tests/test_extractor_v2.py` already pins for
+    `SHORT_SESSION_FACT_RULE` (review cycle 1, P2).
+    """
+    from tortoise import extractor_v2 as v2
+
+    master = v2.build_master_list()
+    marker = "STATE-VALUE CARVE-OUT"
+    assert marker in v2._granularity_text(master), "S1 lost the carve-out"
+    assert marker in v2._render_master_core_only(master), "core-only lost it"
+    assert marker in v2._render_master_verbose(master), "verbose lost it"
+    assert marker not in v2._render_master_compact(master, None), (
+        "the compact render now carries the carve-out: the `state_value_carve_out` "
+        "row still records the omission, so update the row (and #9775) with the "
+        "decision instead of deleting this assertion"
+    )
+
+
 # ── MEMBERSHIP: the declared set is compared, not pinned by hand ─────────────
 #
 # A hand-written tuple cannot prove it is COMPLETE. Each case below is a way the
@@ -895,6 +992,44 @@ def test_membership_fails_closed_on_a_malformed_marker(tmp_path) -> None:
     )
     errors = membership_errors([_row("x")], docs)
     assert any("malformed" in e for e in errors), errors
+
+
+def test_membership_fails_closed_on_a_placeholder_id(tmp_path) -> None:
+    """`<id>` is a template, not a mechanism — and is not silently dropped."""
+    docs = _docs(tmp_path, a__md="<!-- v4-mechanism: <id> -->\n")
+    errors = membership_errors([_row("x")], docs)
+    assert any("does not name a mechanism id" in e for e in errors), errors
+
+
+def test_membership_ignores_the_token_in_prose(tmp_path) -> None:
+    """Documenting the convention must not be reported as a declaration."""
+    docs = _docs(
+        tmp_path,
+        a__md="Write a marker as `<!-- v4-mechanism: <id> -->` beside the claim;\n"
+        "the `v4-mechanism:` token alone is not a declaration.\n"
+        "<!-- v4-mechanism: x -->\n",
+    )
+    assert membership_errors([_row("x")], docs) == []
+
+
+def test_membership_fails_closed_on_an_unterminated_comment(tmp_path) -> None:
+    """An opener with no closer hides any marker inside it — fail closed."""
+    docs = _docs(tmp_path, a__md="<!-- v4-mechanism: x\n")
+    errors = membership_errors([_row("x")], docs)
+    assert any("unterminated" in e for e in errors), errors
+
+
+def test_membership_requires_a_marker_in_every_declared_document(tmp_path) -> None:
+    """A row naming two documents must be marked in BOTH (review cycle 1, P2)."""
+    docs = _docs(
+        tmp_path,
+        a__md="a <!-- v4-mechanism: x -->\n",
+        b__md="b declares it but carries no marker\n",
+    )
+    row = _row("x")
+    row["declared_in"] = ["docs/architecture/a.md", "docs/architecture/b.md"]
+    errors = membership_errors([row], docs)
+    assert any("b.md" in e and "rotted away" in e for e in errors), errors
 
 
 def test_membership_scans_only_the_architecture_docs(tmp_path) -> None:
