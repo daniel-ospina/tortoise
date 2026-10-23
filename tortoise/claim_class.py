@@ -42,6 +42,19 @@ with any asserted claim — i.e. it would make the class a degradation rather th
 a provenance marker. Only the leg that would let the computed claim push belief
 INTO the authored one is blocked.
 
+⚠️ The DOOR is strict and the BACKSTOP is lenient, on purpose. The write
+surfaces refuse any wiring whose FLOWING legs include an override leg, which
+means a class-MIXED edge must state the leg it means: `asserted --IMPL--> 
+derived` is the corroboration wiring (`direction='->'`), and asking for it
+bidirectionally is refused because the reverse leg is the override. The EP
+backstop is the other half — it NARROWS an edge that already exists (a
+pre-guard or bulk-written one) rather than refusing it, which is why a
+``<->`` can appear as a ``<-`` in a factor's effective direction. Judging a
+wiring from the source slot's class ALONE, ignoring the direction, inverted
+both arms: it refused the legal ``<-`` FROM a derived claim (only
+target->source flows) and admitted the illegal ``<-`` INTO one whose flowing
+leg is the derived->asserted push.
+
 ⚠️ The narrowing is WHOLE-FACTOR, not per pair. ``factor_direction`` returns a
 direction TOKEN, and ``_update_nary_factor`` derives ``mutual = fwd and bwd``
 from it — so narrowing a ``<->`` to ``<-`` turns a mutual NAND's ``C(n,2)``
@@ -258,6 +271,30 @@ def supersede_refusal(*, old_id: str, new_id: str) -> str:
         f"a computed claim never terminalises an authored belief. Create the "
         f"replacement as an asserted claim (the authored path), or correct the "
         f"authored claim directly."
+    )
+
+
+def direction_blocks_create(direction: str | None,
+                            source_classes: Iterable[str] | None,
+                            target_classes: Iterable[str] | None) -> bool:
+    """True when the requested WIRING would let a derived claim override an asserted one.
+
+    The door-side counterpart of :func:`factor_direction`: it asks the question
+    of the legs the requested direction actually FLOWS, so a one-way ``<-`` is
+    judged on its target->source leg rather than on the source slot's class.
+    Judging it on the source alone inverted both arms — it refused the legal
+    shape (``<-`` from a derived source CORROBORATES: only target->source
+    flows) and admitted the illegal one (``<-`` into a derived target, whose
+    flowing leg is exactly the derived->asserted push).
+
+    Keeping this in ONE place is the point: the write doors and the EP backstop
+    read the same rule, so the door cannot refuse a shape the load side keeps,
+    or create one the load side must drop.
+    """
+    fwd, bwd = direction_flows(direction)
+    return bool(
+        (fwd and blocks_override(source_classes, target_classes))
+        or (bwd and blocks_override(target_classes, source_classes))
     )
 
 

@@ -16189,20 +16189,35 @@ class TortoiseSDK:
         # once each to keep the per-(label, property) index rather than
         # full-scanning (live.epistemic_label_queries).
         existing_ids: set[str] = set()
+        # #2351: ids that ARE claims (a :Point). ``claimClass`` lives only there,
+        # so a :Subject/:Object/:Event endpoint has NO class — it is not
+        # "asserted", it is not a claim, and it must not trigger the guard
+        # (reading its absence as asserted refused a DERIVED point wired to an
+        # Object — a shape #7902 made writable).
+        point_ids: set[str] = set()
         # #2351 (epic #2349 E-derived): the same probe carries each endpoint's
         # claim CLASS, so the override guard below costs NO extra round trip.
         # The classes are aggregated across every row an id resolves to (the
         # #7822 fan-out rule — a verdict off one row would be row-order
         # dependent); "asserted" is the read-side default for an absent marker.
         endpoint_classes: dict[str, set[str]] = {}
-        for _q in epistemic_label_queries(
-            "MATCH (n:{label}) WHERE n.id IN $ids "
-            "RETURN n.id, coalesce(n.claimClass, 'asserted')"
-        ):
+        for _label, _q in zip(
+                EPISTEMIC_LABELS,
+                epistemic_label_queries(
+                    "MATCH (n:{label}) WHERE n.id IN $ids "
+                    "RETURN n.id, coalesce(n.claimClass, 'asserted')"),
+                strict=True):
             for _row in proj.g.query(
                     _q, params={"ids": inputs}).result_set:
                 existing_ids.add(_row[0])
-                endpoint_classes.setdefault(_row[0], set()).add(_row[1])
+                # ⛔ ``claimClass`` is a :Point property. A :Subject/:Object/
+                # :Event endpoint is not a CLAIM and carries no class — reading
+                # its absence as "asserted" refused a DERIVED point wired to an
+                # Object, a shape #7902 deliberately made writable (#2351
+                # review). Only :Point rows participate in the class guard.
+                if _label == "Point":
+                    point_ids.add(_row[0])
+                    endpoint_classes.setdefault(_row[0], set()).add(_row[1])
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
@@ -16215,10 +16230,15 @@ class TortoiseSDK:
         # NOT epistemic cascades (they transfer no belief) and are not guarded.
         # Raised BEFORE the operator node exists and before any edge is
         # written, so a refused call leaves the graph untouched.
-        if op_type in ("IMPL", "NAND") and target_ids and _claim_class.blocks_override(
-                endpoint_classes.get(source_id),
-                set().union(*(endpoint_classes.get(t, set())
-                             for t in target_ids))):
+        _operator_targets = set().union(
+            *(endpoint_classes.get(t, set()) for t in target_ids if t in point_ids)
+        ) if target_ids else set()
+        if (op_type in ("IMPL", "NAND") and source_id in point_ids
+                and _operator_targets
+                and _claim_class.direction_blocks_create(
+                    direction,
+                    endpoint_classes.get(source_id),
+                    _operator_targets)):
             raise ValueError(_claim_class.override_refusal(
                 source_id=source_id, target_ids=list(target_ids),
                 surface=f"create_operator({op_type})"))
@@ -19950,12 +19970,24 @@ class TortoiseSDK:
                     # input and the caller is told the connection succeeded,
                     # while the module's stated invariant is that the write
                     # path refuses such an edge outright.
+                    # ``classes_for_ids`` is :Point-anchored, so an id absent
+                    # from it has NO class — it is not a claim (:Subject/
+                    # :Object/:Event), and absence must not read as "asserted".
+                    # This is the same parity the other two doors get from
+                    # their label check: the guard applies only when the SOURCE
+                    # is a claim and at least one TARGET is one.
                     _absorb_classes = _claim_class.classes_for_ids(
                         proj.g, [src] + dsts)  # noqa: RUF005
-                    if op_type in ("IMPL", "NAND") and _claim_class.blocks_override(
-                            _absorb_classes.get(src),
-                            set().union(*(_absorb_classes.get(t, set())
-                                          for t in dsts)) if dsts else None):
+                    _absorb_targets = set().union(
+                        *(_absorb_classes.get(t, set()) for t in dsts)
+                    ) if dsts else set()
+                    if (op_type in ("IMPL", "NAND")
+                            and src in _absorb_classes
+                            and _absorb_targets
+                            and _claim_class.direction_blocks_create(
+                                direction,
+                                _absorb_classes.get(src),
+                                _absorb_targets)):
                         raise ValueError(_claim_class.override_refusal(
                             source_id=src, target_ids=list(dsts),
                             surface=f"ingest({op_type}) partial-absorb"))
@@ -20493,7 +20525,12 @@ class TortoiseSDK:
                 # First label wins for a (hypothetical) multi-labelled node;
                 # the terminal/operator guards below are label-independent.
                 found.setdefault(r[0], (_label, bool(r[1]), r[2], bool(r[3])))
-                endpoint_classes.setdefault(r[0], set()).add(r[4])
+                # ⛔ ``claimClass`` is a :Point property: a non-Point endpoint
+                # is not a claim, so its absence must NOT read as "asserted"
+                # (that refused a DERIVED point wired to an Object — a shape
+                # #7902 made writable; #2351 review).
+                if _label == "Point":
+                    endpoint_classes.setdefault(r[0], set()).add(r[4])
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
@@ -20530,9 +20567,17 @@ class TortoiseSDK:
         # #2351: the override guard — a DERIVED source claim may not IMPL-cascade
         # above (or NAND-attack) an ASSERTED target. Raised AFTER the endpoint
         # guards above and BEFORE the MERGE, so a refused call writes nothing.
-        if _claim_class.blocks_override(
-                endpoint_classes.get(source_id),
-                endpoint_classes.get(target_id)):
+        # #2351: the guard applies only when BOTH endpoints are claims (:Point).
+        # A non-Point endpoint carries no ``claimClass``, so it can neither be
+        # overridden nor override — skipping it is what keeps #7902's typed
+        # wirings writable.
+        _tgt_classes = (endpoint_classes.get(target_id)
+                        if found.get(target_id, (None,))[0] == "Point" else None)
+        if (found.get(source_id, (None,))[0] == "Point" and _tgt_classes
+                and _claim_class.direction_blocks_create(
+                    direction,
+                    endpoint_classes.get(source_id),
+                    _tgt_classes)):
             raise ValueError(_claim_class.override_refusal(
                 source_id=source_id, target_ids=[target_id],
                 surface=f"create_direct_edge({op_type})"))
