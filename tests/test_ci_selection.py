@@ -160,6 +160,45 @@ def test_docs_scanning_gates_stay_in_tier1():
         "registration the pre-#8135 sentence (or a dropped #9084 plain-dict "
         "clause) merges green (#4309 class, same as #8614)"
     )
+    assert "test_definite_description_backfill_5059.py" in tier1, (
+        "#5333 review (P1): the *G5's destructive half* doc guards in this file "
+        "read ONLY docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md — `docs/` is "
+        "in NON_PYTHON_PREFIXES and that document matches no SOURCE_PATTERNS "
+        "entry, so a docs-only edit of the passage runs tier1 only; without "
+        "this registration a re-inverted 52%/48% share, a re-asserted "
+        "'nothing writes `archived`' or a new reader of "
+        "`_ALLOWED_TRANSITIONS` merges green (#4309 class, same as #8495's "
+        "sibling row)"
+    )
+
+
+def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
+    """#5333 review (P1): those guards must run on the DOCUMENT they pin.
+
+    Three guards in `tests/test_definite_description_backfill_5059.py` assert
+    only against `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.3's *G5's
+    destructive half*: the load-bearing share, the `archived`-has-a-writer
+    claim, and the `_ALLOWED_TRANSITIONS` production-reader scan. The file was
+    registered in `core` alone — which is right for its module-level guards, and
+    useless for these: `docs/` is in NON_PYTHON_PREFIXES and the document
+    matches no SOURCE_PATTERNS entry, so a docs-only diff filters to
+    `changed == []` and takes the docs-only early return (tier1 ONLY).
+
+    Measured before the fix: `select(["docs/architecture/EXTRACTOR-V4-"
+    "ARCHITECTURE.md"], "pull_request", …)["test_files"]` did not contain this
+    file, while the sibling `test_extractor_v4_failure_policy.py` (dual-
+    registered for exactly this reason) was selected. Dropping the tier1 entry
+    re-opens that hole (#4309 silent-drop class; #8614/#8495 shape).
+    """
+    r = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
+    assert r["full"] is False
+    assert r["surfaces"] == []
+    assert "test_definite_description_backfill_5059.py" in r["test_files"], (
+        "a docs-only edit of the §4.3 relocation passage must select the guards "
+        "that bind its prose (test_definite_description_backfill_5059.py) — "
+        "otherwise the passage can be re-inverted and merge green (#5333 "
+        "review P1, #4309 class)"
+    )
 
 
 def test_fly_secret_drift_gate_runs_on_a_runbook_only_diff():
