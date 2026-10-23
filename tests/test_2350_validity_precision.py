@@ -345,6 +345,85 @@ def test_supersede_inherits_the_successors_start_precision(lane):
     assert _window_props(sdk, old["id"])["validTo"] == "2026-01-01"
 
 
+def test_supersede_inherits_through_an_agreeing_valid_from_kwarg(lane):
+    """#9729 control: the kwarg rung of the end ladder still inherits.
+
+    ``_supersede_window_end`` takes the caller's ``valid_from`` kwarg AHEAD of
+    the stored start, and the agreement guard admits it only when it names the
+    same instant — so that end IS the successor's start and must keep the
+    declared token. Pinned separately because the no-kwarg test above passes
+    with the kwarg arm of the #9729 gate deleted (measured: a mutant adding
+    ``valid_from is None`` to the gate left the whole suite green).
+    """
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk.create_point("statement", "new", validFrom="2026-01-01",
+                           validFromPrecision="month")
+    sdk.supersede_point(old["id"], new["id"], valid_from="2026-01-01")
+    props = _window_props(sdk, old["id"])
+    assert props["validTo"] == "2026-01-01"
+    assert props["validToPrecision"] == "month"
+
+
+def test_supersede_does_not_inherit_a_declaration_onto_a_fabricated_end(lane):
+    """#9729: the inherited token annotates the successor's START — the
+    predecessor's END may only carry it when that END **is** that start.
+
+    ``effective_precision`` gates a declared token on the bound naming an
+    instant (#9244), so the successor's own ``validFrom="TBD"`` reads ``None``.
+    ``supersede_point`` did not go through that resolution: it inherited
+    ``vf_rows[0][2]`` onto the predecessor UNCONDITIONALLY as a WRITE, while the
+    resolution ladder fell through the unorderable start to ``createdAt`` — so a
+    declaration made for a start that names no instant was re-stamped onto an
+    instant nobody declared a granularity for (the successor's ``createdAt``)
+    and read back as that end's precision. The same declaration read ``None``
+    one property away.
+    """
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk.create_point("statement", "new", validFrom="TBD",
+                           validFromPrecision="year")
+    sdk.supersede_point(old["id"], new["id"])
+    props = _window_props(sdk, old["id"])
+    # the end came from the fallback ladder (createdAt / now), never from the
+    # successor's unorderable start.
+    assert props["validTo"] not in (None, "TBD")
+    # …so no declaration may be attached to it: the property stays ABSENT (the
+    # legacy read default derives `day` from the bare timestamp, #9202's axis).
+    assert props["validToPrecision"] is None
+    assert "validToPrecision" not in _props(sdk, old["id"])
+    # the read surface must not resurrect it either. The stored property is
+    # ABSENT, so the read derives the legacy `day` default from the bare
+    # timestamp — the pre-#2350 reading every undeclared END gets (whether an
+    # undeclared END should read `null` instead is #9202's owner decision, not
+    # this write fix). What it must NOT read is the inherited `year`.
+    assert sdk.get_historical_knowledge(
+        old["id"], "2025-01-01")["chain"][0]["valid_to_precision"] == "day"
+    # …and it agrees with what the SAME declaration reads on the successor's own
+    # start: `None`, because that bound names no instant.
+    assert sdk.get_historical_knowledge(
+        new["id"], "2027-01-01")["valid_point"]["valid_from_precision"] is None
+
+
+def test_supersede_stamps_no_precision_when_the_end_is_the_writer_clock(lane):
+    """#9729 control: the gate is on the END'S SOURCE, not on ``createdAt``.
+
+    With the successor's ``validFrom`` unorderable AND its ``createdAt``
+    unparseable, the ladder lands on the writer's ``now`` — the third source,
+    which no declared token ever annotated. The same no-precision verdict must
+    hold there too, otherwise the fix would only cover the ``createdAt`` step.
+    """
+    sdk, _events = lane
+    old = sdk.create_point("statement", "old", validFrom="2024-01-01")
+    new = sdk.create_point("statement", "new", validFrom="TBD",
+                           validFromPrecision="month",
+                           createdAt="not-a-date")
+    sdk.supersede_point(old["id"], new["id"])
+    props = _window_props(sdk, old["id"])
+    assert props["validTo"] not in (None, "TBD", "not-a-date")
+    assert props["validToPrecision"] is None
+
+
 def test_supersede_does_not_fabricate_precision_on_a_legacy_chain(lane):
     sdk, _events = lane
     old = sdk.create_point("statement", "old", validFrom="2025-01-01")
