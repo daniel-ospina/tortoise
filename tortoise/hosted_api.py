@@ -119,6 +119,7 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
     KIND_RESTORE_DRILL_FAILED,
     KIND_SIZE_GUARD_ABORT,
 )
+
 # #9572 review P2: the "nothing was named" predicate (absent OR blank) — ONE
 # home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
 # spellings cannot be drawn differently at the next door.

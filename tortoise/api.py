@@ -14,6 +14,7 @@ import logging
 from . import record_writer
 from .idempotency import IngestKey, IngestResult
 from .ids import now_iso, ulid
+
 # #9572 review P2: "nothing was named" (absent OR blank) has ONE predicate,
 # shared with the SDK doors and the hosted surfaces — see the leaf module.
 from .kind_fallbacks import named_kind
