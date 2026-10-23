@@ -42,6 +42,11 @@ MIGRATIONS = [
     # SHIPPED projection, so a schema still declaring `jsonb` keeps refusing the
     # producer's integer count with `DatatypeMismatch` here too.
     "20261022000001_record_session_capture_redactions_integer.sql",
+    # FORWARD `CREATE TABLE public.session_narrative` (§9.1 / R7, #9555). The
+    # shipped projection's `SessionRecorded` replay now emits an INSERT into it,
+    # so a list without this migration stands up a database that raises
+    # `UndefinedTable` the moment the probe runs the shipped code.
+    "20261023000001_record_session_narrative.sql",
 ]
 DSN = "postgresql://postgres:cap@127.0.0.1:15499/capstone"
 
