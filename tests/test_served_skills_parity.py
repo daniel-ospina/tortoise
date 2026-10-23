@@ -2894,8 +2894,8 @@ def test_9046_every_equivalence_the_served_skills_claim_holds_both_ways():
               or left not in registry.expand_kind(right)]
     assert not untrue, (
         "a served skill claims an equivalence the packs do not declare:\n"
-        + "\n".join(f"  - {name}: {pair}\n      {l}\n      {r}"
-                    for name, pair, l, r in untrue))
+        + "\n".join(f"  - {name}: {pair}\n      {lhs}\n      {rhs}"
+                    for name, pair, lhs, rhs in untrue))
 
 
 def test_9046_the_expand_kind_examples_match_what_the_registry_returns():
