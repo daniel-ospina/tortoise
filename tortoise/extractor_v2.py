@@ -829,26 +829,63 @@ _PACK_TRIGGERS = {
     # `mandate`, `allocation` and `impairment` reproduce that on "the team's
     # mandate…", "resource allocation…", "a visual impairment…".
     #
-    # So each entry is either this namespace's own name or a SYNONYM the pack
-    # declares with a space or a hyphen in it. Two consequences are deliberate:
-    #   * a synonym can be missing here and cost nothing — with no other
-    #     trigger the selector falls back to ALL packs, so the overlay is still
-    #     injected (and a genuine mention almost always carries `portfolio` or
-    #     `allocation target` anyway); a spurious entry, by contrast, STRIPS
-    #     every other pack;
-    #   * `target weight` is therefore left out (generic in engineering prose:
-    #     "target weight for the casing"). `tests/test_investment_portfolio_
-    #     manager_pack.py` pins the row against the manifest's own synonyms, so
-    #     this is a recorded choice, not an omission.
-    # And a row missing a synonym the pack DOES declare is a real loss when a
-    # sibling matches: `policy statement` used to lose the overlay to
-    # `agent-ops:`'s "policy".
+    # A space or a hyphen is NOT enough. Measured on this row's earlier drafts,
+    # each of these selected `portfolio:*` on an ordinary non-portfolio story
+    # and so suppressed the all-packs fallback, dropping the OTHER packs' kinds
+    # — the overlay the story actually needed. Two of them are exceptions to the
+    # SCOPE of that measurement rather than counter-examples to it:
+    # `policy statement` and `policy weight` also match `agent-ops:`'s bare
+    # "policy", so instead of every sibling they dropped dev/marketing/pm/
+    # venture and left agent-ops standing — and since every story carrying
+    # "policy statement" necessarily carries "policy", no sentence exists on
+    # which those two could have matched alone:
+    #   * `valuation mark` — a SUBSTRING of "evaluation mark" and "revaluation
+    #     mark", the same trap as bare `valuation` one word longer;
+    #   * `write-up` / `write-down` — "the write-up of the release", "a
+    #     write-down of the inventory";
+    #   * `reference weight` / `policy weight` / `benchmark weight` — engineering
+    #     prose, "the reference weight of the assembly is 4.2 kg";
+    #   * `allocation target` / `target allocation` — budgeting prose, "the
+    #     council approved its target allocation of the road budget";
+    #   * `policy statement` — compliance prose, "our privacy policy statement";
+    #   * `mandate limits` — "the mandate limits how much we can spend";
+    #   * `fair value mark` / `target weight` — accounting and engineering terms
+    #     that apply to any asset, not to a portfolio position.
+    # All of them are recorded, with the measurement, in
+    # `tests/test_investment_portfolio_manager_pack.py::NON_TRIGGER_SYNONYMS`,
+    # so this is a recorded choice, not an omission.
+    #
+    # THE INVARIANT, made mechanical by that test: an entry is this namespace's
+    # own name, or an `investment `-prefixed phrase (space form only). Nothing
+    # else reaches this row — a per-phrase judgement call is exactly how a
+    # substring collision survives review (the first draft of this fix removed
+    # five and kept five of the same class). A HYPHEN form is deliberately NOT
+    # admitted: measured, `investment-grade` in the row selects `portfolio:*`
+    # alone on "sub-investment-grade bonds widened the spread" and on
+    # "non-investment-grade credits were sold" — the same strip this row exists
+    # to prevent. If the manifest ever declares an `investment-*` compound, it
+    # belongs in `NON_TRIGGER_SYNONYMS` with that measurement.
+    #
+    # THE COST, stated accurately rather than waved away. `_select_pack_kinds`
+    # falls back to ALL packs only when NOTHING matched in ANY namespace — and
+    # the sibling rows carry ordinary English (`dev:` "deploy"/"sprint"/"test",
+    # `venture:` "fund"/"asset"), so that fallback is not much of a net. A
+    # genuinely portfolio-shaped story whose only portfolio vocabulary is a
+    # synonym excluded above DOES lose the overlay once a sibling matches
+    # ("the allocation target for the fund was missed; deploy the fix" selects
+    # dev+venture, no portfolio). That loss is ACCEPTED — the alternative costs
+    # another pack's entire vocabulary — and it is pinned as a recorded decision
+    # in `tests/test_investment_portfolio_manager_pack.py::
+    # test_the_accepted_loss_is_a_recorded_decision`, so a later lane can tell it
+    # from a bug.
+    #
+    # A row missing a synonym the pack DOES declare is a real loss when a
+    # sibling matches: a bare "policy statement" used to lose the overlay to
+    # `agent-ops:`'s "policy". That is the cost of the invariant (`investment
+    # policy` — which a portfolio policy statement is actually called — still
+    # matches).
     "portfolio:": ("portfolio", "investment mandate", "investment policy",
-                   "policy statement", "mandate limits",
-                   "investment guidelines", "allocation target",
-                   "target allocation", "policy weight", "benchmark weight",
-                   "reference weight", "valuation mark", "fair value mark",
-                   "write-down", "write-up"),
+                   "investment guidelines"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it

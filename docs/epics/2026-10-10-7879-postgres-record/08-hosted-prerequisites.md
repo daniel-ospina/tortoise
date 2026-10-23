@@ -99,7 +99,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`) and `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column) — both emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. Everything else is R5's work: the rest of the point-property-derived families (`mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`), `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column), and the OPERATOR topology the descriptor carries — `IMPL`/`NAND`/`hasPart`, its reverse `INPUT`, and the canonical `mitigated_by` mirror (`record_projection._OPERATOR_RELATION_RECORDS`, endpoints resolved across the four epistemic labels) — all emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. Everything else is R5's work: the rest of the point-property-derived families (`about*` **when no `EntityLinked` record exists** — the props copy alone lands no row; `TAGGED`, which has no record `tag` table to key on), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
 | `session_narrative` | `supabase/migrations/20261023000001_record_session_narrative.sql:122` | — **NOT a node table** (no `node_identity` FK): §9.1's verbatim-narrative home, **#9555**/R7. Keyed `(org_id, graph_id, session_id)`, cascading from **`public.graphs`** — not from `public.session`, see R7's DECIDED block for why, and for what a live capture does and does not carry into it today (no journal carrier for `story_arc` yet ⇒ a `NULL` `narrative`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
@@ -280,9 +280,30 @@ layer: a blank / NUL / lone-surrogate `contains_session` is dropped by **both** 
 `record_projection._writable_endpoint_id`), and the blank case is measured — an indexed graph cannot
 match a whitespace-only key (**#9599**), so the fold would mint a duplicate `:Session` and land no
 edge while Postgres held the row. That harness now runs in CI on a projection-only change too (`ci.yml`'s
-`pglite` gate → `schema-drill`), not only on a migration one. An
-**operator's** `IMPL`/`NAND`/`INPUT` edges are still missing: `OperatorAdded` is a `point`-row upsert whose inputs sit in
-`point.props` and no journaled edge record carries them, so they never reach `relation` at all.
+`pglite` gate → `schema-drill`), not only on a migration one. ✅ **Closed by #9553 (R5 class 3) — the operator topology.** `OperatorAdded` is a `point`-row
+upsert whose inputs sit in `point.props` and no journaled EDGE record carries them, so the record
+materialised the operator's `point` row and emitted no `relation` row: a journal rebuild restored the
+`IMPL`/`NAND`/`mitigated_by` structure and a record-sourced rebuild restored the claims without it —
+and `compute_operator_weight` reads exactly those edges, so the loss was a belief change. The Point's
+`{op_type, inputs}` descriptor is the carrier (`_create_edges` reads the same key), and the record
+mirrors it value for value: the `op_type`→predicate map (four composition spellings → `hasPart`), the
+reverse `INPUT`, and the two mitigation gates (`is_non_operator_payload` AND
+`has_usable_mitigation_strength`, restated for the STANDALONE load and pinned value-for-value). The
+endpoints resolve across the **four** epistemic labels (#7902) with each label's CANONICAL key
+(`Point`/`Event` → `node_key`, `Subject`/`Object` → `name`), so `relation.src_label` is a fact looked
+up rather than a `Point` assumption, and the conflict path is `DO NOTHING` because the fold attaches no
+attribute to these edges beyond `idx`. ⛔ The input gate is `_writable_id`'s (a blank key is
+ADMITTED), not the blank-refusing `_writable_endpoint_id` of the two neighbouring families: those
+address an endpoint with an INLINE indexed match where FalkorDB misses a whitespace-only key
+(#9599), while `_create_edges` probes an operator input with a label-disjunctive `WHERE` — a scan —
+and lands the edges for one (measured through the fold). The stricter rule here would make the record
+poorer than the graph on the edge this change carries. Residuals: an input the fold STUBS lands no row (a stub has no
+record row — the `absent` verdict), and a promote snapshot with no `operator` KEY lands none,
+exactly as `_promotion_point_with_operator` reaches `OperatorPromoted` only — while a snapshot whose
+key is present but holds `None`/a non-`dict` lands none too, because that synthesis gate is
+`"operator" in p` and `_create_edges` refuses a non-`dict`. One stated BOUND, on the POORER side:
+the fold MERGEs an edge pair per node when an id resolves to more than one, and the record files one
+row under the first `EPISTEMIC_LABELS` match.
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
 operator topology non-negotiable (a fused claim cannot be `NAND`ed).
@@ -329,12 +350,14 @@ Source) keeps the first anchor on both routes. Every other relation attribute st
 latest-record-wins — those are edge state the later record legitimately corrects, not a recorded
 read version.
 
-The other three class-1
-families stay open for reasons that are NOT this fix's to invent: `about*` needs
+✅ **Also closed by #9553 (R5 class 3) — `mitigated_by`, with its pair.** It is NOT a
+standalone point property: `_create_edges` emits it as a MIRROR of the operator's `IMPL` half, so it
+lands exactly where the operator topology lands (see the class-3 paragraph above) — one family, one
+fix, and the edge census agrees with the journal's for both halves rather than for one.
+The remaining class-1 families stay open for reasons that are NOT this fix's to invent: `about*` needs
 `_create_about_edges`' live name→label cascade (`EntityLinked` already carries it when the capture
-resolved it); `mitigated_by` is written as a PAIR with the operator's `IMPL`/`INPUT`, so half of it
-would leave the record's edge census disagreeing with the journal's; `TAGGED` targets a `:Tag` node
-and the record has no `tag` table for `relation.tgt_key`'s composite FK to point at.
+resolved it); `TAGGED` targets a `:Tag` node and the record has no `tag` table for
+`relation.tgt_key`'s composite FK to point at.
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item
 *implements* that ruling for the record, it does not revisit it.

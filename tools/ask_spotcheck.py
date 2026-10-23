@@ -755,8 +755,22 @@ _DATE_PREAMBLE = re.compile(r"^Current Date:[^\n]*\n*")
 _BLOCK_START = re.compile(r"(?m)(?=^\[session)")
 #: The renderer's body fence (``tortoise/retrieval.py::_BODY_FENCE``).
 _BODY_FENCE = "  | "
-_VALID_WINDOW_OPEN = re.compile(r"\[valid ")
+#: A rendered window marker, in EVERY shape the renderer can emit. Since #9730
+#: an unorderable start is DROPPED rather than interpolated, which introduced
+#: two shapes with NO space after ``valid`` — ``[valid]`` and
+#: ``[valid; end unknown]`` / ``[valid; expired <d>; end unknown]``. A
+#: `r"\[valid "` pattern was exhaustive over the pre-#9730 grammar only, so it
+#: silently stopped attributing a distilled claim whose ``validFrom`` is
+#: present-but-unorderable — and an unattributed claim reads as UNMEASURED,
+#: which fails the D8 leg closed on a claim it simply could not see. ``\b``
+#: covers both spacings (and still never matches ``[validity …]``).
+_VALID_WINDOW_OPEN = re.compile(r"\[valid\b")
 _FLAG_SUPERSEDED_BY = re.compile(r"\[SUPERSEDED BY:")
+#: The CLOSED-window flag is shape-exhaustive without a change: the arrow only
+#: appears in ``[valid <from> → <to>]`` (orderable start ⇒ a space) or
+#: ``[valid → <to>]`` (a PRESENT but UNORDERABLE start: #9730 omits the start
+#: clause and the literal space before the arrow is retained — an ABSENT start
+#: renders no marker at all, so this shape never comes from a missing bound).
 _FLAG_CLOSED_WINDOW = re.compile(r"\[valid [^\]]*→")
 
 

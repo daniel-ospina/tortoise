@@ -68,6 +68,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -2758,3 +2759,422 @@ def test_the_pglite_harness_runs_on_a_projection_only_change(tmp_path):
 
     # ...and an unrelated path still turns it off (not a constant).
     assert _gate_outputs(["docs/README.md"], tmp_path).get("pglite") == "false"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# R5 / #9553 — class 3: the OPERATOR's own topology
+# ════════════════════════════════════════════════════════════════════════════
+# An operator's `IMPL`/`NAND`/`hasPart` edge, its reverse `INPUT`, and the
+# canonical `mitigated_by` mirror exist ONLY as `_create_edges` Cypher driven
+# from the `{op_type, inputs}` descriptor in the Point's snapshot. The record
+# materialised the operator's `point` row and emitted NO `relation` row, so a
+# JOURNAL rebuild restored the epistemic topology while a RECORD-sourced rebuild
+# restored the claims and none of their structure — `compute_operator_weight`
+# reads exactly these edges, so the loss is a belief change, not a cosmetic one.
+#
+# These legs pin the four things a row count cannot see: WHICH records may carry
+# it, the mapping and its reverse, the two mitigation gates, and the endpoint
+# LABEL resolution (an operator input may be any of four labels, #7902).
+
+def _operator_records(record: dict[str, Any]) -> list[tuple[Any, ...]]:
+    """`(rel_type, idx, src journal id, tgt journal id)` per emitted row."""
+    out = []
+    for statement in _relation_statements(record):
+        params = statement.params
+        # INSERT params: org, graph, rel_type, idx, then 12 per endpoint
+        # (4 labels x org/graph/id); the journal id is the 3rd of each block.
+        out.append((params[2], params[3], params[6], params[18]))
+    return out
+
+
+def _operator_added(descriptor, *, point_id: str = "op1", **snapshot) -> dict[str, Any]:
+    point = {"id": point_id, "content": "c", "is_operator": True,
+             "operator": descriptor, **snapshot}
+    return {"type": "OperatorAdded", "ts": "2026-10-12T00:00:00Z",
+            "id": point_id, "point": point}
+
+
+def test_an_operator_lands_its_typed_edge_and_reverse_input():
+    """`IMPL` + its reverse `INPUT`, one pair per input, idx carried."""
+    rows = _operator_records(_operator_added(
+        {"op_type": "IMPL", "inputs": ["p1", "p2"]}))
+    assert rows == [
+        ("IMPL", 0, "op1", "p1"),
+        ("INPUT", 0, "p1", "op1"),
+        ("IMPL", 1, "op1", "p2"),
+        ("INPUT", 1, "p2", "op1"),
+    ], rows
+
+
+def test_the_operator_edges_land_after_the_point_identity():
+    """Ordering is the fix: `relation`'s endpoints are composite FK children."""
+    plan = rp.replay_plan(
+        [_operator_added({"op_type": "NAND", "inputs": ["p1"]})],
+        org_id="org-a", graph_id="g1")
+    kinds = []
+    for statement in plan:
+        sql = statement.sql
+        kinds.append("identity" if "public.node_identity" in sql else
+                     "relation" if "public.relation" in sql else
+                     "point" if "public.point" in sql else "journal")
+    assert kinds == ["identity", "point", "relation", "relation", "journal"], kinds
+
+
+def test_the_typed_edge_has_one_row_per_INPUT_not_one_per_operator():
+    """Fan-out: two inputs are two edges, and a duplicate input is its own idx."""
+    rows = _operator_records(_operator_added(
+        {"op_type": "IMPL", "inputs": ["p1", "p1"]}))
+    assert [r[0] for r in rows] == ["IMPL", "INPUT", "IMPL", "INPUT"], rows
+    assert [r[1] for r in rows] == [0, 0, 1, 1], rows
+
+
+def test_an_unknown_op_type_lands_only_the_reverse_input():
+    """`_create_edges`: `rel_type` is None → `INPUT` only, never a guessed REL."""
+    rows = _operator_records(_operator_added(
+        {"op_type": "SOMETHING_NEW", "inputs": ["p1"]}))
+    assert rows == [("INPUT", 0, "p1", "op1")], rows
+
+
+def test_the_composition_spellings_all_land_hasPart():
+    """Four `op_type` spellings → ONE predicate, exactly as the fold's map."""
+    for op_type in ("composedOf", "decomposesInto", "contains", "wraps"):
+        rows = _operator_records(_operator_added(
+            {"op_type": op_type, "inputs": ["p1"]}))
+        assert rows == [("hasPart", 0, "op1", "p1"),
+                        ("INPUT", 0, "p1", "op1")], (op_type, rows)
+
+
+def test_the_operator_rel_type_map_is_the_folds_own():
+    """Parity pin: the mapping is restated, so pin it to `_create_edges`' source.
+
+    The module is loaded STANDALONE by the PGlite harness, so the fold's literal
+    cannot be imported. Each spelling and each target predicate is asserted to
+    appear in the fold's own source: a predicate the fold adds without a row here
+    makes the record poorer than the graph on that op_type, and a row the fold
+    does not write makes it richer — both are rebuild-lane divergences.
+    """
+    import inspect
+
+    from tortoise.projection.edges import _EdgeHandlers
+
+    source = inspect.getsource(_EdgeHandlers._create_edges)
+    for op_type, rel_type in rp._OPERATOR_REL_TYPES.items():
+        assert f'"{op_type}": "{rel_type}"' in source, (op_type, rel_type)
+    assert set(rp._OPERATOR_REL_TYPES.values()) == {"IMPL", "NAND", "hasPart"}
+    # Non-vacuity: the fold's map is a LITERAL in the source we just read.
+    assert '"NAND": "NAND"' in source and '"IMPL": "IMPL"' in source
+
+
+def test_a_mitigation_lands_the_canonical_mitigated_by_mirror():
+    """#5048 / #4937: `(m)-[:IMPL]->(op)` reaches the record WITH its mirror.
+
+    `mitigate_operator` writes BOTH halves live and the `OperatorAdded` payload
+    carries only the IMPL direction, so `compute_operator_weight` read one half
+    after a rebuild and silently reverted `w_eff` to the undecayed base.
+    """
+    rows = _operator_records(_operator_added(
+        {"op_type": "IMPL", "inputs": ["op1"]},
+        point_id="mid", is_operator=False, mitigation_strength=0.4))
+    assert rows == [("IMPL", 0, "mid", "op1"),
+                    ("INPUT", 0, "op1", "mid"),
+                    ("mitigated_by", 0, "op1", "mid")], rows
+
+
+def test_the_mitigation_gates_are_the_folds_own():
+    """Two gates, value-for-value: the identity AND a writable strength.
+
+    Either alone mints an edge live never wrote: a descriptor on a payload with
+    no `is_operator` flag is the EventAPI/extractor shape (every generic IMPL
+    operator), and a descriptor with no usable strength is a dampening no writer
+    asked for.
+    """
+    def rows_for(**snapshot):
+        return [r[0] for r in _operator_records(_operator_added(
+            {"op_type": "IMPL", "inputs": ["op1"]}, **snapshot))]
+
+    assert "mitigated_by" in rows_for(is_operator=False, mitigation_strength=0.4)
+    # `is_operator` ABSENT is not `False` — the polarity the fold states.
+    assert "mitigated_by" not in rows_for(mitigation_strength=0.4)
+    assert "mitigated_by" not in rows_for(is_operator=True, mitigation_strength=0.4)
+    # The strength band IS the writer's accepted domain: an out-of-band, a
+    # non-numeric, a container, a NaN and an absent value are all refusals.
+    for bad in (1.5, -0.1, "0.4", None, [0.4], {"s": 0.4}, 10 ** 400):
+        assert "mitigated_by" not in rows_for(
+            is_operator=False, mitigation_strength=bad), bad
+    # ...and `bool` is ACCEPTED on purpose: `mitigate_operator`'s range check
+    # passes for `False`/`True` and the node stores it (measured live).
+    assert "mitigated_by" in rows_for(is_operator=False, mitigation_strength=False)
+    # A non-IMPL damping is not a mitigation: the fold pins WHICH relation.
+    for op_type in ("NAND", "composedOf", "SOMETHING_NEW"):
+        rows = [r[0] for r in _operator_records(_operator_added(
+            {"op_type": op_type, "inputs": ["op1"]},
+            is_operator=False, mitigation_strength=0.4))]
+        assert "mitigated_by" not in rows, op_type
+
+
+def test_the_mitigation_predicates_are_the_folds_own():
+    """Parity pin for both restated predicates, over a value table."""
+    from tortoise.projection.entities import (
+        has_usable_mitigation_strength,
+        is_non_operator_payload,
+    )
+
+    payloads = (
+        {}, {"is_operator": False}, {"is_operator": True},
+        {"is_operator": None}, {"is_operator": 0}, {"is_operator": "false"},
+        {"mitigation_strength": 0.4}, {"mitigation_strength": 0},
+        {"mitigation_strength": 1}, {"mitigation_strength": False},
+        {"mitigation_strength": True}, {"mitigation_strength": 1.0000001},
+        {"mitigation_strength": -0.0000001}, {"mitigation_strength": "0.4"},
+        {"mitigation_strength": None}, {"mitigation_strength": [0.4]},
+        {"mitigation_strength": {"v": 0.4}}, {"mitigation_strength": 10 ** 400},
+        {"mitigation_strength": -(10 ** 400)},
+        {"is_operator": False, "mitigation_strength": 0.4},
+    )
+    for payload in payloads:
+        assert rp._is_non_operator_snapshot(payload) == \
+            is_non_operator_payload(payload), payload
+        assert rp._has_usable_mitigation_strength(payload) == \
+            has_usable_mitigation_strength(payload), payload
+    # Non-vacuity: the table exercises both verdicts for both predicates.
+    assert any(rp._has_usable_mitigation_strength(p) for p in payloads)
+    assert any(not rp._has_usable_mitigation_strength(p) for p in payloads)
+
+
+def test_the_epistemic_label_order_is_the_folds_own():
+    """The resolver's label order is the fold's `EPISTEMIC_LABELS`, restated."""
+    from tortoise.live import EPISTEMIC_LABELS
+
+    assert tuple(EPISTEMIC_LABELS) == rp._EPISTEMIC_LABELS, (
+        rp._EPISTEMIC_LABELS, EPISTEMIC_LABELS)
+    # Non-vacuity: all four labels are probed, each against its own table.
+    sql = _relation_statements(_operator_added(
+        {"op_type": "IMPL", "inputs": ["p1"]}))[0].sql
+    for table in ("public.point", "public.subject", "public.object", "public.event"):
+        assert table in sql, (table, sql)
+    # The label is a COLUMN of the endpoint subselect, never a parameter: an
+    # operator input's label is a fact the record looks up, not one it assumes.
+    assert "src.node_label" in sql and "tgt.node_label" in sql, sql
+
+
+def test_the_input_endpoint_resolves_each_labels_canonical_key():
+    """`relation.src_key` is a `node_identity` FK: Subject/Object key on `name`.
+
+    Writing the raw journal id for a Subject would address a phantom identity
+    the hard-delete cascade can never reach — the defect
+    `_endpoint_resolution` exists to prevent.
+    """
+    sql = _relation_statements(_operator_added(
+        {"op_type": "IMPL", "inputs": ["p1"]}))[0].sql
+    for fragment in (
+        # Point: keyed on its own identity, matched on the SAME column.
+        "SELECT 'Point' AS node_label, node_key AS node_key, 0 AS pref "
+        "FROM public.point WHERE org_id = %s AND graph_id = %s AND node_key = %s",
+        # Subject/Object: matched on the graph id, keyed on the canonical name.
+        "SELECT 'Subject' AS node_label, name AS node_key, 1 AS pref "
+        "FROM public.subject WHERE org_id = %s AND graph_id = %s AND id = %s",
+        "SELECT 'Object' AS node_label, name AS node_key, 2 AS pref "
+        "FROM public.object WHERE org_id = %s AND graph_id = %s AND id = %s",
+        # Event: keyed on the `eventId` (node_key) and matched on the SAME
+        # column — `event.id` is nullable and the dominant producers leave it
+        # NULL (`test_the_event_endpoint_matches_a_column_the_record_fills`).
+        "SELECT 'Event' AS node_label, node_key AS node_key, 3 AS pref "
+        "FROM public.event WHERE org_id = %s AND graph_id = %s AND node_key = %s",
+        # First label wins; the whole probe is one derived table per endpoint.
+        "ORDER BY pref LIMIT 1) src",
+    ):
+        assert fragment in sql, (fragment, sql)
+    # Idempotent, and NOT an upsert: these rows carry no attribute to correct.
+    assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " \
+        "tgt_label, tgt_key, idx) DO NOTHING" in sql, sql
+
+
+def test_the_event_endpoint_matches_a_column_the_record_fills():
+    """`event.id` is NULL for the dominant producers, so matching it loses the edge.
+
+    `_upsert_event` keys the graph node `id == eventId` unconditionally
+    (`props["id"] = eid`), so the fold's `s.id = $sid` probe MATCHES a recorded
+    event whose producer emitted no `id` (`mining._make_event`'s nested
+    `{eventId: …}`, `github_map.issue_to_event`/`pr_to_event`) and writes both
+    edges. The record, matching `event.id`, matched no row at all and filed no
+    `relation` row — R5 class 3, silently still open on the Event arm.
+
+    The assertion is the INVARIANT rather than the fix's text: every column the
+    resolver matches on must be a column the record's own Event insert FILLS for
+    this producer shape. It fails on the pre-fix code (`id` is not written at
+    all) and stays honest if the resolver's spelling changes.
+    """
+    records = [
+        # The dominant shape: `eventId` nested under `event`, NO `id` — the fold
+        # reads `inner = event.get("event", event)`, and so does the record.
+        {"type": "EventRecorded", "ts": "2026-10-23T00:00:01Z",
+         "event": {"eventId": "ev1", "eventKind": "decision"}},
+        _operator_added({"op_type": "IMPL", "inputs": ["ev1"]}),
+    ]
+    plan = rp.replay_plan(records, org_id="org-a", graph_id="g1")
+    event_insert = next(
+        s for s in plan if s.sql.startswith("INSERT INTO public.event "))
+    written = set(re.search(r"\(([^)]*)\)", event_insert.sql).group(1).split(", "))
+    assert "id" not in written, (written, event_insert.sql)
+    assert {"node_key", "event_id"} <= written, written
+
+    relation_sql = _relation_statements(records[1])[0].sql
+    # Just the Event subselect: from its `SELECT 'Event'` to the derived table's
+    # own close (`) epistemic`), so no neighbouring label's probe leaks in.
+    probe = relation_sql.split("SELECT 'Event'")[1].split(") epistemic")[0]
+    matched = set(re.findall(r"AND (\w+) = %s", probe))
+    assert matched, probe
+    # Every column the probe compares the journal id against is one this shape
+    # POPULATES — otherwise the subselect returns no row and the endpoint is
+    # `absent` for a node the graph wired.
+    assert matched <= written, (matched, written, probe)
+
+
+def test_a_non_string_or_unwritable_input_lands_no_relation():
+    """The fold's own member gate: non-str / empty / NUL / lone surrogate.
+
+    The refusing member comes FIRST on purpose: an implementation that filtered
+    the list and THEN enumerated would pass when the bad member trails the good
+    one, so only this order proves the fold's `continue`-inside-`enumerate`
+    numbering (the survivor keeps idx **1**).
+    """
+    for bad in (7, None, "", "a\x00b", "\ud800", ["a"], {"a": 1}):
+        rows = _operator_records(_operator_added(
+            {"op_type": "IMPL", "inputs": [bad, "p1"]}))
+        assert rows == [("IMPL", 1, "op1", "p1"),
+                        ("INPUT", 1, "p1", "op1")], (bad, rows)
+
+
+def test_a_blank_input_IS_carried_because_the_folds_probe_scans():
+    """Round-2 P2: the operator gate is `_writable_id`, NOT the blank refusal.
+
+    `_writable_container_id` refuses a whitespace-only key because
+    `_link_session` addresses the container with an INLINE property MATCH that
+    an index answers, and FalkorDB's indexed equality filter misses a blank
+    string (#9599). This family's probe is a label-disjunctive `WHERE` — a SCAN
+    — so the fold really does mint the stub and land BOTH edges for a blank key
+    (measured through the fold on a live engine, review round 2). A blank input
+    that resolves no record row still lands nothing here (the `absent` verdict),
+    but the GATE must not refuse it, or the record is poorer than the graph on
+    the edge this change exists to carry.
+    """
+    rows = _operator_records(_operator_added(
+        {"op_type": "IMPL", "inputs": ["   "]}))
+    assert rows == [("IMPL", 0, "op1", "   "),
+                    ("INPUT", 0, "   ", "op1")], rows
+    # Non-vacuity: the neighbouring families still refuse blank — the rule is
+    # per family, not one global loosening.
+    record = {"type": "PointAdded", "ts": "t", "id": "p1",
+              "contains_session": "   ",
+              "point": {"id": "p1", "content": "c"}}
+    assert not [s for s in _relation_statements(record)
+                if s.params[2] == "CONTAINS"], "CONTAINS must still refuse blank"
+
+
+def test_the_operator_input_gate_is_the_folds_own_rule():
+    """Parity pin for the restated `projection._writable_id`."""
+    from tortoise.projection import _writable_container_id, _writable_id
+
+    values = ("p1", "   ", "\t\n", "", None, 7, ["p1"], "a\x00b", "\ud800",
+              "x" * 40, " " * 40, "ok")
+    for value in values:
+        assert rp._writable_epistemic_id(value) == _writable_id(value), value
+    # Non-vacuity: the two predicates are NOT the same rule, and the difference
+    # is exactly the blank case this change turns on.
+    assert any(rp._writable_epistemic_id(v) != _writable_container_id(v)
+               for v in values)
+    assert rp._writable_epistemic_id("   ") is True
+    assert _writable_container_id("   ") is False
+
+
+def test_only_the_point_materialisations_may_carry_operator_relations():
+    """The four `_upsert` arms — and `apply()`'s one synthesis.
+
+    `apply()` applies `_promotion_point_with_operator` to the
+    `OperatorPromoted` arm ONLY, so a FLAT `PointPromoted` snapshot reaches
+    `_create_edges` with no `operator` key and the fold writes no edge. Reading
+    `op_type`/`inputs` there would mint a row the graph never wrote.
+    """
+    from tortoise.projection import _JOURNAL_POINT_MATERIALIZATION_TYPES
+
+    declared = {type_of for type_of, _how in rp._OPERATOR_RELATION_RECORDS}
+    assert declared == set(_JOURNAL_POINT_MATERIALIZATION_TYPES), (
+        sorted(declared), sorted(_JOURNAL_POINT_MATERIALIZATION_TYPES))
+
+    nested = {"op_type": "IMPL", "inputs": ["p1"]}
+    for record_type in ("PointAdded", "OperatorAdded", "PointPromoted"):
+        record = {"type": record_type, "ts": "t", "id": "op1",
+                  "point": {"id": "op1", "is_operator": True,
+                            "operator": nested}}
+        assert _operator_records(record), record_type
+    # The synthesized arm: FLAT props, no nested descriptor.
+    flat = {"type": "OperatorPromoted", "ts": "t", "id": "op1",
+            "point": {"id": "op1", "is_operator": True,
+                      "op_type": "NAND", "inputs": ["p1"]}}
+    assert _operator_records(flat) == [("NAND", 0, "op1", "p1"),
+                                       ("INPUT", 0, "p1", "op1")]
+    # A FLAT `PointPromoted` snapshot is NOT synthesized by any fold arm.
+    not_promoted = {**flat, "type": "PointPromoted"}
+    assert _operator_records(not_promoted) == []
+    # A non-dict descriptor degrades to no edges in the fold, and to no rows here.
+    # `None` included on the SYNTHESIZED arm too: the synthesis gate is KEY
+    # PRESENCE (`_promotion_point_with_operator`: `"operator" in p` → no
+    # synthesis) and `_upsert_point_edges` only calls `_create_edges` on a
+    # TRUTHY descriptor, so `{"operator": None, "is_operator": True,
+    # "op_type": …}` is edge-less on both fold halves — reading it as "absent"
+    # here would emit a typed edge the graph never wrote.
+    for bad in ("IMPL", 7, ["IMPL"], None):
+        for record_type in ("OperatorAdded", "OperatorPromoted"):
+            record = {"type": record_type, "ts": "t", "id": "op1",
+                      "point": {"id": "op1", "is_operator": True,
+                                "op_type": "IMPL", "inputs": ["p1"],
+                                "operator": bad}}
+            assert _operator_records(record) == [], (bad, record_type)
+    # A custom `Mapping` is not a `dict`, and the fold refuses anything that is
+    # not a `dict` (`isinstance(op, dict)`), so the record must not accept one.
+    class _NotADict(Mapping):
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getitem__(self, key):
+            return self._inner[key]
+
+        def __iter__(self):
+            return iter(self._inner)
+
+        def __len__(self):
+            return len(self._inner)
+
+    mapping = _NotADict({"op_type": "IMPL", "inputs": ["p1"]})
+    # Asserted on the READER, not through `mutations_for`: a non-`dict` value in
+    # the point snapshot is refused earlier, by the props serialiser, so routing
+    # this through the record would test the JSON encoder instead of the gate.
+    assert rp._operator_descriptor(
+        "OperatorAdded", {"is_operator": True, "operator": mapping}) is None
+    assert rp._operator_descriptor(
+        "OperatorAdded", {"is_operator": True,
+                          "operator": dict(mapping)}) == {
+        "op_type": "IMPL", "inputs": ["p1"]}
+
+
+def test_an_unhashable_op_type_is_a_refusal_not_a_crash():
+    """A corrupt record must not abort the write — `mutations_for` is TOTAL.
+
+    `_OPERATOR_REL_TYPES.get({"a": 1})` raises `TypeError: unhashable type`; the
+    fold raises on the same payload, and a record write may not, because the
+    journal append has already committed. The verdict is the fold's unknown-op
+    branch: no typed edge, and the reverse `INPUT` only.
+    """
+    rows = _operator_records(_operator_added(
+        {"op_type": {"a": 1}, "inputs": ["p1"]}))
+    assert rows == [("INPUT", 0, "p1", "op1")], rows
+
+
+def test_a_record_that_never_reaches_the_edge_writer_lands_no_operator_relation():
+    """`PointRevised`-class records never call `_upsert_point_edges`."""
+    for record_type in ("PointRevised", "DedupeRecorded", "DedupeRejected",
+                        "BatchIdStamped", "PointInvalidated", "PointSuperseded"):
+        record = {"type": record_type, "ts": "t", "id": "op1",
+                  "point": {"id": "op1", "is_operator": True,
+                            "operator": {"op_type": "IMPL", "inputs": ["p1"]}}}
+        assert _operator_records(record) == [], record_type

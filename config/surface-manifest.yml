@@ -1746,7 +1746,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_traverse
-  served_from: tortoise/mcp_server.py:290da6f2d39818ea
+  served_from: tortoise/mcp_server.py:5a8b7d283b850602
   served_attributes: cebbf079c1b1d7da
   family: reasoning
   family_rank: 3
@@ -1772,7 +1772,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_entity_profile
-  served_from: tortoise/mcp_server.py:9ad536c494823538
+  served_from: tortoise/mcp_server.py:ea5e01b04146827b
   served_attributes: 3a272b21b8020f47
   family: reasoning
   family_rank: 3
@@ -1824,7 +1824,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_analyze
-  served_from: tortoise/mcp_server.py:d0985e54a0f9be3d
+  served_from: tortoise/mcp_server.py:458b130d9130fe45
   served_attributes: 0b934dac2f43c7b6
   family: reasoning
   family_rank: 3
@@ -2135,7 +2135,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_graphs
-  served_from: tortoise/mcp_server.py:db7cc8b065b95c5d
+  served_from: tortoise/mcp_server.py:c48982d2359a7aea
   served_attributes: 06490fe8c983ed26
   family: sessions
   family_rank: 4
@@ -4213,11 +4213,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.graph_list.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
+  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
+  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false

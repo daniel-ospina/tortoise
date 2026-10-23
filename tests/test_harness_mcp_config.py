@@ -1065,23 +1065,28 @@ class TestDocsPageAndSkillConfig:
         from tortoise.mcp_server import _OVERVIEW_SECTIONS
         assert "graphs" in _OVERVIEW_SECTIONS, (
             "the row teaches overview(section='graphs'); the handler must accept it")
-        # …and it must not promise per-call graph selection, which the surface
-        # does not have (#9340 open): every connector write lands on the default
-        # graph. A card that implied otherwise would send the user looking for a
-        # control that does not exist — the same defect as the stale
-        # Developer-Mode path this issue exists for.
+        # …and it must state the truth about per-call graph selection as the
+        # surface now stands (#9340 landed it): a call that names no graph lands
+        # on the DEFAULT graph, and a call can be pointed at another graph of the
+        # same organization with the `graph` argument. A card that said the
+        # control did not exist would send the user hunting for an absence — the
+        # same defect as the stale Developer-Mode path this issue exists for.
         #
         # Both graph claims are owned by CODE, and both are exercised here:
         #   * the DESTINATION: with no graph scope on the request (the shape a
         #     session / legacy / OAuth connector credential has), `_get_org_sdk`
         #     binds the org's DEFAULT graph; only a credential that carries a
-        #     graph scope is bound to another one. That is what makes "every
-        #     write lands in the default graph" true of a connector rather than
-        #     of callers in general — so both branches are driven, and the
-        #     default branch is the one the row describes;
-        #   * the ABSENCE of a per-call control: no WRITE tool takes a
-        #     graph-selecting parameter (the three that do are read-only, or the
-        #     admin recording flag — named explicitly below, so a new one fails).
+        #     graph scope is bound to another one. That is what makes "an
+        #     unnamed call lands in the default graph" true of a connector
+        #     rather than of callers in general — so both branches are driven,
+        #     and the default branch is the one the row describes;
+        #   * the ABSENCE of a per-tool SELECTOR parameter: no tool takes a
+        #     graph-selecting parameter of its own (the three that do are
+        #     read-only, or the admin recording flag — named explicitly below, so
+        #     a new one fails). Per-call selection itself is a DISPATCH-level
+        #     argument (`mcp_server._take_graph_argument` strips it,
+        #     `mcp_server._resolve_graph_argument` resolves and scopes), which is
+        #     why no handler signature carries one.
         from tortoise import mcp_auth
         # These ContextVars are process-wide on this thread and there is no
         # autouse fixture clearing them, so the reset is in a `finally`: a failing
@@ -1102,17 +1107,19 @@ class TestDocsPageAndSkillConfig:
             mcp_auth._current_graph_id.set("g-9660")
             mcp_auth._current_graph_namespace.set("org_9660_probe__other")
             assert mcp_auth._get_org_sdk()._graph_name == "org_9660_probe__other", (
-                "a graph-BOUND credential must open ITS graph — that is the only "
-                "way a request leaves the default graph, and a connector has none")
+                "a graph-BOUND credential must open ITS graph — and so must a "
+                "graph the CALL selected (#9340), which pivots on exactly this "
+                "ContextVar pair; a connector's own credential carries none")
         finally:
             for var in (mcp_auth._current_org_id, mcp_auth._current_graph_id,
                         mcp_auth._current_graph_namespace):
                 var.set(None)
-        # …and the per-call control is absent from the SURFACE. Enumerated from
+        # …and the per-tool SELECTOR is absent from the SURFACE. Enumerated from
         # the live registry through BOTH dispatch shapes (an `sdk_method`, or a
         # handler in mcp_server — the shape a new graph-aware tool is most likely
-        # to use), so a write tool that grows a graph selector fails here the day
-        # it lands, which is precisely the change #9340 will make.
+        # to use), so a tool that grows a graph parameter of its own fails here
+        # the day it lands. Per-call selection is a DISPATCH-LEVEL argument
+        # (#9340), not a handler parameter, which is what keeps this set exact.
         import inspect
 
         from tortoise import mcp_server as _mcp
@@ -1157,28 +1164,37 @@ class TestDocsPageAndSkillConfig:
             "tortoise_traverse": "read",
             "tortoise_graph_set_recording": "admin",
         }, (
-            "the row says per-call graph selection is not available to a "
-            "connector; exactly these three tools take a graph selector and none "
+            "exactly these three tools take a graph SELECTOR parameter and none "
             "is a write — a WRITE tool gaining one would move a connector's "
-            "writes (#9340), so it must be argued here, not slipped in: "
-            f"{ {n: (active[n].risk, sorted(p)) for n, p in graph_aware.items()} }")
+            "writes (#9340), so it must be argued here, not slipped in (the "
+            "per-call `graph` argument is a dispatch seam and adds no "
+            f"parameter): { {n: (active[n].risk, sorted(p)) for n, p in graph_aware.items()} }")
         mcp_src = self.MCP_SERVER.read_text(encoding="utf-8")
         # Matched as a PATTERN, not a byte string: a re-wrapped or re-quoted line
         # is a no-op, and a second guard that reds on a no-op teaches the next
         # lane to delete it (the #4365 shape-net finding this file already
         # records).
+        #
+        # #236 is still owned by CODE: on HTTP the caller-supplied `graph_name`
+        # is overwritten with the SERVER's graph — the workspace default, or the
+        # graph this call selected (#9340). The derivation is pinned too, because
+        # a name read from the request would be the cross-tenant
+        # `db.select_graph()` the guard exists to prevent.
         org_override = re.compile(
-            r"graph_name\s*=\s*f[\"']org_\{_current_org_id\.get\(\)\}[\"']")
+            r"graph_name\s*=\s*_dispatch_graph_name\(\)")
         assert len(org_override.findall(mcp_src)) >= 2, (
             "#236: HTTP mode must keep overwriting a caller-supplied graph_name "
-            "with the org graph — that is WHY per-call graph selection is not "
-            "available to a connector, so the row may only say so while it is "
-            "true")
+            "with the server-resolved graph — that is what makes a selected "
+            "graph safe to honour")
+        assert "_mcp_auth._current_graph_namespace.get()" in mcp_src, (
+            "the derived graph name must come from the SERVER's own resolution "
+            "(#9340), never from the request")
         assert "default graph" in row_norm, (
-            "the row must state that writes land on the organization's DEFAULT "
-            "graph — that is the connector's actual behaviour (#9340)")
-        assert "picking a graph per call is not available" in row_norm, (
-            "the row must not imply a per-call graph control exists (#9340)")
+            "the row must state that an UNNAMED call lands on the organization's "
+            "DEFAULT graph — that is the connector's actual behaviour (#9340)")
+        assert "graph</code> argument" in steps, (
+            "the row must state that a call CAN be pointed at another graph of "
+            "the same organization, now that #9340 landed it")
 
         # ── which packs ────────────────────────────────────────────────────
         # The hazard is INVISIBLE, not absent — but WHICH default applies depends
@@ -1368,10 +1384,15 @@ class TestDocsPageAndSkillConfig:
         # The unconditional form must be absent from BOTH sides: it is the shape
         # the resolution contract falsifies, so the module must not state it and
         # the page must not quote it.
-        #   (NOTE: `PACK_CONSEQUENCE.unconfigured` / `packCountLine` still render
-        #   "the full catalog applies" for ANY `configured: false` graph, which is
-        #   wrong for a starter-seeded default graph — pre-existing product copy
-        #   on main, out of this change's scope, tracked as #9691.)
+        #   (FIXED in #9691: `packCountLine` and `PACK_CONSEQUENCE.unconfigured`
+        #   now hang the catalog sentence on `packs.js::usesCatalogUnion` —
+        #   `configured: false` AND zero records — so a starter-seeded default
+        #   graph gets the "packs it already holds" line instead. The remaining
+        #   residual is the record-count DERIVATION: it cannot see a tombstone
+        #   the catalog arm offers as `available`. That shape is REACHABLE after
+        #   a rebuild — `:PackSelection` is not a projection config class, so the
+        #   tombstoned `:PackInstall` survives and the marker does not — and the
+        #   durable fix is to enrol the marker, not this copy.)
         assert "only stops new classifications" not in disable, (
             "PACK_CONSEQUENCE.disable must not state the consequence "
             "unconditionally — the resolution contract re-admits a namespace "

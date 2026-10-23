@@ -42,6 +42,10 @@ from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
+# #9572: the "nothing was named" predicate for the identity doors, ONE home
+# shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
+# no cycle — see the module docstring for why it is not a private in sdk.py).
+from .kind_fallbacks import named_kind
 from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
     reject_unrepresentable_number as _reject_unrepresentable_number,
 )
@@ -3558,6 +3562,77 @@ def _drop_reserved_emit_props(props: dict) -> list[str]:
     for _k in _dropped:
         props.pop(_k)
     return _dropped
+
+
+def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
+    """The entity door's property bag, with an UNSENT discriminator left out.
+
+    #9572: ``subjectKind`` / ``objectKind`` is the user-authored discriminator
+    and the fold writes it ON MATCH as ``coalesce($k, <stored>)`` — which is
+    correct ONLY if "the caller named no kind" reaches the fold as **absent**.
+    The door used to fabricate ``"other"`` (``props.pop(kind_key, "other")`` /
+    an ``= "other"`` alias default), so "not supplied" and "supplied as the
+    default" were the same string: a bare re-create silently reset a stored
+    ``team`` / ``capability`` to ``other``, and the journal record carried the
+    fabricated value, so replay reproduced the clobber.
+
+    The ``'other'`` default belongs to the fold's ON CREATE arm (the Object arm
+    already worked this way — ``entities.py::_upsert_object`` reads
+    ``ev.get("object_kind")`` with a NULL coalesce). Deciding it HERE would
+    re-create the defect: nothing downstream can tell a fabricated default from
+    a supplied value.
+
+    ``props`` is returned as a NEW dict in the door's established key order
+    (name, kind?, status, *caller props*) so a caller-supplied ``status`` still
+    overrides the ``"live"`` seed, exactly as before.
+    #9572 review P2: BLANK is not a kind either. ``""`` / ``"   "`` is not
+    ``None``, so it survived the ``is not None`` line and reached the fold as a
+    real value — ``coalesce("", stored)`` returns ``""``, so a blank re-create
+    still destroyed a stored ``team`` and a blank FIRST create stored a
+    discriminator no pack declares. The blank rule is the leaf module's
+    ``named_kind``, shared with the aliases, ``EventAPI``, the two hosted REST
+    handlers and the two seed surfaces, so it cannot be drawn differently at
+    the next door.
+    """
+    kind = named_kind(props.pop(kind_key, None))
+    out: dict = {"name": name}
+    if kind is not None:
+        out[kind_key] = kind
+    out["status"] = "live"
+    out.update(props)
+    return out
+
+def _payload_entity_kind(e: dict) -> str | None:
+    """The payload entity's kind to write, or ``None`` when it must NOT be.
+
+    #9572: a v2 capture payload's ``kind`` is a CLASSIFICATION, not the caller's
+    discriminator. The pipeline repairs an unclassifiable/out-of-vocab entity to
+    its family fallback (``extractor_v2._ENTITY_FALLBACK`` = ``core:other``, and
+    ``kind_classifier.KindClassifier._fallback`` does the same upstream), so by
+    the time the door sees the payload a kind is ALWAYS present — an
+    absent-key guard alone never fires on the default capture path, and the
+    repaired sentinel reached the fold's ``ON MATCH … =coalesce($k, stored)`` as
+    a real kind: a conversation that merely mentioned an Object reset its stored
+    ``capability``.
+
+    So the guard is on the VALUE, and it is one predicate shared with the hosted
+    ``/v1/sessions/commit`` door (``tortoise.kind_fallbacks``) — the twin that
+    imports nothing from this private surface is exactly how the fifth
+    fabricator survived four review rounds.
+
+    A payload entity that names a real kind still writes it, so a genuine
+    re-classification is not frozen out.
+
+    ⚠️ One stored VALUE changes, on purpose: a first create from a v2 payload
+    whose kind was repaired used to store the sentinel (``objectKind =
+    'core:other'``) and now stores ``other`` — the FOLD's ``ON CREATE`` spelling
+    (the SDK/REST doors name no kind at all; ``'other'`` is what the fold
+    supplies). Only a consumer that filters the EXACT string ``'core:other'``
+    sees the move.
+    """
+    from .kind_fallbacks import payload_entity_kind
+
+    return payload_entity_kind(e)
 
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
@@ -11547,20 +11622,23 @@ class TortoiseSDK:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            _ekind = str(e.get("kind", "core:other"))
-            _is_subject = is_subject_kind(_ekind)
+            # #9572: the payload's `kind` is a CLASSIFICATION, not the caller's
+            # discriminator — see `_payload_entity_kind`, which is where the
+            # family-fallback sentinel is dropped.
+            _ekind = _payload_entity_kind(e)
+            _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
                     self.create_entity(
                         "subject", name,
-                        subjectKind=_ekind,
+                        **({"subjectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
                 else:
                     self.create_entity(
                         "object", name,
-                        objectKind=_ekind,
+                        **({"objectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
@@ -32649,12 +32727,16 @@ class TortoiseSDK:
         if isinstance(uses, dict):
             uses = [uses]
         elif isinstance(uses, str):
-            uses = []  # a legacy bare-string use writes objectKind='other'
+            # a legacy bare-string use names NO kind — the fold supplies the
+            # `'other'` default ON CREATE and writes nothing ON MATCH (#9572)
+            uses = []
         if isinstance(uses, (list, tuple)):
             for item in uses:
                 if isinstance(item, dict):
-                    # The fold's own default is 'other' (a bare core kind), so
-                    # an absent 'kind' is the same write it will perform.
+                    # #9572: an absent `kind` is not the same WRITE any more —
+                    # the fold supplies `'other'` ON CREATE and writes nothing
+                    # ON MATCH, so a kindless use cannot overwrite a stored
+                    # discriminator. The gate still screens a NAMED kind.
                     self._refuse_unapproved_kind("objectKind", item.get("kind"))
 
 
@@ -34074,14 +34156,12 @@ class TortoiseSDK:
                 )
             node = self._create_entity(
                 "Subject", _entity_name_id("Subject", name),
-                {"name": name, "subjectKind": props.pop("subjectKind", "other"),
-                 "status": "live", **props},
+                _entity_door_props("subjectKind", name, props),
                 "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
             node = self._create_entity(
                 "Object", _entity_name_id("Object", name),
-                {"name": name, "objectKind": props.pop("objectKind", "other"),
-                 "status": "live", **props},
+                _entity_door_props("objectKind", name, props),
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
@@ -34537,27 +34617,49 @@ class TortoiseSDK:
             node["advisories"] = _adv
         return node
 
-    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
-        """Thin alias for create_entity(type='subject') — epic #888 W2."""
-        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
-        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
-            raise ValueError(
-                "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self._flat_entity_result(
-            self.create_entity("subject", name,
-                               subjectKind=subjectKind, **props))
+    def create_subject(self, name: str, subjectKind: str | None = None,
+                       **props) -> dict:
+        """Thin alias for create_entity(type='subject') — epic #888 W2.
 
-    def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
-        """Thin alias for create_entity(type='object') — epic #888 W2."""
+        ``subjectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572: the alias used to fabricate ``"other"``, so a bare re-create
+        shipped ``subject_kind="other"`` on the record and the fold's ON MATCH
+        ``coalesce($sk, s.subjectKind)`` clobbered the stored, user-authored
+        kind. The ``'other'`` default now comes from the fold's ON CREATE arm,
+        which is the only place it belongs — see ``sdk._entity_door_props``.
+        A BLANK ``subjectKind`` (``""`` / ``"   "``) is "not supplied" too
+        (#9572 review P2): ``kind_fallbacks.named_kind`` normalizes it, so it
+        can neither reset a stored kind nor store ``""``.
+        """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        subjectKind = named_kind(subjectKind)
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
         return self._flat_entity_result(
-            self.create_entity("object", name,
-                               objectKind=objectKind, **props))
+            self.create_entity("subject", name, **props))
+
+    def create_object(self, name: str, objectKind: str | None = None,
+                      **props) -> dict:
+        """Thin alias for create_entity(type='object') — epic #888 W2.
+
+        ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572 — the Object twin of ``create_subject``'s fabricated default.
+        Blank is absent here too (#9572 review P2) — ``named_kind``.
+        """
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
+        objectKind = named_kind(objectKind)
+        if objectKind is not None:
+            props["objectKind"] = objectKind
+        return self._flat_entity_result(
+            self.create_entity("object", name, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
@@ -36983,8 +37085,19 @@ class TortoiseSDK:
                 _reject_unrepresentable_number("oid", oid)
                 _reject_unrepresentable_number("issue_number", issue_number)
                 proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
-                    "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
+                    # #9572: the kind is this door's OWN synthesis (`"pr"` /
+                    # `"issue"` from the frontmatter key) — the caller named
+                    # none. Writing it on MATCH re-typed a stored Object
+                    # (`pm:issue` → `issue`, `capability` → `issue`) from a
+                    # session file's frontmatter, the same fabrication class as
+                    # the doors above, one layer out. The kind belongs to the
+                    # fold's ON CREATE arm; a re-index refreshes the fields it
+                    # legitimately owns and touches nothing else.
+                    "MERGE (o:Object {id:$oid}) "
+                    "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
+                    "o.issue_number=$issue_number, o.url=$url "
+                    "ON MATCH SET o.name=$name, o.repo=$repo, "
+                    "o.issue_number=$issue_number, o.url=$url",
                     params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},
                 )
@@ -38914,11 +39027,22 @@ def _summary_to_payload(summary: dict, session_id: str,
     entities, seen = [], set()
     for st in (summary.get("state") or []):
         name = st.get("name", "")
-        key = (name, st.get("objectKind", "core:concept"))
+        # #9572: a summary entry that names no kind must not INVENT one. The
+        # invented string here was `core:concept` — never a §5 object kind, and
+        # never written by product code (it survives only as a HISTORICAL value
+        # in `tools/calibration_harness.py`'s counts and as test payload data) —
+        # so it could only ever be a fabrication, and the commit door wrote it
+        # as a real discriminator over a stored `capability`. The layer-1
+        # payload requires `entities[].kind`, so the honest value is the
+        # DECLARED family fallback (`core:other`), which
+        # `kind_fallbacks.writable_kind` drops at the door — the fold then
+        # supplies `other` ON CREATE and touches nothing ON MATCH.
+        _ekind = st.get("objectKind") or "core:other"
+        key = (name, _ekind)
         if not name or key in seen:
             continue
         seen.add(key)
-        entities.append({"name": name, "kind": st.get("objectKind", "core:concept"),
+        entities.append({"name": name, "kind": _ekind,
                          "passes_frequency_gate": True})
 
     return {
