@@ -445,10 +445,14 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
 
 With `--reset-scratch`, the verb `TRUNCATE`s the record's **own ten tables** on the scratch DSN
 only, in one statement, **after the artifact has been downloaded and verified** (integrity, table
-set, column pin, decryption) and immediately before `pg_restore`. It is
+set, column pin, decryption) and before `pg_restore`. It is
 opt-in because an automatic truncate would destroy the leftover state of a RED drill — the evidence
-an operator needs — with nothing to show for it; for the same reason every step that can REFUSE runs
-before it, so a refused drill leaves the last run's evidence in place. It
+an operator needs — with nothing to show for it; for the same reason every step that can refuse on
+the **artifact** (integrity, manifest shape, table set, column pin, decryption) runs before it, so a
+drill refused for a bad artifact leaves the last run's evidence in place. The **target** side is not
+covered by that guarantee: `restore_record_backup` re-counts the scratch and writes the payload file
+before `pg_restore` runs, and a failure there happens after the truncate — a narrow residual
+(one successful connect wide), named here rather than promised away. It
 can never touch the record itself: a scratch DSN equal to the source is refused first, and no
 `CASCADE` is used, so the tenancy rows the FKs need (`organizations`, `graphs`) are left alone.
 

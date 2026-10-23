@@ -47,7 +47,9 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import re
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -842,9 +844,9 @@ def test_the_drill_tolerates_rows_written_after_the_dump_and_names_the_window():
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            # 1 = the vacuity count, 2 = the count taken as the artifact is cut
-            # (which is also the manifest's `row_counts`), 3 = the post-dump
-            # re-count. Rows land between 2 and 3.
+            # 1 = the vacuity count, 2 = the `cut` count taken immediately
+            # BEFORE `pg_dump` runs (which is also the manifest's `row_counts`),
+            # 3 = the post-dump re-count. Rows land between 2 and 3.
             if reads["source"] >= 3:
                 db.source = {**db.source, "journal_event": 515}
         return real_connect(dsn)
@@ -983,8 +985,8 @@ def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
 def test_the_drill_does_not_red_when_rows_land_before_the_CUT_and_age_out_by_the_ceiling():
     """#9601 review cycle 4 (P1): a transient peak neither endpoint can see.
 
-    The drill reads the source three times — before the dump, as the artifact is
-    CUT, and once the dump has finished — and a live record makes all three
+    The drill reads the source three times — before the dump, immediately BEFORE
+    the artifact is CUT, and once the dump has finished — and a live record makes all three
     numbers different: rows land after `before` (so the artifact's snapshot holds
     515 journal rows) and are aged out before the post-dump re-count (500). An
     endpoint ceiling — `max(before, after)` = 512 — therefore refused the healthy
@@ -1003,8 +1005,8 @@ def test_the_drill_does_not_red_when_rows_land_before_the_CUT_and_age_out_by_the
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            # 1 = the vacuity count, 2 = the count taken as the artifact is cut,
-            # 3 = the post-dump re-count.
+            # 1 = the vacuity count, 2 = the `cut` count taken immediately before
+            # `pg_dump` runs, 3 = the post-dump re-count.
             if reads["source"] >= 2:
                 db.source = dict(peak)
             if reads["source"] >= 3:
@@ -2111,7 +2113,7 @@ def test_the_documented_exit_1_contract_is_CLASS_aware_in_the_runbook_and_the_ve
 
 
 def test_the_ceiling_claims_only_what_the_three_source_reads_CAN_see():
-    """#9601 review cycle 9 (P3): `cut` is read BEFORE `pg_dump`, not as it is cut.
+    """#9601 review cycle 9 (P3) + cycle 11 (P2): `cut` is read BEFORE `pg_dump`.
 
     The bound is `max(before, cut, after)` and every one of those reads is taken
     OUTSIDE the dump: the artifact's snapshot instant falls between the `cut` read
@@ -2122,17 +2124,30 @@ def test_the_ceiling_claims_only_what_the_three_source_reads_CAN_see():
     cannot see a transient peak", which reads as if it WERE the snapshot count. A
     future lane restoring the bound from that prose is the failure this pins; the
     residual is #9795, and both artifacts must name it rather than imply it away.
+
+    ⛔ THE PIN IS THE CLAIM, NOT ONE PHRASING (#9601 review cycle 11, P2). Cycle
+    9's arm asserted the PRESENT tense ("...as the artifact is cut") only, and
+    the same false statement survived in the PAST tense at three sites —
+    including `verify_restore`'s own docstring, i.e. the API doc for the very
+    argument it mis-describes. The assertion below forbids the claim in either
+    tense, anywhere in the module, and requires the TRUE statement inside
+    `verify_restore`'s docstring specifically, so the guard follows the property
+    down the file instead of proving one wording.
     """
     root = Path(__file__).resolve().parent.parent
     runbook = " ".join((root / "docs" / "infra-runbook.md").read_text().split())
     source = " ".join((root / "tortoise" / "record_backup.py").read_text().split())
 
-    # The false claim, in both artifacts.
-    assert "taken as the artifact is cut" not in runbook, (
-        "the runbook still calls `cut` the count taken as the artifact is cut — it is "
-        "taken BEFORE pg_dump runs, and the snapshot instant is inside the dump")
-    # (The correction itself quotes the false claim, so pin the CLAIM's wording.)
-    assert "taken as the artifact is cut" not in source
+    # The false claim, in BOTH tenses and in both artifacts. Pre-fix the module
+    # carried "as the artifact was cut" three times, so this reds on it.
+    false_claim = re.compile(r"as the artifact (?:is|was) cut")
+    assert not false_claim.search(runbook), (
+        "the runbook still calls `cut` the count taken as the artifact is/was cut — "
+        "it is taken BEFORE pg_dump runs, and the snapshot instant is inside the dump")
+    assert not false_claim.search(source), (
+        "the module still calls `cut` the count taken as the artifact is/was cut — "
+        f"found: {false_claim.findall(source)} (even as a negated quotation, the "
+        "phrase reads as the definition to a lane skimming for `source_high`)")
     assert "cannot see a transient peak" not in source, (
         "the comment still promises the bound sees a transient peak — it sees only "
         "peaks a SAMPLE observed, never one inside the dump window")
@@ -2144,6 +2159,69 @@ def test_the_ceiling_claims_only_what_the_three_source_reads_CAN_see():
     assert "#9795" in runbook, "the residual must be named, not implied away"
     assert "before ``pg_dump`` runs" in source
     assert "#9795" in source
+
+    # ⛔ AND IN THE DOC THE ARGUMENT IS DOCUMENTED BY (cycle 11, P2): the drill's
+    # call site, `create_record_backup`'s `counts` parameter and `verify_restore`'s
+    # `source_high` each stated the false claim. A pin that skims the whole file
+    # cannot tell a corrected site from an uncorrected one, so the API doc is
+    # asserted directly.
+    api_doc = " ".join((rb.verify_restore.__doc__ or "").split())
+    assert "immediately BEFORE ``pg_dump`` runs" in api_doc, (
+        "verify_restore's docstring must say WHEN `source_high` is read — it is the "
+        "API doc the next lane restoring the bound will read")
+    assert "#9795" in api_doc, (
+        "the residual must be named where `source_high` is defined, not only in "
+        "the module docstring a caller may never open")
+    writer_doc = " ".join((rb.create_record_backup.__doc__ or "").split())
+    assert "immediately BEFORE ``pg_dump`` runs" in writer_doc, (
+        "create_record_backup's `counts` docstring must say when the drill reads it")
+
+
+def test_the_pre_restore_guarantee_names_the_ARTIFACT_and_admits_the_target_residual():
+    """#9601 review cycle 11 (P3): the absolute claim was not true.
+
+    The module said the verified artifact's load "leaves NO refusing step between
+    the reset and `pg_restore`", and the runbook said every step that can REFUSE
+    runs before the truncate. After the `TRUNCATE` commits, `restore_record_backup`
+    still (a) re-counts the target and (b) writes the payload file before invoking
+    `pg_restore`, and either can fail — destroying exactly the leftover evidence
+    of the last RED drill the ordering exists to preserve. The claim was absolute
+    and load-bearing (cycles 2 and 5 built on it), so it is NARROWED to what is
+    true — no step that can refuse on the ARTIFACT — with the target-side residual
+    named. Pre-fix, both absolute phrasings were present, so this reds on it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    runbook = " ".join((root / "docs" / "infra-runbook.md").read_text().split())
+    # Comment markers are flattened too: the claim these assertions are about
+    # lives in a `#` comment, and the raw whitespace-normalised form keeps the
+    # `#` the line started with inside the sentence.
+    source = " ".join(
+        re.sub(r"(?m)^[ \t]*#+[ \t]?", "", (root / "tortoise" / "record_backup.py").read_text()).split()
+    )
+    assert "NO refusing step between" not in source, (
+        "the module still claims NO refusing step at all between the reset and "
+        "pg_restore — the target re-count and the payload write both run there")
+    assert "every step that can REFUSE runs" not in runbook, (
+        "the runbook still promises every refusing step runs before the truncate")
+    assert "and immediately before `pg_restore`" not in runbook, (
+        "the runbook still says the reset is immediately before pg_restore")
+
+    # The true, narrower one — and the residual, named with its two real steps.
+    assert "NO step that can refuse on the ARTIFACT" in source
+    assert "residual is the TARGET side" in source
+    assert "re-counts the target" in source
+    assert "writes the payload file" in source
+    assert "refuse on the **artifact**" in runbook
+    assert "The **target** side is not covered by that guarantee" in runbook
+
+    # And the ordering the guarantee IS about still holds in the code: the
+    # artifact is verified before the truncate, and the truncate before the
+    # restore.
+    body = (root / "tortoise" / "record_backup.py").read_text()
+    drill = body.split("def run_restore_drill", 1)[1]
+    assert drill.index("load_verified_artifact(") < drill.index("reset_record_tables(") < drill.index(
+        "restore_record_backup("
+    ), "load_verified_artifact must run before reset_record_tables must run before restore"
 
 
 def test_a_drill_mode_dump_failure_does_not_claim_the_record_is_backed_up(monkeypatch, capsys):
@@ -2442,3 +2520,149 @@ def test_the_verb_exits_the_CLASS_code_when_the_count_leg_cannot_connect(
     assert "Traceback" not in captured.err
     assert "could not be reached" in captured.err
     assert "s3cr3t-pw" not in captured.err
+
+
+# ── the subprocess and reset bounds (#9601 review cycle 8, P2) ─────────────
+
+
+def test_the_dump_asks_pg_dump_not_to_wait_forever_for_a_table_lock():
+    """`pg_dump`'s per-table ACCESS SHARE queues behind a pending ACCESS EXCLUSIVE.
+
+    Without `--lock-wait-timeout` the client waits indefinitely even though the
+    run has a wall-clock bound; the flag makes the dump fail into the retry class
+    while the lock holder is still the problem, and the sentence says so.
+    """
+    runner = FakeRunner()
+    db = FakeDB(SOURCE_COUNTS)
+    rb.create_record_backup(DSN, MemoryStorage(), run=runner, connect=db.connect, key=KEY)
+    argv = runner.argv_for("pg_dump")
+    assert f"--lock-wait-timeout={rb.RECORD_LOCK_WAIT_TIMEOUT_S}s" in argv
+
+
+def test_a_blocked_dump_is_BOUNDED_and_exits_into_the_retry_class(monkeypatch, capsys):
+    """An unattended run must FAIL, not stall: no artifact, no exit code = no alert.
+
+    Pre-fix `_default_run` was a bare `subprocess.run(argv, **kwargs)`, so a dump
+    blocked behind a long transaction (or a wedged database) waited forever — the
+    module's own claim that "a backup run must not hang on a wedged database" was
+    false on its most likely path. A timeout is the RETRY class and nothing was
+    published, so the sentence must not claim otherwise.
+    """
+
+    class BlockedRunner(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            self.calls.append((list(argv), kwargs))
+            if argv[0].endswith("pg_dump"):
+                raise subprocess.TimeoutExpired(argv, rb.RECORD_SUBPROCESS_TIMEOUT_S)
+            return FakeProc(0, "")
+
+    storage = MemoryStorage()
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN],
+        storage=storage,
+        runner=BlockedRunner(),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "did not finish within" in err
+    assert "NOT backed up" in err
+    assert "Traceback" not in err
+    assert storage.list("") == [], "a timed-out dump must upload nothing"
+
+
+def test_a_blocked_restore_is_BOUNDED_and_reports_the_artifact_as_durable(monkeypatch, capsys):
+    """The same bound on `pg_restore`, and the durability sentence still holds.
+
+    The drill publishes BEFORE it restores, so a restore that times out must exit
+    into the post-publish wording with the artifact's id — not into "nothing was
+    backed up", and not into a traceback.
+    """
+
+    class RestoreBlocked(FakeRunner):
+        def __call__(self, argv, **kwargs):
+            self.calls.append((list(argv), kwargs))
+            if argv[0].endswith("pg_dump"):
+                Path(argv[argv.index("--file") + 1]).write_bytes(self.dump_bytes)
+                return FakeProc(0, "")
+            raise subprocess.TimeoutExpired(argv, rb.RECORD_SUBPROCESS_TIMEOUT_S)
+
+    storage = MemoryStorage()
+    rc = _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN],
+        storage=storage,
+        runner=RestoreBlocked(),
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "did not finish within" in err
+    assert "IS backed up" in err
+    assert "nothing was backed up" not in err
+    published = next(
+        json.loads(storage.download(k))["backup_id"]
+        for k in storage._objects
+        if k.endswith(rb.MANIFEST_OBJECT)
+    )
+    assert published in err
+
+
+def test_the_scratch_reset_bounds_its_TRUNCATE_lock_wait():
+    """`TRUNCATE` needs ACCESS EXCLUSIVE — bounded, a blocked reset is a REFUSAL.
+
+    The reset ran under the 5 s CONNECT bound only, so an open transaction on the
+    scratch target held it forever with the job producing no exit code. Both
+    session bounds must be set BEFORE the truncate, on the same session.
+    """
+    seen: list[tuple[str, object]] = []
+
+    class RecordingCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            seen.append((sql, params))
+            return super().execute(sql, params)
+
+    class RecordingConn(FakeConn):
+        def cursor(self):
+            return RecordingCursor(self)
+
+    scratch = dict.fromkeys(THE_RECORD_TABLES, 0)
+    rb.reset_record_tables(
+        SCRATCH_DSN, source_dsn=DSN, connect=lambda dsn: RecordingConn(dsn, scratch)
+    )
+    lock_at = [i for i, (sql, _p) in enumerate(seen) if "lock_timeout" in sql]
+    statement_at = [i for i, (sql, _p) in enumerate(seen) if "statement_timeout" in sql]
+    truncate_at = [i for i, (sql, _p) in enumerate(seen) if sql.upper().startswith("TRUNCATE")]
+    assert len(lock_at) == 1 and len(statement_at) == 1 and len(truncate_at) == 1
+    assert lock_at[0] < truncate_at[0], "lock_timeout must be set on the session BEFORE the TRUNCATE"
+    assert statement_at[0] < truncate_at[0]
+    assert seen[lock_at[0]][1] == (str(int(rb.RECORD_RESET_TIMEOUT_MS)),)
+
+
+def test_a_scratch_reset_blocked_past_the_bound_is_a_REFUSAL_not_a_traceback():
+    """The bound's failure is a documented class: the leftover evidence stands.
+
+    A lock timeout on the truncate means the reset did NOT happen, so the target
+    still holds the previous drill's rows and the run says "could not empty the
+    scratch record" — a refusal (exit 2), never a traceback out of `main()`.
+    """
+
+    class BlockedCursor(FakeCursor):
+        def execute(self, sql, params=None):
+            if sql.upper().startswith("TRUNCATE"):
+                raise _DriverError(
+                    "canceling statement due to lock timeout", "55P03"
+                )
+            return super().execute(sql, params)
+
+    class BlockedConn(FakeConn):
+        def cursor(self):
+            return BlockedCursor(self)
+
+    with pytest.raises(rb.RecordRestoreRefused) as excinfo:
+        rb.reset_record_tables(
+            SCRATCH_DSN,
+            source_dsn=DSN,
+            connect=lambda dsn: BlockedConn(dsn, dict.fromkeys(THE_RECORD_TABLES, 0)),
+        )
+    assert "could not empty the scratch record" in str(excinfo.value)
+    assert not isinstance(excinfo.value, rb.RecordBackupUnavailable)

@@ -229,6 +229,29 @@ _TRANSACTION_POOLER_PORT = 6543
 RECORD_CONNECT_TIMEOUT_S = 5
 RECORD_STATEMENT_TIMEOUT_MS = 30000
 
+#: Wall-clock bound on each `pg_dump` / `pg_restore` subprocess (#9601 review
+#: cycle 8, P2). Both legs used to be a bare `subprocess.run` with no `timeout=`:
+#: `pg_dump`'s per-table `ACCESS SHARE` request queues behind any pending
+#: `ACCESS EXCLUSIVE`, so an unattended cron run could wait FOREVER — producing no
+#: artifact, no exit code and no alert, which contradicts this module's own
+#: promise that "a backup run must not hang on a wedged database" and is the one
+#: failure mode an operator cannot see. An hour is pathological for this record
+#: (seconds in the measured drill); a run that reaches it is reported as a
+#: RETRY-class failure, not a traceback.
+RECORD_SUBPROCESS_TIMEOUT_S = 3600
+
+#: How long `pg_dump` may wait for a table lock before giving up, in a format
+#: `SET statement_timeout` accepts. Short on purpose: a dump that cannot take its
+#: `ACCESS SHARE` is blocked by a long transaction, and waiting is strictly worse
+#: than failing into the retry class while the bound above is still generous.
+RECORD_LOCK_WAIT_TIMEOUT_S = 30
+
+#: Bound on the scratch TRUNCATE's own lock wait and statement, in ms. The reset
+#: runs `TRUNCATE`, which needs `ACCESS EXCLUSIVE`: without this it queues behind
+#: any open transaction on the scratch target and hangs the job exactly as the
+#: dump leg could.
+RECORD_RESET_TIMEOUT_MS = RECORD_STATEMENT_TIMEOUT_MS
+
 Runner = Callable[..., Any]
 Connector = Callable[[str], Any]
 
@@ -935,6 +958,10 @@ def record_row_counts(
 
 
 def _default_run(argv, **kwargs):  # pragma: no cover - thin subprocess seam
+    # ⛔ BOUNDED (#9601 review cycle 8, P2): an unbounded client call on an
+    # unattended job is a silent stall, not a failure. A caller that needs a
+    # different bound passes `timeout=` and wins.
+    kwargs.setdefault("timeout", RECORD_SUBPROCESS_TIMEOUT_S)
     return subprocess.run(argv, **kwargs)
 
 
@@ -972,6 +999,11 @@ def dump_record(
         "--format=custom",
         "--no-owner",
         "--no-privileges",
+        # ⛔ DO NOT WAIT FOREVER FOR A TABLE LOCK (#9601 review cycle 8, P2): the
+        # per-table ACCESS SHARE request queues behind any pending ACCESS
+        # EXCLUSIVE, and a cron job that blocks there produces no artifact, no
+        # exit code and no alert. Failing into the retry class is visible.
+        f"--lock-wait-timeout={RECORD_LOCK_WAIT_TIMEOUT_S}s",
         "--file",
         str(out),
         *[f"--table=public.{t}" for t in record_tables()],
@@ -980,6 +1012,16 @@ def dump_record(
     # `libpq_env`. `pg_dump` with no positional database uses it.
     try:
         proc = runner(argv, env=_subprocess_env(dsn), capture_output=True, text=True)
+    except subprocess.TimeoutExpired as e:
+        # The shipped runner's wall-clock bound (see
+        # `RECORD_SUBPROCESS_TIMEOUT_S`). Nothing has been uploaded, so this is
+        # the RETRY class — never a traceback out of an unattended job.
+        raise RecordBackupError(
+            f"{pg_dump} did not finish within {RECORD_SUBPROCESS_TIMEOUT_S}s and was "
+            "killed — the record was NOT backed up. The dump was blocked (a long "
+            f"transaction holding a table lock, or a wedged database); it waits at "
+            f"most {RECORD_LOCK_WAIT_TIMEOUT_S}s for a table lock before failing"
+        ) from e
     except OSError as e:
         # #9601 review cycle 1 (P2): a missing client binary is a PERMANENT
         # install fault, not "the backup failed, retry" — the same split
@@ -1075,7 +1117,9 @@ def create_record_backup(
 
     ``counts`` lets the caller supply the measurement the manifest records
     instead of this function taking its own — the DRILL passes the count it read
-    as the artifact was cut (#9601 review cycle 4, P1). Without that, the
+    immediately BEFORE ``pg_dump`` runs (#9601 review cycle 4, P1; the snapshot
+    instant is INSIDE the dump that follows, so this number is an upper bound the
+    drill observed and never a snapshot count — #9795). Without that, the
     manifest's number came from a read taken AFTER the drill's own pre-dump read
     and BEFORE its post-dump re-count, so a record that took rows in and aged
     them out inside the dump window produced a claim no endpoint of the drill's
@@ -1510,6 +1554,16 @@ def restore_record_backup(
         ]
         try:
             proc = runner(argv, env=env, capture_output=True, text=True)
+        except subprocess.TimeoutExpired as e:
+            # ⛔ BOUNDED like the dump leg (#9601 review cycle 8, P2). This one is
+            # post-publish when called from the drill, so `run_restore_drill` wraps
+            # it as `RecordRestoreFailed` and the sentence keeps the durability
+            # discrimination: the artifact IS durable, the restore was not proven.
+            raise RecordBackupError(
+                f"{pg_restore} did not finish within {RECORD_SUBPROCESS_TIMEOUT_S}s and "
+                "was killed — the artifact did NOT restore. The target was blocked "
+                "(a long transaction holding a lock, or a wedged database)"
+            ) from e
         except OSError as e:
             # #9601 review cycle 1 (P2): same class split as the dump leg — an
             # absent `pg_restore` is an install fault, not a restore failure.
@@ -1625,8 +1679,14 @@ def verify_restore(
     ``source_after`` is the post-dump re-count: pass it whenever the source can
     be written to (see :func:`compare_row_counts`), so the drill measures what
     the artifact could legitimately contain rather than what a count taken
-    before the dump saw. ``source_high`` is the drill's own reading taken as the artifact was cut (``cut``),
-    which RAISES the ceiling of the accepted window — it never lowers it.
+    before the dump saw.
+
+    ``source_high`` is the drill's own reading taken immediately BEFORE
+    ``pg_dump`` runs (``cut``), which RAISES the ceiling of the accepted window —
+    it never lowers it. ⚠️ It is NOT a measurement of the artifact's snapshot:
+    the snapshot instant lies INSIDE the dump that follows this read, so a row
+    inserted between them and deleted before ``source_after`` is in the artifact
+    and in no read — that residual is #9795, not a guarantee this bound makes.
     """
     report = compare_row_counts(
         source, restored, source_after=source_after, source_high=source_high
@@ -1701,6 +1761,20 @@ def reset_record_tables(
             # class as the connect it follows.
             raise _connection_failure(dsn, e, role="scratch target") from e
         try:
+            # ⛔ THE TRUNCATE IS BOUNDED TOO (#9601 review cycle 8, P2). `TRUNCATE`
+            # needs `ACCESS EXCLUSIVE`, and this leg used to run it under the 5 s
+            # CONNECT bound only — an open transaction on the scratch target then
+            # held the reset forever, with the job producing no exit code. Both
+            # bounds are session settings, so a blocked reset fails as
+            # `RecordRestoreRefused` (a refusal, not a traceback).
+            cur.execute(
+                "SELECT set_config('statement_timeout', %s, false)",
+                (str(int(RECORD_RESET_TIMEOUT_MS)),),
+            )
+            cur.execute(
+                "SELECT set_config('lock_timeout', %s, false)",
+                (str(int(RECORD_RESET_TIMEOUT_MS)),),
+            )
             cur.execute(sql)
         except RecordBackupError:
             raise
@@ -1758,8 +1832,9 @@ def run_restore_drill(
     and it is not a check either — it IS ``cut``, so any ceiling built from these
     reads contains it by construction (see :func:`compare_row_counts`).
 
-    ⚠️ ``cut`` is NOT "the count as the artifact is cut", and the bound is
-    therefore the largest read taken OUTSIDE the dump — not a measurement of the
+    ⚠️ ``cut`` is read immediately BEFORE ``pg_dump`` starts, so it is NOT a
+    measurement of the artifact's snapshot at all: the bound is
+    the largest read taken OUTSIDE the dump — not a measurement of the
     dump's own snapshot (#9601 review cycle 9, P3). The artifact's snapshot
     instant lies between the ``cut`` read and the ``after`` read, so a row
     inserted in that gap and deleted before ``after`` is in the artifact and in
@@ -1926,8 +2001,21 @@ def run_restore_drill(
         # the column pin and decryption each can REFUSE, and a truncate performed on the way
         # to such a refusal destroys the leftover state of the last RED drill
         # that `reset_record_tables` says it must never destroy (#9601 review,
-        # P2). Loading the verified artifact here leaves NO refusing step between
-        # the reset and `pg_restore`.
+        # P2). Loading the verified artifact here leaves NO step that can refuse
+        # on the ARTIFACT — integrity, manifest shape, the table set, the column
+        # pin or decryption — between the reset and `pg_restore` (#9601 review
+        # cycle 11, P3: the older "no refusing step at all" was too strong, see
+        # the residual named below).
+        #
+        # ⚠️ The residual is the TARGET side, and it is named rather than
+        # claimed away: `restore_record_backup` still re-counts the target and
+        # writes the payload file before `pg_restore` runs, and either can fail
+        # (a scratch session that dies between the truncate and this read, a
+        # target written to in that window, a short payload write). Those
+        # destroy the previous drill's leftover rows exactly as a post-reset
+        # artifact refusal would. The window is one successful connect wide, and
+        # closing it needs the emptiness verdict to move BEFORE the truncate —
+        # not done here.
         manifest, payload = load_verified_artifact(storage, backup_key, key=key)
         if reset_scratch:
             reset_record_tables(scratch_dsn, source_dsn=dsn, connect=connect)
@@ -1969,7 +2057,8 @@ def run_restore_drill(
             str(e), backup_id=manifest["backup_id"], backup_key=backup_key
         ) from e
     # ONE upper bound for the verify window (#9601 review cycle 4, P1): `cut`, the
-    # drill's own reading taken as the artifact was cut, must be passed as ``source_high`` — without it a
+    # drill's own reading taken immediately BEFORE `pg_dump` runs (never the
+    # artifact's snapshot count — #9795), must be passed as ``source_high`` — without it a
     # healthy artifact whose rows landed after `before` and aged out before
     # `after` was verified against `[after, before]` alone and red as a data-loss
     # incident on a run that lost nothing.
