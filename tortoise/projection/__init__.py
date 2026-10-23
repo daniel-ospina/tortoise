@@ -16987,6 +16987,15 @@ class FalkorProjection(
         the bound is a no-op (the same verdict the record projection's own
         endpoint resolution gives an absent endpoint).
 
+        ⚠️ ``declare=False`` leaves the residency marker to the CALLER, and an
+        ABSENT marker reads ``complete`` (``residency.read_declaration``'s
+        documented fail-safe). The wipe above deletes the marker either way, so
+        a caller that passes ``declare=False`` and does not write its own
+        declaration leaves the graph claiming the whole record is hot — which a
+        ``--limit``-bounded run has no right to claim. The FAILURE arm always
+        writes a nothing-proven declaration regardless of this flag (#9604
+        review); only the success arm's marker is the caller's to write.
+
         #9124: declare the REBUILD lane, then project the record. Every write
         this engine issues — ``_wipe_all_nodes``'s ``MATCH (n) DETACH DELETE n``,
         ``_ensure_indexes``'s DDL, ``project_records``'s ``MERGE``/``CREATE``
@@ -17132,8 +17141,15 @@ class FalkorProjection(
             relations_written = self._count_projected(
                 "MATCH ()-[r]->() RETURN count(r)", None)
         except BaseException:
-            if declare:
-                self._declare_materialized(view, (), scope=scope)
+            # ⛔ UNCONDITIONAL, not `if declare` (#9604 review). The wipe above
+            # already deleted the `:Meta` marker, and `residency.read_declaration`
+            # answers `complete` for an ABSENT marker — so bailing out here with
+            # no marker would leave the graph reporting "the whole record is hot"
+            # for a run that just emptied it. `declare=False` is therefore NOT
+            # allowed to mean "leave the marker missing": the caller may own the
+            # marker, but `missing` is a claim, not a blank. Nothing is proven
+            # written on this path, so nothing is claimed hot.
+            self._declare_materialized(view, (), scope=scope)
             raise
 
         declaration = None
