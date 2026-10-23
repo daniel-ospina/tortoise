@@ -77,9 +77,14 @@ def find_operators(proj, op_type: str, source_id: str, target_id: str,
     ).result_set
     if not rows:
         return []
+    # ONE pattern, no re-bind: filtering `op` and then matching `op` again in a
+    # following clause is the #6976 shape — on the canonical 6.0.1 instance the
+    # predicate is dropped and the count reads OTHER points' edges
+    # (`tests/test_relationships_bounded.py`). `r.idx > 0` is null for the
+    # mitigation's `mitigated_by` edges, so those cannot inflate the count.
     counts = dict(proj.g.query(
-        "MATCH (op:Point) WHERE op.id IN $ids MATCH (op)-[r]->() "
-        "WHERE r.idx > 0 RETURN op.id, count(r)",
+        "MATCH (op:Point)-[r]->() "
+        "WHERE op.id IN $ids AND r.idx > 0 RETURN op.id, count(r)",
         params={"ids": [row[0] for row in rows]},
     ).result_set)
     return [{"id": row[0], "status": row[1] or "live",
@@ -221,24 +226,31 @@ def resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
         note = (f"existing operator(s) {multi} on this triple also claim other "
                 "pairs — not reused (it would widen this decision's claim); a "
                 "single-pair bridge is created")
-    elif label:
-        # The label is part of the identity, so a labelled write does not reuse
-        # an unlabelled bridge — two predicates over one triple are two claims.
-        # An EXISTING decision file whose edges carried a label the caller used
-        # to be silently dropped (the CLI ignored `label` before #9631) would
-        # otherwise file an unreported twin on its first post-upgrade run, so
-        # say that a bridge is there under another label instead.
+    else:
+        # The label is part of the identity, so the write does not reuse a
+        # bridge filed under a DIFFERENT label — two predicates over one triple
+        # are two claims — and the mirror reading is the same asymmetry: an
+        # UNLABELLED write does not reuse a labelled bridge. Either way a second
+        # claim is created, so say what is already there instead of filing an
+        # unreported twin on the first post-upgrade run of an existing decision
+        # file.
         others = [row for row in find_operators(
-            proj, op_type, source_id, target_id, None, any_label=True)
-            if row["label"] != label]
+            proj, op_type, source_id, target_id, label, any_label=True)
+            if row["label"] != (label or "")]
         if others:
             named = ", ".join(
                 f'{row["id"]} ({row["label"] or "unlabelled"})'
                 for row in others)
-            note = (f"existing operator(s) {named} on this triple carry a "
-                    "DIFFERENT label — not reused (the label is part of the "
-                    "operator identity, so this is a second claim); a labelled "
-                    "bridge is created")
+            if label:
+                note = (f"existing operator(s) {named} on this triple carry a "
+                        "DIFFERENT label — not reused (the label is part of "
+                        "the operator identity, so this is a second claim); "
+                        "a labelled bridge is created")
+            else:
+                note = (f"existing operator(s) {named} on this triple carry a "
+                        "LABEL — not reused (the label is part of the operator "
+                        "identity, so this is a second claim); an UNLABELLED "
+                        "bridge is created")
     op = sdk.create_operator(op_type, source_id, [target_id], label=label,
                              **(create_kwargs or {}))
     cache[key] = op["id"]

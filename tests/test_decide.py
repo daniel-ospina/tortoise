@@ -236,9 +236,9 @@ class TestDecideWiring:
     def test_relevance_edge_never_damps_a_shared_bridge(self, sdk, capsys):
         """A bridge with several targets also claims OTHER pairs, so damping it
         would silently weaken claims this edge never named — the hazard
-        ``_resolve_or_create_operator`` refuses to create for the ``edges`` arm
-        (decide.py ``targets > 1``). The relevance arm must apply the same rule
-        and SAY it declined (#6671 review).
+        ``tortoise.decide_wiring.resolve_or_create_operator`` refuses to create
+        for the ``edges`` arm (``targets > 1``). The relevance arm must apply
+        the same rule and SAY it declined (#6671 review).
         """
         decide = _load_decide_script()
         crit = sdk.create_point("criterion", f"Shared criterion {_mk()}")
@@ -1596,3 +1596,36 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         assert "DIFFERENT label" in out, (
             "a second claim was filed silently — the caller cannot tell the "
             f"existing bridge was not reused: {out}")
+
+    def test_unlabelled_edge_over_a_labelled_bridge_is_named_not_silently_twinned(
+            self, sdk, capsys):
+        """The MIRROR of the labelled case, and the one nothing covered (#9631
+        review): `label` is part of the operator identity, so an UNLABELLED
+        `edges` entry does not match a bridge filed under a label — `matches` is
+        empty and a second claim is created. That is correct, but it used to be
+        silent: the note explaining it was gated on `elif label:`, so a decision
+        file that drops an existing label (or a triple another writer already
+        claimed with a Layer-3 predicate) grew an unreported twin. There is no
+        edge-delete API, so the silence is the whole defect."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
+
+        data = {
+            "context": "issue-9631-unlabelled-note",
+            "options": {}, "criteria": {}, "findings": {},
+            # No label: the file drops the one the existing bridge carries.
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census.get("IMPL") == 2, (
+            "two claims over one triple collapsed or duplicated: "
+            f"{census}")
+        out = capsys.readouterr().out
+        assert "LABEL" in out and "UNLABELLED" in out, (
+            "the twin was filed silently — the caller cannot tell the existing "
+            f"labelled bridge was not reused: {out}")
