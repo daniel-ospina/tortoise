@@ -605,9 +605,8 @@ def _load_decide_script():
     return mod
 
 
-def _operator_census(sdk) -> dict[str, int]:
-    """Operator + mitigation counts in the fixture's graph, by op_type."""
-    proj = sdk._get_proj()
+def _projection_census(proj) -> dict[str, int]:
+    """Operator + mitigation counts in an OPEN projection, by op_type."""
     rows = proj.g.query(
         "MATCH (op:Point) WHERE op.is_operator = true "
         "RETURN op.op_type, count(op)").result_set
@@ -616,6 +615,11 @@ def _operator_census(sdk) -> dict[str, int]:
         "MATCH (op:Point)-[r:mitigated_by]->(m) RETURN count(r)").result_set
     census["_mitigations"] = int(mit[0][0]) if mit else 0
     return census
+
+
+def _operator_census(sdk) -> dict[str, int]:
+    """Operator + mitigation counts in the fixture's graph, by op_type."""
+    return _projection_census(sdk._get_proj())
 
 
 class TestIssue6671DecideRerunIsIdempotent:
@@ -1133,3 +1137,167 @@ class TestIssue6671ReviewGaps:
         assert "update_point(id, status='live')" not in out, (
             "a dead-end promotion remedy was offered for an outdated bridge: "
             + out)
+
+
+class TestIssue9631CliDecideRerunIsIdempotent:
+    """#9631: `tortoise decide` (`tortoise/__main__.py::_cmd_decide`) is the
+    GENERIC CLI path for the wiring `graph-scripts/decide.py` also implements —
+    and it kept its own per-run-only `created_ops` cache after #6671 fixed the
+    script. Re-running a decision through it therefore duplicated every operator
+    and split the mitigations across the copies. Measured on the 2-edge fixture
+    below (before the fix): 3 → 6 operators, 1 → 2 mitigations, and opt:a
+    0.6592 → 0.6756 — visible in the printed 4 dp table.
+
+    Both entry points now call the ONE writer in `tortoise/decide_wiring.py`;
+    these tests drive the real CLI over an isolated embedded store, so they fail
+    if either path re-grows its own lookup.
+    """
+
+    def _decision(self):
+        return {
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {"finding:1": "Finding 1"},
+            "edges": [["crit:1", "IMPL", "opt:a"], ["finding:1", "NAND", "opt:b"]],
+            "truth_edges": [{"source": "finding:1", "op_type": "NAND",
+                             "target": "opt:a"}],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+    def _db(self, tmp_path, monkeypatch) -> str:
+        """An isolated embedded store for the CLI, EP off the calibration gate."""
+        monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
+        return str(tmp_path / f"cli9631_{_mk()}.db")
+
+    def _run_cli(self, db_path: str, data: dict) -> int:
+        """One real `tortoise decide` run against ``db_path``."""
+        import json
+        from unittest import mock
+
+        from tortoise import __main__ as m
+
+        path = f"{db_path}.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return m._cmd_decide(mock.Mock(
+            input=path, options=None, criteria=None, findings=None, edges=None,
+            db=db_path, direction=None))
+
+    def _census(self, db_path: str) -> dict[str, int]:
+        from tortoise.__main__ import _projection_for
+
+        proj = _projection_for(db_path)
+        try:
+            return _projection_census(proj)
+        finally:
+            proj.close()
+
+    def _printed_ranking(self, capsys) -> dict[str, float]:
+        """The option table the command printed, at its own 4 dp precision."""
+        import re
+
+        out = capsys.readouterr().out
+        return {name: float(value) for name, value in
+                re.findall(r"^\s+(opt:\S+)\s+([0-9.]+)\s", out,
+                           flags=re.MULTILINE)}
+
+    def test_rerun_does_not_duplicate_operators(self, tmp_path, monkeypatch):
+        db = self._db(tmp_path, monkeypatch)
+        data = self._decision()
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        # 2 edges + 1 truth edge, all distinct triples: one IMPL, two NAND.
+        assert first.get("IMPL") == 1, first
+        assert first.get("NAND") == 2, first
+
+        assert self._run_cli(db, data) == 0
+        second = self._census(db)
+
+        assert second == first, (
+            "a re-run of `tortoise decide` grew the edge set — EP now counts "
+            f"every relation twice (before={first}, after={second})")
+
+    def test_rerun_leaves_rankings_unchanged(self, tmp_path, monkeypatch, capsys):
+        db = self._db(tmp_path, monkeypatch)
+        data = self._decision()
+
+        assert self._run_cli(db, data) == 0
+        run1 = self._printed_ranking(capsys)
+        # A vacuous pass: an empty table compares equal to an empty table. The
+        # pre-#9631 defect kept printing a table, so "no table" would let the
+        # invariance assertion below pass while the ranking had vanished.
+        assert run1, "the first run printed no ranking — nothing to compare"
+
+        assert self._run_cli(db, data) == 0
+        run2 = self._printed_ranking(capsys)
+
+        # Re-applying the mitigation moves EP a hair once, then the graph is a
+        # fixed point (measured: run2 == run3 == run4 exactly, run1 → run2 moved
+        # opt:a by 1.6e-5). The defect this pins is three orders of magnitude
+        # larger — the duplicated operators moved opt:a 0.6592 → 0.6756 — so the
+        # bound below separates them without being flaky at the 4 dp the table
+        # prints.
+        assert run2.keys() == run1.keys(), (
+            f"the re-run ranked a different option set: {run1} -> {run2}")
+        for name, value in run1.items():
+            assert abs(run2[name] - value) <= 1e-4, (
+                "the ranking depends on how many times the command was run: "
+                f"run1={run1} run2={run2}")
+
+    def test_rerun_does_not_duplicate_part_whole_operators(self, tmp_path,
+                                                          monkeypatch):
+        """`composedOf` mirrors its bridge as `hasPart`. The lookup is
+        edge-type agnostic, so the CLI must reuse those too (the gap a reviewer
+        found in the script fix, now shared)."""
+        db = self._db(tmp_path, monkeypatch)
+        data = {
+            "options": {"opt:a": "Option A"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [["crit:1", "composedOf", "opt:a"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        assert self._run_cli(db, data) == 0
+        second = self._census(db)
+
+        assert first.get("composedOf") == 1, first
+        assert second == first, f"part/whole edge duplicated on re-run: {second}"
+
+    def test_rerun_does_not_duplicate_non_point_endpoints(self, tmp_path,
+                                                          monkeypatch):
+        """Operator endpoints may be :Point/:Subject/:Object/:Event (#7902). A
+        lookup anchored on `:Point` misses a Subject endpoint and duplicates the
+        very edge it guards — the second gap the reviewer found in the script
+        fix, which the CLI would otherwise re-grow."""
+        from tortoise.__main__ import _projection_for
+        from tortoise.sdk import TortoiseSDK
+
+        db = self._db(tmp_path, monkeypatch)
+        writer = TortoiseSDK()
+        writer._proj = _projection_for(db)
+        try:
+            subject = writer.create_subject(f"Subject {_mk()}")
+        finally:
+            writer._proj.close()
+
+        data = {
+            # The Subject end is a raw graph id (the CLI passes unknown names
+            # through); the option is declared so the run ranks something.
+            "options": {"opt:a": "Option A"}, "criteria": {}, "findings": {},
+            "edges": [[subject["id"], "IMPL", "opt:a"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        assert self._run_cli(db, data) == 0
+        second = self._census(db)
+
+        assert first.get("IMPL") == 1, first
+        assert second == first, f"Subject→Point edge duplicated on re-run: {second}"
