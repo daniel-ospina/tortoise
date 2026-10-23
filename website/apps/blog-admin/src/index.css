@@ -26,7 +26,7 @@
 
   /* Tortoise mono accents (site tokens) */
   .font-mono {
-    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+    font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
   }
 
   /* Thin dark scrollbars (editor card) */
@@ -110,7 +110,7 @@
   margin: 0.75em 0;
 }
 .ProseMirror pre code {
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
   font-size: 12.5px;
   color: #cbd5e1;
   background: none;
@@ -118,7 +118,7 @@
 }
 
 .ProseMirror code:not(pre code) {
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
   font-size: 0.85em;
   background: rgba(255, 255, 255, 0.08);
   padding: 1px 5px;

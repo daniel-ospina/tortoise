@@ -430,6 +430,12 @@
         "test-isolation"
       ]
     ],
+    "test-record-postgres": [
+      [
+        "python-ci.yml",
+        "test-record-postgres"
+      ]
+    ],
     "test-slow (${{ matrix.half }})": [
       [
         "python-ci.yml",
@@ -495,7 +501,7 @@
       ]
     ]
   },
-  "gate_digest": "07a0c04bcb2f086b643730bc7426638816e0aa148f64e92082032ee4944854d3",
+  "gate_digest": "3c0ecd04ba161a18caf50dc15ce89a2f3ff4f03188fd8878fb88f6059f8dbde0",
   "live_checked_at": "2026-09-29T02:35:26Z",
   "live_observed_contexts": [
     "ai-review-gate",
@@ -519,5 +525,5 @@
     "test-isolation"
   ],
   "settings_home_consistent": false,
-  "verified_at": "2026-10-22T16:33:30Z"
+  "verified_at": "2026-10-23T18:03:02Z"
 }

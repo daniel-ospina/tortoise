@@ -35,12 +35,17 @@ import logging
 import os
 import re
 import stat
+import unicodedata
 from collections.abc import Callable
 from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
 
 from .domain_loader import known_kinds, register_kind
+# #9572: the "nothing was named" predicate for the identity doors, ONE home
+# shared with the hosted REST/commit doors and the eval lane (stdlib-only leaf,
+# no cycle — see the module docstring for why it is not a private in sdk.py).
+from .kind_fallbacks import named_kind
 from .numeric_domain import (  # #7174: the numeric domain lives in ONE place
     reject_unrepresentable_number as _reject_unrepresentable_number,
 )
@@ -57,6 +62,12 @@ from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import entity_name_id as _entity_name_id
 from .ids import ulid
+# #2817: the S5 money derivation (prose → typed value). Module scope because the
+# capture seam's `warn_on` narrowing below is derived from the CLOSED
+# `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
+# instead of silently muting a warning. `value_normalizer` imports only
+# `tortoise.money` (no cycle; `money` is already loaded via the projection).
+from .value_normalizer import DROP_REASONS, normalize_money_props
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     EMBEDDING_PROPERTY,
     clear_embedding,
@@ -106,6 +117,9 @@ from . import monitoring
 # no tally is armed. Imported at module level because it is stdlib-only at
 # import (its ``metering`` dependency is deferred), so no cycle is introduced.
 from .retrieval_metering import metered_query as _metered_query
+# #2351 (epic #2349 E-derived): the asserted-vs-derived claim class — the ONE
+# home for the vocabulary, the override guard and the read contract.
+from . import claim_class as _claim_class
 from . import file_indexer  # noqa: F401 — binds the classifier/identity module (§4.4); sourceKind registration is registry-owned (source_credibility.SOURCE_KIND_DEFAULTS)
 from .projection import FalkorProjection
 # #7951 §17.1: the single-writer scope the live doors open around their fold.
@@ -400,16 +414,23 @@ _CALIBRATION_GATED_LABELS = ("Point",)
 #:
 #: ⚠️ DECLARED BOUNDARY: Unicode spaces beyond NBSP (em space, ideographic
 #: space, ZWSP, BOM…) are NOT in this family. A ``pointKind`` padded with one of
-#: those still escapes the kind normalisation while EP consumes the node and
-#: stamps it — measured, and pre-existing (``origin/main`` compared the raw kind,
-#: so every spelling escaped). Reachability is NOT "hand-written only": the write
-#: door stores a bare kind verbatim with a warning, so ``create_point`` mints the
-#: shape; every such node IS demandable and clearable, so the gap is one of
-#: coverage, not of an unsatisfiable demand. Each further code point costs one
-#: ``replace()`` on every scanned row (measured: seven characters ≈ +5.7 ms at
-#: 2,000 Points; the full Unicode list timed out on an eight-node fixture), so
-#: the boundary is recorded here and filed (#9287) rather than left implicit or
-#: paid for on the hot path.
+#: those escapes the kind normalisation while EP consumes the node and stamps it
+#: — measured, and pre-existing (``origin/main`` compared the raw kind, so every
+#: spelling escaped). Each further code point costs one ``replace()`` on every
+#: scanned row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full
+#: Unicode list timed out on an eight-node fixture), so the boundary stays
+#: recorded here rather than paid for on the hot path.
+#:
+#: #9287 closed the REACHABLE half of that boundary at the WRITE DOOR instead:
+#: ``create_point``/``update_point`` now REFUSE a ``pointKind`` carrying any
+#: non-identifier character (``_refuse_invisible_kind`` below), so the SDK can
+#: no longer mint a kind this filter cannot classify. Reachability of the
+#: remaining spellings is therefore an IMPORTED / hand-written row (a raw Cypher
+#: ``SET n.pointKind = …``), which is exactly what this filter is for: such a
+#: node IS demandable and clearable, so the gap is one of coverage, not of an
+#: unsatisfiable demand. The two halves are documented together on purpose —
+#: widening this family without touching the door (or vice versa) re-opens
+#: #9287, where the demand and the door disagreed on what a kind may be.
 #: For IDS: exactly the ASCII whitespace class — measured to be the set an id
 #: equality cannot resolve. NBSP is deliberately NOT here: ``create_point``
 #: ACCEPTS an NBSP-padded id, the labelled equality resolves it and
@@ -454,6 +475,238 @@ def _strip_whitespace(expr: str) -> str:
     for ch in _KIND_WHITESPACE_CHARS:
         out = f"replace({out}, {_cypher_ws_literal(ch)}, '')"
     return out
+
+
+#: #9287: what a ``pointKind`` MAY contain — the WRITE-DOOR half of the
+#: boundary ``_KIND_WHITESPACE_CHARS`` declares above.
+#:
+#: A kind is an IDENTIFIER, not prose. The rule is stated POSITIVELY and over
+#: PROPERTIES, not examples: a character is admissible when it is PRINTABLE
+#: (``str.isprintable`` is False across ``Cc``/``Cf``/``Cs``/``Co``/``Cn`` and
+#: the ``Z*`` separators — the whole invisible half of Unicode, where every
+#: escape in this issue lived) and is not one of the measured NON-RENDERING code
+#: points below (Unicode files those under printable categories, so nothing
+#: decidable reaches them). The kind is probed in NFC form, so a decomposed
+#: accent (``'cafe\\u0301'``) is the same identifier as its composed spelling;
+#: the STORED value is never rewritten.
+#:
+#: Why properties and not a blacklist: this fix was opened TWICE on enumerated
+#: rules. A category blacklist missed ``U+3164`` HANGUL FILLER (``Lo``, renders
+#: blank); the enumerated fix for that missed ``U+E0100``..``U+E01EF``
+#: (variation selectors-17+) and ``U+1D159`` (MUSICAL SYMBOL NULL NOTEHEAD,
+#: ``So``) — each measured accepted-and-gate-escaping on the head it was found on
+#: (#9591 review cycles 2 and 3).
+#:
+#: ⚠️ THE RESIDUAL, declared rather than implied: a printable code point whose
+#: glyph renders nothing (or renders a no-op) cannot be recognised by any Unicode
+#: property — "does this draw ink" is not machine-decidable. So that class is an
+#: explicit MEASURED list below, and the tests pin both halves: the generative
+#: `test_the_door_accepts_no_invisible_code_point` walks all 0x110000 code points
+#: (accepted ⇒ printable, at BOTH an edge and an interior position) and asserts
+#: every listed code point is refused, so the next member of the class cannot
+#: slip in silently.
+#:
+#: The other direction is pinned too, and it is the one that matters for the
+#: calibration gate: the read path's normalisation family must be a SUBSET of
+#: what this door refuses — `test_the_door_refuses_every_character_the_gate_strips`.
+#: (The reverse is not true and must not be claimed: the door accepts 'a', '-'
+#: and ':', which the read path does not strip and has no reason to.)
+#:
+#: Why the READ path stays a small enumeration and the DOOR carries the rule:
+#: each code point the read path strips costs one ``replace()`` on every scanned
+#: row (measured: seven characters ≈ +5.7 ms at 2,000 Points; the full Unicode
+#: space list timed out the gate on an eight-node fixture), while the door pays
+#: it once per write.
+_KIND_NON_RENDERING_CHARS = frozenset({
+    "\u115f",  # HANGUL CHOSEONG FILLER (Lo) — renders blank
+    "\u1160",  # HANGUL JUNGSEONG FILLER (Lo)
+    "\u3164",  # HANGUL FILLER (Lo)
+    "\uffa0",  # HALFWIDTH HANGUL FILLER (Lo)
+    "\u2800",  # BRAILLE PATTERN BLANK (So)
+    "\U0001d159",  # MUSICAL SYMBOL NULL NOTEHEAD (So)
+    "\u034f",  # COMBINING GRAPHEME JOINER (Mn) — a visible no-op
+    "\u17b4",  # KHMER VOWEL INHERENT AQ (Mn)
+    "\u17b5",  # KHMER VOWEL INHERENT AA (Mn)
+}) | frozenset(chr(cp) for cp in range(0x180b, 0x1810)) \
+  | frozenset(chr(cp) for cp in range(0xfe00, 0xfe10)) \
+  | frozenset(chr(cp) for cp in range(0xe0100, 0xe01f0))
+
+
+def _kind_non_identifier_char(kind: str, i: int) -> bool:
+    """True when ``kind[i]`` cannot be part of an identifier.
+
+    The POSITIVE rule (see ``_KIND_NON_RENDERING_CHARS``): a character is part
+    of an identifier when it is PRINTABLE and does not render blank, or when it
+    is a plain INTERIOR space. Everything else — separators, controls, format
+    marks, unassigned and non-rendering code points — is refused.
+
+    ONE predicate for both halves of this module's kind rule: the refusal
+    (``_kind_invisible_char``) and the suggested fix (``_kind_suggestion``) read
+    it, so the value a refusal offers is by construction a value the door
+    accepts — a suggestion the caller cannot use is the loop #9591's first
+    review found (``strip()`` cannot remove a ``Cf`` mark, and ``repr()``
+    escaping hands back a DIFFERENT string).
+    """
+    ch = kind[i]
+    if ch == " ":
+        # A plain INTERIOR space is a legitimate separator in an
+        # open-vocabulary kind ('technical debt') and the gate strips it
+        # wherever it occurs, so it can never be an escape. A LEADING/trailing
+        # one is the padding this door exists to refuse.
+        return not (0 < i < len(kind) - 1)
+    if ch in _KIND_NON_RENDERING_CHARS:
+        return True
+    return not ch.isprintable()
+
+
+def _kind_invisible_char(kind: str) -> str | None:
+    """The first character of ``kind`` that cannot be part of an identifier.
+
+    ``' '`` is exempted when it is INSIDE the string: a plain interior space is
+    a legitimate separator in an open-vocabulary kind (``'technical debt'``),
+    and it can never make a node escape the gate's classification — the read
+    path strips it wherever it occurs, so ``'state ment'`` is already demanded
+    as the ``statement`` it is. Every character the POSITIVE rule above does not
+    admit (see ``_KIND_NON_RENDERING_CHARS``)
+    is refused in any position, including the interior: ``'state\\u2003ment'`` is
+    either a separator or padding, and guessing is how a kind silently becomes
+    a different kind.
+    """
+    # NFC probe: a DECOMPOSED spelling ('cafe' + U+0301) is the same
+    # identifier as its composed form, and refusing it would make the door
+    # depend on which normalisation form the caller happened to produce. The
+    # stored value is untouched — normalising what we WRITE would move the dedup
+    # identity `(pointKind, content_hash)` behind the caller's back, which is why
+    # this refuses rather than rewrites in the first place.
+    probe = unicodedata.normalize("NFC", kind)
+    for i in range(len(probe)):
+        if _kind_non_identifier_char(probe, i):
+            return probe[i]
+    return None
+
+
+def _kind_suggestion(kind: str) -> str:
+    """``kind`` with its non-identifier characters removed, for the message.
+
+    One home with ``_kind_invisible_char``: the same categories and the same
+    interior-space exemption, so the value a refusal SUGGESTS is a value the
+    door accepts — a suggestion the caller cannot use is the loop #9287's
+    review found (``strip()`` cannot remove a ``Cf`` mark).
+
+    An interior SPACE SEPARATOR (``Zs``/``Zl``/``Zp`` — em space, ideographic
+    space, NBSP…) is folded to ONE ASCII space instead of being deleted (#9591
+    review cycle 7, P3): deleting it joins the words around it, so
+    ``'technical\\u2003debt'`` was suggested back as ``'technicaldebt'`` — a
+    silently DIFFERENT identifier, which is the hazard the refusal exists to
+    avoid. At an EDGE the separator is padding (the door refuses it there), so
+    it is dropped; ``Cf`` marks (ZWSP, BOM, soft hyphen) are joiners/no-ops and
+    are still deleted — ``'state\\u200bment'`` really is ``'statement'``.
+    """
+    out: list[str] = []
+    for i, ch in enumerate(kind):
+        if not _kind_non_identifier_char(kind, i):
+            out.append(ch)
+            continue
+        if (0 < i < len(kind) - 1
+                and unicodedata.category(ch) in ("Zs", "Zl", "Zp")
+                and out and out[-1] != " "):
+            out.append(" ")
+    return "".join(out).strip()
+
+
+def _clean_model_kind(value, *, default: str = "statement",
+                      door: str = "extractor") -> str:
+    """#9287: canonicalise a kind an LLM produced, BEFORE a write door sees it.
+
+    Model output is UNTRUSTED DATA, not an authored spelling, and the two write
+    seams it reaches are opposites: the SDK doors / the journal seam REFUSE an
+    invisible-character kind (the durable guarantee), while a capture must not
+    abort because a model emitted a stray em-space or zero-width mark inside
+    its JSON. So the producer keeps its own output in contract here — cleaned
+    once, with a WARNING naming the value — instead of either storing the
+    padulation (which the calibration gate cannot classify while EP consumes
+    the node) or failing the whole extraction.
+
+    An empty/blank kind falls back to ``default`` for the same reason: nothing
+    a model returns should be able to mint a kind the gate cannot demand
+    (#9592 is the gate-side half of that).
+    """
+    kind = "" if value is None else str(value)
+    if kind and _kind_invisible_char(kind) is None:
+        return kind
+    fixed = _kind_suggestion(kind) or default
+    _logger.warning(
+        "%s: model returned pointKind %r — using %r (#9287)",
+        door, kind, fixed,
+    )
+    return fixed
+
+
+def _refuse_invisible_kind(prop: str, value, *, door: str) -> None:
+    """#9287: refuse a kind the calibration gate cannot classify.
+
+    The gate demands a prior for every node EP consumes whose ``pointKind``
+    normalises to an evidence kind; EP itself reads NO kind. So a kind the gate
+    cannot classify is a node that is consumed and stamped while the gate stays
+    silent — measured at ``HEAD``: ``create_point('\\u2003statement\\u2003',
+    'x')`` was stored verbatim, ``_uncalibrated_ep_participants(None)`` answered
+    ``[]``, and a ``require_calibration=True`` run stamped it
+    (``ep_alpha 1.287``/``ep_beta 1.242`` — the ``Beta(1, 1)``-as-calibrated
+    class #7478 exists to prevent).
+
+    Refusing is the repair the issue asks for (option 1) and it is the door's
+    own posture for a value its post-write check cannot resolve: it NAMES the
+    argument and the offending code point, so the author fixes the spelling,
+    instead of a silent rewrite of what they asked for (``pointKind`` is part of
+    the dedup identity ``(pointKind, content_hash)``, so a silent canonical
+    form would also move the identity behind the caller's back).
+
+    Non-string kinds are NOT examined: ``create_point(42, …)`` is out of
+    contract, writable on ``origin/main``, and the gate's ``toLower(typeof(…))``
+    guard already keeps it out of the universe (#9063); refusing it here would
+    be a different change with its own blast radius.
+    """
+    if not isinstance(value, str):
+        return
+    bad = _kind_invisible_char(value)
+    if bad is None:
+        return
+    # The suggestion is derived from the refusal itself, never ``value.strip()``:
+    # ``strip()`` removes WHITESPACE only, so for the ``Cf`` half of the family
+    # (ZWSP, BOM, soft hyphen, ZWNJ/ZWJ) it returns the value UNCHANGED and a
+    # caller who follows the message verbatim loops on the identical error
+    # (measured: ``'\ufeffstatement'.strip() == '\ufeffstatement'``).
+    suggestion = _kind_suggestion(value)
+    # ⛔ NOT ``{suggestion!r}``: ``repr`` ESCAPES a ``Cf`` character into its
+    # six-character backslash form, so the message would hand the caller a
+    # DIFFERENT string (`'\\ufeffstatement'` — literally backslash-u-…) that the
+    # door happily accepts and stores under a name they never had. The suggestion
+    # is interpolated raw, inside quotes, so it is the value itself.
+    tail = (
+        f"Pass the kind without the {bad!r} — e.g. '{suggestion}'."
+        if suggestion
+        else "The kind is only invisible characters — supply a name."
+    )
+    # ⛔ STATE THE REASON THAT IS TRUE FOR THIS CHARACTER (#9591 review cycle 4):
+    # the read path HAPPENS to normalise the ASCII/NBSP family, so claiming "the
+    # gate would not demand a prior" for those is false — measured: an imported
+    # row with `' statement'` IS demanded (pinned by
+    # `test_out_of_contract_kind_shapes_do_not_abort_the_gate`). The door is the
+    # guarantee either way; only the out-of-family half is the measured fail-open.
+    reason = (
+        "the read path's own whitespace normalisation happens to fold this "
+        "spelling today, but the door — not a per-row scan — is the guarantee, "
+        "and a kind is an identifier"
+        if bad in _KIND_WHITESPACE_CHARS
+        else "the calibration gate classifies kinds after its own normalisation, "
+             "so this spelling is a DIFFERENT kind: the gate would not demand a "
+             "prior for it while EP still consumed and stamped the node"
+    )
+    raise ValueError(
+        f"{door}: {prop} must be an identifier, but {value!r} carries "
+        f"{bad!r} (U+{ord(bad):04X}). A kind is matched by exact membership, "
+        f"so {reason} (#9287). {tail}"
+    )
 
 
 #: id types an id-equality can resolve. A hand-written array id is not one of
@@ -982,6 +1235,58 @@ _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
                               # E4 (#5007): the verbatim span pointer
                               "span_start", "span_end")
 _CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
+
+#: #2817 route (2) — the drop reasons the CAPTURE WRITE SEAM does NOT report.
+#: This partition is the one recorded on #2817 (comment `6359826543`):
+#: `not_an_iso4217_code` is the noisy one in business prose (`"ISO 9001"`,
+#: `"SOC 2"`, `"Q3 target 30 KPI"`) and `no_candidate` fires on every sentence
+#: with no number at all. Every other reason means "a number was here and it
+#: was NOT safely typed" and stays reported — including `no_currency_anchor`.
+#: `refused_by_layer1` is reported too: a value the store cannot hold is exactly
+#: the abstention a reader must see (the #2817 review's over-range amount).
+#:
+#: ⚠️ Measured residual (2026-10-23): the vocabulary conflates a NON-money bare
+#: number (`"Sprint 14 closed on time"` → `no_currency_anchor`) with a
+#: money-shaped amount in an unsupported currency (`"800 BTC"` →
+#: `not_an_iso4217_code`, so silent here). That partition is a decision's, not
+#: this lane's — a reason-level split is the fix, filed against #2817.
+_CAPTURE_MONEY_WARN_SILENT: frozenset[str] = frozenset({
+    "no_candidate", "not_an_iso4217_code"})
+# Import-time truth of the comment above: a RENAMED reason in the silent set
+# must fail here, never silently re-partition the warning policy. An explicit
+# `raise`, not an `assert`: `python -O` strips asserts, and a guard a runtime
+# flag can delete is not a guard (the shape `extractor_v2.py:5155` states).
+if not _CAPTURE_MONEY_WARN_SILENT <= DROP_REASONS:
+    raise RuntimeError(
+        "capture money warn policy names a reason outside DROP_REASONS: "
+        f"{sorted(_CAPTURE_MONEY_WARN_SILENT - DROP_REASONS)!r}")
+_CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - _CAPTURE_MONEY_WARN_SILENT
+
+#: #2817 (review F1) — the capture seam reports its money abstentions ONCE per
+#: capture, aggregated by reason, never one line per point. The bound is
+#: structural: one entry per call, with at most one bucket per closed-set
+#: reason (``DROP_REASONS``), so no point count can lengthen the receipt. This
+#: is the same shape as the #5654 bounded supersession channel in the same
+#: function — the difference is that this channel needs no withheld count,
+#: because the summary reports the TRUE total it counts.
+_CAPTURE_MONEY_DROP_SUMMARY_PREFIX = (
+    "value-normalizer: {total} point(s) carried an amount that was not "
+    "typed — ")
+
+
+def _capture_money_drop_summary(drops: dict[str, int]) -> str:
+    """ONE bounded receipt entry for a capture's money abstentions.
+
+    Deterministic (reasons sorted) so two captures of byte-identical content
+    produce a byte-identical receipt — including a create and a dedup hit,
+    which is what #2817 review F1's create/dedup asymmetry was about.
+    """
+    reasons = ", ".join(f"{reason} \u00d7{count}"
+                        for reason, count in sorted(drops.items()))
+    return (_CAPTURE_MONEY_DROP_SUMMARY_PREFIX.format(
+                total=sum(drops.values()))
+            + reasons
+            + " (prose only — each value is a drop, never a guess)")
 
 
 def _capture_passthrough_read_fields() -> str:
@@ -3319,6 +3624,77 @@ def _drop_reserved_emit_props(props: dict) -> list[str]:
         props.pop(_k)
     return _dropped
 
+
+def _entity_door_props(kind_key: str, name: str, props: dict) -> dict:
+    """The entity door's property bag, with an UNSENT discriminator left out.
+
+    #9572: ``subjectKind`` / ``objectKind`` is the user-authored discriminator
+    and the fold writes it ON MATCH as ``coalesce($k, <stored>)`` — which is
+    correct ONLY if "the caller named no kind" reaches the fold as **absent**.
+    The door used to fabricate ``"other"`` (``props.pop(kind_key, "other")`` /
+    an ``= "other"`` alias default), so "not supplied" and "supplied as the
+    default" were the same string: a bare re-create silently reset a stored
+    ``team`` / ``capability`` to ``other``, and the journal record carried the
+    fabricated value, so replay reproduced the clobber.
+
+    The ``'other'`` default belongs to the fold's ON CREATE arm (the Object arm
+    already worked this way — ``entities.py::_upsert_object`` reads
+    ``ev.get("object_kind")`` with a NULL coalesce). Deciding it HERE would
+    re-create the defect: nothing downstream can tell a fabricated default from
+    a supplied value.
+
+    ``props`` is returned as a NEW dict in the door's established key order
+    (name, kind?, status, *caller props*) so a caller-supplied ``status`` still
+    overrides the ``"live"`` seed, exactly as before.
+    #9572 review P2: BLANK is not a kind either. ``""`` / ``"   "`` is not
+    ``None``, so it survived the ``is not None`` line and reached the fold as a
+    real value — ``coalesce("", stored)`` returns ``""``, so a blank re-create
+    still destroyed a stored ``team`` and a blank FIRST create stored a
+    discriminator no pack declares. The blank rule is the leaf module's
+    ``named_kind``, shared with the aliases, ``EventAPI``, the two hosted REST
+    handlers and the two seed surfaces, so it cannot be drawn differently at
+    the next door.
+    """
+    kind = named_kind(props.pop(kind_key, None))
+    out: dict = {"name": name}
+    if kind is not None:
+        out[kind_key] = kind
+    out["status"] = "live"
+    out.update(props)
+    return out
+
+def _payload_entity_kind(e: dict) -> str | None:
+    """The payload entity's kind to write, or ``None`` when it must NOT be.
+
+    #9572: a v2 capture payload's ``kind`` is a CLASSIFICATION, not the caller's
+    discriminator. The pipeline repairs an unclassifiable/out-of-vocab entity to
+    its family fallback (``extractor_v2._ENTITY_FALLBACK`` = ``core:other``, and
+    ``kind_classifier.KindClassifier._fallback`` does the same upstream), so by
+    the time the door sees the payload a kind is ALWAYS present — an
+    absent-key guard alone never fires on the default capture path, and the
+    repaired sentinel reached the fold's ``ON MATCH … =coalesce($k, stored)`` as
+    a real kind: a conversation that merely mentioned an Object reset its stored
+    ``capability``.
+
+    So the guard is on the VALUE, and it is one predicate shared with the hosted
+    ``/v1/sessions/commit`` door (``tortoise.kind_fallbacks``) — the twin that
+    imports nothing from this private surface is exactly how the fifth
+    fabricator survived four review rounds.
+
+    A payload entity that names a real kind still writes it, so a genuine
+    re-classification is not frozen out.
+
+    ⚠️ One stored VALUE changes, on purpose: a first create from a v2 payload
+    whose kind was repaired used to store the sentinel (``objectKind =
+    'core:other'``) and now stores ``other`` — the FOLD's ``ON CREATE`` spelling
+    (the SDK/REST doors name no kind at all; ``'other'`` is what the fold
+    supplies). Only a consumer that filters the EXACT string ``'core:other'``
+    sees the move.
+    """
+    from .kind_fallbacks import payload_entity_kind
+
+    return payload_entity_kind(e)
+
 #: The canonical record types a live entity door may journal.
 # `DocumentCreated` (#2296) joins the set: the last unjournaled canonical
 # create, now appended by `_create_entity`'s Document arm (`.query`-invisible —
@@ -3638,7 +4014,8 @@ _RESERVED_ACTOR_PROPS = frozenset(
 
 
 def _sanitize_props(props: dict, *, reject_id: bool = False,
-                    reject_belief_props: bool = False) -> dict:
+                    reject_belief_props: bool = False,
+                    reject_claim_class: bool = False) -> dict:
     """#329: reject server-managed fields on tenant write surfaces.
 
     ``sourcePath``/``source_path`` are server-filesystem fields consumed by the
@@ -3669,6 +4046,27 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
     recompute), which write them TOGETHER and keep the #398 label in sync.
     Through a generic bag they bypassed that accounting. #7951 is the
     structural home (ONE write chokepoint instead of per-path patching).
+
+    ``reject_claim_class`` (#2351): the same chokepoint, one class further out.
+    ``claimClass`` is PROVENANCE — the fact that this claim was COMPUTED rather
+    than AUTHORED — and it is written by the write that MINTS the claim
+    (``create_point``'s create map, via its explicit ``claim_class`` kwarg or
+    the nested prop it pops and validates before this boundary runs). Through a
+    generic update bag it was writable three ways, all measured: setting it to
+    ``'asserted'`` on a derived claim RE-STAMPS it out of every guard surface
+    (the EP backstop, ``create_operator``, ``create_direct_edge``,
+    ``supersede_point``) so it can then override authored beliefs; passing
+    ``None`` REMOVES the property outright (``SET n += $props`` with a None
+    deletes it), the same escape without the marker; and a junk token persists
+    an unknown third class the closed vocabulary exists to prevent. On TOP of
+    that, no ``PointRevised`` arm replays the key, so a write through an update
+    door is a LIVE-ONLY marker a rebuild silently drops — a derived claim
+    quietly becomes authored (#9732). There is no legitimate caller intent —
+    provenance is decided once, at birth, and a caller that disagrees mints a
+    new claim — so this is a HARD-REJECT (never strip-and-ignore), matching
+    ``baseline_system_default``/``_stub``. Both spellings are refused, the same
+    way ``sourcePath``/``source_path`` are above: one class under a second name
+    is how a later reader comes to treat one of them as a third state.
     """
     props = dict(props)
     # #2600: reserved actor keys are STRIP-AND-IGNORE (never a 4xx — the
@@ -3937,6 +4335,27 @@ def _sanitize_props(props: dict, *, reject_id: bool = False,
             "'outdated' is a server-managed lifecycle flag — use "
             "invalidate_point() or supersede_point() to terminalize a claim."
         )
+    # #2351 (epic #2349 E-derived): the claim CLASS is provenance, not a
+    # property — see `reject_claim_class` in the docstring. Gated exactly like
+    # `reject_belief_props` (the #7951 chokepoint) so that EVERY generic write
+    # bag refuses it by construction instead of one door being patched and the
+    # next forgotten: `update_point` and `update_entity` are the two documented
+    # `:Point` update doors (`commit_schema`), and `update_entity` reaches its
+    # write through this same boundary. `create_point` must keep accepting the
+    # nested form: it POPS `claimClass` and validates it on the way in (it
+    # calls this boundary with no flags), and the MCP `tortoise_create_point`
+    # route reaches the marker through exactly that `props` bag.
+    for _class_key in (_claim_class.PROP, "claim_class"):
+        if reject_claim_class and _class_key in props:
+            raise ValueError(
+                f"{_class_key!r} is provenance, not a generic property — it is "
+                "written by create_point, not by an update door (#2351): no "
+                "`PointRevised` arm replays it, so accepting it here would "
+                "persist a live-only marker that a rebuild silently drops, and "
+                "re-stamping or clearing it would move a derived claim out of "
+                "the #2351 override guard (see #9732). Stamp the class on the "
+                "CREATE."
+            )
     # #5256: the `extractedFrom` READ-VERSION anchor is server-derived (it is
     # read from the :Source node by `resolve_source_versions` on the LIVE path
     # and carried in the Point's journaled snapshot), so a tenant must never be
@@ -6057,17 +6476,28 @@ def _supersede_window_start_source(stored_vf, successor_created_at):
     """The stored successor window START ``_supersede_window_end`` will use, or
     ``_WRITER_CLOCK`` when it falls through to the writer's ``now``.
 
-    THE ONE HOME for this predicate (#3985, #5360): the writer
-    (``_supersede_window_end``) and the hosted pre-write mirror
-    (``hosted_api._prevalidate_supersede_window``) BOTH resolve through it, so
-    the PREDICATE cannot drift. (The two sites still derive its INPUTS
-    independently — the mirror reads before the write, the writer after — a
-    separately-positioned read, the #7000 class.) The mirror's whole question —
-    "does the resolution land on the writer's clock?" — is ``is _WRITER_CLOCK``. A duplicated predicate
+    THE ONE HOME for this predicate (#3985, #5360, #9729): THREE callers
+    resolve through it — the writer (``_supersede_window_end``), the hosted
+    pre-write mirror (``hosted_api._prevalidate_supersede_window``), and
+    ``supersede_point``'s precision-inheritance gate, so the PREDICATE cannot
+    drift. The mirror derives its INPUTS on its own, separately positioned read
+    (the #7000 class); the writer and the gate share ONE read, so they cannot
+    see different rows. The mirror's whole question — "does the resolution land
+    on the writer's clock?" — is ``is _WRITER_CLOCK``. A duplicated predicate
     drifted once already (the mirror kept a truthiness test after #3985 made a
     falsey stored start resolvable) and deferred a resolution the writer takes:
     the successor was minted and the boundary then refused it, the #5363
     orphan.
+
+    RETURN CONTRACT: this function returns one of its ARGUMENTS by identity —
+    the ``stored_vf`` or ``successor_created_at`` object itself, never a copy or
+    a normalized value. The first two callers never compare that identity: the
+    mirror only asks ``is _WRITER_CLOCK`` and the writer stamps the returned
+    value. The #9729 gate does compare it (``is stored_vf``) to decide whether
+    the predecessor's END came from the successor's own start, and may
+    therefore inherit its declared precision — so a normalization would go
+    silent THERE ALONE: the END would lose the declaration with no error
+    anywhere. Keep the identity when this predicate changes.
 
     The predicate is PRESENT (not truthy) AND ORDERABLE:
 
@@ -6381,6 +6811,15 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
         return
 
     read_ledger.record_rows(label, rows)
+
+
+#: ``entity_type`` values that resolve to a ``:Point`` read — the only rows
+#: that can carry ``claimClass`` (#2351). ``operator`` is a Point by predicate
+#: and ``point`` is the ``:Point`` label itself (``graph_label`` in
+#: ``tortoise_fts_query``: ``"Point" if entity_type == "operator" else
+#: label``); every other value names a different label (Event / Subject /
+#: Object / Source) that has no such property.
+_CLAIM_CLASS_POINT_TYPES: frozenset[str] = frozenset({"point", "operator"})
 
 
 class TortoiseSDK:
@@ -8149,6 +8588,7 @@ class TortoiseSDK:
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
                       credibility: str | int | float | None = None,
+                      claim_class: str | None = None,
                       **props) -> dict:
         # #1486 (code-review P1): is_episodic is a SERVER-MANAGED flag — bound
         # to this explicit param (never the props passthrough, which
@@ -8213,7 +8653,32 @@ class TortoiseSDK:
         ``credibility`` word (which #398 rules IS a source). The message names
         the cheap fix — ``extractedFrom='session:<id>'`` for an assertion the
         writer itself originates.
+
+        ``claim_class`` (#2351, epic #2349 E-derived) declares whether this
+        claim is AUTHORED (``asserted`` — the default, and what every claim in
+        every existing graph already is) or COMPUTED from other beliefs
+        (``derived``). ⛔ Only ``derived`` is STORED: the ``claimClass``
+        property is written when — and only when — the claim is derived, so
+        absence IS the asserted class, there is no migration and no re-stamp
+        for existing claims, and passing ``claim_class="asserted"`` explicitly
+        is accepted and stores NOTHING (two spellings of one class would invite
+        a later reader to treat one as a third state). The class is a property
+        of the WRITE THAT MINTS the claim: it rides the CREATE, and a dedup hit
+        folds onto the existing claim WITHOUT re-stamping its provenance. A
+        derived claim is second-class by construction — the write path refuses
+        to wire it above an asserted claim and refuses to let it supersede one
+        (see ``tortoise/claim_class.py``).
         """
+        # #9287: a kind is an IDENTIFIER — refuse invisible padding/format
+        # characters BEFORE `_validate_kind` would only WARN about them. The
+        # warning is what let this shape through: a padded kind is not an
+        # unrecognised spelling to register, it is one the calibration gate
+        # classifies as a DIFFERENT kind, so EP consumed and stamped a node the
+        # gate never demanded a prior for (measured; the read-path enumeration
+        # that guards imported rows is documented on
+        # `_KIND_WHITESPACE_CHARS`). First, so a caller whose value is not a
+        # kind at all hears that, not an approval complaint about it.
+        _refuse_invisible_kind("pointKind", kind, door="create_point")
         self._validate_kind(kind)
         # #5475: `pointKind` is one of the properties
         # `pack_state.graph_kind_namespaces` mines the approval set from, so the
@@ -8224,6 +8689,12 @@ class TortoiseSDK:
         # as the entity funnel (`_refuse_unapproved_kind`).
         self._refuse_unapproved_kind("pointKind", kind)
         _coerce_props(props)
+        # #9287: the props passthrough can carry `pointKind` itself and it WINS
+        # over the positional kind (measured: `create_point("statement", …,
+        # pointKind="\u2003statement\u2003")` stored the padded value), so the same
+        # refusal has to run over the mined spellings — the same key set the
+        # approval gate below reads, never a second hand-written list.
+        self._refuse_invisible_point_kinds(props, door="create_point")
         # The props passthrough accepts the OTHER mined key names too
         # (`objectKind`, `eventKind`, ...), and each of those is persisted on
         # the Point and mined back into the approval set — measured:
@@ -8444,6 +8915,21 @@ class TortoiseSDK:
                 f"Invalid status {status!r}. Valid statuses: "
                 f"{sorted(POINT_STATUS_VALUES)}"
             )
+        # #2351 (epic #2349 E-derived): the claim class. Validated HERE, before
+        # any graph write — an unknown class fails loud with nothing created
+        # (the same fail-closed posture as the status vocabulary above and the
+        # #2199 credibility word). The nested ``claimClass`` prop form is POPPED
+        # and validated exactly like ``credibility`` (a generic props passthrough
+        # must not be able to persist an unvalidated third class), with the
+        # explicit kwarg winning when both are given.
+        #
+        # It is deliberately kept OUT of ``props``: it is a property of the
+        # write that MINTS the claim, so it rides the CREATE map below and
+        # never the dedup-hit ``update_point`` forward — a re-run must not
+        # re-stamp an existing claim's provenance in either direction.
+        _nested_claim_class = props.pop(_claim_class.PROP, None)
+        _claim_class_value = _claim_class.validate(
+            claim_class if claim_class is not None else _nested_claim_class)
         if dedup:
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is
             # no longer written). The A10 hash-less content+kind fallback now
@@ -8977,6 +9463,13 @@ class TortoiseSDK:
         # The embedding is written LAST (and `embedding` was popped from props
         # above), so the map carries exactly one `embedding` key.
         _create_map["embedding"] = _embedding_expr
+        # #2351: the claim class rides the CREATE map (one graph write, #2952)
+        # and only for `derived` — absence IS `asserted`, which is what makes
+        # the marker migration-free for every claim already in the graph.
+        # "asserted" passed explicitly is validated and stored as NOTHING.
+        if _claim_class_value == _claim_class.DERIVED:
+            _create_params["claimcls"] = _claim_class.DERIVED
+            _create_map[_claim_class.PROP] = "$claimcls"
         # #5004 round-3: a CALLER-owned vector is stored VERBATIM (the recorded
         # PR #3018 decision) and the replay must restore it in that same FORM.
         # The noun that carries that fact has to be the NODE, not the journal
@@ -9316,8 +9809,25 @@ class TortoiseSDK:
         deployment's provider account; that divergence is warned about
         (``UserWarning``) rather than silently assumed (#6869)."""
         import os
-        import uuid
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+
+        # #9599: the caller's RAW argument is diagnosed BEFORE the mint, in the
+        # same order as `capture_session` (one rule, two doors). Diagnosing the
+        # minted value instead would make the doors disagree with each other and
+        # with the hosted boundary: `session_id or mint()` replaces a FALSY
+        # non-str (`0`, `False`), so the predicate would never see it here while
+        # `SessionRequest`'s typed model 422s it — a review finding.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {"session_id": session_id, "ok": False,
+                    "errors": [_blank_session], "error": _blank_session,
+                    "payload": None}
+        # The mint keeps its ORIGINAL position — before the consent gate — so a
+        # consent-declined receipt still reports the minted id exactly as it did
+        # before this change (`session_id` is public receipt surface; moving the
+        # mint below the gate would have silently turned that field into `None`).
+        session_id = session_id or mint_session_id()
         # #3662: consent FIRST — this is the SDK sibling of the gated CLI
         # primitives (`session capture` / `sessions import`), which also refuse
         # before doing any work, so no extraction (and therefore no BYOK provider
@@ -9338,6 +9848,7 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False,
                     "errors": [declined], "error": declined,
                     "payload": None}
+
         # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
         # they never reach the extraction model. With extractor_model=None the
         # model is built from the AMBIENT environment (_default_byok_model →
@@ -9701,10 +10212,17 @@ class TortoiseSDK:
         "ok" is the success signal (never "extracted" — extracted > 0 can
         co-occur with ok=False on partial-emission failure), "extraction_mode"
         is truthful ("llm:<route>" / "llm" on success, "empty" when the
-        conversation has no extractable content — always with ok=False and an
-        errors entry — and "error" when extraction failed), errors/warnings
-        are additive and never clobbered, and an empty/blank conversation is
-        rejected BEFORE any write (no Session stub, turns=0). W5 Phase F
+        conversation has no extractable content, and "error" when extraction
+        failed), errors/warnings are additive and never clobbered, and an
+        empty/blank conversation is rejected BEFORE any write (no Session stub,
+        turns=0). A request REFUSED at the door (a blank `session_id`, #9599)
+        reports ``extraction_mode: "empty"`` too — nothing was accepted, so
+        nothing was extractable — with ok=False and an ``errors``/
+        ``diagnostics`` entry naming the cause. Reusing "empty" is deliberate:
+        every consumer of this receipt (``tortoise/__main__.py``) already reads
+        "empty" as "degraded / not filed", which is the correct read of a
+        refusal, and a new token would change the receipt shape for no added
+        truth. W5 Phase F
         (#2104): a re-capture of an EXISTING session_id reports
         "extraction_mode": "replayed" (ok=True, 0 points, additive warning —
         the hosted #1727 replay skip; a replay is a no-op on the first
@@ -9727,8 +10245,34 @@ class TortoiseSDK:
         re-attempts extraction through the existing #2335 TRUE-retry path
         instead of silently replaying.
         """
-        import uuid
         from datetime import datetime, timezone
+
+        # #9599: the same door rule as ``commit_session``'s, in the SAME ORDER —
+        # the caller's RAW argument is diagnosed first, then the mint — so the
+        # two doors cannot disagree about any input shape (a review finding: an
+        # earlier draft checked the MINTED value, so `0`/`False` were minted over
+        # here while `123`/`b"  "` were refused, and both doors disagreed with
+        # the hosted boundary, whose typed model 422s all four). Checked BEFORE
+        # the extractor, the projection handle or any graph write: a refused id
+        # writes nothing and journals nothing.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": [_blank_session],
+                "diagnostics": [_blank_session],
+                "stats": {},
+                "warnings": [],
+                "capture_redactions": 0,
+            }
+        session_id = session_id or mint_session_id()
 
         # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
         # capture for a missing key — the key gates EXTRACTION, not storage.
@@ -9737,7 +10281,6 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
         # #5632: snapshot the LIFETIME journal-failure counter at the START of
         # THIS capture. The receipt below must disclose only appends that
         # failed DURING it — a failure from an earlier, unrelated write on this
@@ -11230,20 +11773,23 @@ class TortoiseSDK:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            _ekind = str(e.get("kind", "core:other"))
-            _is_subject = is_subject_kind(_ekind)
+            # #9572: the payload's `kind` is a CLASSIFICATION, not the caller's
+            # discriminator — see `_payload_entity_kind`, which is where the
+            # family-fallback sentinel is dropped.
+            _ekind = _payload_entity_kind(e)
+            _is_subject = is_subject_kind(_ekind or "")
             if _is_subject:
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
                     self.create_entity(
                         "subject", name,
-                        subjectKind=_ekind,
+                        **({"subjectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
                 else:
                     self.create_entity(
                         "object", name,
-                        objectKind=_ekind,
+                        **({"objectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
@@ -11299,6 +11845,13 @@ class TortoiseSDK:
         # `_stream_to_payload` already enforces (#1272) — this restores it on
         # the v2 capture path.
         capture_point_id_map: dict[str, str] = {}
+        #: #2817 (review F1): the money abstentions of THIS capture, counted by
+        #: drop reason — the aggregating sink, not the per-line `warnings` one,
+        #: so a receipt gains one summary entry (`_capture_money_drop_summary`)
+        #: however many points mentioned a number. Filled for EVERY payload
+        #: point, created or resolved: a dedup hit writes nothing but must not
+        #: report differently from the create that preceded it.
+        money_drops: dict[str, int] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
@@ -11306,7 +11859,43 @@ class TortoiseSDK:
                 skipped += 1
                 continue
             payload_id = pid
+            # #2817 (route 2 of the two the issue records as legal): derive the
+            # money value HERE, at the capture write seam, from the point's own
+            # `content` — the FULL stored claim (bounded by the extractor's
+            # `_MAX_CONTENT`), never the 200-char `quote`. The quote is the
+            # wrong source twice over: a value straddling its cut types the
+            # truncated prefix (a 100x understatement whose `verbatim` is still
+            # a byte-exact substring, so traceability would PASS on a wrong
+            # reading), and a quote is an excerpt OF the claim — the value must
+            # agree with the sentence the graph stores.
+            #
+            # Derived BEFORE the resolution below, i.e. on every payload point
+            # and not only on the create branch (#2817 review F1): derivation
+            # is deterministic and content-addressed, so it writes nothing on a
+            # dedup hit, but counting the abstention there too is what makes
+            # the RECEIPT symmetric — byte-identical content reported one way
+            # on a first capture and another way once a canonical exists was
+            # the asymmetry the review named.
+            #
+            # The call sits INSIDE the per-point `try` below (never above it):
+            # a derivation failure must stay POINT-local — skipped, counted in
+            # `errors`, the capture still answered — exactly as it was when the
+            # call lived in the create branch. Outside the guard it would
+            # escape the whole points loop after the session and its turns were
+            # already written: no receipt, no `errors` entry, the partial-write
+            # shape the #2817 P1 fix removed.
+            #
+            # The derived fields are NOT added to
+            # `_CAPTURE_PASSTHROUGH_PROPS`: that set is the public capture
+            # RESPONSE surface (and `validFrom`'s note below is the standing
+            # reason not to widen it). A money value is a graph structural
+            # field read back with `money.read_money_value` (design §7.1:
+            # server-written, not a client field), so the response shape is
+            # untouched — symmetric between a create (stores, does not
+            # advertise) and a dedup hit (writes nothing).
             try:
+                money = normalize_money_props(
+                    content, warn_on=_CAPTURE_MONEY_WARN_ON, drops=money_drops)
                 # 1) in-capture fold: same content minted earlier this seam
                 #    run (extractor payload assembly normally folds these;
                 #    the seam is the backstop).
@@ -11392,6 +11981,12 @@ class TortoiseSDK:
                     create_props = props
                     if props.get("when"):
                         create_props = {**props, "validFrom": props["when"]}
+                    # #2817: the value derived at the top of this loop rides
+                    # the CREATE only — a dedup hit writes no props at all
+                    # (first-writer), and its abstention has already been
+                    # counted for the receipt.
+                    if money:
+                        create_props = {**create_props, **money}
                     _created = self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,
@@ -11548,6 +12143,11 @@ class TortoiseSDK:
                     f"{type(e).__name__}: point write failed for {pid}: {e}")
         if skipped:
             warnings.append(f"{skipped} extracted point(s) failed to write")
+        # #2817 (review F1): the money abstentions of this capture, reported
+        # ONCE and bounded — replacing the per-point append that made the
+        # receipt a function of how many claims happened to mention a number.
+        if money_drops:
+            warnings.append(_capture_money_drop_summary(money_drops))
 
         # W5 Phase D (#2104): surface the extractor's consolidation noops —
         # claims the S3/FTS fold resolved to an EXISTING node were
@@ -12287,6 +12887,11 @@ class TortoiseSDK:
         """
         proj = self._get_proj()
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # #9287: an UPDATE is a WRITE, and ``pointKind`` is writable through it
+        # (measured: ``update_point(id, pointKind='\u2003observation\u2003')``
+        # stored the padded value and the gate never demanded it) — the same
+        # invisible-kind refusal the create door applies, at ITS own door.
+        self._refuse_invisible_point_kinds(props, door="update_point")
         # ── #5475 (residual): an UPDATE is a WRITE, and it widened the set ──
         # The create-side gate is at the funnels every CREATE meets, but
         # ``pointKind`` is one of the properties ``graph_kind_namespaces``
@@ -12298,7 +12903,8 @@ class TortoiseSDK:
         self._refuse_unapproved_kinds_in_props(props)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True,
-                                reject_belief_props=True)
+                                reject_belief_props=True,
+                                reject_claim_class=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # E4 (#5007): same rule as `create_point` / the `Point` model — an
@@ -12463,6 +13069,16 @@ class TortoiseSDK:
                 f"Invalid status {props['status']!r}. "
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
+
+        # #2351 (review P0): ``claimClass`` is a CREATE-time marker, NOT a
+        # revision prop, and this door refuses it — through the SAME #7951
+        # chokepoint as every other generic write bag, not with a second
+        # per-door copy of the rule (``update_entity`` is the other documented
+        # ``:Point`` update door and takes its refusal from the same place, so
+        # patching one and forgetting the next cannot happen again). The
+        # rejection itself, and why replay makes the marker create-only, are
+        # documented on ``_sanitize_props(reject_claim_class=True)``; widening
+        # replay beyond ``PointAdded`` is tracked as #9732.
 
         # #432 plan-review P1: update_point is non-status except the draft→live
         # promote (matches the create_operator promote). Any other status value
@@ -13858,10 +14474,17 @@ class TortoiseSDK:
         state — the window ENDED but at a time we cannot pin, so NO ``validTo``
         is fabricated (the 'half-honest dates are worse than none' rule) and
         the stored marker is what every read path reports as
-        ``end_state='unknown'``. Otherwise the predecessor's end IS the
-        successor's start, so it inherits the successor's ``validFromPrecision``
-        when the caller does not state one, keeping the contiguous boundary's
-        precision honest on both sides.
+        ``end_state='unknown'``. Otherwise the predecessor's end is the
+        successor's RESOLVED start — the caller's ``valid_from`` kwarg when it is
+        usable (it wins outright: the agreement guard forces instant equality
+        whenever the successor has a stored start, and it is the SOLE source for
+        an undated successor), else its own ``validFrom`` when that names an
+        instant, else its ``createdAt``, else ``now`` — and it inherits the
+        successor's ``validFromPrecision`` when, and only when, the resolved end
+        names the successor's start instant: a declaration annotates a bound, it
+        cannot summon one (#9244), so a fallback instant nobody declared a
+        granularity for is stamped with no precision (#9729). A caller who wants
+        a token on a fallback instant states ``valid_to_precision`` explicitly.
 
         Transfers all edges from the old point to the new point:
           - Operator edges (IMPL, NAND, hasPart) with idx, AND their reverse
@@ -13901,6 +14524,27 @@ class TortoiseSDK:
         # replacement (phantom PointSuperseded).
         self._assert_lifecycle_guard(new_id, method="supersession",
                                      role="target")
+        # #2351 (epic #2349 E-derived): the ASSERTED-vs-DERIVED override guard.
+        # Supersession IS an override — `supersede_point` terminalises the
+        # predecessor and transfers its edges and standing to the successor —
+        # so a DERIVED successor must never replace an ASSERTED predecessor (a
+        # computed claim out-ranking an authored belief is the failure mode the
+        # marker exists to prevent). The refusal is BEFORE any mutation, so a
+        # refused call leaves the graph untouched (the #329/#4021 ordering).
+        #
+        # The class is read through the same fan-out discipline as the
+        # lifecycle guard (#7822 — Point ids are not unique, and a verdict read
+        # off one row would be row-order dependent): the predecessor counts as
+        # asserted when ANY node carrying its id is asserted, the successor
+        # counts as derived when ANY node carrying the successor's id is. That
+        # is the fail-closed direction for BOTH sides.
+        _supersede_classes = _claim_class.classes_for_ids(
+            proj.g, [old_id, new_id])
+        if _claim_class.blocks_override(
+                _supersede_classes.get(new_id),
+                _supersede_classes.get(old_id)):
+            raise ValueError(_claim_class.supersede_refusal(
+                old_id=old_id, new_id=new_id))
         # 0. #329: collect + validate ALL edge types BEFORE any mutation.
         #    The edge types are interpolated into query structure (no params
         #    possible) — an unvalidated type (e.g. from a crafted edge) is a
@@ -14031,20 +14675,43 @@ class TortoiseSDK:
         # ``invalidate_point``. (Pre-fix the guard ran first and refused a
         # request that writes no end at all: fail-closed, but wrong for its
         # stated reason and unreachable at the sibling door.) Otherwise the
-        # predecessor's end IS the successor's start, so it inherits the
-        # successor's declared start precision when the caller does not state
-        # one — the precision travels with the contiguous boundary.
+        # predecessor's end is the successor's RESOLVED start (a USABLE
+        # valid_from kwarg, which wins outright — agreed with the stored start
+        # whenever one exists → its own validFrom → its createdAt → now), and it
+        # inherits the successor's declared start precision ONLY when the
+        # resolved end names the successor's start instant (#9729): a
+        # declaration annotates a bound, it cannot summon one (#9244), so a
+        # fabricated fallback instant carries no token.
         from .validity import PRECISION_UNKNOWN as _PREC_UNKNOWN
         from .validity import normalize_precision as _normalize_precision
+        successor_created_at = vf_rows[0][1] if vf_rows else None
         end_precision = _normalize_precision(
             valid_to_precision, field="valid_to_precision")
-        if end_precision is None and vf_rows:
+        if (end_precision is None and vf_rows
+                and _supersede_window_start_source(
+                    stored_vf, successor_created_at) is stored_vf):
+            # #9729: the declared token annotates the successor's START, so it
+            # may ride onto the predecessor's END only when that END came FROM
+            # that start. `_supersede_window_start_source` is the ONE HOME for
+            # "which source does the end resolve from" — an unorderable start
+            # falls through to `createdAt`/`now`, instants nobody declared a
+            # granularity for, and stamping the declaration there is the #9244
+            # lie one surface over: a declaration annotates a bound, it cannot
+            # summon an instant. (Guarding the SOURCE, not `createdAt`'s
+            # orderability, covers both fallback steps with the same predicate
+            # the writer itself resolves through, so the two cannot drift. The
+            # `is` test is exact because that helper RETURNS the argument it
+            # accepted — a future normalization inside it must keep doing so,
+            # or inheritance goes silent. The rung AHEAD of it, the caller's
+            # `valid_from` kwarg, is pinned to the same instant by the
+            # agreement guard above — relax that guard and this gate must be
+            # re-derived.)
             end_precision = vf_rows[0][2] or None
         _end_is_unknown = end_precision == _PREC_UNKNOWN
         succ_vf = _supersede_window_end(
             old_id=old_id, new_id=new_id, old_vfs=old_vfs,
             valid_from=valid_from, stored_vf=stored_vf,
-            successor_created_at=(vf_rows[0][1] if vf_rows else None),
+            successor_created_at=successor_created_at,
             now=now,
             skip_inversion_guard=_end_is_unknown,
         )
@@ -14409,7 +15076,13 @@ class TortoiseSDK:
                 # Row shape: [internal id, logical id, labels, properties] —
                 # #2489 extends the SELECT with properties(target) so the shared
                 # stub_key resolver (projection/edges.py) extracts the per-rel
-                # replay key (name / coalesce(title,name) / url) at emission.
+                # replay key at emission: `name` for aboutSubject/Object/Event/
+                # Point, `url` for aboutDocument and extractedFrom (D10 — a
+                # document IS a :Source). The retired pre-D10 title fallback key
+                # is NOT one: `stub_key` never returns it (a title-only target
+                # yields None), so such a descriptor cannot be emitted at all.
+                # ONE key map in this loop — the emission comment below states
+                # the same, and the two must not drift apart (#5265).
                 target_graph_id = row[0]  # FalkorDB internal node id — exact match
                 target_props = row[3] or {}
                 if target_graph_id in succ_internals:
@@ -14441,10 +15114,13 @@ class TortoiseSDK:
                     transferred += 1
                     continue
                 # #2489: per-rel key extraction via the SHARED resolver — never
-                # target.id (Subjects MERGE by name, Sources by url, Documents by
-                # name-or-title). SKIP unresolvable keys (name-less Point from an
-                # id-targeted create_about_edge; url-less extractedFrom target): a
-                # null-key descriptor is un-replayable — those edges die at
+                # target.id (Subjects MERGE by name, Sources by url — and D10: a
+                # document IS a :Source, so aboutDocument and extractedFrom both
+                # key by `url`, the SAME key the target label moved with; a
+                # title-keyed aboutDocument descriptor is no longer resolvable and
+                # is never emitted). SKIP unresolvable keys (name-less Point from
+                # an id-targeted create_about_edge; a Source target lacking url):
+                # a null-key descriptor is un-replayable — those edges die at
                 # rebuild today anyway (zero regression).
                 if derivable:
                     keyed = stub_key(rel, target_props)
@@ -15776,15 +16452,59 @@ class TortoiseSDK:
         # once each to keep the per-(label, property) index rather than
         # full-scanning (live.epistemic_label_queries).
         existing_ids: set[str] = set()
-        for _q in epistemic_label_queries(
-            "MATCH (n:{label}) WHERE n.id IN $ids RETURN n.id"
-        ):
-            existing_ids.update(
-                row[0] for row in
-                proj.g.query(_q, params={"ids": inputs}).result_set)
+        # #2351: ids that ARE claims (a :Point). ``claimClass`` lives only there,
+        # so a :Subject/:Object/:Event endpoint has NO class — it is not
+        # "asserted", it is not a claim, and it must not trigger the guard
+        # (reading its absence as asserted refused a DERIVED point wired to an
+        # Object — a shape #7902 made writable).
+        point_ids: set[str] = set()
+        # #2351 (epic #2349 E-derived): the same probe carries each endpoint's
+        # claim CLASS, so the override guard below costs NO extra round trip.
+        # The classes are aggregated across every row an id resolves to (the
+        # #7822 fan-out rule — a verdict off one row would be row-order
+        # dependent); "asserted" is the read-side default for an absent marker.
+        endpoint_classes: dict[str, set[str]] = {}
+        for _label, _q in zip(
+                EPISTEMIC_LABELS,
+                epistemic_label_queries(
+                    "MATCH (n:{label}) WHERE n.id IN $ids "
+                    "RETURN n.id, coalesce(n.claimClass, 'asserted')"),
+                strict=True):
+            for _row in proj.g.query(
+                    _q, params={"ids": inputs}).result_set:
+                existing_ids.add(_row[0])
+                # ⛔ ``claimClass`` is a :Point property. A :Subject/:Object/
+                # :Event endpoint is not a CLAIM and carries no class — reading
+                # its absence as "asserted" refused a DERIVED point wired to an
+                # Object, a shape #7902 deliberately made writable (#2351
+                # review). Only :Point rows participate in the class guard.
+                if _label == "Point":
+                    point_ids.add(_row[0])
+                    endpoint_classes.setdefault(_row[0], set()).add(_row[1])
         missing = [i for i in inputs if i not in existing_ids]
         if missing:
             raise ValueError(f"Cannot create operator: Points {missing} do not exist")
+
+        # #2351: the override guard — a DERIVED claim may not IMPL-cascade above
+        # (or NAND-attack) an ASSERTED one. `source_id` is the factor's SOURCE
+        # slot (idx 0 — the position `_update_factor` reads the forward
+        # message's belief from) and `target_ids` are its targets, so this is
+        # exactly the leg EP would push belief along. Part/whole operators are
+        # NOT epistemic cascades (they transfer no belief) and are not guarded.
+        # Raised BEFORE the operator node exists and before any edge is
+        # written, so a refused call leaves the graph untouched.
+        _operator_targets = set().union(
+            *(endpoint_classes.get(t, set()) for t in target_ids if t in point_ids)
+        ) if target_ids else set()
+        if (op_type in ("IMPL", "NAND") and source_id in point_ids
+                and _operator_targets
+                and _claim_class.direction_blocks_create(
+                    direction,
+                    endpoint_classes.get(source_id),
+                    _operator_targets)):
+            raise ValueError(_claim_class.override_refusal(
+                source_id=source_id, target_ids=list(target_ids),
+                surface=f"create_operator({op_type})"))
 
         # Build operator node with direction + optional label (context is NOT written — P1 #49).
         # #780: extraction operators (promote_source=False) carry status:'draft' so
@@ -16118,6 +16838,21 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
+            # #9262 (review cycle 2): an id-less mitigation Point (a
+            # hand-written / imported shape) makes ``mid`` None, and EVERY write
+            # in this branch is id-keyed — ``update_point``, the baseline writer
+            # and the word stamp all match zero rows. Until #9262 the baseline
+            # writer accepted what it could not bind, so this silently updated
+            # nothing and returned ``{}``; since #9262 it REFUSES that id, so
+            # without this guard the whole call aborts with a remedy the caller
+            # cannot execute (it named the OPERATOR, not the mitigation), and
+            # ``commit_ops`` would abort a write loop mid-graph. MEASURED on
+            # origin/main: the call returns ``{}`` and leaves
+            # ``_evidence[None] = (3.0, 1.0)``; that false PASS is a defect of
+            # its own (#9754) — this guard keeps the historical outcome rather
+            # than turning it into an abort.
+            if mid is None:
+                return self.get_point(mid)
             self.update_point(mid, content=f"[MITIGATION] {reason}",
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines
@@ -17099,6 +17834,27 @@ class TortoiseSDK:
                            "entity item with type:'event' and eventKind "
                            "('occurrence'/'turn') for episodic records",
             })
+        # #9287 (review cycle 4): the same refusal the Point write doors raise,
+        # reported as a PHASE-1 violation. Without it this class was
+        # Phase-2-only in `ingest()` — measured: a bundle whose second point
+        # carried a padded kind PASSED `_validate_bundle` (zero mutations) and
+        # then raised from `create_point` mid-write, with the FIRST item already
+        # committed. Every other kind rule here is collected, zero-mutation and
+        # shared by both phases (`TestPhase1Phase2Parity`); this one now is too.
+        bad = _kind_invisible_char(kind)
+        if bad is not None:
+            fix = _kind_suggestion(kind)
+            violations.append({
+                "section": "points", "index": index,
+                "message": f"pointKind must be an identifier, but {kind!r} "
+                           f"carries {bad!r} (U+{ord(bad):04X}) — a kind is "
+                           "matched by exact membership, so this spelling is a "
+                           "different kind (#9287). "
+                           + (f"Pass the kind without the {bad!r} — e.g. "
+                              f"'{fix}'." if fix else
+                              "The kind is only invisible characters — "
+                              "supply a name."),
+            })
 
     def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
@@ -17243,8 +17999,10 @@ class TortoiseSDK:
         return "unidirectional" if op_type == "NAND" else "bidirectional"
 
     def _check_connection(self, index: int, conn: Any,
-                          violations: list[dict]) -> None:
-        """Check 4 — the connection contract (pure; no graph access).
+                          violations: list[dict],
+                          effective_route: str | None) -> None:
+        """Check 4 — the connection contract (pure of its own graph access;
+        the endpoint-kind answer, when one is needed, is handed IN).
 
         exactly one of relation/operator; from/to presence; to shape/emptiness
         (zero-target rows c8(i-iv)); operator/relation vocabulary; self-edge
@@ -17254,6 +18012,21 @@ class TortoiseSDK:
         direction/confidence/weight — plus ``mitigation`` since #5244, because
         a structural edge has no operator bridge to damp; operator route
         carries confidence/weight).
+
+        ``effective_route`` (#9173) is the route the write loop will ACTUALLY
+        take — the request PROMOTED by the endpoint-kind gate
+        (:meth:`_effective_route` / :meth:`_effective_connection_routes`,
+        owner ruling 2026-10-13, #8499). It scopes the multi-item-``to`` arm,
+        which is a DIRECT-edge rule (``create_direct_edge`` takes ONE target;
+        the operator route fans out). It is passed in rather than probed here
+        so the caller keeps its one graph read per bundle/connection — and
+        because Phase 2 has the resolved ids and no bundle to read refs from.
+        The parameter is REQUIRED (no default) on purpose: a default of
+        ``None`` would silently restore the pre-#9173 behaviour for any caller
+        that forgot it, and judging a REQUEST is exactly the defect it closes
+        (#8623, #9173). ``None`` is still accepted, and means "the caller has no
+        endpoints at all, so the request is all there is" — the route it yields
+        is the request, never a guess.
         """
         if not isinstance(conn, dict):
             return  # dict-ness already reported by check 1
@@ -17337,7 +18110,19 @@ class TortoiseSDK:
                                f"address the same endpoint (EP cavity risk)",
                 })
             route = self._connection_route(conn)
-            if route == "direct" and isinstance(tos, list) and len(tos) > 1:
+            # (#9173) DIRECT-edge-scoped, like the terminal guard below: the
+            # rule exists because `create_direct_edge` takes ONE target — and
+            # its own remedy says multi-input fan-out belongs on the operator
+            # route. A Point-bearing pair IS on the operator route without the
+            # caller writing anything (the endpoint-kind gate promotes it), so
+            # judging this arm by the REQUEST refused the very shape the remedy
+            # prescribes: measured at this head, the plain spelling refused and
+            # the identical connection with `reify: true` accepted and
+            # committed (the #8623 residual arm).
+            write_route = (route if effective_route is None
+                           else effective_route)
+            if write_route == "direct" and isinstance(tos, list) \
+                    and len(tos) > 1:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] multi-item 'to' "
@@ -17357,6 +18142,18 @@ class TortoiseSDK:
             if route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
                 # confidence/weight (they are plain direct-edge attributes).
+                # ⛔ #9173 review — DELIBERATELY left on the REQUEST route, not
+                # `write_route`: a promoted Point-bearing plain IMPL already
+                # passes these attributes through and `create_operator` DROPS
+                # them (measured at this head: a SINGULAR plain IMPL between
+                # Points with `confidence: 0.5` validates clean and writes an
+                # edge without it). Scoping this arm by the effective route
+                # would turn that silently-accepted bundle into a refusal — a
+                # new refusal for every existing caller, outside #9173's scope.
+                # The silent drop is a PRE-EXISTING defect on both route
+                # spellings, tracked as its own issue; when it is fixed this arm
+                # must move WITH the multi-item arm above, or the two rules stay
+                # inconsistent inside one function.
                 for key in ("confidence", "weight"):
                     if key in conn:
                         violations.append({
@@ -17740,7 +18537,8 @@ class TortoiseSDK:
                        f"id is {node_id!r}); {remedy}",
         }
 
-    def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
+    def _check_endpoints(self, bundle: dict, violations: list[dict],
+                         effective_routes: list[str] | None = None) -> None:
         """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
         cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
         cycle-17/18). A connection endpoint must carry one of the four
@@ -17752,6 +18550,33 @@ class TortoiseSDK:
         (superseded/retracted) endpoints (#2062/#2422). Bundle-local refs
         resolving to EXISTING (dedup-hit) terminal points are Phase-1
         violations (never a Phase-2 raise).
+
+        ⛔ Which connections are "direct-edge" is the EFFECTIVE route
+        (``effective_routes``, positionally aligned with
+        ``bundle['connections']``; ``None`` computes
+        :meth:`_effective_connection_routes` here), never the
+        ``_connection_route`` REQUEST: every leg scoped by ``route`` below is a
+        prediction about ``create_direct_edge``, and a Point-bearing pair never
+        reaches that primitive — the endpoint-kind gate (#8499) reifies it into
+        an operator, which accepts terminal endpoints and shares the node. Judging
+        by the request refused those connections outright and offered only
+        ``reify: true`` as an escape from a promotion that needed no anchor
+        (#8623's residual class, #9173).
+
+        ⛔ CONSEQUENCE, stated so a future reader is not misled: after #9173 the
+        **bundle-local dedup-hit guard** (the ``content_hash``/``content+kind``
+        leg at the bottom of this check, which resolves a ``points`` item ref)
+        is unreachable BY CONSTRUCTION — a `points` ref makes the pair
+        Point-bearing, so its effective route is always ``operator``. It is
+        retained, not deleted: it is a prediction about
+        ``create_direct_edge``, and narrowing the endpoint-kind gate (#8499) is
+        the only change that would make it live again.
+
+        The by-name / declared-status arms in the item loop are NOT that: they
+        are the ENTITY legs (``section == "entities"``), an Object/Subject/Event
+        pair keeps the direct route, and they stay live — they are what the
+        direct-edge terminal guard now governs, and they are pinned by
+        ``tests/test_ingest_event_endpoint.py``.
 
         #7925: the label set is the SAME on the operator route
         (reify/mitigation/part-whole → create_operator) and the direct route,
@@ -17902,13 +18727,21 @@ class TortoiseSDK:
                     local[item["ref"]] = (section, item)
         external: set[str] = set()
         conns: list[tuple[int, dict, str, list]] = []
+        # (#9173) The EFFECTIVE route, resolved ONCE per bundle: every leg
+        # scoped by `route` below predicts what the write PRIMITIVE will do,
+        # and the primitive is chosen by the endpoint-kind gate, not by the
+        # connection item. `_effective_connection_routes` runs one graph read
+        # for the whole bundle (bundle-local point refs resolve without one).
+        routes = (effective_routes if effective_routes is not None
+                  else self._effective_connection_routes(bundle))
         for i, conn in enumerate(bundle.get("connections") or []):
             if not isinstance(conn, dict) or "operator" not in conn:
                 continue
             frm = conn.get("from")
             tos = conn.get("to")
             to_list = tos if isinstance(tos, list) else [tos]
-            route = self._connection_route(conn)
+            route = routes[i] if i < len(routes) \
+                else self._connection_route(conn)
             for v in [frm] + to_list:  # noqa: RUF005
                 if isinstance(v, str) and v not in local:
                     external.add(v)
@@ -18242,6 +19075,11 @@ class TortoiseSDK:
                                        f"are rejected (#2422)",
                         })
         # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
+        # (#9173) Unreachable for bundle-local POINT refs: a `points` ref makes
+        # the pair Point-bearing, so `route` above is now the EFFECTIVE route
+        # (always 'operator' for such a pair) and this leg's `route != "direct"`
+        # guard skips it. Kept as the prediction of `create_direct_edge` it was
+        # written as — see `_check_endpoints`' docstring.
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
@@ -18506,7 +19344,8 @@ class TortoiseSDK:
                     })
 
     def _check_endpoint_race(self, index: int, conn: dict,
-                             refs: dict[str, str], violations: list[dict]) -> None:
+                             refs: dict[str, str], violations: list[dict],
+                             effective_route: str | None = None) -> None:
         """Phase-2 defense-in-depth (check 3): re-verify endpoints right
         before the connection write — a node deleted/superseded between
         Phase-1 validation and this write is the race class this exists for.
@@ -18522,12 +19361,19 @@ class TortoiseSDK:
         only)."""
         if not isinstance(conn, dict) or "operator" not in conn:
             return
-        route = self._connection_route(conn)
         frm = conn.get("from")
         tos = conn.get("to")
         vals = []
         for v in ([frm] + (tos if isinstance(tos, list) else [tos])):
             vals.append(refs.get(v, v) if isinstance(v, str) else v)
+        # (#9173) The EFFECTIVE route: refs are resolved HERE, so the
+        # endpoint-kind gate can be asked before the write — which is what
+        # makes this a check on the primitive that will run rather than on the
+        # connection item the caller wrote. `effective_route` is that answer
+        # already resolved by the caller (one graph read per connection, shared
+        # with `_check_connection` and the write branch); `None` resolves it.
+        route = (effective_route if effective_route is not None
+                 else self._effective_route(conn, vals))
         external = {v for v in vals if isinstance(v, str)}
         info = self._fetch_endpoint_info(external)
         for v in vals:
@@ -18582,6 +19428,38 @@ class TortoiseSDK:
                                f" — new direct edges to terminal points are "
                                f"rejected (#2422)",
                 })
+
+    def _effective_route(self, conn: dict, node_ids: list[str]) -> str:
+        """The route this connection WILL be written as, given its resolved
+        (or, in Phase 1, resolved-as-far-as-knowable) endpoints: the
+        `_connection_route` REQUEST, promoted to ``'operator'`` when the
+        endpoint-kind gate (:meth:`_point_mediated_route`, owner ruling
+        2026-10-13, #8499) forbids the operator-less shape for these ids.
+
+        The shared declaration is the PROBE (:meth:`_point_bearing_ids`), so the
+        boolean question here and the per-id answer
+        :meth:`_effective_connection_routes` needs cannot drift apart. The
+        composition itself has two spellings, and BOTH must be kept in step:
+
+        - this one, for callers that hold resolved ids — the write loop (step 4),
+          ``_check_endpoint_race``, and ``_check_connection``'s Phase-2 call;
+        - :meth:`_effective_connection_routes`, for Phase 1, which must ALSO
+          resolve bundle-local refs (they have no node yet, so no graph probe can
+          see them, but step 2 mints each as a plain ``:Point``).
+
+        A divergence between the two is the failure mode that produces a Phase-2
+        raise on an already-partially-mutated graph, so a change to the gate
+        belongs in both.
+
+        ``node_ids`` may hold non-strings (a shape violation another check
+        owns); they are simply not probed.
+        """
+        route = self._connection_route(conn)
+        if route == "direct":
+            ids = [i for i in node_ids if isinstance(i, str)]
+            if ids and self._point_mediated_route(ids):
+                return "operator"
+        return route
 
     def _effective_connection_routes(self, bundle: dict) -> list[str]:
         """The EFFECTIVE route of EVERY connection item, positionally aligned
@@ -18693,7 +19571,8 @@ class TortoiseSDK:
             return True  # mitigation-reason conflict, same-label pairs
         return False
 
-    def _check_duplicates(self, bundle: dict, violations: list[dict]) -> None:
+    def _check_duplicates(self, bundle: dict, violations: list[dict],
+                          effective_routes: list[str] | None = None) -> None:
         """Check 7 — intra-bundle duplicate connections (§5.2.7).
 
         Identical duplicates (same from/to/operator with identical direction
@@ -18720,7 +19599,8 @@ class TortoiseSDK:
         # operator dedup key includes `label`, so both operators commit).
         # Resolved ONCE per bundle: the predicate is pairwise, and each probe
         # is a graph read.
-        routes = self._effective_connection_routes(bundle)
+        routes = (effective_routes if effective_routes is not None
+                  else self._effective_connection_routes(bundle))
         for a in range(len(ops)):
             for b in range(a + 1, len(ops)):
                 ia, ca = ops[a]
@@ -18813,18 +19693,72 @@ class TortoiseSDK:
         passes Phase 1 and raises in step 3 after earlier items committed. Those
         are examples, not the closed set: #8755 carries it.
         """
+        from .pack_state import _KIND_PROP_SPELLINGS
+
         violations: list[dict] = []
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
                 self._check_item_shape(section, i, item, violations)
                 if section == "points" and isinstance(item, dict):
-                    self._check_kind(item.get("kind"), i, violations)
+                    kind = item.get("kind")
+                    self._check_kind(kind, i, violations)
+                    # #9287 (review cycle 5): the POSITIONAL `kind` is not the
+                    # only spelling a points item can carry. `create_point`'s
+                    # free-form props passthrough also accepts `pointKind` /
+                    # `point_kind` (mined from `pack_state._KIND_PROP_SPELLINGS`,
+                    # never re-spelled here), and the write door REFUSES a
+                    # padded one. Checking only `kind` here left that refusal
+                    # to Phase 2: measured at this head, a bundle item carrying
+                    # `kind: 'statement'` PLUS `pointKind: '\u2003statement\u2003'`
+                    # passed Phase 1 (zero violations), the FIRST item was
+                    # written, and the second raised a bare `ValueError` from
+                    # `create_point` MID-BATCH — a partial write with a
+                    # non-contract error, the exact class this check exists to
+                    # make zero-mutation. Both spellings are read at the item's
+                    # OWN flatten depth (the reviewer of #9591 measured the
+                    # depth, `_item_prop_at_depth`'s contract).
+                    _depth = _item_flatten_depth(item, section)
+                    for _spelling, _kind_prop in (
+                            _KIND_PROP_SPELLINGS.items()):
+                        if _kind_prop != "pointKind":
+                            continue
+                        _declared, _value = _item_prop_at_depth(
+                            item, _spelling, _depth)
+                        if not _declared:
+                            continue
+                        # The same value already reported as `kind` is ONE
+                        # defect with two spellings, not two violations.
+                        if kind is not None and _value == kind:
+                            continue
+                        # `isinstance(str)` gate (#9591 review cycle 6, P2):
+                        # the DOOR does not examine a non-string kind —
+                        # `_refuse_invisible_kind` returns early for one by
+                        # explicit decision — so a Phase-1 refusal here made
+                        # the validator stricter than the writer and turned a
+                        # previously-successful `ingest` into a whole-bundle
+                        # error (the "reads further than the door" class
+                        # `_item_prop_at_depth`'s docstring names).
+                        if isinstance(_value, str):
+                            self._check_kind(_value, i, violations)
         for i, conn in enumerate(bundle.get("connections") or []):
             self._check_item_shape("connections", i, conn, violations)
-            self._check_connection(i, conn, violations)
+        # (#9173) ONE effective-route resolution per bundle — the request
+        # PROMOTED by the endpoint-kind gate (#8499). Every Phase-1 rule that is
+        # scoped to the direct edge (the multi-item `to` arm in
+        # `_check_connection`, and the terminal/self-edge legs in
+        # `_check_endpoints` + `_check_duplicates`) reads THIS, because those
+        # legs predict what `create_direct_edge` will do and a Point-bearing
+        # pair never reaches it. Resolved once here so the three checks share
+        # one graph read instead of repeating it (#8623 did the same for the
+        # duplicate-conflict label arm).
+        effective_routes = self._effective_connection_routes(bundle)
+        for i, conn in enumerate(bundle.get("connections") or []):
+            self._check_connection(
+                i, conn, violations,
+                effective_routes[i] if i < len(effective_routes) else None)
         self._check_refs(bundle, violations)
-        self._check_endpoints(bundle, violations)
-        self._check_duplicates(bundle, violations)
+        self._check_endpoints(bundle, violations, effective_routes)
+        self._check_duplicates(bundle, violations, effective_routes)
         self._check_gated_status(bundle, promotion_policy, violations)
         return violations
 
@@ -19344,8 +20278,25 @@ class TortoiseSDK:
         for i, conn in enumerate(bundle.get("connections") or []):
             viols = []
             self._check_item_shape("connections", i, conn, viols)
-            self._check_connection(i, conn, viols)
-            self._check_endpoint_race(i, conn, refs, viols)
+            # (#9173) Phase 2 has the resolved ids, so the multi-item arm is
+            # judged by the route the write below will actually take — the
+            # same answer Phase 1 read from `_effective_connection_routes`.
+            # Passing the REQUEST here would make Phase 2 refuse a bundle
+            # Phase 1 accepted (the parity break this parameter closes).
+            # Resolved ONCE per connection and handed to both Phase-2 checks
+            # and to the write branch below: `_effective_route` is a graph
+            # read (`_point_bearing_ids`), and the three call sites ask the
+            # same question about the same ids.
+            _eff = None
+            if isinstance(conn, dict) and "operator" in conn:
+                _to_v = conn.get("to")
+                _ids = [refs.get(x, x) if isinstance(x, str) else x
+                        for x in [conn.get("from"),
+                                  *(_to_v if isinstance(_to_v, list)
+                                    else [_to_v])]]
+                _eff = self._effective_route(conn, _ids)
+            self._check_connection(i, conn, viols, _eff)
+            self._check_endpoint_race(i, conn, refs, viols, _eff)
             if viols:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             src = refs.get(conn["from"], conn["from"])
@@ -19381,8 +20332,10 @@ class TortoiseSDK:
                 # endpoint) and True for any Point-bearing one, so the
                 # operator-mediated structure is chosen where the ruling
                 # requires it.
-                _route = self._connection_route(conn)
-                if _route == "direct" and self._point_mediated_route([src, *dsts]):
+                _request_route = self._connection_route(conn)
+                _route = (_eff if _eff is not None
+                          else self._effective_route(conn, [src, *dsts]))
+                if _request_route == "direct" and _route == "operator":
                     self._append_warning(
                         f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
                         f"plain IMPL/NAND connection between :Point endpoints is "
@@ -19392,7 +20345,6 @@ class TortoiseSDK:
                         f"Point's relations claim. Reified automatically; pass "
                         f"`reify: true` to make the intent explicit."
                     )
-                    _route = "operator"
                 if _route == "direct":
                     edge_res = self.create_direct_edge(
                         op_type, src, dsts[0],
@@ -19443,6 +20395,46 @@ class TortoiseSDK:
                     # promotion under auto.
                     oid = existing["id"]
                     written = set(existing.get("written") or [])
+                    # #2351: the SAME override guard as ``create_operator``.
+                    # This branch completes an existing operator's input set
+                    # with a raw edge MERGE — a second door onto the exact edge
+                    # shape ``create_operator`` refuses to write. Without the
+                    # guard here a DERIVED source gets wired above an ASSERTED
+                    # input and the caller is told the connection succeeded,
+                    # while the module's stated invariant is that the write
+                    # path refuses such an edge outright.
+                    # ``classes_for_ids`` is :Point-anchored, so an id absent
+                    # from it has NO class — it is not a claim (:Subject/
+                    # :Object/:Event), and absence must not read as "asserted".
+                    # This is the same parity the other two doors get from
+                    # their label check: the guard applies only when the SOURCE
+                    # is a claim and at least one TARGET is one.
+                    _absorb_classes = _claim_class.classes_for_ids(
+                        proj.g, [src] + dsts)  # noqa: RUF005
+                    _absorb_targets = set().union(
+                        *(_absorb_classes.get(t, set()) for t in dsts)
+                    ) if dsts else set()
+                    if (op_type in ("IMPL", "NAND")
+                            and src in _absorb_classes
+                            and _absorb_targets
+                            and _claim_class.direction_blocks_create(
+                                # ⛔ CANONICALIZE FIRST. `direction` here may be
+                                # ABSENT, and absent is NOT the mutual default
+                                # for every operator: NAND's absent direction is
+                                # `unidirectional` (`_canonical_direction`), so
+                                # judging the raw token treats a
+                                # direction-omitting NAND as bidirectional and
+                                # REFUSES a back-leg that never flows — a
+                                # wiring `create_operator` accepts for the same
+                                # edge shape (#2351 review). `_find_operator`
+                                # canonicalizes for the same reason; the two
+                                # doors must agree.
+                                self._canonical_direction(op_type, direction),
+                                _absorb_classes.get(src),
+                                _absorb_targets)):
+                        raise ValueError(_claim_class.override_refusal(
+                            source_id=src, target_ids=list(dsts),
+                            surface=f"ingest({op_type}) partial-absorb"))
                     for _i, _inp in enumerate([src] + dsts):  # noqa: RUF005
                         if _inp in written:
                             continue
@@ -19960,17 +20952,29 @@ class TortoiseSDK:
         # sweep the labels once each (index-preserving) and remember WHICH
         # label resolved each id so the MERGE below can anchor on it.
         found: dict[str, tuple[str, bool, str | None, bool]] = {}
+        # #2351 (epic #2349 E-derived): the same probe carries each endpoint's
+        # claim class, so the override guard costs NO extra round trip. Classes
+        # are aggregated across every row an id resolves to (the #7822 fan-out
+        # rule); an absent marker reads as "asserted".
+        endpoint_classes: dict[str, set[str]] = {}
         for _label in EPISTEMIC_LABELS:
             rows = proj.g.query(
                 f"MATCH (p:{_label}) WHERE p.id IN $ids "
                 "RETURN p.id, coalesce(p.is_operator, false), p.status, "
-                "coalesce(p.outdated, false)",
+                "coalesce(p.outdated, false), "
+                "coalesce(p.claimClass, 'asserted')",
                 params={"ids": [source_id, target_id]},
             ).result_set
             for r in rows:
                 # First label wins for a (hypothetical) multi-labelled node;
                 # the terminal/operator guards below are label-independent.
                 found.setdefault(r[0], (_label, bool(r[1]), r[2], bool(r[3])))
+                # ⛔ ``claimClass`` is a :Point property: a non-Point endpoint
+                # is not a claim, so its absence must NOT read as "asserted"
+                # (that refused a DERIVED point wired to an Object — a shape
+                # #7902 made writable; #2351 review).
+                if _label == "Point":
+                    endpoint_classes.setdefault(r[0], set()).add(r[4])
         for pid in (source_id, target_id):
             if pid not in found:
                 raise ValueError(
@@ -20003,6 +21007,24 @@ class TortoiseSDK:
         # full-scan. See live.epistemic_label_queries.
         label_src = found[source_id][0]
         label_tgt = found[target_id][0]
+
+        # #2351: the override guard — a DERIVED source claim may not IMPL-cascade
+        # above (or NAND-attack) an ASSERTED target. Raised AFTER the endpoint
+        # guards above and BEFORE the MERGE, so a refused call writes nothing.
+        # #2351: the guard applies only when BOTH endpoints are claims (:Point).
+        # A non-Point endpoint carries no ``claimClass``, so it can neither be
+        # overridden nor override — skipping it is what keeps #7902's typed
+        # wirings writable.
+        _tgt_classes = (endpoint_classes.get(target_id)
+                        if found.get(target_id, (None,))[0] == "Point" else None)
+        if (found.get(source_id, (None,))[0] == "Point" and _tgt_classes
+                and _claim_class.direction_blocks_create(
+                    direction,
+                    endpoint_classes.get(source_id),
+                    _tgt_classes)):
+            raise ValueError(_claim_class.override_refusal(
+                source_id=source_id, target_ids=[target_id],
+                surface=f"create_direct_edge({op_type})"))
 
         # BARE-pattern MERGE + attribute SET (last-writer-wins; exactly one
         # edge per (src,tgt,type)). `created` is detected by a pre-count
@@ -22090,6 +23112,22 @@ class TortoiseSDK:
           (`invalidate_point` refuses operators) therefore remains a
           permanently unsweepable root, exactly as it was before #7505; that
           residual is tracked, not silently assumed away.
+          ⛔ ONE CARVE-OUT, and it is the opposite case (#9269): an
+          OPERATOR-SHAPED node that is another operator's INPUT. The
+          exemption above protects a pass that MAY NOT have run the factor;
+          this class is one every arm of ``_affected_claims`` now excludes by
+          construction (``ep._non_operator``), so before #9269 it was swept
+          only because it entered ``affected`` as an op-input. Excluding it
+          from `affected` while retaining it here re-classified a SWEPT
+          population as never-sweepable: measured, after
+          ``create_operator('IMPL', a, [b, <is_operator:true>])`` and a
+          converged ``dream(mode='full')`` the shaped input was the ONLY
+          remaining graph flag, ``stale_backlog`` could not drain, and
+          ``_auto_dream_mode()`` returned 'local' forever — the #7505/#2422
+          failure class, reached through the one shape #9269 is about. So the
+          shaped-input class is SWEPT BY CLASSIFICATION here (below), which is
+          how a root that can never be affected stays clearable. A TOP-LEVEL
+          operator (nobody's input) is untouched and keeps the residual above.
         * A ROOT WITH **NO** ``IMPL|NAND`` EDGE AT ALL (an isolated claim).
           Its pass computes nothing (the #3139 ``no_ep_factors`` legitimate
           no-op), so sweeping its flag would be a no-op sweeping its own
@@ -22130,13 +23168,29 @@ class TortoiseSDK:
         # (1) an operator's INPUT. Direction is load-bearing: a mitigation
         # points AT an operator (``(m)-[:IMPL]->(op)``), so it is the operator
         # that would match here, never ``m``.
-        participants |= {r[0] for r in proj.g.query(
+        #
+        # #9269: the same row answers the SWEEP question, which is the opposite
+        # of the retention question. An OPERATOR-SHAPED input (``is_operator``
+        # absent-or-false is the ADMITTED form, so the shaped class is its
+        # complement) can now never enter ``affected`` — every arm of
+        # ``_affected_claims`` carries ``ep._non_operator`` — so the
+        # ``affected`` subtraction above can never clear its flag, and retaining
+        # it as a PARTICIPANT (it is an operator, so the first query retains it)
+        # strands it forever. It is swept by CLASSIFICATION instead. The
+        # spelling is the complement of ``ep._non_operator`` and was measured on
+        # the engine against every spelling in that docstring: the STRING
+        # ``'false'`` and both numerics (``0``, ``1``) are shaped, and ``0 = false``
+        # is false there — the same verdict as the Python identity test.
+        op_input_rows = proj.g.query(
             "MATCH (o:Point)-[:IMPL|NAND]->(n:Point) "
             "WHERE n.id IN $ids "
             "AND (o.is_operator = true OR o.op_type IS NOT NULL) "
-            "RETURN DISTINCT n.id",
+            "RETURN DISTINCT n.id, "
+            "(n.is_operator IS NOT NULL AND n.is_operator <> false)",
             params={"ids": ids},
-        ).result_set}
+        ).result_set
+        participants |= {r[0] for r in op_input_rows}
+        shaped_inputs = {r[0] for r in op_input_rows if r[1]}
         # (2) the two facts the remaining classes need from the edges, in ONE
         # sweep: does the candidate have an IMPL|NAND edge at all (the class
         # boundary — an isolated claim has none and is retained), and is that
@@ -22163,7 +23217,9 @@ class TortoiseSDK:
         # operator is already in `participants`). The #2205/#3139
         # index-independent form is used for the far endpoint.
         participants |= {r[0] for r in edge_rows if r[1]}
-        return (points & edge_bearing) - participants
+        # #9269: the shaped input is the ONE participant class this sweep may
+        # still clear — see the carve-out in the docstring.
+        return (points & edge_bearing) - (participants - shaped_inputs)
 
     def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
                                ) -> tuple[list[str], list[str]]:
@@ -23381,11 +24437,14 @@ class TortoiseSDK:
         apply: ``diagnostic`` — one of ``truncated`` (#395 degeneration guard),
         ``no_factors`` / ``no_dirty_roots`` (nothing to run), ``factors_skipped``;
         and ``skipped_factors`` — one structured record per factor EP DROPPED
-        before it could be consumed (#6105: a draft/terminal endpoint stripped
-        the operator below 2 participating inputs, or a directional operator
-        lost its idx-0 source). ``converged`` speaks only for the factors the
-        run CONSUMED: read ``skipped_factors`` before treating a run as
-        evidence that every wired operator voted.
+        before it could be consumed (#6105). ``reason`` is one of
+        ``source_stripped`` (a non-bidirectional operator lost its idx-0
+        source), ``degenerate`` (a draft/terminal endpoint stripped the operator
+        below 2 participating inputs) or ``derived_over_asserted`` (#2351 — a
+        DERIVED claim's edge into an ASSERTED one, which the class guard blocks;
+        see ``tortoise/claim_class.py``). ``converged`` speaks only for the
+        factors the run CONSUMED: read ``skipped_factors`` before treating a run
+        as evidence that every wired operator voted.
 
         #780: draft Points/operators are EXCLUDED by default (EP only runs
         over live claims); there is no include_draft escape hatch on this
@@ -23914,6 +24973,22 @@ class TortoiseSDK:
         distinguishable from legacy ``baseline_set=true`` rows with no source
         token (issue #398 2x2 mapping — calibrate_summary renders those as
         set-by-author legacy).
+
+        REFUSES (nothing is written, and no prior is left in the in-memory
+        evidence map — a refused write must never leave the SDK believing a
+        prior the graph does not hold):
+          - an unrepresentable ``alpha``/``beta`` (``_reject_unrepresentable_number``);
+          - an id naming a node that cannot carry a ``:Point`` baseline — another
+            epistemic label, a ``:Source``… (#9063); the error names the label
+            it found;
+          - an id naming NO node at all (#9262): the store statement matches
+            zero rows, so reporting success would assert a prior that does not
+            exist. Create the point first, or correct the id.
+        NOT refused: an id the engine's LABELLED equality cannot bind while a
+        ``:Point`` with it exists (an empty / whitespace-padded id). That path
+        keeps its historical no-op — it returns the dict and holds the prior in
+        memory only, writing nothing — because "no node with id" would be a
+        false diagnosis there (#9063). That residual is #9751.
         """
         if source not in BASELINE_SOURCE_TOKENS:
             raise ValueError(
@@ -23931,7 +25006,10 @@ class TortoiseSDK:
         # `alpha=2**70` is CLAMPED to INT64 max and `alpha=Decimal('0.1')` is
         # stored as a different number, and those parameters feed EP confidence.
         # The guard runs BEFORE `self._evidence` is updated so a refused write
-        # cannot leave the in-memory prior divergent from the graph.
+        # cannot leave the in-memory prior divergent from the graph. (The two
+        # refusal paths BELOW land after the update — `written` is only known
+        # after the store answers — so each one pops the seat it just planted,
+        # #9262.)
         _reject_unrepresentable_number("alpha", alpha)
         _reject_unrepresentable_number("beta", beta)
         self._evidence[claim_id] = (alpha, beta)
@@ -23997,12 +25075,21 @@ class TortoiseSDK:
         # SCOPE: this fires on a node that EXISTS and is not a :Point — an
         # epistemic entity label (the #9063 measured class) or any other
         # labelled node (a ``:Source`` addressed by its url, a ``:Tag``...),
-        # since none of them can carry a :Point baseline. An id naming NO node
-        # keeps the historical behaviour — an in-memory-only prior, pinned by
-        # ``test_sdk_ep.py::TestEvidence::test_set_returns_data`` — because it
-        # is a different defect (a typo absorbed as success, with a phantom
-        # in-memory prior that ``_hydrate_evidence`` drops on restart) on a
-        # different contract (#9262), not folded in here.
+        # since none of them can carry a :Point baseline.
+        #
+        # #9262 closes the remaining hole in the SAME contract: an id naming NO
+        # node at all. The statement matched zero rows, yet the method returned
+        # the success dict and planted the prior in ``self._evidence`` — which
+        # ``_hydrate_evidence`` only reloads from ``baseline_set = true`` rows,
+        # so the phantom died on restart and a run's belief state depended on
+        # WHICH PROCESS set it (#1163's request-scoped SDK is that case). The
+        # method's own contract is "Persists to graph immediately", so a write
+        # that bound no row is refused loudly and leaves no in-memory seat.
+        # ⛔ NOT universal, and stated as measured: the ONE zero-row write that is
+        # still a no-op is the id-RESOLUTION case below (``_unbindable``), where
+        # the probe DID find a ``:Point`` but the labelled equality cannot bind
+        # its id — that call returns the dict and KEEPS the in-memory seat, which
+        # is #9751's residual, deliberately outside this issue.
         if not written:
             labels: list[str] = []
             # #7853: id-anchored per-label probe — the indexes are
@@ -24025,8 +25112,15 @@ class TortoiseSDK:
             # the engine's labelled equality misses and the unlabelled scan
             # hits). Claiming ":Point is not a :Point" is a false diagnosis that
             # no caller can act on, so that case keeps the historical no-op
-            # behaviour of an id the write did not bind (#9262's family).
-            if labels and labels[0] in _CALIBRATION_GATED_LABELS:
+            # behaviour of an id the write did not bind.
+            #
+            # ``_unbindable`` is the ONE thing that separates it from #9262's
+            # case below (both leave ``labels`` empty): a node WAS found, so
+            # "no node with id" would be a false diagnosis in the other
+            # direction. It must be captured before the reset. Its phantom seat
+            # (the call returns the dict, the graph stores nothing) is #9751.
+            _unbindable = bool(labels) and labels[0] in _CALIBRATION_GATED_LABELS
+            if _unbindable:
                 labels = []
             if labels:
                 self._evidence.pop(claim_id, None)
@@ -24036,6 +25130,19 @@ class TortoiseSDK:
                     f":Point only (epistemic-entity priors are the open "
                     f"belief-model decision in #9063), so the belief you "
                     f"intended was never stored."
+                )
+            if not _unbindable:
+                # #9262: the probes found NOTHING by this id — a typo'd or
+                # not-yet-created point. Refuse rather than report a prior the
+                # graph does not hold, and drop the seat planted above so the
+                # in-memory map stays a mirror of the graph (#9063's rule).
+                self._evidence.pop(claim_id, None)
+                raise ValueError(
+                    f"set_point_baseline: no node with id {claim_id!r} — nothing "
+                    f"was written. Baselines are persisted onto an existing "
+                    f":Point only, and the prior is NOT kept in memory either "
+                    f"(an unstored baseline must not be believed). Create the "
+                    f"point first, or correct the id."
                 )
         # #2884 D3/FIX-3: a baseline clears the posteriors LIVE (`null`), so a
         # rebuild must replay the CLEAR or it resurrects the stale posteriors
@@ -24543,8 +25650,23 @@ class TortoiseSDK:
                 "coalesce(n.baseline_system_default, false)",
                 params={"id": pid},
             ).result_set
-            bl_src, inherited_at, cur_a, cur_b, bl_set, decide_default = (
-                row[0] if row else (None, None, 1.0, 1.0, False, False))
+            # #9262: an id this loop CANNOT resolve is not a point to derive a
+            # baseline for, so skip it rather than call the writer with it.
+            # ``MATCH (n:Point {id:$id})`` is the same labelled equality
+            # ``set_point_baseline`` writes through, so an empty row means the
+            # write below cannot land EITHER: it would plant an in-memory prior
+            # the graph never stores (measured before this guard — an id-less
+            # hand-written Point, ``id IS NULL``, arrives here as ``pid=None``
+            # and left ``_evidence == {None: (5.0, 1.0)}``), and since #9262 it
+            # would also REFUSE and abort ``compute_confidence`` on a graph
+            # #9275 already handles. Nothing to store ⇒ nothing to believe.
+            # (The public writer keeps its own no-op for the same class —
+            # #9751 — because a CALLER naming such an id must be told the truth;
+            # an internal derivation over a graph it just read has nothing to
+            # tell.)
+            if not row:
+                continue
+            bl_src, inherited_at, cur_a, cur_b, bl_set, decide_default = row[0]
 
             # #2199/#844: an EXPLICIT ``set_point_baseline`` / system-default
             # baseline is FROZEN against source recomputation, and a legacy
@@ -24698,9 +25820,13 @@ class TortoiseSDK:
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
 
-        #9063: the non-operator predicate is the GATE's — absence-or-false,
-        with NO ``op_type`` conjunct (EP's factor-input arm has no non-operator
-        filter, so an ``op_type``-bearing node IS a participant) — plus the
+        #9063/#9269: the non-operator predicate is the GATE's — absence-or-false,
+        with NO ``op_type`` conjunct (EP's factor-input arm applies this SAME
+        absence-or-false predicate since #9269, and a hybrid
+        ``create_point(op_type=...)`` node is ``is_operator = false`` WITH
+        ``op_type``, so it passes on BOTH sides and IS a participant; the
+        ``op_type IS NULL`` conjunct belongs to the STRICTER operator-less
+        direct-edge arms only) — plus the
         id-less exclusion, so a legacy Point written before ``is_operator`` was
         stamped is LISTED here — this is the guidance the
         calibration gate's error message points at, and it must not be empty
@@ -24729,9 +25855,12 @@ class TortoiseSDK:
         #
         # The predicate is the GATE's, exactly — absence-or-false, with NO
         # ``op_type`` conjunct (see ``_uncalibrated_ep_participants``: EP's
-        # factor-input arm has no non-operator filter, so a hybrid
-        # ``create_point(op_type=...)`` node is a participant and must be
-        # listed here for its remedy to exist) — plus the id-less exclusion the
+        # factor-input arm carries this SAME absence-or-false predicate since
+        # #9269, so a hybrid ``create_point(op_type=...)`` node — ``is_operator
+        # = false`` WITH ``op_type`` — is a participant and must be listed here
+        # for its remedy to exist; the ``op_type IS NULL`` conjunct belongs to
+        # the STRICTER operator-less direct-edge arms, never to this one) — plus
+        # the id-less exclusion the
         # gate makes: ``set_point_baseline(None)`` is not a remedy a caller can
         # run, and such a node is never an EP participant.
         not_operator = "(n.is_operator IS NULL OR n.is_operator = false)"
@@ -24907,8 +26036,20 @@ class TortoiseSDK:
         the two cannot drift: ``_affected_claims`` admits a claim only when it
         forms a factor (#5566), and ``_affected_factors`` names every factor
         INPUT — its operator inputs and BOTH endpoints of an operator-less
-        direct edge (#888 W5). The gate's own evidence-kind / live filters
-        decide what to demand calibration of.
+        direct edge (#888 W5). #9269: the OPERATOR-MEDIATED selections in both
+        of those apply the SAME absence-or-false non-operator predicate this
+        gate's universe does, so an operator-shaped node is in neither — the
+        scope and the run cannot disagree about it. That predicate is spelled
+        in Cypher at the affected-set arms and in PYTHON at
+        ``_affected_factors``' Batch 2 (see ``ep._non_operator``, whose
+        Cypher-helper form must NOT be extended to Batch 2 — a WHERE-clause
+        filter there would hide a stripped idx-0 SOURCE). (The
+        operator-less DIRECT-EDGE arms stay a STRICTER spelling, this predicate
+        AND ``op_type IS NULL``; the one population where the gate deliberately
+        demands a prior the run's direct-edge arms exclude is the HYBRID
+        ``is_operator = false`` + ``op_type`` node — recorded, not a drift.) The
+        gate's own evidence-kind / live filters decide what to demand
+        calibration of.
 
         Deriving this from the SELECTED operators' immediate endpoints alone
         is NOT enough: ``ep.run`` re-expands ``max_hops`` from those seeds, so
@@ -25012,19 +26153,34 @@ class TortoiseSDK:
             bare ``n.is_operator = false`` matched ZERO rows on a legacy point
             whose property is ABSENT — that point was consumed AND stamped
             while the gate saw nothing — which is this issue.
-            NO ``op_type IS NULL`` conjunct here, deliberately: EP's
-            factor-INPUT selection (``ep.py`` Batch 2, the ``(o)->(c)`` arm)
-            carries NO non-operator filter, so a HYBRID node
+            NO ``op_type IS NULL`` conjunct here, deliberately: a HYBRID node
             (``create_point(op_type=...)`` → ``is_operator = false`` WITH
-            ``op_type``) is a participant and lands in ``_ep_run_scope``
+            ``op_type``) is an EP participant and lands in ``_ep_run_scope``
             (measured). Excluding it would REMOVE coverage the audit had before
             #9063 (its bare ``is_operator = false`` matched hybrids) — a
             fail-open, the one direction this gate must never move. A legacy
             ``op_type``-only operator is in that same consumed set and is now
             demanded too, which is fail-closed and satisfiable (it is a
-            ``:Point``). ⚠️ RESIDUAL, pre-existing on both trees (#9269): an
-            ``is_operator = true`` node used as a factor input is also consumed
-            and stamped, and is NOT demanded here.
+            ``:Point``).
+            #9269 (CLOSED): an ``is_operator = true`` node used as a factor
+            input USED to be consumed and stamped while this predicate —
+            correctly — demanded nothing of it (the #7478 class), and so did
+            an out-of-contract spelling (the STRING ``is_operator = 'false'``)
+            that matches neither ``IS NULL`` nor ``= false``. Both were closed
+            on the OTHER side: EP's factor-INPUT selection applies THIS SAME
+            absence-or-false predicate, so the two agree by construction —
+            neither demands nor consumes an operator-shaped node. ⛔ It applies
+            it as a PREDICATE with two spellings, not as one helper: in Cypher
+            at the affected-set arms, and in PYTHON at ``_affected_factors``'
+            Batch 2 — which deliberately does NOT use ``ep._non_operator``'s
+            WHERE-clause form, because hiding a stripped idx-0 SOURCE from that
+            arm renumbers the first surviving target into the source slot and
+            inverts directional messages (see that function's docstring). Do
+            not "unify" the two. Widening THIS predicate to reach them was the
+            rejected
+            route (it would demand a prior of every operator Point that happens
+            to be a factor input, and could not cover the string spelling
+            without also demanding every non-boolean spelling).
             NOTE: ``_dedup_match_clauses`` keeps a DIFFERENT form on purpose
             (#2892/#2949); do not restore parity between the two.
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
@@ -26925,6 +28081,15 @@ class TortoiseSDK:
         relationship_filter: str | None = None,
         traversal_path: str | None = None,
         exclude_status: list[str] | None = None,
+        # #2351 (epic #2349 E-derived): filter — and therefore annotate — by the
+        # claim's asserted|derived class. A read-side OPT-IN: ``None`` (the
+        # default) costs no query and emits no key, so every existing caller is
+        # byte-identical. When set, the filter is applied at the SAME
+        # pre-truncation seam as ``exclude_status`` (#898) and every returned
+        # Point carries ``claim_class`` — so a consumer can tell "this was told
+        # to us" from "this was computed from other beliefs" without a new tool
+        # (+0 MCP tools).
+        claim_class: str | None = None,
         # #4509: the OPT-IN pre-truncation turn-echo exclusion. A caller that
         # names the capture session it is extracting for (the S3
         # link-before-create prior lookup) drops that session's own turn
@@ -27079,6 +28244,17 @@ class TortoiseSDK:
             silently shrink the result count — epic #898 recall_state). Default None =
             no filtering (existing behavior unchanged; retracted is already excluded at
             the retrieval layer, #689). Points with no status property are kept.
+        claim_class (#2351, epic #2349 E-derived): 'asserted' or 'derived' — the
+            claim's provenance CLASS, filtered at the SAME pre-truncation seam as
+            ``exclude_status`` and, because the classes are read there anyway,
+            ANNOTATING every returned Point with its ``claim_class`` key (a
+            consumer must be able to tell "this was told to us" from "this was
+            computed from other beliefs"). The read side of the class marker: a
+            claim with no stored ``claimClass`` property IS 'asserted' (every
+            claim authored before the marker existed, and every claim an
+            authoring path writes), so ``claim_class='asserted'`` returns the
+            whole authored graph without a migration. Default None = no filter
+            and no key, i.e. byte-identical to the pre-#2351 read.
         exclude_turn_echo_session (#4509): the OPT-IN turn-echo exclusion — the
             capture session whose OWN transcript echoes (``{session_id}_t{i}`` turn
             Points; ``retrieval.is_turn_echo_row``) must NOT be treated as memory
@@ -27248,6 +28424,19 @@ class TortoiseSDK:
             operator kill switch; ``_valid_time_rerank=False`` is the
             in-process opt-out.
         """
+        # #2351: ``claimClass`` is a Point property, so a class filter on a
+        # non-Point read is a CALLER ERROR and must be refused — silently
+        # dropping it returns the very rows the caller asked to exclude (a
+        # document has no marker, i.e. it reads as asserted), which arrives as
+        # an answer. Checked HERE, before the degraded / fallback tiers below,
+        # because those tiers return early and would otherwise bypass it.
+        if claim_class is not None and entity_type not in _CLAIM_CLASS_POINT_TYPES:
+            raise ValueError(
+                f"claim_class is a Point property (#2351): it cannot filter "
+                f"entity_type={entity_type!r}. Query entity_type='point' (or "
+                f"'operator'), or omit claim_class — ignoring it here would "
+                f"return the rows the caller asked to exclude."
+            )
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
@@ -27302,6 +28491,12 @@ class TortoiseSDK:
                 f"recency_boost must be 0.0-10.0, got {recency_boost!r}")
         if order_by not in ("relevance", "confidence", "graph"):
             raise ValueError(f"order_by must be 'relevance', 'confidence', or 'graph', got {order_by!r}")
+        # #2351: the claim class is a caller INPUT, so it fails loud BEFORE any
+        # retrieval work — a typo'd class must not silently read as "no filter"
+        # (which would return claims the caller asked to exclude). The validated
+        # value gates the filter + annotation below; ``None`` stays None.
+        if claim_class is not None:
+            claim_class = _claim_class.validate(claim_class)
 
         # B6 (#3892): the status sink and the trace used to classify it. When
         # no status is requested this is exactly today's ``leg_trace`` (None
@@ -27383,6 +28578,77 @@ class TortoiseSDK:
                 # break the thing it measures).
                 _read_ledger.record_rows(label, rows)
             return rows
+
+        def _with_claim_class(rows: list[dict],
+                              classes: dict[str, frozenset[str]]) -> list[dict]:
+            """Annotate each returned Point with its asserted|derived class.
+
+            #2351 (epic #2349 E-derived), read side indicator 3. Only reachable
+            when the caller ASKED for the class (``claim_class is not None``):
+            an unfiltered read emits no key at all, so every pre-#2351 caller
+            stays byte-identical — the annotation is OPT-IN, never a widened
+            result shape.
+
+            The classes are the ones the FILTER already read (``classes``), so
+            annotating costs no second round trip. An id carrying no node with
+            a marker reads as ``asserted``: absence IS the default class, which
+            is what lets an authored-only graph be queried without migrating it.
+            """
+            wanted = claim_class
+            for row in rows:
+                pid = row.get("id")
+                if not isinstance(pid, str):
+                    continue
+                carried = classes.get(pid) or frozenset({_claim_class.DEFAULT})
+                # A Point id may fan out to several nodes with different marks
+                # (#7822) — report the class the caller asked for when the id
+                # carries it, else the strongest fact we have.
+                row["claim_class"] = (
+                    wanted if wanted in carried
+                    else _claim_class.DERIVED
+                    if _claim_class.DERIVED in carried
+                    else _claim_class.ASSERTED)
+            return rows
+
+        def _filter_and_annotate_claim_class(
+                rows: list[dict]) -> list[dict] | None:
+            """Filter + annotate DEGRADED hit rows by claim class (#2351).
+
+            The two fallback tiers (``search_snapshot`` / ``fallback_tfidf``)
+            return BEFORE the pre-truncation filter block, and they already
+            replicate the ``exclude_status`` / ``exclude_turn_echo_session``
+            parity by hand for exactly this reason. Without this, a
+            class-filtered read on a degraded store silently returned claims
+            the caller asked to EXCLUDE — the one failure mode a filter must
+            never have. Classes are read from the graph by id, so an
+            unmarked hit stays ``asserted`` (absence IS the class).
+
+            ⛔ ``None`` means THE CLASS READ FAILED. The caller must then
+            neither filter NOR annotate: this tier exists to serve a SICK
+            store, so it may not raise — but a failed read must also not
+            become an answer, and returning the rows unchanged would be
+            indistinguishable from "every id is allowed" and would get every
+            row stamped with a class that was never read (the primary path
+            refuses to do exactly that). Saying nothing is the only honest
+            degradation.
+            """
+            ids = [r.get("id") for r in rows if isinstance(r.get("id"), str)]
+            try:
+                classes = _claim_class.classes_for_ids(graph, ids)
+            except Exception:
+                _logger.warning(
+                    "claim-class filter failed on the degraded fallback — "
+                    "pass-through, without the class annotation", exc_info=True)
+                return None
+            kept: list[dict] = []
+            for row in rows:
+                carried = classes.get(row.get("id")) or frozenset(
+                    {_claim_class.DEFAULT})
+                if claim_class not in carried:
+                    continue
+                row["claim_class"] = claim_class
+                kept.append(row)
+            return kept
 
         try:
             proj = self._get_proj()
@@ -27717,7 +28983,16 @@ class TortoiseSDK:
                 )
                 _key = snapshot_key(proj, getattr(self, "_namespace", None))
                 _snap = _fb_store.get(_key)
-                if _snap is None:
+                # #2351: the snapshot is a deliberately LEAN projection (it
+                # carries no class column), so it cannot honour a claim-class
+                # filter pre-truncation. When one is requested, DROP the (cached
+                # or fresh) snapshot and take the legacy path below — which
+                # filters the CORPUS before truncating. Correctness over the
+                # ~350ms the snapshot saves, on a rare degraded AND
+                # class-filtered read.
+                if claim_class is not None:
+                    _snap = None
+                elif _snap is None:
                     _snap = build_snapshot(proj)
                     if _snap is not None:
                         _fb_store.put(_key, _snap)
@@ -27760,7 +29035,28 @@ class TortoiseSDK:
                         {"id": p.get("id"),
                          "point_kind": p.get("pointKind"),
                          "content": p.get("content")})]
+                allowed_ids: set[str] | None = None
+                if points and claim_class is not None:
+                    # #2351: filter the CORPUS before truncation, the same
+                    # reason ``exclude_status`` is threaded into the tiers
+                    # above: a filter applied AFTER the limit cut silently
+                    # under-fills the caller's ``limit``.
+                    _allowed = _filter_and_annotate_claim_class(points)
+                    if _allowed is not None:
+                        allowed_ids = {p.get("id") for p in _allowed}
+                        points = [p for p in points
+                                  if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
+                if allowed_ids is not None:
+                    # The ANNOTATION has to be re-applied: ``fallback_tfidf``
+                    # rebuilds every row through ``SearchResult.to_dict()``,
+                    # which has no class field, so the stamp put on the CORPUS
+                    # dicts above does not survive into the returned rows. The
+                    # rows kept here are exactly ``allowed_ids`` by
+                    # construction, so the class is known without re-reading.
+                    for _row in legacy_hits:
+                        if _row.get("id") in allowed_ids:
+                            _row["claim_class"] = claim_class
                 if status_trace is not None:
                     status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
@@ -28021,6 +29317,51 @@ class TortoiseSDK:
                     result_ids = [pid for pid in result_ids if pid not in status_excluded_ids]
             except Exception:
                 _logger.warning("exclude_status filter failed — pass-through", exc_info=True)
+
+        # 5d-ter (#2351). The claim-class filter, at the SAME pre-truncation
+        #     seam as exclude_status above and for the same reason: a filter
+        #     applied after the limit cut silently shrinks the result set
+        #     whenever the other class dominates the pool.
+        #
+        #     ⛔ The filter is OPT-IN and the classes are read ONCE, here, then
+        #     reused for the annotation below — so an unfiltered call performs
+        #     no extra read and emits no extra key (byte-identical to
+        #     pre-#2351). The read is the shared fan-out-complete
+        #     ``claim_class.classes_for_ids``: an id carrying several nodes is
+        #     kept when ANY of them carries the requested class, and an id with
+        #     no marker AT ALL is 'asserted' — which is what makes filtering
+        #     for the authored class return the whole pre-marker graph.
+        claim_classes: dict[str, frozenset[str]] = {}
+        # ``claimClass`` is a Point property, and the ANNOTATION below must apply
+        # under exactly the same condition as this filter — otherwise a
+        # class-filtered read of another entity type annotates every row with a
+        # class it was never measured for.
+        #
+        # ⛔ The non-Point refusal happened at the TOP of this method (before
+        # the fallback tiers, which return early); by here ``claim_class``
+        # implies a ``:Point`` read, so the filter and the annotation share one
+        # condition.
+        _claim_class_applies = claim_class is not None
+        # A FAILED class read must not become an answer: pass-through is the
+        # right degradation for the FILTER (return what the caller would have
+        # got before #2351), but stamping every row ``asserted`` would ASSERT a
+        # class that was never read. So a failure clears the annotation too.
+        _claim_classes_ok = True
+        if _claim_class_applies and result_ids:
+            _wanted = claim_class
+            try:
+                claim_classes = _claim_class.classes_for_ids(graph, result_ids)
+                result_ids = [
+                    pid for pid in result_ids
+                    if _wanted in (claim_classes.get(pid)
+                                   or frozenset({_claim_class.DEFAULT}))
+                ]
+            except Exception:
+                _logger.warning(
+                    "claim-class filter failed — pass-through, without the "
+                    "class annotation", exc_info=True)
+                claim_classes = {}
+                _claim_classes_ok = False
 
         # 5d-bis (#4509). Apply the OPT-IN turn-echo exclusion at the SAME
         #     pre-truncation seam as exclude_status (#898): a caller that names
@@ -28619,23 +29960,29 @@ class TortoiseSDK:
                 # #9201: each end's presence rides along — a present-but-
                 # unorderable bound yields precision ``None``, so the block's
                 # presence needs its own datum (see ``SearchResult.to_dict``).
+                # #9244: NO ``or pt.get("validFromPrecision")`` fallback here.
+                # The arm was ALREADY dead (``pt`` carries no window column, per
+                # the note above — so it is not how #9244 was ever reachable;
+                # that was ``effective_precision``'s early return). It is
+                # removed rather than kept as a second resolution path: the
+                # moment ``pt`` widened, a raw declared token could re-enter the
+                # wire behind the ONE resolution home's back, which is the whole
+                # defect class #9244 closes. What stays here is the resolved
+                # ``point_state`` value and nothing else.
                 valid_from_present=bool(
                     point_state.get(pid, {}).get("valid_from_present")),
                 valid_to_present=bool(
                     point_state.get(pid, {}).get("valid_to_present")),
                 valid_from_precision=(
-                    point_state.get(pid, {}).get("valid_from_precision")
-                    or pt.get("validFromPrecision") or ""),
+                    point_state.get(pid, {}).get("valid_from_precision") or ""),
                 valid_to_precision=(
-                    point_state.get(pid, {}).get("valid_to_precision")
-                    or pt.get("validToPrecision") or ""),
+                    point_state.get(pid, {}).get("valid_to_precision") or ""),
                 end_state=(
                     point_state.get(pid, {}).get("end_state")
                     or _resolve_end_state(
                         point_state.get(pid, {}).get("valid_to")
                         or pt.get("validTo"),
-                        point_state.get(pid, {}).get("valid_to_precision")
-                        or pt.get("validToPrecision"))),
+                        point_state.get(pid, {}).get("valid_to_precision"))),
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,
@@ -28701,6 +30048,8 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
+            if _claim_class_applies and _claim_classes_ok:
+                ranked = _with_claim_class(ranked, claim_classes)
             return _with_read_status(ranked)
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
@@ -28726,6 +30075,8 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
+        if _claim_class_applies and _claim_classes_ok:
+            out = _with_claim_class(out, claim_classes)
         return _with_read_status(out)
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
@@ -31761,7 +33112,12 @@ class TortoiseSDK:
 
     @staticmethod
     def _validate_kind(kind: str) -> None:
-        # ponytail: open-ended kind vocabularies — any string accepted.
+        # ponytail: open-ended kind vocabularies — any VISIBLE identifier-shaped
+        # string accepted. (#9287 narrowed this from "any string": a kind
+        # carrying surrounding whitespace or an invisible format mark is refused
+        # at the door by `_refuse_invisible_kind` before this runs — it is not a
+        # spelling to register, it is a different kind the calibration gate
+        # cannot classify.)
         # Warning for unrecognized values; domain_loader.register_kind() can suppress.
         # #951: vocabulary source is the domain_loader adapter — the compiled
         # pack pointKind bucket (pack_registry canonical, plan §5.2 boundary 4).
@@ -31922,6 +33278,21 @@ class TortoiseSDK:
             approved = _installed_namespaces_for_gate(self)
         refuse_unapproved_kinds_in_payload(record, approved, spells=spells)
 
+    def _refuse_invisible_point_kinds(self, props: dict, *, door: str) -> None:
+        """#9287: refuse a padded/invisible ``pointKind`` riding the props path.
+
+        Both mutating Point doors forward a free-form ``props`` dict, and the
+        mined key set is what they are screened with (`_refuse_unapproved_kinds_in_props`'s
+        reason, one rule over): the canonical ``pointKind`` AND its snake
+        spelling — measured at HEAD, an update through either reached the node
+        (`update_point(id, pointKind='\u2003observation\u2003')` stored it).
+        """
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        for spelling, kind_prop in _kind_spellings.items():
+            if kind_prop == "pointKind" and spelling in props:
+                _refuse_invisible_kind("pointKind", props.get(spelling),
+                                       door=door)
+
     def _refuse_unapproved_kinds_in_props(self, props: dict) -> None:
         """Run the #5475 gate over EVERY kind property a write is carrying.
 
@@ -31967,12 +33338,16 @@ class TortoiseSDK:
         if isinstance(uses, dict):
             uses = [uses]
         elif isinstance(uses, str):
-            uses = []  # a legacy bare-string use writes objectKind='other'
+            # a legacy bare-string use names NO kind — the fold supplies the
+            # `'other'` default ON CREATE and writes nothing ON MATCH (#9572)
+            uses = []
         if isinstance(uses, (list, tuple)):
             for item in uses:
                 if isinstance(item, dict):
-                    # The fold's own default is 'other' (a bare core kind), so
-                    # an absent 'kind' is the same write it will perform.
+                    # #9572: an absent `kind` is not the same WRITE any more —
+                    # the fold supplies `'other'` ON CREATE and writes nothing
+                    # ON MATCH, so a kindless use cannot overwrite a stored
+                    # discriminator. The gate still screens a NAMED kind.
                     self._refuse_unapproved_kind("objectKind", item.get("kind"))
 
 
@@ -32022,6 +33397,15 @@ class TortoiseSDK:
         # closes open under another name; and it runs BEFORE any write, so a
         # refusal leaves the graph untouched.
         self._refuse_unapproved_kinds_in_props(props)
+        # ⛔ #9287: NOT gated here, deliberately (#9591 review cycle 3). This
+        # funnel only ever creates Subject/Object/Event/Document/Source —
+        # ``create_entity("Point", …)`` raises `unknown type`
+        # (``_ENTITY_ITEM_LABELS``) — so a ``pointKind`` riding it is a stray
+        # property on a label the calibration gate never reads
+        # (``_CALIBRATION_GATED_LABELS = ("Point",)``), and refusing it failed an
+        # unrelated write (measured: ``create_object(..., props={'point_kind':
+        # padded})``) over a name this gate has no business with. The Point doors
+        # are where it belongs.
         # #329: id + sourcePath/source_path are server-managed — reject.
         # is_episodic is ALSO server-managed (#1486, quota discriminator) —
         # NEVER popped here: the sanitizer's unconditional reject is the
@@ -32624,7 +34008,8 @@ class TortoiseSDK:
         # where that set is built below.
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True,
-                                reject_belief_props=True)
+                                reject_belief_props=True,
+                                reject_claim_class=True)
         # ── #5475 (residual): the UPDATE door onto every label ──
         # ``update_entity`` is the documented tenant route onto Object /
         # Subject / Event / Document / Source nodes, and each of those carries
@@ -32634,6 +34019,21 @@ class TortoiseSDK:
         # ``['dev','marketing']``. Same rule, same funnel, same refusal as the
         # create doors because it is the SAME helper.
         self._refuse_unapproved_kinds_in_props(props)
+        # #9287: ``update_entity`` is the SECOND documented UPDATE door onto a
+        # ``:Point`` (``commit_schema`` lists the pair: ``update_point`` /
+        # ``_update_entity``) and it writes caller props with a live
+        # ``SET n += $p`` — measured at #9591's head: ``update_entity(p["id"],
+        # pointKind='\u2003statement\u2003')`` stored the padded kind and a
+        # ``require_calibration=True`` run stamped the node. The refusal runs
+        # in the ``Point`` branch of the per-label loop below (#9591 review
+        # cycle 5), NOT here: this method is the documented tenant route onto
+        # EVERY label, and an unconditional refusal here failed an unrelated
+        # write on a label the calibration gate never reads — measured:
+        # ``update_entity(object_id, point_kind='statement\u200b')`` raised
+        # while ``create_object(..., props={'point_kind': padded})`` is allowed
+        # (`_create_entity` carries the sibling exemption for the same reason).
+        # The branch below is reached exactly when the node IS a ``:Point``, so
+        # the gate stays closed on the door that matters and inert elsewhere.
         # #3998 (D30): the generic entity surface reaches `:Source` TOO, and its
         # per-label branch below writes caller props with a live `SET n += $p`.
         # Without this the closed :Source surface declared in
@@ -32808,6 +34208,51 @@ class TortoiseSDK:
                 raise ValueError(
                     "'eventId' is server-managed (Event identity) and cannot "
                     "be set via props.")
+        # #9287 (#9591 review cycle 7, P2 — ATOMICITY): the refusal must run
+        # BEFORE this method's FIRST write. The Point `status` arm below commits
+        # `SET n += $s` AND journals `restatus`; placed after it, a refused
+        # `update_entity(pid, status='live', point_kind=<padded>)` told the
+        # caller the call failed while the status change had already landed and
+        # been journaled — a partial commit on a refused call, and the only
+        # gate on this door that was not atomic (every other one, and
+        # `update_point`'s twin of this rule, raise before their write).
+        #
+        # #9287 (review cycle 5): a `point_kind` spelling that actually carries
+        # an invisible character, on THIS call's props — computed once so the
+        # cost is paid only by an offending write, never by every
+        # `update_entity` (the gate reads the props, the probe below reads the
+        # node).
+        from .pack_state import _KIND_PROP_SPELLINGS as _kind_spellings
+        # `isinstance(str)` FIRST (#9591 review cycle 6, P1): `_kind_invisible_char`
+        # requires a string and `unicodedata.normalize` raises TypeError
+        # otherwise, so an unguarded call made `update_entity(id,
+        # point_kind=None)` — the documented property-REMOVAL write, and an
+        # int/None kind is accepted by the doors themselves (they return early
+        # for non-str, `_refuse_invisible_kind`) — raise a raw TypeError from a
+        # gate that has nothing to say about it, on EVERY label.
+        _padded_point_kind = any(
+            isinstance(props.get(_spelling), str)
+            and _kind_invisible_char(props.get(_spelling)) is not None
+            for _spelling, _kind_prop in _kind_spellings.items()
+            if _kind_prop == "pointKind" and _spelling in props)
+        if _padded_point_kind:
+            # ⛔ LABEL-AGNOSTIC, and before the per-label loop (review cycle 6,
+            # P2). Probing inside the `Point` arm left a hole: a node carrying
+            # BOTH `:Point` and another canonical label, addressed by the OTHER
+            # label's key (e.g. `(:Point:Source {url: …})` with no `id`), missed
+            # the Point arm's `{id: $id}` probe and was written by the Source
+            # arm — with the padded kind, on a node the calibration gate scans
+            # by `:Point`. One probe over every key this surface can address a
+            # Point by covers both arms, and it runs ONLY when the props
+            # actually carry an invisible kind, so no ordinary update pays for
+            # it.
+            _pt_hits = proj.g.query(
+                "MATCH (n:Point) WHERE n.id = $id OR n.eventId = $id "
+                "OR n.url = $id RETURN count(n)",
+                params={"id": id_val}).result_set
+            if _pt_hits and _pt_hits[0][0]:
+                self._refuse_invisible_point_kinds(
+                    props, door="update_entity")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Org/Tag nodes are intentionally NOT updated — legacy
@@ -32960,6 +34405,19 @@ class TortoiseSDK:
             # and #327 index plan), the secondary only on a miss.
             id_keys = (prop, *secondary_entity_id_props(label))
             if label == "Point":
+                # #9287: this IS the ``:Point`` update door (``commit_schema``
+                # lists the pair ``update_point`` / ``_update_entity``), and it
+                # writes caller props with a live ``SET n += $p``. The refusal
+                # itself is fired in the match loop below, where a hit proves
+                # the node IS a Point: an unconditional refusal here (or at the
+                # top of this method) failed an unrelated write, because this
+                # surface reaches EVERY label — measured:
+                # ``update_entity(object_id, point_kind='statement\u200b')``
+                # raised while ``create_object(..., props={'point_kind':
+                # padded})`` is allowed by ``_create_entity``'s sibling
+                # exemption, and no calibration gate reads a non-Point label's
+                # ``pointKind`` (``_CALIBRATION_GATED_LABELS == ("Point",)``).
+                # The door that matters stays closed; the others stay inert.
                 # #5004 round-10: mirror `update_point`'s CALLER-VECTOR
                 # discipline on this generic surface too. `_sanitize_props`
                 # deliberately ACCEPTS a caller `embedding` (the recorded
@@ -33310,14 +34768,12 @@ class TortoiseSDK:
                 )
             node = self._create_entity(
                 "Subject", _entity_name_id("Subject", name),
-                {"name": name, "subjectKind": props.pop("subjectKind", "other"),
-                 "status": "live", **props},
+                _entity_door_props("subjectKind", name, props),
                 "SubjectAdded", is_episodic=is_episodic)
         elif t == "object":
             node = self._create_entity(
                 "Object", _entity_name_id("Object", name),
-                {"name": name, "objectKind": props.pop("objectKind", "other"),
-                 "status": "live", **props},
+                _entity_door_props("objectKind", name, props),
                 "ObjectRegistered", is_episodic=is_episodic)
         elif t == "event":
             # ⛔ #8398 (5th review P2-1): a CALLER PROP named ``event`` is
@@ -33773,27 +35229,49 @@ class TortoiseSDK:
             node["advisories"] = _adv
         return node
 
-    def create_subject(self, name: str, subjectKind: str = "other", **props) -> dict:
-        """Thin alias for create_entity(type='subject') — epic #888 W2."""
-        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
-        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
-        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
-            raise ValueError(
-                "'is_episodic' is a server-managed field and cannot be set via props.")
-        return self._flat_entity_result(
-            self.create_entity("subject", name,
-                               subjectKind=subjectKind, **props))
+    def create_subject(self, name: str, subjectKind: str | None = None,
+                       **props) -> dict:
+        """Thin alias for create_entity(type='subject') — epic #888 W2.
 
-    def create_object(self, name: str, objectKind: str = "other", **props) -> dict:
-        """Thin alias for create_entity(type='object') — epic #888 W2."""
+        ``subjectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572: the alias used to fabricate ``"other"``, so a bare re-create
+        shipped ``subject_kind="other"`` on the record and the fold's ON MATCH
+        ``coalesce($sk, s.subjectKind)`` clobbered the stored, user-authored
+        kind. The ``'other'`` default now comes from the fold's ON CREATE arm,
+        which is the only place it belongs — see ``sdk._entity_door_props``.
+        A BLANK ``subjectKind`` (``""`` / ``"   "``) is "not supplied" too
+        (#9572 review P2): ``kind_fallbacks.named_kind`` normalizes it, so it
+        can neither reset a stored kind nor store ``""``.
+        """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
         if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        subjectKind = named_kind(subjectKind)
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
         return self._flat_entity_result(
-            self.create_entity("object", name,
-                               objectKind=objectKind, **props))
+            self.create_entity("subject", name, **props))
+
+    def create_object(self, name: str, objectKind: str | None = None,
+                      **props) -> dict:
+        """Thin alias for create_entity(type='object') — epic #888 W2.
+
+        ``objectKind`` defaults to ``None`` (**absent**, not ``"other"**) since
+        #9572 — the Object twin of ``create_subject``'s fabricated default.
+        Blank is absent here too (#9572 review P2) — ``named_kind``.
+        """
+        _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        _drop_reserved_emit_props(props)  # #2296: strip BEFORE the relay splat
+        if "is_episodic" in props:  # #1486: server-managed (quota discriminator)
+            raise ValueError(
+                "'is_episodic' is a server-managed field and cannot be set via props.")
+        objectKind = named_kind(objectKind)
+        if objectKind is not None:
+            props["objectKind"] = objectKind
+        return self._flat_entity_result(
+            self.create_entity("object", name, **props))
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
                       _server_id: str | None = None, **props) -> dict:
@@ -36219,8 +37697,19 @@ class TortoiseSDK:
                 _reject_unrepresentable_number("oid", oid)
                 _reject_unrepresentable_number("issue_number", issue_number)
                 proj.g.query(
-                    "MERGE (o:Object {id:$oid}) SET o.name=$name, o.objectKind=$okind, "
-                    "o.repo=$repo, o.issue_number=$issue_number, o.url=$url",
+                    # #9572: the kind is this door's OWN synthesis (`"pr"` /
+                    # `"issue"` from the frontmatter key) — the caller named
+                    # none. Writing it on MATCH re-typed a stored Object
+                    # (`pm:issue` → `issue`, `capability` → `issue`) from a
+                    # session file's frontmatter, the same fabrication class as
+                    # the doors above, one layer out. The kind belongs to the
+                    # fold's ON CREATE arm; a re-index refreshes the fields it
+                    # legitimately owns and touches nothing else.
+                    "MERGE (o:Object {id:$oid}) "
+                    "ON CREATE SET o.objectKind=$okind, o.name=$name, o.repo=$repo, "
+                    "o.issue_number=$issue_number, o.url=$url "
+                    "ON MATCH SET o.name=$name, o.repo=$repo, "
+                    "o.issue_number=$issue_number, o.url=$url",
                     params={"oid": oid, "name": name, "okind": okind,
                             "repo": repo, "issue_number": issue_number, "url": url},
                 )
@@ -37575,16 +39064,34 @@ class TortoiseSDK:
         entity read at, and is that still the source's current version?* Each row
         carries ``linkRelation`` (the link set it describes — always
         ``references`` here), ``linkRecordedVersion`` (the version recorded on
-        THAT link, i.e. the edge's own ``sourceVersion`` property),
-        ``sourceCurrentVersion`` (the source's version now) and ``linkCurrency``
-        (the verdict). Every one of those names is scoped to the link on purpose:
+        THAT link), ``sourceCurrentVersion`` (the source's version now) and
+        ``linkCurrency`` (the verdict). ⚠ The two versions are the NORMALISED
+        operands — ``search_engine.version_operand``, i.e. blank-is-absent and
+        strip-tested — NOT the raw properties: an edge holding ``"   "`` reports
+        ``""``, because a truthiness comparison would read ``"   " == "   "`` as
+        ``current``. Normalising here is what keeps this reader's verdict
+        IDENTICAL to ``read_reference_currency_links``', the other reader that
+        addresses this same ``references`` hop — ``read_currency_links`` answers
+        a Point over its ``extractedFrom`` links and never sees this one. A
+        caller that needs the stored bytes must read the property itself.
+
+        Every one of those names is scoped to the link on purpose:
         §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
         version of its OWN under the same ``sourceVersion`` property name, so a
         bare ``sourceVersion``/``currency`` on a Point-addressed call is the
         conflation the search-hit half was retracted for.
         """
         proj = self._get_proj()
-        from .search_engine import currency_status
+        # `version_operand` is REQUIRED here, not cosmetic: this method re-derives
+        # the (recorded, current) pair itself instead of going through
+        # `search_engine.read_reference_currency_links` (the reader for THIS hop),
+        # so without it a whitespace-only
+        # operand (`create_source(..., contentHash="   ")`, which
+        # `_anchor_on_create` stamps because it nulls only `''`) compares EQUAL
+        # to itself and reads `current` here while the same link reads `unknown`
+        # through `tools/source_currency.py`. Two readers disagreeing about one
+        # pair is the exact drift §4.6's "a read" rule forbids.
+        from .search_engine import currency_status, version_operand
 
         r = proj.g.query(
             "MATCH (p:Point {id:$pid})-[:extractedFrom]->(src:Source) "
@@ -37655,8 +39162,8 @@ class TortoiseSDK:
             entity_props = bag.get("entity")
             labels = bag.get("labels")
             entity_is_source = bool(bag.get("entity_is_source"))
-            remembered = bag.get("remembered") or ""
-            current = source_props.get("contentHash") or ""
+            remembered = version_operand(bag.get("remembered"))
+            current = version_operand(source_props.get("contentHash"))
             out.append({
                 # #3998 (D30): the bag is filtered to the DECLARED :Source
                 # surface. A graph written before this change can still hold a
@@ -38150,11 +39657,22 @@ def _summary_to_payload(summary: dict, session_id: str,
     entities, seen = [], set()
     for st in (summary.get("state") or []):
         name = st.get("name", "")
-        key = (name, st.get("objectKind", "core:concept"))
+        # #9572: a summary entry that names no kind must not INVENT one. The
+        # invented string here was `core:concept` — never a §5 object kind, and
+        # never written by product code (it survives only as a HISTORICAL value
+        # in `tools/calibration_harness.py`'s counts and as test payload data) —
+        # so it could only ever be a fabrication, and the commit door wrote it
+        # as a real discriminator over a stored `capability`. The layer-1
+        # payload requires `entities[].kind`, so the honest value is the
+        # DECLARED family fallback (`core:other`), which
+        # `kind_fallbacks.writable_kind` drops at the door — the fold then
+        # supplies `other` ON CREATE and touches nothing ON MATCH.
+        _ekind = st.get("objectKind") or "core:other"
+        key = (name, _ekind)
         if not name or key in seen:
             continue
         seen.add(key)
-        entities.append({"name": name, "kind": st.get("objectKind", "core:concept"),
+        entities.append({"name": name, "kind": _ekind,
                          "passes_frequency_gate": True})
 
     return {

@@ -21,7 +21,7 @@
 # a constant here.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 53b401dacb2558a7852feef1fdb528d40aeb2fc4
+cut_at_commit: 87f23b8642280e9f08b4acee720c002663a22a44
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -47,6 +47,17 @@ response_fields:
     it is a marker and not an empty result; under it `status` is never `empty` (§17.3; the truth fetch is #7953,
     not built)'
   unchanged_when_off: yes — results, count and status stay byte-identical and the key is absent
+- response: tortoise_search
+  field: claim_class
+  emitted_when: '#2351 (epic #2349 E-derived) — the claim''s asserted/derived class, emitted ONLY when the CALLER
+    opts in by passing claim_class to the SDK verb `tortoise_fts_query` (then every returned Point carries the
+    key, and the same seam FILTERS pre-truncation). Recorded because CONTRIBUTING''s carve-out is about what
+    `tools/surface_manifest.py check` FAILS on, not about what goes unrecorded — but stated precisely: the served
+    handlers (`tortoise_search` and the hosted GET /v1/search) do not declare or forward the parameter today, so
+    NO served response carries this key. Making it reachable from a served surface widens an advertised tool
+    schema and is an MCP/SDK Surface Approval decision, not a consequence of this row'
+  unchanged_when_off: yes — the caller has to pass the parameter, so every pre-#2351 call returns rows with no
+    claim_class key at all (byte-identical)
 - response: tortoise_search
   field: outdated
   emitted_when: the legacy flag half of the terminal vocabulary is set on the Point (invalidate_point terminalises
@@ -97,7 +108,9 @@ response_fields:
   emitted_when: '#2350 — the hit is a Point carrying a validity window, and the START''s precision: year|month|day,
     or null where the stored start is PRESENT but names no instant (`""`, `TBD`, `not-a-date` — the #6140 ruling
     makes that "no start was recorded", so there is no granularity to claim; #9201). A legacy bare-ISO (orderable)
-    start reads as day; a caller-declared token wins. Emitted with the same block as valid_to_precision and end_state,
+    start reads as day; a caller-DECLARED token is reported only once that bound itself ORDERS — since #9244 a
+    declaration annotates a bound, it cannot summon one, so a token declared on an unorderable start still reads
+    null. Emitted with the same block as valid_to_precision and end_state,
     whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
   unchanged_when_off: n/a — not flag-gated; an undated hit stays byte-identical (no window keys at all), never a
     defaulted value
@@ -105,8 +118,11 @@ response_fields:
   field: valid_to_precision
   emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, the end-only `unknown`
     marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant (`TBD`
-    — no granularity to claim; #9201). ABSENT (not null) when the window has no end at all, so the open shape stays
-    distinguishable. Emitted with the same block as valid_from_precision and end_state'
+    — no granularity to claim; #9201, and #9244 for a caller-DECLARED token: a declaration annotates a bound, it
+    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change
+    end_state, which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no
+    end at all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and
+    end_state'
   unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state
@@ -1741,7 +1757,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_traverse
-  served_from: tortoise/mcp_server.py:290da6f2d39818ea
+  served_from: tortoise/mcp_server.py:5a8b7d283b850602
   served_attributes: cebbf079c1b1d7da
   family: reasoning
   family_rank: 3
@@ -1767,7 +1783,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_entity_profile
-  served_from: tortoise/mcp_server.py:9ad536c494823538
+  served_from: tortoise/mcp_server.py:ea5e01b04146827b
   served_attributes: 3a272b21b8020f47
   family: reasoning
   family_rank: 3
@@ -1819,7 +1835,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_analyze
-  served_from: tortoise/mcp_server.py:d0985e54a0f9be3d
+  served_from: tortoise/mcp_server.py:458b130d9130fe45
   served_attributes: 0b934dac2f43c7b6
   family: reasoning
   family_rank: 3
@@ -2130,7 +2146,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_list_graphs
-  served_from: tortoise/mcp_server.py:db7cc8b065b95c5d
+  served_from: tortoise/mcp_server.py:c48982d2359a7aea
   served_attributes: 06490fe8c983ed26
   family: sessions
   family_rank: 4
@@ -2297,8 +2313,10 @@ rows:
   cluster: null
   canonical: null
   job: 'List this team''s active packs (#318): the shared pack catalog joined with the tenant graph''s PackInstall
-    activation records. Read-only; empty result when nothing is installed (existence masking — another tenant''s
-    packs are never observable).'
+    activation records. NOT a pure read: when the graph carries no PackInstall record at all, the handler re-seeds
+    the starter set before it answers (one MERGE per starter namespace), so a graphs:read caller can cause a write.
+    The re-seed is skipped when the graph''s pack set was deliberately configured (#8648). Empty result when nothing
+    is installed (existence masking — another tenant''s packs are never observable).'
   dependency: 'handler-served: no declared SDK link'
   lifecycle: active
   used_by: agents, tooling, docs
@@ -4206,11 +4224,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.graph_list.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling, tenant-rest'
+  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling, tenant-rest'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling, tenant-rest'
+  reason: 'no MCP tool binds it; callers: engine, other-tooling, tenant-rest'
   recommended_family: null
   proposed: false
   exemption: false

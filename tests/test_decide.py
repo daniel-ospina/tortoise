@@ -236,9 +236,9 @@ class TestDecideWiring:
     def test_relevance_edge_never_damps_a_shared_bridge(self, sdk, capsys):
         """A bridge with several targets also claims OTHER pairs, so damping it
         would silently weaken claims this edge never named — the hazard
-        ``_resolve_or_create_operator`` refuses to create for the ``edges`` arm
-        (decide.py ``targets > 1``). The relevance arm must apply the same rule
-        and SAY it declined (#6671 review).
+        ``tortoise.decide_wiring.resolve_or_create_operator`` refuses to create
+        for the ``edges`` arm (``targets > 1``). The relevance arm must apply
+        the same rule and SAY it declined (#6671 review).
         """
         decide = _load_decide_script()
         crit = sdk.create_point("criterion", f"Shared criterion {_mk()}")
@@ -605,9 +605,8 @@ def _load_decide_script():
     return mod
 
 
-def _operator_census(sdk) -> dict[str, int]:
-    """Operator + mitigation counts in the fixture's graph, by op_type."""
-    proj = sdk._get_proj()
+def _projection_census(proj) -> dict[str, int]:
+    """Operator + mitigation counts in an OPEN projection, by op_type."""
     rows = proj.g.query(
         "MATCH (op:Point) WHERE op.is_operator = true "
         "RETURN op.op_type, count(op)").result_set
@@ -616,6 +615,11 @@ def _operator_census(sdk) -> dict[str, int]:
         "MATCH (op:Point)-[r:mitigated_by]->(m) RETURN count(r)").result_set
     census["_mitigations"] = int(mit[0][0]) if mit else 0
     return census
+
+
+def _operator_census(sdk) -> dict[str, int]:
+    """Operator + mitigation counts in the fixture's graph, by op_type."""
+    return _projection_census(sdk._get_proj())
 
 
 class TestIssue6671DecideRerunIsIdempotent:
@@ -1133,3 +1137,495 @@ class TestIssue6671ReviewGaps:
         assert "update_point(id, status='live')" not in out, (
             "a dead-end promotion remedy was offered for an outdated bridge: "
             + out)
+
+
+class TestIssue9631CliDecideRerunIsIdempotent:
+    """#9631: `tortoise decide` (`tortoise/__main__.py::_cmd_decide`) is the
+    GENERIC CLI path for the wiring `graph-scripts/decide.py` also implements —
+    and it kept its own per-run-only `created_ops` cache after #6671 fixed the
+    script. Re-running a decision through it therefore duplicated every operator
+    and split the mitigations across the copies. Measured on the 2-edge fixture
+    below (before the fix): 3 → 6 operators, 1 → 2 mitigations, and opt:a
+    0.6592 → 0.6756 — visible in the printed 4 dp table.
+
+    Both entry points now call the ONE writer in `tortoise/decide_wiring.py`;
+    these tests drive the real CLI over an isolated embedded store, so they fail
+    if either path re-grows its own lookup.
+    """
+
+    def _decision(self):
+        return {
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {"finding:1": "Finding 1"},
+            "edges": [["crit:1", "IMPL", "opt:a"], ["finding:1", "NAND", "opt:b"]],
+            "truth_edges": [{"source": "finding:1", "op_type": "NAND",
+                             "target": "opt:a"}],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+    def _db(self, tmp_path, monkeypatch) -> str:
+        """An isolated embedded store for the CLI, EP off the calibration gate."""
+        monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "0")
+        return str(tmp_path / f"cli9631_{_mk()}.db")
+
+    def _run_cli(self, db_path: str, data: dict, *, direction=None) -> int:
+        """One real `tortoise decide` run against ``db_path``."""
+        import json
+        from unittest import mock
+
+        from tortoise import __main__ as m
+
+        path = f"{db_path}.json"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return m._cmd_decide(mock.Mock(
+            input=path, options=None, criteria=None, findings=None, edges=None,
+            db=db_path, direction=direction))
+
+    def _census(self, db_path: str) -> dict[str, int]:
+        from tortoise.__main__ import _projection_for
+
+        proj = _projection_for(db_path)
+        try:
+            return _projection_census(proj)
+        finally:
+            proj.close()
+
+    def _printed_ranking(self, capsys) -> dict[str, float]:
+        """The option table the command printed, at its own 4 dp precision."""
+        import re
+
+        out = capsys.readouterr().out
+        return {name: float(value) for name, value in
+                re.findall(r"^\s+(opt:\S+)\s+([0-9.]+)\s", out,
+                           flags=re.MULTILINE)}
+
+    def test_rerun_does_not_duplicate_operators(self, tmp_path, monkeypatch):
+        db = self._db(tmp_path, monkeypatch)
+        data = self._decision()
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        # 2 edges + 1 truth edge, all distinct triples: one IMPL, two NAND.
+        assert first.get("IMPL") == 1, first
+        assert first.get("NAND") == 2, first
+
+        assert self._run_cli(db, data) == 0
+        second = self._census(db)
+
+        assert second == first, (
+            "a re-run of `tortoise decide` grew the edge set — EP now counts "
+            f"every relation twice (before={first}, after={second})")
+
+    def test_rerun_leaves_rankings_unchanged(self, tmp_path, monkeypatch, capsys):
+        db = self._db(tmp_path, monkeypatch)
+        data = self._decision()
+
+        assert self._run_cli(db, data) == 0
+        run1 = self._printed_ranking(capsys)
+        # A vacuous pass: an empty table compares equal to an empty table. The
+        # pre-#9631 defect kept printing a table, so "no table" would let the
+        # invariance assertion below pass while the ranking had vanished.
+        assert run1, "the first run printed no ranking — nothing to compare"
+
+        assert self._run_cli(db, data) == 0
+        run2 = self._printed_ranking(capsys)
+
+        # Re-applying the mitigation moves EP a hair once, then the graph is a
+        # fixed point (measured: run2 == run3 == run4 exactly, run1 → run2 moved
+        # opt:a by 1.6e-5). The defect this pins is three orders of magnitude
+        # larger — the duplicated operators moved opt:a 0.6592 → 0.6756 — so the
+        # bound below separates them without being flaky at the 4 dp the table
+        # prints.
+        assert run2.keys() == run1.keys(), (
+            f"the re-run ranked a different option set: {run1} -> {run2}")
+        for name, value in run1.items():
+            assert abs(run2[name] - value) <= 1e-4, (
+                "the ranking depends on how many times the command was run: "
+                f"run1={run1} run2={run2}")
+
+    def test_relevance_only_triple_keeps_its_operator_in_the_ranking(
+            self, tmp_path, monkeypatch, capsys):
+        """A relevance edge whose triple is NOT also declared in `edges` wires
+        the operator it damps (this command's documented semantics), and that
+        operator must stay in the explicit factor list. Dropping it on the
+        REUSED branch silently removed the option from the table on the second
+        run (#9631 review, measured: run 1 ranked 2 factors, run 2 ranked 1 and
+        `opt:b` vanished)."""
+        db = self._db(tmp_path, monkeypatch)
+        data = {
+            "options": {"opt:a": "Option A", "opt:b": "Option B"},
+            "criteria": {"crit:1": "Criterion 1", "crit:2": "Criterion 2"},
+            "findings": {},
+            "edges": [["crit:1", "IMPL", "opt:a"]],
+            "truth_edges": [],
+            # Relevance-ONLY triple: nothing else declares crit:2 → opt:b.
+            "relevance_edges": [{"source": "crit:2", "op_type": "NAND",
+                                 "target": "opt:b", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+        assert self._run_cli(db, data) == 0
+        run1 = self._printed_ranking(capsys)
+        assert self._run_cli(db, data) == 0
+        run2 = self._printed_ranking(capsys)
+
+        assert run1, "the first run printed no ranking"
+        assert run2.keys() == run1.keys(), (
+            "a relevance-only triple fell out of the ranking on the re-run: "
+            f"run1={run1} run2={run2}")
+        for name, value in run1.items():
+            assert abs(run2[name] - value) <= 1e-4, (
+                f"run1={run1} run2={run2}")
+
+    def test_relevance_edge_wires_a_single_pair_bridge_next_to_a_shared_one(
+            self, tmp_path, monkeypatch, capsys):
+        """A triple whose only bridge is SHARED with other pairs has no
+        single-pair bridge to damp — the same state the `edges` arm writes its
+        way out of. Gating the mint on `bridges == 0` (instead of "no
+        single-pair bridge") made this input damp NOTHING, a regression against
+        the pre-#9631 CLI, which wired and damped an operator here (#9631
+        review)."""
+        from tortoise.__main__ import _projection_for
+        from tortoise.sdk import TortoiseSDK
+
+        db = self._db(tmp_path, monkeypatch)
+        crit_text, a_text, b_text = (f"Criterion {_mk()}", f"Option A {_mk()}",
+                                     f"Option B {_mk()}")
+        writer = TortoiseSDK()
+        writer._proj = _projection_for(db)
+        try:
+            crit = writer.create_point("criterion", crit_text)
+            a = writer.create_point("option", a_text)
+            b = writer.create_point("option", b_text)
+            shared = writer.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+        finally:
+            writer._proj.close()
+
+        # Same content → `create_point(dedup=True)` resolves the CLI's keys onto
+        # the points seeded above, so the relevance edge names the seeded pair.
+        data = {
+            "options": {"opt:a": a_text, "opt:b": b_text},
+            "criteria": {"crit:1": crit_text},
+            "findings": {},
+            "edges": [],
+            "truth_edges": [],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20}],
+        }
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        assert first.get("IMPL") == 2, (
+            "the relevance edge damped nothing and wired nothing — a shared "
+            f"bridge is not a reason to skip the pair: {first}")
+        assert first.get("_mitigations") == 1, (
+            f"the single-pair bridge was not damped: {first}")
+        probe = _projection_for(db)
+        try:
+            rows = probe.g.query(
+                "MATCH (op:Point {is_operator:true})-[r:mitigated_by]->(m) "
+                "RETURN op.id").result_set
+        finally:
+            probe.close()
+        assert {row[0] for row in rows} != {shared["id"]}, (
+            "the SHARED bridge was damped — that weakens pairs this edge never "
+            "named")
+
+        assert self._run_cli(db, data) == 0
+        assert self._census(db) == first, (
+            "the re-run did not settle on the single-pair bridge: "
+            f"{first} -> {self._census(db)}")
+
+    def test_direction_is_reported_when_the_stored_bridge_has_none(
+            self, tmp_path, monkeypatch, capsys):
+        """Operators written before #7852 carry no `direction` property at all,
+        so `direction_note`'s empty-stored early return silently dropped the
+        requested direction on the most common shape there is (#9631 review).
+        The request cannot be applied in place (a second operator is the
+        irreversible duplication), so it must be SAID."""
+        from tortoise.__main__ import _projection_for
+        from tortoise.sdk import TortoiseSDK
+
+        db = self._db(tmp_path, monkeypatch)
+        crit_text, opt_text = f"Criterion {_mk()}", f"Option {_mk()}"
+        writer = TortoiseSDK()
+        writer._proj = _projection_for(db)
+        try:
+            crit = writer.create_point("criterion", crit_text)
+            opt = writer.create_point("option", opt_text)
+            op_id = writer.create_operator(
+                "NAND", crit["id"], [opt["id"]])["id"]
+            # The pre-#7852 shape: the operator exists, `direction` does not.
+            writer._proj.g.query(
+                "MATCH (p:Point {id:$i}) REMOVE p.direction",
+                params={"i": op_id})
+        finally:
+            writer._proj.close()
+
+        data = {
+            "options": {"opt:a": opt_text},
+            "criteria": {"crit:1": crit_text},
+            "findings": {},
+            "edges": [["crit:1", "NAND", "opt:a"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        assert self._run_cli(db, data, direction="<-") == 0
+        out = capsys.readouterr().out
+        assert "records NO direction" in out, (
+            "the requested direction was silently dropped on a stored bridge "
+            f"that carries none: {out}")
+        assert self._census(db).get("NAND") == 1, (
+            "the unapplied direction filed a second operator: "
+            f"{self._census(db)}")
+
+    def test_labelled_relevance_edge_never_mints_on_an_unlabelled_triple(
+            self, tmp_path, monkeypatch, capsys):
+        """A label is part of the operator identity, so a relevance edge naming
+        `supports` finds nothing on a triple whose only bridge is unlabelled —
+        and that must NOT read as an empty triple (which licenses minting for
+        this command). Pre-#9631 the label was ignored entirely, so filing a
+        labelled twin would be an unreported new claim (#9631 review)."""
+        db = self._db(tmp_path, monkeypatch)
+        data = {
+            "options": {"opt:a": "Option A"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [["crit:1", "IMPL", "opt:a"]],
+            "truth_edges": [],
+            "relevance_edges": [{"source": "crit:1", "op_type": "IMPL",
+                                 "target": "opt:a", "reason": "weak",
+                                 "strength": 0.20, "label": "supports"}],
+        }
+
+        assert self._run_cli(db, data) == 0
+        census = self._census(db)
+        assert census.get("IMPL") == 1, (
+            "a label-scoped relevance edge minted a second, labelled claim on "
+            f"a triple it does not name: {census}")
+        assert census.get("_mitigations") == 0, (
+            f"an unlabelled bridge was damped by a 'supports' mitigation: {census}")
+        out = capsys.readouterr().out
+        assert "DIFFERENT label" in out, (
+            "the refusal was silent — the caller cannot tell nothing was "
+            f"damped: {out}")
+
+    def test_rerun_does_not_duplicate_part_whole_operators(self, tmp_path,
+                                                          monkeypatch):
+        """`composedOf` mirrors its bridge as `hasPart`. The lookup is
+        edge-type agnostic, so the CLI must reuse those too (the gap a reviewer
+        found in the script fix, now shared)."""
+        db = self._db(tmp_path, monkeypatch)
+        data = {
+            "options": {"opt:a": "Option A"},
+            "criteria": {"crit:1": "Criterion 1"},
+            "findings": {},
+            "edges": [["crit:1", "composedOf", "opt:a"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        assert self._run_cli(db, data) == 0
+        second = self._census(db)
+
+        assert first.get("composedOf") == 1, first
+        assert second == first, f"part/whole edge duplicated on re-run: {second}"
+
+    def test_rerun_does_not_duplicate_non_point_endpoints(self, tmp_path,
+                                                          monkeypatch):
+        """Operator endpoints may be :Point/:Subject/:Object/:Event (#7902). A
+        lookup anchored on `:Point` misses a Subject endpoint and duplicates the
+        very edge it guards — the second gap the reviewer found in the script
+        fix, which the CLI would otherwise re-grow."""
+        from tortoise.__main__ import _projection_for
+        from tortoise.sdk import TortoiseSDK
+
+        db = self._db(tmp_path, monkeypatch)
+        writer = TortoiseSDK()
+        writer._proj = _projection_for(db)
+        try:
+            subject = writer.create_subject(f"Subject {_mk()}")
+        finally:
+            writer._proj.close()
+
+        data = {
+            # The Subject end is a raw graph id (the CLI passes unknown names
+            # through); the option is declared so the run ranks something.
+            "options": {"opt:a": "Option A"}, "criteria": {}, "findings": {},
+            "edges": [[subject["id"], "IMPL", "opt:a"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+
+        assert self._run_cli(db, data) == 0
+        first = self._census(db)
+        assert self._run_cli(db, data) == 0
+        second = self._census(db)
+
+        assert first.get("IMPL") == 1, first
+        assert second == first, f"Subject→Point edge duplicated on re-run: {second}"
+
+
+class TestIssue9631SharedWiringRulesAreStatedOnce:
+    """The two rules BOTH entry points obey live in `tortoise/decide_wiring.py`
+    so they cannot drift: `damped_factor_ids` (every damped copy enters the
+    explicit factor list, deduped) and `may_mint_damped_bridge` (only the CLI
+    mints, and only where nothing single-pair sits on the triple)."""
+
+    def test_damped_factor_ids_returns_every_copy_deduped(self):
+        from tortoise.decide_wiring import damped_factor_ids
+
+        assert damped_factor_ids(["a", "b", "a"]) == ["a", "b"]
+        assert damped_factor_ids([]) == []
+
+    def test_mint_gate_refuses_a_twin_and_a_foreign_label(self):
+        """The REFUSAL states, as a pure function. The two LICENSED states are
+        pinned against real `select_damp_targets` output instead of hand-built
+        dicts — a dict differing only in `bridges` (a field the gate never reads)
+        is not a second case (#9631 review, round 5)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge
+
+        empty = {"targets": [], "singles": [], "other_labels": [], "bridges": 0}
+        has_single = {"targets": ["op"], "singles": ["op"],
+                      "other_labels": [], "bridges": 1}
+        other_label = {"targets": [], "singles": [], "other_labels": ["op2"],
+                       "bridges": 1}
+
+        assert may_mint_damped_bridge(empty) is True
+        assert may_mint_damped_bridge(has_single) is False
+        assert may_mint_damped_bridge(other_label) is False
+
+    def test_shared_only_triple_licenses_the_mint(self, sdk):
+        """The other licensed state, read from a REAL graph: every bridge on the
+        triple is shared with other pairs, so there is no single-pair bridge to
+        damp and no other config — minting is the same move the `edges` arm makes
+        (#9631 review, round 5)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
+
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+
+        pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
+                                   a["id"], None)
+        assert pick["singles"] == [], pick
+        assert pick["other_labels"] == [], pick
+        assert pick["bridges"] == 1, pick
+        assert may_mint_damped_bridge(pick) is True
+
+    def test_other_label_single_pair_bridge_blocks_the_mint(self, sdk, capsys):
+        """A triple can carry a SHARED bridge under the named label AND a
+        single-pair bridge under another one. The named scope then has nothing
+        to damp — but minting there would still file a claim next to an existing
+        single-pair bridge, which is exactly what the mint rule forbids. The
+        round-2 gate only populated `other_singles` on the empty-triple branch,
+        so this mixed state slipped through (#9631 review, round 3)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
+
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        shared = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]],
+                                     label="supports")
+        unlabelled = sdk.create_operator("IMPL", crit["id"], [a["id"]])
+
+        pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
+                                   a["id"], "supports")
+        assert pick["singles"] == [], pick
+        assert pick["targets"] == [], pick
+        assert pick["other_labels"] == [unlabelled["id"]], (
+            "the single-pair bridge under another label was not reported, so "
+            f"the mint gate would license a new claim: {pick}")
+        assert pick["bridges"] == 2, (
+            f"`bridges` must count the whole triple, not the label scope: {pick}")
+        assert may_mint_damped_bridge(pick) is False, (
+            "a new claim would be filed next to an existing single-pair bridge")
+        assert shared["id"] not in pick["targets"]
+
+    def test_shared_other_label_bridge_also_blocks_the_mint(self, sdk):
+        """The other-label refusal must not flip on the other bridge's TARGET
+        COUNT: a triple whose only bridge is a SHARED claim under another label
+        is just as much "this claim does not exist", and minting there filed a
+        third bridge next to it (#9631 review, round 5)."""
+        from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
+
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        a = sdk.create_point("option", f"Option A {_mk()}")
+        b = sdk.create_point("option", f"Option B {_mk()}")
+        foreign = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]],
+                                      label="refutes")
+
+        pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
+                                   a["id"], "supports")
+        assert pick["targets"] == [], pick
+        assert pick["other_labels"] == [foreign["id"]], (
+            f"a shared bridge under another label was not reported: {pick}")
+        assert may_mint_damped_bridge(pick) is False, (
+            "a claim was filed next to a shared claim under another label")
+
+    def test_different_label_bridge_is_named_not_silently_twinned(self, sdk,
+                                                                 capsys):
+        """The label is part of the operator identity, so a labelled `edges`
+        entry over a triple that already carries a DIFFERENT label files a
+        second claim. That is correct — and must be SAID, or an existing
+        decision file whose label used to be ignored grows an unreported twin
+        (#9631 review: this note was unpinned)."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
+
+        data = {
+            "context": "issue-9631-label-note",
+            "options": {}, "criteria": {}, "findings": {},
+            "edges": [[crit["id"], "IMPL", opt["id"], "supports"]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census.get("IMPL") == 2, (
+            f"two labelled claims collapsed or duplicated: {census}")
+        out = capsys.readouterr().out
+        assert "DIFFERENT label" in out, (
+            "a second claim was filed silently — the caller cannot tell the "
+            f"existing bridge was not reused: {out}")
+
+    def test_unlabelled_edge_over_a_labelled_bridge_is_named_not_silently_twinned(
+            self, sdk, capsys):
+        """The MIRROR of the labelled case, and the one nothing covered (#9631
+        review): `label` is part of the operator identity, so an UNLABELLED
+        `edges` entry does not match a bridge filed under a label — `matches` is
+        empty and a second claim is created. That is correct, but it used to be
+        silent: the note explaining it was gated on `elif label:`, so a decision
+        file that drops an existing label (or a triple another writer already
+        claimed with a Layer-3 predicate) grew an unreported twin. There is no
+        edge-delete API, so the silence is the whole defect."""
+        decide = _load_decide_script()
+        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk.create_point("option", f"Option {_mk()}")
+        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
+
+        data = {
+            "context": "issue-9631-unlabelled-note",
+            "options": {}, "criteria": {}, "findings": {},
+            # No label: the file drops the one the existing bridge carries.
+            "edges": [[crit["id"], "IMPL", opt["id"]]],
+            "truth_edges": [], "relevance_edges": [],
+        }
+        decide.file_decision(sdk, data)
+
+        census = _operator_census(sdk)
+        assert census.get("IMPL") == 2, (
+            "two claims over one triple collapsed or duplicated: "
+            f"{census}")
+        out = capsys.readouterr().out
+        assert "LABEL" in out and "UNLABELLED" in out, (
+            "the twin was filed silently — the caller cannot tell the existing "
+            f"labelled bridge was not reused: {out}")

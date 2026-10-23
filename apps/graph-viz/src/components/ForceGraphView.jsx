@@ -75,7 +75,7 @@ export default function ForceGraphView() {
       const conf=n.confidence??0.5;
       const importance=Math.log2(d+1)*(0.5+conf*0.5);
       const fs=8+importance*0.3;
-      ctx.font=`${fs}px monospace`;
+      ctx.font=`${fs}px ui-monospace, SFMono-Regular, Menlo, monospace`;
       const lines=wrapLines(ctx,n.content||'',50,15);
       const maxW=lines.length?Math.max(...lines.map(l=>ctx.measureText(l).width)):0;
       const pad=6;
@@ -161,7 +161,7 @@ export default function ForceGraphView() {
     const isFaded=scSet&&!scSet.has(node.id);
     const alpha=isFaded?0.08:0.9;
 
-    const fs=8+importance*0.3;ctx.font=`${fs}px monospace`;
+    const fs=8+importance*0.3;ctx.font=`${fs}px ui-monospace, SFMono-Regular, Menlo, monospace`;
     const lines=wrapLines(ctx,node.content||'',50,15);
     const showLabel=gs>0.12&&!isFaded&&lines.length>0;
     const maxW=showLabel?Math.max(...lines.map(l=>ctx.measureText(l).width)):0;
@@ -185,7 +185,7 @@ export default function ForceGraphView() {
       const badgeR=8;
       const bx=rx+pw-badgeR-2,by=ry+ph-badgeR-2;
       ctx.beginPath();ctx.arc(bx,by,badgeR,0,2*Math.PI);ctx.fillStyle=confColor;ctx.fill();
-      ctx.fillStyle='#0a0e14';ctx.font=`bold ${badgeR-1}px monospace`;ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillStyle='#0a0e14';ctx.font=`bold ${badgeR-1}px ui-monospace, SFMono-Regular, Menlo, monospace`;ctx.textAlign='center';ctx.textBaseline='middle';
       ctx.fillText(pct,bx,by);
     }
     ctx.globalAlpha=1;
@@ -207,7 +207,7 @@ export default function ForceGraphView() {
     const isFaded=scSet&&(!scSet.has(edge.source?.id||edge.source)||!scSet.has(edge.target?.id||edge.target));
     const ea=isFaded?0.02:alpha;
     ctx.strokeStyle=isNand?C.nand:C.impl;ctx.lineWidth=lw;ctx.globalAlpha=ea;
-    if(hasMit){const g=10;ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(mx-ux*g,my-uy*g);ctx.stroke();ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(mx+ux*g,my+uy*g);ctx.lineTo(tx,ty);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=0.8;ctx.fillStyle=C.mit;ctx.font='bold 13px monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.save();ctx.translate(mx,my);ctx.rotate(Math.atan2(dy,dx));ctx.fillText('⊘',0,0);ctx.restore();}
+    if(hasMit){const g=10;ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(mx-ux*g,my-uy*g);ctx.stroke();ctx.setLineDash([4,3]);ctx.beginPath();ctx.moveTo(mx+ux*g,my+uy*g);ctx.lineTo(tx,ty);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=0.8;ctx.fillStyle=C.mit;ctx.font='bold 13px ui-monospace, SFMono-Regular, Menlo, monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.save();ctx.translate(mx,my);ctx.rotate(Math.atan2(dy,dx));ctx.fillText('⊘',0,0);ctx.restore();}
     else{ctx.beginPath();ctx.moveTo(sx,sy);ctx.lineTo(tx,ty);ctx.stroke();}
     ctx.globalAlpha=1;
   },[deg,showMit,scSet]);
@@ -345,7 +345,7 @@ export default function ForceGraphView() {
         setSel(n);setShowDet(true);
       }}>
         <div style={{background:'#1a2e1a',border:`2px solid ${confColor}`,borderRadius:6,padding:'6px 10px',maxWidth:200,boxShadow:'0 4px 16px rgba(0,0,0,0.5)'}}>
-          <div style={{color:'#fff',fontSize:12,fontFamily:'monospace',lineHeight:1.3}}>{(n.content||'').slice(0,80)}</div>
+          <div style={{color:'#fff',fontSize:12,fontFamily:'ui-monospace, SFMono-Regular, Menlo, monospace',lineHeight:1.3}}>{(n.content||'').slice(0,80)}</div>
           <div style={{color:confColor,fontSize:10,fontWeight:700,marginTop:2}}>{Math.round(conf*100)}%</div>
         </div>
       </div>;

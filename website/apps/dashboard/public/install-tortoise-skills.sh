@@ -566,6 +566,34 @@ ${me}" > "$block" || _emit_fail "could not build the new block text — nothing 
     # documentation and then dumped a duplicate block outside any marker: the
     # state said "paired" while the writers latched onto the FIRST anchored
     # markers in the file, which were the example's.
+    #
+    # NO INTERVAL QUANTIFIERS ({m} / {m,n}) ANYWHERE IN THIS AWK PROGRAM (the
+    # fence classifier below needs none). The obvious spelling of its two
+    # functions is /^ {0,3}(`{3,}|~{3,})/, and that spelling is what #9274 is
+    # about — both ways it breaks, and each one lies to the user DIFFERENTLY:
+    #   * Ubuntu 24.04, mawk 1.3.4 20240123 (the distro DEFAULT awk): the state
+    #     pass DIES at REcompile time — "values still on machine stack", exit 100
+    #     — and the READABLE file is refused as "could not read AGENTS.md
+    #     (unreadable, or not a regular file)". Measured in ubuntu:24.04: the
+    #     trigger is a leading zero-minimum interval followed by an open-ended one
+    #     (the fence regex above, and /^ {0,3}(a{3,})/); /x{3,}/ and /^ {0,3}a+/
+    #     compile fine on their own.
+    #   * Debian 12, mawk 1.3.4 20200120: intervals are not ENABLED at all
+    #     (`-W re-interval` there is a "vacuous option"), so the braces are LITERAL
+    #     and no fence ever matches (measured: /^a{3,}/ misses "aaa"). The state
+    #     pass then SUCCEEDS, and what it does depends on the FILE:
+    #       - a fenced EXAMPLE plus a real block -> starts=2/ends=2, so the
+    #         MALFORMED branch below refuses with "the Tortoise block markers are
+    #         MALFORMED … delete from the FIRST start marker" — advice that deletes
+    #         the user's documentation (measured, exit 3);
+    #       - ONLY a fenced example (no real block) -> state PAIRED, the example's
+    #         body is REPLACED in place and the run reports "✓ upgraded" at exit 0:
+    #         the documentation is silently gone, which is exactly the outcome
+    #         #3429's fence skip exists to prevent (measured in debian:12-slim).
+    # So only the panic class above is a blanket refusal; this one is a lie on
+    # SOME files and a silent overwrite on others, and NEITHER names the real
+    # cause — the defect #8947 exists to end. substr() implements the same
+    # CommonMark rule on every awk, so the classifier needs no interval support.
     state="$(LC_ALL=C awk -v ms="$ms" -v me="$me" -v msws="$ms_ws" -v mews="$me_ws" \
                  -v msre="$ms_re" -v mere="$me_re" '
       # NEAR: the marker ALONE on the line once whitespace/BOM is stripped, but
@@ -600,22 +628,35 @@ ${me}" > "$block" || _emit_fail "could not build the new block text — nothing 
       # "three backticks" is not this: `~~~` was not a fence at all (so an example
       # in one was DELETED and reported as an upgrade), and a 4-backtick fence
       # around a 3-backtick example closed at the wrong line.
-      function fence_run(line,   m) {
-        if (!match(line, /^ {0,3}(`{3,}|~{3,})/)) return ""
-        m = substr(line, RSTART, RLENGTH)
-        sub(/^ +/, "", m)
-        return m
+      #
+      # Spelled with substr() and NO interval quantifiers — see the note above the
+      # `state=` assignment for the two mawk builds that make them unusable (#9274).
+      function fence_indent(line,   i) {
+        i = 0
+        while (i < 4 && substr(line, i + 1, 1) == " ") i++
+        return i
+      }
+      function fence_run(line,   i, c, n) {
+        i = fence_indent(line)
+        if (i > 3) return ""
+        c = substr(line, i + 1, 1)
+        if (c != "`" && c != "~") return ""
+        n = 0
+        while (substr(line, i + n + 1, 1) == c) n++
+        if (n < 3) return ""
+        return substr(line, i + 1, n)
       }
       # A CLOSING fence carries nothing after the run but spaces/tabs. Trailing
       # text is legal only on the OPENING fence, so a language-tagged line INSIDE a
       # fence is content — treating it as a close ended the fence early, counted the
       # rest of the example, and produced a false "ran twice" whose remedy deletes
       # the real block plus the documentation.
-      function fence_close(line,   m) {
-        if (!match(line, /^ {0,3}(`{3,}|~{3,})[ \t\r]*$/)) return ""
-        m = substr(line, RSTART, RLENGTH)
-        gsub(/[ \t\r]/, "", m)
-        return m
+      function fence_close(line,   fr, rest) {
+        fr = fence_run(line)
+        if (fr == "") return ""
+        rest = substr(line, fence_indent(line) + length(fr) + 1)
+        gsub(/[ \t\r]/, "", rest)
+        return (rest == "" ? fr : "")
       }
       { lines[NR] = $0 }
       { fr = fence_run($0)

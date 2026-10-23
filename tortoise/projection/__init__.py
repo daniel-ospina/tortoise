@@ -51,7 +51,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
-from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT  # #9532: ONE ownership authority
+from tortoise.retry import (  # #9532: ONE ownership authority; #7357: ONE "reached" rule
+    MEMORY_CEILING_OWNERSHIP_CONSTRAINT,
+    ceiling_reading_drift,
+)
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
@@ -655,11 +658,22 @@ def _reset_vector_gap_warnings() -> None:
 # (0f9e6a2) and only survived in the legacy standalone projection.py, which
 # Phase 2 deletes. This is the ACTIVE wipe-protection: it must live in the
 # module the SDK actually imports.
-# A query is a bulk wipe when it contains DETACH DELETE but has NO property map
-# ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause.
+# A query is a bulk wipe when it contains a DELETE clause — with or without the
+# ``DETACH`` prefix (#8256: FalkorDB auto-detaches, so ``MATCH (n) DELETE n``
+# deletes every node exactly as ``MATCH (n) DETACH DELETE n`` does) — and has NO
+# property map ({...} — e.g. MATCH (n:Label {id:$id})) and NO real WHERE clause
+# on the deleted variable.
 # A WHERE clause is "real" only if it references a property (n.xxx) or a
 # parameter ($id) or CONTAINS / ``IN (...)`` / ``IN [...]`` — tautologies
-# (WHERE true, WHERE 1=1) don't count. ``IN [list]`` was NOT recognized before
+# (WHERE true, WHERE 1=1) don't count.
+#   ⚠️ KNOWN GAP (#9632 review, pre-existing and unfixed here): that rule is a
+#   PRESENCE test, not a RESTRICTION test. ``MATCH (n) WHERE n.id = n.id DELETE n``
+#   matches the property arm and ``MATCH (n) WHERE n:Point OR true DELETE n``
+#   matches the label-predicate arm; both delete every node on FalkorDB v4.20.6
+#   (measured 3 → 0) while the classifier says targeted. Closing it means
+#   refusing an exemption whose WHERE chunk contains a top-level ``OR`` or a
+#   self-comparison — a behaviour change on the guard itself, tracked separately
+#   rather than smuggled into #8256. ``IN [list]`` was NOT recognized before
 # #3007 (only ``IN (``), so a scoped delete whose only reference was
 # `id(n) IN [..]` / `labels(n)[0] IN [..]` was misclassified as a bulk wipe.
 _WHERE_REAL_RE = re.compile(
@@ -765,10 +779,34 @@ def _strip_call_subqueries(statement: str) -> str:
 
 
 # ── #3007: delete-target-aware scoping ──────────────────────────────────────
-# A ``DETACH DELETE`` may name several variables (``DETACH DELETE n, m``); each
-# is a separate target. The clause tail is read up to the next clause keyword so
+# A DELETE may name several variables (``DETACH DELETE n, m``); each is a
+# separate target. The clause tail is read up to the next clause keyword so
 # ``DELETE n RETURN count(*)`` yields ``n``, never ``RETURN``/``count``.
-_DELETE_CLAUSE_RE = re.compile(r"\bDETACH\s+DELETE\b(.*)$", re.IGNORECASE | re.S)
+#
+# #8256: the ``DETACH`` prefix is OPTIONAL here. FalkorDB auto-detaches, so
+# ``MATCH (n) DELETE n`` deletes every node exactly as ``DETACH DELETE`` does,
+# and a classifier that only looked for the two-word spelling let that whole
+# graph wipe through L2 on a production graph.
+#
+# The two lookarounds keep a bare spelling from inventing a clause where there
+# is none — the same clause-position convention ``_WHERE_STOP_RE`` uses:
+#   * ``(?<![\w.$:])`` — a keyword only counts at clause position, never right
+#     after ``.`` (a property ``n.delete``) or ``:`` (a label ``:DELETE``);
+#   * ``(?!\s*:)`` — a map KEY (``{delete: true}``) is followed by ``:``, a
+#     deleted variable never is.
+#
+# #8256 round 2: this matches the clause HEAD only — the target list is read
+# from the text AFTER the match, bounded by ``_CLAUSE_STOP_RE``. A pattern that
+# swallowed the tail (``(.*)$``) could match at most ONCE per statement, so a
+# statement carrying two ``DELETE`` clauses (a legal shape —
+# ``... DELETE r WITH old ... DELETE old``, shipped by
+# ``tortoise/projection/entities.py``) was classified from its FIRST clause
+# alone. Both a regression (``DELETE p ... DETACH DELETE m`` read as targeted)
+# and the hole itself (``DELETE p ... DELETE m`` was still unclassified) followed
+# from that: every clause must be read, and ``_delete_clauses`` below does.
+_DELETE_HEAD_RE = re.compile(
+    r"(?<![\w.$:])(?:DETACH\s+)?DELETE\b(?!\s*:)", re.IGNORECASE
+)
 #: Clause keywords that TERMINATE a DELETE target list (and must never be read
 #: as a variable name). Longest-first is irrelevant here: ``\b`` anchors each.
 _CLAUSE_STOP_RE = re.compile(
@@ -781,26 +819,56 @@ _VAR_NAME_RE = re.compile(r"[A-Za-z_]\w*")
 #: ``(n :Label1:Label2)``, ``[r:IMPL]``, ``(n:$param)``. The bracket must be a
 #: node/rel pattern delimiter immediately before the variable, so a label word
 #: elsewhere in the statement cannot satisfy it.
-_VAR_LABEL_RE = r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+#:
+#: #8256: the SECOND arm is the same signal for a label the masker BLANKED — a
+#: backtick-quoted type is a label too (``-[r:`extractedFrom`]->``, ``(n:`Point`)``),
+#: and ``_LITERAL_OR_COMMENT_RE`` replaces it with spaces. The residual shape is
+#: unambiguous, because a colon directly after a variable INSIDE a pattern
+#: bracket can only open a label: ``[r: ]``. Only what may LEGALLY FOLLOW a type
+#: is asserted — the pattern's closing delimiter, a ``{`` property map, a FURTHER
+#: type (``(n:`A`:`B`)``) or a length marker (``[r:`X`*1..2]``) — so this cannot
+#: be satisfied by a label that appears in prose (comments and string literals
+#: are already blanked, delimiters and all), and a multi-type / variable-length
+#: pattern is not misread as unscoped.
+_VAR_LABEL_RE = (
+    r"[\(\[]\s*{var}\s*:(?:\s*(?:[A-Za-z_]\w*|\$[A-Za-z_]\w*))+"
+    r"|[\(\[]\s*{var}\s*:\s*(?=[:*)\]\-\x7b]|$)"
+)
 #: A ``WITH <projection> ... LIMIT`` block. ``LIMIT`` bounds the rows that flow
 #: forward, so it scopes whatever the projection carries FROM that point.
 _WITH_LIMIT_RE = re.compile(r"\bWITH\b(.*?)\bLIMIT\b", re.IGNORECASE | re.S)
 
 
-def _delete_targets(text: str) -> tuple[list[str], int]:
-    """(deleted variable names, index of the ``DETACH DELETE`` clause, or -1).
+def _delete_clauses(text: str) -> list[tuple[list[str], int]]:
+    """EVERY ``DELETE`` clause as ``(deleted variable names, clause index)``.
 
     Read from the already-masked, CALL-stripped ``text`` so a keyword inside a
-    string/comment cannot become a variable name (#3037).
+    string/comment cannot become a variable name (#3037). #8256: a bare
+    ``DELETE`` is a clause here too — ``DETACH`` is the prefix FalkorDB applies
+    for you, not a different statement.
+
+    #8256 round 2: a statement may carry MORE THAN ONE ``DELETE`` clause
+    (``... DELETE r WITH old ... DELETE old``), and each deletes its own
+    targets. Returning only the leftmost clause let the first one's targets
+    speak for the whole statement — ``MATCH (p:Point {id:$id}) DELETE p WITH p
+    MATCH (m) DETACH DELETE m`` read as a scoped delete and dispatched, where
+    the pre-#8256 ``DETACH``-anchored pattern refused it. Every clause is
+    therefore returned; the verdict is taken over all of them.
+
+    The clause HEAD is matched, and its target list is the text after it
+    bounded by ``_CLAUSE_STOP_RE`` — which lists ``DETACH``/``DELETE``, so one
+    clause's targets can never run into the next clause's. An empty list (a
+    ``DELETE`` with nothing after it) is a real reading, not an absence: the
+    caller treats it as unscoped, so it stays fail-closed.
     """
-    m = _DELETE_CLAUSE_RE.search(text)
-    if m is None:
-        return [], -1
-    tail = m.group(1)
-    stop = _CLAUSE_STOP_RE.search(tail)
-    if stop is not None:
-        tail = tail[: stop.start()]
-    return _VAR_NAME_RE.findall(tail), m.start()
+    clauses: list[tuple[list[str], int]] = []
+    for m in _DELETE_HEAD_RE.finditer(text):
+        tail = text[m.end() :]
+        stop = _CLAUSE_STOP_RE.search(tail)
+        if stop is not None:
+            tail = tail[: stop.start()]
+        clauses.append((_VAR_NAME_RE.findall(tail), m.start()))
+    return clauses
 
 
 #: ``WITH <ident> AS <ident>`` — a re-binding that carries a variable's
@@ -885,7 +953,9 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     Five lexical scoping signals, each anchored to the DELETED variable:
 
     (a)  a LABEL on the variable's own pattern — ``MATCH (n:GraphEvent) ...
-         DETACH DELETE n``;
+         DETACH DELETE n`` (a BACKTICKED type counts: ``-[r:`extractedFrom`]->``
+         is a label the masker blanked, #8256 — including a MULTI-type or
+         variable-length one, ``(n:`A`:`B`)`` / ``[r:`X`*1..2]``);
     (a') a LABEL PREDICATE on it — ``WHERE n:Point``;
     (b)  a ``WITH <var> ... LIMIT`` bound on it — ``WITH n ... LIMIT $overflow``;
     (c)  a PROPERTY MAP on its own pattern — ``MATCH (n:Point {id:$id})``
@@ -903,32 +973,58 @@ def _var_is_scoped(text: str, var: str, delete_at: int) -> bool:
     the name the pattern actually binds.
     """
     maps = _pattern_property_map_vars(text, delete_at)
-    for name in _scope_names(text, var):
+    # #8256 round 3: the label and WHERE signals are bounded at the DELETE too.
+    # Both used to be read over the WHOLE statement, so a construct AFTER the
+    # clause — ``MATCH (n) DELETE n MATCH (n:Point)`` /
+    # ``MATCH (n) DELETE n MATCH (x) WHERE n.id = $id`` — exempted a delete that
+    # had already removed every node. Nothing that can target a DELETE legally
+    # follows it: a pattern bounds rows before they are deleted, so the bound is
+    # a narrowing (fail-closed) and cannot refuse a real targeted delete.
+    bounded = text[: max(delete_at, 0)]
+    # #9632 review (P1, demonstrated on FalkorDB v4.20.6): the ALIAS signal is
+    # bounded too. ``_scope_names`` follows a ``WITH <src> AS <var>`` chain, and
+    # it was read over the WHOLE statement — so a projection placed AFTER the
+    # clause lent the deleted variable a scoped source name:
+    # ``MATCH (x:Point), (n) DELETE n RETURN x AS n`` deleted all 3 nodes on the
+    # engine while the classifier returned False (dispatched at both L2 call
+    # sites). ``RETURN`` is the one position where ``AS`` binds nothing, and the
+    # label on the SOURCE (``x:Point``) then satisfied the label arm. Same
+    # rounding as round 3: nothing that can target a DELETE legally follows it,
+    # so the bound is fail-open-closing and cannot refuse a real targeted delete
+    # (``MATCH (n:Point {id:$id}) WITH n AS m DELETE m`` stays ALLOWED).
+    for name in _scope_names(bounded, var):
         if name in maps:
             return True
         escaped = re.escape(name)
-        if re.search(_VAR_LABEL_RE.format(var=escaped), text) is not None:
+        if re.search(_VAR_LABEL_RE.format(var=escaped), bounded) is not None:
             return True
-        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", text, re.IGNORECASE) is not None:
+        if re.search(r"\bWHERE\s+" + escaped + r"\b\s*:", bounded, re.IGNORECASE) is not None:
             return True
         # Only a WITH *before* the DELETE can bound the rows it deletes.
         for wm in _WITH_LIMIT_RE.finditer(text[:delete_at]):
             if re.search(r"\b" + escaped + r"\b", wm.group(1)) is not None:
                 return True
-        if _where_scopes(text, name):
+        if _where_scopes(bounded, name):
             return True
     return False
 
 
 def _is_bulk_wipe(cypher: str) -> bool:
-    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215).
+    """True when ``cypher`` may delete EVERY node of the graph (#99/#3037/#3007/#8215/#8256).
 
-    Bulk = contains DETACH DELETE and carries no targeting construct on the
-    DELETED variable itself: a property map on ITS node/relationship pattern, a
-    real WHERE reference to it, or a label/LIMIT scope on it. The verdict is
-    made on structure, not on raw text — comments, string literals, backtick
-    identifiers and ``CALL { ... }`` subqueries are blanked first, so a stray
-    ``{`` in any of them cannot exempt a whole-graph wipe (#3037).
+    Bulk = contains a DELETE — with or without the ``DETACH`` prefix — and
+    carries no targeting construct on the DELETED variable itself: a property
+    map on ITS node/relationship pattern, a real WHERE reference to it, or a
+    label/LIMIT scope on it. The verdict is made on structure, not on raw text —
+    comments, string literals, backtick identifiers and ``CALL { ... }``
+    subqueries are blanked first, so a stray ``{`` in any of them cannot exempt a
+    whole-graph wipe (#3037).
+
+    #8256: ``DETACH`` is NOT part of the test. FalkorDB auto-detaches, so
+    ``MATCH (n) DELETE n`` deletes every node exactly as ``MATCH (n) DETACH
+    DELETE n`` does; requiring the two-word spelling left that whole-graph wipe
+    unclassified on every L2 call site (the guarded handle's ``query`` /
+    ``call_procedure`` and the raw-query lane, where L2 is the only layer).
 
     #3007: a label-scoped / LIMIT-bounded delete (``MATCH (n:GraphEvent) WITH n
     ORDER BY n.seq ASC LIMIT $overflow DETACH DELETE n``) is a maintenance
@@ -942,22 +1038,41 @@ def _is_bulk_wipe(cypher: str) -> bool:
     WITH n MATCH (m) DETACH DELETE m`` therefore read as "targeted" and, on the
     raw-query lane where L2 is the only layer, executed a whole-graph wipe on a
     production server graph with no name check and no token.
+
+    #8256 round 2: the per-target rule applies to EVERY ``DELETE`` clause, not
+    to the first one. A statement may carry several (``... DELETE r WITH old
+    ... DELETE old`` is a legal Cypher shape this repo ships), and reading only
+    the leftmost let a scoped first clause vouch for an unscoped second one.
+
+    #8256 round 3 (this review): "every clause" must mean every clause PRESENT,
+    and every signal must be read BEFORE the clause it is supposed to scope.
+    Two holes closed here: (i) a ``DELETE`` inside a ``CALL { ... }`` subquery is
+    blanked by ``_strip_call_subqueries`` and so was never read, letting a
+    scoped sibling clause vouch for it; (ii) the label and WHERE signals were
+    searched over the WHOLE statement, so a construct AFTER the DELETE
+    (``MATCH (n) DELETE n MATCH (n:Point)``) exempted a delete that had already
+    removed every node.
     """
-    # Fast path: the overwhelming majority of statements are reads. A DETACH
-    # DELETE cannot be MASKED INTO existence, so a raw-text miss proves the
-    # statement is not a wipe and the scan below is skipped entirely — the
-    # read path pays no more than it did before #3037.
+    # Fast path: the overwhelming majority of statements are reads. A DELETE
+    # clause cannot be MASKED INTO existence (masking only removes text), so a
+    # raw-text miss proves the statement is not a wipe and the scan below is
+    # skipped entirely — a read that never mentions ``delete`` pays nothing
+    # (measured 0.17 µs). #8256 widened the discriminator from ``"DETACH" and
+    # "DELETE"`` to ``"DELETE"``, so a read whose text contains the substring
+    # WITHOUT a clause — ``WHERE t.deleted_at IS NULL`` is the common one — now
+    # pays one mask + one regex scan before the clause search returns None
+    # (measured 3.98 µs). Cheap enough not to special-case; the claim below is
+    # therefore about reads that do not contain the substring, not all reads.
     up_raw = cypher.upper()
-    if "DETACH" not in up_raw or "DELETE" not in up_raw:
+    if "DELETE" not in up_raw:
         return False
-    # The DELETE keyword is read from the masked text (a CALL subquery's
-    # DELETE is still a DELETE; a DETACH DELETE that lives only in a string or
-    # a comment is not a DELETE at all); the TARGETING constructs are read from
-    # the text with CALL subqueries blanked, so a brace or WHERE clause that
-    # lives inside a read-subquery cannot exempt a wipe that sits outside it.
+    # The DELETE clause is read from the masked text (a CALL subquery's DELETE
+    # is still a DELETE; a DELETE that lives only in a string or a comment is
+    # not a DELETE at all); the TARGETING constructs are read from the text with
+    # CALL subqueries blanked, so a brace or WHERE clause that lives inside a
+    # read-subquery cannot exempt a wipe that sits outside it.
     masked = _mask_cypher_text(cypher)
-    up = masked.upper()
-    if "DETACH" not in up or "DELETE" not in up:
+    if _DELETE_HEAD_RE.search(masked) is None:
         return False
     # #3037: masking removes only TERMINATED literals/comments. A malformed
     # statement keeps its quote, and a brace after it would still look like a
@@ -973,8 +1088,26 @@ def _is_bulk_wipe(cypher: str) -> bool:
     # test is exactly the #8215 defect: a property map (or WHERE reference) on a
     # pattern that binds something OTHER than the deleted variable says nothing
     # about what the DELETE removes.
-    targets, delete_at = _delete_targets(text)
-    if targets and all(_var_is_scoped(text, v, delete_at) for v in targets):  # noqa: SIM103
+    # #8256 round 2: EVERY clause's every target must be scoped — a later
+    # clause is a delete too, so a wipe there is still a whole-graph wipe. An
+    # empty target list (``DELETE`` followed by a clause keyword) is unscoped,
+    # so it stays fail-closed.
+    clauses = _delete_clauses(text)
+    # #8256 round 3: ``_strip_call_subqueries`` blanks a whole ``CALL { ... }``
+    # block, so a DELETE inside one is gone from ``text`` while the existence
+    # check above still saw it in ``masked`` (it is a DELETE, just an unread
+    # one). With round 2's ``all`` semantics a scoped SIBLING clause then
+    # vouched for the subquery's wipe:
+    # ``MATCH (a:Point {id:$a}) WITH a CALL { MATCH (m) DELETE m } DELETE a``
+    # read as targeted and dispatched on a production graph. Fewer clauses read
+    # than are present means an unread clause — fail closed, which is the
+    # conservative direction the strip's own docstring already claims.
+    if len(clauses) != len(_DELETE_HEAD_RE.findall(masked)):
+        return True
+    if clauses and all(  # noqa: SIM103
+        targets and all(_var_is_scoped(text, v, delete_at) for v in targets)
+        for targets, delete_at in clauses
+    ):
         return False
     return True
 
@@ -2812,11 +2945,22 @@ def _union_prewipe_snapshot(leftover: dict | None, fresh: dict) -> dict:
 #     variable the DELETE names (``_var_is_scoped``), including through a
 #     ``WITH <src> AS <dst>`` alias, so a targeting construct on another
 #     pattern no longer makes a whole-graph wipe look scoped.
-#     REMAINDERS (still open):
-#       - a bare ``DELETE`` (no ``DETACH``) is not classified at all, though
-#         FalkorDB auto-detaches and ``MATCH (n) DELETE n`` deletes every node
-#         — tracked: #8256 (pre-existing; widening the classifier is its own
-#         scope decision).
+#     The REMAINDERS list that used to close this note is now EMPTY: its last
+#     entry (a bare ``DELETE`` was not classified at all) is the #8256 fix
+#     recorded directly below.
+#   * ``_is_bulk_wipe`` also UNDER-classified a BARE ``DELETE`` (FIXED by
+#     #8256): the clause pattern required the two-word ``DETACH DELETE``
+#     spelling, so ``MATCH (n) DELETE n`` — which FalkorDB auto-detaches into
+#     the same whole-graph wipe — returned False and reached a production
+#     server graph on every L2 lane. ``DETACH`` is now an OPTIONAL prefix, and
+#     the clause is read at clause position only (``(?<![\w.$:])`` /
+#     ``(?!\s*:)``, the same convention ``_WRITE_CLAUSE_RE`` below already
+#     uses), so a property named ``delete``, a ``:DELETE`` label or a
+#     ``{delete: …}`` map KEY cannot invent one. Widening the clause made one
+#     latent gap load-bearing and it is closed in the same change: a
+#     BACKTICK-quoted type is a label the masker blanks
+#     (``-[r:`extractedFrom`]->`` — session_source_migration's move helpers),
+#     so ``_VAR_LABEL_RE``'s second arm reads the residual ``[r: ]`` shape.
 #
 #
 # History: the pre-#2944 bypass was ``_skip_guard``, a plain boolean
@@ -5101,13 +5245,14 @@ class _GuardedGraph:
     self.g itself, not FalkorProjection.query(). Restored in #49 Phase 2 after
     the v3.0 rewrite (0f9e6a2) dropped it from this live module.
 
-    Intercepts bulk DETACH DELETE (no property map, no real WHERE) and asserts
+    Intercepts a bulk DELETE — with or without the ``DETACH`` prefix (#8256), and
+    with no property map and no real WHERE on the deleted variable — and asserts
     the graph is a test graph before allowing execution. Targeted deletes
     (MATCH (n:Label {id:$id}) ...) pass through unchanged.
     This is L2 of the two-layer guard (see the module comment above): it is
     unconditional — there is deliberately NO bypass attribute. It is also the
     ONLY layer on the raw-query lane (``proj.g.query`` / ``query``), where a
-    bulk DETACH DELETE on an embedded or test-named graph is allowed through
+    bulk DELETE on an embedded or test-named graph is allowed through
     without a token. The rebuild lane additionally requires L1 —
     ``FalkorProjection._wipe_all_nodes()`` asserts the caller's explicit
     per-call opt-in BEFORE reaching here.
@@ -5639,13 +5784,14 @@ class _GuardedGraph:
         journal-backed/server projection (an unarmed EMBEDDED one keeps the
         pre-#9209 pass-through, which L2 itself exempts).
 
-        ⛔ AND L2'S OWN BOUNDARY APPLIES HERE UNCHANGED: it classifies a BULK
-        ``DETACH DELETE`` (``_is_bulk_wipe``), so a bare-DELETE procedure string
-        (``CALL db.labels() MATCH (n) DELETE n //``) is NOT refused by this verb
-        — exactly as the same bare DELETE is not refused through
-        ``proj.g.query``. That is the pre-existing scope of L2, pinned by
-        ``test_the_L2_classifier_still_requires_DETACH`` so a reader of this
-        docstring does not have to guess how wide the verb is.
+        ⛔ AND L2'S OWN BOUNDARY APPLIES HERE UNCHANGED: it classifies a bulk
+        ``DELETE`` whether or not the ``DETACH`` prefix is written
+        (``_is_bulk_wipe``), so a wipe-BEARING procedure string
+        (``CALL db.labels() MATCH (n) DELETE n //``) is refused by this verb
+        exactly as ``MATCH (n) DETACH DELETE n`` is — while a TARGETED delete
+        (``PROCEDURE ... MATCH (n:Point {id:$p}) DELETE n``) stays dispatchable.
+        #8256 made the bare spelling classifiable; before it, a bare-DELETE
+        procedure string reached the graph on every L2 call site.
         """
         statement = _call_procedure_statement(procedure, args=args, emit=emit)
         if statement is None:
@@ -6995,12 +7141,50 @@ def _writable_id(val) -> bool:
     record whose ``name`` was absent (it defaults to ``""``). Refusing it here
     keeps the rule in ONE home rather than repeating ``... and val`` at every
     call site.
+
+    ⛔ A WHITESPACE-ONLY value is deliberately STILL writable here (#9599).
+    Widening this predicate to ``bool(val.strip())`` looks like the same rule,
+    but this function is shared with the fold's LIVE path
+    (``_upsert_subject``/``_upsert_object``). MEASURED with the widening in
+    place: ``create_subject("   ")``/``create_object("   ")`` returned ``{}`` —
+    success, no node written, with a metered write op billed — and
+    ``POST /v1/sessions/commit`` with ``entities:[{"name":"   "}]`` returned
+    **200** with ``nodes_created`` counting a node that never landed and the
+    entity silently dropped. (An earlier draft of this note said "a
+    deterministic 500"; a fresh verifier re-measured it and it is the 200 +
+    silent drop above. The conclusion is unchanged: a 200 that drops the write
+    and reports success is worse than an audible refusal.) The blank SESSION key
+    is therefore refused at EVERY place that writes it, with ONE predicate per
+    layer: the two journal folds and the two snapshot/restore paths
+    (``entities._fold_session_recorded``, ``entities._link_session``,
+    ``rebuild_all``'s ``session_snapshot`` loop, and the record-sourced rebuild
+    — ``rebuild_from_record``, whose node filter lives in
+    ``_project_record_view``) all use ``_writable_container_id`` — this
+    predicate PLUS the blank clause, i.e. the same owner, so a journal replay
+    and a sidecar restore cannot disagree — while the caller-facing doors (the
+    SDK's ``capture_session`` / ``commit_session`` and the hosted
+    ``SessionRequest`` boundary) use ``tortoise.ids.session_id_refusal``, where
+    a caller can be told WHY. ⚠️ That list is the whole replay surface: a new
+    carrier outside it is ungated by construction, so add it here AND in
+    ``tests/test_9599_blank_session_id.py``'s docstring. The blank-NAME class
+    needs the Layer-1 / ingest shape gates, not this predicate.
     """
     return isinstance(val, str) and bool(val) and _annotator_value_ok(val)
 
 
 def _writable_container_id(val) -> bool:
-    """`_writable_id` PLUS the blank refusal — the `contains_session` gate.
+    """`_writable_id` PLUS the blank refusal — the SESSION-ID gate.
+
+    It gates BOTH journal carriers that merge a `:Session` key, so the rule has
+    one owner and not one per fold: `_link_session` (the `contains_session`
+    envelope field on a `PointAdded`) and `_fold_session_recorded` (the `id` of
+    a `SessionRecorded`). The two differ only in the CONSEQUENCE, which each
+    reports through `_log_identity_skip`'s `drops_record` flag: a refused
+    `contains_session` loses one derived EDGE after the Point is written, while
+    a refused `SessionRecorded` loses the container RECORD itself. The DOOR
+    half of the same rule — a caller-supplied `session_id` — is
+    `tortoise.ids.session_id_refusal`, which is a boundary refusal (it has a
+    caller to answer) and never reaches a merge key.
 
     The extra clause is MEASURED, not cosmetic, and it belongs here rather
     than only in the record projection (#9553 review P2), because a rule that
@@ -7016,7 +7200,10 @@ def _writable_container_id(val) -> bool:
     `MATCH … (s:Session {id:$sid})`, landing NO `contains_session` edge — while
     the record projection (Postgres, no such quirk) WOULD have landed the row.
     The embedded engine is worse still: it duplicates the node with no index at
-    all.
+    all. `_fold_session_recorded` had the same hole one carrier up: a
+    `SessionRecorded` for a whitespace-only id resurrected the invisible
+    container on EVERY journal replay, so even a journal written before the
+    capture doors refused one rebuilt the broken session.
 
     ⛔ SCOPE, so this is not over-read as a general sanitizer: the refusals are
     `_writable_id`'s plus BLANK only. A padded-but-real id (`'  s1  '`) is a
@@ -7030,7 +7217,7 @@ def _writable_container_id(val) -> bool:
     and the record fold agree (`record_projection._writable_endpoint_id`
     mirrors this predicate value-for-value, pinned by
     `tests/test_record_projection.py::test_the_envelope_endpoint_gate_is_the_folds_own_rule`).
-    `_link_session` becomes a plain `_writable_id` caller again once #9599 is
+    Both session folds become plain `_writable_id` callers again once #9599 is
     fixed — this gate (`_writable_container_id`) is the stopgap, the index
     defect is the cause.
     """
@@ -10742,15 +10929,18 @@ class FalkorProjection(
             # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
             # different cause — and only a shortfall WIDER than it is treated as
             # evidence that the ceiling is not the explanation.
-            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
-            # floor; the 1% arm is a heuristic that must not scale unbounded,
-            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
-            # print the ceiling sentence for a reading that is far from it —
-            # the over-claim direction, which is the unsafe one (its remedy is
-            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
-            # safe, because the below branch withholds nothing and asks for a
-            # re-read.
-            drift = max(64 << 10, min(cap // 100, 1 << 20))
+            #
+            # ⚠️ THE TOLERANCE IS NOT THIS MODULE'S (#7357 review P2). The SDK's
+            # hedge note TELLS an operator how to decide the same question from
+            # an `INFO memory` read of their own, so the rule has two readers and
+            # lived in two places — and they had already drifted: the note said
+            # "used_memory has reached", with no tolerance, which withdraws the
+            # remedy at a genuine ceiling reading 40 KiB under the cap. THIS
+            # message calls `retry.ceiling_reading_drift`; the note DESCRIBES the
+            # same rule (it holds an exception, not a reading), so a correction to
+            # these numbers must move the note's prose too — nothing makes that
+            # happen by itself, and the bound/unbound list below says so.
+            drift = ceiling_reading_drift(cap)
             if cap <= 2 * drift:
                 # #7392 cycle 7 — a tolerance larger than the ceiling's own
                 # scale makes the below branch UNREACHABLE and prints "has
@@ -10817,17 +11007,44 @@ class FalkorProjection(
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
         #
-        # #7392 review P1 — what that binding does NOT yet cover: the pair is
-        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
-        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
-        # asserts "it has reached its configured dataset limit (`maxmemory`)"
-        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
-        # CLASS, not just the wording), so on a ceiling-less instance the note
-        # and the `cap <= 0` branch above state opposite facts. Measured and
-        # recorded on #7357 (issuecomment-6341756094) — the note is that
-        # issue's deliverable, so it is fixed there, not here; this comment is
-        # the pointer so the next reader does not read the sentence above as
-        # proof that the two already agree.
+        # #7392 review P1 — the gap that binding did NOT cover, now closed on
+        # #7357: the pair was bound on the PROHIBITION and on the remedy, but
+        # NOT on whether a ceiling exists. `tortoise/retry.py::
+        # explain_memory_ceiling` used to assert "it has reached its configured
+        # dataset limit (`maxmemory`)" for any `redis.exceptions.OutOfMemoryError`
+        # (its classifier admits the CLASS, not just the wording), so on a
+        # ceiling-less instance the note and the `cap <= 0` branch above stated
+        # opposite facts (measured and recorded on #7357,
+        # issuecomment-6341756094). The note now branches on
+        # `_chain_names_the_ceiling`: the ceiling sentence needs the engine's own
+        # sentence in the exception, and a class-only refusal is told what the
+        # message does establish plus how to READ whether a ceiling exists.
+        #
+        # ⚠️ WHAT THIS PAIR ACTUALLY SHARES, enumerated, so this cannot be read
+        # as more than it is (#7357, cycle 4 — an earlier draft of this comment
+        # said more than the code held):
+        #   BOUND: the #2981 PROHIBITION, composed from the one constant in
+        #     `tortoise/retry.py`.
+        #   BOUND: the "ceiling was REACHED" rule, via `ceiling_reading_drift`
+        #     — this message CALLS it, the SDK note DESCRIBES it (it holds an
+        #     exception, not a reading). The note's WORDING is pinned by the
+        #     hedge-arm test, not by the drift-value test.
+        #   NOT BOUND: the knob's HOMES. `_CEILING_REMEDY_HOMES` is composed by
+        #     the note ONLY; this message carries its own wording of the same
+        #     two homes in four places. A third home must be added to all of
+        #     them, and nothing reddens if it is not.
+        #   NOT BOUND: the `cap <= 2 * drift` SCALE GUARD below, which only a
+        #     reader HOLDING a reading can apply. At a cap small enough for it
+        #     to fire (under ~128 KiB) this message says "does not show the
+        #     ceiling being reached" where the note's advice would still say to
+        #     raise it. Unreachable with any instance this repo runs — the
+        #     smallest is the 1 MiB lane container — and left stated rather than
+        #     papered over.
+        #   NOT BOUND: the CLASSIFICATION. `_WRITE_REFUSAL_MARKERS` does not
+        #     match a class-only `OOM …` reply, so such a refusal can still fall
+        #     through to the rebuild advice in `_backend_failure_message` — the
+        #     #2981 direction. A separate seam with its own measurement,
+        #     deliberately not widened here.
         return (
             "DB refused writes on open: the graph is INTACT but "
             f"{lead}. This is NOT "
@@ -15124,6 +15341,19 @@ class FalkorProjection(
             if not _writable_id(sid):
                 _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
                 continue
+            # #9599: the SIDEcar is the OTHER way a pre-fix blank container
+            # comes back. `_writable_id` admits a blank on purpose (it is
+            # shared with entity NAMES), so this leg applies
+            # `_writable_container_id` — the SAME predicate the two journal
+            # folds use, not a second spelling of the rule. Without it the
+            # standard recovery command (`rebuild_all`) restored the very
+            # `:Session {id:'   '}` the journal fold refuses — and journal-only
+            # `rebuild()` over the SAME journal ended with none. Two entry
+            # points disagreeing about one journal is worse than either rule:
+            # the operator's log says "dropped" while the node is present.
+            if not _writable_container_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             clean = {k: v for k, v in props.items() if k != "id"}
             self._restore_write(
                 "MERGE (s:Session {id:$id}) SET s += $props",
@@ -15131,6 +15361,12 @@ class FalkorProjection(
                 reason=":Session containers (#3947)",
             )
         for sid, pid in session_point_links:
+            # #9599: same rule for the CONTAINS link restore — a link is only
+            # meaningful against a container that was restored, and the gate is
+            # the same `_writable_container_id`.
+            if not _writable_container_id(sid):
+                _log_identity_skip("Session snapshot", sid, "id (MERGE key)")
+                continue
             self._restore_write(
                 "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                 "MERGE (s)-[:CONTAINS]->(p)",
@@ -16771,16 +17007,32 @@ class FalkorProjection(
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`
           **iff** every record key was materialised; ``limit`` bounds how many
-          nodes are written, and a bounded run therefore declares `partial`,
-          enumerating what it wrote. That is the seam through which the
+          nodes are written, and a bounded run does not declare `partial` merely for
+          being bounded — a bound at or above the record's node count covers every key
+          the plan could write and therefore declares `complete`, so `bounded` is a
+          FLAG, not a state (#9604 review). `coverage` follows the WRITES, so a record
+          row the projection REFUSES (a blank-keyed `:Session`, #9599) makes the
+          declaration `partial` at any bound. That is the seam
+          through which the
           completeness marker (#7952) can FIRE — it is not an eviction policy
           (§2.0 holds the FalkorDB limit high; the trigger for partiality is
-          still §17.3's).
+          still §17.3's). ``limit`` must be >= 1: a 0 bound is empty-slice after
+          an UNCONDITIONAL wipe, i.e. "clear it and put nothing back", so it is
+          refused (#9556 review).
 
         ``limit`` is a bound and nothing more: nodes are taken in a
         deterministic key order, and a relation whose endpoint falls outside
         the bound is a no-op (the same verdict the record projection's own
         endpoint resolution gives an absent endpoint).
+
+        ⚠️ ``declare=False`` leaves the residency marker to the CALLER, and an
+        ABSENT marker reads ``complete`` (``residency.read_declaration``'s
+        documented fail-safe). The wipe above deletes the marker either way, so
+        a caller that passes ``declare=False`` and does not write its own
+        declaration leaves the graph claiming the whole record is hot — which a
+        ``--limit``-bounded run has no right to claim. The FAILURE arm always
+        writes a nothing-proven declaration regardless of this flag (#9604
+        review); only the success arm's marker is the caller's to write.
 
         #9124: declare the REBUILD lane, then project the record. Every write
         this engine issues — ``_wipe_all_nodes``'s ``MATCH (n) DETACH DELETE n``,
@@ -16829,16 +17081,40 @@ class FalkorProjection(
         lane is opened by its only caller.
         """
         from tortoise.cache_projection import (
-            declaration_for,
+            NODE_TABLES,
             project_records,
             record_plan,
-            write_declaration,
         )
 
         nodes = tuple(view.nodes)
+        # #9599: `rebuild_from_record` is a GRAPH write, so it obeys the GRAPH's
+        # rule even though the RECORD layer deliberately keeps the row (see
+        # `record_projection`'s `SessionRecorded` note — the record is the
+        # faithful carrier, a Postgres key is addressable, the engine's key is
+        # not). MEASURED before this gate: the blank `:Session` landed, its
+        # CONTAINS edge silently did not (the engine cannot serve a blank
+        # indexed key back to an equality seek), and the receipt still said
+        # `coverage: complete` with `relations_written: 1` — a false PASS on
+        # the one path a lost cache depends on.
+        refused = {(n.label, n.key) for n in nodes
+                   if n.label == "Session"
+                   and not _writable_container_id(n.key)}
+        if refused:
+            for _label, _key in sorted(refused):
+                _log_identity_skip("Session", _key, "id (MERGE key)")
+            nodes = tuple(
+                n for n in nodes if (n.label, n.key) not in refused)
         if limit is not None:
-            if limit < 0:
-                raise ValueError(f"limit must be >= 0, got {limit}")
+            if limit < 1:
+                # ⚠️ 0 is the destructive no-op: `nodes[:0]` is empty, but the
+                # WIPE below is unconditional, so a 0 bound clears the cache and
+                # writes nothing — a caller asking for "nothing" gets "gone".
+                # Refused at the SEAM, not only at `record-restore`'s own door
+                # (#9556 review P2), so the next caller cannot reach it by
+                # forgetting a check.
+                raise ValueError(
+                    f"limit must be >= 1, got {limit} — a 0 bound would wipe "
+                    f"the graph and project nothing")
             nodes = tuple(sorted(nodes, key=lambda n: (n.label, n.key))[:limit])
             kept = {(n.label, n.key) for n in nodes}
             relations = tuple(
@@ -16847,6 +17123,14 @@ class FalkorProjection(
                 and (r.tgt_label, r.tgt_key) in kept)
         else:
             relations = tuple(view.relations)
+        if refused:
+            # An edge whose endpoint was excluded has nothing to bind — dropping
+            # it here (rather than writing a statement that matches no row) is
+            # what makes `relations_written` mean what it says.
+            relations = tuple(
+                r for r in relations
+                if (r.src_label, r.src_key) not in refused
+                and (r.tgt_label, r.tgt_key) not in refused)
 
         plan = record_plan(nodes, relations)  # raises BEFORE any wipe
 
@@ -16856,22 +17140,93 @@ class FalkorProjection(
             "REFUSING to run bulk DETACH DELETE on non-test graph")
         self._wipe_all_nodes(confirm_destructive=confirm_destructive,
                              operation="rebuild_from_record")
-        self._ensure_indexes()
-        statements = project_records(self.g, plan)
+        # ⛔ Everything from here to the declaration write is POST-WIPE, and a
+        # raise in this window used to leave the graph with NO residency marker
+        # at all (#9604 review). ``residency.read_declaration`` answers
+        # ``complete`` for an ABSENT marker (the documented fail-safe: a missing
+        # declaration is the normal state), so "wiped and then died" read as
+        # "the whole record is hot" — the same §17.3 inversion the
+        # plan-built-marker fix closed, reached through absence instead of
+        # through a stale plan. The marker is therefore made TRUE before the
+        # exception leaves this method: nothing was proven written, so nothing
+        # is claimed hot.
+        try:
+            self._ensure_indexes()
+            statements = project_records(self.g, plan)
+
+            # ⛔ MEASURED AFTER THE WRITE, never the plan's length (#9556 review).
+            # ``len(nodes)`` is the size of the INPUT, computed above — before the
+            # wipe and before ``project_records`` ran — so returning it as
+            # "written" made EVERY caller's count check a tautology: a rebuild that
+            # wiped and materialised nothing still reported
+            # ``nodes_written == len(nodes)``, i.e. a destroyed cache behind an
+            # exit-0-shaped success. That is the false-PASS class, so the counts are
+            # read back off the graph the same way the sibling replay lane does
+            # (``_rebuild_all_replay`` → ``node_count``/``edge_count`` after the
+            # fold). The wipe is unconditional and whole-graph, so everything the
+            # graph holds now was written by THIS run.
+            #
+            # ⚠️ ``relations_written`` can legitimately be lower than the number of
+            # record relations SELECTED: a relation statement MATCHes its endpoints,
+            # so one whose endpoint the projection does not resolve is a no-op (see
+            # this method's module-facing notes). ``relations_selected`` reports the
+            # plan's own size beside it, so the two are told apart rather than
+            # conflated.
+            nodes_written = self._count_projected(
+                "MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) "
+                "RETURN count(n)",
+                {"labels": sorted(NODE_TABLES)})
+            relations_written = self._count_projected(
+                "MATCH ()-[r]->() RETURN count(r)", None)
+        except BaseException:
+            # ⛔ UNCONDITIONAL, not `if declare` (#9604 review). The wipe above
+            # already deleted the `:Meta` marker, and `residency.read_declaration`
+            # answers `complete` for an ABSENT marker — so bailing out here with
+            # no marker would leave the graph reporting "the whole record is hot"
+            # for a run that just emptied it. `declare=False` is therefore NOT
+            # allowed to mean "leave the marker missing": the caller may own the
+            # marker, but `missing` is a claim, not a blank. Nothing is proven
+            # written on this path, so nothing is claimed hot.
+            self._declare_materialized(view, (), scope=scope)
+            raise
 
         declaration = None
         if declare:
             materialized = plan.node_keys()
-            declaration = declaration_for(
-                view.record_keys,
-                [(label, key) for label, key in materialized],
-                scope=scope,
-            )
-            write_declaration(self.g, declaration)
+            # ⛔ The declaration claims only what the MEASURED counts proved
+            # (#9556 review). It used to be built from ``plan.node_keys()`` —
+            # the PLAN — so a rebuild whose writes did not land still wrote a
+            # ``complete`` (or plan-sized ``partial``) residency marker into a
+            # cache that held nothing, and its caller then refused the run as
+            # LOST. The graph was left carrying a claim the code had just
+            # disproved: §17.3 says a key the cache does not hold must read
+            # ``not-hot``/``degraded``, and a ``complete`` marker makes it read
+            # ``empty`` (absence) instead — the polarity this marker exists to
+            # prevent.
+            #
+            # The writing lane knows HOW MANY nodes landed (``nodes_written``)
+            # but not WHICH, so the only provable set is the two ends: all of
+            # the plan when the count matches it, and NOTHING otherwise. The
+            # short direction is the safe one — an understated hot set costs a
+            # residency miss, an overstated one reports a missing node as
+            # genuinely absent.
+            proven = (materialized
+                      if nodes_written == len(set(materialized)) else ())
+            declaration = self._declare_materialized(view, proven, scope=scope)
 
         return {
-            "nodes_written": len(nodes),
-            "relations_written": len(relations),
+            "nodes_written": nodes_written,
+            "relations_written": relations_written,
+            # The plan's own size, stated as such: it is what the projection
+            # SELECTED from the record, and it is NOT a write count.
+            "nodes_selected": len(nodes),
+            "relations_selected": len(relations),
+            # #9604 review P2: the rows this projection DECLINED to project, so
+            # the `nodes_selected` denominator is auditable instead of merely
+            # asserted. This is the set behind the "a refused row is not a
+            # restore shortfall" decision — without it an operator comparing
+            # `nodes_written` with `nodes_selected` cannot see WHY they differ.
+            "refused_keys": sorted(refused),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),
@@ -16879,6 +17234,54 @@ class FalkorProjection(
             "declared_keys": len(declaration.hot_keys or ()) if declaration else 0,
             "source": "record",
         }
+
+    def _declare_materialized(self, view, proven, *, scope: str = ""):
+        """Write the residency marker for what this run PROVED it materialised.
+
+        One writer for both arms of :meth:`_project_record_view` — the landed
+        one (:meth:`_count_projected` matched the plan) and the failed one
+        (nothing is provable, so nothing is claimed hot). ``residency
+        .read_declaration`` treats an ABSENT marker as ``complete``, so a
+        post-wipe failure that wrote no marker would report a destroyed cache as
+        fully hot; this is how the failure arm makes the graph's own truth match
+        the run's.
+        """
+        from tortoise.cache_projection import declaration_for, write_declaration
+
+        declaration = declaration_for(view.record_keys, proven, scope=scope)
+        write_declaration(self.g, declaration)
+        return declaration
+
+    def _count_projected(self, cypher: str,
+                         params: dict | None = None) -> int:
+        """Run one post-rebuild COUNT and return it as an ``int``.
+
+        The measurement half of :meth:`_project_record_view`'s report. A read is
+        permitted on every lane (``_raw_query_lane_permit``/§17.1 gate the
+        MUTATING statements only), so this runs inside the rebuild's declared
+        window unchanged.
+
+        ⚠️ BOUNDED, because this read happens AFTER the wipe: a full-graph count
+        that blocks forever would leave an operator with a destroyed cache and
+        no output at all (the ``record-restore`` verb's contract is bounded
+        reads — ``_target_nodes_before`` bounds the same shape with the same
+        constant, imported from the sibling verb so the two cannot drift).
+
+        A count that cannot be READ (a timeout, a driver error, an empty result
+        set) RAISES rather than returning a plausible number: the caller's whole
+        purpose at this point is to say what the cache now holds, and "unknown"
+        reported as ``0`` would be read as the LOST-wipe finding — a number the
+        code did not measure is exactly the false PASS that made ``len(nodes)``
+        wrong in the first place. The caller classifies this as UNKNOWN.
+        """
+        from tortoise.record_reconcile import CACHE_READ_TIMEOUT_MS
+
+        rows = self.g.query(cypher, params=params,
+                            timeout=CACHE_READ_TIMEOUT_MS).result_set
+        if not rows or not rows[0]:
+            raise RuntimeError(
+                f"the post-rebuild count returned no row: {cypher[:80]}")
+        return int(rows[0][0])
 
     def query(self, cypher: str, **params):
         # #7951 §17.1 — the public raw-query lane is closed for a

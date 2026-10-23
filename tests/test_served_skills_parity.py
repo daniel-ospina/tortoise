@@ -2751,3 +2751,176 @@ def test_8747_the_installer_row_names_a_guard_that_exists_on_this_side():
             f"README.md in this repo never mentions the installer or the MIT "
             f"repo — a guard nobody wrote is not a guard (and a README in the "
             f"other repo is not checkable from here): {cell}")
+
+
+# ── the served skill's KIND claims are checked against the packs (#9046) ────
+#
+# The served tree is a DENORMALISED copy of the pack registry: it tells an agent
+# which kinds exist and what they expand to. Nothing tied those sentences to the
+# registry. `--check-local`/`--check-upstream` compare the mirror against its
+# AUTHOR, so an author-side sentence that is wrong is wrong in BOTH trees and
+# green in both — byte parity cannot see a false claim, only a diverged copy.
+#
+# #9046 is exactly that: the served skill named `pm:task` in three places. `task`
+# is only a SYNONYM VALUE of `pm:issue` (`packs/project-management/manifest.yaml`),
+# so `expand_kind("pm:task")` answers `["pm:task"]` — self-only, silently. The
+# lie therefore reads as "no equivalents" instead of "no such kind", which is why
+# it survived review. Same defect class as the `KNOWN_STALE_TOOL_NAMES` ratchet in
+# `tests/test_served_skills.py` (a served skill naming a tool the client was never
+# granted); this is the KIND-name analogue, checked against the registry the
+# server actually loads rather than against the author repo.
+#
+# WHY THIS FILE. The guard's subject is the served tree AND `packs/`. This file is
+# registered on `onboarding` (whose SOURCE_PATTERN covers `public/skills/**`) and
+# on `core` (`packs/**` falls through to core) plus `tier1`, so every diff that can
+# stale a kind claim selects a surface that runs the guard. `test_served_skills.py`
+# is `onboarding`-ONLY and would be asleep on a packs-only diff (the
+# #1349/#2938/#3332 silent-drop class).
+
+SERVED_ROOT = REPO / "website" / "apps" / "dashboard" / "public" / "skills"
+
+# `<namespace>:<kind>` as the served skills spell it. Only tokens whose namespace
+# a pack DECLARES are treated as kind claims, so prose such as `reify:true`,
+# `crit:adoption` or `opt:mit` is never mistaken for one.
+KIND_TOKEN = re.compile(r"\b([a-z][a-z0-9_-]*):([A-Za-z][A-Za-z0-9]*)\b")
+
+# An equivalence claim made in prose: two backticked names joined by ↔.
+EQUIVALENCE_CLAIM = re.compile(r"`([A-Za-z][\w:.-]*)`\s*↔\s*`([A-Za-z][\w:.-]*)`")
+
+# A live return-value claim: `expand_kind("K")  # returns ["a", "b", ...]`.
+EXPAND_EXAMPLE = re.compile(
+    r'expand_kind\(\s*"([^"]+)"\s*\)[^\n]*#\s*returns?\s*\[([^\]]*)\]')
+
+# Kinds a served skill may name although no pack declares them, pinned EXACTLY so
+# the set can only shrink (the `KNOWN_STALE_TOOL_NAMES` idiom). It is EMPTY, and
+# `pm:task` is the one entry this class ever had — #9046 removed it. A fix REDs
+# the test below; that is the ratchet working, not a regression.
+KNOWN_UNDECLARED_KINDS: dict[str, set[str]] = {}
+
+
+def _served_skill_files() -> list[Path]:
+    files = sorted(SERVED_ROOT.glob("*/SKILL.md"))
+    assert files, f"no served skills found under {SERVED_ROOT}"
+    return files
+
+
+def _pack_registry():
+    from tortoise.pack_registry import PackRegistry
+
+    registry = PackRegistry(REPO / "packs")
+    registry.load_all()
+    return registry
+
+
+def _declared_kinds() -> tuple[set[str], set[str]]:
+    """(declared `ns:kind` tokens, the pack namespaces that own them)."""
+    declared = {kind for kinds in _pack_registry().list_all_kinds().values()
+                for kind in kinds if isinstance(kind, str) and ":" in kind}
+    namespaces = {kind.split(":", 1)[0] for kind in declared}
+    assert declared and namespaces, (
+        "the pack registry declared no namespaced kinds — every assertion below "
+        "would pass vacuously")
+    return declared, namespaces
+
+
+def test_9046_every_kind_the_served_skills_name_is_declared_by_a_pack():
+    """A served skill may only name kinds the packs declare.
+
+    The failure mode this closes is silent by construction: an unknown kind is not
+    an error in `expand_kind`, it is a self-only answer, so an agent that copies a
+    phantom kind from the served text is told it has no subclasses or equivalents
+    rather than that it named a kind which does not exist (#9046's `pm:task`).
+    """
+    declared, namespaces = _declared_kinds()
+
+    offenders: dict[str, set[str]] = {}
+    seen_allowed: set[tuple[str, str]] = set()
+    for path in _served_skill_files():
+        name = path.parent.name
+        named = {f"{ns}:{kind}"
+                 for ns, kind in KIND_TOKEN.findall(path.read_text(encoding="utf-8"))
+                 if ns in namespaces}
+        allowed = KNOWN_UNDECLARED_KINDS.get(name, set())
+        seen_allowed.update((name, kind) for kind in named & allowed)
+        undeclared = named - declared - allowed
+        if undeclared:
+            offenders[name] = undeclared
+
+    assert not offenders, (
+        "a served skill names kinds no pack declares (#9046).\n"
+        + "\n".join(f"  - {name}: {sorted(kinds)}"
+                    for name, kinds in sorted(offenders.items()))
+        + f"\n  Declared kinds live in `packs/*/manifest.yaml` "
+          f"({len(declared)} across {sorted(namespaces)}). A synonym VALUE is not "
+          f"a kind: `pm` declares `issue` with `synonyms: [ticket, task]`, and "
+          f"`expand_kind(\"pm:task\")` returns `[\"pm:task\"]` — self-only and "
+          f"silent. The authored source is "
+          f"daniel-ospina/tortoise-skills-and-integrations, so fix it THERE and "
+          f"re-sync (`--sync`).")
+
+    stale = {(name, kind) for name, kinds in KNOWN_UNDECLARED_KINDS.items()
+             for kind in kinds if (name, kind) not in seen_allowed}
+    assert not stale, (
+        f"KNOWN_UNDECLARED_KINDS entries no longer occur: {sorted(stale)} — "
+        "shrink the map, it exists only as an exact pin on known-bad mentions")
+
+
+def test_9046_every_equivalence_the_served_skills_claim_holds_both_ways():
+    """An ``A ↔ B`` claim in the served text must be true of the registry.
+
+    `equivalentTo` is bidirectional by definition, so a one-way or invented pair
+    sends an agent looking for a bridge that is not there — the shape #9046
+    shipped (`dev:issue` ↔ `pm:task`, where the real equivalence is with
+    `pm:issue`).
+    """
+    claims: list[tuple[str, str, str]] = []
+    for path in _served_skill_files():
+        for left, right in EQUIVALENCE_CLAIM.findall(
+                path.read_text(encoding="utf-8")):
+            if ":" in left and ":" in right:
+                claims.append((path.parent.name, left, right))
+    assert claims, (
+        "no `<kind>` ↔ `<kind>` equivalence claims were found in the served "
+        "skills — this guard has gone dark on the surface it exists for. If the "
+        "equivalence example was deliberately removed, delete this test rather "
+        "than leaving a check that passes while observing nothing")
+
+    registry = _pack_registry()
+    untrue = [(name, f"{left} ↔ {right}",
+               f"expand_kind({left!r}) = {registry.expand_kind(left)}",
+               f"expand_kind({right!r}) = {registry.expand_kind(right)}")
+              for name, left, right in claims
+              if right not in registry.expand_kind(left)
+              or left not in registry.expand_kind(right)]
+    assert not untrue, (
+        "a served skill claims an equivalence the packs do not declare:\n"
+        + "\n".join(f"  - {name}: {pair}\n      {lhs}\n      {rhs}"
+                    for name, pair, lhs, rhs in untrue))
+
+
+def test_9046_the_expand_kind_examples_match_what_the_registry_returns():
+    """A served ``expand_kind("K")  # returns [...]`` example must be a live value.
+
+    This line is the one an agent trusts most, because it is presented as output
+    rather than as guidance — #9046's example listed `pm:task` among the kinds
+    `expand_kind("WorkItem")` returns, which it never was.
+    """
+    registry = _pack_registry()
+
+    checked = 0
+    for path in _served_skill_files():
+        for kind, listed in EXPAND_EXAMPLE.findall(path.read_text(encoding="utf-8")):
+            claimed = re.findall(r'"([^"]+)"', listed)
+            actual = registry.expand_kind(kind)
+            absent = [c for c in claimed if c not in actual]
+            assert not absent, (
+                f"{path.parent.name} documents "
+                f"`expand_kind({kind!r})` as returning {claimed}, but it does not "
+                f"return {absent}. Actual: {actual}")
+            checked += 1
+
+    assert checked, (
+        "no `expand_kind(\"K\")  # returns [...]` example was found in the served "
+        "skills — this guard has gone dark. If the example was deliberately "
+        "removed, delete this test rather than leaving a check that passes while "
+        "observing nothing")

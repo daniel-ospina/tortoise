@@ -19,6 +19,20 @@ Design decisions (locked 2026-08-15, issue #318 — decision comment
       tier exists (pricing/GTM decision).
 - D4  Read-only introspection surface (REST ``GET /v1/packs`` + MCP
       ``packs_list``) — this module is the shared ensure-then-read core.
+- D4a (#9583, recorded 2026-10-22) — D4's *"read-only"* is a statement of
+      what the surface is FOR, and it is not a guarantee the mechanism keeps:
+      this module is the shared ensure-then-READ core, so a
+      ``get_tenant_packs`` read can MERGE a missing starter ``:PackInstall``
+      (the #318 self-heal, one per starter namespace, suppressed when the graph
+      carries a ``:PackSelection`` marker — #2728/#8648). Both surfaces
+      advertised D4's word as a guarantee: the MCP ``packs_list`` description
+      was corrected under #9575 and the REST ``GET /v1/packs`` OpenAPI
+      description — served from that route's docstring — under #9583. D4 is
+      kept VERBATIM above rather than reworded: it is a locked decision list,
+      and an unmarked edit would read as history being tidied. D4's intent
+      (these two endpoints exist to EXPOSE state, not to change it at a
+      caller's request) stands; the ensure half is recorded here, where the
+      next reader of D4 will see it.
 - D5  Existing-tenant backfill handles ``org_{name}`` vs ``org_{id}``
       naming via the RECORDED graph_name (graph-scripts/backfill_pack_installs.py).
 - D6  Existence masking — empty result when nothing to see; errors only for
@@ -1519,7 +1533,9 @@ def kind_spellings_in_payload(payload) -> list[tuple[str, str]]:
 #: all CORE spellings, i.e. the anti-paralysis half of the owner's 2026-10-17
 #: ruling ("an 'other' or more general kind … so we don't completely block the
 #: writer in paralyzing bureaucracy"). ``objectKind``/``subjectKind`` =
-#: ``other`` (the SDK/REST default and a declared canonical object kind);
+#: ``other`` (the FOLD's ``ON CREATE`` default — `projection/entities.py`,
+#: #9572 moved it there when the SDK/REST doors stopped fabricating it — and a
+#: declared canonical object kind);
 #: ``eventKind`` = ``occurrence`` and ``pointKind`` = ``statement`` (the
 #: extractor's own fallbacks); ``documentKind`` has no declared general kind, so
 #: it names none rather than inventing one.

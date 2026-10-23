@@ -179,7 +179,7 @@ export function emailInterstitial(email: string | null, pendingId: string, kind:
 <title>Confirm your sign-in — Tortoise</title>
 <style nonce="${nonce}">
   :root { --bg:#060b14; --surface:#0d1a2d; --text:#cbd5e1; --dim:#94a3b8; --accent:#06b6d4; --red:#ef4444; --border:#1e293b;
-          --mono:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',monospace; --serif:Georgia,'Times New Roman',serif; }
+          --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace; --serif:Georgia,'Times New Roman',serif; }
   *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
   body { background:var(--bg); color:var(--text); font-family:var(--mono); font-size:14px; line-height:1.6;
          display:flex; align-items:center; justify-content:center; min-height:100vh; padding:1.5rem; }
