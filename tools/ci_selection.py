@@ -754,6 +754,39 @@ SOURCE_PATTERNS = {
                    # #3261/#3616/#8334 silent-drop class.
                    "tools/ts/",
                    "config/pages-upload-classification.txt",
+                   # #6870 review (P1): the mono-stack guard
+                   # (`tests/test_website_static.py::
+                   # TestMonospaceStackRendersAsAMonoFace`) widened its scan to
+                   # `apps/` and to the Python modules that emit HTML, but this
+                   # surface is the guard's ONLY registration and neither root
+                   # reached it. Measured before these entries:
+                   # `select(["apps/graph-viz/src/index.css"])` -> `surfaces=[]`
+                   # (a graph-viz-only diff filters to `changed == []` and takes
+                   # the docs-only tier-1 early return, because `apps/` is in
+                   # NON_PYTHON_PREFIXES and matched no SOURCE_PATTERNS row), and
+                   # `select(["tortoise/oauth.py"])` -> `['api', 'core']` with the
+                   # guard absent. So a re-copy of the old Courier-rendering stack
+                   # into one of the 8 graph-viz canvas/JSX declarations or into
+                   # the served MCP consent page merged GREEN — the
+                   # #1349/#3332/#3616 silent-drop class, on the exact surfaces
+                   # the guard was widened to protect. `tortoise/oauth.py` is in
+                   # CORE_ALSO, so `core` stays selected alongside. Concrete
+                   # paths, not globs: `select()` matches with `startswith`.
+                   # Pinned by tests/test_website_static.py::
+                   # TestMonospaceStackRendersAsAMonoFace::
+                   # test_every_file_it_scans_selects_this_guard (derived from the
+                   # files the scan reads) and by tests/test_ci_selection.py::
+                   # test_the_monospace_guard_is_selected_on_every_root_it_scans.
+                   "apps/graph-viz/src/",
+                   "tortoise/oauth.py",
+                   # The guard's other declared emitter (`MODULES`). It carries no
+                   # mono declaration today, so nothing forces its wiring — which
+                   # is exactly why it is named here: the guard's subject list
+                   # must not be able to grow a member whose diff never runs it.
+                   # Paired with `CORE_ALSO` below because a SOURCE_PATTERNS match
+                   # REPLACES the `core` fallback, and `test_render.py` (the
+                   # renderer's own guard) is registered `core`.
+                   "tortoise/render.py",
                    # PR #9652 review (P2): `tests/test_website_static.py`'s new
                    # `TestProductRootMarkerContract` has THREE subjects, and only
                    # two of them selected this surface — `website/product.html`
@@ -777,7 +810,45 @@ SOURCE_PATTERNS = {
                    # silent drop for another. Pinned by
                    # tests/test_ci_selection.py::
                    # test_product_root_marker_guard_runs_on_a_legal_pages_only_diff.
-                   "tests/e2e/test_legal_pages.py"),
+                   "tests/e2e/test_legal_pages.py",
+                   # #9607: `tortoise/quadrature.py` is an input this guard
+                   # DERIVES from — `test_docs_states_the_formulas_quadrature_
+                   # actually_computes` reads both factors out of the module and
+                   # asserts /docs states them, and its own docstring claims
+                   # *"editing `quadrature.py` itself reds the page that describes
+                   # it"*. That was FALSE in CI: `quadrature.py` matched no
+                   # `SOURCE_PATTERNS` entry and is not in `SHARED_MODULES`, so a
+                   # quadrature-only diff took the generic `core` fallback
+                   # (`surfaces=['core']`, `full=False`) and landed in a pool this
+                   # file is not registered in — so a QUADRATURE-ONLY diff could not
+                   # run the formula pin (a PR that also touched a `docs`/website
+                   # page still did, via `onboarding`). Measured on `02e18e752`
+                   # before listing: `select(["tortoise/quadrature.py"])` returned
+                   # `full=False`, `surfaces=['core']`, this file ABSENT from
+                   # `test_files`. Same #1349/#3332/#3616 silent-drop class as the
+                   # derivation inputs directly above (`website/_redirects`,
+                   # `tests/_html_links.py`), and the reverse ratchet in
+                   # `tests/test_website_docs_consistency.py::
+                   # test_every_guard_input_is_selectable_by_ci` pins it so the
+                   # entry cannot be dropped again.
+                   "tortoise/quadrature.py",
+                   # #9607 review P2 (round 5): the SIBLING instance of the entry
+                   # above, one file over. `test_website_docs_consistency.py`
+                   # imports `Point` / `point_content_id` from this module and its
+                   # `test_commit_schema_requires_a_source_on_every_extracted_claim`
+                   # is the evidence under the FAQ's PUBLISHED traceability
+                   # sentence — so relaxing `Point.source_ref` is the one change
+                   # that can falsify what `website/faq.html` ships. Measured
+                   # before this entry: `select(["tortoise/commit_schema.py"])`
+                   # returned `full=False`, `surfaces=['core']`, this file ABSENT
+                   # from `test_files` — the same `core` fallback as quadrature,
+                   # so the change that reds the contract tests could edit them and
+                   # still never run the pin on the page. Paired with a `CORE_ALSO`
+                   # entry below (a named-surface match REPLACES the `core`
+                   # fallback, #2938) and pinned by
+                   # tests/test_ci_selection.py::
+                   # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
+                   "tortoise/commit_schema.py"),
     # NOTE: .github/workflows/deploy-pages.yml is deliberately NOT listed above.
     # A review pointed out that adding it would be a coverage DOWNGRADE: an
     # unlisted path falls into the unknown-path branch -> FULL matrix (fail
@@ -1074,6 +1145,33 @@ SOURCE_PATTERNS = {
 # tuple is redundant for any path already listed here.
 CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.py",
              "tortoise/projection/edges.py",
+             # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
+             # /docs formula guard lives there), and a SOURCE_PATTERNS match
+             # REPLACES the `core` fallback (#2938) — so without this entry the
+             # very PR that edits a formula would STOP running the whole core pool
+             # it selects today (`select(["tortoise/quadrature.py"], ...)` collapses
+             # to the `onboarding` set alone), i.e. the fix for one silent drop would
+             # create another. The pool's size is a DATED ANCHOR, not a live count
+             # (633 at `1ff23919c`; read today's with
+             # `len(select(["tortoise/foo.py"], "pull_request", load_manifest())["test_files"])`)
+             # — it grows with the suite, and a bare count rots.
+             #   ⚠️ Deliberately NOT the whole fix: `tests/test_ep_quadrature.py`
+             # is registered under `ep`, so a quadrature-only diff still drops it —
+             # and so do the three other `ep`-registered suites that import the
+             # module (`test_ep_calibration.py`, `test_ep_projections.py`,
+             # `test_gmm_proofs.py`). That half is pre-existing and is tracked
+             # separately (#9621) rather than folded in here.
+             "tortoise/quadrature.py",
+             # #9607 review P2 (round 5): `tortoise/commit_schema.py` is the other
+             # `core`-fallback input now registered in `onboarding` — same #2938
+             # trade, same remedy. Without this entry the very PR that relaxes
+             # `Point.source_ref` stops running the core pool it selects today
+             # (measured: `select(["tortoise/commit_schema.py"])` collapses to the
+             # `onboarding` set alone), i.e. the fix for one silent drop would
+             # create another. Pinned by
+             # tests/test_ci_selection.py::
+             # test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard.
+             "tortoise/commit_schema.py",
              # #7947 review P1: `tests/eval/write_path/` is a SOURCE_PATTERNS
              # entry of `eval` (the measurement sources), and a named-surface
              # match REPLACES the `tests/` -> core fallback — but `core`
@@ -1297,6 +1395,15 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # (test_control_plane_offload_3498.py), so the SOURCE_PATTERNS
              # `api` match must not drop the core half.
              "tortoise/oauth.py",
+             # #6870 review (P1/P3): the mono-stack guard declares
+             # `tortoise/render.py` in its `MODULES` and scans it, so its diff
+             # must select that guard (`SOURCE_PATTERNS["onboarding"]`). A
+             # named-surface match REPLACES the `core` fallback, and
+             # `tests/test_render.py` — the renderer's own guard — is registered
+             # `core`. Without this entry a renderer-only change would select
+             # `onboarding` and silently stop running the test that guards the
+             # renderer.
+             "tortoise/render.py",
              # #5581: the source-currency derivation helper owns
              # tests/test_source_currency_5581.py, registered `core` — but
              # `tools/` is swallowed by NON_PYTHON_PREFIXES and no
