@@ -831,10 +831,10 @@ block states, with the one exception below (`app.current_org_id`).
 The block's `grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/ → 0 setters` is the
 pre-R6 reading. R6's tenancy boundary now ships the GUC, so the same grep returns
 **2 lines at `ff6379eb2`** — `tortoise/record_projection.py:227` (`TENANT_GUC =
-"app.current_org_id"`) and its docstring at `:3269` — and **5 lines at this head**: `54a3e7abe`
-(R9's backup role must BYPASS RLS) added three `tortoise/record_backup.py` mentions and `c5cbcbb4f`
-moved the projection's two to `:228` and `:3296`. The setter is `TENANT_GUC_SQL`,
-`set_config('app.current_org_id', $1, true)`, installed by
+"app.current_org_id"`) and its docstring at `:3269`, the offsets `c5cbcbb4f` (R6's tenancy boundary)
+introduced — and **5 lines at this head**: `54a3e7abe` (R9's backup role must BYPASS RLS) added three
+`tortoise/record_backup.py` mentions *and* moved the projection's two to `:228` and `:3296`. The
+setter is `TENANT_GUC_SQL`, `set_config('app.current_org_id', $1, true)`, installed by
 `record_projection.scope_connection()` before the first plan statement of both record doors. The
 sites are named by CONTENT rather than by offset because the offset has already moved twice, and the
 count carries its tree because a bare count re-stales on the next main-side edit — that is the
