@@ -708,14 +708,20 @@ def normalize_money(text: str) -> Normalization:
                 amount_minor, currency, minor_unit_exponent=exponent,
                 verbatim=verbatim, as_of=as_of))
         except MoneyValueError as exc:
-            # Unreachable by construction TODAY — every refusal money_props can
-            # raise is pre-empted above (the anchor is a table member, the
-            # exponent IS the table's, ``no_minor_unit`` returns early, the
-            # amount is an int, ``verbatim`` is non-empty by ``_NUM``'s grammar,
-            # ``asOf`` comes from the asserted-date shape). Kept explicit, like
-            # the int() guard below, because ``money.py`` is a LIVE contract that
-            # tightened once already (#8976): a Layer-1 refusal must land on an
-            # abstention, never on an unhandled exception.
+            # REACHABLE, and load-bearing. `money_props` refuses a value the
+            # store cannot hold — an `amountMinor` outside the store's INTEGER
+            # domain is the measured case (`money._validate_amount_minor` →
+            # `numeric_domain.numeric_alteration_reason`, #4647) — and a
+            # Layer-1 refusal must land on an abstention, never on an
+            # unhandled exception: at the capture seam that exception costs the
+            # whole point and reports the capture `ok=False` (the #2817 review
+            # P1). The other refusals are pre-empted above (the anchor is a
+            # table member, the exponent IS the table's, `no_minor_unit`
+            # returns early, `verbatim` is non-empty by `_NUM`'s grammar,
+            # `asOf` comes from the asserted-date shape) and the `int()` guard
+            # is just above — this branch is the one that stays live because
+            # `money.py` is a LIVE contract that tightened twice already
+            # (#8976, then the store domain).
             return _drop("refused_by_layer1", str(exc))
 
     if not props:

@@ -1250,10 +1250,13 @@ _CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
 _CAPTURE_MONEY_WARN_SILENT: frozenset[str] = frozenset({
     "no_candidate", "not_an_iso4217_code"})
 # Import-time truth of the comment above: a RENAMED reason in the silent set
-# must fail here, never silently re-partition the warning policy.
-assert _CAPTURE_MONEY_WARN_SILENT <= DROP_REASONS, (
-    "capture money warn policy names a reason outside DROP_REASONS: "
-    f"{sorted(_CAPTURE_MONEY_WARN_SILENT - DROP_REASONS)!r}")
+# must fail here, never silently re-partition the warning policy. An explicit
+# `raise`, not an `assert`: `python -O` strips asserts, and a guard a runtime
+# flag can delete is not a guard (the shape `extractor_v2.py:5155` states).
+if not _CAPTURE_MONEY_WARN_SILENT <= DROP_REASONS:
+    raise RuntimeError(
+        "capture money warn policy names a reason outside DROP_REASONS: "
+        f"{sorted(_CAPTURE_MONEY_WARN_SILENT - DROP_REASONS)!r}")
 _CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - _CAPTURE_MONEY_WARN_SILENT
 
 
