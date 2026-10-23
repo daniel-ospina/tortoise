@@ -551,6 +551,40 @@ def _money_warnings(res: dict) -> list[str]:
             if "value-normalizer" in w]
 
 
+def test_a_money_derivation_failure_stays_point_local(sdk, monkeypatch):
+    """#2817 review F1 (P3): the derivation sits inside the per-point guard.
+
+    The abstention path is the ONE conversion that keeps a store-refused amount
+    from raising into the capture loop (``value_normalizer``'s
+    ``except MoneyValueError``), and the seam must not be able to undo that: the
+    derive call has to sit INSIDE the loop's ``try``, so a raise costs the point
+    it belongs to and nothing else. Above the ``try`` it would escape the whole
+    points loop after the Session and its turns were already written — no
+    receipt, no ``errors`` entry, the partial-write shape #2817 removed.
+
+    RED with the call above the ``try``: the exception propagates out of
+    ``capture_session`` and the healthy sibling point is never written.
+    """
+    import tortoise.sdk as _sdk_module
+
+    real = _sdk_module.normalize_money_props
+
+    def _boom(text, **kwargs):
+        if "explode" in text:
+            raise ValueError("derivation exploded")
+        return real(text, **kwargs)
+
+    monkeypatch.setattr(_sdk_module, "normalize_money_props", _boom)
+    _install_fake_extract(monkeypatch, _money_channel(
+        "the tranche released EUR 800 last week",
+        "the explode claim reached the seam"))
+
+    res = sdk.capture_session(CONV)          # must NOT raise
+    written = [p["text"] for p in res["points"]]
+    assert written == ["the tranche released EUR 800 last week"], res["points"]
+    assert any("derivation exploded" in e for e in res["errors"]), res["errors"]
+
+
 def test_capture_reports_money_abstentions_once_per_capture(sdk, monkeypatch):
     """#2817 review F1: ONE bounded summary entry, never one line per point.
 

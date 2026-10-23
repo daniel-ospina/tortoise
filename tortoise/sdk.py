@@ -11784,6 +11784,14 @@ class TortoiseSDK:
             # on a first capture and another way once a canonical exists was
             # the asymmetry the review named.
             #
+            # The call sits INSIDE the per-point `try` below (never above it):
+            # a derivation failure must stay POINT-local — skipped, counted in
+            # `errors`, the capture still answered — exactly as it was when the
+            # call lived in the create branch. Outside the guard it would
+            # escape the whole points loop after the session and its turns were
+            # already written: no receipt, no `errors` entry, the partial-write
+            # shape the #2817 P1 fix removed.
+            #
             # The derived fields are NOT added to
             # `_CAPTURE_PASSTHROUGH_PROPS`: that set is the public capture
             # RESPONSE surface (and `validFrom`'s note below is the standing
@@ -11792,9 +11800,9 @@ class TortoiseSDK:
             # server-written, not a client field), so the response shape is
             # untouched — symmetric between a create (stores, does not
             # advertise) and a dedup hit (writes nothing).
-            money = normalize_money_props(
-                content, warn_on=_CAPTURE_MONEY_WARN_ON, drops=money_drops)
             try:
+                money = normalize_money_props(
+                    content, warn_on=_CAPTURE_MONEY_WARN_ON, drops=money_drops)
                 # 1) in-capture fold: same content minted earlier this seam
                 #    run (extractor payload assembly normally folds these;
                 #    the seam is the backstop).
