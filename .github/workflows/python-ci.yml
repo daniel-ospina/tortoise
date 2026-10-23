@@ -3386,9 +3386,9 @@ jobs:
     needs: changes
     if: always() && needs.changes.result == 'success'
     runs-on: ubuntu-latest
-    # The armed file measured 71s on the lane where this was built (61 passed,
-    # 0 skipped, two of them applying the record migrations); 20m is a runaway
-    # bound, not a measurement-thin one.
+    # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
+    # against a warm database, and ~100s when the container first applies the
+    # record migrations. 20m is a runaway bound, not a measurement-thin one.
     timeout-minutes: 20
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
