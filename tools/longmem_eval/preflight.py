@@ -171,6 +171,19 @@ def check_judge_key(judge: Any) -> dict[str, Any]:
     var is set. The detail message names the expected key env var verbatim
     (E2E-2's "judge key absent → pre-flight aborts with a clear message").
     """
+    # #2976: a transport-free judge (the deterministic variant-aware
+    # containment instrument) has no provider and no key to verify — demanding
+    # one would make the keyless ceiling reproduction impossible.
+    if getattr(judge, "no_transport", False):
+        return {
+            "what": "judge-key",
+            "model_id": getattr(judge, "model_id", "deterministic"),
+            "provider": None,
+            "key_env": None,
+            "status": "ok",
+            "latency_ms": 0.0,
+            "detail": "no transport (deterministic judge)",
+        }
     spec = (getattr(judge, "model_spec", None)
             or f"openai:{getattr(judge, 'model_id', 'gpt-4o-2024-08-06')}")
     provider, model_id = _parse_model_spec(spec)

@@ -1,0 +1,77 @@
+{
+  "arms": {
+    "admission": {
+      "by_class": {
+        "current-state": {
+          "correct": 1,
+          "n": 1
+        },
+        "interval": {
+          "correct": 18,
+          "n": 19
+        },
+        "ordering/compare": {
+          "correct": 25,
+          "n": 32
+        }
+      },
+      "context_tokens_median": 7748.5,
+      "correct": 44,
+      "gold_admitted": 52,
+      "n": 52,
+      "refusals": 1,
+      "seconds_mean": 2.98
+    },
+    "admission+completion": {
+      "by_class": {
+        "current-state": {
+          "correct": 1,
+          "n": 1
+        },
+        "interval": {
+          "correct": 16,
+          "n": 19
+        },
+        "ordering/compare": {
+          "correct": 22,
+          "n": 32
+        }
+      },
+      "context_tokens_median": 7490.0,
+      "correct": 39,
+      "gold_admitted": 52,
+      "n": 52,
+      "refusals": 2,
+      "seconds_mean": 2.91
+    },
+    "baseline": {
+      "by_class": {
+        "current-state": {
+          "correct": 0,
+          "n": 1
+        },
+        "interval": {
+          "correct": 11,
+          "n": 19
+        },
+        "ordering/compare": {
+          "correct": 20,
+          "n": 32
+        }
+      },
+      "context_tokens_median": 2170.5,
+      "correct": 31,
+      "gold_admitted": 51,
+      "n": 52,
+      "refusals": 7,
+      "seconds_mean": 6.38
+    }
+  },
+  "provenance": {
+    "judge_model": "variant-containment",
+    "judge_model_spec": "variant-containment",
+    "reader_model": "deepseek-v4-flash",
+    "reader_model_spec": "deepseek:deepseek-v4-flash",
+    "reader_pinned": false
+  }
+}
