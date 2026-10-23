@@ -36,7 +36,22 @@ from tortoise import __main__ as m
 # ── Unit lane: a fake SDK records the call sites; no graph needed ───────────
 
 
+class _FakeGraph:
+    """The idempotent lookup reads the graph (#9631), so this double models an
+    EMPTY graph: every wiring call takes the CREATE branch, which is exactly what
+    these tests inspect (the chosen `--direction` reaches `create_operator`)."""
+
+    class _Result:
+        result_set: ClassVar[list] = []
+
+    def query(self, *args, **kwargs):
+        return self._Result()
+
+
 class _FakeProj:
+    def __init__(self) -> None:
+        self.g = _FakeGraph()
+
     def close(self) -> None:
         pass
 
