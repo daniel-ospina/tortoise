@@ -56,11 +56,18 @@ path (``_update_factor`` / ``_update_nary_factor``), deliberately not made here:
 it would change behaviour for every ``->`` / ``<-`` factor, well beyond this
 issue. Tracked as #9722.
 
-**The read side.** ``tortoise_fts_query`` / MCP ``tortoise_search`` take
-``claim_class`` — an optional filter (applied pre-truncation, the same seam as
-``exclude_status``) that ALSO annotates every returned Point with its class, so
-a consumer can tell "this was told to us" from "this was computed from other
-beliefs" without a new tool (+0 MCP tools, #888/#1521 discipline).
+**The read side.** ``tortoise_fts_query`` takes ``claim_class`` — an optional
+filter (applied pre-truncation, the same seam as ``exclude_status``) that ALSO
+annotates every returned Point with its class, so a consumer can tell "this was
+told to us" from "this was computed from other beliefs" without a new tool
+(+0 MCP tools, #888/#1521 discipline). The SDK search verb dispatches by
+``sdk_method``, so the kwarg reaches it with no registry change.
+
+⚠️ The MCP ``tortoise_search`` handler and the hosted ``/v1/search`` route do
+**NOT** take or forward ``claim_class`` (their kwargs stop at
+``traversal_path``), so a tool caller cannot reach this filter yet. That is a
+tool-SCHEMA change and needs surface approval, so it is scoped out of #2351 and
+tracked as #9725.
 
 **What this deliberately does NOT do.** It does not decide WHAT may be derived.
 Which producers (dream, projection-derived, extraction cross-links) should

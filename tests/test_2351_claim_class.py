@@ -266,14 +266,16 @@ def test_ep_backstop_drops_and_reports_a_fully_blocked_factor(lane):
         f"the drop must be REPORTED, got {reasons!r}")
 
 
-def test_source_slot_is_positional_not_the_first_live_input(lane):
-    """The guard reads the source class from idx 0 of the FULL input list.
+def test_ep_backstop_classifies_the_slot_ep_actually_uses(lane):
+    """The guard reads the source class from the LIVE list — the slot EP uses.
 
-    A draft input at idx 0 is STRIPPED under the default mode, so a guard that
-    took the source class from the live-FILTERED list would attribute it to the
-    first surviving input and block the WRONG leg. Producer: the asserted
-    source at idx 0 goes draft AFTER the operator was legally created (the
-    write guard ran while it was still live), then the factor is re-extracted.
+    A stripped input is NOT in the factor: ``_affected_factors`` hands the
+    live-filtered ids to ``_update_factor``, whose source slot is
+    ``input_ids[0]`` (fwd writes into ``input_ids[1]``). Classifying idx 0 of
+    the FULL list therefore describes a claim the factor does not contain —
+    and on a bidirectional factor the #780/#2422 source-stripped guard does not
+    fire, so it would block the corroboration leg and let the derived->asserted
+    one flow, i.e. let the computed claim push belief INTO the authored one.
     """
     authored = lane.create_point("statement", "asserted source")["id"]
     derived = lane.create_point("statement", "derived input",
@@ -287,21 +289,55 @@ def test_source_slot_is_positional_not_the_first_live_input(lane):
         params={"id": authored})
     factor = _factor(lane, op["id"], derived)
     assert factor is not None, "the factor must not be dropped"
-    # SOURCE is the (stripped) ASSERTED claim at idx 0, so the derived input is
-    # a TARGET: the derived→asserted leg is blocked, giving `->`. Taking the
-    # source class from the live-filtered list would have inverted this to
-    # `<-` — blocking the corroboration the derived claim is entitled to.
-    assert factor[5] == "->", (
-        "the source slot is positional (idx 0 = the asserted claim that went "
-        f"draft), so only the reverse leg may be blocked, got {factor[5]!r}")
+    # The stripped asserted source is gone, so the surviving factor is
+    # [derived, other] and EP's SOURCE slot is the DERIVED claim. Only the
+    # reverse leg may flow: `<-` (the asserted input corroborates the derived
+    # one) — `->` is exactly the derived->asserted override the class forbids.
+    assert factor[5] == "<-", (
+        "the guard must classify the slot EP actually uses (the first LIVE "
+        "input = the derived claim), so only the reverse leg may be blocked, "
+        f"got {factor[5]!r}")
 
 
-def test_read_of_a_non_point_type_is_not_annotated(lane):
-    """``claimClass`` is a Point property — other entities must not inherit it."""
+def test_read_of_a_non_point_type_refuses_the_class_filter(lane):
+    """``claimClass`` is a Point property — a non-Point read must refuse it.
+
+    Silently ignoring the filter would return the rows the caller asked to
+    exclude (every document is unmarked = asserted), which reads as an answer.
+    """
     lane.create_point("statement", "zebra point", claim_class="derived")
-    rows = lane.tortoise_fts_query("zebra", entity_type="document",
-                                   claim_class="asserted")
-    assert all("claim_class" not in row for row in (rows or []))
+    with pytest.raises(ValueError, match="Point property"):
+        lane.tortoise_fts_query("zebra", entity_type="document",
+                                claim_class="asserted")
+
+
+def test_ingest_partial_absorb_cannot_wire_a_derived_source(lane):
+    """The write-path invariant holds on the INGEST door too (#2351 review).
+
+    ``ingest``'s partial-absorb branch completes an existing operator's input
+    set with a raw edge MERGE — the same edge shape ``create_operator``
+    refuses to write. Without the guard there a derived source is wired above
+    an asserted input and the caller is told the connection succeeded.
+    """
+    derived = lane.create_point("statement", "derived source",
+                                claim_class="derived")["id"]
+    first = lane.create_point("statement", "first input",
+                              claim_class="derived")["id"]
+    # Legal at creation time (both endpoints computed).
+    lane.create_operator("IMPL", derived, [first], promote_source=False)
+    # The first input later becomes AUTHORED — a legitimate transition the
+    # write guard cannot intercept.
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id REMOVE n.claimClass",
+        params={"id": first})
+    asserted = lane.create_point("statement", "asserted input")["id"]
+    bundle = {
+        "points": [], "entities": [], "sources": [],
+        "connections": [{"from": derived, "to": [asserted, first],
+                          "operator": "IMPL", "reify": True}],
+    }
+    with pytest.raises(ValueError, match="DERIVED"):
+        lane.ingest(bundle, promotion_policy="auto")
 
 
 def test_ep_backstop_leaves_same_class_factors_alone(lane):

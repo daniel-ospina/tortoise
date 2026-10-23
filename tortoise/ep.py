@@ -2070,10 +2070,11 @@ class TortoiseEP:
             # DERIVED claim must not push belief INTO an ASSERTED one: the leg
             # that would do so is blocked (the reverse leg survives, so a
             # derived claim is still corroborated by the authored belief beside
-            # it). The factor's SOURCE slot is idx 0 — the position
-            # ``_update_factor`` reads the forward message's belief from — and
-            # the classes are read from the SAME Batch-2 statement, so this
-            # costs no query. Both legs blocked ⇒ the factor is DROPPED and
+            # it). The factor's SOURCE slot is ``input_ids[0]`` — the position
+            # ``_update_factor`` reads the forward message's belief from and
+            # pushes into ``input_ids[1]`` — and the classes are read from the
+            # SAME Batch-2 statement, so this costs no query. Both legs blocked
+            # ⇒ the factor is DROPPED and
             # reported (#6105), never silently discarded while the run reports
             # `converged`.
             _input_classes = [
@@ -2081,20 +2082,17 @@ class TortoiseEP:
                     op_input_class[op_id], op_input_live[op_id], strict=True)
                 if live
             ]
-            # The SOURCE slot is POSITIONAL (idx 0 of the FULL input list — the
-            # position ``_update_factor`` reads the forward message's belief
-            # from), NOT the first surviving input. Reading the class off the
-            # live-filtered list attributes the source's class to a different
-            # claim whenever idx 0 was stripped, and on a bidirectional factor
-            # the #780/#2422 source-stripped guard does not fire to save us —
-            # so the guard would then block the WRONG leg.
-            _full_classes = op_input_class[op_id]
-            _source_classes = {_full_classes[0]} if _full_classes else None
-            _target_classes = {
-                cls for cls, live in zip(
-                    _full_classes[1:], op_input_live[op_id][1:], strict=True)
-                if live
-            }
+            # The SOURCE slot is ``input_ids[0]`` — the FIRST SURVIVING input,
+            # because that is the list ``_update_factor`` receives and the
+            # position it reads the forward message's belief from (fwd writes
+            # into ``input_ids[1]``, bwd into ``input_ids[0]``). It is NOT idx 0
+            # of the FULL list: a stripped input is not in the factor at all,
+            # so classifying it describes a claim EP never uses — and on a
+            # BIDIRECTIONAL factor the #780/#2422 source-stripped guard does
+            # not fire, so that misattribution blocked the corroboration leg
+            # and let the derived->asserted leg flow (#2351 review, P0).
+            _source_classes = {_input_classes[0]} if _input_classes else None
+            _target_classes = set(_input_classes[1:])
             effective = claim_class.factor_direction(
                 direction,
                 _source_classes,

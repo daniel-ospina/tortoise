@@ -6626,6 +6626,15 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
     read_ledger.record_rows(label, rows)
 
 
+#: ``entity_type`` values that resolve to a ``:Point`` read — the only rows
+#: that can carry ``claimClass`` (#2351). ``operator`` is a Point by predicate
+#: and ``point`` is the ``:Point`` label itself (``graph_label`` in
+#: ``tortoise_fts_query``: ``"Point" if entity_type == "operator" else
+#: label``); every other value names a different label (Event / Subject /
+#: Object / Source) that has no such property.
+_CLAIM_CLASS_POINT_TYPES: frozenset[str] = frozenset({"point", "operator"})
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -19911,6 +19920,23 @@ class TortoiseSDK:
                     # promotion under auto.
                     oid = existing["id"]
                     written = set(existing.get("written") or [])
+                    # #2351: the SAME override guard as ``create_operator``.
+                    # This branch completes an existing operator's input set
+                    # with a raw edge MERGE — a second door onto the exact edge
+                    # shape ``create_operator`` refuses to write. Without the
+                    # guard here a DERIVED source gets wired above an ASSERTED
+                    # input and the caller is told the connection succeeded,
+                    # while the module's stated invariant is that the write
+                    # path refuses such an edge outright.
+                    _absorb_classes = _claim_class.classes_for_ids(
+                        proj.g, [src] + dsts)  # noqa: RUF005
+                    if op_type in ("IMPL", "NAND") and _claim_class.blocks_override(
+                            _absorb_classes.get(src),
+                            set().union(*(_absorb_classes.get(t, set())
+                                          for t in dsts)) if dsts else None):
+                        raise ValueError(_claim_class.override_refusal(
+                            source_id=src, target_ids=list(dsts),
+                            surface=f"ingest({op_type}) partial-absorb"))
                     for _i, _inp in enumerate([src] + dsts):  # noqa: RUF005
                         if _inp in written:
                             continue
@@ -27753,6 +27779,19 @@ class TortoiseSDK:
             operator kill switch; ``_valid_time_rerank=False`` is the
             in-process opt-out.
         """
+        # #2351: ``claimClass`` is a Point property, so a class filter on a
+        # non-Point read is a CALLER ERROR and must be refused — silently
+        # dropping it returns the very rows the caller asked to exclude (a
+        # document has no marker, i.e. it reads as asserted), which arrives as
+        # an answer. Checked HERE, before the degraded / fallback tiers below,
+        # because those tiers return early and would otherwise bypass it.
+        if claim_class is not None and entity_type not in _CLAIM_CLASS_POINT_TYPES:
+            raise ValueError(
+                f"claim_class is a Point property (#2351): it cannot filter "
+                f"entity_type={entity_type!r}. Query entity_type='point' (or "
+                f"'operator'), or omit claim_class — ignoring it here would "
+                f"return the rows the caller asked to exclude."
+            )
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
             annotate_ep_batch, get_relationships_bounded,
@@ -28652,7 +28691,12 @@ class TortoiseSDK:
         # under exactly the same condition as this filter — otherwise a
         # class-filtered read of another entity type annotates every row with a
         # class it was never measured for.
-        _claim_class_applies = claim_class is not None and graph_label == "Point"
+        #
+        # ⛔ The non-Point refusal happened at the TOP of this method (before
+        # the fallback tiers, which return early); by here ``claim_class``
+        # implies a ``:Point`` read, so the filter and the annotation share one
+        # condition.
+        _claim_class_applies = claim_class is not None
         # A FAILED class read must not become an answer: pass-through is the
         # right degradation for the FILTER (return what the caller would have
         # got before #2351), but stamping every row ``asserted`` would ASSERT a
