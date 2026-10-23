@@ -706,13 +706,24 @@ _CAPTURE_TURN_CAP = re.compile(r"^_CAPTURE_TURN_CAP\s*=\s*(\d+)", re.MULTILINE)
 #: ⛔ TWO MEASURED BYPASSES (#9608 review cycle 2, P2), both now closed:
 #:  1. ``truncat|marker`` did not match the VERB ("any such cut is marked"), so a
 #:     false absolute phrased that way was never selected as a marker clause
-#:     while a true decoy in the same answer satisfied the gate. The mention
-#:     regex therefore covers the verb forms too.
+#:     while a true decoy in the same answer satisfied the gate. The verb is
+#:     therefore a mention — but ONLY inside the cut domain (`_MARKER_DOMAIN_RE`),
+#:     because a bare ``\bmark(?:ed|s|ing)\b`` made the answer's provenance clause
+#:     ("every extracted claim is marked with the source it was drawn from") a
+#:     marker clause and red a true rewording (#9608 review cycle 3, P2).
 #:  2. ``…[^.]{0,80}readable text`` matched **unreadable** text ("the extractor
 #:     drops unreadable text so that …") — the lookbehind closes it.
 #: The bare ``truncat`` stem is deliberately NOT a mention on its own: this file
 #: already records (#9515) that it matched an unrelated sentence about
 #: *truncated neighbourhoods*, and a pin that reds true copy gets deleted.
+#:
+#: ⛔ AND A CONDITION MUST CONDITION THE MARKER (#9608 review cycle 3, P3). Two
+#: branches that only *described* loss passed a false absolute: "…kept with a
+#: truncation marker naming its original length, so no readable text is lost"
+#: (a loss CLAIM — readable text IS discarded, only its length is recorded) and
+#: "…, and readable text is discarded". So the negated branch must reach a
+#: marker-absence object (``without`` / ``unmarked`` / ``silently``) and the
+#: passive branch must sit behind a subordinator (``if`` / ``when`` / ...).
 #:
 #: ⛔ CLAUSES ARE SPLIT ON ``[.!?;:]`` BUT NOT ON ``,`` — a semicolon decoy ("…kept
 #: with a truncation marker naming its original length; a cut that discards
@@ -720,15 +731,21 @@ _CAPTURE_TURN_CAP = re.compile(r"^_CAPTURE_TURN_CAP\s*=\s*(\d+)", re.MULTILINE)
 #: clause, while a comma is ordinary inside a single clause ("…carries a
 #: truncation marker, but only when text is discarded") and splitting there would
 #: red true copy.
-_MARKER_MENTION_RE = re.compile(
-    r"(?:truncat\w*\s+marker|marker\b|\bmark(?:ed|s|ing)\b)", re.I
+_MARKER_MENTION_RE = re.compile(r"(?:truncat\w*\s+marker|marker\b)", re.I)
+_MARKER_VERB_RE = re.compile(r"\bmark(?:ed|s|ing)\b", re.I)
+#: The domain that makes a bare marker VERB a marker mention rather than ordinary
+#: prose (a claim "marked with the source" is provenance, not the capture marker).
+_MARKER_DOMAIN_RE = re.compile(
+    r"\b(?:truncat\w*|clip\w*|cut\w*|windows?|original length)\b", re.I
 )
 _MARKER_CONDITION_RE = re.compile(
     r"(?:"
     r"(?:discards?|loses?|drops?|removes?|sacrifices?)"
     r"[^.;:\u2014]{0,80}(?<!un)(?:readable|legible) text"
-    r"|(?:no|nothing)\s+(?:readable|legible)"
-    r"|(?:readable|legible) text\s+(?:is|would be|gets)\s+"
+    r"|(?:no|nothing)\s+(?:readable|legible)\b[^.;:\u2014]{0,60}"
+    r"\b(?:without|unmarked|silently)\b"
+    r"|\b(?:if|when|whenever|where|unless)\b[^.;:\u2014]{0,40}"
+    r"(?:readable|legible) text\s+(?:is|would be|gets)\s+"
     r"(?:lost|discarded|dropped|removed|cut)"
     r"|only (?:when|if)\b|\bunless\b"
     r")",
@@ -782,6 +799,10 @@ def _marker_clauses(answer: str) -> list[str]:
         c
         for c in _CLAUSE_SPLIT_RE.split(_normalise(answer))
         if _MARKER_MENTION_RE.search(c)
+        or (
+            _MARKER_VERB_RE.search(c)
+            and _MARKER_DOMAIN_RE.search(c)
+        )
     ]
 
 
