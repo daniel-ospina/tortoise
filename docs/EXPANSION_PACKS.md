@@ -388,6 +388,8 @@ kindDefs:
   raw into the prompt; a colon, whitespace or punctuation is refused.
 - **The declaration reaches the extraction prompt.** `compile_value_brief()` carries a declared
   kind's `values` on its brief entry, and the S2/S4 master renders the kind as
+  `- <namespace>:<kind> — <description> [values: <field>(<kind>, <required|optional>), …]` (the
+  shape below is ILLUSTRATIVE — a two-field tenant kind, not a shipped one):
   `- venture:fundingTranche — A tranche of a financing round [values: committedAmountMinor(money,
   required), trancheLabel(quantity, many)]`. The shared S2/S4 rule slot also states the policy:
   keep a declared value EXACT, use the declared name, and never invent a field or a value kind.

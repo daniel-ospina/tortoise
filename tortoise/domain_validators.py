@@ -360,7 +360,8 @@ _OBJECT_UNSET_STATUSES = frozenset({"live"})
 #: The live contract is read off the pack's own declarations at call time
 #: (`_portfolio_mark_contract`) — a hardcoded copy is the drift this pack exists
 #: to avoid, so these two values are pinned against the manifest by
-#: ``test_the_mark_contract_fallback_matches_the_manifest``.
+#: ``tests/test_investment_portfolio_manager_pack.py::
+#: test_the_mark_contract_is_pinned_to_the_manifest``.
 MARK_KIND = "portfolio:valuationMark"
 POSITION_KIND = "venture:investment"
 MARK_RELATION = "marks"
@@ -534,6 +535,15 @@ def validate_portfolio_shape(graph) -> list[dict]:
     from .commit_ops import OBJECT_TERMINAL_STATUSES
 
     declared = _portfolio_declared_statuses()
+    if not declared:
+        # Fail-open but VISIBLE. With no readable `portfolio` pack there is
+        # nothing to grade, and a silent `{}` would make
+        # `validate_domain portfolio` return ok=True over an EMPTY rule set —
+        # a green light over nothing, which is the failure this rule exists to
+        # prevent. Name the degradation instead of returning quietly.
+        logger.warning(
+            "portfolio validator: no readable `portfolio` pack declarations — "
+            "the undeclared-status rule graded nothing")
     if declared:
         # BOTH sides case-folded. The vocabulary keys are the write gate's
         # lowercased forms, while `objectKind` is stored VERBATIM
