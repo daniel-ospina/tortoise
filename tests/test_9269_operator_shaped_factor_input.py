@@ -254,7 +254,7 @@ def test_hybrid_op_type_point_is_still_consumed(sdk):
     """
     hybrid = sdk.create_point("statement", "Hybrid input", op_type="NAND",
                               status="live")
-    a, _b, op = _wire_third_input(sdk, hybrid["id"])
+    _a, _b, op = _wire_third_input(sdk, hybrid["id"])
 
     assert hybrid["id"] in sdk._ep_run_scope([op], 2)
     assert hybrid["id"] in sdk._uncalibrated_ep_participants(None)
