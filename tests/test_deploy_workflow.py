@@ -2971,6 +2971,32 @@ def test_the_census_freshness_claim_is_scoped_to_the_lines_it_actually_re_measur
         "the #9555 note blames a narrative migration that is not in the tree — the "
         "count it corrects has no referent"
     )
+    # 5. The `app.current_org_id` count is MEASURED here, not merely read (#9585
+    # review P2, round 9): the note stated "2 lines" that reproduce at `ff6379eb2`
+    # but not at the head it shipped on (a later merge added three
+    # `record_backup.py` mentions and moved the cited offsets), i.e. the exact
+    # stale-count class the note narrates twice. Pinning the tree is half the fix;
+    # re-deriving the live count is the half that cannot re-stale, because main
+    # moving under the number now reddens THIS test instead of the document.
+    live = [
+        f"{path.relative_to(_REPO_ROOT)}:{lineno}"
+        for base in ("tortoise", "tools")
+        for path in sorted((_REPO_ROOT / base).rglob("*.py"))
+        for lineno, text_line in enumerate(
+            path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+        )
+        if "app.current_org_id" in text_line
+    ]
+    assert f"**{len(live)} lines at this head**" in text, (
+        "the census note's `app.current_org_id` count is not the "
+        f"{len(live)} this tree returns ({', '.join(live)}): a count with no "
+        "tree pin re-stales on the next main-side edit — the failure this note "
+        "exists to close"
+    )
+    assert "**2 lines at `ff6379eb2`**" in text, (
+        "the note dropped the sha its '2 lines' was measured at — a count with no "
+        "tree is the stale-flag class, not a correction of it"
+    )
 
 
 def test_the_record_arming_append_is_guarded_not_merely_present():
