@@ -22,10 +22,10 @@ conjunct belongs to the COUNTING predicates (`summarize_structure` /
 in dedup mints a
 duplicate on an idempotent re-write -- do not restore parity there.
 
-Docker/server lane only: the corruption is a FalkorDB ``GRAPH.COPY``
-behaviour and needs a real server. The file skips cleanly when no
-non-embedded FalkorDB is reachable (mirrors tests/test_indexes.py's #522
-non-embedded gate).
+Docker/server lane only: the corruption is a FalkorDB ENGINE behaviour and
+needs a real server (``GRAPH.COPY`` on the v4 cores, in place on v6 — see
+below). The file skips cleanly when no non-embedded FalkorDB is reachable
+(mirrors tests/test_indexes.py's #522 non-embedded gate).
 
 ⛔ WHERE the corruption appears is an ENGINE property, not a constant (#9226).
 ``GRAPH.COPY`` introduces it on the v4 cores (42004 / 42006 — the
