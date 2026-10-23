@@ -35,6 +35,77 @@ function applyPostRenameVocabulary(sql) {
     .replace(/\bteam_id\b/g, 'org_id');
 }
 
+// ── Split a migration file into its TOP-LEVEL statements ────────────────────
+// A per-statement apply (`psql -f`, autocommit per statement) executes them one
+// at a time and can STOP between any two. The 20261023000001 drill reproduces
+// that by executing the FIRST one alone, so the splitter must be faithful:
+// comments are carried with their statement, and a dollar-quoted `DO $$ … $$`
+// body (which itself contains `;`) must count as ONE statement — that is the
+// property the drill exists to assert.
+function splitTopLevelStatements(sql) {
+  const out = [];
+  let buf = '';
+  let i = 0;
+  while (i < sql.length) {
+    const ch = sql[i];
+    const two = sql.slice(i, i + 2);
+    if (two === '--') {
+      const nl = sql.indexOf('\n', i);
+      const end = nl === -1 ? sql.length : nl + 1;
+      buf += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (two === '/*') {
+      const close = sql.indexOf('*/', i + 2);
+      const end = close === -1 ? sql.length : close + 2;
+      buf += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "'") {
+      // single-quoted literal — '' is an escaped quote, not a terminator
+      let j = sql.indexOf("'", i + 1);
+      if (j === -1) throw new Error('unterminated single-quoted literal');
+      while (sql[j + 1] === "'") j = sql.indexOf("'", j + 2);
+      if (j === -1) throw new Error('unterminated single-quoted literal');
+      buf += sql.slice(i, j + 1);
+      i = j + 1;
+      continue;
+    }
+    if (ch === '"') {
+      const close = sql.indexOf('"', i + 1);
+      if (close === -1) throw new Error('unterminated quoted identifier');
+      buf += sql.slice(i, close + 1);
+      i = close + 1;
+      continue;
+    }
+    if (ch === '$') {
+      const m = /^\$[A-Za-z_0-9]*\$/.exec(sql.slice(i));
+      if (m) {
+        const tag = m[0];
+        const close = sql.indexOf(tag, i + tag.length);
+        if (close === -1) throw new Error(`unterminated dollar-quoted block ${tag}`);
+        buf += sql.slice(i, close + tag.length);
+        i = close + tag.length;
+        continue;
+      }
+    }
+    if (ch === ';') {
+      out.push(buf);
+      buf = '';
+      i += 1;
+      continue;
+    }
+    buf += ch;
+    i += 1;
+  }
+  if (buf.trim()) out.push(buf);
+  // A chunk of nothing but whitespace/comments is not a statement.
+  return out.filter((chunk) =>
+    chunk.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '').trim().length > 0);
+}
+
 const db = new PGlite();
 
 // ── Supabase-local bootstrap (roles, default privileges, auth schema) ──
@@ -245,6 +316,40 @@ for (const f of files) {
                 '2026-02-02T00:00:00Z', '2026-02-02T00:00:00Z');
       `);
     }
+    if (f === '20261023000001_blog_author_backfill_atomic.sql') {
+      // #1383 repair: the forward migration carries the SAME two backfill
+      // passes, and on this database 20261021000001 already ran them — so
+      // without this seed, deleting either pass from the repair leaves the
+      // whole harness green and the repair's coverage is vacuous. Rows are
+      // seeded AFTER 20261021000001 applied (this hook runs immediately before
+      // this file), which is also the shape a real re-run sees.
+      //
+      //  * anon       — the RETIRED default plus its own updated_at and audit
+      //                 columns: only this migration can rewrite it, and its
+      //                 timestamp proves the trigger was disabled across the
+      //                 rewrite;
+      //  * null-image — already carries the real author with no avatar, which
+      //                 ONLY pass 2 can fill (pass 1's guard is 'Tortoise team');
+      //  * named      — a deliberately different author WITH an image, so an
+      //                 over-broad guard (either pass) reds.
+      await db.exec(`
+        INSERT INTO public.blog_posts
+          (slug, title, author, status, created_at, updated_at, created_by, reviewed_by)
+        VALUES ('1383b-preseed-anon', '1383b preseed anon', 'Tortoise team', 'draft',
+                '2026-03-03T00:00:00Z', '2026-03-03T00:00:00Z',
+                'agent-seeded', 'owner-seeded');
+        INSERT INTO public.blog_posts
+          (slug, title, author, author_image_url, status, created_at, updated_at)
+        VALUES ('1383b-preseed-null-image', '1383b preseed null image',
+                'Daniel Ospina', NULL, 'draft',
+                '2026-04-04T00:00:00Z', '2026-04-04T00:00:00Z');
+        INSERT INTO public.blog_posts
+          (slug, title, author, author_image_url, status, created_at, updated_at)
+        VALUES ('1383b-preseed-named', '1383b preseed named', 'Someone Else',
+                'https://example.com/someone-else.jpg', 'draft',
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+      `);
+    }
     await db.exec(sql);
     console.log(`✓ migration ${f}`);
   } catch (e) {
@@ -392,6 +497,13 @@ const suites = [
   // here never runs, and "the suite exists" is then mistaken for "the suite
   // passes". Add the entry in the same commit as the file.
   '20261021000001_blog_author_identity.sql',
+  // #1383 repair — the backfill re-landed FORWARD as ONE statement (the merged
+  // 20261021000001 carries it as four top-level statements, where a
+  // per-statement apply can commit the DISABLE and stop). Its rows are seeded
+  // immediately before it applies; the ATOMICITY shape is drilled below.
+  // NOTE: this list is EXPLICIT, not a glob — add the entry in the same commit
+  // as the file.
+  '20261023000001_blog_author_backfill_atomic.sql',
   '20260827000002_user_identity_profile.sql',
   '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
   '20260906000001_graphs_deleted_at.sql',  // #2304
@@ -1072,6 +1184,102 @@ try {
     + '(Session/sess1 -> Point/p1), and re-replays idempotently');
 } catch (e) {
   console.error(`✗ #9553 R5/CONTAINS FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
+// ── #1383/20261023000001: the backfill repair is ONE statement, and it repairs ─
+//
+// Two drills, because the two claims are different:
+//
+//  A ATOMICITY — the property the merged 20261021000001 lacks. Its backfill is
+//    four top-level statements (DISABLE / UPDATE / UPDATE / ENABLE) among the
+//    file's others, so a per-statement apply (`psql -f`, autocommit per
+//    statement) that stops between any two of them can commit the DISABLE and
+//    never reach the ENABLE, leaving `blog_posts_set_updated_at` off for every
+//    blog write afterwards — silently. This drill therefore replays the file
+//    the way that apply does, ONE TOP-LEVEL STATEMENT AT A TIME, and requires
+//    the trigger to be ENABLED after EVERY prefix: that is the invariant (no
+//    stop point leaves it off), and a prefix alone is not enough — the merged
+//    file's FIRST statement is an ADD COLUMN, so stopping there proves nothing.
+//    Red as soon as a prefix leaves it disabled; green only when the whole
+//    backfill is one statement.
+//
+//  B REPAIR — the forward migration must converge a database that IS in that
+//    damaged state (the live project may be, if the out-of-band apply of
+//    20261021000001 truncated): trigger DISABLED, and rows the backfill never
+//    reached. The damaged state is constructed explicitly and then the
+//    migration text is executed over it.
+const BACKFILL_MIGRATION = '20261023000001_blog_author_backfill_atomic.sql';
+const BACKFILL_SQL = readFileSync(`${MIG_DIR}/${BACKFILL_MIGRATION}`, 'utf8');
+const readTriggerState = async () => {
+  const r = await db.query(`SELECT tgenabled FROM pg_trigger
+     WHERE tgname = 'blog_posts_set_updated_at'
+       AND tgrelid = 'public.blog_posts'::regclass`);
+  return r.rows[0] ? r.rows[0].tgenabled : undefined;
+};
+
+try {
+  const statements = splitTopLevelStatements(BACKFILL_SQL);
+  for (let n = 1; n <= statements.length; n += 1) {
+    await db.exec(statements[n - 1]);
+    const state = await readTriggerState();
+    if (state !== 'O') {
+      console.error(
+        `✗ #1383: after TOP-LEVEL STATEMENT ${n} of ${statements.length}, `
+        + `tgenabled=${state} (disabled). A per-statement apply that stops here — `
+        + 'a lock timeout, a dropped connection, a Ctrl-C — commits the DISABLE and '
+        + 'leaves updated_at frozen for every blog write afterwards, silently. The '
+        + 'whole backfill must be ONE statement (a DO block) so no stop point exists:');
+      console.error(`  offending prefix ends with: ${JSON.stringify(statements[n - 1].trim().slice(-160))}`);
+      process.exit(1);
+    }
+  }
+  console.log(
+    `✓ #1383: the backfill repair is ${statements.length} top-level statement(s) — `
+    + 'no stop point of a per-statement apply leaves the trigger disabled');
+} catch (e) {
+  console.error(`✗ #1383 prefix drill FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+try {
+  // Construct the damaged state a truncated apply of 20261021000001 leaves:
+  // the DISABLE committed, and a row the backfill never reached.
+  await db.exec(`
+    ALTER TABLE public.blog_posts DISABLE TRIGGER blog_posts_set_updated_at;
+    INSERT INTO public.blog_posts
+      (slug, title, author, status, created_at, updated_at)
+    VALUES ('1383b-repair-anon', '1383b repair anon', 'Tortoise team', 'draft',
+            '2026-05-05T00:00:00Z', '2026-05-05T00:00:00Z');
+  `);
+  const damaged = await readTriggerState();
+  if (damaged !== 'D') {
+    throw new Error(`the drill could not construct the damaged state (tgenabled=${damaged}) — it would prove nothing`);
+  }
+  await db.exec(BACKFILL_SQL);
+  const state = await readTriggerState();
+  const row = (await db.query(`SELECT author, author_image_url, updated_at
+     FROM public.blog_posts WHERE slug = '1383b-repair-anon'`)).rows[0] || {};
+  if (state !== 'O') {
+    throw new Error(`the repair left tgenabled=${state} — the truncated-apply state is NOT converged`);
+  }
+  if (row.author !== 'Daniel Ospina'
+      || row.author_image_url !== 'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg') {
+    throw new Error(`the repair did not complete the backfill: ${JSON.stringify(row)}`);
+  }
+  const stamp = row.updated_at instanceof Date
+    ? row.updated_at.toISOString() : String(row.updated_at);
+  if (!stamp.startsWith('2026-05-05')) {
+    throw new Error(
+      `the repair BUMPED updated_at (${stamp}) — the backfill ran with the trigger `
+      + 'enabled, so a repaired post would print "Updated <today>" and open the '
+      + '30-minute no-cache window');
+  }
+  await db.exec(`DELETE FROM public.blog_posts WHERE slug = '1383b-repair-anon';`);
+  console.log('✓ #1383: the repair converges a truncated apply (trigger re-enabled, '
+    + 'backfill completed, updated_at preserved)');
+} catch (e) {
+  console.error(`✗ #1383 forward-repair drill FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
   process.exit(1);
 }
 
