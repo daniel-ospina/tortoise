@@ -182,11 +182,16 @@ fi
 # Say what repo-ahead does NOT establish, before ANY exit prescribes an action.
 # Repo-ahead is a set difference of version STRINGS against
 # `supabase_migrations.schema_migrations`: it proves prod has no ROW, never that
-# prod lacks the objects. One statement for every red exit below (the
+# prod lacks the objects. One statement for every RED exit below (the
 # duplicate-prefix rename, the out-of-order decision, and the ordinary pending
 # set) — the duplicate branch is where a DDL-free repair is most tempting, so
 # scoping the note to one branch is how it got missed (#9613 review finding).
-if [ -n "$REPO_AHEAD" ]; then
+# ⛔ Gated on the exits that prescribe an action, not on repo-ahead alone: a
+# warn-only (index-only) repo-ahead run EXITS 0, and attaching a red-diagnosis
+# note to a green report is the same imprecision this change removes (round-2
+# review finding — measured: warn-only fixture printed the note before
+# "OK (no blocking drift)").
+if [ -n "$REPO_AHEAD" ] && { [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; }; then
   echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
   echo "        the objects. Bookkeeping drift (DDL applied outside 'supabase db push',"
   echo "        so the version was never recorded) produces exactly this report (#9613)."
@@ -286,6 +291,8 @@ if [ -n "$BLOCKING" ]; then
       echo "    (b) the objects are PRESENT and only the version is unrecorded (bookkeeping"
       echo "        drift, #9613): record it WITHOUT running DDL —"
       echo "        supabase migration repair --linked --status applied <version>"
+      echo "        ⛔ OWNER ACTION. A lane must not run prod DDL or 'migration repair'"
+      echo "        (#2240) — and no auto-dispatch on this path exists (#2240 ruling)."
       echo "        Verify in prod first: 'supabase migration list --linked', and"
       echo "        'supabase db diff --linked' for a schema diff. A blanket repair hides"
       echo "        real drift (#1001) — repair only a version whose objects you observed."

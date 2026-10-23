@@ -342,10 +342,21 @@ def test_in_order_block_still_instructs_apply():
 # its JSON-LD storage URL), while this gate reported that same version as "NOT
 # applied to prod". So the red could not be cleared by the action it named and
 # was not cleared by any other: the DDL-free remedy was printed only as a
-# trailing `# rename-repair case:` comment. Both tests below fail against the
-# pre-#9613 script (write `origin/main` @ 3542e8f80 there and run this file);
-# `test_in_order_block_still_instructs_apply` above is the guard that keeps
-# the apply path from being REPLACED rather than joined.
+# trailing `# rename-repair case:` comment. All three tests below fail against
+# the pre-#9613 script; `test_in_order_block_still_instructs_apply` above is the
+# guard that keeps the apply path from being REPLACED rather than joined.
+#
+# ⛔ To measure the "before" side, use a THROWAWAY COPY — never overwrite the
+# script in a working tree:
+#     git worktree add /tmp/pre9613 origin/main
+#     cd /tmp/pre9613 && TORTOISE_TEST_CARVE_OUT=1 uv run pytest \
+#         tests/test_migration_drift_gate.py -k "<new test>"
+# # or: cp -a . /tmp/pre9613 && (cd /tmp/pre9613 && git checkout origin/main -- \
+#         .github/scripts/check-migration-drift)
+# Writing `origin/main`'s script over the tracked file in place mutates the PR
+# under review and RACES a concurrent reviewer: measured on this PR, a peer's
+# suite read the reverted script mid-run and reported 3 failed where the branch
+# is green (round-2 review finding).
 
 
 def test_in_order_block_does_not_claim_prod_lacks_the_objects():
@@ -404,6 +415,11 @@ def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
     assert "db diff --linked" in out, out
     assert "migration list --linked" in out, out
     assert "#1001" in out, out
+    # ... and it is owner-only: #2240 forbids a LANE running prod DDL or repair,
+    # and rules out auto-dispatch on this path (docs/infra-runbook.md §8.6 states
+    # the same bound for the audience that reads this gate's output).
+    assert "#2240" in out, out
+    assert "OWNER ACTION" in out, out
 
 
 def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
@@ -498,8 +514,16 @@ def test_in_order_report_never_executes_supabase():
     would run prod DDL while merely printing it (#4278's defect class).
     `test_report_never_executes_supabase` only covers the OUT OF ORDER branch,
     which is the reason this fixture is added rather than widened (#9613 review
-    finding). Mutation-provable: wrap either line in backticks and the marker
-    appears."""
+    finding).
+
+    What the marker proves, exactly: mutation-verified for the `db push` line —
+    wrap it in backticks and the stub runs (marker written). NOT for the repair
+    line: `<version>` re-parses as a redirect once the line is unquoted, so a
+    backticked mutant fails to execute rather than running the stub. That line's
+    regression is caught by the printed-text assertion below (a mutant prints an
+    empty line where the command was), not by the marker — stated here so the
+    next reader does not read a stronger guarantee than the test gives.
+    """
     r, marker = _run_with_supabase_stub(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
         ["0001"],
@@ -611,12 +635,40 @@ def test_duplicate_branch_never_executes_supabase():
 
 
 def test_clean_run_has_no_remediation_markers():
-    """Negative control: a clean run must not print any block remediation."""
+    """Negative control: a clean run must not print any block remediation.
+
+    The repo-ahead note is in the marker list because it is a RED diagnosis: it
+    says a report "produces exactly this report", so it belongs only on a run
+    that prescribes an action. Round-2 review found the note leaking onto a
+    warn-only EXIT-0 run (its guard was `$REPO_AHEAD`, which warn-class drift
+    also sets) — without this marker the leak was invisible to the suite.
+    """
     r = _run({}, ["0001_base.sql", "20260813000004_claim.sql"], ["0001", "20260813000004"])
     assert r.returncode == 0, r.stderr
     assert "OK" in r.stdout
-    for marker in ("OUT OF ORDER", "BLOCKING", "PENDING AFTER", "include-all"):
+    for marker in (
+        "OUT OF ORDER",
+        "BLOCKING",
+        "PENDING AFTER",
+        "include-all",
+        "note: 'repo-ahead' means prod has no",
+    ):
         assert marker not in r.stdout, f"{marker!r} leaked into a clean run: {r.stdout}"
+
+
+def test_warn_only_run_is_green_and_carries_no_red_diagnosis_note():
+    """A warn-only (index-only) repo-ahead run EXITS 0 — so it must not carry the
+    "repo-ahead proves no ROW, not missing objects" note, which diagnoses a
+    blocked report. Measured leak before the round-2 fix: the note printed
+    immediately above "OK (no blocking drift)"."""
+    r = _run_fixture(
+        {"20260901000001_idx.sql": "CREATE INDEX IF NOT EXISTS idx_x ON public.t (a);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 0, r.stdout
+    assert "OK (no blocking drift)" in r.stdout, r.stdout
+    assert "warn-only" in r.stdout.lower(), r.stdout
+    assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
 
 
 # ── #6136 regression: early-exit pipeline consumers under `set -euo pipefail` ──
