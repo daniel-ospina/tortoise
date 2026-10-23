@@ -2081,10 +2081,24 @@ class TortoiseEP:
                     op_input_class[op_id], op_input_live[op_id], strict=True)
                 if live
             ]
+            # The SOURCE slot is POSITIONAL (idx 0 of the FULL input list — the
+            # position ``_update_factor`` reads the forward message's belief
+            # from), NOT the first surviving input. Reading the class off the
+            # live-filtered list attributes the source's class to a different
+            # claim whenever idx 0 was stripped, and on a bidirectional factor
+            # the #780/#2422 source-stripped guard does not fire to save us —
+            # so the guard would then block the WRONG leg.
+            _full_classes = op_input_class[op_id]
+            _source_classes = {_full_classes[0]} if _full_classes else None
+            _target_classes = {
+                cls for cls, live in zip(  # noqa: B905
+                    _full_classes[1:], op_input_live[op_id][1:], strict=True)
+                if live
+            }
             effective = claim_class.factor_direction(
                 direction,
-                {_input_classes[0]} if _input_classes else None,
-                set(_input_classes[1:]),
+                _source_classes,
+                _target_classes,
             )
             if effective is None:
                 logger.warning(

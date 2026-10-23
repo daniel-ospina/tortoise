@@ -62,7 +62,8 @@ parity in ``projection.entities._POINT_DECLARED_PROPS``.
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from .live import canonical_direction, direction_flows
 

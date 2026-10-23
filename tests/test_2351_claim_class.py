@@ -78,7 +78,7 @@ def _factor(sdk: TortoiseSDK, op_id: str, claim_id: str):
 
 def test_vocabulary_is_closed_and_absence_is_asserted():
     """Two classes, and ``None``/junk read as asserted — never raise on a read."""
-    assert cc.CLAIM_CLASS_VALUES == frozenset({cc.ASSERTED, cc.DERIVED})
+    assert sorted(cc.CLAIM_CLASS_VALUES) == ["asserted", "derived"]
     assert cc.validate(None) == cc.ASSERTED        # absent = the default class
     assert cc.validate("asserted") == cc.ASSERTED
     assert cc.validate("derived") == cc.DERIVED
@@ -258,11 +258,50 @@ def test_ep_backstop_drops_and_reports_a_fully_blocked_factor(lane):
     src, tgt = _two(lane, src_class="derived", tgt_class="asserted")
     _raw_direct_edge(lane, src, tgt, direction="->")
     ep = TortoiseEP(lane._get_proj())
-    assert ep._affected_factors({src, tgt}, skipped=ep._last_skipped_factors) \
-        == [] or all(f[0] != src for f in ep._affected_factors({src, tgt}))
-    reasons = [s["reason"] for s in ep._last_skipped_factors]
+    factors = ep._affected_factors({src, tgt}, skipped=ep._last_skipped_factors)
+    assert all(f[0] != src for f in factors), (
+        f"a fully-blocked factor must not propagate: {factors!r}")
+    reasons = [sk["reason"] for sk in ep._last_skipped_factors]
     assert "derived_over_asserted" in reasons, (
         f"the drop must be REPORTED, got {reasons!r}")
+
+
+def test_source_slot_is_positional_not_the_first_live_input(lane):
+    """The guard reads the source class from idx 0 of the FULL input list.
+
+    A draft input at idx 0 is STRIPPED under the default mode, so a guard that
+    took the source class from the live-FILTERED list would attribute it to the
+    first surviving input and block the WRONG leg. Producer: the asserted
+    source at idx 0 goes draft AFTER the operator was legally created (the
+    write guard ran while it was still live), then the factor is re-extracted.
+    """
+    authored = lane.create_point("statement", "asserted source")["id"]
+    derived = lane.create_point("statement", "derived input",
+                                claim_class="derived")["id"]
+    other = lane.create_point("statement", "second asserted input")["id"]
+    op = lane.create_operator("IMPL", authored, [derived, other])
+    # The source goes draft AFTER creation — bypassing the write guard the way
+    # a status change legitimately can.
+    lane._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id=$id SET n.status='draft'",
+        params={"id": authored})
+    factor = _factor(lane, op["id"], derived)
+    assert factor is not None, "the factor must not be dropped"
+    # SOURCE is the (stripped) ASSERTED claim at idx 0, so the derived input is
+    # a TARGET: the derived→asserted leg is blocked, giving `->`. Taking the
+    # source class from the live-filtered list would have inverted this to
+    # `<-` — blocking the corroboration the derived claim is entitled to.
+    assert factor[5] == "->", (
+        "the source slot is positional (idx 0 = the asserted claim that went "
+        f"draft), so only the reverse leg may be blocked, got {factor[5]!r}")
+
+
+def test_read_of_a_non_point_type_is_not_annotated(lane):
+    """``claimClass`` is a Point property — other entities must not inherit it."""
+    lane.create_point("statement", "zebra point", claim_class="derived")
+    rows = lane.tortoise_fts_query("zebra", entity_type="document",
+                                   claim_class="asserted")
+    assert all("claim_class" not in row for row in (rows or []))
 
 
 def test_ep_backstop_leaves_same_class_factors_alone(lane):

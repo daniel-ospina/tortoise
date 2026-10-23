@@ -28578,7 +28578,12 @@ class TortoiseSDK:
         #     no marker AT ALL is 'asserted' — which is what makes filtering
         #     for the authored class return the whole pre-marker graph.
         claim_classes: dict[str, frozenset[str]] = {}
-        if claim_class is not None and result_ids and graph_label == "Point":
+        # ``claimClass`` is a Point property, and the ANNOTATION below must apply
+        # under exactly the same condition as this filter — otherwise a
+        # class-filtered read of another entity type annotates every row with a
+        # class it was never measured for.
+        _claim_class_applies = claim_class is not None and graph_label == "Point"
+        if _claim_class_applies and result_ids:
             _wanted = claim_class
             try:
                 claim_classes = _claim_class.classes_for_ids(graph, result_ids)
@@ -29271,7 +29276,7 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
-            if claim_class is not None:
+            if _claim_class_applies:
                 ranked = _with_claim_class(ranked, claim_classes)
             return _with_read_status(ranked)
         if order_by == "confidence":
@@ -29298,7 +29303,7 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
-        if claim_class is not None:
+        if _claim_class_applies:
             out = _with_claim_class(out, claim_classes)
         return _with_read_status(out)
 
