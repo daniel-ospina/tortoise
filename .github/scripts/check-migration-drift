@@ -25,7 +25,9 @@
 # Exit codes (mirrors verify-cutover convention):
 #   0 — clean, or only warn-class drift (index-only) / remote-ahead
 #   1 — repo-ahead BLOCKING drift (table/column/function/unique-index)
-#   2 — could not determine state (missing token, API error, parse failure)
+#   2 — could not determine state (missing token, API error, parse failure,
+#       or a duplicate prefix whose files could not be enumerated — the report
+#       would otherwise name a remedy with no operand)
 #
 # Fail-closed by contract: any error exits 2 with an actionable message. A
 # missing secret must fail the deploy, not silently skip the gate.
@@ -263,9 +265,15 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   # seen at one prefix is TWO files), so a hardcoded `_b` aborts with
   # "fatal: bad source". Print the real name of every file but the first, per
   # prefix, with the migrations path so the command runs from the repo root.
-  echo "  Rename operand(s) — at each prefix above keep ONE file. BOTH choices are"
-  echo "  printed where the prefix holds two files: run exactly ONE line per prefix, after"
-  echo "  checking which file's DDL prod already has ('supabase db diff --linked')."
+  # ⛔ THE GUIDANCE MUST MATCH THE OPERAND LIST IT DESCRIBES. A prefix holding N
+  # files gets N-1 `(a)` lines, so "run exactly ONE line per prefix" was wrong for
+  # N>=3: following it left a live duplicate, the next `db push` aborted on it and
+  # the gate was red again (#1235) — the failure this block exists to prevent.
+  # `(b)` is an alternative only at two files (the only arity it is printed for).
+  echo "  Rename operand(s) — at each prefix above keep ONE file. A prefix holding N"
+  echo "  files gets N-1 (a) lines: run EVERY (a) line for that prefix. Where the prefix"
+  echo "  holds two files, (b) is the other choice — run (b) INSTEAD of (a) when prod"
+  echo "  already has the second file's DDL ('supabase db diff --linked')."
   echo "  Operands are shell-quoted; replace NEXTFREE<n> with a free NUMERIC prefix"
   echo "  (^[0-9]+_) — ONE per operand — and run from the repo root:"
   dup_n=0
@@ -313,7 +321,8 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   if [ -n "$REMOTE_MAX" ]; then
     echo "  ⚠️ Which file to KEEP is a prod question this gate cannot answer: run"
     echo "     'supabase db diff --linked' and keep the one whose objects prod already has,"
-    echo "     then run exactly ONE of the operand lines above for that prefix."
+    echo "     then run that prefix's operand lines above — every (a) line, or (b) instead"
+    echo "     of (a) when the prefix holds two files."
   fi
   echo "    Repeat until ONE file remains at each prefix above — a prefix that still"
   echo "    collides is re-listed by the next run."
@@ -326,7 +335,9 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "  OUT OF ORDER after the rename (older than prod's newest applied version $REMOTE_MAX) — resolve these FIRST:$BLOCK_OOO"
     echo '    The deploy runs `supabase db push --include-all`, which applies the whole repo-pending set.'
     echo "  Remediation (in this order):"
-    echo "    1. rename ONE operand per prefix (line (a) or (b) above) to a free prefix that sorts AFTER $REMOTE_MAX;"
+    echo "    1. rename every operand printed above for each prefix — every (a) line, or"
+    echo "       (b) instead of (a) when the prefix holds two files — to free prefixes that"
+    echo "       sort AFTER $REMOTE_MAX;"
     echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
     echo "       already applied but unrecorded -> supabase migration repair --linked"
     echo "       --status applied <version> — OWNER ACTION, a lane must not run prod DDL"
@@ -378,6 +389,7 @@ if [ -n "$BLOCKING" ]; then
     echo "          original file so it is no longer repo-ahead;"
     echo "      (b) already in prod with no schema_migrations row: record it WITHOUT"
     echo "          running DDL — supabase migration repair --linked --status applied <version>"
+    echo "          (OWNER ACTION — a lane must not run prod DDL or repair, #2240)"
     echo "    A blanket repair hides real drift (#1001) — verify in prod first."
   fi
 
@@ -413,8 +425,9 @@ if [ -n "$BLOCKING" ]; then
       echo "        drift, #9613): record it WITHOUT running DDL —"
       echo "        supabase migration repair --linked --status applied <version>"
       echo "        (OWNER ACTION — a lane must not run prod DDL or repair, #2240)"
-      echo "        Verify in prod first: 'supabase migration list --linked', and"
-      echo "        'supabase db diff --linked' for a schema diff. A blanket repair hides"
+      echo "        Verify in prod first: 'supabase db diff --linked' (the objects) and"
+      echo "        'supabase migration list --linked' — version ROWS only, so it cannot"
+      echo "        tell you whether the objects exist. A blanket repair hides"
       echo "        real drift (#1001) — repair only a version whose objects you observed."
     fi
   fi

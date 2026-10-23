@@ -319,9 +319,12 @@ def test_out_of_order_block_does_not_instruct_apply():
     assert "OUT OF ORDER" in r.stdout, r.stdout
     assert "20260918000001" in r.stdout, "the newest applied version must be named"
     assert "supabase migration repair --linked --status applied" in r.stdout
-    # The repair is printed on this branch too, so the #2240 owner bound rides
-    # the shared note here as well (round-3 review finding).
+    # The repair is printed on this branch too, and the ALERT WRAPPER KEEPS ONLY
+    # THE REPORT'S LAST 6000 BYTES (`deploy-api-alert.sh`), so the shared note's
+    # OWNER-ONLY preamble can be cut while this line survives: the inline
+    # qualifier is what must travel with the command itself (round-3 finding).
     assert "#2240" in r.stdout, r.stdout
+    assert "(OWNER ACTION — a lane must not run prod DDL or repair, #2240)" in r.stdout, r.stdout
     # The refused action is withheld, not merely labelled — INCLUDING the
     # "dispatch is the sanctioned lane path" line, which is a forward reference
     # that must not print when no dispatch line follows it (round-7 finding).
@@ -432,7 +435,7 @@ def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
     assert "migration list --linked" in out, out
     assert "#1001" in out, out
     # The DIAGNOSIS is presence-pinned HERE, on the ordinary BLOCKING report: a
-    # mutant deleting the `$BLOCKING` disjunct of its guard left all 35 tests
+    # mutant deleting the `$BLOCKING` disjunct of its guard left the whole suite
     # green before this assertion existed, and the report it dropped the note from
     # is the one #9613 exists for (round-5 review finding).
     assert "note: 'repo-ahead' means prod has no" in out, out
@@ -467,8 +470,8 @@ def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
     # not appear (round-6 review finding).
     assert "produces exactly this report" not in r.stdout, r.stdout
     # The #2240 owner bound rides the OWNER BOUND statement (a separate one from
-    # the repo-ahead diagnosis since round 4), so every red exit carries it; the
-    # two repair SITES also carry an inline qualifier, because the alert wrapper
+    # the repo-ahead diagnosis since round 4), so every red exit carries it; all
+    # THREE repair SITES also carry an inline qualifier, because the alert wrapper
     # keeps only the report's last 6000 bytes.
     assert "#2240" in r.stdout, r.stdout
 
@@ -560,6 +563,9 @@ def test_the_printed_rename_command_actually_runs(tmp_path):
     ]
     assert len(lines) == 1, r.stdout
     assert any(ln.strip().startswith("(b) git mv ") for ln in r.stdout.splitlines()), r.stdout
+    # Two files: `(b)` IS the alternative to `(a)`, and the guidance must say so
+    # (it is printed only for this arity, so a prefix with three files gets no (b)).
+    assert "run (b) INSTEAD of (a)" in r.stdout, r.stdout
     cmd = lines[0][len("(a) ") :].replace("NEXTFREE1", "20261024000001")
 
     work = tmp_path / "repo"
@@ -602,6 +608,20 @@ def test_the_printed_rename_command_actually_runs(tmp_path):
     assert "git mv supabase/migrations/20260813000005_delta.sql" in r3.stdout, r3.stdout
     assert "git mv supabase/migrations/20260813000005_alpha.sql" not in r3.stdout, r3.stdout
     assert "Repeat until ONE file remains" in r3.stdout, r3.stdout
+    # ⛔ THE GUIDANCE MUST MATCH THE OPERAND LIST. Three files at one prefix need
+    # TWO renames, so a "run exactly ONE line per prefix" instruction leaves a
+    # live duplicate — the next `db push` aborts on it and the gate is red again
+    # (#1235). Pin the arity statement to the operands actually printed, and pin
+    # that the two-file-only `(b)` choice is NOT offered here.
+    a_lines = [
+        ln for ln in r3.stdout.splitlines() if ln.strip().startswith("(a) git mv ")
+    ]
+    assert len(a_lines) == 2, r3.stdout
+    assert "run EVERY (a) line" in r3.stdout, r3.stdout
+    assert "run exactly ONE line per prefix" not in r3.stdout, r3.stdout
+    assert "(b) git mv " not in r3.stdout, r3.stdout
+    # ... and the sibling "which file to KEEP" warning uses the same arity rule.
+    assert "every (a) line, or (b) instead" in r3.stdout, r3.stdout
     # The placeholder is a bare token (no shell metacharacters) and carries a
     # GLOBAL index, so two operands can never be given the same prefix by
     # substituting "the" token: each needs its own free numeric prefix.
@@ -616,9 +636,9 @@ def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
 
     Two index-only files at ONE prefix whose version IS recorded in prod: no
     BLOCKING member (index-only is warn class), no repo-ahead — only the
-    duplicate term can fire, and that is a red rename exit. Round-3 review
-    measured a mutant with the term deleted passing all 34 tests, because every
-    other duplicate fixture uses CREATE TABLE and so sets BLOCKING too.
+    duplicate term can fire, and that is a red rename exit. A mutant with the
+    # term deleted stays green, because every other duplicate fixture uses
+    # CREATE TABLE and so sets BLOCKING too.
     """
     r = _run_fixture(
         {
@@ -733,7 +753,7 @@ def test_in_order_report_never_executes_supabase():
       prints a line with a hole, and the exit status is unchanged — nothing
       executes, no marker appears. That line is pinned instead by the LITERAL
       suffix assertion below (with ` <version>`); with the looser `... applied`
-      pin a backticked mutant left the suite green (measured: 0 failed / 35).
+      pin the mutant stayed green.
     """
     r, marker = _run_with_supabase_stub(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
@@ -745,7 +765,7 @@ def test_in_order_report_never_executes_supabase():
     assert "supabase db push --linked --include-all" in r.stdout, r.stdout
     # Literal suffix on purpose: `... applied` alone is still a substring of a
     # backticked mutant (the `<version>` is what vanishes), so a looser pin
-    # leaves that regression uncovered (measured: 0 failed / 35).
+    # leaves that regression uncovered.
     assert "migration repair --linked --status applied <version>" in r.stdout, r.stdout
 
 
@@ -1035,11 +1055,9 @@ def test_many_matching_migrations_still_report_the_verdict():
     buffer — the defect CLASS, not the reported incident.
 
     The fixture directory is nested deep so each `ls` line is long and ~150
-    files suffice; the duplicate-repair path resolves `basename` once PER FILE,
-    so file count — not listing size — is what this test costs. Like its
-    siblings this relies on the host's default pipe capacity: a capacity raised
-    above the fixture's ~115 KiB listing would stop it failing pre-fix (it would
-    still pass post-fix).
+    files suffice. Like its siblings this relies on the host's default pipe
+    capacity: a capacity raised above the fixture's ~115 KiB listing would stop
+    it failing pre-fix (it would still pass post-fix).
     """
     mig = FIXTURES / "migrations"
     for _ in range(6):
