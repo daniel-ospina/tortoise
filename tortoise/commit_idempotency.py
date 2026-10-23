@@ -171,10 +171,17 @@ class CommitRecordStore:
         backoff-then-retry (``docs/INGEST_CONTRACT.md`` §9) is a FIRST
         adjudication, not a second one.
 
-        Refuses to delete anything carrying write work — ``status`` other than
-        ``partial``, or a non-zero ``write_ops_billed`` — so a genuine
-        mid-write crash (the PL3 re-submission path) is untouched. Returns
-        True when a record was deleted.
+        Refuses to delete anything carrying write work, so a genuine mid-write
+        crash (the PL3 re-submission path) is untouched. The load-bearing limb
+        is ``value_nodes_declared IS NULL``: the write phase stamps that on the
+        record at its FIRST statement (``hosted_api`` step 1 — "the stamp and
+        the arithmetic are one statement"), so a crash leaves it SET, while
+        ``write_ops_billed`` is only written AFTER the phase completes and is
+        therefore still 0 on a mid-write record. Both limbs are checked (belt
+        and braces), but do NOT simplify the guard to ``status``/``wob`` alone —
+        that would delete a live in-flight record.
+
+        Returns True when a record was deleted.
         """
         rows = self._proj.g.query(
             "MATCH (r:CommitRecord {client_commit_id:$cid}) "

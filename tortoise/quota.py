@@ -214,7 +214,7 @@ MAX_PROVENANCE_REFS = 500
 #
 # CALIBRATION (a tuning parameter, not a price): 10 MiB/min/org is roughly one
 # free tier's whole node capacity — 10,000 nodes × 1024 B = 9.77 MiB, so the
-# allowance is 2.3% larger than that capacity, per minute. An empty
+# allowance is 2.40% larger than that capacity, per minute. An empty
 # commit is charged its 4-node floor = 4,096 B (pinned by
 # ``tests/test_commit_endpoint.py::test_the_charge_is_the_node_floor_for_a_
 # small_payload``), so the allowance admits 2,560 of them per minute —
