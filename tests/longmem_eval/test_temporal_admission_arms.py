@@ -369,3 +369,88 @@ def test_fingerprint_stamps_the_arm_and_its_budgets_only_when_on(monkeypatch):
     capped = _build_fingerprint(**base)
     assert capped["tr_session_completion_total"] == 20
     assert capped != on, "a budget change must change the fingerprint"
+
+
+def test_completion_never_rebinds_the_ranked_pool(monkeypatch):
+    """The round-1 HIGH, pinned where it actually lived — in the CALLER.
+
+    `_tr_complete_sessions` never mutated its input, so a direct test of it
+    cannot observe the defect. The defect was `pool, ... = _tr_complete_sessions(...)`
+    in `retrieve_for_question`, which made `ret["hits"]` (the pinned
+    `ret["hits"] == the deduped pool` contract) and every pool-derived metric —
+    `ranked_ids`, `evidence_retrieved@k`, `match_source_counts@k`, the C5
+    verdict, and `gold_census(..., ret["hits"])` — count INJECTED material as
+    retrieved. Verified by mutation: reverting to `pool = _completed` must red
+    THIS test and nothing else.
+    """
+    import types
+
+    from tools.longmem_eval import retrieve as R
+
+    class _Empty:
+        result_set: list = []
+
+    class _Graph:
+        def query(self, cypher, params=None):
+            del cypher, params
+            return _Empty()
+
+    class _Sdk:
+        def _get_proj(self):
+            return types.SimpleNamespace(g=_Graph())
+
+    ranked = [
+        {"id": "a", "content": "alpha evidence", "match_source": "fts",
+         "has_answer": True},
+        {"id": "b", "content": "beta evidence", "match_source": "fts",
+         "has_answer": False},
+    ]
+    injected = {"id": "c", "content": "INJECTED", "match_source": "session",
+                "has_answer": True}
+
+    monkeypatch.setattr(R, "hybrid_search", lambda *a, **kw: list(ranked))
+    monkeypatch.setattr(
+        R, "_tr_complete_sessions",
+        lambda *a, **kw: ([*ranked, injected], {"on": True, "applied": True,
+                                                "ok": True, "injected": 1}))
+    seen: dict = {}
+
+    def _assembler(candidates, **kwargs):
+        seen["candidates"] = list(candidates)
+        return []
+
+    monkeypatch.setattr(R, "_assemble_session_context", _assembler)
+
+    question = {"question_id": "q1", "question": "how many days passed?",
+                "question_type": "temporal-reasoning",
+                "question_date": "2023-06-01", "haystack_dates": [],
+                "haystack_sessions": [], "answer": "5"}
+    ret = R.retrieve_for_question(_Sdk(), question, ks=(5,), top_k=20,
+                                  tr_top_k=12, tr_session_admission=True,
+                                  tr_session_completion=True)
+
+    # the READER still gets the completed list …
+    assert [h["content"] for h in seen["candidates"]] == [
+        "alpha evidence", "beta evidence", "INJECTED"]
+    # … but the RANKED POOL does not.
+    assert [h["id"] for h in ret["hits"]] == ["a", "b"], (
+        "the completion pass must not enter ret['hits'] — rebinding `pool` "
+        "makes every pool-derived metric count injected material as retrieved")
+    assert ret["ranked_ids"] == ["a", "b"], (
+        "ranked_ids is persisted from the pool — injected ids must not appear")
+    assert "c" not in {h["id"] for h in ret["hits"]}
+
+
+def test_a_non_resume_run_refuses_to_append_to_an_existing_output(tmp_path):
+    """Reproduction safety: §8's command writes a committed path. Appending to
+    it would DOUBLE the rows and `summarize` does not dedupe, so every absolute
+    number changes while the ratios survive (the artifact still looks valid)."""
+    import pytest
+
+    from tools.longmem_eval import temporal_admission_arms as A
+
+    out = tmp_path / "rows.jsonl"
+    out.write_text('{"qid": "a", "arm": "baseline"}' + "\n")
+    with pytest.raises(SystemExit, match="refusing to APPEND"):
+        A.main(["--data", str(tmp_path / "absent.json"),
+                "--db", "docker://x", "--out", str(out)])

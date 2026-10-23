@@ -1688,26 +1688,34 @@ def assemble_session_context(
     bytes_used = header_bytes
     block_sizes: list[int] = []
 
-    def _try_admit(h: dict, *, budget: int) -> bool:
-        """Admit one hit whole-or-not-at-all under the CURRENT bounds."""
+    def _try_admit(h: dict, *, budget: int) -> str:
+        """Admit one hit whole-or-not-at-all under the CURRENT bounds.
+
+        Returns the REFUSAL CLASS ("" when admitted) so the caller can count
+        each bound separately: folding a byte-ceiling refusal into the token
+        counter made ``stopped_by`` name ``token_cap`` while the byte ceiling
+        was what kept material out — the mislabel this census exists to
+        prevent.
+        """
         nonlocal words, bytes_used
         if not _has_claim_text(h):
-            return False
+            return "no_claim_text"
         block = _render_block(h)
         cost = len(block.split())
         if int((words + cost) * 1.1) > budget:
-            return False
+            return "token_cap"
         block_bytes = len(block.encode("utf-8")) + 2
         if byte_cap is not None and bytes_used + block_bytes > byte_cap:
-            return False
+            return "byte_cap"
         selected.append(h)
         selected_ids.add(_tok(h))
         words += cost
         bytes_used += block_bytes
-        return True
+        return ""
 
     # ── phase 1: BREADTH (rank order, the historical window, extended) ──
-    breadth_dropped = 0
+    breadth_dropped_by_token_cap = 0
+    breadth_dropped_by_byte_cap = 0
     breadth_admitted = 0
     breadth_item_cap_cut = False
     for h in pool:
@@ -1716,11 +1724,13 @@ def assemble_session_context(
             # unexamined (a pool that ended at the bound dropped nothing)
             breadth_item_cap_cut = True
             break
-        before = len(selected)
-        if _try_admit(h, budget=breadth_budget):
+        refusal = _try_admit(h, budget=breadth_budget)
+        if not refusal:
             breadth_admitted += 1
-        elif len(selected) == before and _has_claim_text(h):
-            breadth_dropped += 1
+        elif refusal == "token_cap":
+            breadth_dropped_by_token_cap += 1
+        elif refusal == "byte_cap":
+            breadth_dropped_by_byte_cap += 1
     # ── phase 2: DEPTH (complete the sessions breadth touched, whole-or-skip) ──
     # The session MEMBERSHIP comes from :func:`session_blocks` (ONE grouping
     # implementation, so the assembler and the tested primitive cannot drift),
@@ -1813,8 +1823,10 @@ def assemble_session_context(
         # `None` ("no bound dropped anything") on windows where it refused
         # candidates, which is why it is consulted alongside the depth caps.
         stopped_by = (
-            "byte_cap" if depth_dropped_by_byte_cap else
-            "token_cap" if (depth_dropped_by_token_cap or breadth_dropped)
+            "byte_cap" if (depth_dropped_by_byte_cap
+                           or breadth_dropped_by_byte_cap) else
+            "token_cap" if (depth_dropped_by_token_cap
+                             or breadth_dropped_by_token_cap)
             else "item_cap" if (depth_dropped_by_item_cap or breadth_item_cap_cut)
             else None)
         stats.update({
@@ -1829,7 +1841,10 @@ def assemble_session_context(
             "session_block_sizes": block_sizes,
             "bytes_used": bytes_used,
             "words_used": words,
-            "dropped_by_breadth_bound": breadth_dropped,
+            "dropped_by_breadth_bound": (breadth_dropped_by_token_cap
+                                          + breadth_dropped_by_byte_cap),
+            "dropped_by_breadth_token_cap": breadth_dropped_by_token_cap,
+            "dropped_by_breadth_byte_cap": breadth_dropped_by_byte_cap,
             "breadth_item_cap_cut": breadth_item_cap_cut,
             "dropped_sessions_by_item_cap": depth_dropped_by_item_cap,
             "dropped_sessions_by_token_cap": depth_dropped_by_token_cap,

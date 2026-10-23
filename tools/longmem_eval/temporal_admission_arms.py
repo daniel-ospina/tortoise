@@ -250,6 +250,16 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     arms = tuple(arm_by_id(a.strip()) for a in args.arms.split(",") if a.strip())
+    # ⛔ A non-resume, non-shard run appends. Appending to an EXISTING output
+    # silently DOUBLES the rows, and `summarize` does not dedupe — every
+    # absolute number in a published artifact would change (the ratios survive,
+    # so the file still looks valid). Refuse rather than corrupt a record.
+    if Path(args.out).exists() and not args.resume and args.shard is None \
+            and Path(args.out).stat().st_size > 0:
+        raise SystemExit(
+            f"refusing to APPEND to the existing {Path(args.out)} — pass --resume "
+            f"(skip the qids already measured) or a fresh --out path")
+
     instances = {i["question_id"]: i for i in ds.load_dataset(
         split=args.split, data_path=args.data, download=args.data is None)}
     rows = mt.deterministic_subset(mt.load_census(args.census)["rows"])

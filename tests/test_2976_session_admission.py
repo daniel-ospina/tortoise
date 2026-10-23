@@ -489,3 +489,18 @@ def test_a_breadth_token_drop_is_reported_as_the_token_cap():
     assert len(out) < 30
     assert stats["dropped_by_breadth_bound"] > 0
     assert stats["stopped_by"] == "token_cap", stats
+
+
+def test_a_breadth_byte_refusal_is_reported_as_the_byte_cap():
+    """A breadth refusal by the BYTE ceiling must not be reported as
+    `token_cap`: a caller tuning the token budget while the byte ceiling keeps
+    material out is the false positive this census exists to prevent."""
+    small = _hit(0, "sid-a", "alpha", idx=0)
+    big = _hit(1, "sid-b", "word " * 2000, idx=0)
+    stats: dict = {}
+    out = assemble_session_context([small, big], max_context_tokens=20000,
+                                   byte_cap=800, stats=stats)
+    assert [h["id"] for h in out] == [small["id"]]
+    assert stats["dropped_by_breadth_byte_cap"] == 1
+    assert stats["dropped_by_breadth_token_cap"] == 0
+    assert stats["stopped_by"] == "byte_cap", stats

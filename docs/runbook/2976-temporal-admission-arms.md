@@ -197,18 +197,28 @@ under it.
 ## 8. Reproduction
 
 ```bash
-# 1) the ceiling, offline (no reader, no judge key)
+# 1) the ceiling, offline (no reader, no judge key). The 42/52 leg needs the
+#    277 MB LongMemEval split in the local cache; it SKIPS where the split is
+#    absent (CI), and the other five tests in that file are hermetic.
 uv run python -m tools.longmem_eval.temporal_admission_arms --help   # instrument
-uv run pytest tests/longmem_eval/test_variant_containment_judge.py -q  # 42/52 pin
+uv run pytest tests/longmem_eval/test_variant_containment_judge.py -q
 
 # 2) the arms over one ingest (needs a FalkorDB lane with >= 3 GB: 55 resident
 #    per-question graphs OOM-killed a 2 GB container at q40, and the driver now
-#    releases each question's graph after its arms run)
+#    releases each question's graph after its arms run).
+#    ⛔ Write to a FRESH path, not the committed ones: the driver appends, and a
+#    second 165 rows would change every absolute number while the ratios survive
+#    (so the artifact would still look valid). The driver now REFUSES to append
+#    without --resume; the committed files below are the originals.
 uv run python -m tools.longmem_eval.temporal_admission_arms \
     --split s --data /tmp/lme55.json \
     --db 'docker://:pw@localhost:6379/db' \
     --reader-model deepseek:deepseek-v4-flash \
     --judge-model variant-containment \
-    --out docs/runbook/2976-admission-arms.jsonl \
-    --sum-out docs/runbook/2976-admission-arms-summary.json
+    --out /tmp/2976-admission-arms.jsonl \
+    --sum-out /tmp/2976-admission-arms-summary.json
+
+# the committed artifacts this runbook's tables come from:
+#   docs/runbook/2976-admission-arms.jsonl           (165 rows = 55 q × 3 arms)
+#   docs/runbook/2976-admission-arms-summary.json
 ```
