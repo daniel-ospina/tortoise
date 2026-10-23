@@ -2668,8 +2668,16 @@ states have their own reason string, and neither is an absence (§17.3):
   `declared_keys` is `0` on a perfectly complete restore while
   `unwritten_keys` is `0` too. A read for an unwritten key is a **residency
   miss**: it `degraded` on read and is served from the record, and it is
-  **never** reported as `empty`. To make the cache fully hot, re-run without
-  `--limit`.
+  **never** reported as `empty`. ⛔ **The remedy depends on WHY the key is
+  unwritten, and the two cases are not the same command.** If the run was
+  `bounded` and the bound cut the set, re-run without `--limit` — that makes the
+  cache fully hot. If instead the record carried a row the CACHE cannot address
+  (a blank-keyed `:Session`, reported as `refused_keys` and named on the human
+  line), **no re-run can write it**: the row is unaddressable by construction,
+  and re-running only wipes and rebuilds the cache into the identical state.
+  That is a record/cache addressability gap (§9's exit-0 row above lists it
+  among the declared-partial states), not a writable shortfall — read
+  `refused_keys` before reaching for `--limit`.
 - **`relations-not-hot`** — every node landed but **N of the record's relations
   did not**, because a relation statement MATCHes both endpoints and the record
   does not carry them (R4). Read **`relations_not_written`**; `coverage` says
@@ -2718,7 +2726,7 @@ part of this section, and its status is stated rather than implied:
 
 | drill step | status |
 |---|---|
-| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (41 pins / 42 collected cases, live cache graph included) |
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (the file's whole collected set — 42 pins / 43 collected cases when this row was written; `--collect-only` is the authority, and this numeral is a measurement, not a promise, live cache graph included) |
 | a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 

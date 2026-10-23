@@ -1299,3 +1299,37 @@ def test_a_cache_that_cannot_be_opened_is_UNAVAILABLE_not_a_traceback(
     assert rc == rrestore.EXIT_UNAVAILABLE, err
     assert "could not be opened" in err, err
     assert "ConnectionError" in err, err
+
+
+def test_the_human_line_names_the_refused_rows_and_denies_the_re_run():
+    """§9's not-hot bullet offered a remedy that cannot work for a REFUSED row.
+
+    A record row the cache cannot address (the blank-keyed `:Session`) makes the
+    declaration `partial` at ANY bound, and re-running cannot write it — but the
+    human line said only "N record key(s) were NOT written", so the documented
+    next step (`re-run without --limit`) pointed at a destructive re-run that
+    ends in the identical state, forever. The reviewer measured the same
+    declaration with and without the bound on a 3-node record.
+    """
+    with_refusal = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=3, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0,
+        refused_keys=(("Session", ""),), coverage="partial", declared_keys=0,
+    )
+    line = with_refusal.render()
+    assert "REFUSED by the projection" in line, line
+    assert "Session:''" in line, line
+    assert "no re-run can write them" in line, line
+
+    clean = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=2, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0, coverage="complete",
+        declared_keys=0,
+    )
+    assert "REFUSED" not in clean.render(), (
+        "a restore with no refused row must not print the refusal clause"
+    )

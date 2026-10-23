@@ -230,9 +230,13 @@ class RestoreOutcome:
     declared_keys: int = 0
     #: ``--limit`` was supplied. ⚠️ NOT "something was left out": ``coverage``
     #: comes from the projection's own declaration, and a bound at or above the
-    #: record's node count still declares ``complete``. Read
-    #: :attr:`unwritten_keys` and :attr:`relations_not_written` for what was
-    #: actually left out — never this flag.
+    #: record's node count declares ``complete`` when every selected key landed
+    #: — but that is a fact about the WRITES, not about the flag: a record row the
+    #: projection REFUSES (a blank-keyed ``:Session``, :attr:`refused_keys`) makes
+    #: the declaration ``partial`` at ANY bound, this one included. Read
+    #: :attr:`unwritten_keys`, :attr:`refused_keys` and
+    #: :attr:`relations_not_written` for what was actually left out — never this
+    #: flag.
     bounded: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -332,6 +336,21 @@ class RestoreOutcome:
             # builds the outcome by hand.
             line += (f" — ⚠️ the projection SELECTED {self.nodes_selected} "
                      f"node(s), more than the cache holds")
+        if self.refused_keys:
+            # ⛔ The counter-signal to the not-hot remedy, and the reason it is
+            # printed: a REFUSED row is unaddressable in this cache, so no
+            # re-run (with or without `--limit`) can write it — without this
+            # clause an operator reading only the human line is left to re-run a
+            # destructive verb forever (§9's `not-hot` bullet).
+            shown = ", ".join(f"{label}:{key!r}"
+                              for label, key in self.refused_keys[:5])
+            more = "" if len(self.refused_keys) <= 5 else \
+                f" (+{len(self.refused_keys) - 5} more)"
+            line += (
+                f" — {len(self.refused_keys)} record row(s) were REFUSED by the "
+                f"projection as unaddressable in this cache ({shown}{more}); "
+                f"that is a record/cache addressability gap, NOT a shortfall, "
+                f"and no re-run can write them")
         if self.unwritten_keys:
             line += (
                 f" — {self.unwritten_keys} record key(s) were NOT written, so a "
