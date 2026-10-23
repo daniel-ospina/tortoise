@@ -12825,23 +12825,26 @@ class TortoiseSDK:
                 f"Must be one of: {', '.join(sorted(POINT_STATUS_VALUES))}"
             )
 
-        # #2351 (review P1): ``claimClass`` is a CLOSED vocabulary whose write
-        # invariant is "the property exists ONLY for ``derived``; absence IS
-        # ``asserted``". The generic props passthrough must not carry it —
-        # ``create_point`` pops it for exactly this reason. Left open, this door
-        # accepts an unknown third state (which the writer refuses everywhere
-        # else) and an explicit clear silently re-labels a DERIVED claim as
-        # AUTHORED, which defeats the override guard at both the write surfaces
-        # and the EP backstop with no warning. ``validate`` raises on a junk
-        # value and maps ``None`` to the default, so the stored shape stays the
-        # one spelling (``SET n += {claimClass: null}`` removes the property).
+        # #2351 (review P0): ``claimClass`` is a CREATE-time marker, NOT a
+        # revision prop. The journal folds it on ``PointAdded`` (it is listed in
+        # ``projection.entities._POINT_DECLARED_PROPS``), but NO ``PointRevised``
+        # arm replays it — ``_apply_one``/``_revise_point`` enumerate the props a
+        # revision may fold and ``claimClass`` is in neither. Writing it through
+        # this generic passthrough therefore produced a LIVE-ONLY marker: a
+        # rebuild silently dropped it (a DERIVED claim becomes AUTHORED and the
+        # override guard stops refusing it — the exact defect class this issue
+        # exists to close) or resurrected it after an explicit clear, and
+        # ``check_consistency`` reds the graph with advice that cannot clear the
+        # divergence. So the door REFUSES the key instead of shipping a marker
+        # replay does not own; widening replay is tracked as #9732.
         for _class_key in ('claimClass', 'claim_class'):
             if _class_key in props:
-                _upd_class = props.pop(_class_key)
-                props[_claim_class.PROP] = (
-                    _claim_class.DERIVED
-                    if _claim_class.validate(_upd_class) == _claim_class.DERIVED
-                    else None
+                raise ValueError(
+                    "claimClass is written by create_point, not by "
+                    "update_point (#2351): a revision does not replay it, so "
+                    "accepting it here would persist a live-only marker that a "
+                    "rebuild silently drops (see #9732). Stamp the class on "
+                    "the CREATE."
                 )
 
         # #432 plan-review P1: update_point is non-status except the draft→live

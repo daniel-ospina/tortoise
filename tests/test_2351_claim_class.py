@@ -151,11 +151,30 @@ def test_unknown_class_refused_with_nothing_written(lane):
 
 
 def test_dedup_hit_does_not_restamp_provenance(lane):
-    """The class belongs to the WRITE THAT MINTS — a re-run must not flip it."""
+    """The class belongs to the WRITE THAT MINTS — a re-run must not flip it.
+
+    The DANGEROUS form is a dedup re-run that NAMES a class: if the class rode
+    the dedup forward, a re-submission could silently re-label an authored
+    claim as derived (or bury a derived one). Both directions are pinned here,
+    so the assertion can fail.
+    """
     first = lane.create_point("statement", "same words", claim_class="derived")
     again = lane.create_point("statement", "same words", dedup=True)
     assert again["id"] == first["id"]
     assert _props(lane, first["id"]).get(cc.PROP) == "derived"
+
+    # A dedup re-run that NAMES the ASSERTED class must not bury the marker.
+    lane.create_point("statement", "same words", dedup=True,
+                      claim_class="asserted")
+    assert _props(lane, first["id"]).get(cc.PROP) == "derived", (
+        "a dedup hit must not re-stamp a derived claim as authored")
+
+    # ...and the mirror: naming DERIVED must not promote an authored claim.
+    plain = lane.create_point("statement", "authored words")
+    lane.create_point("statement", "authored words", dedup=True,
+                      claim_class="derived")
+    assert cc.PROP not in _props(lane, plain["id"]), (
+        "a dedup hit must not promote an authored claim to derived")
 
 
 # ── 3. the write-path guard ──────────────────────────────────────────────────
@@ -393,28 +412,49 @@ def test_operator_with_no_targets_is_not_a_derived_override(lane):
     assert op["id"]
 
 
-def test_update_point_refuses_a_junk_class_and_never_stores_it(lane):
-    """The UPDATE door enforces the same closed vocabulary as CREATE (#2351).
+def test_update_point_refuses_the_class_outright(lane):
+    """``claimClass`` is a CREATE-time marker, not a revision prop (#2351).
 
-    ``update_point`` passes unknown props straight to ``SET n += $props``, so
-    without the normalization this door accepts an unknown third state — which
-    ``validate()`` promises is never persisted — and an explicit clear
-    re-labels a DERIVED claim as AUTHORED, defeating the override guard.
+    It is folded on ``PointAdded`` but no ``PointRevised`` arm replays it, so
+    accepting it here wrote a LIVE-ONLY marker: a rebuild dropped it (a DERIVED
+    claim became AUTHORED and the override guard stopped refusing it) or
+    resurrected it after a clear. The door refuses every spelling instead.
     """
     pid = lane.create_point("statement", "computed",
                             claim_class="derived")["id"]
-    with pytest.raises(ValueError, match="Unknown claim_class"):
-        lane.update_point(pid, claimClass="junk")
+    for spelling in ("claimClass", "claim_class"):
+        with pytest.raises(ValueError, match="written by create_point"):
+            lane.update_point(pid, **{spelling: "asserted"})
+        with pytest.raises(ValueError, match="written by create_point"):
+            lane.update_point(pid, **{spelling: "derived"})
+        with pytest.raises(ValueError, match="written by create_point"):
+            lane.update_point(pid, **{spelling: "junk"})
     assert _props(lane, pid).get(cc.PROP) == "derived", (
         "a refused update must not change the stored class")
 
-    # Clearing is an explicit act, and it must be stored as ABSENCE — never as
-    # a second spelling of the default class.
-    lane.update_point(pid, claimClass="asserted")
-    assert cc.PROP not in _props(lane, pid), (
-        "absence IS asserted; the string 'asserted' must never be stored")
-    lane.update_point(pid, claimClass="derived")
-    assert _props(lane, pid).get(cc.PROP) == "derived"
+
+def test_class_marker_survives_a_rebuild(tmp_path):
+    """The marker is REPLAY-OWNED: a rebuild must not drop it (#2351 P0).
+
+    ``create_point`` folds ``claimClass`` on ``PointAdded``, so the class
+    survives a journal replay. That is the invariant ``update_point`` cannot
+    honour — it journals a revision no fold replays — and the reason that door
+    refuses the key instead of writing a live-only marker.
+    """
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "rebuild.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = sdk.create_point("statement", "computed",
+                               claim_class="derived")["id"]
+        assert _props(sdk, pid).get(cc.PROP) == "derived"
+        sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
+        assert _props(sdk, pid).get(cc.PROP) == "derived", (
+            "rebuild dropped the class marker — a DERIVED claim silently "
+            "became AUTHORED and the override guard stopped refusing it")
+    finally:
+        sdk.close()
 
 
 def test_degraded_fallback_tier_honours_the_class_filter(lane, monkeypatch):
