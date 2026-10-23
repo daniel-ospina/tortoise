@@ -1228,6 +1228,52 @@ def test_restore_wrong_key_keeps_live_graph(monkeypatch):
         proj.close()
 
 
+def test_the_graph_restore_path_uses_the_SHARED_rotation_definition():
+    """#9601 review cycle 11 (P3): the "one definition" claim is now ENFORCED.
+
+    `decrypt_backup_with_rotation`'s docstring promised it was "the ONE definition
+    … shared with the graph restore path", and the PR body repeated it — while
+    `restore_backup` still inlined the identical two-step chain
+    (`decrypt_backup` → on `ValueError` → `_try_decrypt_with_chain`). There was no
+    behavioural difference, which is exactly what made it dangerous: the next
+    change to the rotation rule would land in the helper and silently NOT reach
+    the load-bearing family (production graph archives), and the docstring would
+    keep telling reviewers the two paths are one.
+
+    A structural pin, because the two implementations were behaviourally
+    identical: pre-fix this reds on `decrypt_backup(` appearing inside
+    `restore_backup`, post-fix the only path is the shared helper.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "tortoise" / "hosted_backup.py").read_text()
+    assert "def restore_backup(" in source
+    body = source.split("def restore_backup(", 1)[1]
+    # Only up to the next top-level def — the prune/other helpers below are not
+    # this function's body.
+    body = body.split("\ndef ", 1)[0]
+    assert "decrypt_backup_with_rotation(blob" in body, (
+        "restore_backup must decrypt through the shared rotation helper")
+    assert "decrypt_backup(blob" not in body, (
+        "restore_backup still calls the ACTIVE-key-only primitive — the inlined "
+        "copy the shared helper exists to replace")
+    assert "_try_decrypt_with_chain(" not in body, (
+        "restore_backup still walks the candidate chain itself instead of calling "
+        "decrypt_backup_with_rotation")
+
+    # …and the helper's own claim is scoped honestly: both backup families call
+    # it, the export/import pair deliberately does not (their key is identified
+    # by a fingerprint carried in the artifact header, not a rotating env key).
+    from tortoise.hosted_backup import decrypt_backup_with_rotation
+
+    doc = " ".join((decrypt_backup_with_rotation.__doc__ or "").split())
+    assert "tortoise.record_backup" in doc
+    assert "restore_backup" in doc
+    assert "tortoise.export" in doc, (
+        "the docstring must name the callers it deliberately does NOT cover, or a "
+        "future lane reads 'one definition' as tree-wide")
+
+
 def test_prune_intra_team_forged_backup_id(monkeypatch):
     """Delete-path trust: a forged manifest claiming a NEWER backup's id under
     an old key must not delete the newer backup's objects."""
