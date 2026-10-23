@@ -142,9 +142,12 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   exactly one place — `_apply_tenant_scope`, `tortoise/record_projection.py:3152` — which both record doors
   reach through `scope_connection()` (`:3200`; `replay()` at `:3327`, `cache_projection.read_record_view()`
   at `:789`). ⚠️ Those line numbers are as of THIS PR's head: at the `ec9132efe` this section is measured
-  at, the statement did not exist at all (introduced by this change, `git log -S` `TENANT_GUC_SQL` returns
-  exactly one commit), and the only setters were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/`
-  finds it. ⚠️ Two greps that look like the test and are NOT:
+  at, the statement did not exist at all (introduced by this change: `git log -S TENANT_GUC_SQL
+  -- tortoise/` returns exactly one commit). The pathspec is required, and it is the same trap as the
+  greps below: unscoped, the search also matches DOCUMENTATION that merely quotes the constant — this
+  file among it — so it reports a commit that changed a doc, not a setter. The only setters before R6
+  were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/` finds the setter and its use.
+  ⚠️ Two greps that look like the test and are NOT:
   `grep -rn "set_config('app.current_org_id" tortoise/` returns **one** line, and it is PROSE —
   `replay()`'s docstring at `:3269` quotes the statement, while the setter interpolates `TENANT_GUC` and so
   cannot match, which reads as "the code never sets the GUC"; and a bare `grep current_setting` also hits

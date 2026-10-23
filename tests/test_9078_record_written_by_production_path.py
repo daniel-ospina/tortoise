@@ -2622,9 +2622,17 @@ def _tables_added_since_the_reapply_set() -> list[str]:
         # the derivation feeds a GUARD, so a spelling it does not know is a
         # silently unproven relation. `test_ensure_record_schema_rebuilds_…`
         # closes that hole from the other side, against the declared `creates`.
+        # COMMENT-STRIPPED for the same reason the assertions above are: these
+        # headers are ~70% prose about alternatives, so a sentence like "rather
+        # than a CREATE TABLE public.session_turn" would enter `dropped` as a
+        # relation nothing creates and red the required, zero-skip Postgres job
+        # on an honest diff (review of 739da11e1). An over-derivation is not the
+        # hazard here (a `DO $$ … EXECUTE 'CREATE TABLE public.x' $$` match names
+        # a table that really exists); an UNDER-derivation is, and that one is
+        # caught by the `declared <= set(dropped)` assertion below.
         tables += re.findall(
             r"CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+public\s*\.\s*\"?(\w+)\"?",
-            path.read_text(encoding="utf-8"), re.IGNORECASE)
+            _strip_sql_comments(path.read_text(encoding="utf-8")), re.IGNORECASE)
     return sorted(set(tables))
 
 
