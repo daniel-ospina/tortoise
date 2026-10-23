@@ -127,9 +127,11 @@ NOT refusals a `status` filter should find: a domain answer that carries an
 operator — a successful fetch reporting that fact, #4576), and a refusal
 buried deeper than the seam reads (`tortoise_overview()` with no `section`
 nests each section's payload one level down, so a failing section is not
-classified). The gate's own match is a dict carrying an `error` key (or the
-`_SafeError` a body returns), so a refusal answered with a KEYLESS plain dict
-would be invisible to it and to a `status` filter alike; no served tool
+classified). The gate's own match is a dict **literal** carrying a constant
+`error` key (or a body that returns one by name), so a refusal answered with a
+KEYLESS plain dict — or with an `error` key built any other way (`dict(error=…)`,
+a key assigned after construction, an unpack, a conditional) — would be invisible
+to it and to a `status` filter alike; no served tool
 answers that way at this writing — the last one (`tortoise_pack_install`'s
 rejected manifest, `{"installed": false, "validation_errors": [...]}`) is
 answered as an `_SafeError` too. Otherwise: do not read a `status` filter as
