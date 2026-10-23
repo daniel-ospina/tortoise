@@ -246,14 +246,21 @@ class TestPackValidate:
         renamed = manifest.parent.parent / "my-domain-overlay"
         manifest.parent.rename(renamed)
         manifest = renamed / "manifest.yaml"
-        manifest.write_text(manifest.read_text().replace(
-            "  objectKinds: []", "  objectKinds: [BadCase]"))
+        # A CROSS-PACK typo, not a schema error: the registry keys a cross-pack
+        # diagnostic by the MANIFEST's namespace, which is what makes the
+        # directory-name filter lose it. (A schema error is keyed by directory,
+        # so it would be found either way.)
+        manifest.write_text(
+            manifest.read_text()
+            .replace("  objectKinds: []", "  objectKinds: [contract]")
+            .replace("  kindDefs: {}",
+                     "  kindDefs:\n    contract:\n      nearMisses: [gadget]"))
 
         r = _run_cli("pack", "validate", str(renamed))
         out = r.stdout + r.stderr
         assert r.returncode == 1, out
         assert "Clean" not in out
-        assert "camelCase" in out, out
+        assert "nearMisses target 'gadget'" in out, out
 
         # The `--json` machine contract must not read clean either.
         rj = _run_cli("pack", "validate", str(renamed), "--json")
@@ -263,9 +270,8 @@ class TestPackValidate:
         assert payload["ok"] is False
         assert "mydomain" in payload["errors"]
 
-        # CONTROL: the SAME broken manifest under its own namespace name is
-        # redundant evidence the pack is broken either way, so the exit-1 above
-        # is the filter's doing.
+        # CONTROL: a clean pack beside it exits 0, so exit 1 above is the
+        # broken manifest and not the command.
         clean = _scaffold("otherdomain", tmp_path)
         ok = _run_cli("pack", "validate", str(clean.parent))
         assert ok.returncode == 0, ok.stdout + ok.stderr
@@ -279,15 +285,18 @@ class TestPackValidate:
         manifest = _scaffold("mydomain", tmp_path)
         renamed = manifest.parent.parent / "my-domain-overlay"
         manifest.parent.rename(renamed)
-        (renamed / "manifest.yaml").write_text(
-            (renamed / "manifest.yaml").read_text().replace(
-                "  objectKinds: []", "  objectKinds: [BadCase]"))
+        broken = renamed / "manifest.yaml"
+        broken.write_text(
+            broken.read_text()
+            .replace("  objectKinds: []", "  objectKinds: [contract]")
+            .replace("  kindDefs: {}",
+                     "  kindDefs:\n    contract:\n      nearMisses: [gadget]"))
 
         r = _run_cli("pack", "validate", str(tmp_path / "packs"))
         out = r.stdout + r.stderr
         assert r.returncode == 1, out
         assert "Clean" not in out
-        assert "camelCase" in out, out
+        assert "nearMisses target 'gadget'" in out, out
 
     def test_a_missing_declared_dependency_is_not_a_false_green(self, tmp_path):
         """The SECOND fail-open path in the same verdict: it read `reg.errors`
@@ -304,9 +313,9 @@ class TestPackValidate:
         """
         manifest = _scaffold("mydomain", tmp_path)
         text = manifest.read_text()
-        assert "tier: free" in text, "template shape changed"
-        manifest.write_text(text.replace("tier: free",
-                                         "tier: free\ndepends_on: [ghost]"))
+        assert "depends_on: []" in text, "template shape changed"
+        manifest.write_text(text.replace("depends_on: []",
+                                         "depends_on: [ghost]"))
 
         r = _run_cli("pack", "validate", str(manifest.parent))
         out = r.stdout + r.stderr
@@ -356,7 +365,7 @@ class TestPackValidate:
             alpha_manifest.read_text()
             .replace("namespace: alpha", "namespace: beta")
             .replace("name: Alpha Pack", "name: Beta Pack")
-            .replace("tier: free", "tier: free\ndepends_on: [ghost]"))
+            .replace("depends_on: []", "depends_on: [ghost]"))
         # A third sibling whose DIRECTORY is not its namespace: the filter must
         # match on the namespace too, never admit it by path.
         gamma = tmp_path / "packs" / "gamma-dir"
@@ -365,7 +374,7 @@ class TestPackValidate:
             alpha_manifest.read_text()
             .replace("namespace: alpha", "namespace: gam")
             .replace("name: Alpha Pack", "name: Gam Pack")
-            .replace("tier: free", "tier: free\ndepends_on: [ghost]"))
+            .replace("depends_on: []", "depends_on: [ghost]"))
 
         clean = _run_cli("pack", "validate", str(alpha.parent))
         assert clean.returncode == 0, clean.stdout + clean.stderr
