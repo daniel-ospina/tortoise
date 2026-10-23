@@ -589,8 +589,8 @@ def _wait_bound_refused() -> bool:
     the pre-SSE-stall path, where pre-SSE cost >= bound and this seam's own
     deadline has already collapsed to 0. The seam must then NOT emit a second
     ``transport_wait_bound_exceeded`` and must NOT record the redundant refusal
-    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal, so the
-    abandoned dispatch still terminates cleanly.
+    as an ``mcp_tool_call`` ``timeout``. It still returns the refusal — and, since
+    #9762, schedules NOTHING, so this path has no abandoned dispatch to drain.
     """
     state = _wait_bound_state()
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
@@ -625,34 +625,40 @@ async def _scoped_dispatch(name: str, arguments, graph_ref: str | None, *,
     """Resolve the `graph` argument AND dispatch, inside ONE task (#9762).
 
     The resolution used to run in ``_wrapped_call_tool`` BEFORE the dispatch
-task existed, and that ordering was wrong twice over:
+    task existed, and that ordering was wrong in two independent ways:
 
-    * it spends the SAME remaining transport deadline the dispatch does
-      (#3834 F1), so on a request the transport had already refused
-      (``_wait_bound_refused()`` ⇒ ``remaining == 0``) the
-      ``asyncio.timeout(0)`` expired and a request the transport had already
-      ANSWERED raised a graph ``ToolError`` — recorded ``exec_error``/
-      ``ToolError`` in the very ``mcp_tool_call`` series #3834 F-1/F-2 keep
-      truthful, with a control-plane ``graph_list`` read issued for an answered
-      request;
     * the scope it applies is a set of ContextVars with no reset token
       (``mcp_auth.use_graph_target``), so a scope applied to the CALLER's
-      context outlived the dispatch — the next call in that context that names
-      no graph (the documented "untouched default path") inherited it.
+      context OUTLIVED the dispatch: the next call in that context that named no
+      graph (the documented "untouched default path") inherited the previous
+      call's graph, which is the silent-wrong-graph class #9340 closes;
+    * it spends the SAME remaining transport deadline the dispatch does
+      (#3834 F1), so a request the transport had already refused
+      (``_wait_bound_refused()`` ⇒ ``remaining == 0``) raised a graph
+      ``ToolError`` from the wrapper instead of returning the transport's own
+      refusal — recorded ``exec_error``/``ToolError`` in the very
+      ``mcp_tool_call`` series #3834 F-1/F-2 keep truthful, with a
+      control-plane ``graph_list`` read issued for an answered request.
 
-    Resolving INSIDE the task fixes both by construction: the scope lives in the
-    task's own copied context, and the task's result can never be unscoped. That
-    second property is why the naive guard (`if not refused: resolve`) was
-    refused: ``_await_under_mcp_wait_bound`` returns ``task.result()`` when the
-    dispatch finished as the deadline expired, so a SKIPPED resolution would
-    hand a workspace-default result to a caller who named another graph — the
-    silent-wrong-graph class #9340 closes.
+    Resolving INSIDE the task fixes both by construction: the scope moves with
+    the task, so it cannot outlive it and the task's own result is scoped by
+    construction.
+
+    On the naive guard the review of #9762 considered (`if not refused:
+    resolve`, left in the wrapper): its stated hazard — an "unscoped result" —
+    turns out to be UNREACHABLE, because a refused transport implies
+    ``remaining == 0``, and a zero budget can never surface ``task.result()``
+    (``wait_for(shield(task), 0)`` cancels the shield, never the task, so
+    ``task.done()`` is False at that ``except TimeoutError``). Its real defects
+    are the two above: the caller-context leak, and scheduling a
+    side-effecting dispatch whose result nothing will read.
 
     The ``ExitStack`` is owned HERE, not by the caller: `use_record_tenant`
     carries a ContextVar token, and a token created in this task's context can
     only be reset in it (``ContextVar.reset`` from another context raises).
     Owning it here is also what closes the record scope when an ABANDONED
-    dispatch finally finishes, rather than when the caller stopped waiting.
+    (timed-out) dispatch finally finishes, rather than when the caller stopped
+    waiting.
     """
     with contextlib.ExitStack() as stack:
         await _resolve_graph_argument(graph_ref, stack)
@@ -809,19 +815,30 @@ async def _await_under_mcp_wait_bound(name: str, arguments, *, version,
     # its route path for. Escape it for the log line (the analytics sink
     # sanitizes its own copy).
     safe_name = _mcp_auth._sanitize_for_log(name)
-    # #9762: the already-refused (pre-SSE stall) case returned at the top of this
-    # function, before any dispatch was scheduled, so this is always the seam's
-    # OWN breach — the one case where its event is the truthful record.
-    # The SAME breach writer the REST arm uses — one emit site, one prop
-    # vocabulary — scheduled OFF the loop (see
-    # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay
-    # a ``hosted_api`` import, and neither must the breach path, where that
-    # import froze the loop and delivered the refusal seconds late.
-    _emit_mcp_wait_bound_breach_off_loop(
-        _current_org_id.get() or "", latency_ms, name)
-    _log.warning(
-        "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
-        "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
+    # #3834 F-2 / #9762: RE-READ the flag here, not only at entry. The entry
+    # short-circuit only sees a refusal that already happened; a transport that
+    # does not start its response before dispatching (fastmcp's
+    # ``json_response`` mode) can still reach the middleware's refusal branch
+    # WHILE this seam waits, and then the middleware's event is again the
+    # truthful one — emitting here would be the duplicate F-2 exists to prevent.
+    if _wait_bound_refused():
+        # The transport's warning already covers this request; a second
+        # "refusing legibly" warning would describe a refusal the middleware
+        # delivered, not this seam.
+        _log.debug(
+            "MCP tools/call %s refused at the transport while this seam "
+            "waited; this seam's refusal is redundant", safe_name)
+    else:
+        # The SAME breach writer the REST arm uses — one emit site, one prop
+        # vocabulary — scheduled OFF the loop (see
+        # ``_emit_mcp_wait_bound_breach_off_loop``): the fast path must not pay
+        # a ``hosted_api`` import, and neither must the breach path, where that
+        # import froze the loop and delivered the refusal seconds late.
+        _emit_mcp_wait_bound_breach_off_loop(
+            _current_org_id.get() or "", latency_ms, name)
+        _log.warning(
+            "transport wait bound (%.0fs) exceeded: MCP tools/call %s — "
+            "refusing legibly", _mcp_auth._TRANSPORT_WAIT_BOUND_S, safe_name)
     return _wait_bound_refusal_result()
 
 
@@ -1406,9 +1423,19 @@ def _take_graph_argument(name: str,
     return ref
 
 
+#: #9762: the slice of the transport's residual budget the graph lookup must
+#: leave on the clock, so its own "the graph lookup exceeded the wait budget"
+#: refusal wins the race against the seam's generic one deterministically (both
+#: deadlines are otherwise the same absolute instant, and the seam's timer is
+#: armed first). Proportional to the residual, capped so a long budget does not
+#: hand the lookup a materially shorter one.
+_GRAPH_LOOKUP_MARGIN_FRACTION = 0.1
+_GRAPH_LOOKUP_MARGIN_CAP_S = 0.05
+
+
 async def _resolve_graph_argument(ref: str | None,
                                   stack: contextlib.ExitStack) -> None:
-    """Resolve a stripped `graph` OFF the event loop, then scope the request.
+    """Resolve a stripped `graph` OFF the event loop, then scope the dispatch.
 
     `plan_graph_target` reads the reachable graph set (a control-plane query —
     up to three synchronous PostgREST round trips), so it rides
@@ -1417,7 +1444,7 @@ async def _resolve_graph_argument(ref: str | None,
     `use_graph_target`.
 
     A selected CUSTOM graph also installs the RECORD tenant for the rest of the
-    request (`record_tenant_for_graph`), entered on the caller's `stack` so it
+    DISPATCH (`record_tenant_for_graph`), entered on the caller's `stack` so it
     exits with the dispatch. Without it an armed record write under an org-wide
     (OAuth) credential — the connection this feature exists for — would be
     refused `no_tenant`, or, under a declared single-tenant env pair, filed
@@ -1439,6 +1466,21 @@ async def _resolve_graph_argument(ref: str | None,
     arrival = _wait_bound_arrival()
     remaining = (float(_mcp_auth._TRANSPORT_WAIT_BOUND_S) if arrival is None else max(
         0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival)))
+    # #9762: the lookup's deadline is strictly EARLIER than the dispatch's, by a
+    # small share of what is left. Both are armed from the same absolute
+    # deadline (``arrival + bound``), but the seam's timer is created first —
+    # before this task's first step — so with equal deadlines the seam always
+    # wins the race, abandons this lookup and returns the GENERIC wait-bound
+    # refusal. Measured on the pre-margin code with a degraded control plane
+    # (lookup length ≈ the whole residual): 3 of 4 runs recorded
+    # ``timeout/wait_bound`` and 1 recorded the graph refusal, i.e. one failure
+    # class with two different rows in the series this issue is about, and the
+    # actionable "the graph lookup timed out" message usually lost. Leaving a
+    # slice of the residual on the clock makes THIS message win deterministically.
+    # Proportional and capped, so a nearly-spent residual is still usable for a
+    # fast lookup instead of being refused outright.
+    margin = min(_GRAPH_LOOKUP_MARGIN_CAP_S, remaining * _GRAPH_LOOKUP_MARGIN_FRACTION)
+    lookup_budget = max(0.0, remaining - margin)
     # `asyncio.timeout`, NOT `wait_for`: `wait_for` raises `TimeoutError` for
     # BOTH its own deadline and any builtin `TimeoutError` (`socket.timeout` IS
     # `TimeoutError` on 3.12) escaping the lookup — a control-plane read that
@@ -1450,7 +1492,7 @@ async def _resolve_graph_argument(ref: str | None,
         # `to_thread` is this layer's existing idiom for a short blocking read
         # (`mcp_auth` runs the geo check the same way); bounded above, so a slow
         # control plane cannot hold a worker indefinitely.
-        async with asyncio.timeout(remaining) as budget:
+        async with asyncio.timeout(lookup_budget) as budget:
             plan = await asyncio.to_thread(
                 _mcp_auth.plan_graph_target, ref)
     except TimeoutError:

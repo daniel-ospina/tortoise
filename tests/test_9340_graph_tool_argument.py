@@ -1168,12 +1168,14 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
 # `transport_wait_bound` (the very series #3834 F-1/F-2 keep honest), and a
 # control-plane `graph_list` read was issued for an answered request.
 #
-# The obvious guard (`if not _wait_bound_refused(): resolve`) is WRONG and is
-# pinned as wrong below: `_await_under_mcp_wait_bound` returns `task.result()`
-# when the dispatch finished as the deadline expired, so a SKIPPED resolution
-# hands an UNSCOPED result (the workspace default graph) to a caller who named
-# another graph — the silent-wrong-graph class #9340 exists to close. The fix
-# moves the resolution INSIDE the dispatch task, so the scope moves with the
+# The obvious guard (`if not _wait_bound_refused(): resolve`) is WRONG, and two
+# of its defects are pinned below: the scope it applies to the CALLER's context
+# (ContextVars with no reset token) outlives the dispatch, and it still schedules
+# a side-effecting dispatch whose result nothing will read. Its *stated* hazard —
+# a skipped resolution handing back an unscoped result — turns out to be
+# UNREACHABLE (a refused transport implies `remaining == 0`, and a zero budget
+# can never surface `task.result()`), which is why no test here claims it. The
+# fix moves the resolution INSIDE the dispatch task, so the scope moves with the
 # task and cannot outlive it.
 
 
@@ -1231,6 +1233,19 @@ def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
     monkeypatch.setattr(mcp_server, "_emit_mcp_wait_bound_breach_off_loop",
                         lambda *a, **k: breaches.append(a))
     rows = _record_telemetry(monkeypatch)
+    dispatched: list = []
+
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
+        dispatched.append(name)
+        return "DISPATCHED"
+
+    # Pinned, not incidental: the dispatch must be UNREACHABLE on this path, so
+    # a refused request cannot perform a real tool call (a WRITE tool would
+    # mutate state for a caller that was told the request had been refused).
+    # Without this the assertion below would also be racing the abandoned
+    # task's executor thread.
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
 
     result = _wrapped_call(monkeypatch, "tortoise_query",
                            {"query": "x", "graph": "g_fund_a"})
@@ -1245,6 +1260,9 @@ def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
         "truthful")
     assert breaches == [], (
         f"a second breach event was emitted for one request: {breaches}")
+    assert dispatched == [], (
+        "the dispatch was scheduled for a request the transport had already "
+        "answered — a WRITE tool would have mutated state for a refused call")
     assert reads == [], (
         "a control-plane `graph_list` read was issued for a request the "
         "transport had already answered")
@@ -1271,7 +1289,11 @@ def test_a_dispatch_that_completes_as_the_deadline_expires_stays_scoped(
     monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
     # A POSITIVE residual: the deadline is about to expire, it has not already
     # been spent (a spent one refuses the lookup by design — the same bound).
-    spent = mcp_auth._TRANSPORT_WAIT_BOUND_S - 0.2
+    # 2 s, not a hair: the residual carries NO assertion weight (the faked waiter
+    # ignores it) — the only requirement is `remaining > 0` — so give the real
+    # `asyncio.to_thread` round trip a wide margin instead of turning a
+    # congested default executor into a red test about an unrelated property.
+    spent = mcp_auth._TRANSPORT_WAIT_BOUND_S - 2.0
     monkeypatch.setattr(
         mcp_server, "_wait_bound_state",
         lambda: {"_wait_bound_t0": _time.monotonic() - spent})
@@ -1397,11 +1419,20 @@ async def test_the_graph_scope_cannot_outlive_the_dispatch(monkeypatch):
     Executing the resolution inside the dispatch task confines it by
     construction.
     """
+    from tortoise.record_writer import current_record_tenant
+
     monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
+    monkeypatch.setattr(
+        "tortoise.supabase_control.is_supabase_enabled", lambda: True)
     monkeypatch.setattr(mcp_server, "_check_mcp_op_budget", _async_noop)
+    seen: dict = {}
 
     async def _body(name, arguments, *, version=None, run_middleware=True,
                     task_meta=None):
+        # The record tenant is a ContextVar token too, so the same question
+        # applies to it: what the WRITER sees inside the dispatch, and what the
+        # caller's context holds afterwards.
+        seen["record_tenant"] = current_record_tenant()
         return "DISPATCHED"
 
     monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
@@ -1409,10 +1440,108 @@ async def test_the_graph_scope_cannot_outlive_the_dispatch(monkeypatch):
     try:
         await mcp_server._wrapped_call_tool(
             "tortoise_query", {"query": "x", "graph": "g_fund_a"})
+        assert seen.get("record_tenant") == (ORG_A, "g_fund_a"), (
+            "the dispatch did not install the record tenant of the graph it "
+            f"scopes: {seen.get('record_tenant')}")
         assert mcp_auth._current_graph_id.get() is None, (
             "the selected graph survived the dispatch in the CALLER's context — "
             "the next call in this context that names no graph reads it")
         assert mcp_auth._current_graph_namespace.get() is None, (
             "the selected namespace survived the dispatch")
+        assert current_record_tenant() is None, (
+            "the record tenant survived the dispatch in the CALLER's context")
     finally:
         mcp_auth._current_org_id.reset(org)
+
+
+def test_a_slow_graph_lookup_refuses_as_a_graph_error_every_time(monkeypatch):
+    """#9762: the lookup's OWN refusal must win the race with the seam's.
+
+    Both deadlines are the same absolute instant (the transport's remaining
+    budget), and the seam's timer is armed FIRST — before the dispatch task's
+    first step — so with equal deadlines the seam wins, abandons the lookup and
+    returns the GENERIC wait-bound refusal. Measured on the equal-deadline code
+    with a lookup longer than the whole residual: 3 of 4 runs recorded
+    ``timeout/wait_bound`` and 1 the graph refusal, i.e. one failure class with
+    two different rows in the series this issue is about, and the actionable
+    "the graph lookup timed out" message usually lost.
+
+    Repeated deliberately: a single run would pass a third of the time on that
+    code.
+    """
+    # A short residual, so a lookup longer than it is cheap to stage.
+    spent = mcp_auth._TRANSPORT_WAIT_BOUND_S - 0.15
+    monkeypatch.setattr(
+        mcp_server, "_wait_bound_state",
+        lambda: {"_wait_bound_t0": _time.monotonic() - spent})
+
+    def _slow(org_id):
+        _time.sleep(0.3)      # longer than the whole residual
+        return OWN_ROWS
+
+    monkeypatch.setattr(mcp_auth, "reachable_graph_rows", _slow)
+    dispatched: list = []
+
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
+        dispatched.append(name)
+        return "DISPATCHED"
+
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
+    rows = _record_telemetry(monkeypatch)
+
+    for attempt in range(3):
+        with pytest.raises(ToolError) as excinfo:
+            _wrapped_call(monkeypatch, "tortoise_query",
+                          {"query": "x", "graph": "g_fund_a"})
+        message = str(excinfo.value)
+        assert "graph lookup exceeded the wait budget" in message, (
+            f"attempt {attempt}: the lookup's own refusal lost to the generic "
+            f"wait-bound one, so the caller cannot tell what timed out: "
+            f"{message}")
+    assert rows == [("exec_error", "ToolError")] * 3, (
+        f"one failure class recorded more than one row: {rows}")
+    assert dispatched == [], (
+        "a dispatch ran even though the budget was spent by the lookup")
+
+
+def test_a_refusal_that_lands_MID_SEAM_does_not_emit_a_second_breach(monkeypatch):
+    """#3834 F-2 stays closed for the refusal that arrives WHILE we wait.
+
+    The entry short-circuit only sees a refusal that already happened. A
+    transport that does not start its response before dispatching (fastmcp's
+    ``json_response`` mode) can reach ``WaitBoundMiddleware``'s refusal branch
+    mid-wait, and then the middleware's event is again the truthful one — the
+    seam's would be the duplicate F-2 exists to prevent. The flag is therefore
+    read a second time at the emit site, not only at entry.
+    """
+    state = {"_wait_bound_t0": _time.monotonic() - 1.0}
+    monkeypatch.setattr(mcp_server, "_wait_bound_state", lambda: state)
+
+    async def _refused_during_the_wait(task, timeout, *, reference, owner=None):
+        # Exactly what the middleware does to the shared `scope["state"]` dict.
+        state["_wait_bound_refused"] = True
+        raise TimeoutError
+
+    monkeypatch.setattr(mcp_auth, "await_under_wait_bound",
+                        _refused_during_the_wait)
+    breaches: list = []
+    monkeypatch.setattr(mcp_server, "_emit_mcp_wait_bound_breach_off_loop",
+                        lambda *a, **k: breaches.append(a))
+    rows = _record_telemetry(monkeypatch)
+
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
+        return "DISPATCHED"
+
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
+
+    result = _wrapped_call(monkeypatch, "tortoise_query", {"query": "x"})
+
+    assert getattr(result, "meta", None) and \
+        result.meta.get(mcp_server._WAIT_BOUND_META_KEY) is True
+    assert breaches == [], (
+        "the seam emitted a second breach event for a request the middleware "
+        f"had already refused mid-wait: {breaches}")
+    assert rows == [("refused", "transport_wait_bound")], (
+        f"one refusal recorded as {rows} instead of one truthful row")
