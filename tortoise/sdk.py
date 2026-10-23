@@ -18305,16 +18305,26 @@ class TortoiseSDK:
         question to ask.
 
         ⚠️ RESIDUAL, stated so this helper is not read as closing more than it
-        does: a CONTENT (or hash) fold onto a terminal point is still reachable
-        from an ingest and still mutates it — ``create_point(dedup=True)``
-        resolves content unconditionally, so a fresh key (or none) with the
-        SAME content as a retracted point folds onto it and stamps
-        ``batch_id`` — and moves ``updatedAt`` when the item carries props —
-        exactly as the key case did (measured on this tree; an intra-bundle pair
-        can fold onto a terminal point it minted one statement earlier). That
-        half is NOT closed by this change
-        and not claimed to be; it is #9173's accepted trade and needs its own
-        decision rather than a silent widening of this guard.
+        does. Two folds onto a terminal point are still reachable from an
+        ingest, and neither is closed by this change:
+
+        (a) CONTENT/hash — ``create_point(dedup=True)`` resolves content
+        unconditionally, so a fresh key (or none) with the SAME content as a
+        retracted point folds onto it and stamps ``batch_id`` (and moves
+        ``updatedAt`` when the item carries props), exactly as the key case did.
+        This is #9173's accepted trade.
+
+        (b) KEY, INTRA-BUNDLE — this check reads the GRAPH, and a terminal node
+        an EARLIER item in the SAME bundle minted does not exist yet when it
+        runs. Measured: a two-item bundle whose item 0 declares
+        ``status="retracted"`` under ``key=K`` and whose item 1 carries ``K`` is
+        accepted, and item 0 comes back with ``batch_id`` stamped. Closing it
+        needs bundle-ORDER simulation (the shape
+        ``_bundle_entity_name_outcomes`` uses for entity names), not a graph
+        read — so it is disclosed here rather than half-fixed.
+
+        Both need their own decision rather than a silent widening of this
+        guard; tracked as its own issue.
 
         Composition is the writer's own (``_find_points_by_key`` key-first, the
         shared ``_terminal_expression`` predicate), so guard and writer cannot
@@ -18617,13 +18627,26 @@ class TortoiseSDK:
         (#8623's residual class, #9173).
 
         ⛔ CONSEQUENCE, stated so a future reader is not misled: after #9173 the
-        **bundle-local dedup-hit guard** (the ``content_hash``/``content+kind``
-        leg at the bottom of this check, which resolves a ``points`` item ref)
-        is unreachable BY CONSTRUCTION — a `points` ref makes the pair
-        Point-bearing, so its effective route is always ``operator``. It is
-        retained, not deleted: it is a prediction about
+        **bundle-local CONTENT-dedup guard** (the ``content_hash``/
+        ``content+kind`` leg at the bottom of this check, which resolves a
+        ``points`` item ref) is unreachable BY CONSTRUCTION — a `points` ref
+        makes the pair Point-bearing, so its effective route is always
+        ``operator``. It is retained, not deleted: it is a prediction about
         ``create_direct_edge``, and narrowing the endpoint-kind gate (#8499) is
         the only change that would make it live again.
+
+        ⛔ THAT IS NOT THE WHOLE GUARD, and the distinction is load-bearing
+        (#8400/#9818). The **KEY-identity** leg — `points[j]` whose ``key`` a
+        terminal point holds — is NOT a ``create_direct_edge`` prediction, so it
+        is NOT route-scoped and NOT dead: ``create_point``'s key-first dedup
+        resolves that point whatever the content and FOLDS onto it, which
+        MUTATES a terminal node rather than wiring an edge to it. It runs in its
+        own unconditional loop at the end of this check, over every `points`
+        item, connection or not (step 3 writes all of them). A reader who
+        generalises the paragraph above to "there is no live points-item
+        terminal guard" would delete the only thing standing between an ingest
+        and a rewritten retracted point — which is exactly how #9173 made it
+        inert in the first place.
 
         The by-name / declared-status arms in the item loop are NOT that: they
         are the ENTITY legs (``section == "entities"``), an Object/Subject/Event
@@ -19429,11 +19452,12 @@ class TortoiseSDK:
                                f"key {pkey!r} is held by terminal point "
                                f"{holder!r} (dedup hit) — create_point would "
                                f"fold onto it and MUTATE a terminal point, so "
-                               f"the bundle is rejected at validation — see "
-                               f"the terminal holder; call "
-                               f"create_point(..., dedup=False) OUTSIDE the "
-                               f"bundle to mint a second point under that "
-                               f"content (#8400)",
+                               f"the bundle is rejected at validation. To mint "
+                               f"a second point under that content, call "
+                               f"create_point(..., key=<a FRESH key>, "
+                               f"dedup=False) OUTSIDE the bundle — dedup=False "
+                               f"with the SAME key would mint a second carrier "
+                               f"of one key (#6110, #8400)",
                 })
 
     def _check_endpoint_race(self, index: int, conn: dict,

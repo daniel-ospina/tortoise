@@ -379,13 +379,23 @@ fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageR
 
 ```bash
 # backup only — dump -> encrypt -> upload to R2 under record-backups/.
-# The DSN comes from the ENVIRONMENT (`TORTOISE_RECORD_DSN`, and
-# `TORTOISE_RECORD_SCRATCH_DSN` for the drill). Prefer the env vars: an argument
+# The DSN comes from the ENVIRONMENT. Prefer the env vars: an argument
 # is readable by every local user via `ps` and lands in shell history.
-python -m tortoise record-backup
+#
+# ⛔ THE BACKUP HAS ITS OWN DSN, AND IT IS NOT THE RECORD'S (#9801). The record
+# connects as `tortoise_record_app` (NOBYPASSRLS, R6), which is right for every
+# read the product makes and WRONG here: a backup must see every tenant. Point
+# TORTOISE_RECORD_BACKUP_DSN at a role that bypasses RLS (the table owner /
+# `postgres`, or `service_role`) and keep TORTOISE_RECORD_DSN as the app role.
+# Unset, the verb falls back to TORTOISE_RECORD_DSN — and when that DSN names the
+# app role, it fails closed with a sentence naming the role, not an "empty
+# record" (a deployment whose record DSN already bypasses RLS keeps working
+# unchanged — the fallback is checked, not refused on sight).
+TORTOISE_RECORD_BACKUP_DSN=... python -m tortoise record-backup
 
 # backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
-TORTOISE_RECORD_SCRATCH_DSN=... python -m tortoise record-backup --reset-scratch
+TORTOISE_RECORD_BACKUP_DSN=... TORTOISE_RECORD_SCRATCH_DSN=... \
+  python -m tortoise record-backup --reset-scratch
 ```
 
 Exit codes (a scheduler's only signal):
@@ -393,8 +403,8 @@ Exit codes (a scheduler's only signal):
 | code | meaning |
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
-| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the **failure class**, not the mode: a failure **after** the artifact was published raises `RecordRestoreFailed` and names the artifact id — the record IS backed up and only the restore is **NOT proven**: retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry. **Any other** exit-1 failure (a dump, encrypt or upload failure, in either mode) means **nothing was published** — the record is NOT backed up |
-| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults. ⚠️ **A permanent fault found AFTER the upload (the likeliest: a stale scratch credential) still exits `2`, but the artifact is already durable** — the drill publishes before it resets and restores, so the verb names the published `backup_id` and says the record IS backed up, instead of claiming nothing was backed up |
+| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the **failure class**, not the mode: a failure **after** the artifact was published raises `RecordRestoreFailed` and names the artifact id — the record IS backed up and only the restore is **NOT proven**: retry, and if it keeps failing check preconditions 4-5 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry. **Any other** exit-1 failure (a dump, encrypt or upload failure, in either mode) means **nothing was published** — the record is NOT backed up |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a **source role that cannot bypass RLS** (`TORTOISE_RECORD_BACKUP_DSN` names the app role, **or** it is unset *and* its `TORTOISE_RECORD_DSN` fallback resolves to the app role — #9801), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults. ⚠️ **A permanent fault found AFTER the upload (the likeliest: a stale scratch credential) still exits `2`, but the artifact is already durable** — the drill publishes before it resets and restores, so the verb names the published `backup_id` and says the record IS backed up, instead of claiming nothing was backed up |
 | `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
 
 Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
@@ -424,18 +434,38 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
 1. **The DIRECT connection string, not the pooler.** A transaction-mode pooler discards session
    state between transactions; a dump through it can be silently short. The verb refuses a pooler
    host or port 6543 (exit 2) rather than producing an artifact nobody can trust.
-2. **R2 + `TORTOISE_BACKUP_KEY`**, the same credentials the graph sweep uses — one bucket, one key,
+
+2. **A role that BYPASSES RLS — not the record's app role (#9801).** R6 arms the record as
+   `tortoise_record_app` (`NOBYPASSRLS`, not the table owner) and names the database-level
+   backup/restore as one of exactly **three** purposes a bypassing role may serve. Both legs of this
+   verb need it, for different reasons:
+   - the **drill's** `count(*)` per table returns **0** under the `*_app_tenant` policies, because
+     this connection never sets `app.current_org_id` and the R6 migration chose *silent reads* (a
+     missing GUC returns NULL, so rows vanish instead of raising). Pre-#9801 that surfaced as
+     *"the record is EMPTY"* — a misdiagnosis that sends an operator to the data while the fault is
+     the role;
+   - `pg_dump`'s `row_security = off` default is an **error**, not a filtered read, for a
+     `NOBYPASSRLS` role, so backup-only mode produced no artifact at all.
+
+   The verb therefore resolves its DSN from `TORTOISE_RECORD_BACKUP_DSN` (falling back to
+   `TORTOISE_RECORD_DSN` only when that variable is unset) and refuses a connection whose role does
+   not bypass RLS, naming the role and this variable (exit 2 — a config edit, so retrying cannot
+   clear it). A *set but blank* `TORTOISE_RECORD_BACKUP_DSN` is refused rather than fallen back:
+   that is the shape a cron line takes when its environment is gone, and falling back would run the
+   backup as the app role.
+
+3. **R2 + `TORTOISE_BACKUP_KEY`**, the same credentials the graph sweep uses — one bucket, one key,
    so a deployment that backs up graphs needs nothing new.
-3. **The drill's scratch target carries the record's schema** (apply `supabase/migrations`). The
+4. **The drill's scratch target carries the record's schema** (apply `supabase/migrations`). The
    artifact is **data-only** on purpose: the schema's one home is the migrations, and a
    schema-carrying artifact cannot restore into a migrated target at all (`pg_restore` refuses
    `relation "node_identity" already exists` — measured 2026-10-22).
-4. **The scratch target carries the tenancy rows the record's foreign keys reference** —
+5. **The scratch target carries the tenancy rows the record's foreign keys reference** —
    `organizations(id)`, and `graphs(org_id, id)`. These are the control plane, not the record. A
    target without them is refused by the FK, which is the correct direction: a record dangling from
    missing tenancy is not a record. (Do **not** work around it with
    `session_replication_role = replica`.)
-5. **The scratch target's record tables are EMPTY.** A restore into a populated record is refused —
+6. **The scratch target's record tables are EMPTY.** A restore into a populated record is refused —
    it is not a drill, and `pg_restore` would either fail halfway on a duplicate key or overwrite
    live data. A successful drill **leaves them populated**, so a *scheduled* drill needs
    `--reset-scratch` (below); without it the first run succeeds and every later run is refused as
@@ -525,8 +555,19 @@ is one job, alongside the graph sweep's `registry-backup-cron.yml`:
 17 3 * * *   python -m tortoise record-backup --reset-scratch
 ```
 
-Both DSNs are read from the environment (`TORTOISE_RECORD_DSN`,
-`TORTOISE_RECORD_SCRATCH_DSN`), so the job's command line carries no password.
+All three DSNs are read from the environment, so the job's command line carries no password — and the
+BACKUP one is **`TORTOISE_RECORD_BACKUP_DSN`**, not the app-role `TORTOISE_RECORD_DSN` (#9801): a
+backup must see every tenant, and the record's own app role (`NOBYPASSRLS`) is refused with exit `2`
+by design. A job armed with only `TORTOISE_RECORD_DSN` **whose record role is the app role
+therefore exits `2` on every run and publishes nothing** — loud, but never a working archive. (A
+record DSN that already bypasses RLS is still accepted through the fallback; the gate checks the
+ROLE, not which variable supplied it.) The three are:
+
+| variable | what it is |
+|---|---|
+| `TORTOISE_RECORD_BACKUP_DSN` | the **backup** connection: the DIRECT string, as a role that **bypasses RLS** (the table owner / `postgres`, or `service_role`). **This is the one the job needs.** |
+| `TORTOISE_RECORD_SCRATCH_DSN` | the drill's empty scratch target (direct, not the pooler) |
+| `TORTOISE_RECORD_DSN` | the record's own app-role DSN. Used only as a FALLBACK when the backup DSN is unset — and when it names the app role the run fails closed with a refusal naming the role, rather than backing up as the app role (a record DSN that already bypasses RLS is accepted: the gate checks the ROLE, not the variable) |
 
 Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
 restate the record's loss window as anything smaller. The drill's own cadence can be slower than the

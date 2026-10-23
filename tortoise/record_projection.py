@@ -146,6 +146,7 @@ __all__ = [
     "JOURNAL_EVENT_TYPES",
     "PACKAGED_MIGRATIONS",
     "RECORD_MUTATIONS",
+    "ROLE_POSTURE_SQL",
     "TENANT_GUC",
     "TENANT_GUC_SQL",
     "TENANT_SCOPE_SQL",
@@ -273,8 +274,16 @@ TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 #: record mutations, and a caller that filters on `current_setting` keeps seeing
 #: every non-plan statement the seam issues. The org id and the table names
 #: travel as bind parameters.
-TENANT_SCOPE_SQL = (
-    f"SELECT current_setting('{TENANT_GUC}', true) AS tenant, "
+
+#: The ROLE POSTURE half of `TENANT_SCOPE_SQL` below, on its own, so the SAME four
+#: predicates decide "does this connection bypass RLS?" on every path that asks
+#: — the tenant scope (which REQUIRES non-bypassing) and R9's backup (which
+#: REQUIRES bypassing, one of the three purposes R6 names). Two copies of these
+#: predicates would be two answers to one question, and the backup's copy would
+#: be the one nobody re-reads: #9801 is exactly that failure — a backup verb
+#: connected as the app role, counted ZERO rows under the `*_app_tenant`
+#: policies, and reported the record as EMPTY.
+_ROLE_POSTURE_SELECT = (
     "       r.rolsuper OR r.rolbypassrls "
     "       OR EXISTS (SELECT 1 FROM pg_roles g "
     "                   WHERE g.oid <> r.oid "
@@ -287,7 +296,25 @@ TENANT_SCOPE_SQL = (
     "                     AND (c.relowner = r.oid "
     "                          OR pg_has_role(r.oid, c.relowner, 'USAGE'))) "
     "       AS bypassing "  # named so a mapping-shaped row (RealDict) can be read
-    "  FROM pg_roles r "
+)
+
+#: The posture ALONE: ``(role, bypassing)`` for ``current_user``, with no GUC in
+#: the statement. For a caller whose obligation is the OPPOSITE of the scope's —
+#: R9's ``pg_dump``/``pg_restore``, which R6 names as a legitimate bypass purpose
+#: because a backup must see every tenant. ``role`` is selected so a refusal can
+#: NAME the role instead of blaming the data (#9801). Takes ONE bind parameter:
+#: the table set, exactly like :data:`TENANT_SCOPE_SQL`.
+ROLE_POSTURE_SQL = (
+    "SELECT r.rolname AS role, "
+    + _ROLE_POSTURE_SELECT
+    + "  FROM pg_roles r "
+    " WHERE r.rolname = current_user"
+)
+
+TENANT_SCOPE_SQL = (
+    f"SELECT current_setting('{TENANT_GUC}', true) AS tenant, "
+    + _ROLE_POSTURE_SELECT
+    + "  FROM pg_roles r "
     " WHERE r.rolname = current_user"
 )
 

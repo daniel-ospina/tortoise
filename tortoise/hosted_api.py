@@ -17137,6 +17137,97 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # never gated.
         _check_org_limit(org, "points")
 
+        # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
+        # REQUEST (payload shape, #9425) and the org's ALREADY-COUNTED nodes
+        # (#5637). Neither bounds the growth this lane leaves behind: a
+        # `points: []` commit mints :Session + transcript :Source +
+        # AgentSession :Event, and `_count_resource("points")` matches none of
+        # those labels, so that count never moves and its gate can never trip.
+        # #4010 made sessions unlimited for every tier, which removed this
+        # lane's only TOTAL bound; the total bound itself is #4051 §4 and needs
+        # an owner ruling (#4495/#5331 decided the UNIT is MB/GB, not nodes) —
+        # this is the slice of #4051 that needs no ruling: a per-org, 60s
+        # BYTE allowance on what a tenant may ingest, refused with 429 +
+        # Retry-After. It is a throttle (rate), not a cap (total): a legitimate
+        # commit at any rate below the allowance is unaffected, and a plan that
+        # wants more speaks to us (#5425's posture — rate limit, not refusal of
+        # the customer's data).
+        #
+        # WHY HERE — the SAME site as the sessions/points gates above, i.e. after
+        # every replay return and BEFORE the budget adjudication. Before the
+        # adjudication is load-bearing, not cosmetic: the `held` outcome WRITES
+        # (it MERGEs the :Session node with its `value_nodes_held` counter, and
+        # for a fresh `session_id` that MERGE CREATES it) and the `fail`
+        # outcome still leaves the :CommitRecord merged above — so every request
+        # that gets past the replay returns writes at least one node, and a gate
+        # below the adjudication (i.e. below the `held` return, not below the
+        # replay returns) would leave the held band's :Session mint
+        # (one uncounted node per request, the very class this issue is about)
+        # completely uncharged. ⛔ Moving the gate ABOVE the replay returns is the
+        # opposite error and is forbidden: a replay writes no nodes and must
+        # never 402 (#1727, pinned by
+        # `test_replay_does_not_consume_the_budget`).
+        #
+        # ⛔ SCOPE, stated precisely because overstating a gate is worse than the
+        # gap it leaves: the refusal is NOT write-free. `store.acquire(...)`
+        # above merges the `:CommitRecord` idempotency anchor BEFORE any gate in
+        # this handler (as it does for the pre-existing sessions and points
+        # gates), so a 429 leaves one `status='partial'` record — replay-safe,
+        # counted by no quota, and deliberately not charged (a refused charge is
+        # not appended to the window). It is bounded by the per-key rate limit
+        # and it is the same residual every gate on this path already carries;
+        # it is recorded here so the next reader does not take "pre-write" to
+        # mean "mints nothing".
+        #
+        # CHARGE = max(payload bytes, nodes it will mint × 1024). The payload
+        # term stops a `summary`/`story_arc` (uncapped by Layer-1) from adding
+        # megabytes for a few hundred bytes of node charge; the node floor
+        # stops the `points: []` loop from being cheap. Both are stated in
+        # `commit_schema.commit_ingest_charge_bytes`; the reason it is NOT
+        # `plan.reconcile.net_new` (the PL4 metered figure) is there too — that
+        # counts points+entities+operators only, so an events-only payload
+        # would meter 0 while minting a node per entry.
+        from tortoise.commit_schema import commit_ingest_charge_bytes
+        from tortoise.quota import commit_ingest_admit
+
+        admission = commit_ingest_admit(org.get("org_id"),
+                                       commit_ingest_charge_bytes(payload))
+        if not admission.allowed:
+            retry_after = max(1, math.ceil(admission.retry_after))
+            # #5425's seam, not a hand-appended sentence: it terminates the
+            # prose and appends the ONE contact path. A throttle is not a
+            # ceiling to buy out of — it names its own next step ("retry
+            # shortly") and the header says how long. The SENTENCE follows
+            # `scope`: in the shared-overflow regime the caller's own `used`
+            # can be 0 (the instance's shared capacity is what is spent), so
+            # saying "by this team" would blame a tenant that wrote nothing.
+            message = (
+                "The shared ingest allowance for this instance is saturated "
+                "— retry shortly"
+                if admission.scope == "process" else
+                "Too much data is being written by this team right now — "
+                "retry shortly")
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "ingest_rate_limited",
+                    "message": with_limit_contact(message),
+                    # "org" = the caller's own allowance; "process" = the ONE
+                    # shared overflow bucket an instance falls back to when its
+                    # owned store is full of active orgs (bounded flood
+                    # regime). `used` is the caller's own spend in either case,
+                    # so `used: 0` with `scope: "process"` is a refusal about
+                    # the instance, never about the caller's traffic.
+                    "scope": admission.scope,
+                    "resource": "commit_ingest_bytes",
+                    "used": admission.used,
+                    "limit": admission.limit,
+                    "unit": "bytes/60s",
+                    "retry_after": retry_after,
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+
         # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
         if plan.budget.outcome == "fail":
             # Ceiling exceeded (>50): nothing written; the record stays partial

@@ -92,6 +92,9 @@ __all__ = [  # noqa: RUF022
     "validate_domain_rules", "domain_block_warnings", "_infer_payload_domain",
     # canonicalization
     "canonical_payload", "compute_client_commit_id", "point_content_id",
+    # ingest budget (#4051 §3.1)
+    "declared_commit_write_count", "commit_ingest_charge_bytes",
+    "COMMIT_INGEST_BYTES_PER_NODE",
     # reconciliation
     "GraphState", "PointReconcile", "EntityReconcile", "OperatorReconcile",
     "ReconcileResult", "reconcile_payload",
@@ -876,6 +879,167 @@ class CommitPayload(BaseModel):
         except ValueError:
             raise ValueError("captured_at must be an ISO 8601 timestamp")  # noqa: B904
         return v
+
+
+# ── #4051 §3.1: the per-org ingest charge ────────────────────────────────
+# The input to ``quota.commit_ingest_admit``. Computed from the PAYLOAD, never
+# from metering: the PL4 figure (``plan.reconcile.net_new``) is
+# points+entities+operators only, so an ``events[]``-only commit meters 0 while
+# minting a :Event per entry — a budget keyed on it would be bypassable by the
+# very hole it exists to bound.
+
+#: Nodes the write phase mints for EVERY commit, before any payload entry:
+#: the ``:CommitRecord`` idempotency anchor (``commit_idempotency._MERGE_CYPHER``
+#: — merged before ANY gate on this handler, so a refused request mints it
+#: too), the ``:Session`` MERGE, its transcript ``:Source`` (D10 — a document IS
+#: a ``:Source``) and the AgentSession ``:Event``
+#: (``hosted_api._execute_commit_writes`` steps 1-3). The last three are exactly
+#: the labels `_count_resource("points")` does NOT match, which is why a
+#: ``points: []`` commit was invisible to every quota (#4051).
+_COMMIT_FIXED_NODES = 4
+
+#: The planning figure the repo's own cost basis uses for ONE node
+#: (``product/pricing.json`` → ``billing.cost_basis.bytes_per_node`` = 1024).
+#: Deliberately NOT a price and NOT a cap input — ``tortoise/graph_storage.py``
+#: records that the ``bytes_per_node`` constant and ``max_graph_nodes`` are
+#: owner territory and stay untouched. This is a RATE unit: it converts "how
+#: many nodes will this request leave behind" into stored bytes, so a
+#: node-counting loop cannot be cheap merely because each node is small.
+#: A test ties the value to pricing.json, so an owner retune of the cost basis
+#: cannot silently leave this rate charging the old figure.
+COMMIT_INGEST_BYTES_PER_NODE = 1024
+
+#: Nodes ONE ``points[]`` entry costs at most. The write phase
+#: (``hosted_api._execute_commit_writes`` §5/§6b) takes one of three reconcile
+#: actions per entry, and they do NOT mint the same number of nodes:
+#:
+#: * ``new`` → the ``:Point`` + its ``PointAdded`` ``:GraphEvent`` = **2**;
+#: * ``supersede`` → the successor ``:Point`` + its ``PointAdded``, **and** the
+#:   predecessor's ``PointSuperseded`` ``:GraphEvent``
+#:   (``sdk.supersede_point``, hosted_api §6b) = **3**;
+#: * ``merge`` → ``MATCH (p:Point {id:$pid}) SET p.updatedAt`` only = **0**.
+#:
+#: Charging **3** per entry is therefore the upper bound over every action, and
+#: it is deliberate that the payload-only signature cannot tell them apart: an
+#: entry is charged for the WORST shape it can take. Review cycle 3 measured the
+#: 2-node flat rate under-charging a superseding point by exactly one node — the
+#: fail-OPEN direction — so the rate follows the reconcile actions, not the
+#: payload shape. (Over-charging a ``merge`` entry by 3 nodes is the accepted
+#: direction; it delays a request where under-charging would remove the bound.)
+_COMMIT_POINT_ENTRY_NODES = 3
+
+#: ``operators[]`` — 2 nodes for ``IMPL``/``NAND`` (``sdk.create_operator``:
+#: the operator ``:Point`` + its ``OperatorAdded`` ``:GraphEvent``), **3** for a
+#: ``MITIGATES`` bridge-attack: ``sdk.mitigate_operator`` CREATEs the mitigation
+#: ``:Point`` and then emits BOTH ``PointAdded`` and ``OperatorAdded`` for it —
+#: two durability records, not one. The mitigation Point is in no other lane
+#: (it is not a ``points[]`` entry), so this entry must carry it.
+_COMMIT_OPERATOR_ENTRY_NODES = 2
+_COMMIT_MITIGATES_ENTRY_NODES = 3
+
+#: ``supersessions[]`` — the canonical ``pt_<sha>`` fold routes to
+#: ``sdk.supersede_point`` (one ``PointSuperseded`` ``:GraphEvent``) and the
+#: entity fold to ``ObjectSuperseded``; two also covers the edge/status writes
+#: that mint no node.
+_COMMIT_SUPERSESSION_ENTRY_NODES = 2
+
+_COMMIT_FLAT_NODE_LANES = ("entities", "events", "sources")
+
+
+def _operator_op_type(op) -> str:
+    """The wire ``op_type`` of one ``operators[]`` entry, model or raw dict."""
+    if isinstance(op, dict):
+        return str(op.get("op_type") or "")
+    return str(getattr(op, "op_type", "") or "")
+
+
+def declared_commit_write_count(payload) -> int:
+    """Graph NODES one commit payload will mint — a declared UPPER bound.
+
+    * ``_COMMIT_FIXED_NODES`` — the ``:CommitRecord`` anchor, ``:Session``, its
+      transcript ``:Source`` and the AgentSession ``:Event``;
+    * one more for the canonical ``session:<id>`` ``:Source`` that step 4 of
+      ``_execute_commit_writes`` materializes **only when ``provenance_refs``
+      is non-empty** (an ordinary commit has provenance refs, so omitting it
+      would under-charge the common case by 20%);
+    * ``entities[]``/``events[]``/``sources[]``: one node per entry;
+    * ``points[]``: ``_COMMIT_POINT_ENTRY_NODES`` (3) per entry — the bound over
+      the ``new``/``supersede``/``merge`` reconcile actions;
+    * ``operators[]``: 3 for a ``MITIGATES`` bridge-attack, 2 otherwise;
+    * ``supersessions[]``: ``_COMMIT_SUPERSESSION_ENTRY_NODES`` (2) per entry.
+
+    Each lane's rate is the WORST shape that entry can take, because the
+    function is a pure function of the REQUEST (it must be computable and
+    testable without the graph, and must not move as the graph changes) — it
+    deliberately does not read ``plan.reconcile``, whose per-entry action is
+    only known after reconciliation and would make the same request charge
+    differently depending on what the tenant already wrote.
+
+    ``provenance_refs[]`` entries are otherwise NOT charged one-for-one: beyond
+    that single Source they grow the session ``:Source``'s stored
+    ``provenance_spans`` property rather than minting nodes, and their count is
+    already bounded by ``quota.MAX_PROVENANCE_REFS`` — the payload term of
+    :func:`commit_ingest_charge_bytes` charges the bytes they actually add.
+
+    UPPER, deliberately, in both directions that can be wrong: a MERGE that
+    finds an existing node mints nothing, and the ``:GraphEvent`` term is
+    charged per ENTRY rather than per actual event, so a replay-heavy or
+    dedup-heavy client is charged for more than it writes. That is the
+    fail-closed direction for a throttle (over-charging delays a request;
+    under-charging removes the bound). A payload shape that mints MORE nodes
+    than this returns is a defect: the charge must never be cheaper than the
+    write — pinned against the GRAPH by
+    ``tests/test_commit_endpoint.py::TestCommitOrgIngestBound``,
+    ``test_the_charge_is_never_cheaper_than_the_write``, on a ``new``, a
+    ``supersede`` and a ``MITIGATES`` shape.
+    """
+    total = _COMMIT_FIXED_NODES
+    if getattr(payload, "provenance_refs", None):
+        total += 1  # the canonical ``session:<id>`` :Source (step 4)
+    for lane in _COMMIT_FLAT_NODE_LANES:
+        total += len(getattr(payload, lane, None) or ())
+    total += _COMMIT_POINT_ENTRY_NODES * len(getattr(payload, "points", None) or ())
+    total += _COMMIT_SUPERSESSION_ENTRY_NODES * len(
+        getattr(payload, "supersessions", None) or ())
+    for op in getattr(payload, "operators", None) or ():
+        total += (_COMMIT_MITIGATES_ENTRY_NODES
+                  if _operator_op_type(op) == "MITIGATES"
+                  else _COMMIT_OPERATOR_ENTRY_NODES)
+    return total
+
+
+def commit_ingest_charge_bytes(payload) -> int:
+    """The stored BYTES one commit is charged against its org's ingest budget.
+
+    ``max(payload bytes, nodes it will mint × 1024)``:
+
+    * the **payload term** stops the fat-property bypass — ``summary`` and
+      ``story_arc`` carry no field cap (Layer-1 caps point content/quote and the
+      event/source/entity counts, not these two), so a commit of three nodes
+      carrying an 8 MiB summary would add megabytes for a few hundred bytes of
+      node charge. It is the **whole re-serialized §6.1 request body**
+      (``model_dump_json()``), NOT the ``canonical_payload`` subset the server
+      hashes for ``client_commit_id`` — that one omits ``sources``,
+      ``provenance_refs``, ``telemetry``, ``extractor`` and each point's
+      ``confidence``/``c_cal``/``status``/``reason``, so charging it would
+      understate the bytes a client actually sends (``docs/INGEST_CONTRACT.md``
+      §9 states the unit in these terms);
+    * the **node floor** stops the reverse — a ``points: []`` commit's ~1 KB
+      body mints ~3 KB of nodes, which is the cheapest iteration of the very
+      loop #4051 is about (measured pre-fix: unbounded).
+
+    Serializing the payload costs one pass; the commit path ALSO canonicalizes
+    a JSON subset per request, but only to hash ``client_commit_id`` — this
+    charge deliberately measures the full body instead. It runs on the
+    endpoint's worker thread (``asyncio.to_thread(_commit_sync)``), never on
+    the event loop.
+    """
+    try:
+        payload_bytes = len(payload.model_dump_json().encode("utf-8"))
+    except Exception:  # a charge must never fail a commit
+        payload_bytes = 0
+    return max(payload_bytes,
+               declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE)
 
 
 # ── Layer-1 validation (deterministic) ────────────────────────────────────

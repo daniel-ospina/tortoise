@@ -8,7 +8,7 @@
  * form state — this is the stale-closure guard (code-review P2, PR #1818).
  */
 
-import { buildSaveRecord, createPost, updatePost, purgePostCache, type SaveFormFields } from '@/lib/blog-api';
+import { buildSaveRecord, createPost, updatePost, purgePostCache, notifyPublished, type SaveFormFields } from '@/lib/blog-api';
 
 export type SaveMode = 'draft' | 'publish';
 
@@ -33,6 +33,11 @@ export function createSaveHandler(getState: GetSaveContext) {
     if (ctx.isNew) {
       record.created_by = ctx.userId;
       const created = await createPost(record);
+      // #9803: the editor writes status directly to Supabase, so the agent
+      // API's publish transition never sees this — the editor tells the
+      // side-effect endpoint instead. Publish only; a draft create submits
+      // nothing.
+      if (mode === 'publish' && created.slug) void notifyPublished(created.slug);
       return created.id;
     }
     if (!ctx.id) throw new Error('Missing post id');
@@ -46,6 +51,12 @@ export function createSaveHandler(getState: GetSaveContext) {
     const holdHidesPublished = ctx.form.hold_for_review && ctx.wasPublished;
     if ((mode === 'draft' && ctx.wasPublished || holdHidesPublished) && ctx.form.slug) {
       void purgePostCache(ctx.form.slug);
+    }
+    // #9803: publish — including "publish again" on an already-live post. The
+    // endpoint re-checks that the row is published and owns the 24h window, so
+    // this is safe to fire on every publish save.
+    if (mode === 'publish' && ctx.form.slug) {
+      void notifyPublished(ctx.form.slug);
     }
     return ctx.id;
   };

@@ -208,6 +208,12 @@ class FakeCursor:
         if "count(*)" in sql:
             table = sql.split('"')[1]
             self._value = self._conn.counts[table]
+        elif "rolbypassrls" in sql:
+            # The ROLE POSTURE read (#9801). The default connection bypasses RLS,
+            # which is what R6 names the backup role to be — so every pre-#9801
+            # arm in this file keeps measuring what it was written to measure.
+            # `FakeConn.role` / `FakeConn.bypassing` move it.
+            self._value = (self._conn.role, self._conn.bypassing)
         elif sql.upper().startswith("TRUNCATE"):
             # The scratch reset: every record table in ONE statement, exactly as
             # the module emits it — so a reset that silently emptied one table
@@ -220,6 +226,11 @@ class FakeCursor:
         return None
 
     def fetchone(self):
+        # A tuple for the count/config reads, and the posture pair for
+        # `ROLE_POSTURE_SQL` — the real driver returns a row either way, and a
+        # cursor that returned None there would read as "the role is unknown".
+        if isinstance(self._value, tuple):
+            return self._value
         return (self._value,)
 
     def close(self) -> None:
@@ -227,9 +238,21 @@ class FakeCursor:
 
 
 class FakeConn:
-    def __init__(self, dsn: str, counts: dict[str, int]) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        counts: dict[str, int],
+        *,
+        role: str = "postgres",
+        bypassing=True,
+    ) -> None:
         self.dsn = dsn
         self.counts = counts
+        # The RLS posture `ROLE_POSTURE_SQL` reports for this connection (#9801).
+        # Default: a bypassing backup role, which is what R6 requires of R9's
+        # leg — so an arm that does not care about the role is unaffected.
+        self.role = role
+        self.bypassing = bypassing
         self.closed = False
         self.rolled_back = False
         self.committed = False
@@ -394,6 +417,32 @@ def test_the_ambient_libpq_environment_never_reaches_the_dump(monkeypatch):
             "must reach the database its DSN names, not the one a shell variable names")
     # The minimum a client needs to RUN is still passed through.
     assert env["PATH"] == "/usr/bin"
+
+
+def test_percent_encoded_credentials_are_decoded_at_every_userinfo_site():
+    """#3039: ONE userinfo reader — and the one it names must DECODE.
+
+    Every site in this module that reads the DSN's userinfo (the libpq
+    environment, the error sentence, the manifest's non-secret coordinates) goes
+    through `tortoise.config.parse_uri_userinfo`; a raw
+    `urlsplit(...).username` read here is refused by
+    `tests/test_from_uri_userinfo.py::test_no_raw_urlparse_userinfo_read_in_guarded_dirs`.
+    This test pins the CONTRACT that makes that substitution safe, because the
+    guard cannot: `urlsplit` does NOT percent-decode, while libpq/psycopg DO, so
+    handing the raw form to the client authenticates with a literal `%40` and
+    fails with a misleading "invalid username-password pair". `env` is exactly
+    what libpq reads, so a revert to the raw fields (or to `raw_uri_userinfo`)
+    reds this.
+    """
+    dsn = "postgresql://rec%40ord:p%40ss%3Aword@db.projectref.supabase.co:5432/postgres"
+    env = rb.libpq_env(dsn)
+    assert env["PGUSER"] == "rec@ord"
+    assert env["PGPASSWORD"] == "p@ss:word"
+    # The manifest is plaintext and world-readable — decoded, never re-encoded.
+    assert rb._source_of(dsn)["user"] == "rec@ord"
+    # An error sentence names the user; the encoded form must not leak into it.
+    assert "rec@ord@" in rb._coordinates_for_message(dsn)
+    assert "rec%40ord" not in rb._coordinates_for_message(dsn)
 
 
 def test_the_manifest_records_the_table_set_the_ciphertext_hash_and_no_credentials():
@@ -844,10 +893,13 @@ def test_the_drill_tolerates_rows_written_after_the_dump_and_names_the_window():
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            # 1 = the vacuity count, 2 = the `cut` count taken immediately
-            # BEFORE `pg_dump` runs (which is also the manifest's `row_counts`),
-            # 3 = the post-dump re-count. Rows land between 2 and 3.
-            if reads["source"] >= 3:
+            # 1 = the role-posture read (#9801), 2 = the vacuity count, 3 = the
+            # `cut` count taken immediately BEFORE `pg_dump` runs (which is also
+            # the manifest's `row_counts`), 4 = the post-dump re-count. Rows land
+            # between 3 and 4 — i.e. INSIDE the dump, which is the case this arm
+            # exists for: an insertion during the dump must not read as an
+            # impossible artifact.
+            if reads["source"] >= 4:
                 db.source = {**db.source, "journal_event": 515}
         return real_connect(dsn)
 
@@ -878,21 +930,23 @@ def test_the_drill_does_not_red_when_a_row_lands_between_the_two_source_reads():
     perfectly healthy backup: exit 3, `"verdict": "MISMATCH"` with no
     `mismatches`, on the exact schedule `docs/infra-runbook.md` documents, on a
     run whose restore had not started. The sibling test above places the
-    concurrent row at the THIRD read, which is the one placement that never
-    exercises that guard; this one places it at the second.
+    concurrent row AFTER the dump (read 4), which is the one placement that never
+    exercises that guard; this one places it AT the `cut` read (read 3), so the
+    count that becomes the artifact's own claim sees it.
     """
     db = FakeDB(SOURCE_COUNTS)
     reads = {"source": 0}
     real_connect = db.connect
     # The row is committed BEFORE the read it precedes, so the count taken as the
-    # artifact is cut (read #2) already sees it — and so does the dump, and so
-    # does the post-dump re-count (read #3).
+    # artifact is cut (read #3 — #1 is the role-posture read added by #9801, #2 is
+    # the vacuity count) already sees it — and so does the dump, and so does the
+    # post-dump re-count (read #4).
     artifact_counts = {**SOURCE_COUNTS, "journal_event": 515}
 
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            if reads["source"] >= 2:
+            if reads["source"] >= 3:
                 db.source = dict(artifact_counts)
         return real_connect(dsn)
 
@@ -903,7 +957,7 @@ def test_the_drill_does_not_red_when_a_row_lands_between_the_two_source_reads():
         DSN, MemoryStorage(), SCRATCH_DSN,
         run=FakeRunner(on_restore=restore), connect=connect, key=KEY,
     )
-    assert reads["source"] >= 2, "the concurrent row must land before the manifest count"
+    assert reads["source"] >= 3, "the concurrent row must land before the manifest count"
     assert report["verdict"] == "RESTORED"
     assert report["tables"]["journal_event"] == {
         "source": 512, "source_after": 515, "restored": 515,
@@ -966,7 +1020,9 @@ def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            if reads["source"] >= 3:
+            # 1 = the role-posture read (#9801), 2 = the vacuity count, 3 = the
+            # `cut` count, 4 = the post-dump re-count.
+            if reads["source"] >= 4:
                 db.source = dict(after_counts)
         return real_connect(dsn)
 
@@ -975,7 +1031,7 @@ def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
         run=FakeRunner(on_restore=lambda: db.scratch.update(SOURCE_COUNTS)),
         connect=connect, key=KEY,
     )
-    assert reads["source"] >= 3, "the deletion must land before the ceiling read"
+    assert reads["source"] >= 4, "the deletion must land before the ceiling read"
     assert report["verdict"] == "RESTORED"
     assert report["tables"]["journal_event"] == {
         "source": 512, "source_after": 500, "restored": 512,
@@ -1005,11 +1061,12 @@ def test_the_drill_does_not_red_when_rows_land_before_the_CUT_and_age_out_by_the
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            # 1 = the vacuity count, 2 = the `cut` count taken immediately before
-            # `pg_dump` runs, 3 = the post-dump re-count.
-            if reads["source"] >= 2:
-                db.source = dict(peak)
+            # 1 = the ROLE POSTURE read (#9801), 2 = the vacuity count, 3 = the
+            # `cut` count taken immediately before `pg_dump` runs, 4 = the
+            # post-dump re-count.
             if reads["source"] >= 3:
+                db.source = dict(peak)
+            if reads["source"] >= 4:
                 db.source = dict(aged_out)
         return real_connect(dsn)
 
@@ -1018,7 +1075,7 @@ def test_the_drill_does_not_red_when_rows_land_before_the_CUT_and_age_out_by_the
         run=FakeRunner(on_restore=lambda: db.scratch.update(peak)),
         connect=connect, key=KEY,
     )
-    assert reads["source"] >= 3, "the deletion must land before the post-dump re-count"
+    assert reads["source"] >= 4, "the deletion must land before the post-dump re-count"
     assert report["verdict"] == "RESTORED"
     assert report["tables"]["journal_event"] == {
         "source": 512, "source_after": 500, "restored": 515,
@@ -1053,9 +1110,10 @@ def test_an_artifact_with_no_row_counts_claim_uses_the_SAME_ceiling(monkeypatch)
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            if reads["source"] >= 2:
-                db.source = dict(peak)
+            # 1 = the role-posture read (#9801), then the three counts.
             if reads["source"] >= 3:
+                db.source = dict(peak)
+            if reads["source"] >= 4:
                 db.source = dict(aged_out)
         return real_connect(dsn)
 
@@ -1105,7 +1163,10 @@ def test_a_lost_table_is_STILL_red_on_a_record_that_moved():
     def connect(dsn):
         if dsn == DSN:
             reads["n"] += 1
-            if reads["n"] >= 3:
+            # 1 = the role-posture read (#9801), 2 = the vacuity count, 3 = the
+            # `cut` count, 4 = the post-dump re-count. The row lands INSIDE the
+            # dump (between 3 and 4), so the artifact may legitimately carry it.
+            if reads["n"] >= 4:
                 db.source = {**db.source, "journal_event": 515}
         return real_connect(dsn)
 
@@ -1582,34 +1643,6 @@ def test_addresses_normalise_an_ipv4_mapped_ipv6_spelling(real_address_math):
     )
 
 
-def test_a_percent_encoded_credential_reaches_libpq_DECODED(tmp_path):
-    """#3039: the record DSN's userinfo must be percent-DECODED before libpq.
-
-    `urllib.parse.urlsplit` does NOT decode userinfo; `redis.from_url` and
-    libpq's own URI handling DO. `record_backup` read `.username`/`.password`
-    straight off the `_split_dsn` result, so a password containing `@`, `:`,
-    `/`, `?`, `#` or `%` reached `pg_dump` as a literal `%XX` and the backup
-    failed with a misleading auth error.
-
-    This pin exists because the #3039 source guard CANNOT see that shape: it
-    tracks attribute reads on bindings from a `urlparse`/`urlsplit` CALL, and
-    `parts = _split_dsn(dsn)` is neither — so the bug survived the sweep and
-    nothing stopped the raw read from being restored silently.
-    """
-    # `@` and `:` inside the password, percent-encoded the way a DSN must.
-    dsn = "postgresql://record_user:p%40ss%3Aword@db.projectref.supabase.co:5432/rec"
-    env = rb.libpq_env(dsn)
-    assert env["PGUSER"] == "record_user"
-    assert env["PGPASSWORD"] == "p@ss:word", (
-        "the credential reached libpq still percent-encoded — libpq decodes "
-        "URI userinfo, so the decoded form is what authenticates (#3039)"
-    )
-    # The non-secret coordinates still come from `_split_dsn`, undamaged.
-    assert env["PGHOST"] == "db.projectref.supabase.co"
-    assert env["PGPORT"] == "5432"
-    assert env["PGDATABASE"] == "rec"
-
-
 def test_the_guard_REFUSES_ambient_libpq_coordinates(monkeypatch):
     """#9601 review cycle 7 (P2): `PGHOSTADDR` outranks the URI's host.
 
@@ -1796,10 +1829,17 @@ def test_list_record_backups_skips_unreadable_manifests():
 
 
 def _cli(monkeypatch, argv, storage=None, fail_storage=None, db=None, *, runner=None,
-         patch_connector=True, backup_key=KEY, scratch_env=None):
+         patch_connector=True, backup_key=KEY, scratch_env=None, backup_env=None):
     from tortoise import __main__ as cli
 
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    # #9801 gives the backup its OWN DSN surface. Clear it by default, exactly
+    # like the scratch one below, so an operator's shell env cannot decide which
+    # role a test backs up as; a test that pins the env route passes `backup_env=`.
+    if backup_env is None:
+        monkeypatch.delenv(rb.RECORD_BACKUP_DSN_ENV, raising=False)
+    else:
+        monkeypatch.setenv(rb.RECORD_BACKUP_DSN_ENV, backup_env)
     # The scratch DSN has an environment surface too (#9601 review, P2). Clear it
     # by default so an operator's shell env cannot turn every backup-mode test
     # into a drill; a test that pins the env route passes `scratch_env=`.
@@ -2137,7 +2177,7 @@ def test_the_documented_exit_1_contract_is_CLASS_aware_in_the_runbook_and_the_ve
     assert "FAILURE CLASS" in doc
     assert "RecordRestoreFailed" in doc
     assert "NOTHING was published" in doc
-    assert "check preconditions 3-4" in doc
+    assert "check preconditions 4-5" in doc
 
 
 def test_the_ceiling_claims_only_what_the_three_source_reads_CAN_see():
@@ -2485,11 +2525,15 @@ def _raising(message: str, pgcode: str | None = None, seen: list[str] | None = N
 def test_a_driver_failure_of_the_COUNT_leg_is_a_documented_class_not_a_traceback():
     """P2: `connector(dsn)` stood outside every `try`, so `OperationalError` escaped.
 
-    Every mode's FIRST act is this count leg, and `_default_connector`'s last
-    statement is a bare `psycopg2.connect(...)`. A refused connection / bad password
-    / absent database therefore left `main()` as an interpreter traceback: exit 1
-    ("try again") on faults only a config edit clears, and no sentence from the
-    class table the verb documents. Pre-fix this raises `_DriverError`.
+    The first *connection* either mode opens is the role-posture read (#9801) —
+    from `create_record_backup` in backup-only mode, from `run_restore_drill` in
+    drill mode. The first *count* is the drill's emptiness check (`before`), or,
+    in backup-only mode, `create_record_backup`'s own manifest count; there is no
+    drill at all in backup-only mode. `_default_connector`'s last statement is a
+    bare `psycopg2.connect(...)`, so a refused connection / bad password / absent
+    database used to leave `main()` as an interpreter traceback: exit 1 ("try
+    again") on faults only a config edit clears, and no sentence from the class
+    table the verb documents. Pre-fix this raises `_DriverError`.
     """
     with pytest.raises(rb.RecordBackupError) as excinfo:
         rb.record_row_counts(DSN, connect=_raising("connection ... failed: refused"))
@@ -2535,15 +2579,77 @@ def test_a_PERMANENT_driver_fault_is_exit_2_so_a_scheduler_stops_retrying():
 
 
 @pytest.mark.parametrize("pgcode,expected", [(None, 1), ("28P01", 2)])
-def test_the_verb_exits_the_CLASS_code_when_the_count_leg_cannot_connect(
+def test_the_verb_exits_the_CLASS_code_when_the_ROLE_leg_cannot_connect(
         monkeypatch, capsys, pgcode, expected):
     """The end-to-end half: the code a scheduler actually branches on.
 
+    Since #9801 the gate is the FIRST connection either path opens, so the
+    `_default_connector` failure this arm injects happens on the ROLE-POSTURE
+    read — the mapping is the same (`require_bypassing_role` routes through the
+    same `_connect` → `_connection_failure` pair as the count leg). Naming the
+    leg is not enough to prove it, because an arm that only asserts the exit code
+    is satisfied by a run that never opened the gate and failed on the count
+    instead, so the arm also spies both legs: the gate must be REACHED and the
+    count must NOT be. The count leg's own end-to-end proof is
+    `test_the_verb_exits_the_CLASS_code_when_the_COUNT_leg_cannot_connect` below.
+
     Pre-fix this is not an exit code at all — the exception leaves `main()`.
     """
+    reached: list[str] = []
+    real_gate, real_count = rb.require_bypassing_role, rb.record_row_counts
+
+    def gate(*a, **kw):
+        reached.append("gate")
+        return real_gate(*a, **kw)
+
+    def count(*a, **kw):
+        reached.append("count")
+        return real_count(*a, **kw)
+
+    monkeypatch.setattr(rb, "require_bypassing_role", gate)
+    monkeypatch.setattr(rb, "record_row_counts", count)
     monkeypatch.setattr(rb, "_default_connector", _raising("could not connect", pgcode))
     rc = _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], patch_connector=False)
     captured = capsys.readouterr()
+    assert reached == ["gate"], (
+        f"the failure must land on the role gate BEFORE any count — reached {reached}")
+    assert rc == expected, f"stdout={captured.out!r} stderr={captured.err!r}"
+    assert "Traceback" not in captured.err
+    assert "could not be reached" in captured.err
+    assert "s3cr3t-pw" not in captured.err
+
+
+@pytest.mark.parametrize("pgcode,expected", [(None, 1), ("28P01", 2)])
+def test_the_verb_exits_the_CLASS_code_when_the_COUNT_leg_cannot_connect(
+        monkeypatch, capsys, pgcode, expected):
+    """The count leg's OWN end-to-end exit mapping, past the #9801 role gate.
+
+    The arm above now fails on the posture read, because the gate became the
+    first connection; without this sibling the verb-level proof for "a driver
+    failure on the COUNT leg is exit 1 (retryable) / 2 (permanent)" would be
+    asserting that mapping about the gate instead of the leg it names. So the
+    connector answers the posture read and raises on the SECOND connect, and the
+    arm pins that the posture statement really ran first — otherwise a run that
+    never opened the gate would satisfy the exit code by accident.
+    """
+    log = _StatementLog()
+    base = _logged_connect(FakeDB(SOURCE_COUNTS), log)
+    attempts: list[str] = []
+
+    def connector(dsn):
+        attempts.append(dsn)
+        if attempts[1:]:  # the gate already ran; the COUNT leg is what fails
+            raise _DriverError("could not connect", pgcode)
+        return base(dsn)
+
+    monkeypatch.setattr(rb, "_default_connector", connector)
+    rc = _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], patch_connector=False)
+    captured = capsys.readouterr()
+    assert attempts == [DSN, DSN], (
+        "the run must reach the posture read and then the count leg")
+    assert any("rolbypassrls" in sql for sql in log.sql), (
+        f"the role gate never executed, so this arm is not measuring the count leg: "
+        f"{log.sql}")
     assert rc == expected, f"stdout={captured.out!r} stderr={captured.err!r}"
     assert "Traceback" not in captured.err
     assert "could not be reached" in captured.err
@@ -2731,3 +2837,298 @@ def test_a_scratch_side_count_failure_does_not_blame_the_record():
         "the failure happened on the SCRATCH side — the sentence must say so")
     assert "the record could not be reached" not in message, (
         "a scratch-side outage must not be reported as a record outage")
+
+
+# ── #9801: the backup must run as a role that BYPASSES RLS ──────────────────
+#
+# R6 arms the record as `tortoise_record_app` — `NOBYPASSRLS`, not the table
+# owner — and names the database-level backup as one of exactly three purposes a
+# bypassing role may serve. Nothing enforced that on this module, so the verb
+# connected as the APP role: every per-table count returned ZERO (`app.current_org_id`
+# is never set, and R6 chose silent reads), the drill refused with "the record is
+# EMPTY" about a fully populated record, and in backup-only mode `pg_dump`'s
+# `row_security = off` default is an ERROR under a NOBYPASSRLS role. Both paths
+# published nothing while the module read as done.
+
+
+class _RoledDB(FakeDB):
+    """A fake record whose connection reports an arbitrary RLS posture."""
+
+    def __init__(self, *args, role="postgres", bypassing=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.role = role
+        self.bypassing = bypassing
+
+    def connect(self, dsn):
+        conn = super().connect(dsn)
+        conn.role, conn.bypassing = self.role, self.bypassing
+        return conn
+
+
+class _StatementLog:
+    """Every statement a connection issued, so ORDER can be asserted."""
+
+    def __init__(self):
+        self.sql: list[str] = []
+
+
+def _logged_connect(db, log: _StatementLog):
+    real = db.connect
+
+    def connect(dsn):
+        conn = real(dsn)
+        real_cursor = conn.cursor
+
+        def cursor():
+            cur = real_cursor()
+            execute = cur.execute
+
+            def _execute(sql, params=None):
+                log.sql.append(sql)
+                return execute(sql, params)
+
+            cur.execute = _execute
+            return cur
+
+        conn.cursor = cursor
+        return conn
+
+    return connect
+
+
+def test_require_bypassing_role_names_the_role_it_accepted():
+    """The happy path returns the ROLE, so a caller can say who did the dump."""
+    db = _RoledDB(SOURCE_COUNTS, role="postgres", bypassing=True)
+    assert rb.require_bypassing_role(DSN, connect=db.connect) == "postgres"
+
+
+def test_the_drill_refuses_a_non_bypassing_role_and_NAMES_it_before_any_count():
+    """#9801's headline: the sentence names the ROLE, never the data.
+
+    Pre-fix the same run raised `"the record is EMPTY"` — sending an operator to
+    inspect a populated record while the fault was the connecting role — and it
+    did so AFTER reading every table's count, i.e. after acting on numbers the
+    policies had already emptied.
+    """
+    log = _StatementLog()
+    db = _RoledDB(SOURCE_COUNTS, role="tortoise_record_app", bypassing=False)
+
+    with pytest.raises(rb.RecordBackupUnavailable) as excinfo:
+        rb.run_restore_drill(
+            DSN, MemoryStorage(), SCRATCH_DSN,
+            run=FakeRunner(), connect=_logged_connect(db, log), key=KEY,
+        )
+
+    message = str(excinfo.value)
+    assert "tortoise_record_app" in message, "the refusal must NAME the role"
+    assert rb.RECORD_BACKUP_DSN_ENV in message, "…and the surface that fixes it"
+    assert "EMPTY" not in message, (
+        "a role fault must not be reported as an empty record — that misdiagnosis "
+        "is the defect")
+    # THE ORDER: the role was decided BEFORE the first `count(*)`, so no evidence
+    # was taken from a connection the policies were silently emptying.
+    assert not any("count(*)" in sql for sql in log.sql), (
+        f"the drill counted before checking the role: {log.sql}")
+    assert any("rolbypassrls" in sql for sql in log.sql), log.sql
+
+
+def test_the_backup_refuses_a_non_bypassing_role_before_dumping(monkeypatch):
+    """Backup-only mode: no artifact at all, and the role named (#9801)."""
+    runner = FakeRunner()
+    storage = MemoryStorage()
+    db = _RoledDB(SOURCE_COUNTS, role="tortoise_record_app", bypassing=False)
+
+    with pytest.raises(rb.RecordBackupUnavailable, match="tortoise_record_app"):
+        rb.create_record_backup(DSN, storage, run=runner, connect=db.connect, key=KEY)
+
+    assert runner.calls == [], "nothing may be dumped under a role that cannot read the rows"
+    assert storage.list("") == []
+
+
+def test_the_verb_exits_2_on_a_non_bypassing_role_and_names_the_variable(monkeypatch, capsys):
+    """The scheduler's view: a permanent config fault is `2`, not `1` (retry)."""
+    storage = MemoryStorage()
+    db = _RoledDB(SOURCE_COUNTS, role="tortoise_record_app", bypassing=False)
+
+    assert _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", SCRATCH_DSN],
+        storage=storage, db=db,
+    ) == 2
+
+    err = capsys.readouterr().err
+    assert "tortoise_record_app" in err
+    assert rb.RECORD_BACKUP_DSN_ENV in err
+    assert "the record is EMPTY" not in err
+    assert storage.list("") == []
+
+
+def test_the_backup_dsn_env_surface_wins_over_the_record_dsn(monkeypatch):
+    """Two surfaces, two roles: the backup must not inherit the app DSN (#9801)."""
+    seen: dict[str, str] = {}
+
+    def capture(dsn, storage, **kwargs):
+        seen["dsn"] = dsn
+        raise rb.RecordBackupUnavailable("captured")
+
+    monkeypatch.setattr(rb, "create_record_backup", capture)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://app:pw@db.test/app_role_db")
+    backup_dsn = "postgresql://postgres:pw@db.test/record?sslmode=require"
+
+    assert _cli(
+        monkeypatch, ["record-backup"], backup_env=backup_dsn,
+    ) == 2  # exit 2 from the captured refusal; the DSN is what this pins
+    assert seen["dsn"] == backup_dsn, (
+        "the backup must run on its OWN DSN surface, not the record's app-role one")
+
+
+def test_a_blank_backup_dsn_env_is_refused_not_fallen_back_to_the_app_role(monkeypatch, capsys):
+    """A cron line whose env is gone must NOT silently back up as the app role.
+
+    Falling through to `TORTOISE_RECORD_DSN` here is precisely the #9801 defect:
+    an empty record, a published-nothing run, and a green-looking exit.
+    """
+    storage = MemoryStorage()
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", DSN)
+
+    assert _cli(
+        monkeypatch, ["record-backup"], storage=storage, backup_env="",
+    ) == 2
+
+    err = capsys.readouterr().err
+    assert rb.RECORD_BACKUP_DSN_ENV in err
+    assert "set but names nothing" in err
+    assert storage.list("") == []
+
+
+def test_the_role_gate_reads_a_mapping_shaped_row_and_a_NamedTuple_one():
+    """Both cursor shapes, because the gate is the FIRST statement either path runs.
+
+    `record_projection` advertises `dict`-shaped rows (a `RealDict` cursor) and a
+    plain positional one; reading the posture by position alone raises `KeyError:
+    0` on the mapping shape before anything else executes — the same defect the
+    tenant scope paid for in #9600 review cycle 4.
+    """
+    class _MappingCursor(FakeCursor):
+        def fetchone(self):
+            return {"role": "postgres", "bypassing": True}
+
+    class _NamedTupleCursor(FakeCursor):
+        def fetchone(self):
+            from collections import namedtuple
+            Row = namedtuple("Row", "role bypassing")
+            return Row("postgres", True)
+
+    for cursor_cls in (_MappingCursor, _NamedTupleCursor):
+        class _Conn(FakeConn):
+            def cursor(self, _cls=cursor_cls):
+                return _cls(self)
+
+        assert rb.require_bypassing_role(
+            DSN, connect=lambda dsc, _c=_Conn: _c(dsc, SOURCE_COUNTS)
+        ) == "postgres"
+
+
+def test_a_role_whose_posture_cannot_be_READ_is_refused_not_assumed():
+    """An unverifiable role is not a verified one — the fail-closed direction.
+
+    Two shapes: no `pg_roles` row at all (`fetchone()` returns None), and a row
+    whose `bypassing` leg came back NULL (an expression Postgres could not
+    evaluate). Neither may be read as "bypasses".
+    """
+    class _NoRowCursor(FakeCursor):
+        def fetchone(self):
+            return None
+
+    class _NullPostureCursor(FakeCursor):
+        def fetchone(self):
+            return ("postgres", None)
+
+    for cursor_cls, expected in (
+        (_NoRowCursor, "could not be read"),
+        (_NullPostureCursor, "could not be evaluated"),
+    ):
+        class _Conn(FakeConn):
+            def cursor(self, _cls=cursor_cls):
+                return _cls(self)
+
+        with pytest.raises(rb.RecordBackupUnavailable, match=expected):
+            rb.require_bypassing_role(
+                DSN, connect=lambda dsc, _c=_Conn: _c(dsc, SOURCE_COUNTS)
+            )
+
+
+def test_the_posture_statement_carries_the_SAME_predicates_as_the_scope():
+    """One definition, two shapes — and the pin that keeps them one.
+
+    `ROLE_POSTURE_SQL` is what decides whether a dump may run at all, and nothing
+    else in the Python tree executes it: a dropped predicate here would fail
+    closed at runtime with no test reddening — a SEMANTICALLY valid drop yields
+    `bypassing = false` → `RecordBackupUnavailable` → exit `2`, and only a SQL
+    SYNTAX break reaches exit `1` through `_connection_failure`. The four legs are
+    therefore pinned against `TENANT_SCOPE_SQL` — the statement the runtime SQL
+    suite DOES execute — so drift reddens here instead.
+    """
+    from tortoise import record_projection as rp
+
+    for leg in (
+        "r.rolsuper OR r.rolbypassrls",
+        "pg_has_role(r.oid, g.oid, 'USAGE')",
+        "c.relowner = r.oid",
+        "pg_has_role(r.oid, c.relowner, 'USAGE')",
+    ):
+        assert leg in rp.ROLE_POSTURE_SQL, f"the backup gate lost {leg!r}"
+        assert leg in rp.TENANT_SCOPE_SQL, (
+            f"{leg!r} is gone from the scope statement — the two no longer answer "
+            "the same question")
+    assert "AS role" in rp.ROLE_POSTURE_SQL, (
+        "the role column has no alias — a RealDict cursor cannot name the role in "
+        "the refusal, which is the whole point of #9801")
+    assert "AS bypassing" in rp.ROLE_POSTURE_SQL
+    assert "current_setting" not in rp.ROLE_POSTURE_SQL, (
+        "the posture statement must not depend on the tenant GUC: the backup leg "
+        "is deliberately unscoped (it must see every tenant)")
+
+
+def test_a_malformed_backup_dsn_names_the_variable_it_was_read_from(monkeypatch, capsys):
+    """The value came from the BACKUP surface — say so, and say ONLY that (#9801).
+
+    `record_writer.record_dsn` names its own env var in its message, and sending
+    an operator to `TORTOISE_RECORD_DSN` for a value they set on
+    `TORTOISE_RECORD_BACKUP_DSN` is the same "say which one" failure the role
+    refusal exists to end. Naming the right surface in an APPENDED clause was not
+    enough — the sentence still opened by blaming `TORTOISE_RECORD_DSN`, and the
+    appended clause ran on from a message with no closing period.
+    """
+    assert _cli(
+        monkeypatch, ["record-backup"],
+        backup_env="mysql://user:pw@db.example/record",
+    ) == 2
+
+    err = capsys.readouterr().err
+    assert rb.RECORD_BACKUP_DSN_ENV in err, (
+        "the message must attribute the malformed value to the surface it came from")
+    assert "TORTOISE_RECORD_DSN" not in err, (
+        "the app-role variable must not be named at all: the value was never read "
+        f"from it, and naming it first sends the operator to the wrong arm — {err!r}")
+    assert "record The value" not in err, (
+        f"the sentence runs on from an unterminated message — {err!r}")
+    assert "pw@db.example" not in err, "the value itself is never echoed"
+
+
+def test_a_malformed_flag_dsn_is_attributed_to_the_FLAG(monkeypatch, capsys):
+    """The flag wins over both env surfaces, so the sentence must name the flag.
+
+    `--record-dsn` takes precedence over `TORTOISE_RECORD_BACKUP_DSN` and
+    `TORTOISE_RECORD_DSN`; attributing its value to either variable is the same
+    misattribution one surface up.
+    """
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", "mysql://u:pw@db.example/record"],
+    ) == 2
+
+    err = capsys.readouterr().err
+    assert "--record-dsn" in err, err
+    assert "TORTOISE_RECORD_DSN" not in err, (
+        f"the value came from argv, not from an env surface — {err!r}")
+    assert "pw@db.example" not in err
