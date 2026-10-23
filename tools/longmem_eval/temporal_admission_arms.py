@@ -86,7 +86,16 @@ ARMS: tuple[dict[str, Any], ...] = (
     {"id": "baseline",
      "knobs": {"tr_session_admission": False,
                "tr_session_completion": False}},
-    {"id": "admission", "knobs": {"tr_session_admission": True}},
+    {"id": "admission",
+     # BOTH switches explicit, for the same reason as `baseline`: an arm that
+     # names only the switch under test leaves the OTHER one to the ambient
+     # env, so an operator shell carrying
+     # TORTOISE_LME_TR_SESSION_COMPLETION=1 (which this PR's own runbook
+     # documents arming) would make `admission` byte-identical to
+     # `admission+completion` and publish the completion number under the
+     # `admission` label, with a ~0 delta between the two arms.
+     "knobs": {"tr_session_admission": True,
+               "tr_session_completion": False}},
     {"id": "admission+completion",
      "knobs": {"tr_session_admission": True, "tr_session_completion": True}},
 )

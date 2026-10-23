@@ -220,6 +220,53 @@ def test_item_cap_still_available_as_an_explicit_opt_in():
     assert stats["stopped_by"] == "item_cap"
 
 
+def test_a_depth_block_refused_by_the_item_bound_is_counted_as_item_cap():
+    """Each depth refusal keeps its own counter, and ``item_cap`` is reported
+    only for a block the ITEM bound refused — not for every depth drop."""
+    pool = [
+        _hit(0, "sid-a", "alpha"),
+        _hit(1, "sid-b", "beta"),
+        _hit(0, "sid-a", "gamma", idx=1),
+        _hit(1, "sid-b", "delta", idx=1),
+    ]
+    stats: dict = {}
+    out = assemble_session_context(pool, max_context_tokens=8000, item_cap=3,
+                                   stats=stats)
+    # breadth admitted three hits (a0, b0, a1 — pool rank order), then the
+    # breadth walk broke on the cap; sid-b's remaining block does not fit the
+    # cap either, so it is refused by the ITEM bound.
+    assert [h["content"] for h in out] == ["alpha", "beta", "gamma"]
+    assert stats["dropped_sessions_by_item_cap"] == 1
+    assert stats["dropped_sessions_by_token_cap"] == 0
+    assert stats["dropped_sessions_by_byte_cap"] == 0
+    assert stats["stopped_by"] == "item_cap"
+
+
+def test_a_depth_block_refused_by_the_byte_cap_is_counted_as_byte_cap():
+    """A byte-ceiling refusal must never be reported as a token-cap drop: that
+    is the mislabel this census exists to prevent (the #2976 argument is "the
+    ITEM cap binds and the token budget is unused", so a census that cannot
+    name the bound that fired cannot support it)."""
+    big = "zebra " * 200                     # 200 words ≈ 1200 rendered bytes
+    pool = [
+        _hit(0, "sid-a", "alpha"),
+        _hit(0, "sid-a", big, idx=1),
+    ]
+    stats: dict = {}
+    # breadth_share 0.02 of 2000 tokens = a 40-token breadth budget, so the big
+    # hit is refused in breadth; the DEPTH pass then reaches it with the full
+    # 2000-token budget (the token bound does NOT refuse it) and the byte
+    # ceiling does.
+    out = assemble_session_context(pool, max_context_tokens=2000,
+                                   breadth_share=0.02, byte_cap=800,
+                                   stats=stats)
+    assert [h["content"] for h in out] == ["alpha"]
+    assert stats["dropped_sessions_by_byte_cap"] == 1
+    assert stats["dropped_sessions_by_token_cap"] == 0
+    assert stats["dropped_sessions_by_item_cap"] == 0
+    assert stats["stopped_by"] == "byte_cap"
+
+
 def test_accounting_matches_render_context():
     """`words_used` must be the words the reader actually consumes — the
     R1 #1540 accounting invariant, kept by the session path."""

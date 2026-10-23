@@ -153,6 +153,12 @@ a systematic difference — the arms share one process and one route).
 - **Issue baseline re-grade:** the committed `A-default` hypotheses are re-graded
   with the same grader (9/52) rather than quoting its official-judge 0/52, so all
   three rows are the same instrument.
+- **Arms are pinned against the ambient env.** Every arm names BOTH #2976
+  switches explicitly (`tr_session_admission` / `tr_session_completion`), so an
+  operator shell carrying `TORTOISE_LME_TR_SESSION_COMPLETION=1` cannot make
+  `admission` byte-identical to `admission+completion` and publish the
+  completion number under the `admission` label. A re-run inherits the arm
+  table, not the shell.
 - **Committed rows are the measurement columns.** The per-row arm censuses
   (`admission_stats` / `completion_stats`) and `gold_in_pool` were produced by a
   pre-review revision of the driver (a review finding: the completion pass was

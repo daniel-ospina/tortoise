@@ -7726,9 +7726,18 @@ durations:
   test_surface_resolution.py: 0.9
   test_telemetry_registration.py: 1.6
   test_temporal_leg_2976.py: 0.4
-  test_2976_session_admission.py: 5.0  # measured locally: 12 pure-function tests, 4.6s
-  longmem_eval/test_variant_containment_judge.py: 18.0  # measured locally: 6 tests, 17.5s incl. the 277 MB split load
-  longmem_eval/test_temporal_admission_arms.py: 8.5  # measured locally: 5 tests, 8.5s
+  # #2976: the three new surfaces take the header's flat `DEFAULT_FAST_WEIGHT`
+  # (the #2818/#3419/#9121 convention), NOT a local timing. A file ADDED BY A
+  # PR can never carry a CI junit measurement (the refresher samples
+  # push-to-main runs only), and a weight is a SHARD-LAYOUT input — a dev-box
+  # reading would size shards for a cost CI does not pay. The
+  # `test_variant_containment_judge.py` reading in particular was dominated by
+  # loading a 277 MB cached split that CI does not have (the dataset leg SKIPS
+  # there), so a local number would model this box, not the shard.
+  # `tools/ci_timing.py --refresh-durations` replaces these from junit.
+  test_2976_session_admission.py: 2.0  # unmeasured — new in #2976; no sweep has collected it (hermetic, pure functions)
+  longmem_eval/test_variant_containment_judge.py: 2.0  # unmeasured — new in #2976; the 277 MB split leg SKIPS in CI, so no CI reading exists
+  longmem_eval/test_temporal_admission_arms.py: 2.0  # unmeasured — new in #2976; no sweep has collected it (hermetic)
   test_terminal_dedup_nullhash.py: 1.5
   test_terminal_status_vocabulary.py: 0.6
   test_time_aware_2520.py: 0.0        # unmeasured — arrived via main #5297; no source leg measured it, 0.0 is main's minimum-weight pin

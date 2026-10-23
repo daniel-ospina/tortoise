@@ -32,10 +32,26 @@ def test_arms_differ_only_in_the_2976_switches():
     assert base["knobs"] == {"tr_session_admission": False,
                              "tr_session_completion": False}
     adm = arms.arm_by_id("admission")
-    assert set(adm["knobs"]) == {"tr_session_admission"}
+    # BOTH switches explicit: an arm naming only the switch under test leaves
+    # the other one to the ambient env, so a shell carrying
+    # `TORTOISE_LME_TR_SESSION_COMPLETION=1` would make `admission` identical
+    # to `admission+completion`.
+    assert adm["knobs"] == {"tr_session_admission": True,
+                            "tr_session_completion": False}
     comp = arms.arm_by_id("admission+completion")
-    assert set(comp["knobs"]) == {"tr_session_admission",
-                                 "tr_session_completion"}
+    assert comp["knobs"] == {"tr_session_admission": True,
+                             "tr_session_completion": True}
+    # every arm resolves BOTH switches, so no arm's configuration can depend
+    # on the ambient env
+    for arm in arms.ARMS:
+        assert set(arm["knobs"]) == {"tr_session_admission",
+                                     "tr_session_completion"}, (
+            f"{arm['id']} leaves a #2976 switch to the ambient env")
+    # …and the three arms are three DIFFERENT configurations, so a delta
+    # between any two of them is attributable to exactly the switch that
+    # differs
+    assert len({json.dumps(a["knobs"], sort_keys=True)
+                for a in arms.ARMS}) == len(arms.ARMS)
     for arm in arms.ARMS:
         assert not (set(arm["knobs"]) & set(arms.SHARED_KNOBS)), (
             f"{arm['id']} re-specifies a shared knob — the delta would stop "
@@ -152,6 +168,77 @@ def test_completion_requires_admission_loudly():
             object(), {"question_id": "q", "question": "how many days?",
                        "question_type": "temporal-reasoning"},
             tr_session_completion=True, tr_session_admission=False)
+
+
+def test_admission_on_selects_the_session_assembler_without_an_item_cap(
+        monkeypatch):
+    """THE SHIPPED WIRING: `tr_session_admission` ON must route the reader
+    window through `assemble_session_context` with NO item cap (the item cap IS
+    the defect), and OFF must leave the historical `assemble_context(...
+    context_item_cap=tr_top_k)` untouched.
+
+    Nothing else pins the selection: if a later change passed
+    ``context_item_cap=eff_item_cap`` into the session assembler, or inverted
+    the ``if``, every other test stays green while the arm silently measures
+    the OLD 12-item window — the exact 0/52-class regression #2976 exists to
+    fix. Hermetic: the pool comes from a stubbed ``hybrid_search`` and the
+    graph double answers ``[]``, so no DB, no reader, no judge.
+    """
+    import types
+
+    from tools.longmem_eval import retrieve as R
+
+    class _Empty:
+        result_set: list = []
+
+    class _Graph:
+        def query(self, cypher, params=None):
+            del cypher, params
+            return _Empty()
+
+    class _Sdk:
+        def _get_proj(self):
+            return types.SimpleNamespace(g=_Graph())
+
+    calls: dict[str, tuple] = {}
+
+    def _session_assembler(*args, **kwargs):
+        calls["session"] = (args, kwargs)
+        return []
+
+    def _item_capped_assembler(*args, **kwargs):
+        calls["item_capped"] = (args, kwargs)
+        return []
+
+    monkeypatch.setattr(R, "_assemble_session_context", _session_assembler)
+    monkeypatch.setattr(R, "_assemble_context", _item_capped_assembler)
+    monkeypatch.setattr(R, "hybrid_search", lambda *a, **kw: [])
+
+    question = {"question_id": "q1", "question": "how many days passed?",
+                "question_type": "temporal-reasoning",
+                "question_date": "2023-06-01", "haystack_dates": [],
+                "haystack_sessions": [], "answer": "5"}
+
+    ret = R.retrieve_for_question(_Sdk(), question, ks=(5,), top_k=20,
+                                  tr_top_k=12, tr_session_admission=True)
+    assert set(calls) == {"session"}, (
+        f"admission ON must use ONLY the session assembler, got {sorted(calls)}")
+    _args, kwargs = calls["session"]
+    assert "item_cap" not in kwargs, (
+        "the item cap is the defect — the session assembler must not receive it")
+    assert ret["tr_session_admission_stats"]["applied"] is True
+
+    # …and OFF keeps the historical item-capped assembler, unchanged.
+    calls.clear()
+    ret_off = R.retrieve_for_question(_Sdk(), question, ks=(5,), top_k=20,
+                                      tr_top_k=12,
+                                      tr_session_admission=False)
+    assert set(calls) == {"item_capped"}, (
+        f"admission OFF must keep the item-capped assembler, got {sorted(calls)}")
+    _args, off_kwargs = calls["item_capped"]
+    assert off_kwargs["context_item_cap"] == 12, (
+        "TR keeps its pinned tr_top_k item cap when the arm is OFF")
+    assert ret_off["tr_session_admission_stats"]["applied"] is False
 
 
 def test_completion_fetch_failure_keeps_the_original_pool(monkeypatch):

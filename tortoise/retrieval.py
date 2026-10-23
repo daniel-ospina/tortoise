@@ -1645,9 +1645,15 @@ def assemble_session_context(
 
     ``stats`` (optional out-dict) reports the session-grain census —
     ``sessions_available`` / ``sessions_admitted`` / ``session_block_sizes`` /
-    which bound dropped what — so a measurement can tell "no session had any
-    material" from "the budget was the binding constraint". That distinction is
-    what #2976 turns on.
+    which bound dropped what (one counter per refusal class, plus
+    ``stopped_by``) — so a measurement can tell "no session had any material"
+    from "the budget was the binding constraint". That distinction is what
+    #2976 turns on.
+
+    ``stopped_by`` follows ``assemble_context``'s polarity: it names a bound
+    only when that bound actually DROPPED a session block (precedence byte →
+    token → item). A cap that was merely REACHED — the pool ended exactly on
+    it — reports ``None``, because a caller tunes the knob it is told fired.
     """
     if max_context_tokens < 1:
         raise ValueError("max_context_tokens must be >= 1, got "
