@@ -201,15 +201,29 @@ closed at both layers:
   point-PROPERTY set now lands too — one `relation` row per ref
   (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the fan-out
   the fold's `_link_source` performs (many-to-many, `#3263`). Three details make
-  it parity rather than a plausible copy: the target is resolved on the Source's
-  `url` (`node_key`) ALONE, never the `id` fallback `_ENTITY_MATCH_COLUMNS`
-  supplies for `EntityLinked`, because `_link_source` MERGEs
-  `(s:Source {url:$url})`; the ref container and the per-member gate mirror
+  it parity rather than a plausible copy: the target resolves to the SAME Source
+  the fold picks — `resolve_source_key`'s canonical identity, matched on `url`
+  **or** `canonical_url`, ordered like its `ORDER BY s.url LIMIT 1`, and never
+  via the `id` fallback `_ENTITY_MATCH_COLUMNS` supplies for `EntityLinked` —
+  which also required the projection to DERIVE `source.canonical_url`, since no
+  payload may carry it (`projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists `canonicalUrl` as
+  writer-derived); the ref container and the per-member gate mirror
   `_link_source`'s (a dict fans out to nothing, `#8171`); and the `#5256`
   read-version anchor rides `relation.source_version` — a PRIMARY column the
   cache projection maps back to `r.sourceVersion` — from the Point's own
   `sourceVersionTransit` carrier, all-or-nothing and raw-ref keyed, exactly as
-  `_point_source_transit` decides. The other class-1 families are still **not**
+  `_point_source_transit` decides.
+  **Two residuals, neither an unmatched-URL case.** (a) The Source's record must
+  precede the Point's (the live order: the capture materialises the session
+  Source first, `sdk.py::_materialize_session_source`), else the insert finds no
+  `source` row and lands nothing — the `absent` verdict every relation gives.
+  (b) A ref naming a Source the record never saw — `_link_source` MINTS an
+  **unjournaled** stub for one (`_mint_source_stub`, **#5024**) — has no
+  `(Source, key)` identity for `relation.tgt_key`'s composite FK at all, so the
+  record lands nothing by design: minting a node from an edge directive would
+  materialise a Source no record created. Same absent verdict, same reason, as
+  the CONTAINS envelope family (**#9594**).
+  The other class-1 families are still **not**
   materialized, each for its own reason: `about*` needs `_create_about_edges`'
   live name→label cascade (and `EntityLinked` already carries it whenever the
   capture resolved it); `mitigated_by` is emitted as a PAIR with the operator's

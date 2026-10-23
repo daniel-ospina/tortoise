@@ -612,6 +612,37 @@ _EXTRACTED_RECORD = {
 }
 
 
+def test_a_document_source_row_derives_its_canonical_identity_too():
+    """DELIBERATE, PINNED divergence (#9553 review P2). Pin it, do not infer it.
+
+    The record's `canonical_url` is a pure function of the row's own key, and it
+    is derived for EVERY `source` row — including a `DocumentCreated` one, whose
+    live fold (`_upsert_document`) writes no `canonicalUrl` at all. A restored
+    document `:Source` therefore carries a property live leaves unset until
+    something touches it: the record is richer, on one property, on that path.
+
+    This is NOT fixed by scoping the derive to the types whose fold writes it,
+    because a variant `extractedFrom` ref resolving onto a DOCUMENT target is
+    exactly the silent provenance loss the resolver exists to prevent — and
+    `resolve_source_key`'s adopt-on-touch backfills the same value on the first
+    touch, so the two states converge on use. Both halves are asserted here so a
+    later "tidy-up" that narrows the derive has to delete a named decision.
+    """
+    document = {
+        "type": "DocumentCreated", "ts": "2026-10-12T00:00:00Z",
+        "id": "https://example.com/a/?utm_source=x",
+        "url": "https://example.com/a/?utm_source=x",
+    }
+    plan = rp.replay_plan([document], org_id="org-a", graph_id="g1")
+    source = next(s for s in plan if "INSERT INTO public.source" in s.sql)
+    assert "canonical_url" in source.sql, source.sql
+    assert rp._normalize_source_url(document["url"]) in source.params, source.params
+    # ... and the divergence converges: the value is exactly the canonical form
+    # `resolve_source_key` would backfill, so a rebuild and a first live touch
+    # agree on the node's identity.
+    assert "https://example.com/a" in source.params, source.params
+
+
 def test_a_point_lands_its_extractedFrom_relation_after_the_point_identity():
     """The provenance edge lands, and it lands LAST — endpoints are FK children."""
     plan = rp.replay_plan([_EXTRACTED_RECORD], org_id="org-a", graph_id="g1")
@@ -626,20 +657,85 @@ def test_a_point_lands_its_extractedFrom_relation_after_the_point_identity():
     relation = plan[2]
     assert relation.params[:6] == ("org-a", "g1", "extractedFrom", "Point",
                                    "Source", 0), relation.params
-    # The TARGET is matched on the Source's `url` (its MERGE key) and NOT on the
-    # `id` fallback `_ENTITY_MATCH_COLUMNS` gives `EntityLinked`: `_link_source`
-    # MERGEs `(s:Source {url:$url})`, so an id match could attach the row to a
-    # node the fold never chose. The SQL proves which predicate was emitted.
-    assert "public.source WHERE org_id = %s AND graph_id = %s AND node_key = %s" \
+    # The TARGET resolves the way `_mint_source_stub` does, and NOT on the `id`
+    # fallback `_ENTITY_MATCH_COLUMNS` gives `EntityLinked`: the fold calls
+    # `resolve_source_key` (canonicalise, then any Source registered under that
+    # canonical form) before it MERGEs `(s:Source {url:$url})`. So the record
+    # matches the raw ref OR the canonical form, ordered like the fold's
+    # `ORDER BY s.url LIMIT 1`. An id match could attach the row to a node the
+    # fold never chose. The SQL proves which predicate was emitted.
+    assert "public.source WHERE org_id = %s AND graph_id = %s AND " \
+        "(node_key = %s OR canonical_url = %s) ORDER BY node_key LIMIT 1" \
         in relation.sql, relation.sql
-    # params: the row's own values, then the two `(org, graph, key)` triples the
-    # endpoint subqueries bind — src LAST-5, tgt LAST-1 (the row carries no
-    # optional column here, so the tail is exactly those two triples).
-    assert relation.params[-6:-3] == ("org-a", "g1", "p1"), relation.params
-    assert relation.params[-3:] == ("org-a", "g1", "src1"), relation.params
+    # params: the row's own values, then the two endpoint subquery triples/quadruples
+    # the caller joins on — src, then tgt (raw ref, canonical form).
+    assert relation.params[-7:-4] == ("org-a", "g1", "p1"), relation.params
+    assert relation.params[-4:] == ("org-a", "g1", "src1", "src1"), relation.params
     # Idempotent: a replayed capture converges on the one row.
     assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " \
         in relation.sql
+
+
+def test_a_url_variant_ref_resolves_to_the_recorded_canonical_source():
+    """#9553 review P1: the fold resolves a VARIANT ref to the registered Source.
+
+    `_mint_source_stub` calls `resolve_source_key` BEFORE its MERGE, so
+    `create_source("https://example.com/a")` + `create_point(extractedFrom=
+    "https://example.com/a/?utm_source=x")` lands the edge on the REGISTERED
+    node, whose url is the canonical spelling. A record matching the raw ref
+    alone resolved onto no `source` row and emitted a relation whose target
+    subselect was empty — zero rows, no error, while the journal rebuild
+    restored the edge. The record must bind the canonical form too.
+    """
+    variant = "https://example.com/a/?utm_source=x"
+    record = {**_EXTRACTED_RECORD, "point": dict(_SNAPSHOT, extractedFrom=variant)}
+    relations = _relation_statements(record)
+    assert len(relations) == 1, [s.sql for s in relations]
+    # The raw ref is retained as the row's `tgt` intent, but the RESOLUTION
+    # binds both spellings, so the subselect can find the canonical row.
+    assert relations[0].params[-2:] == (variant, "https://example.com/a"), \
+        relations[0].params
+    # A non-network ref normalises to itself — no phantom second spelling.
+    plain = _relation_statements(_EXTRACTED_RECORD)[0]
+    assert plain.params[-2:] == ("src1", "src1"), plain.params
+
+
+def test_the_source_canonicaliser_is_the_folds_own():
+    """Parity pin for the RESTATED `normalize_source_url` (`source_identity.py`).
+
+    The module is loaded STANDALONE by the PGlite harness, so the canonicaliser
+    is restated rather than imported. A drift in either spelling would make the
+    record resolve a variant to a DIFFERENT `:Source` than the journal lane, on
+    the same journal line, with no error anywhere.
+    """
+    from tortoise.source_identity import normalize_source_url
+
+    values = (
+        "https://example.com/a",
+        "https://example.com/a/",
+        "HTTPS://Example.COM/a/b/?utm_source=x&b=2&a=1#frag",
+        "https://example.com/a?fbclid=1",
+        "https://example.com:443/a",
+        "https://example.com:8443/a",
+        "http://example.com:80/a",
+        "https://example.com//a//b",
+        "https://example.com",
+        "https://[2001:db8::1]/a",
+        "https://example.com/a?b=&c=1",
+        "session:abc-123",
+        "corpus://name/a?utm_source=x",
+        "release-1.0",
+        "",
+        None,
+        7,
+        "https://[bad",
+        "https://Example.com/a/../b",
+    )
+    for value in values:
+        assert rp._normalize_source_url(value) == normalize_source_url(value), value
+    # Non-vacuity: the table must exercise BOTH a rewrite and an identity.
+    assert any(rp._normalize_source_url(v) != v for v in values)
+    assert any(rp._normalize_source_url(v) == v for v in values if isinstance(v, str))
 
 
 def test_an_operator_capture_carries_the_same_provenance_edge():
@@ -789,10 +885,14 @@ def test_a_record_sourced_rebuild_materialises_the_provenance_edge():
     statement = _relation_statements({**_EXTRACTED_RECORD, "point": dict(
         _SNAPSHOT, extractedFrom="src1", sourceVersionTransit=[["src1", "h1"]])})[0]
     rel_type, src_label, tgt_label = statement.params[2:5]
+    # The tail is [src org, src graph, src key][tgt org, tgt graph, raw ref,
+    # canonical ref] — the tgt endpoint binds TWO values (raw + canonical, see
+    # `_endpoint_resolution`), so the src key is fifth-from-last and the target
+    # the row addresses is the canonical spelling second-from-last.
     rel = cp.relation_from_row({
         "rel_type": rel_type,
-        "src_label": src_label, "src_key": statement.params[-4],
-        "tgt_label": tgt_label, "tgt_key": statement.params[-1],
+        "src_label": src_label, "src_key": statement.params[-5],
+        "tgt_label": tgt_label, "tgt_key": statement.params[-2],
         "idx": 0, "source_version": statement.params[6], "props": {},
     })
     built = cp.relation_statement(rel)

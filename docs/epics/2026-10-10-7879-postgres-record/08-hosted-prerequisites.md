@@ -283,11 +283,26 @@ one `relation` row per ref (`record_projection._POINT_PROPERTY_RELATIONS`), beca
 fan-out `_link_source` performs (many-to-many, `#3263`), and the `#5256` read-version anchor rides
 `relation.source_version` — the PRIMARY column the cache projection maps back to `r.sourceVersion`
 — from the Point's own `sourceVersionTransit` carrier. Three parity details are load-bearing: the
-target resolves on the Source's `url`/`node_key` ALONE (the fold MERGEs `(s:Source {url:$url})`, so
-the `EntityLinked` `id` fallback would attach the row to a node the fold never chose); the ref
+target resolves to the SAME Source the fold picks — `resolve_source_key`'s canonical identity,
+matched on `url` **or** `canonical_url` and ordered like its `ORDER BY s.url LIMIT 1` (never via the
+`EntityLinked` `id` fallback), which additionally required the projection to DERIVE
+`source.canonical_url`, because `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists `canonicalUrl` as writer-derived and
+no payload may carry it; the ref
 container and per-member gates mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and
 the blank/NUL rule is the same `_writable_endpoint_id` the CONTAINS gate uses, justified by the
-same `#9599` indexed-key measurement (`:Source(url)` is indexed too). The other three class-1
+same `#9599` indexed-key measurement (`:Source(url)` is indexed too).
+
+**Two residuals, stated so a green suite is not read as coverage of them.** (a) The Source's record
+must precede the Point's — the live order, since the capture materialises the session Source first
+(`sdk.py::_materialize_session_source`); replayed the other way the insert finds no `source` row and
+lands nothing, the `absent` verdict every relation already gives (a record-sourced rebuild is fed in
+journal order, `#9190`). (b) A ref naming a Source the record never saw — `_link_source` MINTS an
+**unjournaled** stub for one (`_mint_source_stub`, `#5024`) — has no `(Source, key)` identity for
+`relation.tgt_key`'s composite FK at all, so the record lands nothing by design: minting a node from
+an edge directive would materialise a Source no record created. Same absent verdict, same reason, as
+the CONTAINS envelope family (`#9594`).
+
+The other three class-1
 families stay open for reasons that are NOT this fix's to invent: `about*` needs
 `_create_about_edges`' live name→label cascade (`EntityLinked` already carries it when the capture
 resolved it); `mitigated_by` is written as a PAIR with the operator's `IMPL`/`INPUT`, so half of it

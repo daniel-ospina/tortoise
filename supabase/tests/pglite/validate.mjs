@@ -1182,6 +1182,77 @@ try {
   unlinkSync(segment);
   console.log('✓ #9553: the point-property extractedFrom edge lands one `relation` row '
     + '(Point/p1 -> Source/src1, source_version=h1), and re-replays idempotently');
+
+  // ── #9553 review P1: a URL-VARIANT ref resolves to the REGISTERED Source ──
+  //
+  // The fold does not address a `:Source` by the raw ref: `_mint_source_stub`
+  // calls `resolve_source_key` FIRST (canonicalise, then take the url of any
+  // Source already registered under that canonical form) and only then MERGEs.
+  // So a point whose `extractedFrom` is a tracking-param VARIANT of a registered
+  // Source lands its edge on the REGISTERED node. A record that matched the raw
+  // ref alone found no `source` row and emitted a relation whose target subselect
+  // was empty: zero rows, no error, while the journal rebuild restored the edge.
+  //
+  // The record's `canonical_url` column is fed by NO payload —
+  // `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` puts `canonicalUrl`
+  // among the writer-DERIVED keys — so the projection derives it from the node's
+  // own key; this leg fails if either half regresses (the derivation, or the
+  // two-spelling resolution).
+  const variantRecords = [
+    {
+      type: 'SourceCreated', ts: '2026-10-22T00:00:03Z', id: 'https://example.com/a',
+      url: 'https://example.com/a', sourceKind: 'document', contentHash: 'h2',
+    },
+    {
+      type: 'PointAdded', ts: '2026-10-22T00:00:04Z', id: 'p2',
+      point: {
+        id: 'p2', content: 'variant claim', pointKind: 'observation',
+        extractedFrom: 'https://example.com/a/?utm_source=x',
+      },
+    },
+  ];
+  const variantSegment = join(tmpdir(), `9553c1v-${process.pid}.jsonl`);
+  writeFileSync(variantSegment,
+    variantRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const variantPlan = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     variantSegment, ...tenant],
+    { encoding: 'utf8' },
+  )).plan;
+  await db.exec('BEGIN');
+  for (const statement of variantPlan) {
+    await db.query(statement.sql, statement.params);
+  }
+  await db.exec('COMMIT');
+  const canonicalRow = await db.query(
+    `SELECT node_key, canonical_url FROM public.source
+      WHERE org_id = $1 AND graph_id = $2 AND node_key = 'https://example.com/a'`,
+    tenant);
+  if (canonicalRow.rows.length !== 1 || canonicalRow.rows[0].canonical_url !== 'https://example.com/a') {
+    throw new Error(
+      'the record did not derive the Source canonical identity '
+      + `(rows: ${JSON.stringify(canonicalRow.rows)}) — no payload may carry it, so a `
+      + 'URL-variant ref cannot resolve and the provenance edge is lost');
+  }
+  const variantRows = await db.query(
+    `SELECT src_label, src_key, tgt_label, tgt_key, idx FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'
+        AND src_key = 'p2'`,
+    tenant);
+  const variantGot = variantRows.rows.map((r) =>
+    `${r.src_label}/${r.src_key} -> ${r.tgt_label}/${r.tgt_key}`);
+  if (variantRows.rows.length !== 1
+      || variantGot[0] !== 'Point/p2 -> Source/https://example.com/a') {
+    throw new Error(
+      `the variant ref resolved to ${JSON.stringify(variantGot)}, expected exactly `
+      + '["Point/p2 -> Source/https://example.com/a"] — the fold resolves a variant '
+      + 'to the registered Source, so a record that binds only the raw ref is POORER '
+      + 'than the graph and a record-sourced rebuild drops the edge (#9553 review P1)');
+  }
+  unlinkSync(variantSegment);
+  console.log('✓ #9553: a URL-variant ref resolves to the registered Source '
+    + '(Point/p2 -> Source/https://example.com/a), matching the fold');
 } catch (e) {
   console.error(`✗ #9553 R5/EXTRACTED-FROM FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
   process.exit(1);
