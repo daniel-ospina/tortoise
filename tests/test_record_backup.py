@@ -1306,12 +1306,55 @@ def test_the_reset_refuses_the_shapes_libpq_RESOLVES_somewhere_else():
         "MORE THAN ONE host",
     )
     # The inert keys still work: they cannot move the connection, and the dump leg
-    # forwards exactly these.
-    rb.reset_record_tables(
-        "postgresql://record_user:pw@db.scratchref.supabase.co:5432/scratch?sslmode=require",
-        source_dsn=DSN,
-        connect=lambda dsn: FakeConn(dsn, dict.fromkeys(THE_RECORD_TABLES, 0)),
-    )
+    # forwards exactly these. `application_name` is the DENY-BY-EFFECT case (#9601
+    # review cycle 8, P3): the previous allow-list refused it with a message claiming
+    # libpq honours it, which was a false block on the normal way an operator marks a
+    # drill's sessions in the server log.
+    for inert in ("sslmode=require", "application_name=tortoise-drill", "keepalives=1"):
+        rb.reset_record_tables(
+            f"postgresql://record_user:pw@db.scratchref.supabase.co:5432/scratch?{inert}",
+            source_dsn=DSN,
+            connect=lambda dsn: FakeConn(dsn, dict.fromkeys(THE_RECORD_TABLES, 0)),
+        )
+
+
+def test_the_reset_refuses_WILDCARD_addresses_and_the_other_loopback_family():
+    """#9601 review cycle 8 (P1/P2): 'any' is not a server, and `::1` is `127.0.0.1`.
+
+    Both measured end-to-end on a real socket before this fix:
+
+    * a scratch DSN spelled `0.0.0.0` (the value every container bind and every
+      `listen_addresses` line contains) PASSED the guard and the kernel routed it to
+      loopback, where `reset_record_tables` truncated the record; same for `[::]`,
+      `[::ffff:0.0.0.0]` and `[0:0:0:0:0:ffff:0:0]`.
+    * `[::1]` and `127.0.0.1` produced disjoint address sets for ONE dual-stack
+      server, so the guard passed a target that dialed the record.
+
+    A wildcard is REFUSED (no drill target legitimately names "any"), and loopback
+    is ONE token in either family, so the mapped/wildcard spellings also collapse
+    onto it rather than sitting beside it.
+    """
+
+    def never(dsn):
+        raise AssertionError("connected to a target the guard could not reason about")
+
+    loopback_record = "postgresql://u:p@127.0.0.1:5432/postgres"
+    for wildcard in (
+        "postgresql://u:p@0.0.0.0:5432/postgres",
+        "postgresql://u:p@[::]:5432/postgres",
+    ):
+        with pytest.raises(rb.RecordRestoreRefused, match="WILDCARD"):
+            rb.reset_record_tables(wildcard, source_dsn=loopback_record, connect=never)
+    for same in (
+        "postgresql://u:p@[::1]:5432/postgres",
+        "postgresql://u:p@[::ffff:127.0.0.1]:5432/postgres",
+        "postgresql://u:p@[::ffff:0.0.0.0]:5432/postgres",
+        "postgresql://u:p@0.0.0.0:5432/postgres",
+    ):
+        # Each is the SAME place as the loopback record: refused, never connected.
+        with pytest.raises(rb.RecordRestoreRefused):
+            rb.reset_record_tables(same, source_dsn=loopback_record, connect=never)
+    assert rb._dsn_addresses("::1") == rb._dsn_addresses("127.0.0.1") != frozenset()
 
 
 def test_a_failed_dump_delete_does_NOT_orphan_its_manifest():

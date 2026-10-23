@@ -462,15 +462,17 @@ def _subprocess_env(dsn: str) -> dict[str, str]:
 # ── the identity guard: what must never be TRUNCATEd ────────────────────────
 
 
-#: The query keys that CANNOT move a connection, so a DSN carrying them is still
-#: one the identity guard can reason about — they are exactly the keys `libpq_env`
-#: forwards to the dump/restore legs, so the two legs agree on what they mean.
-#: EVERYTHING ELSE is refused: libpq honours `dbname`, `host`, `hostaddr`, `port`
-#: and `service` from the query string, and a coordinate this guard does not read
-#: is a coordinate it cannot compare (#9601 review cycle 6, P1 — measured:
-#: `…/scratchdb?dbname=postgres` passed the guard and libpq connected to
-#: `postgres`).
-_INERT_QUERY_KEYS = frozenset({"sslmode", "connect_timeout", "sslrootcert", "options"})
+#: The libpq URI query keys that can MOVE a connection. Everything else libpq
+#: accepts there (`application_name`, `keepalives*`, `target_session_attrs`,
+#: `channel_binding`, `sslcert`, …) cannot change which server or database a
+#: connection reaches, so a DSN carrying one is still one the identity guard can
+#: reason about. The rule is DENY-BY-EFFECT (#9601 review cycle 8, P3): the previous
+#: allow-list refused `?application_name=…` — the normal way an operator marks a
+#: drill's sessions in the server log — with a message claiming libpq honours it.
+#: `service`/`servicefile` are here because a service file can set any coordinate.
+_MOVING_QUERY_KEYS = frozenset(
+    {"dbname", "host", "hostaddr", "port", "service", "servicefile"}
+)
 
 
 def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
@@ -516,7 +518,7 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
     moving = sorted(
         key
         for key in parse_qs(parts.query, keep_blank_values=True)
-        if key not in _INERT_QUERY_KEYS
+        if key.lower() in _MOVING_QUERY_KEYS
     )
     if moving:
         raise RecordRestoreRefused(
@@ -526,22 +528,43 @@ def _dsn_identity(dsn_str: str, *, label: str = "the record") -> dict[str, str]:
             "the coordinate in the URI itself, and the credential in the "
             "environment surface (TORTOISE_RECORD_DSN / TORTOISE_RECORD_SCRATCH_DSN)."
         )
-    host = (parts.hostname or "").lower()
+    host = unquote(parts.hostname or "").lower()
     if not host:
         raise RecordRestoreRefused(
             f"the {label} DSN names no host — libpq would fall back to PGHOST or "
             "a local socket, which can be the record. Name the server explicitly."
         )
-    if "," in host:
+    if "," in host or "#" in host:
         # ⛔ A MULTI-HOST LIST IS AN UNREAD COORDINATE (#9601 review cycle 7, P1 —
         # measured: `host1,host2` compared as one name whose `getaddrinfo` fails, so
         # the address fallback was silently inert, while libpq tried each host in
         # turn and succeeded on the record). `urlsplit` keeps the list whole, so no
-        # comparison here can see the individual hosts it would dial.
+        # comparison here can see the individual hosts it would dial. The host is
+        # UNQUOTED first, because `%2C` is a comma to libpq and a literal to
+        # `urlsplit` (#9601 review cycle 8 residual).
         raise RecordRestoreRefused(
-            f"the {label} DSN names MORE THAN ONE host ({host!r}) — libpq tries each "
-            "in turn, so the server this guard compared is not the server the "
-            "connection would reach. Name one host."
+            f"the {label} DSN names MORE THAN ONE host, or hides one behind an "
+            f"escape ({host!r}) — libpq tries each in turn, so the server this "
+            "guard compared is not the server the connection would reach. Name "
+            "one host."
+        )
+    # ⛔ A WILDCARD ADDRESS IS NOT A PLACE (#9601 review cycle 8, P1 — measured
+    # end-to-end: a scratch DSN spelled `0.0.0.0` PASSED the guard and the kernel
+    # routed it to loopback, where `reset_record_tables` truncated the record; same
+    # for `[::]`, `[::ffff:0.0.0.0]` and `[0:0:0:0:0:ffff:0:0]`). `0.0.0.0` is not
+    # exotic — it is what every container bind and every `listen_addresses` line
+    # contains, so it is the value an operator copies by accident, which is exactly
+    # the accident this guard exists for. No drill target legitimately names "any".
+    try:
+        literal = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        literal = None
+    if literal is not None and literal.is_unspecified:
+        raise RecordRestoreRefused(
+            f"the {label} DSN names the WILDCARD address {host!r} — 'any' is not a "
+            "server: the kernel routes it to a real interface (loopback on most "
+            "hosts), so this target cannot be shown to be different from the "
+            "record. Name the server's actual address."
         )
     # Strip BOTH slashes, not just the leading one: `…/postgres/` names the same
     # database as `…/postgres`, and refusing too much is the safe direction for a
@@ -591,7 +614,16 @@ def _dsn_addresses(host: str) -> frozenset[str]:
             addresses.add(raw)
             continue
         mapped = getattr(parsed, "ipv4_mapped", None)
-        addresses.add(str(mapped or parsed))
+        resolved = mapped or parsed
+        if resolved.is_loopback or resolved.is_unspecified:
+            # ⛔ ONE TOKEN FOR THIS MACHINE (#9601 review cycle 8, P2 — measured:
+            # `[::1]` and `127.0.0.1` produced disjoint sets for ONE dual-stack
+            # server, and `0.0.0.0`/`::` produced a third, so the guard passed a
+            # target that dialed the record). A wildcard routes to a real interface
+            # and loopback is loopback, in either family.
+            addresses.add("loopback")
+            continue
+        addresses.add(str(resolved))
     return frozenset(addresses)
 
 
