@@ -719,6 +719,11 @@ json.dump({"records": len(records), "plan": plan}, sys.stdout)
 const PROJECTION_RECORD_TABLES = [
   'node_identity', 'journal_event', 'source', 'event', 'session',
   'object', 'subject', 'point', 'relation',
+  // §9.1's narrative home (#9555). It joins the SNAPSHOT (so the second replay
+  // is compared with it included) even though this fixture creates `sess1` and
+  // then deletes it, which makes the snapshot leg empty here by construction —
+  // the DELETE is pinned separately below, where it can actually fail.
+  'session_narrative',
 ];
 
 async function projectionSnapshot() {
@@ -855,6 +860,21 @@ try {
           WHERE node_label = 'Source' AND node_key = 'session:sess1')       AS identity_row`);
   if (Number(stub.rows[0].source_row) || Number(stub.rows[0].identity_row)) {
     console.error(`✗ #7969: the SessionDeleted left its agentSession Source stub: ${JSON.stringify(stub.rows)}`);
+    process.exit(1);
+  }
+
+  // §9.1's narrative home, the DELETE half (#9555). The fixture's capture writes
+  // a narrative row for `sess1` (the `SessionRecorded` leg, ev-12) and deletes
+  // the session (the `SessionDeleted` at ev-32), so the projection's own `DELETE FROM
+  // public.session_narrative` must leave NOTHING behind — a delete that filtered
+  // the wrong tenant, or that the secondary projection never emitted, leaves a
+  // row here. (The create half is exercised by the snapshot leg above; its
+  // final state is empty in this fixture, which is why the explicit assertion is
+  // the one that can fail.)
+  const narrativeRows = await db.query(
+    `SELECT count(*) AS n FROM public.session_narrative`);
+  if (Number(narrativeRows.rows[0].n) !== 0) {
+    console.error(`✗ #9555: the SessionDeleted left its narrative row behind: ${JSON.stringify(narrativeRows.rows)}`);
     process.exit(1);
   }
 

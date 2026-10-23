@@ -29001,23 +29001,29 @@ class TortoiseSDK:
                 # #9201: each end's presence rides along — a present-but-
                 # unorderable bound yields precision ``None``, so the block's
                 # presence needs its own datum (see ``SearchResult.to_dict``).
+                # #9244: NO ``or pt.get("validFromPrecision")`` fallback here.
+                # The arm was ALREADY dead (``pt`` carries no window column, per
+                # the note above — so it is not how #9244 was ever reachable;
+                # that was ``effective_precision``'s early return). It is
+                # removed rather than kept as a second resolution path: the
+                # moment ``pt`` widened, a raw declared token could re-enter the
+                # wire behind the ONE resolution home's back, which is the whole
+                # defect class #9244 closes. What stays here is the resolved
+                # ``point_state`` value and nothing else.
                 valid_from_present=bool(
                     point_state.get(pid, {}).get("valid_from_present")),
                 valid_to_present=bool(
                     point_state.get(pid, {}).get("valid_to_present")),
                 valid_from_precision=(
-                    point_state.get(pid, {}).get("valid_from_precision")
-                    or pt.get("validFromPrecision") or ""),
+                    point_state.get(pid, {}).get("valid_from_precision") or ""),
                 valid_to_precision=(
-                    point_state.get(pid, {}).get("valid_to_precision")
-                    or pt.get("validToPrecision") or ""),
+                    point_state.get(pid, {}).get("valid_to_precision") or ""),
                 end_state=(
                     point_state.get(pid, {}).get("end_state")
                     or _resolve_end_state(
                         point_state.get(pid, {}).get("valid_to")
                         or pt.get("validTo"),
-                        point_state.get(pid, {}).get("valid_to_precision")
-                        or pt.get("validToPrecision"))),
+                        point_state.get(pid, {}).get("valid_to_precision"))),
                 subject=point_state.get(pid, {}).get("subject"),
                 topics=cap_topics,
                 summary=cap_summary,
