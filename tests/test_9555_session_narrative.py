@@ -435,6 +435,45 @@ def test_a_count_this_home_cannot_hold_still_lands_the_records_own_row():
     assert not [s for s in statements if rr.NARRATIVE_TABLE in s.sql]
 
 
+def test_the_no_count_reset_states_the_scope_it_actually_has():
+    """A COUNTS-ONLY record emits NOTHING, and the reset's own rule says so.
+
+    The bug this pins is a docstring that spoke for the code (#9638 review P3,
+    raised three times because each fix moved the note but not the promise):
+    `_narrative_upsert_statement` said an unrepresentable count "must read as no
+    count stated" unconditionally, while `_narrative_statements` returns `[]`
+    when the record carries no representable value at all — so the one shape
+    with NOTHING but an unrepresentable count (`{"type": "SessionRecorded",
+    "id": "s1", "capture_redactions": {"total": 7}}`) silently keeps the
+    previous capture's number in an existing row.
+
+    BOTH HALVES ARE ASSERTED, and each is a different failure. The BEHAVIOUR is
+    the pinned refusal above: no statement, hence no all-NULL row invented for a
+    session nothing described. The DOCSTRING is read because it is the only place
+    a future reader is told the rule, and the rule it was told was the false one:
+    it must scope the reset to a record that also carries a representable value.
+
+    RED on the pre-fix text: the qualifier was absent from the docstring. If a
+    later editor wants the reset to fire for counts-only records, that is a
+    design change — it has to move this assertion AND
+    `test_a_count_this_home_cannot_hold_still_lands_the_records_own_row`, not
+    quietly re-promise it in prose.
+    """
+    counts_only = {"type": "SessionRecorded", "id": "s1",
+                   "capture_redactions": {"total": 7}}
+    assert _narrative_statements(counts_only) == []
+
+    docstring = " ".join((rp._narrative_upsert_statement.__doc__ or "").split())
+    assert "THAT RESET APPLIES ONLY WHEN THE SAME RECORD ALSO CARRIES A " \
+           "REPRESENTABLE VALUE" in docstring, (
+        "`_narrative_upsert_statement`'s docstring must scope the no-count reset "
+        "to a record that ALSO carries a representable value — otherwise it "
+        "promises a reset that `_narrative_statements`'s `if not values` guard "
+        "never emits for a counts-only record, which is the contradiction "
+        "#9638's review raised"
+    )
+
+
 def test_an_unrepresentable_count_is_stated_as_no_count_on_a_recapture():
     """Arrival order must not decide the number. A second capture over the same
     session that carries a count this column cannot hold must READ as "no count

@@ -351,6 +351,27 @@ _INDEX_RECORD_ROW_MARKER = "**Hosted prerequisites for the Postgres record (epic
 _INDEX_CENSUS_RE = re.compile(
     r"\*\*(?P<tables>\d+) record tables \+ (?P<views>\d+) procedural views\*\*"
 )
+
+# ── the two RE-DERIVED NUMBERS that are not table/view counts (#9638 P2) ─────
+# The census above counts tables and views. Two further figures are quoted in
+# the same ledgers as *the number of migrations on disk* and *how many lines a
+# grep matches* — and both went stale the moment a migration was added, because
+# nothing read them. They are derived here from the same directory the doc's own
+# command reads, so the sentence and the tree cannot disagree.
+_MIGRATIONS_DIR = REPO_ROOT / "supabase" / "migrations"
+#: §A1/R7's "at this head, N migrations" and the index row's "`pgvector` = 0
+#: occurrences in N migrations" — the SAME denominator (`supabase/migrations`).
+_PREREQ_MIGRATION_COUNT_RE = re.compile(r"at this head, (?P<count>\d+) migrations")
+_INDEX_MIGRATION_COUNT_RE = re.compile(
+    r"`pgvector` = 0 occurrences in (?P<count>\d+) migrations"
+)
+#: The `narrative|raw_turn|raw_text|transcript` census command's own terms —
+#: the alternation the two "N lines" claims were taken with.
+_NARRATIVE_CENSUS_TERMS = ("narrative", "raw_turn", "raw_text", "transcript")
+#: §G's re-measurement: "returns **N lines, all in `<migration>`**".
+_PREREQ_GREP_LINE_COUNT_RE = re.compile(r"returns \*\*(?P<count>\d+) lines, all in")
+#: R7's: "the same command matches `<migration>` on N lines".
+_PREREQ_R7_GREP_LINE_COUNT_RE = re.compile(r"on (?P<count>\d+) lines")
 #: The record's own migrations: a 14-digit stamp and the `record_` noun. This
 #: deliberately does NOT use a bare `*record*` glob — `0014_metering_records.sql`
 #: is metering, not the record, and counting it would make the census wrong in
@@ -652,6 +673,98 @@ def test_the_prerequisites_a1_census_matches_the_record_migrations():
         f"{sorted(extra)}, which no record migration defines — the ledger has "
         "gone stale in the other direction (a dropped table, or a typo)"
     )
+
+
+def test_the_migration_and_grep_census_reproduces_at_this_head():
+    """The two RE-DERIVED numbers in the ledgers must equal what the tree holds.
+
+    #9638's own thesis is that a census stated in `docs/00_index.md` /
+    `08-hosted-prerequisites.md` must be what the migrations ARE — the two pins
+    above enforce exactly that for the table and view counts. Two further figures
+    sit in the same sentences, were re-taken by this PR, and were wrong by one:
+
+    * `08-hosted-prerequisites.md` R7: *"at this head, 68 migrations"* — measured
+      69, i.e. the number forgot to count the migration this PR adds. This is the
+      failure mode the pins above were written for, one artefact over.
+    * `docs/00_index.md`'s #7879 row: *"`pgvector` = 0 occurrences in 68
+      migrations"* — the same denominator, stale by the same migration.
+    * both files: the `narrative|raw_turn|raw_text|transcript` grep *"on 37
+      lines"* / *"returns **37 lines**"* — measured 36, because the \u26a0\ufe0f CARRIER
+      GAP block was rewritten after the number was taken.
+
+    Neither number had a reader, which is why both could be wrong at the head of
+    the PR that re-derived them. This test IS that reader: the denominator comes
+    from `supabase/migrations/*.sql` (the directory the doc's own command reads)
+    and the line count from scanning those files with the command's own terms.
+
+    RED on the pre-fix text — measured: 68 stated vs 69 on disk in both files, and
+    37 stated vs 36 scanned in two places.
+
+    Non-vacuity: the expectations are not re-typed numbers. Adding or removing a
+    migration changes the first, and any migration that mentions one of the four
+    terms changes the second — the document then goes WRONG in the other
+    direction, which is why both assertions are equality.
+    """
+    migrations = sorted(_MIGRATIONS_DIR.glob("*.sql"))
+    assert migrations, f"no migrations under {_MIGRATIONS_DIR}"
+    on_disk = len(migrations)
+
+    prerequisites = _PREREQUISITES_DOC.read_text(encoding="utf-8")
+    index_row = next(
+        line
+        for line in _INDEX_DOC.read_text(encoding="utf-8").splitlines()
+        if _INDEX_RECORD_ROW_MARKER in line
+    )
+
+    for label, pattern, text in (
+        ("08-hosted-prerequisites.md R7's `at this head, N migrations`",
+         _PREREQ_MIGRATION_COUNT_RE, prerequisites),
+        ("docs/00_index.md's #7879 row `... in N migrations`",
+         _INDEX_MIGRATION_COUNT_RE, index_row),
+    ):
+        stated = [int(m.group("count")) for m in pattern.finditer(text)]
+        assert stated, (
+            f"{label} no longer states its migration count — restate it rather "
+            "than deleting the phrase: this pin reads it, and without it the "
+            "re-derivation stops reproducing"
+        )
+        assert set(stated) == {on_disk}, (
+            f"{label} says {sorted(set(stated))} migrations, "
+            f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} holds {on_disk} "
+            f"({migrations[-1].name} is the newest). Update the stated number "
+            "— a stale denominator is what makes the census unreproducible"
+        )
+
+    # The same command the docs quote: `grep -riE '<terms>' supabase/migrations`
+    # — `-i` case-folded, one row per matching LINE.
+    matched_lines = 0
+    for path in migrations:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            folded = line.lower()
+            if any(term in folded for term in _NARRATIVE_CENSUS_TERMS):
+                matched_lines += 1
+    assert matched_lines, (
+        "the narrative/raw-text census grep matches nothing — the `N lines` "
+        "claim in §A1/R7 and §G describes a match that no longer exists"
+    )
+
+    for label, pattern, text in (
+        ("08-hosted-prerequisites.md §G's `returns **N lines**`",
+         _PREREQ_GREP_LINE_COUNT_RE, prerequisites),
+        ("08-hosted-prerequisites.md R7's `on N lines`",
+         _PREREQ_R7_GREP_LINE_COUNT_RE, prerequisites),
+    ):
+        stated = [int(m.group("count")) for m in pattern.finditer(text)]
+        assert stated, (
+            f"{label} no longer states its line count — restate it rather than "
+            "deleting the phrase: this pin reads it"
+        )
+        assert set(stated) == {matched_lines}, (
+            f"{label} says {sorted(set(stated))} lines, the "
+            "`narrative|raw_turn|raw_text|transcript` grep over "
+            f"supabase/migrations matches {matched_lines}. Re-run the command "
+            "and state its own number"
+        )
 
 
 def test_primary_properties_have_a_column():

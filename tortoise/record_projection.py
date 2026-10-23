@@ -1958,6 +1958,23 @@ def _narrative_upsert_statement(
     "carried but unrepresentable" must read as *no count stated* — leaving the
     previous capture's number in place would serve a value the latest record
     contradicts, which is the same false claim as writing 0.
+
+    ⛔ THAT RESET APPLIES ONLY WHEN THE SAME RECORD ALSO CARRIES A REPRESENTABLE
+    VALUE. `_narrative_statements` returns `[]` when a record's whole payload
+    falls outside this home, so a COUNTS-ONLY record (the shape
+    `{"type": "SessionRecorded", "id": …, "capture_redactions": {"total": 7}}`)
+    emits no statement at all and an existing row keeps the previous capture's
+    number. That is a deliberate refusal, not the unconditional rule the rest of
+    this paragraph would otherwise promise, and the reason is the row: emitting
+    the reset without a value means an INSERT with no payload column, which on a
+    FRESH session is exactly the all-NULL row this home refuses to invent — it
+    reads as "session known, no text", a claim no record made. The cost is
+    bounded and unreachable from today's producers: `turn_count` is
+    `len(windowed)` and `capture_redactions` a summed span count (both far inside
+    `[0, _INT4_MAX]`), `session.capture_redactions` has been `integer` since
+    `20261022000001`, and a count is meaningful only beside the text whose
+    carrier writes it — that carrier carries a representable value, so the reset
+    fires there.
     """
     columns = ["org_id", "graph_id", "session_id", *values, "props"]
     params: list[Any] = [

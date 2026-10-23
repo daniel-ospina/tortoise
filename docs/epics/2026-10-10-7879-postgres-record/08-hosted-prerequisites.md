@@ -316,8 +316,8 @@ boundary. This is the one item whose *answer* is a policy call rather than an im
 `8767b1c8b` measurement **there was no dedicated table for it** — the text was carried as data, in the
 `point.content` column and in the layer-1 `journal_event.payload` mirror of the record that wrote it
 (see below) — `grep -riE 'narrative|raw_turn|raw_text|transcript'` over all
-65 migrations returned **0** (at this head, 68 migrations, the same command matches
-`20261023000001_record_session_narrative.sql` on 37 lines — the table this item's DECIDED block adds);
+65 migrations returned **0** (at this head, 69 migrations, the same command matches
+`20261023000001_record_session_narrative.sql` on 36 lines — the table this item's DECIDED block adds);
 `public.session` carries `turn_count` and **no turns**. §9.1 is explicit
 that *"the narrative is not something we're suggesting to store in the graph (same as raw) but store
 in supabase"*, and §9.4 makes the **link** load-bearing (*"at answer time, send the source's VERBATIM
@@ -636,5 +636,5 @@ grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_bac
 
 ⚠️ **Re-measured 2026-10-22 (#9555): the third command is no longer 0.** The block above stands as
 what was run at `8767b1c8b`; at this head the same `narrative|raw_turn|raw_text|transcript` grep
-returns **37 lines, all in `20261023000001_record_session_narrative.sql`** — R7's table, the tenth
+returns **36 lines, all in `20261023000001_record_session_narrative.sql`** — R7's table, the tenth
 record table (§A1). The other six commands were re-run at this head and are still exactly as stated.
