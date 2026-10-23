@@ -1171,10 +1171,11 @@ class TestCrossPackRefs:
 
         The #2781 gate is right for a bare ref: the pack may legitimately be
         naming a SIBLING pack's predicate, so an absent `hr` explains `gatedBy`
-        away as "install pack 'hr'". A namespaced target names no predicate or
-        semantics value, so that advice cannot make it resolve — and once
-        `pack validate` reads `unresolved_refs` into its verdict (#9663) the
-        advice would also turn a TYPO into an installable, fixable gap.
+        away as "install pack 'hr'". A namespaced target matches no predicate or
+        semantics value a bare-conforming catalog declares, so that advice cannot
+        make it resolve — and once `pack validate` reads `unresolved_refs` into
+        its verdict (#9663) the advice would also turn a TYPO into an
+        installable, fixable gap.
 
         `bare_only=True` at that one call site keeps it fatal. FAIL-ON: drop
         that argument and this pack LOADS (0 → 1) with the ref filed as a

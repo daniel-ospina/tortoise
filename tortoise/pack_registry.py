@@ -2114,13 +2114,14 @@ class PackRegistry:
                 # universe this ref resolves against is predicates + semantics
                 # values, and those are declared BARE by contract (#2030) — the
                 # engine emits and matches them bare. `venture:holds` therefore
-                # names no predicate or semantics value, so "install pack
-                # 'venture'" is advice that cannot make it resolve;
-                # `bare_only=True` keeps it fatal. (One residual: `_validate`
-                # only checks a declared predicate's first character, so a pack
-                # could itself declare `predicate: venture:holds` and make such
-                # a ref resolve — nothing in the shipped catalog does, and
-                # rejecting it is a behaviour change filed separately, #9760.)
+                # matches nothing a bare-conforming catalog can supply, so
+                # "install pack 'venture'" cannot make it resolve;
+                # `bare_only=True` keeps it fatal. (The one way it does resolve:
+                # `_validate` only checks a declared predicate's first
+                # character, so a pack could itself declare
+                # `predicate: venture:holds` — nothing in the shipped catalog
+                # does, and rejecting it is a behaviour change filed
+                # separately, #9760.)
                 # A BARE target still takes the gate, because naming a sibling
                 # pack's predicate is the documented, legitimate use of
                 # `depends_on` (`constrainedBy` vs venture's `gatedBy`).
