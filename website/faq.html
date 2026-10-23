@@ -251,7 +251,7 @@
 
       <h3 id="missed">What happens if extraction misses something?</h3>
       <p>If a relationship is missed when it is observable, no later search recovers it, because the relationship was never inside either document — which is why extraction quality is what the write path spends its effort on, and why the captured source text is kept as the authoritative record.</p>
-      <p>The graph sits over the evidence; it does not replace it. A missed relationship leaves the graph incomplete — the underlying record is untouched, and the stored text is still there to search directly, within the capture window: a turn over 5,000 characters is kept with a truncation marker that names its original length.</p>
+      <p>The graph sits over the evidence; it does not replace it. A missed relationship leaves the graph incomplete — the underlying record is untouched, and the stored text is still there to search directly, within the capture window: a turn over 5,000 characters is cut at that window, and a cut that discards readable text carries a truncation marker naming the turn's original length.</p>
 
       <h3 id="different">How is this different from other memory systems?</h3>
       <p>One specific thing: <strong>propagated confidence</strong> — a belief score that moves when the evidence around it moves, rather than a static field written once. A graph <em>stores</em> relationships; Tortoise <em>computes</em> over them, propagating belief across the weighted ones so a claim's score reflects the evidence that actually bears on it.</p>
