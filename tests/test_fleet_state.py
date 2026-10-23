@@ -687,7 +687,8 @@ def test_live_sources_degrade_to_empty_on_null_json(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=None,
-                 by_sid=None, prs=(), prs_measured=True, prs_error=""):
+                 by_sid=None, prs=(), prs_measured=True, prs_error="",
+                 issues=(), issues_measured=None, issues_error=""):
     monkeypatch.setattr(fs, "load_registry", lambda: list(registry))
     monkeypatch.setattr(
         fs, "cmux_workspaces",
@@ -700,8 +701,14 @@ def _fleet_build(monkeypatch, *, registry, live, measured, error="", overrides=N
     monkeypatch.setattr(fs, "worktrees", lambda _root: {})
     monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
         prs, measured=prs_measured, error=prs_error))
+    # #9392 review P2: the open-ISSUE read is its own measurement. It used to be
+    # hard-wired to `prs_measured`, which made "PR read failed, issue read
+    # succeeded" — the case `open_issues_read` must get right — inexpressible, so
+    # no test could go red for the `None`-when-unmeasured guard.
     monkeypatch.setattr(fs, "open_issues", lambda _repo, limit=800: fs.GitHubRows(
-        [], measured=prs_measured, error=prs_error))
+        list(issues),
+        measured=prs_measured if issues_measured is None else issues_measured,
+        error=issues_error))
     return fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="", sample_s=0.0, do_pane=False)
 
 
@@ -1501,6 +1508,257 @@ def test_build_refuses_to_cache_a_state_with_an_unreadable_registry(tmp_path, mo
     assert "NOT CACHED" in err and "lane registry" in err
 
 
+# ---------------------------------------------------------------------------
+# #9392 — an ABSENT lane roster is a PROVISIONING gap, not a failed read
+# ---------------------------------------------------------------------------
+
+_ABSENT_ROSTER = (
+    "FileNotFoundError: [Errno 2] No such file or directory: "
+    "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'"
+)
+_UNREADABLE_ROSTER = (
+    "PermissionError: [Errno 13] Permission denied: "
+    "'/tmp/cell-home/.pi/agent/state/lane-registry.tsv'"
+)
+
+
+def test_an_absent_roster_names_provisioning_and_not_a_rebuild(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """#9392: the refusal must name the cause's real OWNER.
+
+    Measured before the fix, in a cell whose roster was never provisioned:
+    `fleet_state.py build` printed only "NOT CACHED: the lane registry could not
+    be read" — while `collision_preflight.py` spent the same run telling the
+    reader to rebuild the board, which fails on this very read. A reader was
+    sent in a loop, so the sentence has to distinguish NEVER PROVISIONED from a
+    file that exists and could not be read, and say that a rebuild cannot help.
+    """
+    fake = _unread_registry_state()
+    fake["reconciliation"]["registry_error"] = _ABSENT_ROSTER
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    assert fs.cmd_build(
+        argparse.Namespace(out=str(out), state=str(out), json=False)) == 2
+    assert not out.exists(), "a failed read must never be written as fact"
+    err = capsys.readouterr().err
+    assert "NOT CACHED" in err and "lane registry" in err
+    # …the actionable cause and its owner.
+    assert "NEVER PROVISIONED" in err
+    assert "lane-registry.tsv" in err
+    assert "CANNOT create it" in err, "a rebuild must be named as no remedy"
+    assert "PROVISIONING" in err and "CELL step" in err
+    assert fs.REGISTRY_ROW_FORMAT in err, "name the format a row has to be in"
+    # …and never the self-row shortcut the false-CLEAN class comes from.
+    assert "Do NOT write a row for this lane alone" in err
+
+
+def test_a_present_but_unreadable_roster_is_not_called_unprovisioned(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Two causes, two sentences. Sending a reader to "provision" a file whose
+    real problem is its MODE would be the same defect one cause over (#9392)."""
+    fake = _unread_registry_state()
+    fake["reconciliation"]["registry_error"] = _UNREADABLE_ROSTER
+    monkeypatch.setattr(fs, "_load_or_build", lambda _args: fake)
+    out = tmp_path / "fleet-state.json"
+    assert fs.cmd_build(
+        argparse.Namespace(out=str(out), state=str(out), json=False)) == 2
+    err = capsys.readouterr().err
+    assert "EXISTS but could not be read" in err
+    assert "permissions/encoding" in err
+    assert "NEVER PROVISIONED" not in err
+
+
+def test_registry_remedy_has_three_arms_and_never_lists_the_rebuild() -> None:
+    """No recorded cause must not be guessed at — and NO arm may suggest the
+    rebuild that fails on the same read (#9392)."""
+    absent = fs.registry_remedy(_ABSENT_ROSTER)
+    assert "NEVER PROVISIONED" in absent
+    assert fs.registry_never_provisioned(_ABSENT_ROSTER) is True
+    for text in ("FileNotFoundError", "No such file or directory", "FileNotFound"):
+        assert fs.registry_never_provisioned(text) is True, text
+    for other in (_UNREADABLE_ROSTER, "", "cause not recorded"):
+        assert fs.registry_never_provisioned(other) is False, other
+        assert "NEVER PROVISIONED" not in fs.registry_remedy(other)
+    assert "not recorded" in fs.registry_remedy("")
+    for error in (_ABSENT_ROSTER, _UNREADABLE_ROSTER, ""):
+        assert "rebuild the fleet board" not in fs.registry_remedy(error).lower()
+
+
+def test_other_errnos_are_not_read_as_a_missing_roster() -> None:
+    """⛔ `"errno 2" in text` IS A PREFIX of errno 20/21/26/27/28 (review P2).
+
+    So `IsADirectoryError` — the predicate's OWN docstring example of a roster
+    that is PRESENT and unreadable — ENOTDIR, ENOSPC, EROFS and EMFILE were all
+    classified as NEVER PROVISIONED, and the reader was sent to provision a file
+    that is already there while the arm it needed ("EXISTS but could not be
+    read") was withheld. The errno is matched as a TOKEN.
+    """
+    absent_errnos = {
+        20: "NotADirectoryError: [Errno 20] Not a directory: /x/lane-registry.tsv",
+        21: "IsADirectoryError: [Errno 21] Is a directory: /x/lane-registry.tsv",
+        26: "OSError: [Errno 26] Text file busy: /x/lane-registry.tsv",
+        27: "OSError: [Errno 27] File too large: /x/lane-registry.tsv",
+        28: "OSError: [Errno 28] No space left on device: /x/lane-registry.tsv",
+    }
+    for errno, text in absent_errnos.items():
+        with_name_and_without = (text, text.split(": ", 1)[1].lower())
+        for shape in with_name_and_without:
+            assert fs.registry_never_provisioned(shape) is False, shape
+        assert "EXISTS but could not be read" in fs.registry_remedy(text), errno
+        assert "NEVER PROVISIONED" not in fs.registry_remedy(text), errno
+    # …and the cause it MUST still catch, in both shapes, is unchanged.
+    for absent in (_ABSENT_ROSTER, "[errno 2] no such file or directory",
+                   "errno 2"):
+        assert fs.registry_never_provisioned(absent) is True, absent
+        assert "NEVER PROVISIONED" in fs.registry_remedy(absent), absent
+
+
+def test_the_board_publishes_the_roster_size_beside_its_provenance(monkeypatch) -> None:
+    """#9392's silent half: a ONE-ROW roster is indistinguishable from a full one.
+
+    The measured incident: a hand-written self-row turned 11 live lanes
+    invisible and flipped an INCOMPLETE into a CLEAN with no code change, because
+    `board source: rebuilt` describes the READ, never its coverage. The board now
+    carries the counts, so a reader can print "roster rows: 1".
+    """
+    monkeypatch.setattr(fs, "load_registry",
+                        lambda: [("cell-t3", "WS-A", "")])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {f"WS-{n}": {"cwd": f"/tmp/w{n}"} for n in range(3)}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    rec = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                         sample_s=0.0, do_pane=False)["reconciliation"]
+    assert rec["registry_rows"] == 1, "the roster of one is visible as one"
+    assert rec["workspaces_count"] == 3
+
+
+def test_the_workspace_count_excludes_synthetic_process_only_lanes(monkeypatch) -> None:
+    """the count is CMUX workspaces, not the `PROC:` entries the board mints.
+
+    `register_process_lanes` MUTATES the same live map to add a `PROC:<pid>` entry
+    for a lane found in the process table and not in cmux (#8999: the sanctioned
+    `nohup` launch path), so `len(workspaces)` published "live cmux workspaces: 2"
+    for a cmux list of ONE. That is the value the exit-2 remedy prints beside the
+    roster count, and it is wrong worst exactly here: the synthetic entry is minted
+    when the process's cwd is claimed by !=1 registry row — i.e. when the roster is
+    missing rows, the cell case #9392 exists for — while the remedy tells the
+    operator to take one uuid per lane from `cmux list-workspaces --json`, a list a
+    `PROC:` entry is not in.
+    """
+    monkeypatch.setattr(fs, "load_registry", lambda: [("cell-t3", "WS-A", "")])
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {"WS-A": {"cwd": "/tmp/a"}}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    # One PROCESS-only lane: no cmux workspace, cwd not claimed by exactly one row.
+    monkeypatch.setattr(fs, "live_sessions", lambda: fs.LiveSessions(
+        {f"{fs.PROC_WS_PREFIX}4242": [
+            {"store": fs.LIVE_STORE_PROCESS, "cwd": "/tmp/elsewhere"}]},
+        measured=True))
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees",
+                        lambda _root: {"/tmp/elsewhere": {"branch": "fix/x"}})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    state = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                           sample_s=0.0, do_pane=False)
+    # …the synthetic workspace IS registered (the lane must not look terminal)…
+    assert any(fs.is_proc_ws(lane["identity"]["workspace"])
+               for lane in state["lanes"]), (
+        "the process-only lane must still be a lane with a namespaced workspace")
+    # …and the PUBLISHED COUNT is the cmux one, not the mutated map's length.
+    assert state["reconciliation"]["workspaces_count"] == 1, (
+        "a PROC: pseudo-workspace is not a live cmux workspace")
+
+
+def test_an_unmeasured_workspace_read_publishes_no_count(monkeypatch) -> None:
+    """⛔ ABSENT IS NOT ZERO, for the LIVE count too (review P1).
+
+    EVERY failure path of `cmux_workspaces` returns an EMPTY `WorkspaceMap`, so
+    `len()` beside a failed read is an artefact of the failure. Publishing it
+    made the claim gate print "vs 0 live workspace(s)" for a fleet nobody asked
+    successfully — the documented fail-open of #7738, where the beat cannot
+    reach cmux — i.e. it asserted an empty live fleet and read every roster row
+    as a ghost lane. The board must say "this read did not happen" (`None`), not
+    `0`.
+    """
+    monkeypatch.setattr(fs, "load_registry",
+                        lambda: fs.RegistryRows([("cell-t3", "WS-A", "")],
+                                                measured=True))
+    # The REAL fail-open shape: no workspaces AND `measured=False`.
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {}, measured=False, error="could not confirm a single cmux window"))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    rec = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                         sample_s=0.0, do_pane=False)["reconciliation"]
+    assert rec["workspaces_measured"] is False
+    assert rec["workspaces_count"] is None, (
+        "an unmeasured workspace read must not publish a count")
+    # …while the MEASURED roster beside it is still published: the fix is one
+    # field, not a refusal to say anything.
+    assert rec["registry_rows"] == 1
+
+
+
+def test_an_unmeasured_registry_read_publishes_no_count(monkeypatch) -> None:
+    """⛔ ABSENT IS NOT ZERO, for the ROSTER count too (review P2, #9392).
+
+    `load_registry` returns `RegistryRows(error=…)` with NO rows on any `OSError`,
+    so `len()` beside `registry_measured: false` is an artefact of the failure —
+    and `fleet_state.py build --json` prints that object BEFORE its refusal. The
+    sibling field below already answers with `None`; publishing `0` here is the
+    "roster rows: 0" false-CLEAN direction this PR exists to close, one key over
+    from where it was closed.
+    """
+    monkeypatch.setattr(fs, "load_registry",
+                        lambda: fs.RegistryRows(measured=False,
+                                                error=_ABSENT_ROSTER))
+    monkeypatch.setattr(fs, "cmux_workspaces", lambda: fs.WorkspaceMap(
+        {"WS-A": {"cwd": "/tmp/wa"}}, measured=True))
+    monkeypatch.setattr(fs, "pane_bindings", lambda: {})
+    monkeypatch.setattr(fs, "live_sessions", lambda: {})
+    monkeypatch.setattr(fs, "load_overrides", lambda: {})
+    monkeypatch.setattr(fs, "session_index", lambda: ({}, {}))
+    monkeypatch.setattr(fs, "worktrees", lambda _root: {})
+    monkeypatch.setattr(fs, "open_prs", lambda _repo, limit=400: fs.GitHubRows(
+        [], measured=True))
+    monkeypatch.setattr(fs, "open_issues",
+                        lambda _repo, limit=fs.OPEN_ISSUES_LIMIT: fs.GitHubRows(
+                            [], measured=True))
+    rec = fs.build_state(repo="o/r", repo_root="/tmp", orch_ws="",
+                         sample_s=0.0, do_pane=False)["reconciliation"]
+    assert rec["registry_measured"] is False
+    assert rec["registry_rows"] is None, (
+        "an unmeasured roster read must not publish a row count")
+    # …while the MEASURED workspace count beside it IS still published, so the fix
+    # is one field and not a blanket refusal to say anything.
+    assert rec["workspaces_count"] == 1
+
+
+
 def test_cmd_build_refuses_to_cache_an_unread_board(tmp_path, monkeypatch, capsys) -> None:
     """#7957 H5: a failed read is never CACHED. Writing it would replace the last good
     state with an empty fleet and free every lane into capacity on the next read."""
@@ -1681,6 +1939,41 @@ def test_an_open_issue_read_at_the_cap_is_stamped_as_truncated(monkeypatch) -> N
     assert rec["open_issues_truncated"] is True
     assert rec["open_issues_read"] == fs.OPEN_ISSUES_LIMIT
     assert rec["open_issues_limit"] == fs.OPEN_ISSUES_LIMIT
+
+
+def test_an_open_issue_read_that_failed_publishes_no_count(monkeypatch) -> None:
+    """ABSENT IS NOT ZERO for the open-issue read too (#9392 review P2).
+
+    `gh_json` returns NO rows on failure, so `len(issues_read)` beside a failed
+    read publishes "0 open issues" — and `cmd_build --json` prints the object
+    BEFORE its own refusal, so a reader can act on the invented zero. The guard
+    exists in `build_state`; this pins it, because a guard nothing can make red
+    is not a gate.
+    """
+    st = _fleet_build(monkeypatch, registry=[], live={}, measured=True,
+                      issues=[{"number": 1}, {"number": 2}, {"number": 3}],
+                      issues_measured=False,
+                      issues_error="gh: Could not resolve host: api.github.com")
+    rec = st["reconciliation"]
+    assert rec["open_issues_read"] is None, (
+        "a failed issue read must publish NO count, not the empty list's length"
+    )
+
+
+def test_a_measured_issue_read_publishes_its_count_even_when_the_pr_read_failed(
+        monkeypatch) -> None:
+    """The distinguishing case: the ISSUE read succeeded while the PR read did
+    not. Gating the count on `github_measured` (the AND) would discard a real
+    measurement — the wrong fix this pins against (#9392 review P2)."""
+    st = _fleet_build(monkeypatch, registry=[], live={}, measured=True,
+                      prs_measured=False, prs_error="gh: HTTP 502",
+                      issues=[{"number": 1}, {"number": 2}, {"number": 3}],
+                      issues_measured=True)
+    rec = st["reconciliation"]
+    assert rec["github_measured"] is False, "the PR read failed"
+    assert rec["open_issues_read"] == 3, (
+        "the issue read DID happen, so its count is a measurement and must be published"
+    )
 
 
 def test_an_open_issue_read_below_the_cap_is_not_truncated(monkeypatch) -> None:
