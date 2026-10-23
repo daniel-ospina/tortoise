@@ -501,7 +501,7 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     # destination is the one the command uses.
     assert (
         "git mv supabase/migrations/20260813000005_second.sql"
-        " supabase/migrations/<next-free-prefix-2>_second.sql"
+        " supabase/migrations/NEXTFREE1_second.sql"
     ) in r.stdout, r.stdout
     # Nothing shape-specific to a `_a`/`_b` fixture pair, and never the old
     # rename-onto-the-other-duplicate form ("fatal: destination exists").
@@ -526,6 +526,53 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     assert r2.returncode == 1, r2.stdout
     assert "git mv supabase/migrations/20260813000005_second.sql" in r2.stdout, r2.stdout
     assert "git mv supabase/migrations/20260813000006_second.sql" in r2.stdout, r2.stdout
+    # One operand index per operand ACROSS prefixes, so the tokens differ.
+    assert "NEXTFREE1_" in r2.stdout and "NEXTFREE2_" in r2.stdout, r2.stdout
+
+
+def test_the_printed_rename_command_actually_runs(tmp_path):
+    """The report's only purpose is that someone runs the line it prints.
+
+    Round 8 measured the line aborting two ways — unquoted space name
+    (`fatal: destination 'gamma.sql' is not a directory`) and, worse, a name
+    containing `$(…)` executing on paste. This test EXECUTES what the report
+    printed, with only the NEXTFREE<n> token substituted, in a throwaway git repo
+    — the only pin that survives future rewording of the text around it.
+    """
+    mig = tmp_path / "migrations"
+    mig.mkdir()
+    nasty = "20260813000005_beta $(touch PWNED) gamma.sql"
+    (mig / nasty).write_text(
+        "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n", encoding="utf-8"
+    )
+    (mig / "20260813000005_alpha.sql").write_text(
+        "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n", encoding="utf-8"
+    )
+    env = _seam_env(mig, _stub_curl(["0001"]))
+    r = subprocess.run(
+        ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT
+    )
+    assert r.returncode == 1, r.stdout
+    lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("git mv ")]
+    assert len(lines) == 1, r.stdout
+    cmd = lines[0].replace("NEXTFREE1", "20261024000001")
+
+    work = tmp_path / "repo"
+    (work / "supabase" / "migrations").mkdir(parents=True)
+    for f in mig.iterdir():
+        (work / "supabase" / "migrations" / f.name).write_bytes(f.read_bytes())
+    subprocess.run(["git", "init", "-q", "."], cwd=work, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=work, check=True)
+    run = subprocess.run(
+        ["bash", "-c", cmd], cwd=work, capture_output=True, text=True
+    )
+    assert run.returncode == 0, f"{cmd!r} -> {run.stderr}"
+    names = sorted(p.name for p in (work / "supabase" / "migrations").iterdir())
+    # Exactly one file left at the old prefix; the other moved, name intact.
+    assert names.count("20260813000005_alpha.sql") == 1, names
+    assert any(n.startswith("20261024000001_") for n in names), names
+    # ... and pasting it did NOT run the command substitution in the filename.
+    assert not (work / "PWNED").exists(), "the printed command executed a filename"
 
     # N files at one prefix need N-1 renames, so N-1 operands; and a filename with
     # a space must survive whole (no `basename`/`xargs` word-splitting) — both
@@ -539,10 +586,20 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
         ["0001"],
     )
     assert r3.returncode == 1, r3.stdout
-    assert "git mv supabase/migrations/20260813000005_beta gamma.sql" in r3.stdout, r3.stdout
+    # SHELL-QUOTED (round-8 finding): unquoted, a name with a space prints a
+    # command that aborts with "destination 'gamma.sql' is not a directory", and
+    # a name containing `$(…)` EXECUTES it on copy-paste. `%q` is the pin.
+    assert "git mv supabase/migrations/20260813000005_beta\\ gamma.sql" in r3.stdout, r3.stdout
     assert "git mv supabase/migrations/20260813000005_delta.sql" in r3.stdout, r3.stdout
     assert "git mv supabase/migrations/20260813000005_alpha.sql" not in r3.stdout, r3.stdout
     assert "Repeat until ONE file remains" in r3.stdout, r3.stdout
+    # The placeholder is a bare token (no shell metacharacters) and carries a
+    # GLOBAL index, so two operands can never be given the same prefix by
+    # substituting "the" token: each needs its own free numeric prefix.
+    assert "NEXTFREE1_" in r3.stdout, r3.stdout
+    # The gate cannot see which file's DDL prod already has; keeping the wrong one
+    # re-runs the applied DDL and silently never applies the other (#1001, round-8).
+    assert "Which file to KEEP is a prod question" in r3.stdout, r3.stdout
 
 
 def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():

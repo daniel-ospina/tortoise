@@ -227,18 +227,15 @@ fi
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   echo "  BLOCKING duplicate migration version prefixes (abort \`supabase db push\` AND mask drift state — see #1235):"
   for v in $DUP_LOCAL_VERSIONS; do
-    dup_paths="$(ls -1 "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null || true)"
     files=""
-    # ⛔ ONE PATH PER LINE, read with IFS= — no `basename`/`xargs`, which
-    # word-split a filename containing a space into a broken command (a name the
-    # CLI pattern ^[0-9]+_(.*)\.sql$ accepts; measured round-7 finding).
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      files="$files ${p##*/}"
-    done <<DUP_LIST
-$dup_paths
-DUP_LIST
-    echo "    - $v  [$files ]"
+    # ⛔ NUL-SAFE ENUMERATION: a filename may contain a space (accepted by the
+    # CLI pattern ^[0-9]+_(.*)\.sql$) and, pathologically, a newline. `xargs`,
+    # `basename` and unquoted globbing all split those into a broken command —
+    # measured round-7 and round-8 findings.
+    while IFS= read -r -d '' p; do
+      files="${files:+$files }${p##*/}"
+    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+    echo "    - $v  [$files]"
   done
   # ⛔ THE OPERANDS ARE THE ACTUAL FILES, NEVER `${v}_b.sql` (review rounds 5-7).
   # The printed remedy was `git mv ${v}_a.sql ${v}_b.sql`, which renames one
@@ -250,22 +247,34 @@ DUP_LIST
   # seen at one prefix is TWO files), so a hardcoded `_b` aborts with
   # "fatal: bad source". Print the real name of every file but the first, per
   # prefix, with the migrations path so the command runs from the repo root.
-  echo "  Rename operand(s) — the FIRST file listed at each prefix stays put, every other"
-  echo "  file at that prefix moves to a free prefix (run from the repo root):"
+  echo "  Rename operand(s) — at each prefix above keep ONE file and move each file listed"
+  echo "  here to its own prefix. Operands are shell-quoted; replace NEXTFREE<n> with a"
+  echo "  free NUMERIC prefix (^[0-9]+_) — ONE per operand — and run from the repo root:"
+  dup_n=0
   for v in $DUP_LOCAL_VERSIONS; do
-    dup_paths="$(ls -1 "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null || true)"
-    n=0
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      n=$((n + 1))
-      [ "$n" -ge 2 ] || continue
+    seen=0
+    while IFS= read -r -d '' p; do
+      seen=$((seen + 1))
+      [ "$seen" -ge 2 ] || continue
+      dup_n=$((dup_n + 1))
       name="${p##*/}"
       slug="${name#${v}_}"
-      echo "    git mv supabase/migrations/$name supabase/migrations/<next-free-prefix-$n>_$slug"
-    done <<DUP_PATHS
-$dup_paths
-DUP_PATHS
+      printf '    git mv %q %q\n' "supabase/migrations/$name" \
+        "supabase/migrations/NEXTFREE${dup_n}_$slug"
+    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
   done
+  # ⛔ THE GATE CANNOT SEE WHICH FILE'S DDL PROD ALREADY HAS. When the colliding
+  # version IS recorded, "keep the first listed one" can keep the file that never
+  # applied and move the one that did: the moved file's DDL re-runs (this repo's
+  # migrations are idempotent, so it passes silently), the kept file's DDL is
+  # NEVER applied, and the next run is green because the version is recorded —
+  # the silent #1001 loss this gate exists to prevent. Same limit the OUT OF
+  # ORDER block states; it belongs here too (round-8 review finding).
+  if [ -n "$REMOTE_MAX" ] && [ -z "$BLOCK_OOO" ]; then
+    echo "  ⚠️ Which file to KEEP is a prod question this gate cannot answer: check each file's"
+    echo "     objects in prod ('supabase migration list --linked', 'supabase db diff --linked')"
+    echo "     and keep the one whose DDL prod already has — not simply the first listed."
+  fi
   echo "    Repeat until ONE file remains at each prefix above — a prefix that still"
   echo "    collides is re-listed by the next run."
   if [ -n "$BLOCK_OOO" ]; then
