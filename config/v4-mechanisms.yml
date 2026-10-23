@@ -63,11 +63,24 @@
 # E2 comment — *"mark the omission explicit in the registry this issue builds"*.
 # ⚠️ That is the whole point of the exercise: a hand-written list cannot prove it
 # is complete, which is how a declared mechanism (this one) stayed unregistered
-# while the seven-entry gate stayed green. So EVERY declaring document now
-# carries a `<!-- v4-mechanism: <id> -->` marker at the declaration site, and
-# `membership_errors()` in the gate fails closed in BOTH directions — a marker
-# with no row, and a row with no marker. See the gate's docstring for the rule
-# and its stated limit.
+# while the seven-entry gate stayed green. So every declaration in
+# `docs/architecture/*.md` carries a `<!-- v4-mechanism: <id> -->` marker at the
+# declaration site, and `membership_errors()` in the gate fails closed in BOTH
+# directions — a marker with no row, and a row with no marker — AND holds each
+# row to its OWN declared documents: every scanned document a row names must
+# carry its marker (a marker elsewhere does not stand in for it), and a row that
+# names none is refused outright. See the gate's docstring for the rule and its
+# stated limits.
+#
+# ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
+# here rather than assumed covered: `packs/dev/manifest.yaml` (`embed_gate`'s
+# policy source) is YAML, and the marker convention is a markdown-comment
+# convention over `docs/architecture/*.md`. A row that declares such a source
+# must ALSO declare a scanned document carrying its marker — `membership_errors`
+# refuses a row whose every declaring document is outside the surface, because
+# an unfindable declaration must not read as a marked one. So the "every
+# declaring source" claim covers the DOCUMENTS; the pack's own declaration site
+# is checked by nobody and is listed here so that limit is legible.
 #
 # ⛔ NOT IN SCOPE — the substrate refactor, any change to the extraction/write
 # path, and indicator (2)'s "generate the design document from the registry"

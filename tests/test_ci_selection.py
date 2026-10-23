@@ -170,6 +170,17 @@ def test_docs_scanning_gates_stay_in_tier1():
         "`_ALLOWED_TRANSITIONS` merges green (#4309 class, same as #8495's "
         "sibling row)"
     )
+    assert "test_v4_declared_mechanisms.py" in tier1, (
+        "#9778 review (P1): the declared-mechanism MEMBERSHIP gate derives the "
+        "declared set from the `<!-- v4-mechanism: <id> -->` markers in "
+        "docs/architecture/*.md — `docs/` is in NON_PYTHON_PREFIXES, so a "
+        "docs-only diff runs tier1 only (EXTRACTOR-V4-ARCHITECTURE.md takes "
+        "the early return, STORAGE-ARCHITECTURE.md selects `onboarding`, and "
+        "`core` is added only when NOTHING matched); registered in `core` "
+        "alone, deleting or renaming a marker merged green while the gate was "
+        "red on main (#4309/#3616 class, same dual registration as the six "
+        "sibling test_extractor_v4_* doc guards)"
+    )
 
 
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():

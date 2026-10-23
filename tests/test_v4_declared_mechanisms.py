@@ -31,7 +31,7 @@ there" is a fact about the code, not about the path.
 
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
-* It does not implement any mechanism. Three of the seven are genuinely absent
+* It does not implement any mechanism. Three of the eight are genuinely absent
   and are *meant* to be marked `not-implemented` — recording an absence is the
   output, not a failure.
 * It does not generate a design document from the registry (indicator (2) /
@@ -42,23 +42,36 @@ WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 prove it is COMPLETE — and that is how `state_value_carve_out` (the verbatim
 state/operational-value carve-out, #2453) stayed unregistered while this gate
 stayed green: a hand-written list of seven cannot notice an eighth mechanism the
-design declares in prose. So every declaring document carries a
-`<!-- v4-mechanism: <id> -->` marker AT THE DECLARATION SITE, and
-`membership_errors` fails closed on BOTH shapes:
+design declares in prose. So every declaration in `docs/architecture/*.md`
+carries a `<!-- v4-mechanism: <id> -->` marker AT THE DECLARATION SITE, and
+`membership_errors` fails closed on ALL THREE shapes:
 
   * a marker in `docs/architecture/*.md` whose id has NO registry row — the
-    declared-and-absent shape this whole issue exists to kill; and
+    declared-and-absent shape this whole issue exists to kill;
   * a registry row whose id NO design document marks — a row whose declaration
     cannot be found, i.e. an *unmarked* row (#5064 refactor direction 1: "there
-    is no third state and no unmarked row").
+    is no third state and no unmarked row"); and
+  * a marker sitting in a document the row does NOT declare, or a row that names
+    no document inside the scanned surface at all — the ATTRIBUTION half (#9778
+    review P2): comparing the two id sets proved they agreed, never that a row's
+    OWN declaration was the one found, so a row whose declared document had been
+    left unmarked passed as long as some other document carried its id.
 
-⚠️ ITS STATED LIMIT, because overclaiming here is the same defect: a prose
-declaration that carries NEITHER a marker NOR a row is invisible to this gate —
-the marker is a convention, and nothing forces prose to adopt it. The convention
-is what makes the comparison POSSIBLE (there is no other machine-readable
-surface in a prose design); which declarations exist TODAY is the enumeration
-deliverable #5064's Scope section names, and that enumeration is the backfill,
-not a property the gate can derive.
+⚠️ ITS STATED LIMITS, because overclaiming here is the same defect:
+
+  * a prose declaration that carries NEITHER a marker NOR a row is invisible to
+    this gate — the marker is a convention, and nothing forces prose to adopt
+    it. The convention is what makes the comparison POSSIBLE (there is no other
+    machine-readable surface in a prose design); which declarations exist TODAY
+    is the enumeration deliverable #5064's Scope section names, and that
+    enumeration is the backfill, not a property the gate can derive;
+  * a `declared_in:` entry OUTSIDE `docs/architecture/*.md` — `embed_gate`'s
+    `packs/dev/manifest.yaml` is the live case — is NOT marker-checked: the
+    convention is a markdown-comment convention and this gate scans only the
+    architecture docs. Such a row still has to carry its marker in one of its
+    scanned documents, so the row is never unverifiable; what is uncovered is
+    that extra source, and it is named in the registry header rather than
+    silently assumed to be checked.
 * It does not touch the extraction/write-path stages.
 * It does not check that a cited test file is REGISTERED in the CI manifest —
   that surface is owned by `tools/ci_selection.py --integrity`. The gate checks
@@ -124,7 +137,8 @@ DECLARED_IDS = (
 #: WHERE the design's declarations live, and HOW one is marked. The marker is the
 #: only machine-readable surface a prose design has, so the marker convention is
 #: what turns "the design declares a set" into something one gate can compare
-#: against the registry — in BOTH directions (`membership_errors`). Bounded to
+#: against the registry — in BOTH directions (`membership_errors`) AND attributed
+#: to the document the row itself names (#9778 review P2). Bounded to
 #: `docs/architecture/*.md` on purpose: the two documents that declare the v4
 #: write path live there, and widening the scan to every `.md` would make an
 #: unrelated doc's prose able to red (or silently satisfy) the gate.
@@ -253,6 +267,11 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     directory is reported: an unreadable surface is a verdict, not an empty set
     (the same polarity as `_defined_names` returning ``None``).
 
+    The CONVENTION itself — an angle-bracketed placeholder id
+    (``<!-- v4-mechanism: <id> -->``, which is how the rule is written down) —
+    is skipped: it names no mechanism, so counting it as a declaration made
+    describing the rule in a scanned document a red gate (#9778 review P3).
+
     The second return value is the violation list, so one caller can report the
     malformed shapes and the membership verdicts together.
     """
@@ -299,11 +318,53 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     return markers, errors
 
 
+def _declaring_paths(row: dict) -> list[str]:
+    """The row's own `declared_in:` entries, defensively read.
+
+    `gate_errors` owns the field's SHAPE (a non-list, a non-string entry, an
+    escaping path are all its verdicts). This only has to answer "WHICH
+    documents does the row say declare it" for the attribution and coverage
+    rules, so it accepts the entries it can use and ignores the rest — the shape
+    defect is reported once, by the gate that owns it.
+    """
+    declared = row.get("declared_in")
+    if not isinstance(declared, list):
+        return []
+    return [d for d in declared if isinstance(d, str) and d.strip()]
+
+
+def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
+    """The declared documents that resolve INSIDE the gate's scanned surface.
+
+    Resolved against the docs dir's own root (`<root>/docs/architecture` ->
+    `<root>`), not string-compared: a declaration written as
+    `./docs/architecture/X.md`, with a doubled separator, or through a symlink
+    names the same document, and a string comparison would silently attribute it
+    to nothing (a false red on a legitimate registry). Containment — not mere
+    existence — is the test, so `packs/dev/manifest.yaml` is NOT a scanned
+    declaring document: the markdown marker convention does not reach it.
+    """
+    scanned_dir = docs_dir.resolve()
+    root = docs_dir.parent.parent
+    targets: set[Path] = set()
+    for entry in entries:
+        rel = Path(entry)
+        if rel.is_absolute():
+            continue
+        try:
+            resolved = (root / rel).resolve()
+        except (OSError, RuntimeError, ValueError):  # unresolvable: not attributable
+            continue
+        if resolved.is_relative_to(scanned_dir):
+            targets.add(resolved)
+    return targets
+
+
 def membership_errors(
     mechanisms: list[dict], docs_dir: Path = ARCH_DOCS
 ) -> list[str]:
     """The BIDIRECTIONAL membership rule: no unregistered declaration, no
-    undeclared row.
+    undeclared row — and every scanned document a row declares must mark it.
 
     `gate_errors` proves every row is implemented-with-a-test or explicitly
     marked absent. It cannot prove the row set is COMPLETE — a hand-pinned tuple
@@ -319,12 +380,25 @@ def membership_errors(
         away. The composite rule above compares `id` SETS, so deleting ONE of two
         markers left the suite green (review cycle 1, P2) while the registry kept
         claiming both documents declare it — the same declared-implies-present
-        shape one level down.
+        shape one level down;
+      * a row naming NO document inside the scanned surface at all -> its
+        declaration site is unreachable, so the marker convention cannot confirm
+        it, and an unverifiable row must not read as a marked one (#9778 review
+        P2). The rules above would pass it vacuously: with no scanned declaring
+        document there is no per-document check to fail.
 
     Kept SEPARATE from `gate_errors` on purpose: `gate_errors` is also the
     per-row mutation surface, and folding a repository-wide scan into it would
     make every synthetic row in those proofs also a membership defect — a verdict
     the synthetic case never meant to make.
+
+    ⚠️ STATED LIMIT: a `declared_in:` entry OUTSIDE `docs/architecture/*.md`
+    (e.g. `packs/dev/manifest.yaml`, `embed_gate`'s policy source) is not
+    marker-checked — the convention is a markdown-comment convention and this
+    gate scans only the architecture docs. Such a row must ALSO declare a scanned
+    document carrying its marker, so the row is never unverifiable; what is
+    uncovered is that extra source, and it is named in the registry header rather
+    than silently assumed.
 
     ``mechanisms`` is the parsed registry list (same shape `gate_errors` takes).
     """
@@ -338,9 +412,7 @@ def membership_errors(
         if not (isinstance(row_id, str) and row_id):
             continue
         ids.add(row_id)
-        entries = row.get("declared_in")
-        if isinstance(entries, list):
-            declared_docs[row_id] = [e for e in entries if isinstance(e, str)]
+        declared_docs[row_id] = _declaring_paths(row)
 
     for mid in sorted(set(markers) - ids):
         where = ", ".join(sorted(set(markers[mid])))
@@ -359,29 +431,37 @@ def membership_errors(
             f"an UNMARKED row, and #5064's refactor direction allows none: put "
             f"the marker at the site that declares the mechanism, or drop the row"
         )
-    # A row that names SEVERAL documents in `declared_in:` must be marked in
-    # EVERY one of them that lies inside the scanned surface. Only entries under
-    # `docs_dir` are checkable here (a pack manifest is cited as a policy source
-    # and carries no marker); an entry outside it is not silently required, and
-    # is not silently satisfied either — the id-set rule above still needs ONE
-    # marker somewhere.
-    scanned = {doc.resolve() for doc in docs_dir.glob("*.md")}
+    # A row that names documents in `declared_in:` must be marked in EVERY one
+    # that lies inside the scanned surface, and must name at least one of them.
+    # Only entries under `docs_dir` are checkable here (a pack manifest is cited
+    # as a policy source and carries no marker); an entry outside it is neither
+    # silently required nor silently accepted, and the coverage rule below
+    # refuses a row that relies on such an entry ALONE.
     for mid, entries in sorted(declared_docs.items()):
-        for entry in entries:
-            try:
-                resolved = (docs_dir.parent.parent / entry).resolve()
-            except (OSError, ValueError, RuntimeError):
+        scanned_targets = _scanned_targets(entries, docs_dir)
+        if not scanned_targets:
+            errors.append(
+                f"{mid}: the row names NO declaring document inside the gate's "
+                f"scanned surface ({docs_dir.name}/*.md: "
+                f"{', '.join(entries) or 'nothing'}) — its marker can never be "
+                f"found where the declaration is, so the row is UNVERIFIABLE and "
+                f"reads as an unmarked row (#9778 review P2): declare the "
+                f"document that carries the marker, or move the marker to a "
+                f"document the row names"
+            )
+            continue
+        if mid not in markers:
+            continue  # already reported above as an UNMARKED row
+        for resolved in sorted(scanned_targets):
+            if resolved.name in markers[mid]:
                 continue
-            if resolved not in scanned:
-                continue
-            if mid not in markers or resolved.name not in markers[mid]:
-                errors.append(
-                    f"{mid}: `declared_in:` names {resolved.name}, but that "
-                    f"document carries no `{MARKER_TOKEN} {mid}` marker — half "
-                    f"of a multi-document declaration has rotted away, and a "
-                    f"reader of {resolved.name} would not meet the mechanism's "
-                    f"verdict where it is declared"
-                )
+            errors.append(
+                f"{mid}: `declared_in:` names {resolved.name}, but that "
+                f"document carries no `{MARKER_TOKEN} {mid}` marker — half "
+                f"of a multi-document declaration has rotted away, and a "
+                f"reader of {resolved.name} would not meet the mechanism's "
+                f"verdict where it is declared"
+            )
     return errors
 
 
@@ -932,11 +1012,20 @@ def test_the_compact_render_omits_the_carve_out_the_row_records() -> None:
 # a surface that cannot be read at all.
 
 
-def _row(mid: str = "x") -> dict:
+#: Where the fixture rows below declare themselves, relative to `tmp_path`. The
+#: attribution rule resolves each row's `declared_in:` against a root, so a
+#: fixture row has to name a document under the fixture docs dir — the same
+#: relationship the real registry has to the real one.
+FIXTURE_DECLARED_DOC = "docs/architecture/a.md"
+
+
+def _row(mid: str = "x", declared_in: list[str] | None = None) -> dict:
     return {
         "id": mid,
         "name": mid,
-        "declared_in": ["config/v4-mechanisms.yml"],
+        "declared_in": (
+            [FIXTURE_DECLARED_DOC] if declared_in is None else list(declared_in)
+        ),
         "state": "implemented",
         "code": ["tortoise/fanout.py"],
         "tests": ["tests/test_fanout_cap.py"],
@@ -961,8 +1050,8 @@ def test_membership_fails_closed_on_a_marker_with_no_registry_row(tmp_path) -> N
     """The root sentence: a mechanism the design declares must have a verdict."""
     docs = _docs(
         tmp_path,
-        EXTRACTOR__md="text <!-- v4-mechanism: x --> "
-        "<!-- v4-mechanism: ghost -->\n",
+        a__md="text <!-- v4-mechanism: x -->\n",
+        EXTRACTOR__md="more text <!-- v4-mechanism: ghost -->\n",
     )
     errors = membership_errors([_row("x")], docs)
     assert any("ghost" in e and "NO row" in e for e in errors), errors
@@ -982,7 +1071,14 @@ def test_membership_accepts_a_mechanism_two_documents_declare(tmp_path) -> None:
         EXTRACTOR__md="a <!-- v4-mechanism: x -->\n",
         STORAGE__md="b <!-- v4-mechanism: x -->\n",
     )
-    assert membership_errors([_row("x")], docs) == []
+    row = _row(
+        "x",
+        declared_in=[
+            "docs/architecture/EXTRACTOR.md",
+            "docs/architecture/STORAGE.md",
+        ],
+    )
+    assert membership_errors([row], docs) == []
 
 
 def test_membership_fails_closed_on_a_malformed_marker(tmp_path) -> None:
@@ -1088,6 +1184,74 @@ def test_membership_fails_closed_on_an_unreadable_document(tmp_path) -> None:
     (docs / "latin1.md").write_bytes(b"\xff\xfe not utf-8 \xff")
     errors = membership_errors([_row("x")], docs)
     assert any("could not be read" in e for e in errors), errors
+
+
+# ── COVERAGE: a row's declaration site must be REACHABLE (#9778 P2) ──────────
+#
+# Comparing the two id sets (and even requiring each declared document to carry
+# the marker) is VACUOUS for a row whose every declaring document lies outside
+# the scanned surface: there is no per-document check to fail, so the row passes
+# while the convention can never confirm it. That is exactly what a
+# `declared_in:` of `packs/dev/manifest.yaml` alone would look like.
+
+
+def test_membership_fails_closed_on_a_marker_in_an_undeclared_document(tmp_path) -> None:
+    """A marker sitting in a document the row does NOT declare is not its marker.
+
+    Pre-fix (id-set comparison only) this was a PASS: the row's own declared
+    document carries no marker and nothing said so, because some OTHER document
+    happened to carry its id.
+    """
+    docs = _docs(
+        tmp_path,
+        a__md="the declared site — and NO marker here\n",
+        b__md="an unrelated passage <!-- v4-mechanism: x -->\n",
+    )
+    errors = membership_errors([_row("x")], docs)
+    assert any("a.md" in e and "rotted away" in e for e in errors), errors
+    # The verdict is not the UNMARKED one: a marker WAS found, just not where the
+    # row says its declaration is. Conflating the two would let a mutation that
+    # drops the per-document rule hide behind the other rule's message.
+    assert not any("UNMARKED row" in e for e in errors), errors
+
+
+#: `declared_in:` entries the gate cannot scan. `embed_gate` really carries one
+#: (`packs/dev/manifest.yaml`, its policy source), so the coverage rule below is
+#: about a row relying on such a source ALONE.
+UNSCANNED_DECLARED_DOC = "packs/dev/manifest.yaml"
+
+
+def test_membership_fails_closed_on_a_row_declaring_only_unscanned_sources(
+    tmp_path,
+) -> None:
+    """A row whose every declaring document is outside the surface is UNVERIFIABLE.
+
+    The marker convention does not reach a YAML pack or a `docs/plans/` page, so
+    such a row's declaration can never be found — and an unfindable declaration
+    must not read as a marked one. Pre-fix this passed as long as ANY scanned
+    document carried the id (measured: this case returned no errors at HEAD).
+    """
+    docs = _docs(tmp_path, a__md="a passage <!-- v4-mechanism: x -->\n")
+    row = _row("x", declared_in=[UNSCANNED_DECLARED_DOC])
+    errors = membership_errors([row], docs)
+    assert any("names NO declaring document inside" in e and "x:" in e for e in errors), (
+        errors
+    )
+
+
+def test_membership_accepts_a_row_that_also_declares_an_unscanned_source(
+    tmp_path,
+) -> None:
+    """The control for the rule above — `embed_gate`'s REAL shape.
+
+    A policy source outside the surface is legitimate AS LONG AS the row also
+    names a scanned document that carries its marker; the uncovered source is a
+    stated limit, not a violation. Without this control the coverage rule could
+    be passing because it always fires.
+    """
+    docs = _docs(tmp_path, a__md="a passage <!-- v4-mechanism: x -->\n")
+    row = _row("x", declared_in=[UNSCANNED_DECLARED_DOC, "docs/architecture/a.md"])
+    assert membership_errors([row], docs) == []
 
 
 # ── the gate's own fail-closed proof (mutation) ─────────────────────────────

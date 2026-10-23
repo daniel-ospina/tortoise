@@ -146,7 +146,7 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 ### A4. Record → cache, and the coherence markers — **EXISTS as mechanism**
 
 - `tortoise/cache_projection.py:608` `read_record_view` — the record's keyed view (Interface B input).
-- `tortoise/projection/__init__.py:16271` `FalkorProjection.rebuild_from_record` — the record→graph
+- `tortoise/projection/__init__.py` (`FalkorProjection.rebuild_from_record`; the verb that calls it is `tortoise/record_restore.py`) — the record→graph
   projection, sharing the destructive-token gate and the wipe with `rebuild_all`.
 - §17.2's **completeness marker** (`tortoise/residency.py`) and the **residency router**
   (`tortoise/residency_router.py`), both off by default.
@@ -187,7 +187,7 @@ idempotent, total, and stores no EP scalar`.
 | **the end-to-end proof, in CI** | ⛔ **NEVER RUNS.** No CI job sets `TEST_RECORD_DB_URI` (the test file says so itself, and `grep` over `.github/` agrees), **and** `psycopg2` is the optional `[postgres]` extra — absent from the default dev/CI env, so the two Postgres legs `importorskip` and **skip even when a Postgres is given**. | measured: run 1 → `57 passed, 2 skipped`; run 2 with `--extra postgres` → **`2 passed`** |
 | **the edge / operator half of the record** | ⚠️ **`relation` = 0 rows** on the live capture measurement, and the number is a consequence of **R4**: the capture *does* write journaled `EntityLinked` records (each one a `RelationUpsert` (`record_projection`)), but their endpoints are the claim `PointAdded` rows, which that capture's `search_keys` disagreement gets refused — so the relations have nowhere to land. `04-projection.md` §3 *additionally* declares the point-property-derived edge family *"not materialized by this increment"*. | §G run 2; R4 |
 | **the `session` record** | ✅ **FIXED (#9264).** `capture_redactions` was `jsonb` while the producer emits an **integer**, so the `SessionRecorded` carrying it was refused (`DatatypeMismatch`) and counted on `record_write_failures`; the module refuses to coerce (`record_projection._jsonb_or_scalar`), which is what kept it visible. The forward migration `20261022000001_record_session_capture_redactions_integer.sql` narrows the column to `integer` (every other `public.session` counter was already `integer`), and the tolerance entry for it is deleted — `_SCHEMA_DISAGREEMENTS` now carries `search_keys` only, which is the remaining half of R4. | migration `20261022000001`; `tests/test_9078_record_written_by_production_path.py` `_SCHEMA_DISAGREEMENTS = {"search_keys": …}` |
-| **rebuild the graph from the record** | ⚠️ A **method with no CLI verb and no production caller**. | `FalkorProjection.rebuild_from_record` — `grep` finds no `__main__` verb |
+| **rebuild the graph from the record** | ✅ **The operator half exists now** — `python -m tortoise record-restore` (`tortoise/record_restore.py`, #9556/R8), with `docs/infra-runbook.md` §9 and its drill table (the drill's *armed-record* row is still **NOT MEASURED**, #9548/#9551). ⛔ **The production door is still blocked**: the wipe runs #2944's L2 name guard and the disposable-graph registry that would admit `org_*` graphs is not landed, so today only a `test_`-named graph can be restored. | `grep -rn 'rebuild_from_record' tortoise/__main__.py` → 1 (the verb's docstring); `grep -rn 'rebuild_from_record(' tortoise/ \| grep -v 'def '` → 1 (`record_restore.py`, the verb's caller) |
 | **RLS as the tenancy boundary** | ⚠️ **Policies exist; nothing sets the GUC.** `app.current_org_id` is set only in `supabase/tests/*.sql` — the migrations that define the policies only *read* it, via `current_setting(…, true)` — and **no Python path sets it**. Which role the record connects as is **R6's decision** and cannot be read off this census — it is the DSN's user, and no DSN is set today (`NOT_ARMED`), so no role is in force. §4's bypass rule fires for the table owner and for `service_role` (R1's arming DSN names `postgres`; the record migrations' own comment says the write path connects as `service_role`), while R6's third option — a **non-bypass** app role — would put RLS in force instead. | `grep -rn app.current_org_id tortoise/ tools/` → 0 setters |
 | **the record's durability** | ⛔ **NO MODULE OF OURS BACKS UP THE RECORD.** The modules that archive today copy **the graph** — RDB/BGSAVE plus a local copy of the journal's `events.jsonl` (`tortoise/backup.py`), and the Cloudflare-R2 logical dump (`hosted_backup.py`, `backup_sweep.py`, the self-hosted sweep `selfhost_backup.py`). `docs/durability-posture.md`, the page that records durability for every deployment, has **no row for the record** (four deployments, none of them Postgres; it never mentions Supabase). Whether the Supabase project backs it up is **unverified** — the tree's statements about that are plan-level and about the **control plane**, not the record (`docs/plans/2026-08-08-669-align.md:21`, `docs/ops/registry-backup-dr.md:1051`) — so this is R9's owner decision, not a verified backup. | §3; §14.1 **O1**: *"DURABILITY = the store's backup"*; R9 |
 
@@ -472,8 +472,13 @@ with this change, and #9555 stays open on (1) and (2).
 
 ### R8 — A restore path from the record: an operator verb and a drill · **M** · code + ops · **BLOCKER**
 
-**What:** `FalkorProjection.rebuild_from_record` (`projection/__init__.py:16271`) is a method with
-**no CLI verb and no production caller**; there is no runbook section and **no drill**. The repo's own
+**What:** `FalkorProjection.rebuild_from_record` (`projection/__init__.py`) is the record→cache seam.
+⛔ **Landed** (#9556): `python -m tortoise record-restore` is its production caller, the composition
+(its four refusals, its measured counts, its exit codes) is `tortoise/record_restore.py`, the runbook
+section is `docs/infra-runbook.md` §9, and a drill table states which steps are measured. **Not
+landed, and the reason this item stays open:** the production graph name (`org_*`) is refused by
+`#2944`'s L2 name guard until the disposable-graph registry exists, and the drill's armed-record row is
+unmeasured (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). The repo's own
 precedent is that restores fail at the *artifact* boundary, not at the API: **`#3895`** (CLOSED
 COMPLETED, 2026-09-25) is the drill that restored **9,687 / 10,000** edges, and it failed because
 its logical dump filtered the **node** export but not the **edge** export, so **313** edges
@@ -700,8 +705,10 @@ grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
 grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters
-grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 0
-grep -rn 'rebuild_from_record(' tortoise/ | grep -v 'def '                  → 0 call sites
+grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 1 (the verb's docstring)
+grep -rn 'rebuild_from_record(' tortoise/ | grep -v 'def '                  → 1 (`record_restore.py` — the `record-restore` caller)
+# ⛔ Both were 0 before #9556 landed the operator verb. The residual gap is NOT this census: it is
+# that a production graph name (`org_*`) is refused by #2944's L2 guard (see refusal 4 in runbook §9).
 grep -rniE '\bpostgres\b|psycopg|pg_dump' tortoise/backup.py tortoise/hosted_backup.py \
   tortoise/backup_sweep.py tortoise/selfhost_backup.py                            → 0
 ```
