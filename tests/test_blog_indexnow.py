@@ -54,6 +54,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 WEBSITE = REPO_ROOT / "website"
 POSTS_FUNCTION = WEBSITE / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 INDEXNOW_MODULE = WEBSITE / "functions" / "blog" / "_shared" / "indexnow.ts"
+ADMIN_NOTIFY_MODULE = WEBSITE / "functions" / "blog" / "api" / "notify-publish.ts"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml"
 
 SITE = "https://tortoise.premiselabs.co"
@@ -101,6 +102,7 @@ for (const c of cases) {
     status: c.status,
     created_by: c.agent || 'blog-indexnow-test',
     body: 'body text',
+    hold_for_review: c.holdForReview === undefined ? false : c.holdForReview,
     indexnow_submitted_at: c.lastSubmittedAt === undefined ? null : c.lastSubmittedAt,
   };
   const submissions = [];
@@ -233,6 +235,23 @@ CASES: dict[str, dict] = {
     },
     # Published → draft. Same isolation.
     "unpublish_legacy": {"status": "published", "steps": [{"status": "draft"}]},
+    # Published but HELD → the hold is cleared. No status change, but the URL
+    # stops 404ing, so this IS a publish transition (#9803): it must submit. The
+    # case that reds if the trigger tests `resultStatus` alone.
+    "hold_cleared_while_published": {
+        "status": "published",
+        "holdForReview": True,
+        "lastSubmittedAt": None,
+        "steps": [{"hold_for_review": False}],
+    },
+    # Published and live → a title edit. Still a zero: `becameLive` must not
+    # widen into "any published row notifies".
+    "edit_while_published_live": {
+        "status": "published",
+        "holdForReview": False,
+        "lastSubmittedAt": None,
+        "steps": [{"title": "renamed again"}],
+    },
     # Draft → draft.
     "draft_edit": {"status": "draft", "steps": [{"title": "still drafting"}]},
     # Draft → published → edit → unpublish → published, all within one day.
@@ -515,6 +534,42 @@ def test_the_operator_table_documents_every_shape_and_loses_no_row() -> None:
     )
 
 
+def test_the_admin_endpoints_logs_are_documented_and_balanced() -> None:
+    """The same pin, for the module #9803 added beside this one.
+
+    The table above is the runbook's discovery mechanism and the console operator
+    is told to grep it; the admin endpoint emits three `[indexnow]` lines of its
+    own. Deleting its `console.warn`s (a plausible "the 503 already says it"
+    edit) leaves every behavioural case green, because they assert status, result
+    and submissions — so the balance and the doc rows are the only pin there is.
+
+    Read from the SOURCE, both directions: every `console.*` call must parse as an
+    `[indexnow]` shape, and every parsed shape must appear in the operator table.
+    """
+    source = ADMIN_NOTIFY_MODULE.read_text(encoding="utf-8")
+    calls = len(re.findall(r"console\.\w+\(", source))
+    heads = [
+        m.group(1).split("${", 1)[0].rstrip(": ")
+        for m in re.finditer(r"console\.\w+\(\s*`\[indexnow\] ([^`]+)`", source)
+        if m.group(1).split("${", 1)[0].rstrip(": ")
+    ]
+    assert len(heads) == calls, (
+        f"{calls} console calls but {len(heads)} parsed [indexnow] shapes in "
+        f"{ADMIN_NOTIFY_MODULE.name} — a log line is written in a form this test cannot "
+        f"read, so it is not actually pinned: {sorted(heads)}"
+    )
+    assert len(heads) == 3, (
+        f"expected the three documented admin-path shapes, got {sorted(heads)} — adding "
+        "a log line means the operator doc gains a row"
+    )
+    doc = (REPO_ROOT / "docs" / "blog-authoring.md").read_text(encoding="utf-8").replace("\\|", "|")
+    missing = sorted(s for s in heads if s not in doc)
+    assert missing == [], (
+        "docs/blog-authoring.md's IndexNow table omits admin-path log shapes: "
+        f"{missing} — the operator cannot act on a line the runbook does not describe"
+    )
+
+
 # ── V1: the key file is served from the site root ──────────────────────────
 def test_v1_the_key_file_is_served_at_the_site_root(results) -> None:
     """The key file exists, is named after the key, and carries ONLY the key.
@@ -604,7 +659,7 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
     The issue's V3 expectation is "1 submission total, not 3" for that sequence;
     the zero cases are what make the same test discriminate on both axes.
     """
-    for name in ("edit_while_published_legacy", "unpublish_legacy", "draft_edit"):
+    for name in ("edit_while_published_legacy", "edit_while_published_live", "unpublish_legacy", "draft_edit"):
         res = results[name]
         assert res["statuses"] and all(s < 400 for s in res["statuses"]), (
             f"{name}: the PATCHes themselves must still succeed: {res['statuses']}"
@@ -626,6 +681,24 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
     # the #7751 shape one layer down.
     assert _logs_matching(sequence, "skipped (submitted "), (
         f"a window-suppressed re-publish must log why: {sequence['logs']}"
+    )
+
+
+def test_clearing_a_hold_on_a_published_row_submits(results) -> None:
+    """The mirror transition (#9803). No status changes, but the URL stops
+    answering 404 — so nothing being submitted is the defect: a row can become
+    public and never be announced.
+
+    The row has NEVER been submitted, so the 24h window cannot explain the
+    expected one submission; and the companion zero case
+    (``edit_while_published_live``) is what keeps the fix from widening into
+    "every PATCH on a published row notifies".
+    """
+    res = results["hold_cleared_while_published"]
+    assert res["statuses"] == [200], res["statuses"]
+    assert len(res["submissions"]) == 1, (
+        f"expected ONE submission after the hold was cleared, got "
+        f"{len(res['submissions'])}: {_submitted_urls(res)}"
     )
 
 

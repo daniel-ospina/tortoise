@@ -457,14 +457,14 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   let getRes: Response;
   try {
     getRes = await fetch(
-      `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by,body&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by,body,hold_for_review&slug=eq.${encodeURIComponent(slug)}&limit=1`,
       { headers: serviceHeaders(env) },
     );
   } catch {
     return err(503, "upstream", "supabase unreachable");
   }
   if (!getRes.ok) return err(503, "upstream", `supabase ${getRes.status}`);
-  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null; body: string }>;
+  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null; body: string; hold_for_review: boolean | null }>;
   const post = rows[0];
   if (!post) return err(404, "not_found", "post not found");
   if (post.status === "archived") return err(409, "archived", "archived is terminal");
@@ -540,7 +540,19 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   // waitUntil, so the response does not wait on the vendor: the post is live
   // either way, a submission failure must not fail the publish, and there is no
   // retry in this path — the failure is logged with its status instead.
-  if (resultStatus === "published" && post.status !== "published") {
+  // BECAME LIVE, not "result is published". Clearing the hold on an
+  // ALREADY-published row changes no status but makes the URL stop 404ing, so it
+  // is a publish transition too — the same defect #9803 fixed on the console side
+  // (`clearHoldPost`), reachable here through the drafts-queue Publish, which
+  // publishes an agent's held draft without clearing the hold. Deliberately
+  // narrow: an edit that leaves a live post live (`status unchanged`,
+  // `hold_for_review` untouched) still submits nothing, as the window note above
+  // promises.
+  const becameLive =
+    resultStatus === "published" &&
+    (post.status !== "published" ||
+      (post.hold_for_review === true && patch.hold_for_review === false));
+  if (becameLive) {
     waitUntil(
       notifyPublished({
         env,
