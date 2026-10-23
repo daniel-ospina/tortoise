@@ -1,0 +1,1335 @@
+"""#9556 / R8 — ``rebuild_from_record`` has an OPERATOR VERB, and it refuses to lie.
+
+Measured for #9556: ``FalkorProjection.rebuild_from_record`` had **no CLI verb
+and no production caller** (``grep -rn 'rebuild_from_record(' tortoise/ | grep
+-v 'def '`` → 0 call sites), so *"the graph is gone, restore it"* had a method
+and no operator answer. ``tortoise/record_restore.py`` is the composition and
+``python -m tortoise record-restore`` is its caller — the same shape, the same
+DSN resolution and the same exit-code discipline as ``record-reconcile`` (its
+sibling verb).
+
+What is pinned here, and each one is a way a restore verb is worthless:
+
+1. **An EMPTY source is REFUSED, and the cache is provably untouched.** A view
+   with no rows wipes the cache and writes nothing — the shipped path RETURNS
+   NORMALLY (``nodes_written: 0``, ``coverage: partial``), i.e. an
+   exit-0-shaped success that destroyed the cache. Two live tests: one seeds a
+   real graph and asserts the refusal AND that its node is still there (a verb
+   that wiped first and refused after would pass any exit-code-only pin), and
+   one asserts the source refusal fires BEFORE the target graph is opened —
+   opening a projection creates the graph and MERGEs its ``:Meta`` marker.
+2. **A rebuild that materialised nothing is reported, not trusted** — the
+   record HAD rows, the wipe ran, and the cache holds none of them. Pinned with
+   a REAL projection whose write half is a no-op: the projection must report
+   ``nodes_written == 0`` (it MEASURES the cache after the rebuild) and the verb
+   must land on exit ``2``/UNKNOWN — pre-fix the same run printed
+   ``✓ restored … 2 node(s) written`` over an EMPTY cache, exit ``0``.
+3. **The cache's L2 guard is reported as a REFUSAL, not a traceback** (#2944).
+   It fires on every production graph name (``org_<org_id>``), so an operator
+   must read the reason, not a stack trace.
+4. **The verb cannot guess its target.** ``--cache-graph`` has no derived
+   default: a wrong guess opens an EMPTY graph and the run would report a
+   restore into a graph nobody reads (the ``record-reconcile`` rule, where the
+   consequence is *worse* for a restore).
+5. **No DSN / a malformed DSN is "no verdict", never "restored"** — and the DSN
+   arming surface is the writer's ``record_dsn``, not a second spelling here.
+6. **The verb CALLS the composition** (an AST pin — the ``record-reconcile``
+   lesson: an import-only pin is satisfied by a body that returns a constant).
+7. **The restore is bounded by the record, not by the journal** — the
+   composition cannot reach ``rebuild_all`` (R8's indicator: 0 restore steps
+   that read the journal instead of the record).
+8. **A bounded restore declares ``partial``** and reports the unwritten keys as
+   ``not-hot`` (§17.3), so a green exit never reads as "the whole cache is
+   back", and **a live restore puts the record's state in the cache** (the
+   pre-existing node is gone, the record's nodes are there).
+
+⚠️ This file is registered in ``config/ci-surfaces.yml`` under BOTH ``api`` and
+``core``, for the reason ``test_record_reconcile_trigger.py`` is: the caller
+lives in ``tortoise/__main__.py`` — an EXACT ``api`` SOURCE_PATTERN whose match
+REPLACES the ``core`` fallback — while ``record_restore.py`` matches no
+SOURCE_PATTERN at all. One registration alone leaves the pin unexecuted on the
+change that breaks the other half (#1349/#2938/#3154).
+"""
+from __future__ import annotations
+
+import ast
+import contextlib
+import json
+import sys
+import types
+import uuid
+from pathlib import Path
+
+import pytest
+
+from tortoise import cache_projection as cp
+from tortoise import record_restore as rrestore
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_MODULE_PATH = _REPO_ROOT / "tortoise" / "record_restore.py"
+_CLI_PATH = _REPO_ROOT / "tortoise" / "__main__.py"
+
+_TARGET = "test_9556_target"
+
+
+# ── fixtures / fakes ───────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def cache_graph(shared_proj):
+    """A per-test cache graph, so a restore's counts are only THIS test's."""
+    if shared_proj is None:
+        pytest.skip("no graph engine available on this lane")
+    graph = shared_proj.db.select_graph(f"test_9556_{uuid.uuid4().hex[:8]}")
+    try:
+        yield graph
+    finally:
+        with contextlib.suppress(Exception):
+            graph.delete()
+
+
+class _FakeConn:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingProjection:
+    """A projection whose ``rebuild_from_record`` the test can observe.
+
+    Only the projection is faked — the composition, its guards, the exit-code
+    mapping and the CLI wiring are the shipped ones.
+    """
+
+    def __init__(self, *, result: dict | None = None,
+                 raises: BaseException | None = None,
+                 guard_refuses: bool = False) -> None:
+        self.g = None
+        self.closed = False
+        self.calls: list[dict] = []
+        self._result = result
+        self._raises = raises
+        self._guard_refuses = guard_refuses
+
+    def _assert_test_graph(self, reason: str = "", *, graph_name=None):
+        """The projection's L2 guard, faked so a refusal is observable."""
+        if self._guard_refuses:
+            raise RuntimeError(
+                "Graph guard: operation blocked on non-test graph "
+                "'org_acme'. "
+                f"{reason} — destructive bulk ops require a graph name "
+                "starting with 'test_' or 'tortoise_test'.")
+
+    def rebuild_from_record(self, view, **kwargs):
+        self.calls.append({"view": view, **kwargs})
+        if self._raises is not None:
+            raise self._raises
+        if self._result is not None:
+            return dict(self._result)
+        nodes = len(view.nodes)
+        bounded = kwargs.get("limit") is not None
+        written = nodes if not bounded else min(nodes, kwargs["limit"])
+        return {
+            "nodes_written": written,
+            "relations_written": len(view.relations),
+            "statements": 0,
+            "record_nodes": nodes,
+            "record_relations": len(view.relations),
+            "coverage": "partial" if bounded else "complete",
+            "declared_keys": written,
+            "source": "record",
+        }
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _view(n: int = 2) -> cp.RecordView:
+    return cp.RecordView(nodes=tuple(
+        cp.RecordNode(label="Point", key=f"p-9556-{i}",
+                      props={"id": f"p-9556-{i}", "content": f"c{i}",
+                             "status": "live"})
+        for i in range(n)))
+
+
+def _install_fakes(monkeypatch, *, view, projection):
+    """Fake only the two HANDLES: the record connection and the projection."""
+    from tortoise.projection import FalkorProjection
+
+    conn = _FakeConn()
+
+    def _connect(dsn, **kw):
+        return conn
+
+    fake_psycopg2 = types.ModuleType("psycopg2")
+    fake_psycopg2.connect = _connect                    # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake_psycopg2)
+    monkeypatch.setattr(
+        cp, "read_record_view",
+        lambda conn, *, org_id, graph_id: view, raising=True)
+    monkeypatch.setattr(
+        FalkorProjection, "from_uri",
+        staticmethod(lambda uri, graph_name=None: projection))
+    return conn
+
+
+def _drive(monkeypatch, *, view, projection=None, extra_args=()):
+    """Run ``python -m tortoise record-restore``; return (rc, conn, projection)."""
+    from tortoise import __main__ as cli
+
+    projection = projection if projection is not None else _RecordingProjection()
+    conn = _install_fakes(monkeypatch, view=view, projection=projection)
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET, *extra_args])
+    return rc, conn, projection
+
+
+# ── 5. no verdict is not a restore ─────────────────────────────────────────
+
+
+def test_the_verb_refuses_without_a_record_dsn(monkeypatch, capsys):
+    from tortoise import __main__ as cli
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "no record DSN" in err, err
+    assert "UNCHANGED" in err, err
+
+
+def test_a_malformed_record_dsn_is_a_MISCONFIGURATION_not_an_outage(capsys):
+    """The DSN arming surface is ``record_writer.record_dsn``, not a re-spelling."""
+    from tortoise import __main__ as cli
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--record-dsn", "mysql://user:pw@db.example/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "must start with postgresql:// or postgres://" in err, err
+    assert "misconfiguration, not an unarmed record" in err, err
+    assert "mysql://" not in err, err          # the value is fingerprinted
+    assert "pw@db.example" not in err, err
+
+
+def test_an_unreadable_record_is_UNAVAILABLE_and_nothing_is_wiped(
+        monkeypatch, capsys):
+    from tortoise import __main__ as cli
+
+    projection = _RecordingProjection()
+    _install_fakes(monkeypatch, view=_view(2), projection=projection)
+
+    def _boom(dsn, **kw):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setitem(sys.modules, "psycopg2",
+                        types.SimpleNamespace(connect=_boom))
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "record is unreadable" in err, err
+    assert "UNCHANGED" in err, err
+    assert projection.calls == [], "nothing may be restored over an unread record"
+
+
+# ── 4. the target cannot be guessed ───────────────────────────────────────
+
+
+def test_the_verb_refuses_to_guess_the_cache_graph(monkeypatch, capsys):
+    """A wrong guess opens an EMPTY graph and reports a restore nobody reads."""
+    from tortoise import __main__ as cli
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://fake/record")
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--org", "o", "--graph", "g"])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "--cache-graph is required" in err, err
+    assert "EMPTY graph" in err, err
+    assert "Nothing was restored" in err, err
+
+
+# ── 6. the verb does not merely IMPORT the composition ────────────────────
+
+
+def _called_names(path: Path, func: str) -> set[str]:
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == func:
+            return {c.func.id for c in ast.walk(node)
+                    if isinstance(c, ast.Call)
+                    and isinstance(c.func, ast.Name)}
+    raise AssertionError(f"{func} not found in {path}")
+
+
+def test_the_verb_CALLS_the_restore_composition():
+    """An import-only pin is satisfied by a body of ``return EXIT_RESTORED``."""
+    called = _called_names(_CLI_PATH, "_cmd_record_restore")
+    for required in ("restore_from_record_view", "read_record_view",
+                     "record_dsn", "log_result"):
+        assert required in called, (
+            f"`_cmd_record_restore` never CALLS {required}: it imports the "
+            f"piece and does not run it")
+
+
+def test_the_composition_passes_the_destructive_token_at_the_entry_point():
+    """A composition that forgot it would raise on EVERY restore.
+
+    That failure is indistinguishable from a guard doing its job by exit code
+    alone (both are non-zero), so it is pinned on the source: exactly one
+    ``rebuild_from_record`` call, with ``confirm_destructive=True``.
+    """
+    tree = ast.parse(_MODULE_PATH.read_text())
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "rebuild_from_record"]
+    assert len(calls) == 1, "expected exactly one rebuild_from_record call"
+    kw = {k.arg: k.value for k in calls[0].keywords}
+    assert isinstance(kw.get("confirm_destructive"), ast.Constant)
+    assert kw["confirm_destructive"].value is True
+
+
+# ── 7. the restore reads the RECORD, never the journal ────────────────────
+
+
+def test_the_restore_cannot_reach_the_journal_replay():
+    """R8's indicator: 0 restore steps that require reading the journal.
+
+    Pinned on the AST, not on the prose: the module docstring names
+    ``rebuild_all`` to say it is deliberately unreachable, and a naive
+    substring pin would redden on the sentence that documents the rule.
+    """
+    tree = ast.parse(_MODULE_PATH.read_text())
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+
+    assert "rebuild_all" not in names | attrs, (
+        "record_restore must not CALL the journal replay (`rebuild_all`) — R8's "
+        "restore reads the RECORD only")
+    assert not any(m == "tortoise.log" or m.startswith("tortoise.log.")
+                   for m in imported), (
+        f"record_restore imports a journal module: {sorted(imported)}")
+
+
+# ── 1. an EMPTY source is refused, and the cache is provably untouched ────
+
+
+def test_an_empty_record_is_REFUSED_and_the_cache_is_not_wiped(
+        monkeypatch, shared_proj, cache_graph, capsys):
+    """The guard the verb exists behind: an empty source WIPES and restores nothing.
+
+    A REAL cache graph holding a REAL node, read back AFTER the refusal — an
+    exit-code-only pin would also pass if the verb wiped and then refused.
+    """
+    from tortoise import __main__ as cli
+
+    cache_graph.query("CREATE (:Point {id:'p-9556-survivor'})")
+    projection = _projection_bound_to(shared_proj, cache_graph)
+    _install_fakes(monkeypatch, view=cp.RecordView(), projection=projection)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", cache_graph.name])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_REFUSED, err
+    assert "NO rows" in err, err
+    assert "--allow-empty" in err, err
+    remaining = cache_graph.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    assert remaining == 1, (
+        "the empty-source refusal must happen BEFORE the wipe — the cache still "
+        f"holds its node, got {remaining}")
+
+
+def test_allow_empty_proceeds(monkeypatch, capsys):
+    """The positive control: the refusal is a guard, not a wall."""
+    projection = _RecordingProjection(result={
+        "nodes_written": 0, "relations_written": 0, "statements": 0,
+        "record_nodes": 0, "record_relations": 0,
+        "coverage": "complete", "declared_keys": 0, "source": "record"})
+    rc, conn, projection = _drive(
+        monkeypatch, view=cp.RecordView(), projection=projection,
+        extra_args=("--allow-empty",))
+    out = capsys.readouterr().out
+
+    assert rc == rrestore.EXIT_RESTORED, out
+    assert len(projection.calls) == 1, "the wipe was authorized and must run"
+    assert projection.calls[0]["confirm_destructive"] is True
+    assert projection.closed and conn.closed, "the verb owns both handles"
+
+
+# ── 2. a rebuild that materialised nothing is not a restore ───────────────
+
+
+def test_a_rebuild_that_materialised_nothing_is_UNAVAILABLE(monkeypatch,
+                                                           capsys):
+    """Exit 2, NOT the exit-3 class — the wipe already ran.
+
+    Exit ``3`` is documented as "REFUSED, nothing was written", which an
+    operator reads as "my cache is as it was". After a wipe that put nothing
+    back that reading is false, so this case belongs in the UNKNOWN class.
+    """
+    projection = _RecordingProjection(result={
+        "nodes_written": 0, "relations_written": 0, "statements": 0,
+        "record_nodes": 2, "record_relations": 0,
+        "coverage": "complete", "declared_keys": 0, "source": "record"})
+    rc, _, _ = _drive(monkeypatch, view=_view(2), projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "holds 0 node(s)" in err, err
+    assert "LOST" in err, err
+    assert "REFUSED" not in err, err
+
+
+def test_a_contradictory_report_is_UNAVAILABLE_rather_than_a_silent_pass(
+        monkeypatch, capsys):
+    """The MEASURED cache count disagrees with the record — UNKNOWN, not green."""
+    projection = _RecordingProjection(result={
+        "nodes_written": 7, "relations_written": 0, "statements": 0,
+        "record_nodes": 2, "record_relations": 0,
+        "coverage": "complete", "declared_keys": 2, "source": "record"})
+    rc, _, _ = _drive(monkeypatch, view=_view(2), projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "the cache holds 7 node(s)" in err, err
+    assert "disagree" in err, err
+
+
+def test_a_row_the_projection_REFUSES_is_not_a_restore_shortfall(
+        monkeypatch, capsys):
+    """RED pre-fix: the denominator was the RAW record count, not the plan's size.
+
+    Since #9599 a blank-/whitespace-keyed ``:Session`` is kept by the RECORD (it
+    is the faithful carrier, and a Postgres key is addressable) but refused by
+    the GRAPH write (the engine cannot serve a blank indexed key back to an
+    equality seek), so ``_project_record_view`` drops it from the plan.
+
+    Comparing the MEASURED count against ``len(view.nodes)`` then reported a
+    shortfall the projection itself had declared: exit 2 "the cache state is
+    UNKNOWN" over a cache that landed every writable row, and an operator whose
+    cache this run had just destroyed told to "fix the cause and re-run" — a
+    remedy that can never succeed. ``nodes_selected`` is the post-refusal plan
+    size, so it is the only denominator that describes what the run was
+    supposed to write.
+
+    The mutation that reds this: drop ``nodes_selected`` from the result dict
+    (keep ``nodes_written: 2`` and a 3-node view) — the raw count comes back as
+    the denominator and the run reports UNKNOWN for a correct restore.
+    """
+    view = cp.RecordView(nodes=(
+        cp.RecordNode(label="Point", key="p-9556-keep",
+                      props={"id": "p-9556-keep", "content": "kept",
+                             "status": "live"}),
+        cp.RecordNode(label="Point", key="p-9556-keep-2",
+                      props={"id": "p-9556-keep-2", "content": "kept too",
+                             "status": "live"}),
+        # The row the projection refuses: the record keeps it, the graph cannot.
+        cp.RecordNode(label="Session", key="",
+                      props={"id": "", "summary": "blank-keyed"}),
+    ))
+    projection = _RecordingProjection(result={
+        "nodes_written": 2, "relations_written": 0, "nodes_selected": 2,
+        "relations_selected": 0, "statements": 0, "record_nodes": 3,
+        "record_relations": 0, "coverage": "complete", "declared_keys": 0,
+        "source": "record"})
+    rc, _, _ = _drive(monkeypatch, view=view, projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_RESTORED, err
+    assert "UNKNOWN" not in err, err
+    assert "LOST" not in err, err
+
+
+def test_a_non_mapping_report_is_UNAVAILABLE_not_a_traceback(monkeypatch,
+                                                             capsys):
+    """A future projection that returns a non-report must not escape as a crash.
+
+    ``result.get(...)`` on, say, a list raises ``AttributeError`` — outside the
+    module's exception boundary, so the operator would get a traceback where the
+    contract promises exit ``2`` and an UNKNOWN statement.
+    """
+    class _ListReportProjection(_RecordingProjection):
+        def rebuild_from_record(self, view, **kwargs):
+            self.calls.append({"view": view, **kwargs})
+            return ["not", "a", "report"]
+
+    rc, conn, projection = _drive(monkeypatch, view=_view(2),
+                                  projection=_ListReportProjection())
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "not a report" in err, err
+    assert "UNKNOWN" in err, err
+    assert "Traceback" not in err, err
+    assert projection.closed and conn.closed
+
+
+# ── 3. the L2 guard is a refusal, not a traceback ─────────────────────────
+
+
+def test_the_cache_guard_refusal_is_reported_as_a_REFUSAL(monkeypatch, capsys):
+    """#2944's L2 refuses a bulk wipe on a non-``test_`` server graph.
+
+    Every production graph name is ``org_<org_id>``, so this is the shape an
+    operator WILL hit: the reason must be printed, the exit code distinct, and
+    the refusal must be attributed BEFORE the rebuild (the fake's
+    ``rebuild_from_record`` is never reached — asserted).
+    """
+    projection = _RecordingProjection(guard_refuses=True)
+    rc, conn, projection = _drive(monkeypatch, view=_view(2),
+                                  projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_REFUSED, err
+    assert "Restore REFUSED" in err, err
+    assert "non-test graph 'org_acme'" in err, err
+    assert "#2944" in err, err
+    # Pre-wipe attribution: the guard is asked BEFORE any rebuild, so nothing
+    # was written and the "REFUSED" class is honest.
+    assert projection.calls == [], "the wipe must not be attempted past a refusal"
+    assert projection.closed and conn.closed, "both handles must close"
+
+
+def test_a_failure_DURING_the_rebuild_is_UNKNOWN_not_a_clean_refusal(
+        monkeypatch, capsys):
+    """A post-preflight failure may have wiped: exit 2, never "nothing written".
+
+    ``DirectCacheWriteRefused`` / ``CacheProjectionError`` are ``RuntimeError``
+    subclasses raised from ``project_records`` — i.e. AFTER the wipe. A verb
+    that mapped every ``RuntimeError`` to the refusal class would tell the
+    operator the cache was untouched while it was destroyed.
+    """
+    from tortoise.projection import DirectCacheWriteRefused
+
+    projection = _RecordingProjection(raises=DirectCacheWriteRefused(
+        "Refusing a mutating statement on the raw-query lane"))
+    rc, conn, projection = _drive(monkeypatch, view=_view(2),
+                                  projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "UNKNOWN" in err, err
+    assert "DURING the rebuild" in err, err
+    assert "REFUSED" not in err, err
+    assert len(projection.calls) == 1
+    assert projection.closed and conn.closed
+
+
+def test_an_unexpected_driver_error_is_UNAVAILABLE_not_a_traceback(
+        monkeypatch, capsys):
+    """A socket error during the wipe is not a ``RuntimeError``.
+
+    ``DirectCacheWriteRefused``/``CacheProjectionError`` are ``RuntimeError``
+    subclasses, so a ``except RuntimeError`` classifier catches them and misses
+    every driver error (a reset socket, a driver's own exception type). The
+    unclassified case must land on exit ``2`` with an UNKNOWN statement from
+    ONE place (the composition) — otherwise it leaves as a traceback, and the
+    one path with no documented code is the one where the cache may have been
+    wiped and not rebuilt.
+    """
+    projection = _RecordingProjection(raises=ConnectionResetError(
+        "connection reset by peer"))
+    rc, _, _ = _drive(monkeypatch, view=_view(2), projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "UNKNOWN" in err, err
+    assert "Traceback" not in err, err
+
+
+# ── 8. a bounded restore is PARTIAL, and its unwritten keys are not-hot ───
+
+
+def test_a_bounded_restore_declares_partial_and_names_the_not_hot_set(
+        monkeypatch, capsys):
+    projection = _RecordingProjection()
+    rc, _, _ = _drive(monkeypatch, view=_view(5), projection=projection,
+                      extra_args=("--limit", "2", "--json"))
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+
+    assert rc == rrestore.EXIT_RESTORED, out
+    assert projection.calls[0]["limit"] == 2
+    assert payload["coverage"] == "partial"
+    assert payload["unwritten_keys"] == 3, payload
+
+
+def test_the_human_line_names_the_not_hot_consequence():
+    """A partial restore must not read as "the whole cache is back"."""
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="org_o",
+        record_nodes=5, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        coverage="partial", declared_keys=2, bounded=True)
+    line = outcome.render()
+    assert "not-hot" in line, line
+    assert "never empty" in line, line
+    assert outcome.unwritten_keys == 3, outcome.as_dict()
+
+
+def test_a_COMPLETE_restore_is_not_reported_as_not_hot():
+    """A ``complete`` declaration enumerates NO keys — and that is not a gap.
+
+    ``declaration_for`` returns ``coverage=complete, hot_keys=()`` when it covers
+    the whole record, so ``record_nodes - declared_keys`` reported EVERY
+    complete restore as fully not-hot (measured: a 5-node full restore printed
+    "5 record key(s) were NOT written").
+    """
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="org_o",
+        record_nodes=5, record_relations=0, nodes_written=5,
+        relations_written=0, target_nodes_before=0,
+        coverage="complete", declared_keys=0, bounded=False)
+    assert outcome.unwritten_keys == 0, outcome.as_dict()
+    assert "not-hot" not in outcome.render(), outcome.render()
+
+
+def test_limit_zero_is_REFUSED_before_any_write(monkeypatch, capsys):
+    """0 is not a harmless bound: it wipes and writes nothing.
+
+    Measured before the guard: the wipe ran, the "wrote 0" refusal fired AFTER
+    it, and the verb exited 3 — whose documented meaning is "nothing was
+    written". A scripted ``--limit $N`` with ``N=0`` would destroy a cache and
+    report the code that means untouched.
+    """
+    projection = _RecordingProjection()
+    rc, _, projection = _drive(monkeypatch, view=_view(2),
+                               projection=projection,
+                               extra_args=("--limit", "0"))
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "--limit must be >= 1" in err, err
+    assert projection.calls == [], "a 0 bound must not reach the wipe"
+
+
+def test_the_pre_wipe_count_is_BOUNDED(monkeypatch):
+    """The count is a full-graph read: unbounded, it can hang before any output."""
+    seen: list[dict] = []
+
+    class _Rows(list):
+        @property
+        def result_set(self):
+            return [[0]]
+
+    class _Graph:
+        def query(self, cypher, **kw):
+            seen.append({"cypher": cypher, **kw})
+            return _Rows()
+
+    projection = _RecordingProjection()
+    projection.g = _Graph()
+    rrestore.restore_from_record_view(
+        _view(2), org_id="o", graph_id="g", cache_graph="test_x",
+        project=projection)
+
+    assert seen and "timeout" in seen[0], seen
+    assert seen[0]["timeout"] == rrestore.CACHE_READ_TIMEOUT_MS, seen
+
+
+def test_the_pre_wipe_count_ignores_the_projections_own_marker(
+        shared_proj, cache_graph):
+    """A never-served graph must read 0, not 1 — the count's whole job.
+
+    Opening a projection MERGEs `:Meta {key:'point_fts_v2'}` into the target
+    (measured: a plain `MATCH (n) RETURN count(n)` on a freshly-created graph
+    read **1**), which made `target held 0 node(s)` unprintable and a mistyped
+    target indistinguishable from a used one.
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    # Reproduce the marker the SHIPPED construction writes.
+    cache_graph.query("MERGE (m:Meta {key:'point_fts_v2'}) SET m.v = true")
+
+    assert rrestore._target_nodes_before(proj) == 0, (
+        "the projection's own `:Meta` marker must not read as restorable data")
+    cache_graph.query("CREATE (:Point {id:'p-9556-counted'})")
+    assert rrestore._target_nodes_before(proj) == 1
+
+
+def test_the_source_refusals_run_BEFORE_the_target_graph_is_opened(
+        monkeypatch, capsys):
+    """A refused run must not CREATE the graph it was asked about.
+
+    Opening a projection is a write (its `:Meta` marker), so `python -m tortoise
+    record-restore` used to create a mistyped target on its way to refusing an
+    empty record — the exact case where touching the named graph is worst.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.projection import FalkorProjection
+
+    opened: list[dict] = []
+    monkeypatch.setattr(
+        FalkorProjection, "from_uri",
+        staticmethod(lambda uri, graph_name=None: opened.append(
+            {"uri": uri, "graph_name": graph_name})))
+
+    conn = _FakeConn()
+
+    def _connect(dsn, **kw):
+        return conn
+
+    fake = types.ModuleType("psycopg2")
+    fake.connect = _connect                            # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg2", fake)
+    monkeypatch.setattr(cp, "read_record_view",
+                        lambda conn, *, org_id, graph_id: cp.RecordView(),
+                        raising=True)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "typo",
+                   "--cache-graph", "test_9556_never_opened"])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_REFUSED, err
+    assert opened == [], (
+        "the target graph was opened (and therefore created + marked) before "
+        "the empty-source refusal")
+    assert conn.closed
+
+
+def test_the_seam_refuses_a_zero_bound_and_leaves_the_graph_alone(
+        shared_proj, cache_graph):
+    """The destructive no-op is refused at the SEAM, not only at the verb.
+
+    `_project_record_view` accepted `limit == 0`, sliced `nodes[:0]` and still
+    ran the unconditional wipe — so any future caller of `rebuild_from_record`
+    could clear a cache by asking for "nothing".
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-seam'})")
+
+    with pytest.raises(ValueError, match="limit must be >= 1"):
+        proj.rebuild_from_record(_view(2), confirm_destructive=True, limit=0)
+
+    assert cache_graph.query(
+        "MATCH (p:Point) RETURN count(p)").result_set[0][0] == 1, (
+        "a refused 0 bound must not reach the wipe")
+
+# ── the live drive: a real cache, restored from a real view ───────────────
+
+
+def _projection_bound_to(shared_proj, graph):
+    """A REAL ``FalkorProjection`` whose graph handle is ``graph``.
+
+    ``from_uri`` would open the graph by name on the server; instead the
+    construction state is copied off the session's projection and only the
+    graph handle/name are rebound, so ``_project_record_view`` (token → L2 →
+    wipe → indexes → records → declaration) runs unmodified on a graph this
+    test owns.
+
+    ⛔ The copy's ``db`` is a NON-CLOSING proxy (#9604 review). The CLI path
+    closes the projection it was handed (``_cmd_record_restore``'s ``finally``),
+    and ``FalkorProjection.close`` routes to ``db._t_close()`` — which on the
+    embedded/redislite lane TEARS THE SERVER DOWN, not merely a pool
+    disconnect. A shallow ``__dict__`` copy shares the session fixture's db, so
+    the ``[cli]`` parameter closed the shared fixture mid-file: the test's own
+    final assertion died on a removed socket and every later ``_LIVE_`` pin
+    errored for a reason unrelated to what it pins (6 failed / 29 passed on
+    ``TORTOISE_TEST_CARVE_OUT=1``). Closing the copy must close nothing the
+    session owns.
+    """
+    from tortoise.projection import FalkorProjection
+
+    proj = object.__new__(FalkorProjection)
+    proj.__dict__.update(shared_proj.__dict__)
+    proj.g = graph
+    proj._graph_name = graph.name
+    proj.db = _NonClosingDB(shared_proj.db)
+    proj._closed = False
+    return proj
+
+
+class _NonClosingDB:
+    """Forwards everything to a real db, and closes NOTHING.
+
+    Exists only so a projection a test hands to a caller that closes it (the
+    ``record-restore`` CLI) cannot tear down the session-scoped fixture that
+    every other live pin in the file depends on.
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    def close(self) -> None:
+        return None
+
+    def _t_close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize("mode", ["module", "cli"])
+def test_a_live_restore_puts_the_record_state_into_the_cache(
+        monkeypatch, shared_proj, cache_graph, capsys, mode):
+    """The end of the chain: record view → cache, by the shipped projection.
+
+    Asserts on the CACHE, not on the exit code: a verb that returned a constant
+    leaves the pre-existing node in place and the record's nodes absent.
+    """
+    from tortoise import __main__ as cli
+
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    projection = _projection_bound_to(shared_proj, cache_graph)
+
+    if mode == "module":
+        outcome = rrestore.restore_from_record_view(
+            _view(2), org_id="o", graph_id="g",
+            cache_graph=cache_graph.name, project=projection)
+        assert outcome.nodes_written == 2, outcome.render()
+        assert outcome.target_nodes_before == 1, outcome.render()
+    else:
+        _install_fakes(monkeypatch, view=_view(2), projection=projection)
+        rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                       "--record-dsn", "postgresql://fake/record",
+                       "--org", "o", "--graph", "g",
+                       "--cache-graph", cache_graph.name])
+        printed = capsys.readouterr()
+        assert rc == rrestore.EXIT_RESTORED, printed.err
+        assert "✓ restored o/g -> cache" in printed.out, printed.out
+
+    ids = sorted(r[0] for r in cache_graph.query(
+        "MATCH (p:Point) RETURN p.id").result_set)
+    assert ids == ["p-9556-0", "p-9556-1"], (
+        f"the cache must hold exactly the record's two points: got {ids}")
+
+
+def test_a_LIVE_complete_restore_reports_zero_unwritten_keys(
+        monkeypatch, shared_proj, cache_graph, capsys):
+    """End-to-end against a REAL projection: 5 in, 5 out, 0 not-hot.
+
+    This is the assertion the review found missing: every fake agreed with the
+    code's arithmetic, so the complete-declaration bug (``declared_keys == 0`` →
+    ``unwritten_keys == record_nodes``) was invisible to the suite.
+    """
+    from tortoise import __main__ as cli
+
+    projection = _projection_bound_to(shared_proj, cache_graph)
+    _install_fakes(monkeypatch, view=_view(5), projection=projection)
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", cache_graph.name, "--json"])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_RESTORED, printed.err
+    payload = json.loads(printed.out)
+    assert payload["coverage"] == "complete", payload
+    assert payload["nodes_written"] == 5, payload
+    assert payload["unwritten_keys"] == 0, payload
+    assert "not-hot" not in printed.out, printed.out
+
+
+# ── the counts are MEASURED, not the plan's length (#9556 review P2) ──────
+
+
+def test_a_LIVE_rebuild_reports_what_the_CACHE_holds_not_the_plans_length(
+        shared_proj, cache_graph, monkeypatch):
+    """RED pre-fix: ``nodes_written`` was ``len(nodes)`` — the plan's size.
+
+    The projection's write half is replaced by a no-op, so nothing is
+    materialised; the wipe is real, so the cache really does end up empty. A
+    count that is read back off the graph reports ``0``; a count that is the
+    input tuple's length reports ``2`` and hands the operator a destroyed cache
+    behind a green exit.
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    monkeypatch.setattr(cp, "project_records", lambda g, plan: 0)
+
+    report = proj.rebuild_from_record(_view(2), confirm_destructive=True)
+
+    assert cache_graph.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0, (
+        "the fixture must really leave the cache empty, or the pin is vacuous")
+    assert report["nodes_written"] == 0, (
+        "nodes_written must be MEASURED from the cache; the pre-fix value is "
+        f"the plan's length ({report.get('nodes_selected')} selected)")
+    assert report["nodes_selected"] == 2, report
+
+
+def test_a_LIVE_wipe_that_materialised_nothing_is_UNAVAILABLE_not_green(
+        monkeypatch, shared_proj, cache_graph, capsys):
+    """The end of the false-PASS: a real wipe, a real empty cache, exit 2.
+
+    Pre-fix this run exited ``0`` and printed ``✓ restored … 2 node(s) …
+    written`` over a cache it had just emptied — the "successful-looking run
+    that destroyed the cache" the verb exists to prevent, arriving through the
+    counts instead of through the source.
+    """
+    from tortoise import __main__ as cli
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    monkeypatch.setattr(cp, "project_records", lambda g, plan: 0)
+    _install_fakes(monkeypatch, view=_view(2), projection=proj)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16390/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", cache_graph.name])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, printed.err
+    assert "LOST" in printed.err, printed.err
+    assert "✓" not in printed.out, (
+        f"a wiped cache must never print the restored line: {printed.out}")
+    remaining = cache_graph.query(
+        "MATCH (p:Point) RETURN count(p)").result_set[0][0]
+    assert remaining == 0, (
+        f"the fixture must have wiped the cache for this pin to mean anything "
+        f"(got {remaining} point(s))")
+
+
+def test_the_partial_severity_uses_the_CONSTANT_not_a_literal(monkeypatch,
+                                                             caplog):
+    """``log_result`` compared against the string ``"complete"``.
+
+    ``COVERAGE_COMPLETE`` is ``"complete"`` today, so the literal was correct
+    only by coincidence: a rename would silently log every COMPLETE restore as a
+    WARNING (the partial-restore severity). Measured by moving the constant.
+    """
+    import logging
+
+    monkeypatch.setattr(rrestore, "COVERAGE_COMPLETE", "whole-record")
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="org_o",
+        record_nodes=5, record_relations=0, nodes_written=5,
+        relations_written=0, target_nodes_before=0,
+        coverage="whole-record", declared_keys=0, bounded=False)
+
+    with caplog.at_level(logging.INFO, logger=rrestore.LOG_NAME):
+        rrestore.log_result(outcome)
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], (
+        f"a complete restore was logged as a warning: {caplog.records}")
+
+
+def test_the_post_rebuild_count_is_BOUNDED_and_never_invents_a_zero():
+    """This read runs AFTER the wipe, so two things must not go wrong.
+
+    An unbounded full-graph count could block forever with the cache already
+    destroyed and nothing printed (the verb's contract is bounded reads), and an
+    UNREADABLE count returned as `0` would be a number the code did not measure —
+    rendered as `the cache now holds 0 node(s)`, i.e. the LOST-wipe message,
+    which is a conclusion rather than the measurement that did not happen.
+    """
+    from tortoise.projection import FalkorProjection
+
+    proj = object.__new__(FalkorProjection)
+    seen: list[dict] = []
+
+    class _Rows(list):
+        @property
+        def result_set(self):
+            return self
+
+    class _Graph:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def query(self, cypher, **kw):
+            seen.append(kw)
+            return _Rows(self.rows)
+
+    proj.g = _Graph([[3]])
+    assert proj._count_projected("RETURN count(n)") == 3
+    assert seen[0]["timeout"] == rrestore.CACHE_READ_TIMEOUT_MS, seen
+
+    proj.g = _Graph([])
+    with pytest.raises(RuntimeError, match="no row"):
+        proj._count_projected("RETURN count(n)")
+
+
+# ── the guard is about the RECORD having rows, not about it having NODES ───
+#    (#9556 review P2: a relations-only scope wiped the cache and put nothing
+#     back, and BOTH count guards were keyed on ``record_nodes``, so the run
+#     printed ``✓ restored … 0 node(s)`` and exited 0.)
+
+
+def _view_with_relations(n_nodes: int, n_relations: int) -> cp.RecordView:
+    nodes = tuple(
+        cp.RecordNode(label="Point", key=f"p-9556-{i}",
+                      props={"id": f"p-9556-{i}", "content": f"c{i}",
+                             "status": "live"})
+        for i in range(n_nodes))
+    relations = tuple(
+        cp.RecordRelation(rel_type="related", src_label="Point",
+                          src_key=f"p-9556-{i % max(n_nodes, 1)}",
+                          tgt_label="Point",
+                          tgt_key=f"p-9556-{(i + 1) % max(n_nodes, 1)}", idx=i)
+        for i in range(n_relations))
+    return cp.RecordView(nodes=nodes, relations=relations)
+
+
+def test_a_relations_only_record_that_restored_NOTHING_is_UNAVAILABLE(
+        monkeypatch, capsys):
+    """RED pre-fix: ``record_nodes`` was falsy, so neither guard fired.
+
+    A record that carries relations but no nodes is the measured shape when the
+    relation endpoints are kept out of the record (R4). Its relation statements
+    MATCH endpoints that are not there, so the rebuild wipes the cache and
+    materialises nothing — and ``if record_nodes and nodes_written == 0`` was
+    skipped while ``0 != min(0, None)`` passed, i.e. exit ``0`` under a
+    ``✓ restored`` line over a destroyed cache.
+    """
+    from tortoise import __main__ as cli
+
+    projection = _RecordingProjection(result={
+        "nodes_written": 0, "relations_written": 0, "nodes_selected": 0,
+        "relations_selected": 3, "statements": 0, "record_nodes": 0,
+        "record_relations": 3, "coverage": "partial", "declared_keys": 0,
+        "source": "record"})
+    _install_fakes(monkeypatch, view=_view_with_relations(0, 3),
+                   projection=projection)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, printed.out + printed.err
+    assert "LOST" in printed.err, printed.err
+    assert "3 relation(s)" in printed.err, printed.err
+    assert "✓" not in printed.out, (
+        f"a cache that got nothing back must never print the restored line: "
+        f"{printed.out}")
+
+
+def test_relations_that_did_not_land_are_DECLARED_not_silently_complete(
+        monkeypatch, capsys):
+    """``coverage`` is a claim about NODES; the relation shortfall is its own state.
+
+    Every node lands, no edge does. ``coverage=complete`` is true of the node
+    set and useless about edges, so the run must carry the shortfall in the
+    machine-readable contract (``relations_not_written`` + ``declared_partial``)
+    — otherwise a consumer keyed on ``coverage`` reads a cache missing every
+    edge as fully restored (the #3895 shape).
+    """
+    from tortoise import __main__ as cli
+
+    projection = _RecordingProjection(result={
+        "nodes_written": 2, "relations_written": 0, "nodes_selected": 2,
+        "relations_selected": 3, "statements": 0, "record_nodes": 2,
+        "record_relations": 3, "coverage": "complete", "declared_keys": 0,
+        "source": "record"})
+    _install_fakes(monkeypatch, view=_view_with_relations(2, 3),
+                   projection=projection)
+
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:16379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET, "--json"])
+    printed = capsys.readouterr()
+
+    assert rc == rrestore.EXIT_RESTORED, printed.err
+    payload = json.loads(printed.out)
+    assert payload["nodes_written"] == 2, payload
+    assert payload["coverage"] == "complete", payload
+    assert payload["relations_not_written"] == 3, payload
+    assert payload["declared_partial"] == ["relations-not-hot"], payload
+
+
+def test_the_human_line_names_the_relation_shortfall():
+    """The operator line must say it too — the JSON is not the only reader."""
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_o",
+        record_nodes=2, record_relations=3, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        coverage=rrestore.COVERAGE_COMPLETE, nodes_selected=2,
+        relations_selected=3)
+    line = outcome.render()
+
+    assert "3 record relation(s) are NOT in the cache" in line, line
+    assert "relations-not-hot" in line, line
+    assert "`coverage` above covers NODES only" in line, line
+
+
+def test_a_LIVE_declaration_claims_only_what_the_MEASURED_counts_proved(
+        shared_proj, cache_graph, monkeypatch):
+    """RED pre-fix: the declaration was built from the PLAN, not the counts.
+
+    A rebuild whose writes did not land wrote a plan-sized ``complete``
+    residency marker into the cache it had just emptied, and the composition
+    then refused the run as LOST — leaving a graph claiming ``hot`` for keys it
+    does not hold, so a read for one reports ``empty`` instead of ``not-hot``
+    (§17.3's polarity, inverted).
+    """
+    from tortoise.residency import read_declaration
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+    monkeypatch.setattr(cp, "project_records", lambda g, plan: 0)
+
+    proj.rebuild_from_record(_view(2), confirm_destructive=True)
+
+    declaration = read_declaration(cache_graph)
+    assert declaration.partial, (
+        f"a wipe that materialised nothing must not leave a complete "
+        f"declaration behind: {declaration}")
+    assert not declaration.hot_keys, (
+        f"the writing lane knows HOW MANY landed, not WHICH — so the only "
+        f"provable hot set is empty here: {declaration.hot_keys}")
+
+
+def test_a_LIVE_landed_rebuild_still_declares_complete(
+        shared_proj, cache_graph):
+    """The other direction: the proof-direction fix must not understate a real one."""
+    from tortoise.residency import read_declaration
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    proj.rebuild_from_record(_view(3), confirm_destructive=True)
+
+    declaration = read_declaration(cache_graph)
+    assert not declaration.partial, (
+        f"a rebuild that landed every record node must still declare "
+        f"complete, or every residency read becomes a miss: {declaration}")
+
+
+# ── the RELATION count is measured too, and the measurement is pinned ──────
+#    (#9604 review round 2: `relations_written` was only ever exercised through
+#     fake result dicts, so reverting the post-write relation count to
+#     `len(relations)` — or to 0 — left every pin green.)
+
+
+def test_a_LIVE_restore_lands_an_edge_and_reports_no_relation_shortfall(
+        shared_proj, cache_graph):
+    """The positive control: an edge whose endpoints ARE in the record lands.
+
+    Asserts the EDGE in the cache (not just the counter) and the absence of a
+    declared shortfall — the half that a count stuck at 0 would fabricate.
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    view = _view_with_relations(2, 1)
+
+    outcome = rrestore.restore_from_record_view(
+        view, org_id="o", graph_id="g", cache_graph=cache_graph.name,
+        project=proj)
+
+    edges = cache_graph.query(
+        "MATCH (:Point)-[r:related]->(:Point) RETURN count(r)"
+    ).result_set[0][0]
+    assert edges == 1, f"the record's edge must be in the cache: got {edges}"
+    assert outcome.relations_written == 1, outcome.render()
+    assert outcome.relations_not_written == 0, outcome.render()
+    assert outcome.declared_partial == (), outcome.render()
+
+
+def test_a_LIVE_restore_reports_an_edge_whose_endpoint_is_NOT_in_the_record(
+        shared_proj, cache_graph):
+    """The negative control: a relation whose endpoint the record lacks is a no-op.
+
+    ``relation_statement`` is a ``MATCH … MERGE``, so an endpoint the projection
+    cannot resolve writes nothing and raises nothing — the #3895 shape. The run
+    still exits 0 (the node contract holds), but the shortfall must be MEASURED
+    and DECLARED, never swallowed (RED pre-fix: ``relations_written`` was
+    reported but never compared, and nothing carried ``relations-not-hot``).
+    """
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    nodes = _view_with_relations(2, 0).nodes
+    orphan = cp.RecordRelation(rel_type="related", src_label="Point",
+                               src_key="p-9556-0", tgt_label="Point",
+                               tgt_key="p-9556-ABSENT", idx=0)
+    view = cp.RecordView(nodes=nodes, relations=(orphan,))
+
+    outcome = rrestore.restore_from_record_view(
+        view, org_id="o", graph_id="g", cache_graph=cache_graph.name,
+        project=proj)
+
+    edges = cache_graph.query(
+        "MATCH (:Point)-[r:related]->(:Point) RETURN count(r)"
+    ).result_set[0][0]
+    assert edges == 0, f"the orphan edge must not be in the cache: got {edges}"
+    assert outcome.nodes_written == 2, outcome.render()
+    assert outcome.relations_written == 0, outcome.render()
+    assert outcome.relations_not_written == 1, outcome.render()
+    assert outcome.declared_partial == ("relations-not-hot",), outcome.render()
+    assert "relations-not-hot" in outcome.render(), outcome.render()
+
+
+def test_a_LIVE_failed_rebuild_leaves_a_truthful_declaration(
+        shared_proj, cache_graph, monkeypatch):
+    """A raise BETWEEN the wipe and the declaration must not leave the old claim.
+
+    ``rebuild_from_record`` writes its residency marker from the measured counts
+    AFTER ``project_records``. If the projection (or the count itself) raises in
+    that window there is no marker to overwrite — and ``read_declaration`` then
+    answers ``complete`` for a marker that does not exist, so a read for a key
+    the wiped cache does not hold reports ``empty`` instead of ``not-hot``
+    (§17.3 inverted, the same class as the plan-built marker).
+    """
+    from tortoise.residency import read_declaration
+
+    proj = _projection_bound_to(shared_proj, cache_graph)
+    cache_graph.query("CREATE (:Point {id:'p-9556-stale'})")
+
+    def _boom(g, plan):
+        raise RuntimeError("driver died mid-materialisation")
+
+    monkeypatch.setattr(cp, "project_records", _boom)
+
+    with pytest.raises(RuntimeError, match="driver died"):
+        proj.rebuild_from_record(_view(2), confirm_destructive=True)
+
+    remaining = cache_graph.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0]
+    assert remaining == 0, "the fixture must really have wiped the cache"
+
+    declaration = read_declaration(cache_graph)
+    assert declaration.partial, (
+        f"a wiped graph with no proven write must not read as complete: "
+        f"{declaration}")
+    assert not declaration.hot_keys, declaration.hot_keys
+
+
+# ── the refusal DATUM, and the cache that cannot be opened (#9604 review) ────
+
+
+def test_the_JSON_report_carries_the_refused_keys():
+    """`refused_keys` is what makes `nodes_selected < record_nodes` auditable.
+
+    §9 publishes it as the audit trail for a difference an operator would
+    otherwise have to guess at, so it is pinned HERE as well as in the LOST
+    line below: a mutation that deletes the field from `as_dict` left every
+    other arm green (measured on the #9604 review), i.e. the documented datum
+    was carried by prose alone.
+    """
+    outcome = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=3, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0,
+        refused_keys=(("Session", ""), ("Session", " ")),
+    )
+    assert outcome.as_dict()["refused_keys"] == [["Session", ""], ["Session", " "]], (
+        "the refusal datum the runbook §9 tells an operator to read is not in "
+        "the report — the difference between nodes_selected and record_nodes "
+        "would then have no stated cause"
+    )
+
+
+def test_the_LOST_line_keeps_the_refusal_that_caused_it(monkeypatch, capsys):
+    """A wiped-and-empty cache must NAME the refusals, not only say LOST.
+
+    The zero-write guard's own datum: when every row of the scope was a row the
+    projection declines (a blank-keyed `:Session`, which the RECORD keeps and
+    the cache cannot address), the cache holds none of the record — so the
+    class stays exit 2 — and the ONE thing that explains it is `refused_keys`.
+    Pre-fix that parse ran AFTER the guard, so the line said LOST with no
+    reason. The mutation that reds this: `refused_note = ""`.
+    """
+    view = cp.RecordView(nodes=(
+        cp.RecordNode(label="Session", key="",
+                      props={"id": "", "summary": "blank-keyed"}),
+    ))
+    projection = _RecordingProjection(result={
+        "nodes_written": 0, "relations_written": 0, "nodes_selected": 0,
+        "relations_selected": 0, "statements": 0, "record_nodes": 1,
+        "record_relations": 0, "coverage": "partial", "declared_keys": 0,
+        "source": "record", "refused_keys": [["Session", ""]],
+    })
+    rc, _, _ = _drive(monkeypatch, view=view, projection=projection)
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "LOST" in err, err
+    assert "were REFUSED by the projection" in err, (
+        f"the LOST line dropped the refusal that caused it: {err!r}")
+    assert "Session:''" in err, (
+        f"the LOST line must NAME the refused row, not just count it: {err!r}")
+
+
+def test_a_cache_that_cannot_be_opened_is_UNAVAILABLE_not_a_traceback(
+        monkeypatch, capsys):
+    """§9's exit-2 row for "cache unreachable" had no pin at all.
+
+    Measured on the #9604 review: every `from_uri` fake in this file returned a
+    projection (or None), so the `except Exception` around it was never
+    exercised — a re-raise there would have produced a traceback where §9
+    documents exit 2 and an "UNCHANGED" statement.
+    """
+    from tortoise import __main__ as cli
+    from tortoise.projection import FalkorProjection
+
+    _install_fakes(monkeypatch, view=_view(2),
+                   projection=_RecordingProjection())
+
+    def _cannot_open(uri, graph_name=None):
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(
+        FalkorProjection, "from_uri",
+        staticmethod(_cannot_open))
+    rc = cli.main(["record-restore", "--db", "docker://:x@localhost:6379/g",
+                   "--record-dsn", "postgresql://fake/record",
+                   "--org", "o", "--graph", "g",
+                   "--cache-graph", _TARGET])
+    err = capsys.readouterr().err
+
+    assert rc == rrestore.EXIT_UNAVAILABLE, err
+    assert "could not be opened" in err, err
+    assert "ConnectionError" in err, err
+
+
+def test_the_human_line_names_the_refused_rows_and_denies_the_re_run():
+    """§9's not-hot bullet offered a remedy that cannot work for a REFUSED row.
+
+    A record row the cache cannot address (the blank-keyed `:Session`) makes the
+    declaration `partial` at ANY bound, and re-running cannot write it — but the
+    human line said only "N record key(s) were NOT written", so the documented
+    next step (`re-run without --limit`) pointed at a destructive re-run that
+    ends in the identical state, forever. The reviewer measured the same
+    declaration with and without the bound on a 3-node record.
+    """
+    with_refusal = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=3, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0,
+        refused_keys=(("Session", ""),), coverage="partial", declared_keys=0,
+    )
+    line = with_refusal.render()
+    assert "REFUSED by the projection" in line, line
+    assert "Session:''" in line, line
+    assert "no re-run can write them" in line, line
+
+    clean = rrestore.RestoreOutcome(
+        org_id="o", graph_id="g", cache_graph="test_c",
+        record_nodes=2, record_relations=0, nodes_written=2,
+        relations_written=0, target_nodes_before=0,
+        nodes_selected=2, relations_selected=0, coverage="complete",
+        declared_keys=0,
+    )
+    assert "REFUSED" not in clean.render(), (
+        "a restore with no refused row must not print the refusal clause"
+    )

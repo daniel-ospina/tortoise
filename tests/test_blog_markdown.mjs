@@ -1042,7 +1042,7 @@ console.log("the shipped avatar exists, and is the URL the migration backfills (
   // a typo there would be green in every harness suite (those assert the same
   // literal against itself) and 404 the avatar on exactly the repaired posts.
   const repair = readFileSync(
-    new URL("../supabase/migrations/20261023000001_blog_author_backfill_atomic.sql", import.meta.url),
+    new URL("../supabase/migrations/20261023000002_blog_author_backfill_atomic.sql", import.meta.url),
     "utf8",
   );
   // Every WRITE is checked, not "the string appears somewhere": the file writes
