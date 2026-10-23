@@ -107,8 +107,11 @@ response_fields:
   field: valid_to_precision
   emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, the end-only `unknown`
     marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant (`TBD`
-    — no granularity to claim; #9201). ABSENT (not null) when the window has no end at all, so the open shape stays
-    distinguishable. Emitted with the same block as valid_from_precision and end_state'
+    — no granularity to claim; #9201, and #9244 for a caller-DECLARED token: a declaration annotates a bound, it
+    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change
+    end_state, which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no
+    end at all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and
+    end_state'
   unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state

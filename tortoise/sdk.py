@@ -29002,11 +29002,14 @@ class TortoiseSDK:
                 # unorderable bound yields precision ``None``, so the block's
                 # presence needs its own datum (see ``SearchResult.to_dict``).
                 # #9244: NO ``or pt.get("validFromPrecision")`` fallback here.
-                # The raw property arm this field used to carry is precisely how
-                # a declared token could re-enter the wire behind
-                # ``effective_precision``'s back, and it is dead weight besides
-                # (``pt`` carries no window column, per the note above) — so the
-                # ONE resolution home stays the only thing that decides.
+                # The arm was ALREADY dead (``pt`` carries no window column, per
+                # the note above — so it is not how #9244 was ever reachable;
+                # that was ``effective_precision``'s early return). It is
+                # removed rather than kept as a second resolution path: the
+                # moment ``pt`` widened, a raw declared token could re-enter the
+                # wire behind the ONE resolution home's back, which is the whole
+                # defect class #9244 closes. What stays here is the resolved
+                # ``point_state`` value and nothing else.
                 valid_from_present=bool(
                     point_state.get(pid, {}).get("valid_from_present")),
                 valid_to_present=bool(

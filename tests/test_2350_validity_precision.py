@@ -592,16 +592,62 @@ def test_declared_precision_on_an_unorderable_start_reads_null_everywhere(lane):
     assert fb[0].get("valid_from_precision") is None, fb[0]
 
     # CONTROL — the same declaration on an ORDERABLE start still reads ``year``
+    # (the day is re-read for the lookup: ``window_rows`` selects on
+    # ``when OR createdAt``, and ``q`` is only reachable through its
+    # ``createdAt`` stamp, so a run crossing UTC midnight between the two
+    # ``_utc_today()`` calls would drop it — the #9406 clock-reading class
+    # this file's ``_utc_today`` docstring records).
     q = sdk.create_point("statement", "declared on an instant",
                          validFrom="2024-06-01", validFromPrecision="year")
     assert sdk.get_historical_knowledge(
         q["id"], A_DATE)["chain"][0]["valid_from_precision"] == "year"
-    qrow = next(r for r in port.window_rows(today, today) if r["id"] == q["id"])
+    q_day = _utc_today()
+    qrow = next(r for r in port.window_rows(q_day, q_day) if r["id"] == q["id"])
     assert qrow["valid_from_precision"] == "year"
     qhit = next(r for r in _scan(sdk) if r["id"] == q["id"])
     assert qhit["valid_from_precision"] == "year"
     qfb = _decorate_fallback_hits([{"id": q["id"]}], sdk._get_proj().g)
     assert qfb[0].get("valid_from_precision") == "year"
+
+
+def test_declared_precision_on_an_unorderable_end_reads_null_both_sides(lane):
+    """#9244 applies to BOTH ends — ``effective_precision`` is end-agnostic.
+
+    The issue asked that the both-ends consequence be stated EXPLICITLY rather
+    than discovered: a declaration on a PRESENT-but-unorderable ``validTo``
+    (accepted by the same write boundary, which only refuses a declaration on an
+    ABSENT end) also resolves to no precision. Measured through the public write
+    so a future edit to either end's plumbing reddens this.
+
+    ``end_state`` stays ``known``: whether a stored-but-un-datable END should
+    report ``END_UNKNOWN`` is #9202's owner ruling, and a precision gate must
+    not pre-empt it — that assertion is the pin.
+    """
+    sdk, _events = lane
+    p = sdk.create_point("statement", "declared end on no instant",
+                         validFrom="2024-06-01", validTo="TBD",
+                         validToPrecision="year")
+    props = _window_props(sdk, p["id"])
+    assert props["validTo"] == "TBD", props
+    assert props["validToPrecision"] == "year", props
+
+    gk = sdk.get_historical_knowledge(p["id"], A_DATE)["chain"][0]
+    assert gk["valid_to_precision"] is None
+    assert gk["end_state"] == "known"
+
+    hit = next(r for r in _scan(sdk) if r["id"] == p["id"])
+    assert "valid_to_precision" in hit, hit
+    assert hit["valid_to_precision"] is None, hit
+    assert hit["end_state"] == "known"
+
+    # CONTROL — the same declaration on an ORDERABLE end still reads ``year``
+    q = sdk.create_point("statement", "declared end on an instant",
+                         validFrom="2024-06-01", validTo="2026-01-01",
+                         validToPrecision="year")
+    assert sdk.get_historical_knowledge(
+        q["id"], A_DATE)["chain"][0]["valid_to_precision"] == "year"
+    qhit = next(r for r in _scan(sdk) if r["id"] == q["id"])
+    assert qhit["valid_to_precision"] == "year"
 
 
 def test_undated_hits_emit_no_precision_keys(lane):
