@@ -495,8 +495,9 @@ not be read"* — never as the claim that everything is already on the graph.
 optional `packs: [{namespace, status}]` alongside `org_id`/`name`/`scopes`, so
 create-and-configure is ONE call and an unconfigured graph becomes a *choice*
 rather than the only possibility. Three behaviours to keep straight, because
-they are deliberately different: **field absent** → no pack decision, the graph
-is born UNCONFIGURED and keeps the catalog union (the decided default below);
+they are deliberately different: **field absent** → no pack decision, so the graph
+is born UNCONFIGURED with no `:PackInstall` records — the catalog-union arm until
+records exist (the first packs read self-heals the starter set, which narrows it);
 **`packs: []`** → born CONFIGURED with an empty set, the narrowest deliberate
 act; **a list** → exactly that set. The 201 envelope then carries the resolved
 set under `packs` (`{namespaces, revision, configured}`) so the caller never
@@ -525,15 +526,25 @@ customer-facing territory that owns per-graph permissions.
 > is what removes). `configured: false` is stated in words, and WHICH words
 > depend on the **records**, never on the flag alone (#9691): only the
 > record-less graph resolves to the whole catalog, so only it is told so — "Not
-> configured yet — this graph holds no packs, so the full catalog applies." The
-> arm every starter-seeded default graph is in gets the other sentence — "Not
-> configured yet — this graph uses the packs it already holds (2 active packs ·
-> 1 off). Saving pins the set." The count in parentheses describes the rows the
-> payload carries, never a bare number a reader could mistake for the enforced
-> set, and it is omitted in the record-less arm rather than printed as a
-> structurally-0 "0 active packs" beside the catalog claim.
+> configured yet — this graph holds no packs, so the full catalog applies.
+> Saving pins the set." The arm every starter-seeded default graph is in gets
+> the other sentence — "Not configured yet — this graph uses the packs it
+> already holds (2 active packs · 1 off). Saving pins the set." The count in
+> parentheses describes the rows the payload carries, never a bare number a
+> reader could mistake for the enforced set, and it is omitted in the
+> record-less arm rather than printed as a structurally-0 "0 active packs"
+> beside the catalog claim.
+> A catalog that could not be READ gets neither claim (`catalog_ok: false`): the
+> record-less arm drops the catalog sentence, and the modal note says the
+> catalog could not be read rather than that it applies — the same distinction
+> the degraded add-list line draws.
 > `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
 > zero records (a tombstone counts; the catalog arm of `available` does not).
+> ⚠️ The predicate derives the record set from the two lists the payload carries
+> rather than from the resolved set itself, so a CATALOG-shipped tombstone with
+> no marker (offered by the catalog arm as `available`, never as `removed`) is a
+> residual it cannot see; the exact fix is to surface the record count / the
+> union flag on the payload, which is tracked on the issue.
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 
