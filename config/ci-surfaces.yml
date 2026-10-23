@@ -4653,6 +4653,14 @@ surfaces:
   # required: `tools/ci_selection.py --integrity` exits 1 on an undeclared test
   # file, and a file in NO leg runs nowhere (#3514).
   - test_6211_ep_anchor.py
+  # #9269: the regression pin for "an operator-shaped node is not a factor
+  # input" — the operator-mediated arms of `_affected_claims` /
+  # `_affected_factors` carry `ep._non_operator`, and Batch 2 strips an
+  # operator-shaped input IN PYTHON so `source_stripped` still fires. It is
+  # declared here (not left to the `ep`/`sdk` FULL-matrix fallback) because
+  # `tools/ci_selection.py --integrity` exits 1 on a test file in NO leg, and a
+  # file in no leg runs nowhere (#3514).
+  - test_9269_operator_shaped_factor_input.py
   - test_ep_mitigation.py
   - test_ep_terminal_ghost.py
   # #2500: the pre-#2490 terminal-EP backfill guard. Dual-registered with
@@ -7120,6 +7128,7 @@ durations:
   test_auth_flip.py: 0.8
   test_battery_config.py: 1.2
   test_calibration.py: 2.0
+  test_9269_operator_shaped_factor_input.py: 1.5  # unmeasured — new in #9269; the sweeper fills this from the run's junit
   test_eval_ingest_cache.py: 1.5
   test_lme_ingest_v2_supersession.py: 1.8
   test_one_free_org_entitlement.py: 2.8

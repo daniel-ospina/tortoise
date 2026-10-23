@@ -13,8 +13,10 @@ readers use an absence-or-false predicate instead (`(x.is_operator IS NULL OR
 x.is_operator = false)`, #3139/#3154): that is what `dream.py` selects on, and
 #9063 moved the CALIBRATION GATE -- plus the ``calibrate_summary`` audit, the
 guidance its error points at -- onto it with NO ``op_type`` conjunct, because
-EP's factor-input arm has no non-operator filter (an ``op_type``-bearing hybrid
-IS a participant). Dedup keeps its OWN two-disjunct form,
+the predicate must not exclude a node EP CONSUMES: EP's factor-input arm carries
+that SAME absence-or-false predicate (#9269), so an ``op_type``-bearing hybrid
+-- ``is_operator = false`` WITH ``op_type`` -- passes on both sides and IS a
+participant. Dedup keeps its OWN two-disjunct form,
 ``(n.is_operator IS NULL OR n.is_operator = false) AND (n.op_type IS NULL OR
 n.is_operator = false)`` (#2892/#2949): the bare ``... AND n.op_type IS NULL``
 conjunct belongs to the COUNTING predicates (`summarize_structure` /

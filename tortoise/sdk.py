@@ -25080,9 +25080,13 @@ class TortoiseSDK:
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
 
-        #9063: the non-operator predicate is the GATE's — absence-or-false,
-        with NO ``op_type`` conjunct (EP's factor-input arm has no non-operator
-        filter, so an ``op_type``-bearing node IS a participant) — plus the
+        #9063/#9269: the non-operator predicate is the GATE's — absence-or-false,
+        with NO ``op_type`` conjunct (EP's factor-input arm applies this SAME
+        absence-or-false predicate since #9269, and a hybrid
+        ``create_point(op_type=...)`` node is ``is_operator = false`` WITH
+        ``op_type``, so it passes on BOTH sides and IS a participant; the
+        ``op_type IS NULL`` conjunct belongs to the STRICTER operator-less
+        direct-edge arms only) — plus the
         id-less exclusion, so a legacy Point written before ``is_operator`` was
         stamped is LISTED here — this is the guidance the
         calibration gate's error message points at, and it must not be empty
@@ -25111,9 +25115,12 @@ class TortoiseSDK:
         #
         # The predicate is the GATE's, exactly — absence-or-false, with NO
         # ``op_type`` conjunct (see ``_uncalibrated_ep_participants``: EP's
-        # factor-input arm has no non-operator filter, so a hybrid
-        # ``create_point(op_type=...)`` node is a participant and must be
-        # listed here for its remedy to exist) — plus the id-less exclusion the
+        # factor-input arm carries this SAME absence-or-false predicate since
+        # #9269, so a hybrid ``create_point(op_type=...)`` node — ``is_operator
+        # = false`` WITH ``op_type`` — is a participant and must be listed here
+        # for its remedy to exist; the ``op_type IS NULL`` conjunct belongs to
+        # the STRICTER operator-less direct-edge arms, never to this one) — plus
+        # the id-less exclusion the
         # gate makes: ``set_point_baseline(None)`` is not a remedy a caller can
         # run, and such a node is never an EP participant.
         not_operator = "(n.is_operator IS NULL OR n.is_operator = false)"
