@@ -880,11 +880,11 @@ def _cmd_record_backup(args):
     # turns the resulting mismatch into a refusal that names the role, instead of
     # a drill reporting a populated record as EMPTY).
     env_backup = os.environ.get(RECORD_BACKUP_DSN_ENV)
-    #: Which surface the DSN is about to come from, so a malformed value can be
-    #: attributed to the RIGHT variable — `record_dsn`'s own message names
-    #: `TORTOISE_RECORD_DSN`, and pointing an operator at the app-role variable
-    #: for a value they set on the backup surface is the same "say which one"
-    #: failure the role refusal exists to end (#9801).
+    #: Which surface the DSN is about to come from, handed to `record_dsn` so a
+    #: malformed value is attributed to the RIGHT arm in the sentence itself.
+    #: `record_dsn`'s default message names `TORTOISE_RECORD_DSN`, and pointing an
+    #: operator at the app-role variable for a value they set on the backup surface
+    #: is the same "say which one" failure the role refusal exists to end (#9801).
     dsn_surface = "--record-dsn" if args.record_dsn is not None else ""
     if args.record_dsn is None and env_backup is not None and not env_backup.strip():
         # Set-but-blank is the shape a cron line takes when its environment is
@@ -899,12 +899,15 @@ def _cmd_record_backup(args):
         args.record_dsn = env_backup.strip()
         dsn_surface = RECORD_BACKUP_DSN_ENV
     try:
-        dsn = record_dsn(args.record_dsn)
+        # ⛔ THE SURFACE IS NAMED IN THE SENTENCE, NOT APPENDED TO IT (#9801).
+        # `record_dsn`'s message hardcodes `TORTOISE_RECORD_DSN`; a value the
+        # operator set on the BACKUP surface would therefore be reported against
+        # the app-role variable and then followed by an appended attribution —
+        # two surfaces named in one sentence, the wrong one first, and the
+        # appended clause running on from a message with no closing period.
+        dsn = record_dsn(args.record_dsn, surface=dsn_surface or None)
     except RecordWriteError as e:
-        from_where = (f" The value was read from {dsn_surface}."
-                      if dsn_surface else "")
-        print(f"Error: {e}{from_where} — the record was NOT backed up.",
-              file=sys.stderr)
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
         return 2
     # ⛔ argv is PUBLIC — every user on the box can read a process's arguments
     # (`ps`), and an argument also lands in shell history and the scheduler's own

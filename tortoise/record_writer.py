@@ -421,7 +421,9 @@ class RecordWrite:
         return status_vocabulary.classify(configured=True, reached=True)
 
 
-def record_dsn(explicit: str | None = None) -> str | None:
+def record_dsn(
+    explicit: str | None = None, *, surface: str | None = None
+) -> str | None:
     """The armed DSN, or ``None`` when the record is not armed.
 
     ``explicit`` wins over the environment (an injected value makes the DB-free
@@ -429,6 +431,13 @@ def record_dsn(explicit: str | None = None) -> str | None:
     raises :class:`RecordWriteError` carrying only a fingerprint of the value —
     the same secret-hygiene rule ``tortoise/audit_events.py`` applies to
     ``TORTOISE_AUDIT_DSN`` (#2903/#2796).
+
+    ``surface`` names the arm the value came from when it is NOT
+    ``TORTOISE_RECORD_DSN`` itself (#9801): the record's backup leg has its own
+    variable, and telling an operator to fix ``TORTOISE_RECORD_DSN`` for a value
+    they set on ``TORTOISE_RECORD_BACKUP_DSN`` is the same "say which one"
+    misattribution the role refusal exists to end. Only the NAME travels — the
+    value is still reduced to its fingerprint.
     """
     raw = explicit if explicit is not None else os.environ.get(RECORD_DSN_ENV)
     dsn = "" if raw is None else str(raw).strip()
@@ -437,9 +446,9 @@ def record_dsn(explicit: str | None = None) -> str | None:
     if not dsn.startswith(_DSN_SCHEMES):
         got = hashlib.sha256(dsn.encode()).hexdigest()[:8]
         raise RecordWriteError(
-            f"{RECORD_DSN_ENV} must start with postgresql:// or postgres:// "
-            f"(got <{got}>...) — a configured-but-unusable record DSN is a "
-            f"misconfiguration, not an unarmed record"
+            f"{surface or RECORD_DSN_ENV} must start with postgresql:// or "
+            f"postgres:// (got <{got}>...) — a configured-but-unusable record "
+            f"DSN is a misconfiguration, not an unarmed record"
         )
     return dsn
 

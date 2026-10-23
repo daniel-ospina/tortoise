@@ -2499,11 +2499,13 @@ def _raising(message: str, pgcode: str | None = None, seen: list[str] | None = N
 def test_a_driver_failure_of_the_COUNT_leg_is_a_documented_class_not_a_traceback():
     """P2: `connector(dsn)` stood outside every `try`, so `OperationalError` escaped.
 
-    Every mode's FIRST act is this count leg, and `_default_connector`'s last
-    statement is a bare `psycopg2.connect(...)`. A refused connection / bad password
-    / absent database therefore left `main()` as an interpreter traceback: exit 1
-    ("try again") on faults only a config edit clears, and no sentence from the
-    class table the verb documents. Pre-fix this raises `_DriverError`.
+    The first *connection* either mode opens is the role-posture read (#9801);
+    the first *count* is still the drill's vacuity read. `_default_connector`'s
+    last statement is a bare `psycopg2.connect(...)`, so a refused connection /
+    bad password / absent database used to leave `main()` as an interpreter
+    traceback: exit 1 ("try again") on faults only a config edit clears, and no
+    sentence from the class table the verb documents. Pre-fix this raises
+    `_DriverError`.
     """
     with pytest.raises(rb.RecordBackupError) as excinfo:
         rb.record_row_counts(DSN, connect=_raising("connection ... failed: refused"))
@@ -2549,15 +2551,61 @@ def test_a_PERMANENT_driver_fault_is_exit_2_so_a_scheduler_stops_retrying():
 
 
 @pytest.mark.parametrize("pgcode,expected", [(None, 1), ("28P01", 2)])
-def test_the_verb_exits_the_CLASS_code_when_the_count_leg_cannot_connect(
+def test_the_verb_exits_the_CLASS_code_when_the_ROLE_leg_cannot_connect(
         monkeypatch, capsys, pgcode, expected):
     """The end-to-end half: the code a scheduler actually branches on.
+
+    Since #9801 the gate is the FIRST connection either path opens, so the
+    `_default_connector` failure this arm injects happens on the ROLE-POSTURE
+    read, not on the count leg it used to reach — the mapping is the same
+    (`require_bypassing_role` routes through the same `_connect` →
+    `_connection_failure` pair), but the leg being proven is the gate's. The
+    count leg's own end-to-end proof is
+    `test_the_verb_exits_the_CLASS_code_when_the_COUNT_leg_cannot_connect` below,
+    which lets the posture read succeed and fails the second connect.
 
     Pre-fix this is not an exit code at all — the exception leaves `main()`.
     """
     monkeypatch.setattr(rb, "_default_connector", _raising("could not connect", pgcode))
     rc = _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], patch_connector=False)
     captured = capsys.readouterr()
+    assert rc == expected, f"stdout={captured.out!r} stderr={captured.err!r}"
+    assert "Traceback" not in captured.err
+    assert "could not be reached" in captured.err
+    assert "s3cr3t-pw" not in captured.err
+
+
+@pytest.mark.parametrize("pgcode,expected", [(None, 1), ("28P01", 2)])
+def test_the_verb_exits_the_CLASS_code_when_the_COUNT_leg_cannot_connect(
+        monkeypatch, capsys, pgcode, expected):
+    """The count leg's OWN end-to-end exit mapping, past the #9801 role gate.
+
+    The arm above now fails on the posture read, because the gate became the
+    first connection; without this sibling the verb-level proof for "a driver
+    failure on the COUNT leg is exit 1 (retryable) / 2 (permanent)" would be
+    asserting that mapping about the gate instead of the leg it names. So the
+    connector answers the posture read and raises on the SECOND connect, and the
+    arm pins that the posture statement really ran first — otherwise a run that
+    never opened the gate would satisfy the exit code by accident.
+    """
+    log = _StatementLog()
+    base = _logged_connect(FakeDB(SOURCE_COUNTS), log)
+    attempts: list[str] = []
+
+    def connector(dsn):
+        attempts.append(dsn)
+        if attempts[1:]:  # the gate already ran; the COUNT leg is what fails
+            raise _DriverError("could not connect", pgcode)
+        return base(dsn)
+
+    monkeypatch.setattr(rb, "_default_connector", connector)
+    rc = _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], patch_connector=False)
+    captured = capsys.readouterr()
+    assert attempts == [DSN, DSN], (
+        "the run must reach the posture read and then the count leg")
+    assert any("rolbypassrls" in sql for sql in log.sql), (
+        f"the role gate never executed, so this arm is not measuring the count leg: "
+        f"{log.sql}")
     assert rc == expected, f"stdout={captured.out!r} stderr={captured.err!r}"
     assert "Traceback" not in captured.err
     assert "could not be reached" in captured.err
@@ -2999,12 +3047,14 @@ def test_the_posture_statement_carries_the_SAME_predicates_as_the_scope():
 
 
 def test_a_malformed_backup_dsn_names_the_variable_it_was_read_from(monkeypatch, capsys):
-    """The value came from the BACKUP surface — say so (#9801).
+    """The value came from the BACKUP surface — say so, and say ONLY that (#9801).
 
     `record_writer.record_dsn` names its own env var in its message, and sending
     an operator to `TORTOISE_RECORD_DSN` for a value they set on
     `TORTOISE_RECORD_BACKUP_DSN` is the same "say which one" failure the role
-    refusal exists to end.
+    refusal exists to end. Naming the right surface in an APPENDED clause was not
+    enough — the sentence still opened by blaming `TORTOISE_RECORD_DSN`, and the
+    appended clause ran on from a message with no closing period.
     """
     assert _cli(
         monkeypatch, ["record-backup"],
@@ -3014,4 +3064,27 @@ def test_a_malformed_backup_dsn_names_the_variable_it_was_read_from(monkeypatch,
     err = capsys.readouterr().err
     assert rb.RECORD_BACKUP_DSN_ENV in err, (
         "the message must attribute the malformed value to the surface it came from")
+    assert "TORTOISE_RECORD_DSN" not in err, (
+        "the app-role variable must not be named at all: the value was never read "
+        f"from it, and naming it first sends the operator to the wrong arm — {err!r}")
+    assert "record The value" not in err, (
+        f"the sentence runs on from an unterminated message — {err!r}")
     assert "pw@db.example" not in err, "the value itself is never echoed"
+
+
+def test_a_malformed_flag_dsn_is_attributed_to_the_FLAG(monkeypatch, capsys):
+    """The flag wins over both env surfaces, so the sentence must name the flag.
+
+    `--record-dsn` takes precedence over `TORTOISE_RECORD_BACKUP_DSN` and
+    `TORTOISE_RECORD_DSN`; attributing its value to either variable is the same
+    misattribution one surface up.
+    """
+    assert _cli(
+        monkeypatch, ["record-backup", "--record-dsn", "mysql://u:pw@db.example/record"],
+    ) == 2
+
+    err = capsys.readouterr().err
+    assert "--record-dsn" in err, err
+    assert "TORTOISE_RECORD_DSN" not in err, (
+        f"the value came from argv, not from an env surface — {err!r}")
+    assert "pw@db.example" not in err
