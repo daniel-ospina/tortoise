@@ -69,6 +69,11 @@ Mutations that turn these RED (each verified RED before merge, restored byte-exa
   * accept only a bare fence (no indent, no language tag) -> the ```md test fails;
   * drop the unclosed-fence fallback                      -> the unclosed-fence test
     fails: ``state=none`` means APPEND, so one more copy is added per run, forever;
+  * use an interval quantifier in the fence classifier        -> the mawk test
+    fails: on a host whose awk is mawk the state pass dies (Ubuntu 24.04's mawk
+    PANICS at REcompile time, Debian 12's compiles ``{3,}`` as literal braces) and
+    the READABLE AGENTS.md is refused as "could not read AGENTS.md" at exit 3 —
+    #9274, invisible on this host's BSD awk and on CI's gawk;
   * neutralise BOTH the ``tr`` guard and the non-empty check -> the failing-``tr``
     test fails: ``tr`` dying empties both stripped markers, which silently disables
     the mangled detector, and a file whose two markers are BOTH spacing-mangled
@@ -142,6 +147,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -676,6 +682,35 @@ def test_a_cr_inside_a_line_is_a_real_difference(tmp_path):
 #    an unparsed state, and a planted staging symlink
 
 
+#: #9274 — a stand-in for mawk, which IS `awk` on a stock Debian 12 / Ubuntu 24.04.
+#: Both released builds break the obvious spelling of the fence classifier, in
+#: different ways:
+#:   * 1.3.4 20240123 (Ubuntu 24.04) PANICS at REcompile time on
+#:     ``/^ {0,3}(`{3,}|~{3,})/`` — "values still on machine stack", exit 100
+#:     (measured in ``ubuntu:24.04``; the trigger is the leading zero-minimum
+#:     interval followed by an open-ended one — ``/^ {0,3}a+/`` and ``/x{3,}/``
+#:     compile fine);
+#:   * 1.3.4 20200120 (Debian 12) predates interval support entirely
+#:     (``-W re-interval`` is a "vacuous option"), so ``{3,}`` is a LITERAL and no
+#:     fence ever matches (measured: ``/^a{3,}/`` misses "aaa").
+#: The shim models the PANIC for the whole interval-quantifier class rather than
+#: re-implementing mawk's state-stack bug: on the Debian build every interval is
+#: already wrong, so "a classifier that needs none" is the only spelling that is
+#: right on both — and over-refusing here fails in the safe direction (a red test,
+#: not a user's refused ``AGENTS.md``). Anything without an interval goes to the
+#: HOST awk, so the rest of the installer still runs for real.
+MAWK_SHIM = """#!/bin/sh
+prog=
+for a in "$@"; do prog="$prog
+$a"; done
+if printf '%s' "$prog" | grep -qE '\\{[0-9]+(,[0-9]*)?\\}'; then
+  echo "REcompile() - panic:  values still on machine stack for <interval expression>" >&2
+  exit 100
+fi
+exec @REAL_AWK@ "$@"
+"""
+
+
 def _install_with_stub(tmp_path: Path, stub: str, body: str, agents: str | None):
     """Run the REAL installer with one stubbed command first on PATH."""
     base = _fixture_tree(tmp_path)
@@ -812,6 +847,48 @@ def test_an_unparsed_state_fails_instead_of_claiming_an_upgrade(tmp_path):
     assert "✓ AGENTS.md" not in done.stdout, done.stdout
     if agents.exists():
         assert agents.read_text(encoding="utf-8") == LEGACY_BLOCK
+
+
+def test_the_fence_classifier_installs_on_a_host_whose_awk_is_mawk(tmp_path):
+    """#9274 — the block must install where ``awk`` is mawk, not refuse a readable
+    file. On Debian/Ubuntu (mawk is the distro default) the fence classifier's
+    interval quantifiers either panic (Ubuntu 24.04) or silently never match
+    (Debian 12), and the installer turned that into
+    ``✗ AGENTS.md — could not read AGENTS.md (unreadable, or not a regular file)``
+    and exit 3 over a file it could read. Unobservable on BSD awk (this host) and
+    on CI's gawk, which is why it shipped."""
+    real_awk = shutil.which("awk")
+    assert real_awk, "no awk on PATH — cannot model a mawk host"
+    shim = MAWK_SHIM.replace("@REAL_AWK@", real_awk)
+
+    # The shim itself is pinned: a shim that stopped modelling the panic would
+    # make the assertion below vacuous (the installer would just pass).
+    probe_dir = tmp_path / "probe-bin"
+    probe_dir.mkdir()
+    (probe_dir / "awk").write_text(shim, encoding="utf-8")
+    (probe_dir / "awk").chmod(0o755)
+    refused = subprocess.run(
+        [str(probe_dir / "awk"), '/^ {0,3}(`{3,}|~{3,})/'],
+        capture_output=True, text=True, timeout=60)
+    assert refused.returncode == 100, (
+        f"the shim must refuse what mawk 1.3.4 refuses: rc={refused.returncode}\n"
+        f"{refused.stdout}{refused.stderr}")
+    assert "REcompile() - panic" in refused.stderr, refused.stderr
+
+    # A fenced EXAMPLE of the markers plus the real (legacy) block: the fence
+    # scanner is exercised on the way to the upgrade, exactly as on a mawk host.
+    agents_in = ("# House rules\n\n"
+                 f"```\n{START}\n...\n{END}\n```\n\n" + LEGACY_BLOCK)
+    done, agents = _install_with_stub(tmp_path, "awk", shim, agents_in)
+
+    assert done.returncode == 0, (
+        "a mawk host must install the block, not refuse a readable file:\n"
+        f"{done.stdout}{done.stderr}")
+    assert "could not read" not in done.stderr, done.stderr
+    text = agents.read_text(encoding="utf-8")
+    assert text.count(START) == 2, f"the documented fenced EXAMPLE must survive:\n{text}"
+    assert text.count(END) == 2, f"the example plus ONE closed block:\n{text}"
+    assert "unversioned" in _agents_report(done.stdout), done.stdout
 
 
 def test_a_planted_staging_symlink_cannot_redirect_the_write(tmp_path):
