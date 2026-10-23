@@ -1591,7 +1591,15 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     assert "self._extract_session_v2(" in sources["sdk"][call_line - 1], (
         f"README cites the call at sdk.py:{call_line}, which is "
         f"{sources['sdk'][call_line - 1].strip()!r} — the line moved and the cite did not")
-    entry = re.search(r"`extractor_v2\.py:(\d+)`", readme)
+    # Anchored on the entry-point SENTENCE, not on the first backticked
+    # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
+    # dozens of lines in that file (the flag reads, the gates, the surfaces),
+    # so "the first one" is whichever paragraph happens to come first — it
+    # pinned nothing about the entry point and red-ed the moment a cite was
+    # added above it.
+    entry = re.search(
+        r"`extractor_v2\.extract_session_v2` \(`extractor_v2\.py:(\d+)`\)",
+        readme)
     assert entry, "the extractor_v2 entry-point cite is gone"
     entry_line = int(entry.group(1))
     assert sources["extractor_v2"][entry_line - 1].lstrip().startswith(

@@ -568,9 +568,10 @@ def test_the_run_happens_inside_the_forced_arm():
 def test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound():
     """`references` points AT the derived node; counting it outward counts Sources.
 
-    The shipped log prints `references=7/7` anchored AND `:Event 0/41`, which
-    cannot both be true: the 7 anchored references edges ARE the 7 anchored
-    Events. This pins the two directions so the pair can never disagree again.
+    An earlier stamp of this bundle printed `references=7/7` anchored AND
+    `:Event 0/41`, which cannot both be true: the 7 anchored references edges ARE
+    the 7 anchored Events. This pins the two directions so the pair can never
+    disagree again.
     """
     assert measure.ANCHOR_OUT == ("extractedFrom",)
     assert measure.ANCHOR_IN == ("references",)
@@ -705,11 +706,22 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     `extractor_v2.py:7912` computes `vet_enabled` (the FLAG) BEFORE the
     `if not edus:` early return at `:7916`, whose surface is literally
     `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:7932`); the
-    passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
+    VET passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
     `:8000`, `if vet_enabled and complete_list:` `:8122`). So the flag-ON +
     empty-list session emits `enabled: True` with empty counters and no pass ran —
-    and a FAILED pass leaves the same shape (`_run_vet_pass` returns `{}` on its
-    fail-open path, `:7781-7801`).
+    and a FAILED vet pass leaves the same shape (`_run_vet_pass` returns `{}` on
+    its fail-open path, `:7781-7801`).
+
+    The CLASSIFY pass is DIFFERENT CODE, so the cause is PER SURFACE:
+    `classify_later` is computed at `:7881`, its gates are
+    `if classify_later and embed_list:` (`:8012`) around `if items:` (`:8015`) and
+    `if classify_later and complete_list:` (`:8137`) around `if items:` (`:8147`),
+    and its fail-open `except` sits at `:8028` / `:8158`. A cause templated for the
+    surface NAME while citing the VET lines told a reader of the classify block
+    that the VET pass's gate idled it — false: an idle classify block comes from no
+    embed list or no classify ITEMS, and `embed_list` is only its first gate
+    (#9823 r4 P2). The assertions below are per step and mutually exclusive, so
+    SWAPPING the two causes fails.
 
     Accepting that block as a witness made S2.2/S2.3 WITNESSED (6/8 -> 8/8) from
     ONE such session, because `_witness_block` returns the first positive anywhere
@@ -727,17 +739,47 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
     assert "S2.2" not in observed and "S2.3" not in observed, observed
     assert len(observed) == len(measure.STEPS) - 2, sorted(observed)
-    for step in ("S2.2", "S2.3"):
-        cause = unobserved[step]
+    vet_cause = unobserved["S2.2"]
+    classify_cause = unobserved["S2.3"]
+    for cause in (vet_cause, classify_cause):
         assert "NO pass activity" in cause, cause
         # the three causes are distinct: flag-on/no-activity names the flag and
         # the LIST gate, and must NOT be attributed to the #9116 meta fold
         assert "`enabled` reads True" in cause, cause
-        assert "tortoise/extractor_v2.py:7912" in cause, cause
-        assert ":7932" in cause, cause
-        assert "if vet_enabled and embed_list" in cause, cause
+        assert "never that the pass ran" in cause, cause
         assert "tortoise/sdk.py:12401" not in cause, cause
         assert "did NOT run" not in cause, cause
+
+    # ── S2.2 cites the VET pass's own code … ──────────────────────────────
+    assert "tortoise/extractor_v2.py:7912" in vet_cause, vet_cause
+    assert ":7932" in vet_cause, vet_cause
+    assert "if vet_enabled and embed_list" in vet_cause, vet_cause
+    assert "_run_vet_pass" in vet_cause, vet_cause
+    # … and NOT the classify pass's flag or gates
+    for classify_cite in ("classify_later", "if classify_later", ":7881",
+                          ":8012", ":8015", ":8137", ":8147"):
+        assert classify_cite not in vet_cause, (classify_cite, vet_cause)
+
+    # ── S2.3 cites the CLASSIFY pass's own code … ─────────────────────────
+    assert "tortoise/extractor_v2.py:7881" in classify_cause, classify_cause
+    assert "if classify_later and embed_list" in classify_cause, classify_cause
+    assert ":8012" in classify_cause, classify_cause
+    assert ":8015" in classify_cause, classify_cause
+    assert "if classify_later and complete_list" in classify_cause, classify_cause
+    assert ":8137" in classify_cause, classify_cause
+    # … and NOT the VET pass's flag, pass function or gates
+    for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled",
+                     ":7912", ":7932", ":8000", ":8122", ":7781"):
+        assert vet_cite not in classify_cause, (vet_cite, classify_cause)
+
+    # Different text, so neither cause can stand in for the other: a version
+    # emitting the SAME sentence for both surfaces would satisfy every
+    # "NO pass activity" assertion above and still send one of the two readers to
+    # code its pass never runs.
+    assert vet_cause != classify_cause
+    assert measure._IDLE_CITES["vet"] in vet_cause
+    assert measure._IDLE_CITES["classify_later"] in classify_cause
+
     # and the OFF refusal still reads as the OFF refusal (the two are not merged)
     off = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
                 surfaces={"vet": {"enabled": False, "s2": {}, "union": {}},
@@ -746,6 +788,34 @@ def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
     _obs, off_unobserved = measure.observe_steps(off, _FULL_CENSUS)
     assert "did NOT run" in off_unobserved["S2.2"], off_unobserved["S2.2"]
     assert "NO pass activity" not in off_unobserved["S2.2"], off_unobserved["S2.2"]
+
+
+def test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass():
+    """One table keyed by the surface — and each entry names ITS OWN pass's code.
+
+    The defect this pins: `_witness_block` templated the surface NAME (`{key!r}`)
+    into ONE cause whose every citation was the VET pass's (`vet_enabled`,
+    `if vet_enabled and …`, `_run_vet_pass`), so the S2.3 line argued about code
+    the classify pass never runs. A test asserting the VET cites INSIDE the S2.3
+    cause — which is what shipped — pinned the defect instead of catching it; a
+    swapped pair fails the exclusivity assertions here.
+    """
+    cites = measure._IDLE_CITES
+    assert set(cites) == set(measure._WITNESS_KEYS), sorted(cites)
+    assert set(cites) == {"vet", "classify_later"}
+    for key, text in cites.items():
+        assert "tortoise/extractor_v2.py:" in text, (key, text)
+        assert "never that the pass ran" in text, (key, text)
+    # the vet entry never names the classify gates, and vice versa
+    for classify_cite in ("classify_later", "if classify_later"):
+        assert classify_cite not in cites["vet"], cites["vet"]
+    for vet_cite in ("vet_enabled", "_run_vet_pass", "if vet_enabled"):
+        assert vet_cite not in cites["classify_later"], cites["classify_later"]
+    # the classify entry must name the gate that idles an EMPTY ITEM SET as well
+    # as the list gate: `embed_list` alone does not explain a classify block with
+    # a populated list and nothing to classify
+    assert "if items:" in cites["classify_later"], cites["classify_later"]
+    assert "if items:" not in cites["vet"], cites["vet"]
 
 
 def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
@@ -853,34 +923,34 @@ def test_the_derivation_figure_moves_when_a_derivation_link_is_lost():
     in node terms.
 
     The denominator is now fixed by the WRITER, so the two cases differ on the
-    SHIPPED run's own composition (121 claims, all anchored, plus 8 `other`):
-    ``121/129`` intact versus ``120/129`` when one of the 121 links is dropped
+    SHIPPED run's own composition (141 claims, all anchored, plus 9 `other`):
+    ``141/150`` intact versus ``140/150`` when one of the 141 links is dropped
     and that node joins the residual.
     """
-    census = {"points": 323, "turn_rows": 159, "turn_rows_anchored": 0,
-              "operator_points": 35, "operator_points_anchored": 0}
-    # the shipped run's census: 121 claims (all anchored) + 8 other, unanchored
-    intact = dict(census, extraction_claims=121, extraction_claims_anchored=121,
-                  other_points=8, other_points_anchored=0)
+    census = {"points": 338, "turn_rows": 159, "turn_rows_anchored": 0,
+              "operator_points": 29, "operator_points_anchored": 0}
+    # the shipped run's census: 141 claims (all anchored) + 9 other, unanchored
+    intact = dict(census, extraction_claims=141, extraction_claims_anchored=141,
+                  other_points=9, other_points_anchored=0)
     anchored, total, share = measure.derivation_only(intact)
-    assert (anchored, total) == (121, 129), (anchored, total)
-    assert round(share, 6) == round(121 / 129, 6), share
+    assert (anchored, total) == (141, 150), (anchored, total)
+    assert round(share, 6) == round(141 / 150, 6), share
 
     # ONE derivation link lost: the node leaves the link-defined class and joins
     # the residual, exactly as a dropped extractedFrom edge would move it.
-    lost = dict(census, extraction_claims=120, extraction_claims_anchored=120,
-                other_points=9, other_points_anchored=0)
+    lost = dict(census, extraction_claims=140, extraction_claims_anchored=140,
+                other_points=10, other_points_anchored=0)
     anchored_lost, total_lost, share_lost = measure.derivation_only(lost)
-    assert (anchored_lost, total_lost) == (120, 129), (anchored_lost, total_lost)
+    assert (anchored_lost, total_lost) == (140, 150), (anchored_lost, total_lost)
     assert share_lost < share, (share_lost, share)
-    assert round(share_lost, 6) == round(120 / 129, 6), share_lost
+    assert round(share_lost, 6) == round(140 / 150, 6), share_lost
 
     # non-vacuity against BOTH pre-fix readings: the old one ignored `other`
     # entirely (1.0 for every count) and the first one folded operator Points in.
     for other in (0, 1, 9, 40):
         _a, t, _s = measure.derivation_only(
             dict(intact, other_points=other))
-        assert t == 121 + other, (other, t)
+        assert t == 141 + other, (other, t)
     assert measure.derivation_only(
         dict(intact, extraction_claims_anchored=120,
              extraction_claims=120, other_points=9))[2] < 1.0

@@ -747,8 +747,7 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
             # two places such a surface would land if the seam were fixed: the
             # extractor's own top-level keys (``result["vet"]`` /
             # ``result["classify_later"]``) and the stats block.
-            "surfaces": {key: receipt.get(key)
-                         for key in ("vet", "classify_later")},
+            "surfaces": {key: receipt.get(key) for key in _WITNESS_KEYS},
             "receipt_keys": sorted(str(key) for key in receipt),
             "stats_keys": sorted(str(key) for key in stats),
         })
@@ -758,6 +757,49 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
 #: The two stat keys a #9116 surface carries when its pass did WORK. Required for
 #: ANY witness: the flag alone is not evidence (see :func:`_pass_ran`).
 _WITNESS_STATS = ("s2", "union")
+
+#: The two surfaces :func:`_witness_block` is asked about. Named here (not inline in
+#: ``run_corpus``) so the per-surface cause table below can be held to it.
+_WITNESS_KEYS = ("vet", "classify_later")
+
+#: The flag-on/no-activity cause's CODE CITES, PER SURFACE — never one pass's
+#: lines templated over both. The two passes are different code: a cause keyed on
+#: the surface NAME while hard-wired to the VET lines (`vet_enabled`, the
+#: `if vet_enabled and …` gates, `_run_vet_pass`) told a reader of the classify
+#: block where the VET pass is gated, which is not where the classify pass is. The
+#: classify pass has its own flag (`classify_later`), its own gates
+#: (`if classify_later and …`, then `if items:` — an EMPTY ITEM SET idles it too)
+#: and its own fail-open `except`; none of the vet cites describe it (#9823 r4).
+#: A surface added to :func:`_witness_block` must add its cites here: a plain
+#: ``_IDLE_CITES[key]`` lookup fails LOUDLY rather than borrowing another pass's
+#: code.
+_IDLE_CITES: dict[str, str] = {
+    "vet": (
+        "The extractor emits exactly this shape when the flag is ON and the list "
+        "the VET pass would have worked on is empty: `vet_enabled` is computed "
+        "BEFORE the `if not edus:` early return that emits {'enabled': "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:7912 and "
+        ":7932), and each VET pass is gated on the LIST — `if vet_enabled and "
+        "embed_list:` (:8000), `if vet_enabled and complete_list:` (:8122) — so "
+        "a block that says enabled=true proves the FLAG, never that the pass "
+        "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
+        "returns {} on its fail-open path, :7781-7801)."
+    ),
+    "classify_later": (
+        "The extractor emits exactly this shape when the flag is ON and the "
+        "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
+        "tortoise/extractor_v2.py:7881 (and set False when its classifier cannot "
+        "be constructed, :7906), the `if not edus:` early return emits "
+        "{'enabled': classify_later, 's2': {}, 'union': {}, "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:7928-7931), and each "
+        "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
+        "`if classify_later and embed_list:` (:8012) around `if items:` "
+        "(:8015), `if classify_later and complete_list:` (:8137) around "
+        "`if items:` (:8147) — so a block that says enabled=true proves the "
+        "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
+        "empty stats (its fail-open `except` at :8028 / :8158)."
+    ),
+}
 
 
 def _pass_ran(block: dict) -> bool | None:
@@ -784,6 +826,13 @@ def _pass_ran(block: dict) -> bool | None:
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
     exception path (``extractor_v2.py:7781-7801``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
+
+    ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
+    is different code (``classify_later`` at ``:7881``, its own early-return
+    block, its ``if classify_later and …`` gates around ``if items:``, its own
+    fail-open ``except``), so the rule is stated pass-agnostically here and the
+    CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
+    pass's lines templated over the other's name.
 
     The rule applied here, in this order:
 
@@ -853,26 +902,17 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
             if ran is False and block.get("enabled") is True:
                 # flag ON, no activity: the pass was gated out (or failed) with
                 # its flag set — NOT a contradiction of the arm, and NOT #9116.
+                # The cites are the SURFACE's own (``_IDLE_CITES``): the vet
+                # block and the classify block are idled by different code.
                 idle = idle or (
                     where,
                     f"the {key!r} surface IS present at {where} and its own "
                     f"`enabled` reads True, but it carries NO pass activity — "
                     f"neither {'/'.join(_WITNESS_STATS)} is non-empty "
-                    f"({_summary(block)}). The extractor emits exactly this "
-                    f"shape when the flag is ON and the list a pass would have "
-                    f"worked on is empty: `vet_enabled` is computed BEFORE the "
-                    f"`if not edus:` early return that emits "
-                    f"{{'enabled': vet_enabled, 's2': {{}}, 'union': {{}}}} "
-                    f"(tortoise/extractor_v2.py:7912 and :7932), and each pass "
-                    f"is gated on the LIST — `if vet_enabled and embed_list:` "
-                    f"(:8000), `if vet_enabled and complete_list:` (:8122) — so a "
-                    f"block that says enabled=true proves the FLAG, never that "
-                    f"the pass ran. A failed pass leaves the same empty stats "
-                    f"(`_run_vet_pass` returns {{}} on its fail-open path, "
-                    f":7781-7801). This is NOT the #9116 absent-surface cause: "
-                    f"the surface is HERE and says the flag was set, and the "
-                    f"step stays unobserved until it carries a non-empty "
-                    f"{'/'.join(_WITNESS_STATS)} AS WELL")
+                    f"({_summary(block)}). {_IDLE_CITES[key]} This is NOT the "
+                    f"#9116 absent-surface cause: the surface is HERE and says "
+                    f"the flag was set, and the step stays unobserved until it "
+                    f"carries a non-empty {'/'.join(_WITNESS_STATS)} AS WELL")
             elif ran is False:
                 refused = refused or (
                     where,
@@ -1131,14 +1171,18 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.2"] = (
             f"UNOBSERVED — {vet_refusal}. The arm forced TORTOISE_VET=1 "
             f"in-process (read back from os.environ; the `arm:` line above is "
-            f"that read-back), and the probe will not score a block as a witness "
-            f"for a pass that RAN unless the block shows the pass DID something")
+            f"that read-back), and a block that does not show the pass DID "
+            f"something is never scored as its witness")
     else:
         unobserved["S2.2"] = (
-            f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process (read back "
-            f"from os.environ; the `arm:` line above is that read-back), so the "
-            f"pass RAN and its surface EXISTS one layer down: "
-            f"extract_session_v2 sets result['vet'] at "
+            f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process and read it "
+            f"back from os.environ (the `arm:` line above is that read-back), "
+            f"so the pass was ENABLED for this run — and whether it then DID any "
+            f"work is NOT observable through this surface, which is exactly why "
+            f"the surface is missing: a flag-on block that idles (an empty list, "
+            f"or a failed fail-open pass) is indistinguishable from this one, so "
+            f"this run does not claim the pass ran. Its surface EXISTS one layer "
+            f"down: extract_session_v2 emits result['vet'] UNCONDITIONALLY at "
             f"tortoise/extractor_v2.py:8288-8292. It is DROPPED one layer up, at "
             f"the meta fold tortoise/sdk.py:12401 (\"stats\": out.get(\"stats\") "
             f"or {{}} inside _extract_session_v2 — the sibling key is not "
@@ -1166,9 +1210,15 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     else:
         unobserved["S2.3"] = (
             f"UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process "
-            f"(read back from os.environ), so the pass RAN and its surface "
-            f"EXISTS one layer down: extract_session_v2 sets "
-            f"result['classify_later'] at tortoise/extractor_v2.py:8278-8285. It "
+            f"and read it back from os.environ (the `arm:` line above is that "
+            f"read-back), so the pass was ENABLED for this run — and whether it "
+            f"then DID any work is NOT observable through this surface, which is "
+            f"exactly why the surface is missing: a flag-on block that idles (no "
+            f"classify items, or a failed fail-open pass) is indistinguishable "
+            f"from this one, so this run does not claim the pass ran. Its "
+            f"surface EXISTS one layer down: extract_session_v2 emits "
+            f"result['classify_later'] UNCONDITIONALLY at "
+            f"tortoise/extractor_v2.py:8278-8285. It "
             f"is DROPPED at the same meta fold, tortoise/sdk.py:12401 "
             f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
             f"Measured on this run: the same {stats_key_total} stats key(s) and "

@@ -13,8 +13,8 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9073, #9116, #5199, #5333, #7
 
 **Measured at:** `027c8c1ab` on branch `feat/9080-tm` (2026-10-20, after merging `origin/main` at `78ef670d3`) — that
 is the stamp of the shipped REFUSAL log (`capstone.log`), and it is kept because the file is
-kept. The SCORED run below is stamped separately (**Scored at** `6020cbd5f`,
-2026-10-23T22:55:51Z), because it is a different artifact from a different program
+kept. The SCORED run below is stamped separately (**Scored at** `e0fc940b5`,
+2026-10-23T23:16:55Z), because it is a different artifact from a different program
 (`probes/capstone_measure.py`).
 
 **Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
@@ -56,7 +56,7 @@ running end to end."*
 > |---|---|---|---|
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.600000**, after **0.600000** over **25** Objects → below the floor, so **REFUSED** (the arithmetic would fail: the bound is 0.300000) | ⛔ **BLOCKED** |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator is carried by **no committed artifact** (the artifact counts 42 value literals, before = after); E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (E2a unmeasured) |
-> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **128 / 404 = 0.3168** — `Point` 121/323 anchored, `:Object` **0/46**, `:Event` **7/35** | ⛔ **RED** |
+> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **148 / 433 = 0.3418** — `Point` 141/338 anchored, `:Object` **0/50**, `:Event` **7/45** | ⛔ **RED** |
 > | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
 >
@@ -74,10 +74,10 @@ running end to end."*
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
     --prereg "$(git rev-parse HEAD)"
-# G0 pre-registration 6020cbd5f… READ (schema capstone-preregistration/v1)
+# G0 pre-registration e0fc940b5… READ (schema capstone-preregistration/v1)
 # G1 corpus sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc MATCHES the frozen pin
 # arm TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> (read back from os.environ)
-# → docs/evidence/7949-capstone/capstone-measured-6020cbd5.log
+# → docs/evidence/7949-capstone/capstone-measured-e0fc940b.log
 ```
 
 ⛔ **The arm needs no exported flags, and that is a required property, not a convenience.**
@@ -104,27 +104,32 @@ every bar is **parsed out of the record** by `parse_bars` (none is typed in the 
 one pass over the seven pre-registered sessions runs through
 `TortoiseSDK(graph_name=<fresh disposable graph>).capture_session(turns, session_id=<sid>)`.
 
-⚠️ **On the stamp.** The log's `# head:` is `6020cbd5f` — the commit the run was stamped at and the
+⚠️ **On the stamp.** The log's `# head:` is `e0fc940b5` — the commit the run was stamped at and the
 commit G0 read the frozen record out of — while the probe BYTES that produced it are this
 worktree's, i.e. **the tree was dirty at run time** (the fixes in this round are exactly that diff).
-That is disclosed rather than smoothed: `git diff 6020cbd5f -- docs/evidence/7949-capstone/probes/`
+That is disclosed rather than smoothed: `git diff e0fc940b5 -- docs/evidence/7949-capstone/probes/`
 is the difference between the measuring program and the stamp. Re-running once these changes are
 committed reproduces the same row SET from a clean tree, under a `<new-head8>` filename — a row
 moves only that way, and the file it replaces is removed (the supersede chain is below). (The census
-NUMBERS are LLM-dependent and move between passes; the verdict does not — see E3 below.)
+NUMBERS are LLM-dependent and move between passes; the verdict does not — see E3 below.) The probe's
+own delta AFTER this run is two unreached strings — the `_pass_ran` docstring clause naming the
+classify pass, and the wording of the present-but-unobserved refusal branch — and neither renders a
+line of this log: both surfaces were ABSENT on this run, so the refusal branch never fired (S2.2/S2.3
+below carry the absent-surface cause). Disclosed rather than smoothed, like the dirty-tree delta
+itself.
 
 | session | ok | mode | extracted | edus | points | operators | search |
 |---|---|---|---|---|---|---|---|
-| `wp01_quarry_debug` | ✅ | `llm:deepseek-direct` | 25 | 26 | 25 | 3 | 15 queries, not degraded |
-| `wp02_lumen_refactor` | ✅ | `llm:deepseek-direct` | 18 | 22 | 18 | 5 | 15, not degraded |
-| `wp03_ember_design` | ✅ | `llm:deepseek-direct` | 16 | 24 | 16 | 7 | 15, not degraded |
-| `wp04_aurora_perf` | ✅ | `llm:deepseek-direct` | 15 | 20 | 15 | 7 | 15, not degraded |
-| `wp05_retro_writeup` | ✅ | `llm:deepseek-direct` | 12 | 23 | 12 | 4 | 15, not degraded |
-| `wp06_quarry_rollout` | ✅ | `llm:deepseek-direct` | 18 | 22 | 18 | 7 | 15, not degraded |
-| `wp07_bluepeak_followup` | ✅ | `llm:deepseek-direct` | 17 | 22 | 17 | 12 | 15, not degraded |
+| `wp01_quarry_debug` | ✅ | `llm:deepseek-direct` | 26 | 26 | 26 | 5 | 15 queries, not degraded |
+| `wp02_lumen_refactor` | ✅ | `llm:deepseek-direct` | 22 | 22 | 22 | 4 | 15, not degraded |
+| `wp03_ember_design` | ✅ | `llm:deepseek-direct` | 18 | 24 | 18 | 7 | 15, not degraded |
+| `wp04_aurora_perf` | ✅ | `llm:deepseek-direct` | 17 | 20 | 17 | 4 | 15, not degraded |
+| `wp05_retro_writeup` | ✅ | `llm:deepseek-direct` | 19 | 23 | 19 | 5 | 15, not degraded |
+| `wp06_quarry_rollout` | ✅ | `llm:deepseek-direct` | 23 | 22 | 23 | 9 | 15, not degraded |
+| `wp07_bluepeak_followup` | ✅ | `llm:deepseek-direct` | 16 | 22 | 16 | 9 | 15, not degraded |
 
-Seven of seven sessions returned `ok=True` with **zero errors**; 159 episode units, **121 claims** and
-**404 derived nodes** were written to one fresh graph. The arm runs with `TORTOISE_VET=1` and
+Seven of seven sessions returned `ok=True` with **zero errors**; 159 episode units, **141 claims** and
+**433 derived nodes** were written to one fresh graph. The arm runs with `TORTOISE_VET=1` and
 `TORTOISE_CLASSIFY_LATER=1` **forced ON in-process and read back** (the deployed config leaves both
 OFF), the same convention #9076's E1/E2 arms used, so S2.2 and S2.3 are on-path for the pass even
 though the receipt cannot witness them.
@@ -135,15 +140,14 @@ though the receipt cannot witness them.
 |---|---|---|
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
-| S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=72 events=28 points=121` |
-| S2.2 VET | ❌ **#9116** | the pass RAN (`TORTOISE_VET=1`, forced and read back), and its surface **exists**: `extract_session_v2` sets `result["vet"]` at `tortoise/extractor_v2.py:8288-8292`. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:12401` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 140 stats keys and 18 receipt keys inspected, `vet` in neither |
+| S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
+| S2.2 VET | ❌ **#9116** | the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists**: `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:8288-8292`. Whether it then DID work is not observable through the receipt — the missing surface is exactly the instrument — so this row does not claim it ran. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:12401` (`"stats": out.get("stats") or {}` inside `_extract_session_v2`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
 | S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8278-8285` and dropped at the same fold, `tortoise/sdk.py:12401` |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
-| S5 CONNECT | ✅ | the graph write: 404 derived nodes (`Point` 323, `Object` 46, `Event` 35); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=70 INPUT=70 NAND=8` |
-| S6 COMMIT | ✅ | 323 `:Point` nodes persisted, 156 carrying the commit's `eventId` stamp, 329 `:GraphEvent`s |
+| S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
+| S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
 
-**6 of 8.** The two that are missing are missing from the INSTRUMENT, not from the pipeline:
-the passes run, the receipt does not say so. Working around that by reading a wrapper's state is
+**6 of 8.** The two that are missing are missing from the INSTRUMENT: the arm was forced and read back, so both passes were ENABLED on this run — but whether either did work is NOT observable through this surface, which is exactly why the surface is missing (a flag-on block that idles, or a fail-open pass, leaves the same empty stats). So the honest statement is "enabled and not witnessed", not "ran and was hidden" — and the receipt does not say so either way. Working around that by reading a wrapper's state is
 exactly the instrumentation E4's row forbids, so the honest output is `UNOBSERVED` with its cause
 and file:line — and any table the probe emits records `steps_observed` **and**
 `steps_unobserved` so the count cannot be read as 8.
@@ -171,18 +175,41 @@ non-empty S2 stats) fails CLOSED.
 ⛔ **And the FLAG is not ACTIVITY** — the sharper half, and the one this rule got wrong first. The
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
-is reached. `vet_enabled` is computed at `extractor_v2.py:7912-7915`, i.e. BEFORE the
+is reached. `vet_enabled` is computed at `extractor_v2.py:7912`, i.e. BEFORE the
 `if not edus:` early return (`:7916`), which emits literally
 `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:7932`), and
-each pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8000`), `if vet_enabled and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:8000`), `if vet_enabled and
 complete_list:` (`:8122`). So a session with the flag ON and an empty list emits `enabled: True`
-with empty counters and no pass ran (a FAILED pass leaves the same shape: `_run_vet_pass` returns
+with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
 `{}` on its fail-open path, `:7781-7801`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
-activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity",
-pointing at `:7912`/`:7932`/`:8000`/`:8122`) that is distinct from both the OFF cause and `#9116`'s
-absent-surface cause: three negatives, three places to look.
+activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
+distinct from both the OFF cause and `#9116`'s absent-surface cause: three negatives, three places
+to look.
+
+⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
+first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
+the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
+classify pass has its own flag (`classify_later`, `:7881`), its own early-return block
+(`:7928-7931`), its own gates — `if classify_later and embed_list:` (`:8012`) around `if items:`
+(`:8015`), and `if classify_later and complete_list:` (`:8137`) around `if items:` (`:8147`) — and its
+own fail-open `except` (`:8028` / `:8158`), so an idle classify block comes from no embed list **or
+no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
+(`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
+another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
+per-step, mutually exclusive assertions in `test_the_flag_alone_is_not_a_witness_and_has_its_own_cause`
+— swapping the two causes fails.
+
+⛔ **And "the flag was set" is not "the pass ran" IN THE SHIPPED LOG EITHER.** The absent-surface
+cause used to read "the arm forced `TORTOISE_VET=1` … **so the pass RAN**", supported only by the
+`arm:` read-back — the equation `_pass_ran` itself rejects two sections up. A forced flag read back
+proves the flag; a classify or vet block can legitimately carry `enabled: True, s2: {}` (an empty
+list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
+indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
+that whether it did work is not observable here; the `#9116` attribution (the surface is emitted
+unconditionally at `:8278`/`:8288` and dropped at `sdk.py:12401`) and the "where the fix must
+target" line are unchanged.
 
 Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
 there WITH activity), `test_a_stats_home_for_the_classify_surface_also_counts`,
@@ -191,6 +218,8 @@ UNOBSERVED and the count drops to 6/8),
 `test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work`,
 `test_the_flag_alone_is_not_a_witness_and_has_its_own_cause` (`{"enabled": True, "s2": {},
 "union": {}}` stays UNOBSERVED, 6/8, with the distinct cause and NOT the `#9116` one),
+`test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` (the per-surface cite table, with
+mutual exclusion — a swapped pair fails),
 `test_the_unobserved_cause_counts_the_keys_it_actually_inspected` and
 `test_every_step_is_witnessed_or_given_a_cause`. (The shipped-log test still asserts THIS
 artifact's 6/8 — that pins the record, not the probe's capability.)
@@ -214,36 +243,36 @@ applied by one Cypher query per label — is:
 
 The old single-direction query printed `references=7/7` anchored beside `:Event 0/41` — two claims
 that cannot both be true, because those 7 anchored edges ARE the 7 anchored Events. The correct
-count is `:Event` **7/35** (`anchored_in=7`, `anchored_out=0`); the census prints both directions
+count is `:Event` **7/45** (`anchored_in=7`, `anchored_out=0`); the census prints both directions
 per label so the pair can never disagree again
 (`test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound`).
 
 | label | nodes written | anchored | unanchored | of which, inbound `references` |
 |---|---|---|---|---|
-| `Point` | 323 | 121 | 202 | 0 (all 121 via outbound `extractedFrom`) |
-| `Object` | 46 | **0** | 46 | 0 |
-| `Event` | 35 | **7** | 28 | **7** |
-| **total** | **404** | **128** | **276** | 7 |
+| `Point` | 338 | 141 | 197 | 0 (all 141 via outbound `extractedFrom`) |
+| `Object` | 50 | **0** | 50 | 0 |
+| `Event` | 45 | **7** | 38 | **7** |
+| **total** | **433** | **148** | **285** | 7 |
 
-Relationship-level: `extractedFrom` **121/121** anchored, `references` **7/7**, and
-`aboutObject` **0/171**, `mitigated_by` 0/8, `CONTAINS` 0/280 (those are not derivation links).
+Relationship-level: `extractedFrom` **141/141** anchored, `references` **7/7**, and
+`aboutObject` **0/211**, `mitigated_by` 0/9, `CONTAINS` 0/300 (those are not derivation links).
 
-⇒ **E3 = 128/404 = 0.3168, RED — and the RED is the decision, not a defect.** `:Object` mention
+⇒ **E3 = 148/433 = 0.3418, RED — and the RED is the decision, not a defect.** `:Object` mention
 links are identity links that carry no `sourceVersion` **by design** (owner-approved option A,
 2026-09-25, #5199), so the frozen denominator — which counts `:Object` — makes `= 1.000`
 unreachable **as registered**. #9736 owns the choice: re-register the denominator as the classes
 the model treats as derivations, or reopen the model. A lane cannot pick, and this bundle does not.
 
 ⛔ **E3's Point denominator mixes classes that CANNOT derive, and the figure is taken over the
-writer class — not over the link.** Of the 323 `Point` nodes: **159 mechanical turn rows**
+writer class — not over the link.** Of the 338 `Point` nodes: **159 mechanical turn rows**
 (`_write_capture_turns`, `_TURN_WRITE_CYPHER` at `sdk.py:2367`, wired only by `CONTAINS`),
-**121 extraction claims**, **35 operator Points** and **8 other Points** — each class read off the
+**141 extraction claims**, **29 operator Points** and **9 other Points** — each class read off the
 property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
 hand-typed, and each printed with its own anchored count.
 
 Two of those classes are **structurally incapable** of an `extractedFrom` link: turn rows carry
 none BY CONSTRUCTION, and operator Points are written by `create_operator` (the IMPL/NAND/INPUT
-operator writer, `tortoise/sdk.py`), which never writes one — measured here as 0 of 35 anchored.
+operator writer, `tortoise/sdk.py`), which never writes one — measured here as 0 of 29 anchored.
 The first correction excluded them and then took the figure over **`extraction_claims` alone** —
 which was CIRCULAR: that class is DEFINED by `deriv > 0`, i.e. by the very link the figure reports,
 so it could not say anything but `1.000000` and it could not move when a link was LOST (a node that
@@ -256,20 +285,20 @@ So the figure is now **`anchored / expected-to-derive`** over the WRITER class: 
 non-operator Points = extraction claims **+ `other`**. `other` is not a footnote any more — it is
 the class where a **lost derivation link lands** (Points with no `extractedFrom` that are neither
 turn rows nor operator Points) — so it sits INSIDE the denominator and an unanchored node in it is
-visible in the figure. On this run: **`121/129 = 0.937984`**, and dropping one of the 121 links
-moves it to `120/129`. That is also why it is not the `132/161 = 0.82` a denominator summing
+visible in the figure. On this run: **`141/150 = 0.940000`**, and dropping one of the 141 links
+moves it to `140/150`. That is also why it is not the `141/179 = 0.7877` a denominator summing
 operator Points reports (a shortfall nothing could close): the incapable classes are named with
 their own anchored counts instead of being folded in, and the frozen denominator is **not** changed
-unilaterally — the "all derived nodes" reading (128/404, and the 276 unanchored nodes — nearly all
+unilaterally — the "all derived nodes" reading (148/433, and the 285 unanchored nodes — nearly all
 turn rows, `:Object` mention links and operator Points, none of them derivations) stays printed
-beside it. Without that, those 276 read as "extraction claims lost their provenance" when most are
+beside it. Without that, those 285 read as "extraction claims lost their provenance" when most are
 not derivations at all. What the figure cannot say by itself is whether a given unanchored `other`
 Point LOST a link or was minted by a writer that never derives — that attribution is #9736's open
 question, and the line prints the composition so it is argued from numbers. Pinned by
 `test_the_derivation_figure_divides_by_the_writer_class_not_the_link` and
 `test_the_derivation_figure_moves_when_a_derivation_link_is_lost`.
 
-The floor is met (404 ≥ 30), so this is a scored measurement and not a refusal. The *numbers* move
+The floor is met (433 ≥ 30), so this is a scored measurement and not a refusal. The *numbers* move
 with LLM non-determinism; the *verdict* does not — every stamp of this probe has been RED, because
 `:Object` mention links never carry an anchor.
 
@@ -352,8 +381,8 @@ artifact's no-loss control (42/42 value literals, 90/90 real facts) is consisten
 does not compute it. #9775 records that the state-value carve-out is absent on one render path.
 
 **What E1 would take, precisely.** The measurement run DOES produce a pre-registered-corpus
-population large enough to score E1 — **46 `:Object` nodes**, and this pass's bare-definite share
-is printed in the log as the `e1-aux` line (7/46, against the E1b proxy 90/90). What it does not
+population large enough to score E1 — **50 `:Object` nodes**, and this pass's bare-definite share
+is printed in the log as the `e1-aux` line (6/50 = 0.12, against the E1b proxy 90/90). What it does not
 produce is a **before** arm: E1's criterion is a
 *ratio between two arms*, and two independent captures would confound the gate with LLM
 non-determinism — which is exactly why the bare-definite share is not quoted as a trend: the same
@@ -372,7 +401,7 @@ removal/relocation (**#5333**).
 | file | what it is |
 |---|---|
 | `capstone.log` | the shipped REFUSAL record (`capstone_run.py`, stamped `027c8c1ab`): G0 refused before any model call, 5 rows, no numbers |
-| `capstone-measured-6020cbd5.log` | the SCORED run (`capstone_measure.py`, stamped `6020cbd5f`, generated 2026-10-23T22:55:51Z): 3 RED + 2 BLOCKED, every row carrying its artifact |
+| `capstone-measured-e0fc940b.log` | the SCORED run (`capstone_measure.py`, stamped `e0fc940b5`, generated 2026-10-23T23:16:55Z): 3 RED + 2 BLOCKED, every row carrying its artifact |
 | `e5-rescore.json` | the E5 re-score artifact the E5 row cites (written by the probe) |
 
 ⛔ **Each earlier stamp is SUPERSEDED and its file is gone, deliberately.** `cf98e15f1` was written
@@ -382,16 +411,22 @@ anchor in one direction (so its `:Event 0/41` contradicted its own `references=7
 fixed both, but its envelope was stale: every `tortoise/sdk.py` line it cited (`:12196` for the meta
 fold, `:12477` for `link_source_to_event`, `:2306-2331` for `_TURN_WRITE_CYPHER`) had moved under
 it when `main` advanced, so the one instruction it carried for #9116 — "the fix targets
-`sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` (the stamped run this one replaces) fixed
+`sdk.py:12196`" — pointed into unrelated code. `8a8bbcba2` fixed
 the OFF-block witness hazard, but its rule accepted `enabled: true` on its own — and `enabled` is the
 FLAG, not activity (see "The eight steps" above), so a single flag-on/empty-list session could have
 made V5 pass on a step nobody observed; its derivation figure was also circular (`132/132`, a class
-defined by the link it measures). Keeping any of them alongside the corrected run would leave two
-artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
+defined by the link it measures). `6020cbd5f` (the stamped run THIS one replaces) fixed that rule but
+left two prose defects this round repairs: its flag-on/no-activity cause was templated for the surface
+NAME while every citation in it was the VET pass's, so the S2.3 line sent a reader to code the
+classify pass never runs (`classify_later` at `:7881`, its `if classify_later and …` / `if items:`
+gates at `:8012`/`:8015`/`:8137`/`:8147`), and its absent-surface cause asserted "so the pass RAN"
+from the forced-and-read-back flag alone — the very equation `_pass_ran` rejects — so an unobserved
+step read as a pass that ran and was merely hidden. Keeping any of them alongside the corrected run
+would leave two artifacts claiming to be THE measurement. **Superseding is how a row moves: re-run the probe, DELETE
 the file it replaces, disclose the chain — never edit a number.** The "exactly one" rule is not a
 convention: `tests/test_7949_capstone_measure.py::test_the_shipped_measurement_log_is_structurally_clean`
 asserts EXACTLY ONE scored log (and validates the newest by its `# generated:` stamp, not by filename
-order — `capstone-measured-6020cbd5.log` sorts BEFORE the `8a8bbcba` file it replaced), and
+order — `capstone-measured-6020cbd5.log` sorted BEFORE the `8a8bbcba` file it replaced), and
 `tools/capstone_preregistration_check.py::check_single_measured_log` refuses a second one in the
 required CI gate with a message that names the files and the repair.
 
@@ -407,11 +442,11 @@ docs/evidence/7949-capstone` → `OK — … the ordering holds`, three evidence
 ## The gate: two questions, two exits
 
 ```bash
-uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-6020cbd5.log
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-e0fc940b.log
 # → capstone-verdict-check: … GREEN=0, RED=3, BLOCKED=2, UNPREREGISTERED=0
 # → ✅ verdict table is structurally sound  (exit 0)
 
-uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-6020cbd5.log --require-green
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-e0fc940b.log --require-green
 # → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
 ```
 
@@ -449,7 +484,7 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   mention links are unanchored by design (#5199 → #9736 owns the choice).
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
   (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
-  relationships (IMPL 61 / INPUT 58 / NAND 6) are a *step witness*, not the 15-edge gold.
+  relationships (IMPL 57 / INPUT 58 / NAND 10) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
   the record's denominator is 29 marker-bearing sentences. #9738 owns that, and this bundle says
   so instead of calling the numbers final.
@@ -539,8 +574,9 @@ number's resolution is checked against the tree when it is re-derived.)
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself, which
 carries none of `result["vet"]`, `result["classify_later"]`, `result["search"]`,
 `result["payload"]` — so it reports those steps unobserved and refuses at G5 for EVERY input.
-That is a property of the caller's receipt, not of §4.4 or of the pipeline: the steps RUN, the
-surface the probe is handed does not say so. The drop is one layer ABOVE the extractor: it builds
+That is a property of the caller's receipt, not of §4.4 or of the pipeline: the steps' surfaces are
+BUILT unconditionally, and the surface the probe is handed does not say so. The drop is one layer
+ABOVE the extractor: it builds
 `result["vet"]` and `result["classify_later"]` and the SDK's meta fold
 (`tortoise/sdk.py:12401`, `"stats": out.get("stats") or {}` inside `_extract_session_v2`) copies
 `stats` and `error_census` only — so **#9116's fix targets
