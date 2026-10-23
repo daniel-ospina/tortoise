@@ -617,6 +617,62 @@ def test_reader_marker_on_the_search_wire_never_leaks_an_unorderable_start(lane)
     assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-01-01]"
 
 
+def test_a_padded_start_is_gated_on_the_raw_bound_not_the_display_copy(lane):
+    """#9730 P2: the orderability gate must run on the RAW stored bound.
+
+    ``_validity_marker`` trims the bound for DISPLAY, but every other surface
+    resolves orderability from the raw value: ``search_engine._created_sort_key``
+    tests ``s[0].isdigit()``, so one leading/trailing space buckets the bound as
+    UNORDERABLE — therefore ``validity.effective_precision`` (and the #6140 start
+    gate in ``sdk._covers``, and the write-path warning) reads a padded date as
+    "no start was recorded", while gating on the trimmed copy made the marker
+    assert one. That is the cross-surface drift ``window_read_fields`` passes the
+    bounds RAW to prevent (#2350 review P2).
+
+    The trimmed text is still what a rendered start PRINTS; a bound that cannot
+    be ordered prints no start clause at all — the reading the precision beside
+    it gives.
+
+    Fails pre-fix on every assertion here: the marker was
+    ``[valid since 2024-06-01]`` for a bound whose ``valid_from_precision`` is
+    ``None``.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import effective_precision
+
+    for padded in (" 2024-06-01", "2024-06-01 ", "  2024-06-01  "):
+        # non-vacuous: the bound IS present, is a date once trimmed, and the
+        # read gate already reads it as "no instant" — the marker disagreed.
+        assert padded.strip() == "2024-06-01"
+        assert effective_precision(padded, None) is None, padded
+        marker = _validity_marker({"valid_from": padded,
+                                   "valid_from_precision": None,
+                                   "end_state": "open"})
+        assert marker == "[valid]", (padded, marker)
+        # ... and the same for the two other shapes the start clause feeds.
+        assert _validity_marker({"valid_from": padded,
+                                 "end_state": "unknown"}) == \
+            "[valid; end unknown]"
+        assert _validity_marker({"valid_from": padded,
+                                 "valid_to": "2026-06-12"}) == \
+            "[valid → 2026-06-12]"
+
+    # the wire: the padded bound is stored VERBATIM (no write-side trim), so the
+    # renderer really does receive the raw value it must gate on.
+    sdk, _events = lane
+    padded_pt = sdk.create_point("statement", "padded start",
+                                 validFrom=" 2024-06-01 ")
+    dated = sdk.create_point("statement", "clean start",
+                             validFrom="2024-06-01")
+    hits = {r["id"]: r for r in _scan(sdk)}
+    assert hits[padded_pt["id"]]["valid_from"] == " 2024-06-01 "
+    assert hits[padded_pt["id"]]["valid_from_precision"] is None
+    assert _validity_marker(hits[padded_pt["id"]]) == "[valid]"
+    # control: the untrimmed-orderable twin keeps its start clause.
+    assert hits[dated["id"]]["valid_from_precision"] == "day"
+    assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-06-01]"
+
+
 def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_type():
     """#9730 P3: ``_bounds_an_instant`` documents "can never disagree" with
     ``validity.effective_precision``, so it must carry that helper's NUMERIC
@@ -649,6 +705,14 @@ def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_type():
     for text in ("", None, "TBD", "not-a-date", "2026"):
         assert _bounds_an_instant(text) is False, text
         assert effective_precision(text, None) is None, text
+    # a PADDED date is unorderable on BOTH surfaces: ``_created_sort_key``
+    # tests ``s[0].isdigit()`` / ``fromisoformat`` on the raw string, so one
+    # space is enough. Parity here is what makes the marker drop the start
+    # clause instead of asserting one (``_validity_marker`` gates on the raw
+    # bound for exactly this reason).
+    for padded in (" 2024-06-01", "2024-06-01 ", "  2024-06-01  "):
+        assert _bounds_an_instant(padded) is False, padded
+        assert effective_precision(padded, None) is None, padded
     assert _bounds_an_instant("2024-01-01") is True
     assert effective_precision("2024-01-01", None) == "day"
 

@@ -940,19 +940,26 @@ def _validity_marker(h: dict) -> str:
              for s in supersedes if (s.get("content_snippet") or "").strip()]
     if snips:
         marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
-    vf = (h.get("valid_from") or "").strip()
+    # ``vf`` is the DISPLAY form (trimmed); the ORDERABILITY gate below runs on
+    # ``raw_vf``, the stored value — the same one ``validity.effective_precision``
+    # resolves the precision beside this marker from. Gating on the trimmed
+    # copy made the two disagree for a padded date (``"2024-06-01 "`` read as a
+    # start here, "no start recorded" beside it), which is the cross-surface
+    # drift ``window_read_fields`` passes the bounds RAW to prevent.
+    raw_vf = h.get("valid_from")
+    vf = (raw_vf or "").strip()
     vt = (h.get("valid_to") or "").strip()
     ex = (h.get("expired_at") or "").strip()
     if vf:
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
         # #9730: a START that names no instant renders NO start clause. The
         # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
-        # ``search_engine._created_sort_key(vf)[0] == 0``, the one
+        # ``search_engine._created_sort_key(raw_vf)[0] == 0``, the one
         # ``validity.effective_precision`` resolves precision behind), not a
         # second notion of "parseable" — so the marker cannot disagree with
         # the precision it sits beside. ``""`` already escapes as falsey;
         # only truthy-but-unorderable values leaked here.
-        vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(vf) \
+        vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(raw_vf) \
             else ""
         since = f" since {vfd}" if vfd else ""
         if vt:
@@ -989,10 +996,12 @@ def _bounds_an_instant(value: object) -> bool:
     one the #6140/#9201/#9244 read gate resolves precision behind and
     ``commit_schema.validate_validity_window`` orders with — so the
     reader-facing marker and the precision beside it can never disagree about
-    whether a bound names an instant. Imported lazily inside the call for the
-    same reason ``validity.effective_precision`` does: ``retrieval`` sits in
-    the import graph ``search_engine`` is assembled from, and the eager edge
-    is the cycle.
+    whether a bound names an instant — which is why ``_validity_marker`` hands
+    this function the RAW stored bound, never its own trimmed display copy (a
+    padded date orders as nothing on every other surface). Imported lazily
+    inside the call for the same reason ``validity.effective_precision`` does:
+    ``retrieval`` sits in the import graph ``search_engine`` is assembled from,
+    and the eager edge is the cycle.
 
     A NUMERIC bound (``int``/``float``, and so ``bool``) short-circuits to True
     — mirroring ``validity.effective_precision``'s own short-circuit, which is
