@@ -119,6 +119,11 @@ from tortoise.incident_kinds import (  # #4780: the one kind declaration site
     KIND_RESTORE_DRILL_FAILED,
     KIND_SIZE_GUARD_ABORT,
 )
+
+# #9572 review P2: the "nothing was named" predicate (absent OR blank) — ONE
+# home, shared with the SDK doors, EventAPI and the seed surfaces, so the two
+# spellings cannot be drawn differently at the next door.
+from tortoise.kind_fallbacks import named_kind
 from tortoise.live import epistemic_disjunction  # #7902: the shared label set
 from tortoise.mcp_server import create_http_app
 from tortoise.monitoring import (  # #2850/2953 liveness-readiness decouple
@@ -9215,7 +9220,13 @@ async def _require_approved_kind(sdk: TortoiseSDK, kind: str, *, door: str) -> N
 
 class CreateObjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    objectKind: str = Field(default="other")
+    # #9572: ``None`` means "the caller named no kind" and is FORWARDED AS "not
+    # supplied". A fabricated ``"other"`` default here re-opened the exact
+    # clobber the SDK doors had: the fold writes the discriminator ON MATCH as
+    # ``coalesce($ok, o.objectKind)``, so a defaulted request silently reset a
+    # stored ``capability`` to ``other`` on a re-create. The ``'other'`` default
+    # is the fold's ON CREATE arm.
+    objectKind: str | None = Field(default=None)
     # lifecycle status rides props (create_entity splats **props over the
     # 'live' default) — the onboarding STATE seed passes in_progress.
     status: str | None = None
@@ -9236,18 +9247,27 @@ async def create_object(body: CreateObjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
-    # #5475: the kind must not widen the graph's own approval set.
-    await _require_approved_kind(sdk, body.objectKind, door="create_object")
+    # #5475: the kind must not widen the graph's own approval set. #9572: only a
+    # NAMED kind is checked — an absent one is not a kind, and the fold supplies
+    # the ``'other'`` default ON CREATE. #9572 review P2: BLANK is not a kind
+    # either — ``""`` is not ``None``, so it passed this gate (a bare value names
+    # no pack, by design) and reached the fold's ``coalesce($k, stored)``, which
+    # returns the first NON-NULL argument: a blank re-create reset a stored kind
+    # to ``""``. ``kind_fallbacks.named_kind`` is the ONE predicate for that.
+    _okind = named_kind(body.objectKind)
+    if _okind is not None:
+        await _require_approved_kind(sdk, _okind, door="create_object")
     try:
         props = {}
         if body.status:
             props["status"] = body.status
+        if _okind is not None:
+            props["objectKind"] = _okind
         # #3718: sdk.create_object is SYNC FalkorDB socket I/O — run it in a
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
-        node = await asyncio.to_thread(
-            sdk.create_object, body.name, objectKind=body.objectKind, **props)
+        node = await asyncio.to_thread(sdk.create_object, body.name, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -9270,7 +9290,8 @@ async def create_object(body: CreateObjectRequest, request: Request,
 
 class CreateSubjectRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
-    subjectKind: str = Field(default="other")
+    # #9572: ``None`` = not supplied — see CreateObjectRequest above.
+    subjectKind: str | None = Field(default=None)
 
 
 @app.post("/v1/subjects")
@@ -9288,13 +9309,20 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     await _graph_offload(lambda: _check_org_limit(org, "points"),
                          op="check_org_limit.points")
     sdk = await _data_sdk_offloaded(org)
-    # #5475: the same input constraint as /v1/objects, on the subject door.
-    await _require_approved_kind(sdk, body.subjectKind, door="create_subject")
+    # #5475: the same input constraint as /v1/objects, on the subject door
+    # (#9572: only a NAMED kind — see CreateObjectRequest; BLANK is not a kind,
+    # per ``kind_fallbacks.named_kind``).
+    _skind = named_kind(body.subjectKind)
+    if _skind is not None:
+        await _require_approved_kind(sdk, _skind, door="create_subject")
     try:
         # #3718: sync FalkorDB I/O — off-loaded off the event loop (see
-        # create_object above for the pattern and rationale).
+        # create_object above for the pattern and rationale). #9572: forward the
+        # kind ONLY when the caller named one, so a bare re-create cannot reset
+        # a stored kind to the default.
+        _kind = ({"subjectKind": _skind} if _skind is not None else {})
         node = await asyncio.to_thread(
-            sdk.create_subject, body.name, subjectKind=body.subjectKind)
+            sdk.create_subject, body.name, **_kind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -16668,17 +16696,32 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # edges are the canonical predicate (aboutEntity does NOT exist, §4.2); the
     # gated binder is the only aboutSubject producer. ──
     for er in reconcile.entities:
-        if is_subject_kind(er.entity.kind):
+        # #9572: the payload's `kind` is a CLASSIFICATION and `extractor_v2`
+        # repairs an unclassifiable entity to `core:other`. Writing that repair
+        # as the discriminator reached the fold's
+        # `ON MATCH … =coalesce($k, stored)` as a real kind, so this door — the
+        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTs
+        # here) — reset a stored `capability` on a bare re-mention. ONE
+        # predicate, shared with `sdk._payload_entity_kind`
+        # (`tortoise.kind_fallbacks`): a repair is not a discriminator, so it is
+        # omitted and the fold's `ON CREATE` arm supplies `other`.
+        from tortoise.kind_fallbacks import writable_kind
+        _ekind = writable_kind(er.entity.kind)
+        _kind_kw = {}
+        if _ekind is not None:
+            _kind_kw = ({"subjectKind": _ekind} if is_subject_kind(_ekind)
+                        else {"objectKind": _ekind})
+        if is_subject_kind(_ekind or ""):
             sdk.create_entity(
                 "subject", er.entity.name,
-                subjectKind=er.entity.kind,
+                **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
         else:
             sdk.create_entity(
                 "object", er.entity.name,
-                objectKind=er.entity.kind,
+                **_kind_kw,
                 passes_frequency_gate=er.entity.passes_frequency_gate,
                 is_episodic=False,
             )
@@ -31077,8 +31120,14 @@ class _OrgSeedSurface:
     def query(self, cypher, **params):
         return self._sdk._get_proj().query(cypher, **params)
 
-    def create_subject(self, name, subjectKind="other", **props):
-        return self._sdk.create_subject(name, subjectKind=subjectKind, **props)
+    def create_subject(self, name, subjectKind=None, **props):
+        # #9572: ``None`` = not supplied, forwarded as absent — a fabricated
+        # ``"other"`` default here would re-open the clobber the SDK doors had.
+        # A BLANK kind is "not supplied" too (review P2): ``named_kind``.
+        subjectKind = named_kind(subjectKind)
+        if subjectKind is not None:
+            props["subjectKind"] = subjectKind
+        return self._sdk.create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
         return self._sdk.create_edge(relation, from_id, to_id)

@@ -8578,8 +8578,21 @@ def _cmd_pack_validate(args) -> int:
     """tortoise pack validate <dir> — schema + cross-pack validation.
 
     Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
-    the validator is the single source of truth). Exit 0 clean, 1 errors.
+    the validator is the single source of truth). Exit 0 clean, 1 otherwise.
     Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+
+    The verdict reads BOTH registry buckets, because they answer the same
+    question from two sides and only one of them used to reach the exit code:
+    `reg.errors` (a typo → the pack is ISOLATED) and `reg.unresolved_refs` (a
+    missing PEER → the pack stays loaded and its references into the absent
+    pack do not resolve, #2781). Reading only `errors` printed `✓ Clean` and
+    exited 0 for a catalog whose declared `depends_on` was not installed
+    (#9663) — the same false green, one bucket over. A pack whose declared
+    dependency is absent is not clean: it is *loaded but unresolved*, and the
+    references it declares into that pack do not resolve. This also matches the
+    hosted install gate (`pack_manifest_store.validate_manifest` refuses exactly
+    these refs), so the local and hosted gates cannot disagree in the fail-open
+    direction.
 
     #2766: also prints the per-relation write-path verdict
     (writable | declaration-only | predicate-not-in-allowlist) from the one
@@ -8599,10 +8612,52 @@ def _cmd_pack_validate(args) -> int:
         return 1
     reg = PackRegistry(packs_dir)
     reg.load_all()
-    errors: dict[str, list[str]] = {}
-    for ns, errs in reg.errors.items():
-        if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
-            errors[ns] = errs
+    # The registry keys `errors` by the MANIFEST's namespace, which is NOT the
+    # pack's directory name: `packs/project-management` declares `pm`,
+    # `packs/investment-portfolio-manager` declares `portfolio`. Keying this
+    # filter on the directory name silently dropped every error for such a pack
+    # — it printed "✓ Clean" and exited 0 while the registry had ISOLATED the
+    # pack (#9663: measured on `packs/investment-portfolio-manager` with a
+    # `nearMisses` typo — one isolation, zero printed errors, exit 0). Match
+    # BOTH the declared namespace and the directory name, so a manifest too
+    # broken to yield a namespace (keyed by directory name) is still reported.
+    target_manifest = target / "manifest.yaml"
+
+    def _scope(found: dict[str, list[str]],
+               keys: set[str]) -> dict[str, list[str]]:
+        """The registry's per-namespace bucket, scoped to the requested pack.
+
+        Both spellings are checked because the registry keys a diagnostic by
+        whatever it KNOWS: a pack it loaded by its MANIFEST namespace, a
+        manifest too broken to yield one by its DIRECTORY name. Nothing else
+        is the caller's business — a SIBLING's gap must not become this pack's
+        verdict (`errors` always had that false red; `unresolved_refs` only
+        inherited it once it reached the exit code, #9663).
+        """
+        return {ns: msgs for ns, msgs in found.items() if ns in keys}
+
+    if not target_manifest.exists():
+        # No manifest at the target means a `packs/` DIRECTORY was passed: the
+        # "validate every pack" mode, where there is no single pack to scope
+        # to. The old filter ran here too and hid every namespace whose
+        # directory name differs (`pm`, `portfolio`) — the same false green one
+        # level up (#9663 review), so this leg reports the registry verbatim.
+        errors: dict[str, list[str]] = dict(reg.errors)
+        unresolved: dict[str, list[str]] = dict(reg.unresolved_refs)
+    else:
+        target_keys = {target.name}
+        import yaml
+        try:
+            declared = yaml.safe_load(target_manifest.read_text()) or {}
+        except Exception:  # noqa: BLE001, RUF100 — unparseable ⇒ keyed by dir
+            declared = {}
+        declared_ns = declared.get("namespace") if isinstance(declared, dict) else None
+        if isinstance(declared_ns, str) and declared_ns.strip():
+            target_keys.add(declared_ns.strip())
+        errors = _scope(reg.errors, target_keys)
+        # Same scoping for the missing-peer bucket: it is keyed by the LOADED
+        # pack's namespace, and `target_keys` already carries the declared one.
+        unresolved = _scope(reg.unresolved_refs, target_keys)
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
     # load warns with — so `validate` cannot report a relation as bound to a
     # path its own declaration does not bind. Enumerated from the registry
@@ -8625,13 +8680,19 @@ def _cmd_pack_validate(args) -> int:
     for rel in relations:
         verdict_counts[rel["write_verdict"]] = (
             verdict_counts.get(rel["write_verdict"], 0) + 1)
-    ok = not errors
+    n_errors = sum(len(v) for v in errors.values())
+    n_unresolved = sum(len(v) for v in unresolved.values())
+    # An unresolved reference is NOT clean: the pack loaded, but what it
+    # declares does not resolve, so `✓ Clean` over it is a claim the registry's
+    # own data contradicts (#9663).
+    ok = not errors and not n_unresolved
     if getattr(args, "json", False):
         print(_json.dumps({
             "ok": ok,
             "packs_dir": str(packs_dir),
             "loaded": sorted(reg.packs),
             "errors": errors,
+            "unresolved_refs": unresolved,
             "relation_verdicts": {
                 "counts": verdict_counts,
                 "relations": relations,
@@ -8645,6 +8706,16 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if unresolved:
+            # Distinct from the isolated-pack section above: these packs are
+            # LOADED, and the diagnostic names the pack that is missing. Kept
+            # separate so "installed but incomplete" is never read as "typo".
+            print("  ⚠ unresolved references — the pack is loaded, the peer it "
+                  "names is not:")
+            for ns, msgs in sorted(unresolved.items()):
+                print(f"    {ns}:")
+                for m in msgs:
+                    print(f"      {m}")
         if relations:
             print("  relation write verdicts:")
             for rel in sorted(relations, key=lambda r: (r["pack"], r["predicate"])):
@@ -8655,7 +8726,11 @@ def _cmd_pack_validate(args) -> int:
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
-            print(f"✗ {sum(len(v) for v in errors.values())} error(s)")
+            if n_errors:
+                print(f"✗ {n_errors} error(s)")
+            if n_unresolved:
+                print(f"✗ {n_unresolved} unresolved reference(s) — a declared "
+                      f"or referenced pack is not installed")
     return 0 if ok else 1
 
 

@@ -86,6 +86,20 @@ slow_shards: 5
 
 surfaces:
   api:
+  # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `onboarding`.
+  # This file pins the ONBOARDING seed surfaces, and two of them live outside
+  # `core`: `_OrgSeedSurface` in `tortoise/hosted_api.py` — an EXACT `api`
+  # SOURCE_PATTERNS match — and `_SdkSeedSurface` in
+  # `tortoise/onboarding/selfhost.py` (the `onboarding` arm below). A match
+  # REPLACES the `core` fallback in `select()`, so a `hosted_api.py`-only or
+  # `selfhost.py`-only diff selected NONE of these cases (measured:
+  # `surfaces=['api']` / `['onboarding']`, guard absent) — the #1349/#2938
+  # silent-drop class, in the direction where a PR re-introducing
+  # `create_subject(self, name, subjectKind="other", **props)` runs every
+  # surface except the guard that forbids it. `git grep` finds no other test
+  # covering either surface. Pinned by
+  # `tests/test_ci_selection.py::test_the_9572_seed_surface_pins_are_selected_on_their_own_modules`.
+  - test_9572_discriminator_not_clobbered.py
   - test_9340_graph_tool_argument.py
   - test_9583_openapi_read_only_claim.py
   # #9583: a served GET docstring IS the OpenAPI operation `description` a customer
@@ -1604,6 +1618,7 @@ surfaces:
   # runtime reader of the directory (see the module docstring).
   - test_9231_record_migrations_trigger.py
   - test_9256_lane_probe_attribution.py
+  - test_9572_discriminator_not_clobbered.py
   - test_9555_session_narrative.py
   - test_9287_invisible_kind_write_door.py
   # #9494: registered ONCE, in the `core` block below beside `test_monitoring.py`
@@ -4745,6 +4760,11 @@ surfaces:
   # the `api` entry above).
   - test_9121_onboarding_residual_pins.py
   onboarding:
+  # #9572 review P2-2 (round 9): MULTI-REGISTERED with `core` and `api`, for the
+  # same reason as the `api` arm — `test_selfhost_seed_surface_does_not_fabricate_a_kind`
+  # pins `_SdkSeedSurface` in `tortoise/onboarding/selfhost.py`, an `onboarding`
+  # SOURCE_PATTERNS prefix match that REPLACES the `core` fallback.
+  - test_9572_discriminator_not_clobbered.py
   - test_4932_per_pr_artifact_scope.py
   # #5045 review P1: the cost-dimension CENSUS walks every tracked `.py`, and
   # `tortoise/onboarding/**` selects `onboarding`, REPLACING the `core` fallback
@@ -6397,6 +6417,7 @@ push_extra: []
 # value moves or it is held, so an unchanged row keeps the figure it was given.
 durations_captured_at: "2026-10-21T09:30:00Z"
 durations:
+  test_9572_discriminator_not_clobbered.py: 2.0  # unmeasured — new in #9572; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #2818/#3400/#9121 convention), NEVER a local reading: the map is a SHARD-LAYOUT input modelling CI. Surface: the identity-upsert discriminator (a bare re-create or a blank kind must not reset `subjectKind`/`objectKind`) across every door and caller layer that used to fabricate the default. MEASURED 2026-10-23 against `origin/main` dd0d9e3f6 (this file copied into a detached worktree there and run with THAT worktree's own `.venv`): **30 cases, 22 taking the `sdk` graph fixture, 26 FAIL pre-fix, 4 pass** — and **5 of the 26 fail BY IMPORT** (`tortoise.kind_fallbacks` ×4, `sdk._payload_entity_kind` ×1: the modules are new here). The 4 that pass pre-fix are over-fix guards, named rather than counted: `test_subject_first_create_still_defaults_to_other`, `test_object_first_create_still_defaults_to_other`, `test_subject_explicit_kind_still_updates`, `test_caller_supplied_props_still_apply_on_recreate`. ⛔ Do NOT measure the pre-fix half with the FIXING worktree's `.venv`: it is an editable install of the fix, so a module absent at base resolves back into the fix and the run reports **23 fail / 7 pass** instead (measured — the contamination is invisible except in the number, so a detached worktree needs its own `uv sync`). Five pins live at ROUTE level, all FAIL pre-fix: four in `test_hosted_api.py` (`/v1/subjects` and `/v1/objects`, each with a NAMED-kind re-create and a BLANK-kind re-create) and one in `test_commit_endpoint.py` (`/v1/sessions/commit`, the production capture door). Registration: `core` (the block above) PLUS `api` and `onboarding`, because these pins cover `_OrgSeedSurface` (`tortoise/hosted_api.py`) and `_SdkSeedSurface` (`tortoise/onboarding/selfhost.py`) and a SOURCE_PATTERNS match REPLACES the `core` fallback (pinned by `tests/test_ci_selection.py::test_the_9572_seed_surface_pins_are_selected_on_their_own_modules`). Lane: not an embedded fixture — the file is registered on `core` and is not in `TEST_NO_REDIRECT_STEMS` (`tests/_embedded.py`), so under `TORTOISE_TEST_MODE=1` + `TORTOISE_DB_URI` its explicit `TortoiseSDK(.../topic.db)` construction is redirected to the docker server (a socket, not an embedded DB). No Postgres, no network egress. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep has measured it.
   test_9340_graph_tool_argument.py: 2.0  # unmeasured — new in #9340; no CI sweep has collected it, so it carries the flat default for an unmeasured file (the #9121/#9192/#3400 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. Do NOT substitute a local timing: the file is DB-free and hermetic (58 collected cases, re-derived with `--collect-only` at this head rather than estimated: resolution tables over injected rows, the dispatch/threading and record-tenant seams, the handler-level graph-SELECTION checks (the ``graph`` an advertised tool actually reads) and `mcp._list_tools()` schema reads; the one session cost is the module's first `list_tools()` build, which the #3400 trap attributes to whichever test runs first). It has to exist as a ROW, not merely as a default: adding the file to the `api` surface without a weight puts one more unweighted fast file in the pool, and the coverage floor is measured against the pool's own size (`--integrity`'s `duration_coverage_issues`). `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_9555_session_narrative.py: 2.0  # unmeasured — new in #9555 (R7, §9.1's narrative home); no sweep has collected it, so it carries the flat `DEFAULT_FAST_WEIGHT` for an unmeasured file (the #2818/#3419/#9121 convention) rather than a local reading, which this map forbids as a SHARD-LAYOUT input. What the weight covers: DB-free and graph-free — it parses the record migrations on disk (`table_columns`/`RECORD_MUTATIONS`), builds statement plans in memory against a DB-API-shaped double, and reads no journal, no Postgres and no FalkorDB. It is registered HERE as well as in a surface list because the row IS the coverage numerator: without it the map fell to 892/992 = 89.92%, below `--integrity`'s 0.90 floor, and `tests/test_ci_selection.py::test_duration_coverage_guard_boundary_and_realistic` reds (the same zero-headroom trap the #9121/#9362 rows record). `tools/ci_timing.py --refresh-durations` replaces this from junit.
   test_9287_invisible_kind_write_door.py: 2.0  # unmeasured — new in #9287 (#3400/#4348 trap): a file ADDED BY A PR can never carry a CI junit measurement (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT`, not a dev-box reading (#2818/#3419). The row is REQUIRED here, not cosmetic: the `core` surface row above is manifest CLASSIFICATION, and this file entering `fast_pool()` without a weight reds `--integrity`'s `duration_coverage_issues` — measured at this head, 894/994 = 89.94% without the row (below the 0.90 floor) and 895/994 = 90.04% with it. LOCAL cost NOT adopted, and it is not small: `test_the_door_accepts_no_invisible_code_point` calls the predicate twice for all 0x110000 code points, so the flat default UNDER-estimates this file; a weight is a SHARD-LAYOUT input, so it stays at the default until `tools/ci_timing.py --refresh-durations` replaces it from junit.

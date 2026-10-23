@@ -192,19 +192,17 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: is the fold's, not the record's (#9634).
 #:
 #: WHY THIS TABLE EXISTS. A bare write journals NO discriminator ONCE #9572
-#: LANDS — that branch (open, unmerged: `fix/9572-discriminator-clobber`)
-#: removes the fabricated `subjectKind`/`objectKind` default from every write
-#: door, which is correct: the record must not state a kind nobody named. ⚠️ On
-#: the tree this table lands in the discriminator is still FABRICATED at every
-#: write door (the SDK/EventAPI identity doors, the hosted `POST /v1/subjects`
-#: and `/v1/objects` models, the seed surfaces, the extractor lanes), so the
-#: divergence below is not yet reachable through a live write door; this is the
-#: record→cache half that has to land WITH or BEFORE #9572, and it is reachable
-#: today for any record row written without the column.
+#: LANDS — that branch (`fix/9572-discriminator-clobber`) removes the fabricated
+#: `subjectKind`/`objectKind` default from every write door, which is correct:
+#: the record must not state a kind nobody named. This branch carries BOTH
+#: halves (#9634's record side was closed by #9711, which introduced this table;
+#: #9572 is the write-door side), so a bare write journals no kind at all and
+#: the FOLD supplies the default below — and the divergence is reachable through
+#: any record row written without the column.
 #:
-#: The FOLD supplies that default under `ON CREATE` regardless —
-#: `projection/entities.py`'s `_upsert_subject` writes `s.subjectKind=$sk` with
-#: the parameter defaulting to `"other"`, and `_upsert_object` writes both
+#: The FOLD supplies that default under `ON CREATE` —
+#: `projection/entities.py`'s `_upsert_subject` writes
+#: `s.subjectKind=coalesce($sk, 'other')` and `_upsert_object` writes both
 #: `o.objectKind=coalesce($ok, 'other')` and `o.title=coalesce($title, '')`.
 #: `public.subject.subject_kind` / `public.object.object_kind` / `title` are
 #: NULLABLE, and `_props_from_row` drops a NULL column (#7971 property 3 — no
@@ -221,22 +219,31 @@ ADDITIONAL_PRIMARY_COLUMNS: dict[str, dict[str, str]] = {
 #: `EntityMutated` state map does), and this table supplies the same fallback the
 #: fold supplies when none was.
 #:
-#: ⚠️ RESIDUAL — the Subject clause does NOT coalesce, so this table's
-#: `subjectKind` fallback is the LOADER's DECISION for the null case, not fold
-#: parity (the Object half below IS parity). `_upsert_subject` writes
-#: `s.subjectKind=$sk` with no `coalesce`, and the parameter is
-#: `ev.get("subject_kind", "other")` — a default for an ABSENT key only. A key
-#: PRESENT-and-null therefore sets `$sk = null`, and `SET ... = NULL` REMOVES
-#: the property (`#7936`, on `_upsert_subject` itself), so the live fold leaves
-#: a present-null Subject with NO `subjectKind` at all while an absent key gets
-#: `'other'`. The record cannot reproduce that split: `subject_kind` is NULL and
-#: the tail is empty in BOTH cases, so the row carries nothing that separates
-#: them. This table fills `'other'` for both — a present-null tail names no
-#: kind, and leaving a REQUIRED property (§4.2) absent is the defect #9634
-#: exists to close. Effectively unreachable through the product today (`sdk.py`
-#: moves a caller's `subjectKind` into the column, and `subjectKind` is in
-#: `_SUBJECT_HANDLED`, so `_persist_extra_props` never puts it in the tail), so
-#: the residual is stated rather than measured for this case.
+#: ✅ THE SUBJECT HALF IS PARITY TOO (#9572). `_upsert_subject` now writes
+#: `s.subjectKind=coalesce($sk, 'other')` under `ON CREATE`, with `$sk` built as
+#: `ev.get("subject_kind")` — a NULL default, never `"other"`. An ABSENT key and
+#: a PRESENT-and-null key therefore behave IDENTICALLY (both coalesce to
+#: `'other'`), exactly as the Object clauses do, so the record row and the fold
+#: agree on the null case and this table's fill reproduces the fold rather than
+#: overriding it. The Subject row STAYS (a NULL record column still needs the
+#: `'other'` fill to match the fold, ONTOLOGY §4.2 REQUIRED) — it is parity now,
+#: not a decision of this loader's.
+#:
+#: ⚠️ HISTORY, kept because it is why the two halves look different in git, and
+#: because the pre-#9572 shape is one edit away. The clause USED to be
+#: `s.subjectKind=$sk` with the parameter `ev.get("subject_kind", "other")` — a
+#: default for an ABSENT key only — so a present-null key set `$sk = null` and
+#: `SET ... = NULL` REMOVED the property (`#7936`), while an absent key got
+#: `'other'`. The loader then had to DECIDE the null case, which is why a
+#: RESIDUAL note used to stand here; #9572 removed the split at the fold, so the
+#: residual is DISCHARGED and must not be reinstated as prose.
+#:
+#: ⚠️ What #9572 deliberately does NOT move is the `ON MATCH` arm —
+#: `s.subjectKind=coalesce($sk, s.subjectKind)` preserves a STORED kind, which
+#: IS the fix: a bare re-create sends NULL and a stored `team` survives. That is
+#: exactly why the parameter must never regain a fabricated default: with `$sk`
+#: defaulted, "the caller named none" and "the caller named other" are the same
+#: value at that arm, and the stored kind is clobbered.
 #:
 #: EXCLUDED, each with its reason — the fold's OTHER `ON CREATE` defaults are
 #: not applied here, and the reasons are not all "it is not a constant":
@@ -709,16 +716,13 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # COALESCE (`coalesce($ok, 'other')`, `coalesce($title, '')`), so an
     # explicit null and an absent column behave identically there.
     #
-    # On the SUBJECT side it is a DECISION, not parity: `s.subjectKind=$sk`
-    # carries no coalesce and its parameter is
-    # `ev.get("subject_kind", "other")` — defaulting on an ABSENT key only. A
-    # key present-and-null sets `$sk = null`, and `SET ... = NULL` REMOVES the
-    # property (#7936), so the fold leaves a present-null Subject with NO
-    # `subjectKind` while an absent one gets `'other'`; the record row
-    # (`subject_kind` NULL, tail empty) is identical either way and cannot
-    # distinguish them. This loader chooses `'other'` for both, because a
-    # present-null tail names no kind and an absent REQUIRED property (§4.2) is
-    # the defect #9634 closes. Declared where the table is, as a residual.
+    # On the SUBJECT side it is parity TOO (#9572):
+    # `s.subjectKind=coalesce($sk, 'other')` with `$sk` NULL-defaulted, so a
+    # present-null key and an absent column both take the fold's `'other'` — the
+    # same null-as-silence rule as Object, and the record row cannot distinguish
+    # them either. (Before #9572 the SUBJECT clause did not coalesce, so this
+    # fill WAS the loader's decision for the null case; that residual is
+    # discharged, see the note where the table is declared.)
     for prop, default in FOLD_ON_CREATE_DEFAULTS.get(label, {}).items():
         if props.get(prop) is None:
             props[prop] = default
