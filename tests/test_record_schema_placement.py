@@ -365,6 +365,14 @@ _PREREQ_MIGRATION_COUNT_RE = re.compile(r"at this head, (?P<count>\d+) migration
 _INDEX_MIGRATION_COUNT_RE = re.compile(
     r"`pgvector` = 0 occurrences in (?P<count>\d+) migrations"
 )
+#: §A5's *third* restatement of the same denominator — `grep -riE
+#: 'pgvector|vector\(' over all N` / `migrations` — which wraps across a line
+#: break, so the separator is `\s+` and not a literal space. Without this
+#: pattern the figure had a reader in two of its three homes and could go stale
+#: in the third with the census test still green (the exact failure the docstring
+#: below names). It deliberately cannot reach §A1/R7's historical `over all` EOL
+#: → `65 migrations`, because there is no space after `all` there.
+_PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
 #: The `narrative|raw_turn|raw_text|transcript` census command's own terms —
 #: the alternation the two "N lines" claims were taken with.
 _NARRATIVE_CENSUS_TERMS = ("narrative", "raw_turn", "raw_text", "transcript")
@@ -691,6 +699,10 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
     * both files: the `narrative|raw_turn|raw_text|transcript` grep *"on 37
       lines"* / *"returns **37 lines**"* — measured 36, because the \u26a0\ufe0f CARRIER
       GAP block was rewritten after the number was taken.
+    * `08-hosted-prerequisites.md` §A5: *"over all 70"* / *"migrations"* — the
+      SAME denominator again, wrapped across a line break, and the one site of
+      the three that no pattern read: it was corrected to 71 only by hand, so
+      the next migration would have left it stale with this test green.
 
     Neither number had a reader, which is why both could be wrong at the head of
     the PR that re-derived them. This test IS that reader: the denominator comes
@@ -721,6 +733,8 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
          _PREREQ_MIGRATION_COUNT_RE, prerequisites),
         ("docs/00_index.md's #7879 row `... in N migrations`",
          _INDEX_MIGRATION_COUNT_RE, index_row),
+        ("08-hosted-prerequisites.md §A5's `over all N migrations`",
+         _PREREQ_PGVECTOR_TOTAL_RE, prerequisites),
     ):
         stated = [int(m.group("count")) for m in pattern.finditer(text)]
         assert stated, (

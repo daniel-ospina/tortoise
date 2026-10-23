@@ -696,6 +696,20 @@ def test_cli_exits_two_when_the_document_is_absent(tmp_path, capsys):
     assert "no PRE-REGISTRATION.md" in capsys.readouterr().err
 
 
+def test_cli_exits_two_when_the_document_is_not_utf8(tmp_path, capsys):
+    """#9089 review cycle 6: an undecodable document is a CHECK ERROR, not a finding.
+
+    A non-UTF-8 `PRE-REGISTRATION.md` raised `UnicodeDecodeError`, which is not a
+    `CheckError`, so it escaped `main`'s handler and surfaced as a traceback with exit 1 —
+    the code this tool reserves for FINDINGS, on a document it never read. Exit 2 is the
+    documented answer for an unreadable subject (`docs/capstone_verdict_check`'s sibling
+    reader got the same hardening in this PR).
+    """
+    (tmp_path / check.PREREG_NAME).write_bytes(b"# pre-registration\n\xff\xfe not utf-8\n")
+    assert check.main(["--dir", str(tmp_path), "--no-git", "--no-corpus"]) == 2
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
 def test_cli_exits_one_on_a_broken_document(tmp_path, capsys):
     target = _doc(tmp_path, _rows(
         "| E1 | shape Objects written |  | `<= 0.50 × before` |",
@@ -2228,3 +2242,147 @@ def test_the_ci_pin_still_catches_a_shallow_checkout():
     assert "fetch-depth" in " ".join(violations), (
         f"the strict pin must refuse a shallow checkout by name; got {violations}"
     )
+
+
+# ── the content-based arm: a log that PROVES it measured nothing (#9089) ─────
+
+
+def _capstone_body(*, run_status="REFUSED", prereg_status="ABSENT",
+                   numerator=None, denominator=None, schema=None, blocks=1,
+                   receipt=None) -> str:
+    """A capstone log whose machine record is the only thing the exemption may read."""
+    from tools import capstone_verdict_check as cvc
+
+    run = {"status": run_status, "steps_observed": [], "steps_required": ["S0"]}
+    if receipt is not None:
+        # `run.e4_receipt` is where the probe writes the E4 number on the COMPLETED path.
+        run["e4_receipt"] = receipt
+    record = {
+        # The REAL schema, imported: the exemption pins it, so a fixture with an invented one would
+        # test a shape the gate refuses (#9089 review P2).
+        "schema": schema if schema is not None else cvc.SCHEMA,
+        "prereg": {"status": prereg_status, "sha": "0" * 40},
+        "run": run,
+        "rows": [{"criterion": "E1", "verdict": "BLOCKED", "numerator": numerator,
+                  "denominator": denominator, "blocked_by": "#9075"}],
+    }
+    block = ("=== CAPSTONE-VERDICT-BEGIN ===\n"
+             f"{json.dumps(record, indent=2, sort_keys=True)}\n"
+             "=== CAPSTONE-VERDICT-END ===\n")
+    return "# capstone\n" + block * blocks
+
+
+def test_a_log_that_proves_it_measured_nothing_needs_no_ordering(tmp_path, monkeypatch):
+    """THE FIX (#9089): history put the log first, and the log carries NO number at all.
+
+    `capstone.log` is added before `PRE-REGISTRATION.md` because it was written before the repo
+    required a registration (#9507). The ordering rule protects a NUMBER from thresholds written
+    afterwards; a log whose own machine record says `prereg.status=ABSENT`, `run.status=REFUSED`
+    and `numerator/denominator: null` on every row has no number to launder. It is exempt on its
+    CONTENT, re-asked every run — not by pinning the file name.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_000, body=_capstone_body())
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log]) == []
+
+
+@pytest.mark.parametrize("overrides", [
+    {"numerator": 0, "denominator": 5},
+    {"run_status": "COMPLETED"},
+    # #9089 review P1: the measurement test used to read only `rows`.
+    {"receipt": {"numerator": 14, "denominator": 15}},
+    # #9089 review P2: the receipt's counts are not all named numerator/denominator — the
+    # probe writes `s4_items`, `merged_items`, `corrected_by_s4`, `verbatim_reemissions` and
+    # `added_by_s4` too, so a two-key match exempted a record carrying five other numbers.
+    {"receipt": {"s4_items": 200, "merged_items": 7}},
+])
+def test_the_content_arm_stops_covering_the_log_the_moment_it_could_score(
+        tmp_path, monkeypatch, overrides):
+    """Self-healing, and each of the two measurement conditions is load-bearing on its own.
+
+    A row that gains a number, or a run that COMPLETED, means the log could have been scored
+    against thresholds written after it — so the exemption must stop applying with no second edit
+    anywhere.
+
+    The PREREG STATUS is deliberately NOT in this list (#9089 review cycle 4, measured): the
+    bundle's own documented re-run passes G0 and refuses at G1, emitting `prereg.status=OK` with
+    every number null — a log that proves it measured nothing. Requiring `ABSENT` refused to
+    exempt it, which turned that documented command into an ordering violation. What the run
+    READ cannot make laundering possible; what it MEASURED can, and that is what these cases are.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_000,
+                     body=_capstone_body(**overrides))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    failures = check.check_ordering(prereg, [log])
+    assert len(failures) == 1, failures
+    assert "not strictly after" in failures[0], failures
+    assert "does not prove it measured nothing" in failures[0], failures
+
+
+def test_a_post_g0_refusal_with_no_number_is_exempt(tmp_path, monkeypatch):
+    """#9089 review cycle 4 — the bundle's OWN documented re-run must not turn CI red.
+
+    Measured at this head: `capstone_run.py --prereg <sha> --corpus battery/config/corpus.json`
+    passes G0 (the registration is committed) and refuses at G1 (no frozen corpus sha), so it
+    emits `prereg.status=OK`, `run.status=REFUSED` and every numerator/denominator null. An
+    earlier revision of the predicate exempted only `ABSENT` and therefore refused this log —
+    which, once committed by the README's own `| tee`, reds the ordering check for every PR on
+    a log that provably measured nothing.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_000,
+                     body=_capstone_body(prereg_status="OK"))
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    assert check.check_ordering(prereg, [log]) == []
+
+
+def test_the_content_arm_refuses_to_exempt_anything_it_cannot_read(tmp_path):
+    """Fail-closed: a missing/!JSON/rowless/ambiguous record is a REFUSAL, never a pass.
+
+    The last two arms are the ones a reviewer measured (#9089 review P1/P2): a log carrying TWO
+    verdict blocks (reachable by `capstone_run.py | tee -a capstone.log`) could hide a number in
+    the block the reader did not take, and an unrecognised schema is a shape this predicate cannot
+    read — so both refuse rather than reading the shape they happen to understand.
+    """
+    for body in (
+        "no machine record here\n",
+        "=== CAPSTONE-VERDICT-BEGIN ===\n{not json\n=== CAPSTONE-VERDICT-END ===\n",
+        "=== CAPSTONE-VERDICT-BEGIN ===\n{}\n=== CAPSTONE-VERDICT-END ===\n",
+        _capstone_body().replace('"status": "REFUSED"', '"status": ""'),
+        _capstone_body(blocks=2),
+        _capstone_body(schema="capstone-verdict-v2"),
+        # #9089 review P2: a document nested past the parser's limit raises RecursionError,
+        # which is NOT a JSONDecodeError — it escaped this predicate entirely.
+        "=== CAPSTONE-VERDICT-BEGIN ===\n" + "[" * 100000 + "\n=== CAPSTONE-VERDICT-END ===\n",
+    ):
+        path = tmp_path / "_probe_body.log"
+        path.write_text(body)
+        try:
+            ok, why = check._log_declares_no_measurement(path)
+        finally:
+            path.unlink()
+        assert not ok and why, body
+
+
+def test_the_shipped_capstone_log_proves_it_measured_nothing():
+    """The real artefact, on the real file — this is what unblocks the required check."""
+    ok, why = check._log_declares_no_measurement(PREREG_DIR / "capstone.log")
+    assert ok, why
+
+
+def test_an_exempted_log_is_named_in_the_report_not_waived_silently(tmp_path, monkeypatch):
+    """A waived ordering violation must be VISIBLE (#9089 review P2).
+
+    The tool's own rule, ninety lines from the exemption: a system that reads as fully checked
+    while one half never ran is the silent-green shape this tool exists to refuse. An exempted log
+    makes the ordering line GREEN, so the name has to travel with it — otherwise the next lane
+    cannot tell an ordered log from a waived one.
+    """
+    repo = _repo(tmp_path, monkeypatch)
+    log = _write_log(repo, "capstone.log", epoch=1_700_000_000, body=_capstone_body())
+    prereg = _write_and_commit(repo, check.PREREG_NAME, epoch=1_700_000_100)
+    exempted: list[str] = []
+    assert check.check_ordering(prereg, [log], None, exempted) == []
+    assert exempted == ["capstone.log"], exempted
