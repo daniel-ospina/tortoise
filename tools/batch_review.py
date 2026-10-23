@@ -408,11 +408,20 @@ def render_comment(manifest: dict, entry: dict, result: dict) -> str:
             lines.append(f"  - fix: {f['fix'].strip()}")
     if result.get("summary"):
         lines += ["", result["summary"].strip()]
-    lines += [
-        "",
-        "_Reviewer: fresh context, no prior review of this PR. Findings above are "
-        "anchored to files in this PR's diff._",
-    ]
+    if result.get("anchors_checked"):
+        footer = (
+            "_Reviewer: fresh context, no prior review of this PR. Findings above are "
+            "anchored to files in this PR's diff._"
+        )
+    else:
+        # No cached diff was readable, so the anchor was NOT measured — say that
+        # instead of asserting a property nothing checked.
+        footer = (
+            "_Reviewer: fresh context, no prior review of this PR. This run had no "
+            "readable cached diff, so findings' file anchors were NOT checked against "
+            "it — they are the reviewer's report, unverified._"
+        )
+    lines += ["", footer]
     return "\n".join(lines)
 
 
@@ -429,6 +438,40 @@ def _malformed(entry: dict, why: str) -> dict:
         "reason": why,
         "findings": [],
     }
+
+
+def _diff_file_paths(entry: dict) -> set[str] | None:
+    """The file paths the cached diff touches, or ``None`` when there is none to read.
+
+    `render_comment` tells a human that each finding is *anchored to a file in this
+    PR's diff*. That is only true if something MEASURES it — the model's `file`
+    string is otherwise unconstrained — so the anchor is checked against the diff
+    this batch actually read (the same cached bytes the digest was taken from).
+
+    ``None`` means "no cached diff to check against" (a manifest assembled by hand,
+    or a cache cleaned mid-run). That is *unknown*, not *wrong*: the finding is
+    accepted and `render_comment` says the anchor was not checked, rather than
+    asserting an anchor nothing verified.
+    """
+    path = str(entry.get("diff_path") or "").strip()
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    paths: set[str] = set()
+    for line in text.splitlines():
+        m = re.match(r"^diff --git a/(.+?) b/(.+)$", line)
+        if m:
+            # A rename touches two paths; a finding about either one is anchored.
+            paths.update((m.group(1), m.group(2)))
+            continue
+        m = re.match(r"^\+\+\+ b/(.+)$", line)
+        if m:
+            paths.add(m.group(1))
+    paths.discard("/dev/null")
+    return paths or None
 
 
 def validate_answer(
@@ -513,6 +556,7 @@ def validate_answer(
             continue
         clean_findings: list[dict] = []
         bad = ""
+        anchors = _diff_file_paths(e)
         for f in findings:
             if not isinstance(f, dict):
                 bad = "a finding was not an object"
@@ -526,6 +570,11 @@ def validate_answer(
                 break
             if not str(f.get("file", "")).strip():
                 bad = "a finding did not name a file in the PR's diff"
+                break
+            # Measured, not asserted: the file must be one the cached diff touches.
+            finding_file = str(f["file"]).strip()
+            if anchors is not None and finding_file not in anchors:
+                bad = f"finding file {finding_file!r} is not in this PR's diff"
                 break
             line = f.get("line")
             if line is not None and (
@@ -566,6 +615,9 @@ def validate_answer(
                 "reason": "; ".join(notes),
                 "summary": str(item.get("summary", "")).strip(),
                 "findings": clean_findings,
+                # Whether the cached-diff anchor check above actually ran for this
+                # PR; `render_comment`'s footer depends on it.
+                "anchors_checked": anchors is not None,
             }
         )
     return out

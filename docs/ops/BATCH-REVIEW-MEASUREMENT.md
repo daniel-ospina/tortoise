@@ -1,3 +1,15 @@
+---
+title: "Batch review — measured, and why it is not the queue fix"
+type: operations
+domain: platform
+doc_status: live
+subjects.team: epistemic-team
+aboutSubjects: tortoise, review-gate, batch-review
+aboutObjects: tortoise, "#9790"
+created: 2026-10-23
+updated: 2026-10-23
+---
+
 # Batch review — measured, and why it is not the queue fix (2026-10-23)
 
 **Status:** measurement + a tested harness (`tools/batch_review.py`), **not wired into
@@ -267,9 +279,16 @@ uv run python tools/batch_review.py record  --manifest .batch-review/manifest.js
 ```
 
 Tests: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_review.py -q`
-(39 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
+(46 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
 result never invalidates a sibling, and a record is never minted for a PR that fell
-out or whose digest is not the manifest's). The two digest cases are host-free by
+out or whose digest is not the manifest's). The record path's EXECUTOR is covered too:
+`record` is run against a stub `record-review.sh`, so the planned argv (and the
+fail-closed rc when the recorder refuses a PR) is asserted rather than assumed. A
+finding's file anchor is MEASURED against the cached diff it claims to come from — a
+finding naming a path that diff does not touch fails its PR — so the evidence
+comment's "anchored to files in this PR's diff" is a checked sentence, and the
+footer says the anchor was NOT checked when a run carries no readable cached diff.
+The two digest cases are host-free by
 construction: the real normalizer is host state (the CI runners carry no
 `scripts/lib/`), so one case INJECTS a stub normalizer to assert the `index` line is
 not content, and the other pins the raw-sha256 fallback that a runner takes.

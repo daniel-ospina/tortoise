@@ -492,3 +492,158 @@ def test_verify_returns_3_and_names_the_fallout(tmp_path, capsys):
     assert rc == 3
     err = capsys.readouterr().err
     assert "#2" in err and "do not reuse another PR's verdict" in err
+
+
+# ── the posted claim is MEASURED: findings must be anchored to the diff ─────
+
+CACHED_DIFF = (
+    "diff --git a/tools/thing.py b/tools/thing.py\n"
+    "--- a/tools/thing.py\n"
+    "+++ b/tools/thing.py\n"
+    "@@ -1 +1 @@\n"
+    "-x\n"
+    "+y\n"
+)
+
+
+def _manifest_with_cached_diff(tmp_path, body=CACHED_DIFF):
+    m = manifest((1, HEAD_A, DIFF_A))
+    p = tmp_path / "1.diff"
+    p.write_text(body, encoding="utf-8")
+    m["prs"][0]["diff_path"] = str(p)
+    return m
+
+
+def _finding(file, severity="P2", claim="c", **extra):
+    return {"severity": severity, "file": file, "claim": claim, **extra}
+
+
+def test_a_finding_anchored_outside_the_cached_diff_is_refused(tmp_path):
+    # `render_comment` asserts the anchor; `validate_answer` must therefore have
+    # measured it. Before this check, ANY non-empty `file` string passed, so the
+    # posted sentence was a claim the code never tested.
+    m = _manifest_with_cached_diff(tmp_path)
+    out = br.validate_answer(
+        m, {"results": [result(1, HEAD_A, DIFF_A, findings=[_finding("other/file.py")])]}
+    )
+    assert out[0]["status"] == "invalid"
+    assert "not in this PR's diff" in out[0]["reason"]
+    assert out[0]["verdict"] is None
+
+
+def test_a_finding_anchored_in_the_cached_diff_passes_and_the_footer_says_checked(tmp_path):
+    m = _manifest_with_cached_diff(tmp_path)
+    out = br.validate_answer(
+        m,
+        {
+            "results": [
+                result(1, HEAD_A, DIFF_A, findings=[_finding("tools/thing.py", line=3)])
+            ]
+        },
+    )
+    assert out[0]["status"] == "ok"
+    assert out[0]["anchors_checked"] is True
+    comment = br.render_comment(m, m["prs"][0], out[0])
+    assert "anchored to files in this PR's diff" in comment
+
+
+def test_a_rename_anchors_either_side_of_the_cached_diff(tmp_path):
+    # `diff --git a/old b/new` names two paths; a finding about either is anchored.
+    m = _manifest_with_cached_diff(
+        tmp_path,
+        body="diff --git a/old.py b/new.py\n--- a/old.py\n+++ b/new.py\n@@ -1 +1 @@\n-x\n+y\n",
+    )
+    out = br.validate_answer(
+        m,
+        {
+            "results": [
+                result(1, HEAD_A, DIFF_A, findings=[_finding("old.py"), _finding("new.py")])
+            ]
+        },
+    )
+    assert out[0]["status"] == "ok", out[0]["reason"]
+
+
+def test_the_anchoring_claim_is_withheld_when_no_cached_diff_exists():
+    # A manifest with no readable cache cannot measure the anchor: the finding is
+    # accepted (unknown != wrong) but the comment must not assert it was checked.
+    m = manifest((1, HEAD_A, DIFF_A))
+    out = br.validate_answer(
+        m, {"results": [result(1, HEAD_A, DIFF_A, findings=[_finding("anything.py")])]}
+    )
+    assert out[0]["status"] == "ok"
+    assert out[0]["anchors_checked"] is False
+    comment = br.render_comment(m, m["prs"][0], out[0])
+    assert "anchors were NOT checked" in comment
+    assert "anchored to files in this PR's diff" not in comment
+
+
+# ── record: the ONLY executor of a minted record, over a stub recorder ─────
+
+
+@pytest.fixture()
+def stub_recorder(tmp_path):
+    """A stand-in for `record-review.sh`: journals its argv, and can fail one PR."""
+    log = tmp_path / "recorder-argv.log"
+    script = tmp_path / "record-review.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" >> "{log}"\n'
+        'echo "---" >> '
+        f'"{log}"\n'
+        'if [ "$1" = "2" ]; then exit 4; fi\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script, log
+
+
+def _record_files(tmp_path, m, outcomes, evidence):
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(m))
+    apath = tmp_path / "verified.json"
+    apath.write_text(json.dumps({"results": outcomes}))
+    epath = tmp_path / "evidence.json"
+    epath.write_text(json.dumps(evidence))
+    return ["record", "--manifest", str(mpath), "--answer", str(apath), "--evidence", str(epath)]
+
+
+def test_record_execs_the_recorder_once_per_clean_pr_with_the_planned_argv(
+    tmp_path, stub_recorder
+):
+    script, log = stub_recorder
+    m = manifest((1, HEAD_A, DIFF_A))
+    outcome = br.validate_answer(m, {"results": [result(1, HEAD_A, DIFF_A)]})[0]
+    argv = _record_files(tmp_path, m, [outcome], {1: "comment:42"})
+    argv += ["--record-review", str(script)]
+    assert br.main(argv) == 0
+    lines = [ln for ln in log.read_text().splitlines() if ln != "---"]
+    # The exact contract the plan builds: pr, head, verdict, repo, evidence, expect-head.
+    assert lines == ["1", HEAD_A, "clean", "o/r", "--evidence", "comment:42", "--expect-head", HEAD_A]
+
+
+def test_record_names_the_pr_and_fails_when_the_recorder_rejects(tmp_path, stub_recorder, capsys):
+    script, _log = stub_recorder
+    m = manifest((1, HEAD_A, DIFF_A), (2, HEAD_B, DIFF_B))
+    outcomes = [
+        br.validate_answer(manifest((1, HEAD_A, DIFF_A)), {"results": [result(1, HEAD_A, DIFF_A)]})[0],
+        br.validate_answer(manifest((2, HEAD_B, DIFF_B)), {"results": [result(2, HEAD_B, DIFF_B)]})[0],
+    ]
+    argv = _record_files(
+        tmp_path, m, outcomes, {1: "comment:42", 2: "comment:43"}
+    ) + ["--record-review", str(script)]
+    assert br.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "#2" in err and "rc=4" in err and "NO record" in err
+
+
+def test_record_refuses_when_no_clean_verdict_has_evidence(tmp_path, stub_recorder, capsys):
+    script, _log = stub_recorder
+    m = manifest((1, HEAD_A, DIFF_A))
+    outcomes = [br.validate_answer(m, {"results": [result(1, HEAD_A, DIFF_A, verdict="issues")]})[0]]
+    argv = _record_files(tmp_path, m, outcomes, {}) + ["--record-review", str(script)]
+    assert br.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "nothing to record" in err
+    assert "must not land" in err
