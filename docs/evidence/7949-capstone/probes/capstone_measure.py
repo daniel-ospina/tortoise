@@ -23,7 +23,10 @@ working, and its refusal table stays the artifact that pins the refusal contract
     disposable graph: ``capture_session(turns, session_id=<sid>)`` per session.
   * **THE OBSERVATION** reads each of the eight steps off the object that actually
     carries it — ``stats`` for six of them, the live graph for the commit, and an
-    explicit UNOBSERVED-with-cause for the two the receipt has no key for.
+    explicit UNOBSERVED-with-cause for the two the receipt has no key for. The
+    two #9116 steps are DECIDED from the surfaces the run actually carries (the
+    receipt's top-level keys and its stats block), so a seam fix makes them
+    OBSERVED without editing this probe, and the count is derived.
   * **THE NUMBERS** are E3 (a census over the run's own graph), E4 (the committed
     operator receipt, read verbatim), E5 (a fresh re-score of the #7947 arms
     against this corpus's current gold), and E1/E1b/E2a/E2b (parsed out of the
@@ -41,15 +44,23 @@ therefore reported with their proxy numbers PRINTED and their verdict ``BLOCKED`
 (``below_floor``: *"REFUSED, which is neither a pass nor a fail"*).
 
 ⚠️ THE RUN ARM. ``TORTOISE_VET`` and ``TORTOISE_CLASSIFY_LATER`` are forced ON for
-the measured arm (they default OFF in the deployed config), so S2.2/S2.3 are
-ON-PATH for this pass — the convention #9076's E1/E2 run used ("the gate is
-measured with its flags forced ON"). They are still UNWITNESSABLE through
-``capture_session``'s receipt: ``extract_session_v2`` builds ``result["stats"]``
-at ``tortoise/extractor_v2.py:7543-7558`` (+ ``:8340-8360``) and the VET/classify
-results are stack locals (``_run_vet_pass`` is called at ``:8001`` and ``:8123``;
-``_apply_classify_kinds`` at ``:8017`` and ``:8149``) that never reach it. That is
-#9116, cited rather than worked around: working around it would mean reading a
-wrapper's state, which is the instrumentation E4's row forbids.
+the measured arm — IN PROCESS, with the previous values restored in a ``finally``
+and the set values READ BACK from ``os.environ`` before the pass, the way
+``e1_e2_probe.run_arm`` does it (they default OFF in the deployed config), so
+S2.2/S2.3 are ON-PATH for this pass — the convention #9076's E1/E2 run used ("the
+gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
+UNSET for the same reason: it also switches S2.2 on, so an ambient value would
+silently change the arm. The ``arm:`` line is that read-back, never a typed
+literal — a run that cannot read a flag back as set REFUSES rather than printing a
+claim nothing supports. They are still UNWITNESSABLE through
+``capture_session``'s receipt, and the failure is ONE LAYER UP from where it was
+first attributed: ``extract_session_v2`` DOES build the surfaces
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:8278-8285`` and
+``result["vet"]`` at ``:8288-8292``); they are dropped at the meta fold,
+``tortoise/sdk.py:12196`` (``"stats": out.get("stats") or {}`` — the sibling key
+is never copied). That is #9116, cited rather than worked around: working around
+it would mean reading a wrapper's state, which is the instrumentation E4's row
+forbids.
 
 ⛔ WHERE THE LOG GOES. NOT over ``capstone.log``. That file is the shipped REFUSAL
 record, its add-commit predates the pre-registration, and
@@ -85,6 +96,7 @@ import os
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 #: ``docs/evidence/7949-capstone/probes/capstone_measure.py`` → repo root.
@@ -115,22 +127,148 @@ STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: + Event``) — not a choice this probe makes.
 DERIVED_LABELS = ("Point", "Object", "Event")
 
-#: The relationship types a derived node can be anchored THROUGH: ``extractedFrom``
-#: is the Point→(GraphEvent|Event) derivation; ``references`` is the
-#: Source→target derivation whose ANCHORED target labels are
-#: ``_DERIVATION_REFERENCES_LABELS`` (``tortoise/projection/edges.py:467``).
-ANCHOR_RELS = ("extractedFrom", "references")
+#: The relationship type that points FROM a derived node at its source. The
+#: anchor is a property of that DERIVATION LINK, so the derived node is its
+#: START: ``(Point)-[:extractedFrom]->(GraphEvent|Event)``.
+ANCHOR_OUT = ("extractedFrom",)
+
+#: The relationship type that points AT a derived node: ``(Source)-[:references]
+#: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
+#: (``tortoise/projection/edges.py:2168-2192``, ``MERGE (s)-[r:references]->(e)
+#: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
+#: path at ``tortoise/sdk.py:12477`` (``(Source)-[:references]->(sessionCaptured
+#: Event)``). The anchor is on the same link, but the DERIVED node is its TARGET.
+#: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
+ANCHOR_IN = ("references",)
 
 E3_RULE = (
     "a derived node (Point/Object/Event) carries a version anchor iff it is the "
-    "SOURCE of at least one extractedFrom|references relationship whose "
-    "sourceVersion is a non-empty string — the anchor is a property of the "
+    "SOURCE of at least one extractedFrom relationship whose sourceVersion is a "
+    "non-empty string, OR the TARGET of at least one references relationship "
+    "whose sourceVersion is a non-empty string. The two directions are NOT "
+    "interchangeable: extractedFrom points FROM the derived node at its source "
+    "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
+    "the derived node ((Source)-[:references]->(Event|Document) — "
+    "tortoise/projection/edges.py:2168-2192 link_source_to_event, reached from "
+    "the capture path at tortoise/sdk.py:12477). The anchor is a property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:494-503 "
-    "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the derivation target labels "
+    "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
     "are _DERIVATION_REFERENCES_LABELS (edges.py:467: Event, Document). A "
     "Source->Object link is identity/mention and carries none BY DESIGN (owner "
     "option A, #5199; #9736)"
 )
+
+#: The flags the measured arm forces ON — #9076's convention ("the gate is
+#: measured with its flags forced ON"), and the reason ``e1_e2_probe.run_arm``
+#: sets them the same way. Forcing them HERE is what makes the ``arm:`` line a
+#: fact about the run instead of a claim about the operator's shell: without it
+#: the probe printed an ON arm while measuring the default OFF one.
+ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
+
+#: A flag the arm PINS OFF so the measured population is a function of THIS file,
+#: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
+#: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
+#: would silently change the arm between two runs of the same probe.
+ARM_OFF = ("TORTOISE_VALUE_GATE",)
+
+#: The three Point classes E3's frozen denominator mixes, each read off a
+#: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2306-2331`` — turn
+#: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
+#: ``CONTAINS``), ``is_operator`` by the operator writers, and an
+#: ``extractedFrom`` edge by the extraction projection.
+POINT_COMPOSITION_CYPHER = (
+    "MATCH (n:Point) "
+    "OPTIONAL MATCH (n)-[xf:extractedFrom]->() "
+    "OPTIONAL MATCH (n)<-[rf:references]-() "
+    "WITH n, "
+    "size([x IN collect(DISTINCT xf) WHERE x IS NOT NULL]) AS deriv, "
+    "size([x IN collect(DISTINCT xf) WHERE x IS NOT NULL "
+    "AND x.sourceVersion IS NOT NULL "
+    "AND trim(toString(x.sourceVersion)) <> '']) AS deriv_anchored, "
+    "size([x IN collect(DISTINCT rf) WHERE x IS NOT NULL "
+    "AND x.sourceVersion IS NOT NULL "
+    "AND trim(toString(x.sourceVersion)) <> '']) AS in_anchored "
+    "RETURN count(n) AS points, "
+    "sum(CASE WHEN coalesce(n.is_episodic, false) THEN 1 ELSE 0 END) "
+    "AS turn_rows, "
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND coalesce(n.is_operator, false) THEN 1 ELSE 0 END) "
+    "AS operator_points, "
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND NOT coalesce(n.is_operator, false) AND deriv > 0 "
+    "THEN 1 ELSE 0 END) AS extraction_claims, "
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND NOT coalesce(n.is_operator, false) AND deriv = 0 "
+    "THEN 1 ELSE 0 END) AS other_points, "
+    # The ANCHORABLE denominator = extraction claims + operator Points: the two
+    # classes whose writers are supposed to derive from a version. Turn rows are
+    # excluded (no derivation link by construction) and so is `other`, which is
+    # disclosed on its own class line rather than folded in.
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND (deriv > 0 OR coalesce(n.is_operator, false)) "
+    "THEN 1 ELSE 0 END) AS claim_denominator, "
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND (deriv > 0 OR coalesce(n.is_operator, false)) "
+    "AND (deriv_anchored > 0 OR in_anchored > 0) "
+    "THEN 1 ELSE 0 END) AS claim_anchored"
+)
+
+
+# ── the measured arm (forced, read back, restored) ────────────────────────
+
+@contextmanager
+def measured_arm():
+    """Force the measured arm ON, READ IT BACK, and restore it in a ``finally``.
+
+    The read-back is the point. A probe that prints an arm it never set measures
+    whatever the shell happened to hold, and the log then declares a pass that
+    did not run — a FABRICATED measurement, not a disappointing one. So the
+    values are re-read from ``os.environ`` AFTER setting and handed to
+    :func:`arm_header`; a flag that does not read back as set REFUSES the run
+    (fail closed) rather than printing a claim nothing supports.
+    """
+    keys = (*ARM_ON, *ARM_OFF)
+    saved = {key: os.environ.get(key) for key in keys}
+    try:
+        for key in ARM_ON:
+            os.environ[key] = "1"
+        for key in ARM_OFF:
+            os.environ.pop(key, None)
+        observed = {key: os.environ.get(key) for key in keys}
+        for key in ARM_ON:
+            if observed[key] != "1":
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — the measured arm sets "
+                    f"{key}=1 but os.environ reads back {observed[key]!r}; a log "
+                    f"that declares an arm it did not run is a fabricated "
+                    f"measurement, so this pass writes no table")
+        yield observed
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def arm_header(observed: dict[str, str | None]) -> str:
+    """The ``arm:`` line, DERIVED from the read-back — never a typed literal."""
+    parts = []
+    for key in (*ARM_ON, *ARM_OFF):
+        value = observed.get(key)
+        parts.append(f"{key}={value if value not in (None, '') else '<unset>'}")
+    return (" ".join(parts) + " (set/pinned IN-PROCESS for this pass and read "
+            "back from os.environ after setting; the deployed config leaves "
+            "both passes OFF)")
+
+
+def arm_record(observed: dict[str, str | None]) -> dict:
+    """The machine half of the arm: the SAME read-back the header prints."""
+    record: dict[str, str | None] = {key: observed.get(key)
+                                     for key in (*ARM_ON, *ARM_OFF)}
+    record["source"] = "os.environ read-back after measured_arm() forced it"
+    return record
 
 
 # ── pure helpers (pinned by tests/test_7949_capstone_measure.py) ───────────
@@ -555,6 +693,7 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
                              "S0 would have nothing to read")
         started = time.time()
         receipt = sdk.capture_session(turns, session_id=sid)
+        stats = receipt.get("stats") or {}
         results.append({
             "session_id": sid,
             "turns": len(turns),
@@ -562,10 +701,130 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
             "extraction_mode": receipt.get("extraction_mode"),
             "extracted": receipt.get("extracted"),
             "errors": list(receipt.get("errors") or []),
-            "stats": receipt.get("stats") or {},
+            "stats": stats,
             "elapsed_s": round(time.time() - started, 1),
+            # WHATEVER the probe holds for the two step witnesses #9116 names —
+            # kept verbatim (never summarised to a constant) so `observe_steps`
+            # can only report a step whose surface is ACTUALLY here. These are the
+            # two places such a surface would land if the seam were fixed: the
+            # extractor's own top-level keys (``result["vet"]`` /
+            # ``result["classify_later"]``) and the stats block.
+            "surfaces": {key: receipt.get(key)
+                         for key in ("vet", "classify_later")},
+            "receipt_keys": sorted(str(key) for key in receipt),
+            "stats_keys": sorted(str(key) for key in stats),
         })
     return results
+
+
+def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str]:
+    """The first non-empty ``key`` surface a run actually CARRIES, and where.
+
+    Looks where the surface would legitimately land — the extractor's top-level
+    key on the receipt, then the stats block — and NOWHERE else: a witness read
+    off a wrapper's state is the instrumentation E4's row forbids.
+    """
+    for run in runs:
+        surfaces = run.get("surfaces") or {}
+        block = surfaces.get(key)
+        if isinstance(block, dict) and block:
+            return block, f"receipt[{key!r}] (session {run['session_id']})"
+        block = (run.get("stats") or {}).get(key)
+        if isinstance(block, dict) and block:
+            return block, f"stats[{key!r}] (session {run['session_id']})"
+    return None, ""
+
+
+def _summary(block: dict) -> str:
+    """A compact, honest rendering of a witness block (never a paraphrase)."""
+    parts = []
+    for key in ("enabled", "s2", "union", "restamp_overrides", "slot_rekeys"):
+        if key in block:
+            value = block[key]
+            rendered = json.dumps(value, sort_keys=True, default=str)
+            if len(rendered) > 160:
+                rendered = rendered[:157] + "..."
+            parts.append(f"{key}={rendered}")
+    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:200]
+
+
+def anchor_census_cypher(label: str) -> str:
+    """E3's per-label anchoring count — BOTH directions, one statement.
+
+    A derived node is anchored when it is the START of an anchored
+    ``extractedFrom`` link (``(Point)-[:extractedFrom]->(source)``) **or** the
+    END of an anchored ``references`` link (``(Source)-[:references]->(Event)``).
+    A single out-direction query counted SOURCES instead of Events and reported
+    ``:Event 0/41 anchored`` beside ``references=7/7`` — two claims that cannot
+    both be true, which is how the bug was caught against the shipped log.
+
+    The two OPTIONAL MATCHes are COLLECTED separately and de-duplicated before
+    the check: joining them row-wise would multiply each node by its edge count
+    and change what ``anchored`` counts.
+    """
+    return (
+        f"MATCH (n:{label}) "
+        "OPTIONAL MATCH (n)-[out:" + "|".join(ANCHOR_OUT) + "]->() "
+        "OPTIONAL MATCH (n)<-[inc:" + "|".join(ANCHOR_IN) + "]-() "
+        "WITH n, "
+        "size([x IN collect(DISTINCT out) WHERE x IS NOT NULL "
+        "AND x.sourceVersion IS NOT NULL "
+        "AND trim(toString(x.sourceVersion)) <> '']) AS out_anchors, "
+        "size([x IN collect(DISTINCT inc) WHERE x IS NOT NULL "
+        "AND x.sourceVersion IS NOT NULL "
+        "AND trim(toString(x.sourceVersion)) <> '']) AS in_anchors "
+        "RETURN count(n) AS nodes, "
+        "sum(CASE WHEN out_anchors + in_anchors > 0 THEN 1 ELSE 0 END) "
+        "AS anchored, "
+        "sum(CASE WHEN out_anchors > 0 THEN 1 ELSE 0 END) "
+        "AS anchored_out, "
+        "sum(CASE WHEN in_anchors > 0 THEN 1 ELSE 0 END) "
+        "AS anchored_in"
+    )
+
+
+def derivation_only(composition: dict | None) -> tuple[int, int, float | None]:
+    """E3's figure over the ANCHORABLE Points only — ``(anchored, total, share)``.
+
+    E3's frozen denominator counts ``Point + Object + Event``, and the Point half
+    includes the mechanical turn rows that carry no derivation link BY
+    CONSTRUCTION (one per corpus turn). Counting them is defensible under "all
+    derived nodes" (the wording is not this probe's to change), but a reader who
+    takes the row's unanchored count as "extraction claims that lost provenance"
+    is reading it wrong — so the anchorable half is reported beside it. #9736 must
+    choose between re-registering the metric and reopening the model; both
+    readings are on the record so neither choice is made blind.
+
+    ``claim_denominator`` is extraction claims **+ operator Points** — the two
+    classes whose writers are supposed to derive from a version.
+    """
+    block = composition or {}
+    total = int(block.get("claim_denominator") or 0)
+    anchored = int(block.get("claim_anchored") or 0)
+    return anchored, total, ((anchored / total) if total else None)
+
+
+def point_composition_line(composition: dict | None) -> str:
+    """The per-class Point decomposition, DERIVED from the census — never typed."""
+    block = composition or {}
+    anchored, total, share = derivation_only(block)
+    classes = (
+        f"turn_rows={int(block.get('turn_rows') or 0)} "
+        f"extraction_claims={int(block.get('extraction_claims') or 0)} "
+        f"operator_points={int(block.get('operator_points') or 0)} "
+        f"other={int(block.get('other_points') or 0)} "
+        f"(total={int(block.get('points') or 0)} Point nodes)")
+    figure = (f"{anchored}/{total}" +
+              (f" = {share:.6f}" if share is not None else ""))
+    return (
+        f"e3 point composition: {classes} — each class read off the property its "
+        f"WRITER stamps (is_episodic for turn rows, is_operator for operator "
+        f"Points, an extractedFrom edge for extraction claims); turn rows carry "
+        f"NO derivation link BY CONSTRUCTION (_write_capture_turns, "
+        f"tortoise/sdk.py:2306-2331, wired only by CONTAINS), so they can never "
+        f"anchor and their count is not a provenance shortfall. derivation-only "
+        f"figure: {figure} (anchorable Points = extraction claims + operator "
+        f"Points; the frozen 'all derived nodes' reading above is unchanged)")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -610,13 +869,30 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     observed: dict[str, str] = {}
     unobserved: dict[str, str] = {}
 
+    # What the probe HELD, counted — never typed. The two #9116 steps are decided
+    # from these surfaces, so the count is the measurement and the cause line
+    # reports it instead of quoting a remembered number.
+    stats_keys = sorted({key for run in runs
+                         for key in (run.get("stats_keys")
+                                     or (run.get("stats") or {}).keys())})
+    receipt_keys = sorted({key for run in runs
+                           for key in (run.get("receipt_keys") or ())})
+    stats_key_total = sum(len(run.get("stats") or {}) for run in runs)
+    ran = sorted({run["session_id"] for run in runs})
+
     if edus and chunks:
         observed["S0"] = (f"the reader segmented the corpus: stats.edus={edus} "
                           f"stats.chunks={chunks} over {len(runs)} sessions")
+    else:
+        unobserved["S0"] = (f"the reader segmented nothing: stats.edus={edus}, "
+                            f"stats.chunks={chunks} across {len(runs)} sessions")
 
     if s1:
         observed["S1"] = (f"the first LLM stage ran: stats.llm.by_stage.s1 "
                           f"calls={s1}")
+    else:
+        unobserved["S1"] = ("stats.llm.by_stage carries no 's1' roll-up — the "
+                            "narration stage issued no call")
 
     if s2:
         observed["S2.1"] = (f"the S2 map ran: stats.llm.by_stage.s2 calls={s2}; "
@@ -627,20 +903,44 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.1"] = ("stats.llm.by_stage carries no 's2' roll-up — the "
                               "S2 map issued no call")
 
-    unobserved["S2.2"] = (
-        "UNOBSERVED — TORTOISE_VET=1 was set for this arm (the pass is ON-path), "
-        "but capture_session's receipt carries no VET surface: extract_session_v2 "
-        "builds result['stats'] at tortoise/extractor_v2.py:7543-7558 "
-        "(+ :8340-8360) and _run_vet_pass's stats (:8001, :8123) are stack locals "
-        "that never reach it. Measured on this run: the receipt's stats carries 20 "
-        "keys and 'vet' is not one of them. #9116 is the seam; reading a wrapper "
-        "instead is the instrumentation E4's row forbids")
+    vet_block, vet_where = _witness_block(runs, "vet")
+    if vet_block is not None:
+        observed["S2.2"] = (
+            f"the VET pass surfaced its own evidence: {vet_where} "
+            f"— {_summary(vet_block)}")
+    else:
+        unobserved["S2.2"] = (
+            f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process (read back "
+            f"from os.environ; the `arm:` line above is that read-back), so the "
+            f"pass RAN and its surface EXISTS one layer down: "
+            f"extract_session_v2 sets result['vet'] at "
+            f"tortoise/extractor_v2.py:8288-8292. It is DROPPED one layer up, at "
+            f"the meta fold tortoise/sdk.py:12196 (\"stats\": out.get(\"stats\") "
+            f"or {{}} — the sibling key is not copied). Measured on this run: "
+            f"inspected {stats_key_total} stats key(s) across {len(ran)} "
+            f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
+            f"{len(receipt_keys)} receipt top-level key(s) "
+            f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
+            f"#9116 is the seam, and tortoise/sdk.py:12196 is the line its fix "
+            f"must target; reading a wrapper instead is the instrumentation "
+            f"E4's row forbids")
 
-    unobserved["S2.3"] = (
-        "UNOBSERVED — TORTOISE_CLASSIFY_LATER=1 was set for this arm, but "
-        "_apply_classify_kinds (:8017, :8149) writes into the embed list and its "
-        "s2_classify_stats is a stack local, not a stats key (same construction, "
-        "tortoise/extractor_v2.py:7543-7558) — #9116")
+    classify_block, classify_where = _witness_block(runs, "classify_later")
+    if classify_block is not None:
+        observed["S2.3"] = (
+            f"the S2.3 classify pass surfaced its own evidence: "
+            f"{classify_where} — {_summary(classify_block)}")
+    else:
+        unobserved["S2.3"] = (
+            f"UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process "
+            f"(read back from os.environ), so the pass RAN and its surface "
+            f"EXISTS one layer down: extract_session_v2 sets "
+            f"result['classify_later'] at tortoise/extractor_v2.py:8278-8285. It "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:12196. Measured "
+            f"on this run: the same {stats_key_total} stats key(s) and "
+            f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
+            f"no 'classify_later'. #9116 is the seam; "
+            f"tortoise/sdk.py:12196 is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
@@ -662,6 +962,9 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"node(s) written by the run [{per_label}]; "
             f"stats.operator_endpoints_minted={endpoints}; operator-shaped "
             f"relationships written [{operators or 'none'}]")
+    else:
+        unobserved["S5"] = ("the run's own graph carries no derived node "
+                            "(Point/Object/Event) — nothing was written")
 
     if census_data.get("points") and \
             census_data.get("event_stamped_points") is not None:
@@ -670,6 +973,26 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"run's graph, {census_data['event_stamped_points']} of them carrying "
             f"the commit's eventId provenance stamp; "
             f"{census_data['graph_events']} :GraphEvent(s)")
+    else:
+        unobserved["S6"] = (f"the commit cannot be witnessed: points="
+                            f"{census_data.get('points')}, event-stamped="
+                            f"{census_data.get('event_stamped_points')}")
+
+    # The step count is DERIVED, so it cannot be a constant: every step is either
+    # witnessed or carries its own cause, and the two sets may not overlap or
+    # leave a hole. A step that vanished from both is exactly how "6 of 8" became
+    # a value that survived a fix to its own cause.
+    uncovered = [step for step in STEPS
+                 if step not in observed and step not in unobserved]
+    if uncovered:
+        raise SystemExit(f"capstone-measure: REFUSED — step(s) {uncovered} are "
+                         "neither witnessed nor given a cause; a table that "
+                         "silently drops a step cannot report a count")
+    overlap = sorted(set(observed) & set(unobserved))
+    if overlap:
+        raise SystemExit(f"capstone-measure: REFUSED — step(s) {overlap} are "
+                         "both witnessed and unwitnessed; the count would be "
+                         "ambiguous")
 
     return observed, unobserved
 
@@ -695,18 +1018,38 @@ def census(uri: str) -> dict:
         # Per-label queries rather than one grouped query: `labels(n)[0]` would
         # group a multi-labelled node under the wrong key, and the denominator is
         # exactly the thing this census may not get subtly wrong.
-        rows = projection.g.query(
-            f"MATCH (n:{label}) "
-            "OPTIONAL MATCH (n)-[r:" + "|".join(ANCHOR_RELS) + "]->() "
-            "WITH n, size([x IN collect(r) WHERE x IS NOT NULL "
-            "AND x.sourceVersion IS NOT NULL "
-            "AND trim(toString(x.sourceVersion)) <> '']) AS anchors "
-            "RETURN count(n) AS nodes, "
-            "sum(CASE WHEN anchors > 0 THEN 1 ELSE 0 END) AS anchored"
-        ).result_set
+        #
+        # TWO DIRECTIONS, because the anchor sits on ONE link and the derived
+        # node is on opposite ends of it: `(Point)-[:extractedFrom]->(source)`
+        # makes the derived node the START, while
+        # `(Source)-[:references]->(Event)` makes it the END. Counting both in
+        # the out-direction counted SOURCES and reported `:Event 0/41` beside
+        # `references=7/7` — two claims that cannot both be true.
+        rows = projection.g.query(anchor_census_cypher(label)).result_set
         nodes = int(rows[0][0] or 0) if rows else 0
         anchored = int(rows[0][1] or 0) if rows else 0
-        per_label[label] = {"nodes": nodes, "anchored": anchored}
+        per_label[label] = {
+            "nodes": nodes,
+            "anchored": anchored,
+            "anchored_out": int(rows[0][2] or 0) if rows else 0,
+            "anchored_in": int(rows[0][3] or 0) if rows else 0,
+        }
+
+    # E3's Point denominator mixes three node classes; the split is read off the
+    # properties each WRITER stamps (is_episodic for turn rows, is_operator for
+    # operator Points, an extractedFrom edge for extraction claims) so the note
+    # can disclose it instead of implying that every unanchored Point is an
+    # extraction claim that lost its provenance.
+    composition_rows = projection.g.query(POINT_COMPOSITION_CYPHER).result_set
+    composition = {
+        key: int(composition_rows[0][index] or 0)
+        for index, key in enumerate(
+            ("points", "turn_rows", "operator_points", "extraction_claims",
+             "other_points", "claim_denominator", "claim_anchored"))
+    } if composition_rows else {
+        "points": 0, "turn_rows": 0, "operator_points": 0,
+        "extraction_claims": 0, "other_points": 0,
+        "claim_denominator": 0, "claim_anchored": 0}
 
     relationship_counts: dict[str, int] = {}
     relationship_anchored: dict[str, int] = {}
@@ -726,6 +1069,7 @@ def census(uri: str) -> dict:
         "uri": uri,
         "label_counts": label_counts,
         "per_label": per_label,
+        "point_composition": composition,
         "derived_total": sum(block["nodes"] for block in per_label.values()),
         "anchored_total": sum(block["anchored"] for block in per_label.values()),
         "points": int(label_counts.get("Point", 0)),
@@ -888,7 +1232,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                census_data: dict, e1: dict, e1_aux: dict, e1_out: dict,
                e1b_out: dict, e2a_out: dict, e2b_out: dict, e3: dict,
                e3_out: dict, e4: dict, e4_out: dict, e5: dict, e5_out: dict,
-               rows: list[dict], out_path: str) -> str:
+               rows: list[dict], out_path: str,
+               arm: dict | None = None) -> str:
     """The human log with the machine table at the bottom (one artifact, one read)."""
     lines: list[str] = []
     add = lines.append
@@ -903,8 +1248,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         "— G1 compared it with the frozen pin")
     add(f"# graph: {graph} (fresh, disposable; every node in it was written by "
         "this run)")
-    add("# arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 (forced ON for this pass; "
-        "the deployed config leaves both OFF)")
+    add(f"# arm: {arm_header(arm or {})}")
     add("")
     add("## the run — one pass over the pre-registered corpus")
     for run in runs:
@@ -928,7 +1272,9 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         else:
             add(f"step {step} UNOBSERVED {unobserved.get(step, 'no witness')}")
     add(f"steps witnessed: "
-        f"{len([s for s in STEPS if s in observed])}/{len(STEPS)}")
+        f"{len([s for s in STEPS if s in observed])}/{len(STEPS)}"
+        + (f" (unwitnessed: {', '.join(s for s in STEPS if s not in observed)})"
+           if len(observed) < len(STEPS) else ""))
     add("")
     add("## E3 census — derived nodes and their version anchor")
     add(f"e3 rule: {E3_RULE}")
@@ -936,13 +1282,17 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         block = census_data["per_label"].get(label) or {"nodes": 0, "anchored": 0}
         add(f"e3 label={label} nodes={block['nodes']} "
             f"anchored={block['anchored']} "
-            f"unanchored={block['nodes'] - block['anchored']}")
+            f"unanchored={block['nodes'] - block['anchored']} "
+            f"anchored_out={block.get('anchored_out', 0)} "
+            f"anchored_in={block.get('anchored_in', 0)}")
     add(f"e3 numerator={e3['numerator']} denominator={e3['denominator']} "
         f"below_floor={'REFUSED' if e3['below_floor'] else 'no'} "
         f"outcome={e3['outcome']} bar={e3['bar']}")
     add("e3 relationship anchors: " + ", ".join(
         f"{name}={census_data['relationship_anchored'].get(name, 0)}/{count}"
         for name, count in sorted(census_data["relationship_counts"].items())))
+    composition = census_data.get("point_composition") or {}
+    add(point_composition_line(composition))
     add(f"e3 note: Source->Object identity/mention links are unanchored BY DESIGN "
         f"(owner option A, #5199; #9736) — aboutObject="
         f"{census_data['relationship_counts'].get('aboutObject', 0)} edge(s), "
@@ -1071,7 +1421,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "kind": "capstone-measure",
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
-            "arm": {"TORTOISE_VET": "1", "TORTOISE_CLASSIFY_LATER": "1"},
+            "arm": arm_record(arm or {}),
             "steps_observed": [step for step in STEPS if step in observed],
             "steps_unobserved": {step: unobserved.get(step) for step in STEPS
                                  if step not in observed},
@@ -1083,6 +1433,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "rule": E3_RULE,
                 "per_label": census_data["per_label"],
                 "label_counts": census_data["label_counts"],
+                "point_composition": census_data.get("point_composition"),
                 "relationship_anchored": census_data["relationship_anchored"],
                 "relationship_counts": census_data["relationship_counts"],
             },
@@ -1200,7 +1551,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"capstone-measure: running {len(sessions)} sessions through "
           "capture_session ...", flush=True)
 
-    runs = run_corpus(graph, sessions)
+    # The measured arm is FORCED here and read back — a printed arm that the
+    # shell did not actually hold measures the OFF population under an ON label
+    # (`e1_e2_probe.run_arm` forces its flags the same way).
+    with measured_arm() as arm:
+        print(f"capstone-measure: arm {arm_header(arm)}", flush=True)
+        runs = run_corpus(graph, sessions)
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
     observed, unobserved = observe_steps(runs, census_data)
@@ -1277,6 +1633,11 @@ def main(argv: list[str] | None = None) -> int:
     # ── E3 ────────────────────────────────────────────────────────────────
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
                            derived=census_data["derived_total"], bars=bars)
+    composition = census_data.get("point_composition") or {}
+    claim_anchored, claim_den, derivation_share = derivation_only(composition)
+    derivation = (f"{claim_anchored}/{claim_den}" +
+                  (f" = {derivation_share:.6f}"
+                   if derivation_share is not None else ""))
     e3 = {
         "verdict": verdict_word(e3_result),
         "numerator": census_data["anchored_total"],
@@ -1291,7 +1652,21 @@ def main(argv: list[str] | None = None) -> int:
                  f"never anchor — and the frozen denominator counts them anyway, "
                  f"so the = 1.000 bar is unreachable as registered (#9736: either "
                  f"the metric is re-registered or the model is reopened; a lane "
-                 f"cannot pick)"),
+                 f"cannot pick). COMPOSITION of the {composition.get('points', 0)} "
+                 f"Point nodes the denominator also counts: "
+                 f"{composition.get('turn_rows', 0)} mechanical turn rows + "
+                 f"{composition.get('extraction_claims', 0)} extraction claims + "
+                 f"{composition.get('operator_points', 0)} operator Points + "
+                 f"{composition.get('other_points', 0)} other, each class read off "
+                 f"the property its writer stamps. The turn rows carry NO "
+                 f"derivation link BY CONSTRUCTION (tortoise/sdk.py:2306-2331, "
+                 f"wired only by CONTAINS), so counting them is defensible under "
+                 f"'all derived nodes' but they can never anchor and are not a "
+                 f"provenance shortfall; the DERIVATION-ONLY figure over the "
+                 f"anchorable Points is {derivation}. #9736 must choose between "
+                 f"re-registering the metric and reopening the model, and this "
+                 f"row reports BOTH readings so neither choice is made on a "
+                 f"denominator whose composition was hidden"),
     }
 
     # ── E4 ────────────────────────────────────────────────────────────────
@@ -1349,7 +1724,8 @@ def main(argv: list[str] | None = None) -> int:
                       e1_out=e1_result, e1b_out=e1b_result,
                       e2a_out=e2a_result, e2b_out=e2b_result, e3=e3,
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
-                      e5_out=e5_result, rows=rows, out_path=out_path)
+                      e5_out=e5_result, rows=rows, out_path=out_path,
+                      arm=arm)
 
     destination = ROOT / out_path
     destination.parent.mkdir(parents=True, exist_ok=True)

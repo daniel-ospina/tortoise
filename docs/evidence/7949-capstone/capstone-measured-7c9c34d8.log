@@ -1,41 +1,42 @@
 # extractor-v4 capstone MEASUREMENT — S0 -> S6 on the pre-registered corpus (#9080)
-# generated: 2026-10-23T21:11:26Z
+# generated: 2026-10-23T21:56:07Z
 # probe: docs/evidence/7949-capstone/probes/capstone_measure.py
-# head: cf98e15f17c1245824052177f8b9e21d39547223
-# pre-registration: cf98e15f17c1245824052177f8b9e21d39547223 (read from the COMMIT with `git show`)
+# head: 7c9c34d84b7690123906ce73d6ef3d4d7f12b683
+# pre-registration: 7c9c34d84b7690123906ce73d6ef3d4d7f12b683 (read from the COMMIT with `git show`)
 # corpus: tests/eval/write_path fixtures_hash=sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc (7 sessions) — G1 compared it with the frozen pin
-# graph: capstone_measure_cf98e15f_1792789731 (fresh, disposable; every node in it was written by this run)
-# arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 (forced ON for this pass; the deployed config leaves both OFF)
+# graph: capstone_measure_7c9c34d8_1792792401 (fresh, disposable; every node in it was written by this run)
+# arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> (set/pinned IN-PROCESS for this pass and read back from os.environ after setting; the deployed config leaves both passes OFF)
 
 ## the run — one pass over the pre-registered corpus
-session wp01_quarry_debug ok=True extraction_mode=llm:deepseek-direct extracted=24 errors=[] turns=26 edus=26 chunks=1 entities=10 events=7 points=24 operators=2 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=22.1
-session wp02_lumen_refactor ok=True extraction_mode=llm:deepseek-direct extracted=16 errors=[] turns=22 edus=22 chunks=1 entities=8 events=2 points=16 operators=0 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=17.2
-session wp03_ember_design ok=True extraction_mode=llm:deepseek-direct extracted=20 errors=[] turns=24 edus=24 chunks=1 entities=17 events=8 points=20 operators=7 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=24.2
-session wp04_aurora_perf ok=True extraction_mode=llm:deepseek-direct extracted=19 errors=[] turns=20 edus=20 chunks=1 entities=14 events=3 points=19 operators=4 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=20.5
-session wp05_retro_writeup ok=True extraction_mode=llm:deepseek-direct extracted=13 errors=[] turns=23 edus=23 chunks=1 entities=15 events=7 points=13 operators=3 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=18.8
-session wp06_quarry_rollout ok=True extraction_mode=llm:deepseek-direct extracted=23 errors=[] turns=22 edus=22 chunks=1 entities=10 events=4 points=23 operators=7 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=22.7
-session wp07_bluepeak_followup ok=True extraction_mode=llm:deepseek-direct extracted=11 errors=[] turns=22 edus=22 chunks=1 entities=8 events=3 points=11 operators=5 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=17.9
+session wp01_quarry_debug ok=True extraction_mode=llm:deepseek-direct extracted=25 errors=[] turns=26 edus=26 chunks=1 entities=11 events=3 points=25 operators=0 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=22.5
+session wp02_lumen_refactor ok=True extraction_mode=llm:deepseek-direct extracted=23 errors=[] turns=22 edus=22 chunks=1 entities=8 events=8 points=23 operators=3 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=20.6
+session wp03_ember_design ok=True extraction_mode=llm:deepseek-direct extracted=22 errors=[] turns=24 edus=24 chunks=1 entities=19 events=11 points=22 operators=10 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=23.1
+session wp04_aurora_perf ok=True extraction_mode=llm:deepseek-direct extracted=21 errors=[] turns=20 edus=20 chunks=1 entities=12 events=7 points=21 operators=11 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=23.5
+session wp05_retro_writeup ok=True extraction_mode=llm:deepseek-direct extracted=15 errors=[] turns=23 edus=23 chunks=1 entities=15 events=9 points=15 operators=5 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=19.3
+session wp06_quarry_rollout ok=True extraction_mode=llm:deepseek-direct extracted=21 errors=[] turns=22 edus=22 chunks=1 entities=10 events=5 points=21 operators=6 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=21.4
+session wp07_bluepeak_followup ok=True extraction_mode=llm:deepseek-direct extracted=13 errors=[] turns=22 edus=22 chunks=1 entities=9 events=4 points=13 operators=5 search_queries=15 search_degraded=False operator_endpoints_minted=0 elapsed_s=18.1
 
 ## the eight steps — witnessed, or unobserved with its cause
 step S0 WITNESSED the reader segmented the corpus: stats.edus=159 stats.chunks=7 over 7 sessions
 step S1 WITNESSED the first LLM stage ran: stats.llm.by_stage.s1 calls=7
-step S2.1 WITNESSED the S2 map ran: stats.llm.by_stage.s2 calls=7; entities=82 events=34 points=126
-step S2.2 UNOBSERVED UNOBSERVED — TORTOISE_VET=1 was set for this arm (the pass is ON-path), but capture_session's receipt carries no VET surface: extract_session_v2 builds result['stats'] at tortoise/extractor_v2.py:7543-7558 (+ :8340-8360) and _run_vet_pass's stats (:8001, :8123) are stack locals that never reach it. Measured on this run: the receipt's stats carries 20 keys and 'vet' is not one of them. #9116 is the seam; reading a wrapper instead is the instrumentation E4's row forbids
-step S2.3 UNOBSERVED UNOBSERVED — TORTOISE_CLASSIFY_LATER=1 was set for this arm, but _apply_classify_kinds (:8017, :8149) writes into the embed list and its s2_classify_stats is a stack local, not a stats key (same construction, tortoise/extractor_v2.py:7543-7558) — #9116
+step S2.1 WITNESSED the S2 map ran: stats.llm.by_stage.s2 calls=7; entities=84 events=47 points=140
+step S2.2 UNOBSERVED UNOBSERVED — the arm forced TORTOISE_VET=1 in-process (read back from os.environ; the `arm:` line above is that read-back), so the pass RAN and its surface EXISTS one layer down: extract_session_v2 sets result['vet'] at tortoise/extractor_v2.py:8288-8292. It is DROPPED one layer up, at the meta fold tortoise/sdk.py:12196 ("stats": out.get("stats") or {} — the sibling key is not copied). Measured on this run: inspected 142 stats key(s) across 7 receipt(s) [chain_notes, chunks, deletions, edus, elapsed_s, entities, events, failed_chunks, llm, noops, operator_endpoints_minted, operators, points, recovery, s4_delta, s4_delta_empty, s4_merge, search_degraded, search_queries, supersessions, tier_a_points] and 18 receipt top-level key(s) [capture_redactions, diagnostics, error, errors, extracted, extraction_mode, extraction_provider, graph_ops, ok, points, protocol_version, provenance, session_id, stats, status, surfaced, turns, warnings]; 'vet' is in neither. #9116 is the seam, and tortoise/sdk.py:12196 is the line its fix must target; reading a wrapper instead is the instrumentation E4's row forbids
+step S2.3 UNOBSERVED UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process (read back from os.environ), so the pass RAN and its surface EXISTS one layer down: extract_session_v2 sets result['classify_later'] at tortoise/extractor_v2.py:8278-8285. It is DROPPED at the same meta fold, tortoise/sdk.py:12196. Measured on this run: the same 142 stats key(s) and 18 receipt top-level key(s) inspected above carry no 'classify_later'. #9116 is the seam; tortoise/sdk.py:12196 is the line its fix must target
 step S3 WITNESSED the graph was searched on the real backend: stats.search_queries=105 > 0, stats.search_degraded=false on every session
-step S5 WITNESSED the graph write landed: 412 derived node(s) written by the run [Point 311 (126 anchored), Object 60 (0 anchored), Event 41 (0 anchored)]; stats.operator_endpoints_minted=0; operator-shaped relationships written [IMPL=39, INPUT=38, NAND=6]
-step S6 WITNESSED the commit persisted: 311 :Point node(s) in the run's graph, 145 of them carrying the commit's eventId provenance stamp; 304 :GraphEvent(s)
-steps witnessed: 6/8
+step S5 WITNESSED the graph write landed: 449 derived node(s) written by the run [Point 336 (140 anchored), Object 59 (0 anchored), Event 54 (7 anchored)]; stats.operator_endpoints_minted=0; operator-shaped relationships written [IMPL=56, INPUT=58, NAND=10]
+step S6 WITNESSED the commit persisted: 336 :Point node(s) in the run's graph, 169 of them carrying the commit's eventId provenance stamp; 355 :GraphEvent(s)
+steps witnessed: 6/8 (unwitnessed: S2.2, S2.3)
 
 ## E3 census — derived nodes and their version anchor
-e3 rule: a derived node (Point/Object/Event) carries a version anchor iff it is the SOURCE of at least one extractedFrom|references relationship whose sourceVersion is a non-empty string — the anchor is a property of the DERIVATION LINK (tortoise/projection/edges.py:494-503 _anchor_on_create/_DERIVATION_ANCHOR_SET), and the derivation target labels are _DERIVATION_REFERENCES_LABELS (edges.py:467: Event, Document). A Source->Object link is identity/mention and carries none BY DESIGN (owner option A, #5199; #9736)
-e3 label=Point nodes=311 anchored=126 unanchored=185
-e3 label=Object nodes=60 anchored=0 unanchored=60
-e3 label=Event nodes=41 anchored=0 unanchored=41
-e3 numerator=126 denominator=412 below_floor=no outcome=FAIL bar=share = 1.0 (zero unanchored), floor 30 derived nodes
-e3 relationship anchors: CONTAINS=0/285, IMPL=0/39, INPUT=0/38, NAND=0/6, aboutObject=0/192, aboutSubject=0/21, extractedFrom=126/126, mitigated_by=0/7, references=7/7
-e3 note: Source->Object identity/mention links are unanchored BY DESIGN (owner option A, #5199; #9736) — aboutObject=192 edge(s), 0 anchored
-e1-aux objects_in_graph=60 bare_definite=12 share=0.2 note=AFTER arm only — this run has no before arm, so E1 is NOT scoreable from it; 60 Objects CLEARS the frozen floor of 30, but one arm cannot decide `after <= 0.5 x before` — the before arm is the missing half, and two independent captures would confound the gate with LLM non-determinism
+e3 rule: a derived node (Point/Object/Event) carries a version anchor iff it is the SOURCE of at least one extractedFrom relationship whose sourceVersion is a non-empty string, OR the TARGET of at least one references relationship whose sourceVersion is a non-empty string. The two directions are NOT interchangeable: extractedFrom points FROM the derived node at its source ((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT the derived node ((Source)-[:references]->(Event|Document) — tortoise/projection/edges.py:2168-2192 link_source_to_event, reached from the capture path at tortoise/sdk.py:12477). The anchor is a property of the DERIVATION LINK (tortoise/projection/edges.py:494-503 _anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels are _DERIVATION_REFERENCES_LABELS (edges.py:467: Event, Document). A Source->Object link is identity/mention and carries none BY DESIGN (owner option A, #5199; #9736)
+e3 label=Point nodes=336 anchored=140 unanchored=196 anchored_out=140 anchored_in=0
+e3 label=Object nodes=59 anchored=0 unanchored=59 anchored_out=0 anchored_in=0
+e3 label=Event nodes=54 anchored=7 unanchored=47 anchored_out=0 anchored_in=7
+e3 numerator=147 denominator=449 below_floor=no outcome=FAIL bar=share = 1.0 (zero unanchored), floor 30 derived nodes
+e3 relationship anchors: CONTAINS=0/299, IMPL=0/56, INPUT=0/58, NAND=0/10, aboutObject=0/213, aboutSubject=0/32, extractedFrom=140/140, mitigated_by=0/8, references=7/7
+e3 point composition: turn_rows=159 extraction_claims=140 operator_points=29 other=8 (total=336 Point nodes) — each class read off the property its WRITER stamps (is_episodic for turn rows, is_operator for operator Points, an extractedFrom edge for extraction claims); turn rows carry NO derivation link BY CONSTRUCTION (_write_capture_turns, tortoise/sdk.py:2306-2331, wired only by CONTAINS), so they can never anchor and their count is not a provenance shortfall. derivation-only figure: 140/169 = 0.828402 (anchorable Points = extraction claims + operator Points; the frozen 'all derived nodes' reading above is unchanged)
+e3 note: Source->Object identity/mention links are unanchored BY DESIGN (owner option A, #5199; #9736) — aboutObject=213 edge(s), 0 anchored
+e1-aux objects_in_graph=59 bare_definite=0 share=0.0 note=AFTER arm only — this run has no before arm, so E1 is NOT scoreable from it; 59 Objects CLEARS the frozen floor of 30, but one arm cannot decide `after <= 0.5 x before` — the before arm is the missing half, and two independent captures would confound the gate with LLM non-determinism
 
 ## E1 / E1b / E2a / E2b — parsed out of the landed e1-e2.log
 e1 parsed: before_share=0.600000 after_share=0.600000 objects=15/25 sha=c2544f54f143e53ff5489b137ce1e9a52d3ed370 corpus=e1e2_corpus.json corpus_sha256=e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b declared prereg=UNPREREGISTERED declared result=UNPREREGISTERED
@@ -68,14 +69,14 @@ e5 incomplete receipts (disclosed, not silently averaged): wp07_bluepeak_followu
 criterion | verdict | measured | evidence | blocked_by
 E1 | BLOCKED | unmeasured | docs/evidence/7949-capstone/e1-e2.log | #5333
 E2 | BLOCKED | unmeasured | docs/evidence/7949-capstone/e1-e2.log | #9775
-E3 | RED | 126/412 | docs/evidence/7949-capstone/capstone-measured-cf98e15f.log | #9736
+E3 | RED | 147/449 | docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log | #9736
 E4 | RED | 2/15 | tests/eval/write_path/receipts/w2b-operator-2026-10-19.json | #8503
 E5 | RED | 12/25 | docs/evidence/7949-capstone/e5-rescore.json | #9738
 
 ## why each non-green row is not green
 row E1 note: the only E1 artifact is docs/evidence/7949-capstone/e1-e2.log: before=0.600000 after=0.600000 objects=25 bound=0.300000 vs bar after_share <= 0.5 x before_share (Objects floor 30) — after_share is NOT <= 0.5 x before_share, so the arithmetic would FAIL — but the row is NOT RED, because the record's own floor makes it REFUSED: the artifact's denominator is 25 Objects (under the frozen floor of 30) and is the 25-name owner-labelled audit population rather than 'all :Object nodes written by the run'. Its corpus (e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b) is not the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc), and the artifact declares prereg=UNPREREGISTERED result=UNPREREGISTERED. No before/after pair on the pre-registered corpus exists, and the mechanism that must move the share is an owner ruling on removal/relocation (#5333) — so no scored E1 measurement exists to be red
 row E2 note: E2a: BLOCKED — values=42 (the frozen 14-unit denominator is not carried by any committed artifact) vs bar 13 of 14. E2b: PASS — fused=1/114 = 0.008772 vs bar fused share <= 0.05 (floor 30 surviving units) (a proxy: the artifact counts atomic POINTS, not surviving planted units). The E2 row is BLOCKED because the composite criterion needs BOTH halves and E2a's frozen 14-value-bearing-unit denominator is carried by no committed artifact; the artifact's no-loss control (values 42 before and after, real_facts 90) is consistent with E2a but does not compute it. Same corpus caveat as E1: e78d306ccb4bce73459c5c22b61122140ba860b1108d3eba2ebecb661cbdfe6b is not sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc, and #9775 records that the state-value carve-out is absent on one render path
-row E3 note: anchored=126 derived=412 share=0.305825; bar share = 1.0 (zero unanchored), floor 30 derived nodes; measured on THIS run's own graph (capstone_measure_cf98e15f_1792789731, fixtures_hash sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). The Source->Object identity link carries no sourceVersion BY DESIGN (owner option A, #5199), so ':Object mention links' can never anchor — and the frozen denominator counts them anyway, so the = 1.000 bar is unreachable as registered (#9736: either the metric is re-registered or the model is reopened; a lane cannot pick)
+row E3 note: anchored=147 derived=449 share=0.327394; bar share = 1.0 (zero unanchored), floor 30 derived nodes; measured on THIS run's own graph (capstone_measure_7c9c34d8_1792792401, fixtures_hash sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). The Source->Object identity link carries no sourceVersion BY DESIGN (owner option A, #5199), so ':Object mention links' can never anchor — and the frozen denominator counts them anyway, so the = 1.000 bar is unreachable as registered (#9736: either the metric is re-registered or the model is reopened; a lane cannot pick). COMPOSITION of the 336 Point nodes the denominator also counts: 159 mechanical turn rows + 140 extraction claims + 29 operator Points + 8 other, each class read off the property its writer stamps. The turn rows carry NO derivation link BY CONSTRUCTION (tortoise/sdk.py:2306-2331, wired only by CONTAINS), so counting them is defensible under 'all derived nodes' but they can never anchor and are not a provenance shortfall; the DERIVATION-ONLY figure over the anchorable Points is 140/169 = 0.828402. #9736 must choose between re-registering the metric and reopening the model, and this row reports BOTH readings so neither choice is made on a denominator whose composition was hidden
 row E4 note: edge_correct=2 planted=15; bar 15 of 15; content_ok=8 operators_total=27 on the SAME receipt. Its own date=2026-10-19T01:39:26Z, commit=6164c683c and corpus_hash=sha256:943a99ec619b4c67b8e31fefb90316ea023bbaddd1905d835b9d930243518324 differ from the frozen corpus (sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc), and its verdict=regression failure_origin=gate_regression: the planted edges are not formed at all (#8503), and the receipt's retrievability rate is UNMEASURED (#9596)
 row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND raw >= 0.8 (floor 10 sentences); raw recovery = 1 - 0.52 = 0.4800 FAILS the 0.80 absolute floor while the 1.0833 ratio passes 0.90 — the record's own note says the ratio alone is degenerate, which is why the absolute floor exists. The re-score grades the 2026-10-18 arm receipts against THIS commit's gold (the gold is part of fixtures_hash) and warns INCOMPLETE RECEIPTS: wp07_bluepeak_followup:raw partial=True truncated=False s2_error=None s1_error=False s1_truncated=False — its holdout delta cannot be certified. #9738 also records that §10's prior measurement was visible when the record claimed it was not, and that the 25-bound vs 29-marker populations must be reconciled before either number is called final
 
@@ -84,12 +85,12 @@ row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND
   "schema": "capstone-verdict-v1",
   "issue": 9080,
   "epic": 7949,
-  "head": "cf98e15f17c1245824052177f8b9e21d39547223",
+  "head": "7c9c34d84b7690123906ce73d6ef3d4d7f12b683",
   "prereg": {
-    "sha": "cf98e15f17c1245824052177f8b9e21d39547223",
+    "sha": "7c9c34d84b7690123906ce73d6ef3d4d7f12b683",
     "status": "OK",
     "artifact": "docs/evidence/7949-capstone/preregistration.json",
-    "read_from": "git show cf98e15f17c1245824052177f8b9e21d39547223:docs/evidence/7949-capstone/preregistration.json"
+    "read_from": "git show 7c9c34d84b7690123906ce73d6ef3d4d7f12b683:docs/evidence/7949-capstone/preregistration.json"
   },
   "corpus": {
     "path": "tests/eval/write_path",
@@ -110,10 +111,12 @@ row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND
     "status": "COMPLETED",
     "kind": "capstone-measure",
     "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
-    "graph": "capstone_measure_cf98e15f_1792789731",
+    "graph": "capstone_measure_7c9c34d8_1792792401",
     "arm": {
       "TORTOISE_VET": "1",
-      "TORTOISE_CLASSIFY_LATER": "1"
+      "TORTOISE_CLASSIFY_LATER": "1",
+      "TORTOISE_VALUE_GATE": null,
+      "source": "os.environ read-back after measured_arm() forced it"
     },
     "steps_observed": [
       "S0",
@@ -124,102 +127,117 @@ row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND
       "S6"
     ],
     "steps_unobserved": {
-      "S2.2": "UNOBSERVED \u2014 TORTOISE_VET=1 was set for this arm (the pass is ON-path), but capture_session's receipt carries no VET surface: extract_session_v2 builds result['stats'] at tortoise/extractor_v2.py:7543-7558 (+ :8340-8360) and _run_vet_pass's stats (:8001, :8123) are stack locals that never reach it. Measured on this run: the receipt's stats carries 20 keys and 'vet' is not one of them. #9116 is the seam; reading a wrapper instead is the instrumentation E4's row forbids",
-      "S2.3": "UNOBSERVED \u2014 TORTOISE_CLASSIFY_LATER=1 was set for this arm, but _apply_classify_kinds (:8017, :8149) writes into the embed list and its s2_classify_stats is a stack local, not a stats key (same construction, tortoise/extractor_v2.py:7543-7558) \u2014 #9116"
+      "S2.2": "UNOBSERVED \u2014 the arm forced TORTOISE_VET=1 in-process (read back from os.environ; the `arm:` line above is that read-back), so the pass RAN and its surface EXISTS one layer down: extract_session_v2 sets result['vet'] at tortoise/extractor_v2.py:8288-8292. It is DROPPED one layer up, at the meta fold tortoise/sdk.py:12196 (\"stats\": out.get(\"stats\") or {} \u2014 the sibling key is not copied). Measured on this run: inspected 142 stats key(s) across 7 receipt(s) [chain_notes, chunks, deletions, edus, elapsed_s, entities, events, failed_chunks, llm, noops, operator_endpoints_minted, operators, points, recovery, s4_delta, s4_delta_empty, s4_merge, search_degraded, search_queries, supersessions, tier_a_points] and 18 receipt top-level key(s) [capture_redactions, diagnostics, error, errors, extracted, extraction_mode, extraction_provider, graph_ops, ok, points, protocol_version, provenance, session_id, stats, status, surfaced, turns, warnings]; 'vet' is in neither. #9116 is the seam, and tortoise/sdk.py:12196 is the line its fix must target; reading a wrapper instead is the instrumentation E4's row forbids",
+      "S2.3": "UNOBSERVED \u2014 the arm forced TORTOISE_CLASSIFY_LATER=1 in-process (read back from os.environ), so the pass RAN and its surface EXISTS one layer down: extract_session_v2 sets result['classify_later'] at tortoise/extractor_v2.py:8278-8285. It is DROPPED at the same meta fold, tortoise/sdk.py:12196. Measured on this run: the same 142 stats key(s) and 18 receipt top-level key(s) inspected above carry no 'classify_later'. #9116 is the seam; tortoise/sdk.py:12196 is the line its fix must target"
     },
     "step_witnesses": {
       "S0": "the reader segmented the corpus: stats.edus=159 stats.chunks=7 over 7 sessions",
       "S1": "the first LLM stage ran: stats.llm.by_stage.s1 calls=7",
-      "S2.1": "the S2 map ran: stats.llm.by_stage.s2 calls=7; entities=82 events=34 points=126",
+      "S2.1": "the S2 map ran: stats.llm.by_stage.s2 calls=7; entities=84 events=47 points=140",
       "S3": "the graph was searched on the real backend: stats.search_queries=105 > 0, stats.search_degraded=false on every session",
-      "S5": "the graph write landed: 412 derived node(s) written by the run [Point 311 (126 anchored), Object 60 (0 anchored), Event 41 (0 anchored)]; stats.operator_endpoints_minted=0; operator-shaped relationships written [IMPL=39, INPUT=38, NAND=6]",
-      "S6": "the commit persisted: 311 :Point node(s) in the run's graph, 145 of them carrying the commit's eventId provenance stamp; 304 :GraphEvent(s)"
+      "S5": "the graph write landed: 449 derived node(s) written by the run [Point 336 (140 anchored), Object 59 (0 anchored), Event 54 (7 anchored)]; stats.operator_endpoints_minted=0; operator-shaped relationships written [IMPL=56, INPUT=58, NAND=10]",
+      "S6": "the commit persisted: 336 :Point node(s) in the run's graph, 169 of them carrying the commit's eventId provenance stamp; 355 :GraphEvent(s)"
     },
     "sessions": [
       {
         "session_id": "wp01_quarry_debug",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 24,
+        "extracted": 25,
         "errors": [],
-        "elapsed_s": 24.3
+        "elapsed_s": 26.8
       },
       {
         "session_id": "wp02_lumen_refactor",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 16,
+        "extracted": 23,
         "errors": [],
-        "elapsed_s": 18.1
+        "elapsed_s": 22.5
       },
       {
         "session_id": "wp03_ember_design",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 20,
+        "extracted": 22,
         "errors": [],
-        "elapsed_s": 26.0
+        "elapsed_s": 25.0
       },
       {
         "session_id": "wp04_aurora_perf",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 19,
+        "extracted": 21,
         "errors": [],
-        "elapsed_s": 22.1
+        "elapsed_s": 26.0
       },
       {
         "session_id": "wp05_retro_writeup",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 13,
+        "extracted": 15,
         "errors": [],
-        "elapsed_s": 20.1
+        "elapsed_s": 21.0
       },
       {
         "session_id": "wp06_quarry_rollout",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 23,
+        "extracted": 21,
         "errors": [],
-        "elapsed_s": 24.4
+        "elapsed_s": 23.4
       },
       {
         "session_id": "wp07_bluepeak_followup",
         "ok": true,
         "extraction_mode": "llm:deepseek-direct",
-        "extracted": 11,
+        "extracted": 13,
         "errors": [],
-        "elapsed_s": 19.1
+        "elapsed_s": 19.8
       }
     ],
     "e3_census": {
-      "rule": "a derived node (Point/Object/Event) carries a version anchor iff it is the SOURCE of at least one extractedFrom|references relationship whose sourceVersion is a non-empty string \u2014 the anchor is a property of the DERIVATION LINK (tortoise/projection/edges.py:494-503 _anchor_on_create/_DERIVATION_ANCHOR_SET), and the derivation target labels are _DERIVATION_REFERENCES_LABELS (edges.py:467: Event, Document). A Source->Object link is identity/mention and carries none BY DESIGN (owner option A, #5199; #9736)",
+      "rule": "a derived node (Point/Object/Event) carries a version anchor iff it is the SOURCE of at least one extractedFrom relationship whose sourceVersion is a non-empty string, OR the TARGET of at least one references relationship whose sourceVersion is a non-empty string. The two directions are NOT interchangeable: extractedFrom points FROM the derived node at its source ((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT the derived node ((Source)-[:references]->(Event|Document) \u2014 tortoise/projection/edges.py:2168-2192 link_source_to_event, reached from the capture path at tortoise/sdk.py:12477). The anchor is a property of the DERIVATION LINK (tortoise/projection/edges.py:494-503 _anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels are _DERIVATION_REFERENCES_LABELS (edges.py:467: Event, Document). A Source->Object link is identity/mention and carries none BY DESIGN (owner option A, #5199; #9736)",
       "per_label": {
         "Point": {
-          "nodes": 311,
-          "anchored": 126
+          "nodes": 336,
+          "anchored": 140,
+          "anchored_out": 140,
+          "anchored_in": 0
         },
         "Object": {
-          "nodes": 60,
-          "anchored": 0
+          "nodes": 59,
+          "anchored": 0,
+          "anchored_out": 0,
+          "anchored_in": 0
         },
         "Event": {
-          "nodes": 41,
-          "anchored": 0
+          "nodes": 54,
+          "anchored": 7,
+          "anchored_out": 0,
+          "anchored_in": 7
         }
       },
       "label_counts": {
         "EpMeta": 1,
-        "Event": 41,
-        "GraphEvent": 304,
+        "Event": 54,
+        "GraphEvent": 355,
         "GraphEventMeta": 1,
         "Meta": 1,
-        "Object": 60,
-        "Point": 311,
+        "Object": 59,
+        "Point": 336,
         "Session": 7,
         "Source": 7,
-        "Subject": 14
+        "Subject": 16
+      },
+      "point_composition": {
+        "points": 336,
+        "turn_rows": 159,
+        "operator_points": 29,
+        "extraction_claims": 140,
+        "other_points": 8,
+        "claim_denominator": 169,
+        "claim_anchored": 140
       },
       "relationship_anchored": {
         "CONTAINS": 0,
@@ -228,19 +246,19 @@ row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND
         "NAND": 0,
         "aboutObject": 0,
         "aboutSubject": 0,
-        "extractedFrom": 126,
+        "extractedFrom": 140,
         "mitigated_by": 0,
         "references": 7
       },
       "relationship_counts": {
-        "CONTAINS": 285,
-        "IMPL": 39,
-        "INPUT": 38,
-        "NAND": 6,
-        "aboutObject": 192,
-        "aboutSubject": 21,
-        "extractedFrom": 126,
-        "mitigated_by": 7,
+        "CONTAINS": 299,
+        "IMPL": 56,
+        "INPUT": 58,
+        "NAND": 10,
+        "aboutObject": 213,
+        "aboutSubject": 32,
+        "extractedFrom": 140,
+        "mitigated_by": 8,
         "references": 7
       }
     },
@@ -307,14 +325,14 @@ row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND
       "criterion": "E3",
       "verdict": "RED",
       "evidence_kind": "measurement",
-      "evidence": "docs/evidence/7949-capstone/capstone-measured-cf98e15f.log",
-      "sha": "cf98e15f17c1245824052177f8b9e21d39547223",
-      "numerator": 126,
-      "denominator": 412,
+      "evidence": "docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log",
+      "sha": "7c9c34d84b7690123906ce73d6ef3d4d7f12b683",
+      "numerator": 147,
+      "denominator": 449,
       "corpus_sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
       "sibling": null,
       "blocked_by": "#9736",
-      "note": "anchored=126 derived=412 share=0.305825; bar share = 1.0 (zero unanchored), floor 30 derived nodes; measured on THIS run's own graph (capstone_measure_cf98e15f_1792789731, fixtures_hash sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). The Source->Object identity link carries no sourceVersion BY DESIGN (owner option A, #5199), so ':Object mention links' can never anchor \u2014 and the frozen denominator counts them anyway, so the = 1.000 bar is unreachable as registered (#9736: either the metric is re-registered or the model is reopened; a lane cannot pick)"
+      "note": "anchored=147 derived=449 share=0.327394; bar share = 1.0 (zero unanchored), floor 30 derived nodes; measured on THIS run's own graph (capstone_measure_7c9c34d8_1792792401, fixtures_hash sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc). The Source->Object identity link carries no sourceVersion BY DESIGN (owner option A, #5199), so ':Object mention links' can never anchor \u2014 and the frozen denominator counts them anyway, so the = 1.000 bar is unreachable as registered (#9736: either the metric is re-registered or the model is reopened; a lane cannot pick). COMPOSITION of the 336 Point nodes the denominator also counts: 159 mechanical turn rows + 140 extraction claims + 29 operator Points + 8 other, each class read off the property its writer stamps. The turn rows carry NO derivation link BY CONSTRUCTION (tortoise/sdk.py:2306-2331, wired only by CONTAINS), so counting them is defensible under 'all derived nodes' but they can never anchor and are not a provenance shortfall; the DERIVATION-ONLY figure over the anchorable Points is 140/169 = 0.828402. #9736 must choose between re-registering the metric and reopening the model, and this row reports BOTH readings so neither choice is made on a denominator whose composition was hidden"
     },
     {
       "criterion": "E4",
@@ -335,7 +353,7 @@ row E5 note: ratio=1.0833 raw=0.4800 narrative=0.5200 n=25; bar ratio >= 0.9 AND
       "verdict": "RED",
       "evidence_kind": "measurement",
       "evidence": "docs/evidence/7949-capstone/e5-rescore.json",
-      "sha": "cf98e15f17c1245824052177f8b9e21d39547223",
+      "sha": "7c9c34d84b7690123906ce73d6ef3d4d7f12b683",
       "numerator": 12,
       "denominator": 25,
       "corpus_sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",

@@ -13,8 +13,8 @@ aboutObjects: "#7949, #9080, #9075, #9076, #9077, #9073, #9116, #5199, #5333, #7
 
 **Measured at:** `027c8c1ab` on branch `feat/9080-tm` (2026-10-20, after merging `origin/main` at `78ef670d3`) — that
 is the stamp of the shipped REFUSAL log (`capstone.log`), and it is kept because the file is
-kept. The SCORED run below is stamped separately (**Scored at** `cf98e15f1`), because it is a
-different artifact from a different program (`probes/capstone_measure.py`).
+kept. The SCORED run below is stamped separately (**Scored at** `7c9c34d84`, 2026-10-23), because
+it is a different artifact from a different program (`probes/capstone_measure.py`).
 
 **Blast radius — the files this branch touches** (`git diff --name-only origin/main...HEAD`; the
 COUNT is deliberately not restated here — it changed twice while this was open, and a stale
@@ -55,7 +55,7 @@ running end to end."*
 > |---|---|---|---|
 > | **E1** | `after_share <= 0.50 × before_share`, over all `:Object` nodes, floor **30** | before **0.600000**, after **0.600000** over **25** Objects → below the floor, so **REFUSED** (the arithmetic would fail: the bound is 0.300000) | ⛔ **BLOCKED** |
 > | **E2** | E2a `>= 13 of 14` value-bearing units; E2b fused share `<= 0.05` | E2a: the frozen **14-unit** denominator is carried by **no committed artifact** (the artifact counts 42 value literals, before = after); E2b: **1/114 = 0.008772** | ⛔ **BLOCKED** (E2a unmeasured) |
-> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **126 / 412 = 0.3058** — `Point` 126/311 anchored, `:Object` **0/60**, `:Event` **0/41** | ⛔ **RED** |
+> | **E3** | `= 1.000` (zero unanchored), floor **30** derived nodes | **147 / 449 = 0.3274** — `Point` 140/336 anchored, `:Object` **0/59**, `:Event` **7/54** | ⛔ **RED** |
 > | **E4** | `= 15 of 15` planted operator edges wired AND persisted | **2 / 15** | ⛔ **RED** |
 > | **E5** | ratio `>= 0.90` **AND** raw absolute `>= 0.80` | ratio **1.0833** (passes) but raw absolute **0.4800** (fails), n = 25 | ⛔ **RED** |
 >
@@ -73,10 +73,23 @@ running end to end."*
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
     --prereg "$(git rev-parse HEAD)"
-# G0 pre-registration cf98e15f1… READ (schema capstone-preregistration/v1)
+# G0 pre-registration 7c9c34d84… READ (schema capstone-preregistration/v1)
 # G1 corpus sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc MATCHES the frozen pin
-# → docs/evidence/7949-capstone/capstone-measured-cf98e15f.log
+# arm TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1 TORTOISE_VALUE_GATE=<unset> (read back from os.environ)
+# → docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log
 ```
+
+⛔ **The arm needs no exported flags, and that is a required property, not a convenience.**
+`probes/capstone_measure.py` FORCES `TORTOISE_VET=1` and `TORTOISE_CLASSIFY_LATER=1` in-process
+(restoring the previous values in a `finally`, exactly as `e1_e2_probe.run_arm` does), pins
+`TORTOISE_VALUE_GATE` unset — it also switches S2.2 on, so an ambient value would silently change
+the arm — and then **reads the values back out of `os.environ`**. The log's `arm:` line is that
+read-back, never a typed literal, and a flag that does not read back as set REFUSES the run. The
+earlier stamp of this bundle printed `arm: TORTOISE_VET=1 TORTOISE_CLASSIFY_LATER=1` while setting
+neither: a re-run following a recipe that exported only `TORTOISE_DB_URI` measured the **OFF**
+population under a log declaring both ON. Pinned by
+`tests/test_7949_capstone_measure.py::test_the_measured_arm_is_forced_in_process_and_restored`,
+`::test_a_flag_that_does_not_read_back_refuses_the_run` and `::test_the_run_happens_inside_the_forced_arm`.
 
 `probes/capstone_measure.py` is the instrument this row needed and PR #9089 did not have.
 `capstone_run.py` drives the real entry point and then reads four step witnesses off a receipt
@@ -90,21 +103,29 @@ every bar is **parsed out of the record** by `parse_bars` (none is typed in the 
 one pass over the seven pre-registered sessions runs through
 `TortoiseSDK(graph_name=<fresh disposable graph>).capture_session(turns, session_id=<sid>)`.
 
+⚠️ **On the stamp.** The log's `# head:` is `7c9c34d84` — the commit the run was stamped at and the
+commit G0 read the frozen record out of — while the probe BYTES that produced it are this
+worktree's, i.e. **the tree was dirty at run time** (the fixes in this round are exactly that diff).
+That is disclosed rather than smoothed: `git diff 7c9c34d84 -- docs/evidence/7949-capstone/probes/`
+is the difference between the measuring program and the stamp. Re-running once these changes are
+committed produces the same rows from a clean tree, under a `<new-head8>` filename — a row moves
+only that way.
+
 | session | ok | mode | extracted | edus | points | operators | search |
 |---|---|---|---|---|---|---|---|
-| `wp01_quarry_debug` | ✅ | `llm:deepseek-direct` | 24 | 26 | 24 | 2 | 15 queries, not degraded |
-| `wp02_lumen_refactor` | ✅ | `llm:deepseek-direct` | 16 | 22 | 16 | 0 | 15, not degraded |
-| `wp03_ember_design` | ✅ | `llm:deepseek-direct` | 20 | 24 | 20 | 7 | 15, not degraded |
-| `wp04_aurora_perf` | ✅ | `llm:deepseek-direct` | 19 | 20 | 19 | 4 | 15, not degraded |
-| `wp05_retro_writeup` | ✅ | `llm:deepseek-direct` | 13 | 23 | 13 | 3 | 15, not degraded |
-| `wp06_quarry_rollout` | ✅ | `llm:deepseek-direct` | 23 | 22 | 23 | 7 | 15, not degraded |
-| `wp07_bluepeak_followup` | ✅ | `llm:deepseek-direct` | 11 | 22 | 11 | 5 | 15, not degraded |
+| `wp01_quarry_debug` | ✅ | `llm:deepseek-direct` | 25 | 26 | 25 | 0 | 15 queries, not degraded |
+| `wp02_lumen_refactor` | ✅ | `llm:deepseek-direct` | 23 | 22 | 23 | 3 | 15, not degraded |
+| `wp03_ember_design` | ✅ | `llm:deepseek-direct` | 22 | 24 | 22 | 10 | 15, not degraded |
+| `wp04_aurora_perf` | ✅ | `llm:deepseek-direct` | 21 | 20 | 21 | 11 | 15, not degraded |
+| `wp05_retro_writeup` | ✅ | `llm:deepseek-direct` | 15 | 23 | 15 | 5 | 15, not degraded |
+| `wp06_quarry_rollout` | ✅ | `llm:deepseek-direct` | 21 | 22 | 21 | 6 | 15, not degraded |
+| `wp07_bluepeak_followup` | ✅ | `llm:deepseek-direct` | 13 | 22 | 13 | 5 | 15, not degraded |
 
-Seven of seven sessions returned `ok=True` with **zero errors**; 126 claims and 412 derived nodes
-were written to one fresh graph. The arm runs with `TORTOISE_VET=1` and
-`TORTOISE_CLASSIFY_LATER=1` **forced ON** (the deployed config leaves both OFF), the same
-convention #9076's E1/E2 arms used, so S2.2 and S2.3 are on-path for the pass even though the
-receipt cannot witness them.
+Seven of seven sessions returned `ok=True` with **zero errors**; 159 episode units, **140 claims** and
+**449 derived nodes** were written to one fresh graph. The arm runs with `TORTOISE_VET=1` and
+`TORTOISE_CLASSIFY_LATER=1` **forced ON in-process and read back** (the deployed config leaves both
+OFF), the same convention #9076's E1/E2 arms used, so S2.2 and S2.3 are on-path for the pass even
+though the receipt cannot witness them.
 
 ## The eight steps — 6 witnessed, 2 not, and why
 
@@ -112,12 +133,12 @@ receipt cannot witness them.
 |---|---|---|
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
-| S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=82 events=34 points=126` |
-| S2.2 VET | ❌ **#9116** | the pass RAN (`TORTOISE_VET=1`), but `capture_session`'s receipt carries no VET surface — `extract_session_v2` builds `result["stats"]` at `tortoise/extractor_v2.py:7543-7558` (`+:8340-8360`) and `_run_vet_pass`'s stats (`:8001`, `:8123`) are stack locals. Measured: the receipt's `stats` has 20 keys and `vet` is not one of them |
-| S2.3 CLASSIFY | ❌ **#9116** | same construction: `_apply_classify_kinds` (`:8017`, `:8149`) writes into the embed list; `s2_classify_stats` never reaches `stats` |
+| S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=84 events=47 points=140` |
+| S2.2 VET | ❌ **#9116** | the pass RAN (`TORTOISE_VET=1`, forced and read back), and its surface **exists**: `extract_session_v2` sets `result["vet"]` at `tortoise/extractor_v2.py:8288-8292`. It is dropped one layer UP, at the meta fold `tortoise/sdk.py:12196` (`"stats": out.get("stats") or {}`) — measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer: `result["classify_later"]` is built at `extractor_v2.py:8278-8285` and dropped at the same fold, `tortoise/sdk.py:12196` |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
-| S5 CONNECT | ✅ | the graph write: 412 derived nodes (`Point` 311, `Object` 60, `Event` 41); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=39 INPUT=38 NAND=6` |
-| S6 COMMIT | ✅ | 311 `:Point` nodes persisted, 145 carrying the commit's `eventId` stamp, 304 `:GraphEvent`s |
+| S5 CONNECT | ✅ | the graph write: 449 derived nodes (`Point` 336, `Object` 59, `Event` 54); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=56 INPUT=58 NAND=10` |
+| S6 COMMIT | ✅ | 336 `:Point` nodes persisted, 169 carrying the commit's `eventId` stamp, 355 `:GraphEvent`s |
 
 **6 of 8.** The two that are missing are missing from the INSTRUMENT, not from the pipeline:
 the passes run, the receipt does not say so. Working around that by reading a wrapper's state is
@@ -125,35 +146,71 @@ exactly the instrumentation E4's row forbids, so the honest output is `UNOBSERVE
 and file:line — and any table the probe emits records `steps_observed` **and**
 `steps_unobserved` so the count cannot be read as 8.
 
+⛔ **The count is a measurement, not a constant.** `observe_steps` looks for a `vet` /
+`classify_later` surface in what the run actually holds (the receipt's top-level keys and its
+`stats` block) and reports the step OBSERVED when it finds one; when it does not, it reports the
+number of keys it really inspected instead of quoting a remembered one. A step is never
+*assigned* unwitnessed, and every step ends up in exactly one of the two sets (a hole or an
+overlap refuses the run). So the epic's own GREEN gate — V5, all eight steps observed — stays
+reachable: landing `#9116` flips these two rows **without touching the probe or these tests**.
+Pinned by `test_a_witnessed_vet_surface_makes_s2_2_observed` (8/8 witnessed when the surface is
+there), `test_a_stats_home_for_the_classify_surface_also_counts`,
+`test_the_unobserved_cause_counts_the_keys_it_actually_inspected` and
+`test_every_step_is_witnessed_or_given_a_cause`. (The shipped-log test still asserts THIS
+artifact's 6/8 — that pins the record, not the probe's capability.)
+
 ## E3 — the census, and the contradiction it measures
 
 The anchor is a property of the **derivation link**, not of the node
 (`tortoise/projection/edges.py:494-503` `_anchor_on_create` / `_DERIVATION_ANCHOR_SET`), and the
 derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:467`: `Event`,
-`Document`). So the rule applied — printed in the log, applied by one Cypher query per label — is:
+`Document`). ⛔ **The two directions are not interchangeable**, and the first stamp of this bundle
+got one of them backwards: `extractedFrom` points FROM the derived node
+(`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
+(`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2168-2192`,
+reached from the capture path at `sdk.py:12477`). So the rule now applied — printed in the log,
+applied by one Cypher query per label — is:
 
-> a derived node carries a version anchor **iff** it is the SOURCE of at least one
-> `extractedFrom|references` relationship whose `sourceVersion` is a non-empty string.
+> a derived node carries a version anchor **iff** it is the **source** of at least one
+> `extractedFrom` relationship whose `sourceVersion` is a non-empty string, **or** the **target**
+> of at least one `references` relationship whose `sourceVersion` is a non-empty string.
 
-| label | nodes written | anchored | unanchored |
-|---|---|---|---|
-| `Point` | 311 | 126 | 185 |
-| `Object` | 60 | **0** | 60 |
-| `Event` | 41 | **0** | 41 |
-| **total** | **412** | **126** | **286** |
+The old single-direction query printed `references=7/7` anchored beside `:Event 0/41` — two claims
+that cannot both be true, because those 7 anchored edges ARE the 7 anchored Events. The correct
+count is `:Event` **7/54** (`anchored_in=7`, `anchored_out=0`); the census prints both directions
+per label so the pair can never disagree again
+(`test_the_e3_census_counts_references_inbound_and_extractedfrom_outbound`).
 
-Relationship-level: `extractedFrom` **126/126** anchored, `references` **7/7**, and
-`aboutObject` **0/192**, `mitigated_by` 0/7, `CONTAINS` 0/285 (those are not derivation links).
+| label | nodes written | anchored | unanchored | of which, inbound `references` |
+|---|---|---|---|---|
+| `Point` | 336 | 140 | 196 | 0 (all 140 via outbound `extractedFrom`) |
+| `Object` | 59 | **0** | 59 | 0 |
+| `Event` | 54 | **7** | 47 | **7** |
+| **total** | **449** | **147** | **302** | 7 |
 
-⇒ **E3 = 0.3058, RED — and the RED is the decision, not a defect.** `:Object` mention links are
-identity links that carry no `sourceVersion` **by design** (owner-approved option A, 2026-09-25,
-#5199), so the frozen denominator — which counts `:Object` — makes `= 1.000` unreachable **as
-registered**. #9736 owns the choice: re-register the denominator as the classes the model treats
-as derivations, or reopen the model. A lane cannot pick, and this bundle does not.
+Relationship-level: `extractedFrom` **140/140** anchored, `references` **7/7**, and
+`aboutObject` **0/213**, `mitigated_by` 0/8, `CONTAINS` 0/299 (those are not derivation links).
 
-**E3's floor is met** (412 ≥ 30), so this is a scored measurement and not a refusal. Note also
-that a repeat run of the same probe wrote 437 derived nodes with 142 anchored (0.3249) — the
-*numbers* move with LLM non-determinism, the *verdict* does not.
+⇒ **E3 = 147/449 = 0.3274, RED — and the RED is the decision, not a defect.** `:Object` mention
+links are identity links that carry no `sourceVersion` **by design** (owner-approved option A,
+2026-09-25, #5199), so the frozen denominator — which counts `:Object` — makes `= 1.000`
+unreachable **as registered**. #9736 owns the choice: re-register the denominator as the classes
+the model treats as derivations, or reopen the model. A lane cannot pick, and this bundle does not.
+
+⛔ **E3's Point denominator mixes three node classes, and the row now says so.** Of the 336 `Point`
+nodes: **159 mechanical turn rows** (`_write_capture_turns`, `sdk.py:2306-2331`, wired only by
+`CONTAINS`), **140 extraction claims**, **29 operator Points** and 8 other Points — each class read
+off the property its **writer** stamps (`is_episodic`, `is_operator`, an `extractedFrom` edge), none
+hand-typed. Turn rows carry no derivation link BY CONSTRUCTION, so they can never anchor: counting
+them is defensible under the frozen wording ("all derived nodes") and the denominator is **not**
+changed unilaterally — but the **derivation-only figure over the anchorable Points is
+140/169 = 0.8284**, and the row prints both readings beside each other. Without that, the row's
+302 unanchored nodes read as "302 extraction claims lost their provenance" when most are not
+derivations at all. Pinned by `test_the_point_composition_disclosure_is_derived_and_shows_both_readings`.
+
+The floor is met (449 ≥ 30), so this is a scored measurement and not a refusal. The *numbers* move
+with LLM non-determinism; the *verdict* does not — every stamp of this probe has been RED, because
+`:Object` mention links never carry an anchor.
 
 ## E4 — the committed operator receipt, read verbatim
 
@@ -234,23 +291,33 @@ artifact's no-loss control (42/42 value literals, 90/90 real facts) is consisten
 does not compute it. #9775 records that the state-value carve-out is absent on one render path.
 
 **What E1 would take, precisely.** The measurement run DOES produce a pre-registered-corpus
-population large enough to score E1 — **60 `:Object` nodes** (12 of them `^the <X>`, share
-0.200), against the E1b proxy 90/90. What it does not produce is a **before** arm: E1's criterion
-is a *ratio between two arms*, and two independent captures would confound the gate with LLM
-non-determinism (the same probe wrote 64 Objects and 15 bare-definite names on the previous run
-and 60/12 on this one). So E1 needs the controlled design #9076 built — one extraction, both arms
-applied to the SAME candidate population (`assert_one_gate_population`) — pointed at
-`tests/eval/write_path` and made to persist. That is work, and it is recorded here rather than
-approximated by a ratio of two runs that nobody controlled. The mechanism that must move the
-share is an owner ruling on removal/relocation (**#5333**).
+population large enough to score E1 — **59 `:Object` nodes** (`0` of them `^the <X>` on this pass,
+against the E1b proxy 90/90). What it does not produce is a **before** arm: E1's criterion is a
+*ratio between two arms*, and two independent captures would confound the gate with LLM
+non-determinism — which is exactly why the bare-definite share is not quoted as a trend: the same
+probe on the same corpus has produced double-digit bare counts on one pass and zero on the next.
+So E1 needs the controlled design #9076 built — one extraction, both arms applied to the SAME
+candidate population (`assert_one_gate_population`) — pointed at `tests/eval/write_path` and made
+to persist. That is work, and it is recorded here rather than approximated by a ratio of two runs
+that nobody controlled. The mechanism that must move the share is an owner ruling on
+removal/relocation (**#5333**).
 
 ## Two artifacts, and why `capstone.log` is not overwritten
 
 | file | what it is |
 |---|---|
 | `capstone.log` | the shipped REFUSAL record (`capstone_run.py`, stamped `027c8c1ab`): G0 refused before any model call, 5 rows, no numbers |
-| `capstone-measured-cf98e15f.log` | the SCORED run (`capstone_measure.py`, stamped `cf98e15f1`): 3 RED + 2 BLOCKED, every row carrying its artifact |
+| `capstone-measured-7c9c34d8.log` | the SCORED run (`capstone_measure.py`, stamped `7c9c34d84`): 3 RED + 2 BLOCKED, every row carrying its artifact |
 | `e5-rescore.json` | the E5 re-score artifact the E5 row cites (written by the probe) |
+
+⛔ **The `cf98e15f1` stamp is SUPERSEDED and its file is gone, deliberately.** That pass was written
+by a probe with two defects this bundle has since fixed — it printed an arm it never set (so it
+measured the default-OFF population under a log declaring both passes ON) and it counted the E3
+anchor in one direction (so its `:Event 0/41` contradicted its own `references=7/7`). Keeping it
+alongside the corrected run would leave two artifacts claiming to be THE measurement, and
+`tests/test_7949_capstone_measure.py::test_the_shipped_measurement_log_is_structurally_clean`
+requires exactly one. Superseding is how a row moves: **re-running the probe**, never editing a
+number.
 
 ⛔ **A scored table must NOT be written into `capstone.log`**, and this is mechanical, not a
 preference: `tools/capstone_preregistration_check.py::_log_declares_no_measurement` exempts a log
@@ -264,11 +331,11 @@ docs/evidence/7949-capstone` → `OK — … the ordering holds`, three evidence
 ## The gate: two questions, two exits
 
 ```bash
-uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-cf98e15f.log
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log
 # → capstone-verdict-check: … GREEN=0, RED=3, BLOCKED=2, UNPREREGISTERED=0
 # → ✅ verdict table is structurally sound  (exit 0)
 
-uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-cf98e15f.log --require-green
+uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log --require-green
 # → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
 ```
 
@@ -306,7 +373,7 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   mention links are unanchored by design (#5199 → #9736 owns the choice).
 - **No E4 edge denominator of our own.** E4's number is the committed operator receipt's
   (`2/15`), whose corpus revision is not the frozen one; the run's own operator-shaped
-  relationships (IMPL 39 / INPUT 38 / NAND 6) are a *step witness*, not the 15-edge gold.
+  relationships (IMPL 56 / INPUT 58 / NAND 10) are a *step witness*, not the 15-edge gold.
 - **Nothing about E5's population reconciliation.** The instrument's `n` is 25 bound qualifiers;
   the record's denominator is 29 marker-bearing sentences. #9738 owns that, and this bundle says
   so instead of calling the numbers final.
@@ -314,8 +381,10 @@ witnessed steps is printed — an honest finding for `#7949`, never a guess.
   closes *inference* (green rows with no artifact), not forgery.
 - **Nothing about the five dependencies beyond their state** — the states above are a fresh read
   (2026-10-23), but *why* each is open is the issue body's decomposition, not re-derived.
-- **The two unwitnessed steps stay unwitnessed.** `capture_session`'s receipt carries no step
-  surface (#9116), so S2.2/S2.3 are `UNOBSERVED` for every input this probe can be handed.
+- **The two unwitnessed steps stay unwitnessed for THIS run.** `capture_session`'s receipt
+  carries no step surface (#9116), so S2.2/S2.3 are `UNOBSERVED` for every input this probe can be
+  handed TODAY — but the probe now decides that from the surfaces it actually holds, so landing
+  #9116 flips both rows with no probe edit (see "The eight steps" above).
 
 ## Reproduce
 
@@ -328,7 +397,10 @@ TORTOISE_TEST_CARVE_OUT=1 .venv/bin/python -m pytest \
 # THE MEASURED RUN — a provider key and a searchable backend are required, and
 # #9116 still bounds the OBSERVATION (S2.2/S2.3/S3/S6 have no receipt witness for
 # capstone_run.py; the measurement probe recovers S3/S6 from the live graph and
-# reports S2.2/S2.3 unobserved). It writes its own file — never over capstone.log:
+# reports S2.2/S2.3 unobserved). It writes its own file — never over capstone.log.
+# NO ARM EXPORTS: the probe forces TORTOISE_VET/TORTOISE_CLASSIFY_LATER itself,
+# pins TORTOISE_VALUE_GATE unset, and prints the os.environ READ-BACK as its
+# `arm:` line — check that line in the log it writes, not your shell.
 export TORTOISE_DB_URI="$(uv run python tools/test_lane.py uri | sed -n "s/^export TORTOISE_DB_URI=//p" | tr -d "'")"
 uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
     --prereg "$(git rev-parse HEAD)"
@@ -375,8 +447,8 @@ them against the tree on every run):
 | S0 READ | `_edus_from_conversation` `:7915` | `stats["edus"]`, `stats["chunks"]` | ✅ |
 | S1 NARRATE | `run_s1` `:7948` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
 | S2.1 EXTRACT | `run_s2` `:7972` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:8001` | `result["vet"]` | ❌ **#9116** |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:8017` | `result["classify_later"]` | ❌ **#9116** |
+| S2.2 VET | `_run_vet_pass` `:8001` | `result["vet"]` — built at `extractor_v2.py:8288-8292`, DROPPED at the meta fold `sdk.py:12196` | ❌ **#9116** |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:8017` | `result["classify_later"]` — built at `extractor_v2.py:8278-8285`, dropped at the same fold | ❌ **#9116** |
 | S3 RESOLVE | `search_graph` `:8033` | `result["search"]` | ❌ **#9116** — but `stats["search_queries"]`/`stats["search_degraded"]` ARE on it, which is how `capstone_measure.py` witnesses S3 |
 | S5 CONNECT | `execute_embed` `:8253` (+ `run_s4` `:8054` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]` | ❌ **#9116** — the committed `:Point` nodes and their `eventId` stamps in the live graph are the witness `capstone_measure.py` uses |
@@ -385,9 +457,12 @@ them against the tree on every run):
 carries none of `result["vet"]`, `result["classify_later"]`, `result["search"]`,
 `result["payload"]` — so it reports those steps unobserved and refuses at G5 for EVERY input.
 That is a property of the caller's receipt, not of §4.4 or of the pipeline: the steps RUN, the
-surface the probe is handed does not say so. `capstone_measure.py` witnesses four of them from
-`stats` and the live graph and reports the remaining two as unobserved with their file:line,
-which is why the SCORED table exists at all while the WITNESS of two steps does not.
+surface the probe is handed does not say so. The drop is one layer ABOVE the extractor: it builds
+`result["vet"]` and `result["classify_later"]` and the SDK's meta fold
+(`tortoise/sdk.py:12196`) copies `stats` and `error_census` only — so **#9116's fix targets
+`sdk.py:12196`**, not `extractor_v2.py`. `capstone_measure.py` witnesses four of them from `stats`
+and the live graph and reports the remaining two as unobserved with their file:line, which is why
+the SCORED table exists at all while the WITNESS of two steps does not.
 
 ## Dependency state (fresh read, 2026-10-23)
 
