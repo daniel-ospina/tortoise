@@ -338,6 +338,118 @@ def run_domain_graph_validators(
     return violations, drift
 
 
+# ── graph-surface validator: the portfolio overlay (#9663) ────────────────
+
+_PORTFOLIO_DOMAIN = "portfolio"
+
+
+def _portfolio_declared_statuses() -> dict[str, list[str]]:
+    """``{bare kind: declared statuses}`` from the loaded `portfolio` pack.
+
+    Read from the registry at call time (never a hardcoded copy — that is the
+    map `#2729` exists to remove). ``{}`` when the pack machinery is unavailable:
+    the same degradation ``_expand`` accepts, since a validator that raised here
+    would be swallowed by ``run_domain_graph_validators`` and read as CLEAN.
+    """
+    try:
+        from .domain_loader import _get_registry
+        reg = _get_registry()
+        pack = reg.get_pack(_PORTFOLIO_DOMAIN) if reg is not None else None
+    except Exception:  # noqa: BLE001, RUF100 — advisory surface, see docstring
+        return {}
+    if pack is None:
+        return {}
+    out: dict[str, list[str]] = {}
+    for kind, spec in (pack.kind_defs or {}).items():
+        statuses = spec.get("statuses") if isinstance(spec, dict) else None
+        if isinstance(statuses, list) and statuses:
+            out[kind] = [s for s in statuses if isinstance(s, str)]
+    return out
+
+
+@domain_validator(_PORTFOLIO_DOMAIN, surface=SURFACE_GRAPH)
+def validate_portfolio_shape(graph) -> list[dict]:
+    """The portfolio overlay's own graph-surface rules (issue #9663).
+
+    The pack's acceptance asks for ``tortoise_validate_domain`` to be CLEAN, and
+    a validator that does not exist cannot be clean:
+    ``run_domain_graph_validators`` returns ``([], [])`` for a known namespace
+    with no rules registered, so the check would pass on ANY graph. These two
+    rules come from the manifest's own declarations:
+
+      1. ``undeclared_object_status`` — a `portfolio:mandate` /
+         `portfolio:allocationTarget` whose ``status`` is outside its kind's
+         declared ``statuses``. A declared-statuses kind OWNS its state (the
+         connector fold no longer applies to it), so an out-of-vocabulary status
+         is a state nothing declared — and every "what is the current position?"
+         read misses it.
+      2. ``orphaned_valuation_mark`` — a `portfolio:valuationMark` Event with no
+         ``aboutObject`` edge. The manifest declares the mark as an occurrence
+         ABOUT a position (`marks`); an unlinked one records that a mark
+         happened and can never be joined back to what it marked.
+
+    One batched anchored query per rule (no N+1) — the anchor lives in the MATCH
+    pattern, not a bare ``WHERE``, because an unanchored leg degrades to a full
+    scan and a timeout here surfaces as a FALSE CLEAN (#8173).
+    """
+    violations: list[dict] = []
+
+    declared = _portfolio_declared_statuses()
+    if declared:
+        kinds = [f"{_PORTFOLIO_DOMAIN}:{k}" for k in declared]
+        allowed = {f"{_PORTFOLIO_DOMAIN}:{k}": set(v) for k, v in declared.items()}
+        rows = graph.g.query(
+            "MATCH (o:Object) WHERE o.objectKind IN $kinds "
+            "AND o.status IS NOT NULL "
+            "RETURN o.id, o.objectKind, o.name, o.status",
+            params={"kinds": kinds},
+        ).result_set
+        for node_id, object_kind, name, status in rows:
+            valid = allowed.get(object_kind)
+            if not valid or status in valid:
+                continue
+            violations.append({
+                "rule": "undeclared_object_status",
+                "kind": object_kind,
+                "ref": node_id,
+                "message": (
+                    f"{object_kind} '{name}' carries status '{status}', which "
+                    f"its kind does not declare (declared: "
+                    f"{', '.join(sorted(valid))})"
+                ),
+                "fix": (
+                    "write the state the kind declares, or amend the kind's "
+                    "`statuses` in packs/investment-portfolio-manager/"
+                    "manifest.yaml — a declared-statuses kind OWNS its state"
+                ),
+            })
+
+    mark_kind = f"{_PORTFOLIO_DOMAIN}:valuationMark"
+    rows = graph.g.query(
+        "MATCH (e:Event) WHERE e.eventKind = $kind "
+        "OPTIONAL MATCH (e)-[:aboutObject]->(o:Object) "
+        "WITH e, count(o) AS targets WHERE targets = 0 "
+        "RETURN e.id, e.name",
+        params={"kind": mark_kind},
+    ).result_set
+    for node_id, name in rows:
+        violations.append({
+            "rule": "orphaned_valuation_mark",
+            "kind": mark_kind,
+            "ref": node_id,
+            "message": (
+                f"valuation mark '{name}' is not linked to any Object — the "
+                f"manifest declares `marks` as a relation to the position it "
+                f"marks, so the mark cannot be joined back to what it valued"
+            ),
+            "fix": (
+                "re-create the mark with `aboutObject=<the venture:investment "
+                "it values>` (create_entity('event', ..., aboutObject=...))"
+            ),
+        })
+    return violations
+
+
 def _drift_warnings(domain: str) -> list[dict]:
     """Manifest chains declared for the domain with NO registered validator →
     advisory drift warning (never fails a clean run — out-of-scope chains,

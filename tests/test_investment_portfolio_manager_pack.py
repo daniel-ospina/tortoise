@@ -20,9 +20,13 @@ What this file pins, in the issue's own terms:
 4. **The clash rules are declared where the classifier reads them** — every
    kind carries `synonyms` / `examples` (classifier) and `nearMisses` (rerank),
    so ambiguity is resolved in the manifest rather than by minting a kind.
-5. **Core extraction is unchanged with the pack OFF** — proven against a packs
-   dir with this pack removed, for both the value brief and the kind-index spec
-   (and its cache key), not asserted from the gate's existence.
+5. **Core extraction is unchanged with the pack OFF** — and the UNGATED path
+   is measured too, because it is a different path: a graph with no
+   `:PackInstall` records gets the catalog union (#2714/#5163), so the pack IS
+   there. The gated half is compared against a packs dir with this pack
+   REMOVED (value brief, kind-index spec, cache key); the ungated half asserts
+   that stripping this pack's own contributions leaves exactly the gated
+   compile — the pack adds entries and modifies nobody's.
 6. **Each new kind is mintable on a fresh graph**, and the declared
    `values` declaration reaches the extraction prompt.
 
@@ -441,44 +445,100 @@ def packs_without_portfolio(tmp_path_factory) -> Path:
     return dst
 
 
-class TestExtractionWithThePackOff:
-    """The acceptance's "doesn't disturb anything" half: not a claim about the
-    gate, a comparison against a catalog WITHOUT this pack."""
+def _strip_portfolio(table: dict) -> dict:
+    """`table` minus THIS pack's own contributions.
 
-    def test_the_pack_contributes_nothing_when_it_is_not_installed(self):
-        registry = PackRegistry(default_packs_dir())
-        registry.load_all()
-        installed = [ns for ns in registry.packs if ns != NS]
-        gated = compile_value_brief(default_packs_dir(),
-                                    installed_namespaces=installed)
+    Both compiles key their kind entries by `ns:kind`, but
+    `memory_granularity` is keyed by bare namespace — filtering only on the
+    former would leave one of this pack's entries in place and make the
+    comparison below fail for the wrong reason.
+    """
+    out = {k: v for k, v in table.items() if not k.startswith(f"{NS}:")}
+    gran = out.get("memory_granularity")
+    if isinstance(gran, dict) and NS in gran:
+        out["memory_granularity"] = {
+            n: g for n, g in gran.items() if n != NS}
+    return out
+
+
+def _installed_minus_portfolio() -> list[str]:
+    """The catalog's installed set with THIS pack excluded — the gate a graph
+    that never installed it resolves (the pack is not a starter)."""
+    registry = PackRegistry(default_packs_dir())
+    registry.load_all()
+    return [ns for ns in registry.packs if ns != NS]
+
+
+class TestExtractionWithThePackOff:
+    """The acceptance's "doesn't disturb anything" half, measured on BOTH paths
+    that actually run — they are not the same path, and treating them as one is
+    how this check passed on evidence that covered neither of them.
+
+    * **GATED** — a graph whose resolved installed set excludes this pack
+      (`installed_namespaces=`): the pack must contribute NOTHING. Compared
+      against a catalog copy with the pack physically removed, for the value
+      brief, the kind-index spec and its cache key.
+    * **UNGATED** — a graph with NO `:PackInstall` records gets the catalog
+      union by contract (#2714 indicator 3 / #5163), so this pack IS present.
+      "Unchanged" therefore cannot mean "absent": the invariant is that it ADDS
+      its own entries and MODIFIES nobody else's — asserted below, per entry.
+    """
+
+    def test_gated_off_contributes_nothing(self):
+        gated = compile_value_brief(
+            default_packs_dir(), installed_namespaces=_installed_minus_portfolio())
         assert not [k for k in gated if k.startswith(f"{NS}:")], list(gated)
 
-    def test_gated_off_brief_equals_a_catalog_without_the_pack(
+    def test_gated_off_equals_a_catalog_without_the_pack(
             self, packs_without_portfolio):
-        registry = PackRegistry(default_packs_dir())
-        registry.load_all()
-        installed = [ns for ns in registry.packs if ns != NS]
-        gated = compile_value_brief(default_packs_dir(),
-                                    installed_namespaces=installed)
+        gated = compile_value_brief(
+            default_packs_dir(), installed_namespaces=_installed_minus_portfolio())
         without = compile_value_brief(packs_without_portfolio)
         assert gated == without
-        assert any(k.startswith(f"{NS}:") for k in
-                   compile_value_brief(default_packs_dir()))
+        # The positive control that makes the equality mean something.
+        assert any(k.startswith(f"{NS}:") for k in compile_value_brief())
 
     def test_gated_off_kind_index_and_its_cache_key_are_unchanged(
             self, packs_without_portfolio):
-        registry = PackRegistry(default_packs_dir())
-        registry.load_all()
-        installed = [ns for ns in registry.packs if ns != NS]
-        gated = compile_kind_index_spec(default_packs_dir(),
-                                       installed_namespaces=installed)
+        gated = compile_kind_index_spec(
+            default_packs_dir(), installed_namespaces=_installed_minus_portfolio())
         without = compile_kind_index_spec(packs_without_portfolio)
         assert gated == without
         assert cache_key_for(gated) == cache_key_for(without)
 
-    def test_the_declared_value_reaches_the_prompt_when_it_IS_installed(self):
-        """The consumer half of #2818: a declaration that no prompt reads is
-        decoration."""
+    def test_the_ungated_union_adds_the_pack_and_modifies_no_other_entry(self):
+        """The path a graph with no `:PackInstall` records actually takes.
+
+        This pack IS in the union there, so the meaningful assertion is
+        per-entry: stripping the pack's OWN contributions (its `ns:kind` brief
+        keys and its `memory_granularity[ns]` text) leaves EXACTLY the gated
+        brief / kind index — i.e. no other pack's entry, and no core entry,
+        moved.
+        """
+        installed = _installed_minus_portfolio()
+        gated_brief = compile_value_brief(
+            default_packs_dir(), installed_namespaces=installed)
+        ungated_brief = compile_value_brief()
+        assert _strip_portfolio(ungated_brief) == gated_brief
+        assert set(ungated_brief) - set(gated_brief) == {
+            f"{NS}:mandate", f"{NS}:allocationTarget", f"{NS}:valuationMark",
+        }
+        assert NS in ungated_brief["memory_granularity"]
+        assert NS not in gated_brief["memory_granularity"]
+
+        gated_index = compile_kind_index_spec(
+            default_packs_dir(), installed_namespaces=installed)
+        ungated_index = compile_kind_index_spec()
+        assert _strip_portfolio(ungated_index) == gated_index
+        added = set(ungated_index) - set(gated_index)
+        assert added == {
+            f"{NS}:mandate", f"{NS}:allocationTarget", f"{NS}:valuationMark",
+        }, added
+
+    def test_the_declared_value_reaches_the_prompt(self):
+        """The consumer half of #2818: a declaration no prompt reads is
+        decoration. This is the UNGATED (union) render — the one a graph with no
+        pack records gets."""
         master = v2._build_master_from_brief(compile_value_brief())
         assert master["pack_values"] == {
             f"{NS}:allocationTarget": [{
@@ -488,9 +548,10 @@ class TestExtractionWithThePackOff:
                 "cardinality": "one",
             }],
         }
-        rendered = v2._render_master_verbose(master)
-        assert "[values: targetPct(percent" in rendered
+        assert "[values: targetPct(percent" in v2._render_master_verbose(master)
         assert "KIND VALUE FIELDS" in v2._s2s4_rules(master)
+        # …and it is the ONLY kind in the catalog that renders the segment.
+        assert v2._render_master_verbose(master).count("[values:") == 1
 
 
 # ── 5. Each new kind is mintable on a fresh graph ─────────────────────────
@@ -509,6 +570,52 @@ class TestKindsAreMintable:
         verdict = sdk.validate_domain(NS)
         assert verdict["ok"] is True, verdict
         assert verdict["violations"] == []
+
+    @requires_db
+    def test_validate_domain_has_teeth(self, sdk):
+        """`tortoise_validate_domain` clean is only evidence if the domain HAS
+        rules: `run_domain_graph_validators` returns `([], [])` for a known
+        namespace with none registered, so a clean verdict alone would be
+        vacuous. Both of this pack's rules are exercised — each fires on the
+        shape it names, and the clean case is the same graph corrected.
+        """
+        from tortoise.domain_validators import (
+            SURFACE_GRAPH,
+            domain_validators,
+        )
+
+        assert domain_validators(NS, surface=SURFACE_GRAPH), (
+            "the portfolio domain must register at least one graph-surface "
+            "validator, or `validate_domain` is a green light over nothing")
+
+        position = sdk.create_object("Alpha Holdings (seed position)",
+                                     objectKind="venture:investment")
+        # 1. an out-of-vocabulary status on a state-owning kind
+        sdk.create_object("Mandate M-9", objectKind=f"{NS}:mandate",
+                          status="active")
+        # 2. a mark with no position behind it
+        sdk.create_entity("event", "VM orphan",
+                          eventKind=f"{NS}:valuationMark")
+
+        verdict = sdk.validate_domain(NS)
+        assert verdict["ok"] is False
+        rules = {v["rule"] for v in verdict["violations"]}
+        assert rules == {"undeclared_object_status", "orphaned_valuation_mark"}
+        orphan = next(v for v in verdict["violations"]
+                      if v["rule"] == "orphaned_valuation_mark")
+        assert orphan["kind"] == f"{NS}:valuationMark"
+        assert orphan["fix"], "a violation must name its fix"
+
+        # The same graph, corrected, is clean — the rules are about the shape,
+        # not about the kinds existing.
+        sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-9'}) SET o.status = 'adopted'")
+        sdk.create_entity("event", "VM-1",
+                          eventKind=f"{NS}:valuationMark",
+                          aboutObject=position["id"])
+        sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'VM orphan'}) DETACH DELETE e")
+        assert sdk.validate_domain(NS)["ok"] is True
 
     @requires_db
     def test_each_object_kind_mints_with_its_own_status(self, sdk):

@@ -399,11 +399,15 @@ kindDefs:
   `description`/`synonyms`/`examples`/`nearMisses`; rendering value schemas into the index `text`
   would rotate `kind_index.cache_key_for` on every install and silently re-embed the whole kind
   index. A test pins the index spec byte-identical with and without a declaration.
-- **A props-less pack renders byte-identically.** The brief key is absent when a kind declares
-  nothing, so the brief, the master's `pack_kinds` section and every rendered prompt are
-  byte-for-byte what they were before #2818 for the entire shipped catalog (the master gains one
-  empty `pack_values` section — the same always-present shape as `pack_hints`; a test pins the
-  renders and all six starter packs still validate unchanged).
+- **A props-less KIND renders byte-identically; a declaring PACK does not.** The brief key is
+  absent when a kind declares nothing, so that kind's `pack_kinds` line and its brief entry are
+  byte-for-byte what they were before #2818. The shipped catalogue is no longer props-less as a
+  whole: since #9663 `portfolio:allocationTarget` declares `targetPct (percent, required)`, which
+  adds one `[values: …]` segment to the PACK KINDS list and the `KIND VALUE FIELDS` policy block to
+  the S2/S4 rule slot — on the gated path only when that pack is installed, and on the catalog
+  UNION path (a graph with no `:PackInstall` records, #2714/#5163) for everyone else. The other six
+  shipped packs still declare nothing, so their entries are unchanged; a test pins the catalogue's
+  declared set to exactly that ONE field and asserts the segment count is 1.
 - **The hosted overlay carries it too.** Unlike `statuses`/`folds` (catalog-only — a tenant
   manifest never enters a `PackRegistry`), `values` is compiled by the same loop in
   `compile_value_brief(tenant_manifests=…)`, so a hosted tenant pack's declaration reaches its own

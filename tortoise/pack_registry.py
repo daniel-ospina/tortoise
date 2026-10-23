@@ -2098,13 +2098,13 @@ class PackRegistry:
                 # declared predicate or a semantics value — the same split
                 # kindDefs uses (shape per-manifest, resolution here, because a
                 # bare name is not decidable from one manifest alone).
-                # #9663: resolution goes through the SAME `_report_unresolved`
-                # gate the relation ENDPOINTS above use, not straight to
-                # `self.errors`. A relation may legitimately name another
-                # pack's predicate as its near-miss (`constrainedBy` vs
-                # venture's `gatedBy`), and a pack that DECLARED that
-                # dependency must be reported as having a missing peer (#2781)
-                # — not isolated as if it had a typo, which is what an error
+                # #9663: resolution shares the ONE #2781 bucket decision
+                # (`_record_unresolved`) the relation ENDPOINTS above use, rather
+                # than writing straight to `self.errors`. A relation may
+                # legitimately name another pack's PREDICATE as its near-miss
+                # (`constrainedBy` vs venture's `gatedBy`), and a pack that
+                # DECLARED that dependency must be reported as having a missing
+                # peer — not isolated as if it had a typo, which is what an error
                 # here does. Measured on a catalog with `venture` removed:
                 # `gatedBy` went to `errors` and `unresolved_refs` stayed empty,
                 # so the whole pack was dropped with no diagnostic naming the
@@ -2112,16 +2112,12 @@ class PackRegistry:
                 for target in rel.get("nearMisses", []) or []:
                     if target in all_predicates:
                         continue
-                    site = (f"relation '{pred}': nearMisses target '{target}' "
-                            f"does not resolve to any declared predicate or "
-                            f"semantics value (core or loaded pack)")
-                    explanation = self._missing_pack_explanation(
+                    self._record_unresolved(
+                        ns,
+                        f"relation '{pred}': nearMisses target '{target}' does "
+                        f"not resolve to any declared predicate or semantics "
+                        f"value (core or loaded pack)",
                         target, loaded, missing_deps[ns])
-                    if explanation is None:
-                        self.errors.setdefault(ns, []).append(site)
-                    else:
-                        self.unresolved_refs.setdefault(ns, []).append(
-                            f"{site} — {explanation}")
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
@@ -2212,15 +2208,32 @@ class PackRegistry:
         reference it carries. The FATAL half keeps the pre-#2781 message
         verbatim so existing diagnostics and their assertions are unchanged.
         """
+        self._record_unresolved(
+            ns, f"{site} does not resolve to any known kind (core or loaded pack)",
+            ref, loaded, missing_deps)
+
+    def _record_unresolved(
+        self, ns: str, message: str, ref: str,
+        loaded: set[str], missing_deps: list[str],
+    ) -> None:
+        """THE #2781 bucket decision, in one place (#9663 review).
+
+        Every reference site (relation endpoints, `equivalentTo`, kindDefs and
+        relation `nearMisses`, chain steps, v3.1 extraction slots) must answer
+        the same question — is this reference a MISSING PEER (reported, pack
+        survives) or a TYPO (fatal, pack isolated)? `_report_unresolved` used to
+        be the only holder of that decision because it also owned the message;
+        relation `nearMisses` needs a different message, so it re-implemented the
+        branch — and a policy that lives in two places diverges the first time a
+        third bucket is added, in the site nobody remembers. This helper owns the
+        branch; callers own their wording.
+        """
         explanation = self._missing_pack_explanation(ref, loaded, missing_deps)
         if explanation is None:
-            self.errors.setdefault(ns, []).append(
-                f"{site} does not resolve to any known kind (core or loaded pack)"
-            )
+            self.errors.setdefault(ns, []).append(message)
         else:
             self.unresolved_refs.setdefault(ns, []).append(
-                f"{site} does not resolve to any known kind — {explanation}"
-            )
+                f"{message} — {explanation}")
 
     @staticmethod
     def _missing_pack_explanation(
