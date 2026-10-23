@@ -1008,11 +1008,13 @@ def _bounds_an_instant(value: object) -> bool:
     there so that an integer too large for ``float()`` cannot raise
     ``OverflowError`` out of the ordering primitive (a read path must not
     acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
-    instant here too (1970-01-01T00:00:00Z). Today ``_validity_marker`` still
-    raises at ``(h.get("valid_from") or "").strip()`` for a numeric bound
-    (#9741), so this branch is unreachable from the renderer — it exists so the
-    parity claim above survives #9741 handing the raw bound through, instead of
-    turning into an ``OverflowError`` on the read path.
+    instant here too (1970-01-01T00:00:00Z). Today ``_validity_marker`` cannot
+    render a numeric bound at all (#9741): a TRUTHY one raises ``AttributeError``
+    at ``(h.get("valid_from") or "").strip()``, and a FALSY one (``0`` /
+    ``0.0`` / ``False``) short-circuits on that ``or ""`` and renders NO marker
+    — so this branch is unreachable from the renderer while #9741 is open. It
+    exists so the parity claim above survives #9741 handing the raw bound
+    through, instead of turning into an ``OverflowError`` on the read path.
     """
     if isinstance(value, (int, float)):
         return True

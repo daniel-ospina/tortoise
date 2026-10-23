@@ -768,8 +768,9 @@ _VALID_WINDOW_OPEN = re.compile(r"\[valid\b")
 _FLAG_SUPERSEDED_BY = re.compile(r"\[SUPERSEDED BY:")
 #: The CLOSED-window flag is shape-exhaustive without a change: the arrow only
 #: appears in ``[valid <from> → <to>]`` (orderable start ⇒ a space) or
-#: ``[valid → <to>]`` (empty start ⇒ the renderer's ``lead`` emits no start and
-#: the literal space before the arrow is retained).
+#: ``[valid → <to>]`` (a PRESENT but UNORDERABLE start: #9730 omits the start
+#: clause and the literal space before the arrow is retained — an ABSENT start
+#: renders no marker at all, so this shape never comes from a missing bound).
 _FLAG_CLOSED_WINDOW = re.compile(r"\[valid [^\]]*→")
 
 
