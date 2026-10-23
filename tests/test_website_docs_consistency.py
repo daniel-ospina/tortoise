@@ -685,14 +685,116 @@ def test_faq_cites_the_real_paper_title() -> None:
 #: FAQ cannot outrun what the store keeps (#9517).
 _CAPTURE_TURN_CAP = re.compile(r"^_CAPTURE_TURN_CAP\s*=\s*(\d+)", re.MULTILINE)
 
+#: The qualifier the clipper's own blank-retention path makes necessary (#9608).
+#: `_clip_capture_turn_content` returns an over-cap **whitespace-only** turn
+#: UNMARKED — it holds no readable text, so there is nothing to mark and nothing
+#: was lost (#4897 review rounds 12-14; load-bearing, because marking a
+#: marker-only turn let the v1 extractor mint it into a synthetic Point).
+#: "A turn over the window is kept WITH a truncation marker" is therefore a
+#: universal the shipped clipper refutes, so neither retention answer may state
+#: it unconditionally — both carry `#source-text`'s predicate instead.
+#:
+#: ⛔ THE PIN IS THE INVARIANT, NOT THIS WORDING. A phrase blacklist pins only the
+#: phrasings it happens to list: a reworded absolute ("… is stored with a
+#: truncation marker") passed the first version of this guard at the #9608 review.
+#: So every CLAUSE in either answer that mentions the marker must carry a
+#: condition on the cut — the regexes below — and a future editor rewording the
+#: condition ("every turn that loses readable text is marked", "a marker is added
+#: only when text is discarded") stays green. `_MARKER_CONDITIONAL` is the
+#: illustrative phrasing used in the failure messages only, never the gate.
+#:
+#: ⛔ TWO MEASURED BYPASSES (#9608 review cycle 2, P2), both now closed:
+#:  1. ``truncat|marker`` did not match the VERB ("any such cut is marked"), so a
+#:     false absolute phrased that way was never selected as a marker clause
+#:     while a true decoy in the same answer satisfied the gate. The verb is
+#:     therefore a mention — but ONLY inside the cut domain (`_MARKER_DOMAIN_RE`),
+#:     because a bare ``\bmark(?:ed|s|ing)\b`` made the answer's provenance clause
+#:     ("every extracted claim is marked with the source it was drawn from") a
+#:     marker clause and red a true rewording (#9608 review cycle 3, P2).
+#:  2. ``…[^.]{0,80}readable text`` matched **unreadable** text ("the extractor
+#:     drops unreadable text so that …") — the lookbehind closes it.
+#: The bare ``truncat`` stem is deliberately NOT a mention on its own: this file
+#: already records (#9515) that it matched an unrelated sentence about
+#: *truncated neighbourhoods*, and a pin that reds true copy gets deleted.
+#:
+#: ⛔ AND A CONDITION MUST CONDITION THE MARKER (#9608 review cycle 3, P3). Two
+#: branches that only *described* loss passed a false absolute: "…kept with a
+#: truncation marker naming its original length, so no readable text is lost"
+#: (a loss CLAIM — readable text IS discarded, only its length is recorded) and
+#: "…, and readable text is discarded". So the negated branch must reach a
+#: marker-absence object (``without`` / ``unmarked`` / ``silently``) and the
+#: passive branch must sit behind a subordinator (``if`` / ``when`` / ...).
+#:
+#: ⛔ CLAUSES ARE SPLIT ON ``[.!?;:]`` BUT NOT ON ``,`` — a semicolon decoy ("…kept
+#: with a truncation marker naming its original length; a cut that discards
+#: readable text is a rare case") must not borrow the condition from the next
+#: clause, while a comma is ordinary inside a single clause ("…carries a
+#: truncation marker, but only when text is discarded") and splitting there would
+#: red true copy.
+#:
+#: ⛔ AN ABSENCE DISCHARGE IS A CONDITION TOO (#9608 cycle 4, P3 — rot): the copy
+#: must be able to state the EXCEPTION this whole test is about ("a whitespace-only
+#: turn is returned unmarked, with no truncation marker"), and "holds
+#: non-whitespace" is the clipper's own predicate spelled out, so both discharge
+#: the rule. Without them the guard red the only sentence a maintainer would write
+#: to document the blank path.
+#:
+#: ⛔ KNOWN, DOCUMENTED TRADEOFFS, not oversights: a same-clause appositive that
+#: re-conditions the marker ("…naming its original length — a marker records a cut
+#: that discards readable text") and an anaphoric follow-on clause ("…; the same
+#: applies to a blank turn") are accepted, because the em dash and comma are the
+#: same punctuation that keeps true copy ("…naming the original length — whenever
+#: readable text is discarded") green. This is a smell-detector against an
+#: absolute, not a natural-language prover.
+_MARKER_MENTION_RE = re.compile(r"(?:truncat\w*\s+marker|marker\b)", re.I)
+_MARKER_VERB_RE = re.compile(r"\bmark(?:ed|s|ing)\b", re.I)
+#: The domain that makes a bare marker VERB a marker mention rather than ordinary
+#: prose (a claim "marked with the source" is provenance, not the capture marker).
+_MARKER_DOMAIN_RE = re.compile(
+    r"\b(?:truncat\w*|clip\w*|cut\w*|windows?|original length)\b", re.I
+)
+_MARKER_CONDITION_RE = re.compile(
+    r"(?:"
+    r"(?:discards?|loses?|drops?|removes?|sacrifices?)"
+    r"[^.;:\u2014]{0,80}(?<!un)(?:readable|legible) text"
+    r"|(?:no|nothing)\s+(?:readable|legible)\b[^.;:\u2014]{0,60}"
+    r"\b(?:without|unmarked|silently)\b"
+    r"|\b(?:if|when|whenever|where|unless)\b[^.;:\u2014]{0,40}"
+    r"(?:readable|legible) text\s+(?:is|would be|gets)\s+"
+    r"(?:lost|discarded|dropped|removed|cut)"
+    r"|only (?:when|if)\b|\bunless\b"
+    r"|\b(?:no|without)\s+(?:an?\s+)?(?:truncation\s+)?marker\b"
+    r"|\bunmarked\b"
+    r"|\bnon-whitespace\b"
+    r")",
+    re.I,
+)
+_MARKER_CONDITIONAL = "cut that discards readable text"
+_CLAUSE_SPLIT_RE = re.compile(r"(?<=[.!?;:])\s+")
+
+#: Floor under `_CAPTURE_TURN_CAP` for the copy's "naming the turn's original
+#: length" (#9608 review, P3). `_capture_truncation_marker` is
+#: `37 + len(str(total))` characters; inside a window smaller than that, the
+#: clipper falls back to the BARE sentinel (``…[truncated:``), which names no
+#: length, so the FAQ's claim would be false for EVERY readable cut. 64 is a
+#: CONSERVATIVE CUSHION, not the marker's width: it guarantees `keep >= 0` for any
+#: turn shorter than 10^27 characters (37 + 27 digits = 64). At the production
+#: 5,000 that fallback needs a >=4,964-digit total, i.e. unreachable — pinned so a
+#: lowered window reds the suite for the reason the copy depends on rather than
+#: only on the string match.
+_MARKER_WIDTH_FLOOR = 64
+
 
 def _capture_turn_cap() -> int:
     """How many code points of a captured turn are actually stored (`sdk.py`).
 
     Derived, not restated: `_clip_capture_turn_content` cuts every over-cap turn
-    to this many code points and appends the truncation marker, so a docs claim
-    about what "the source" retains is bounded by this number, and a change to
-    the constant must red the FAQ rather than silently falsify it.
+    to at most this many code points and marks the cut with the turn's original
+    length — EXCEPT a turn that holds no non-whitespace at all, which is returned
+    unmarked because nothing readable was discarded (#4897 review rounds 12-14;
+    #9608 for why that exception is what makes the copy conditional). So a docs
+    claim about what "the source" retains is bounded by this number, and a change
+    to the constant must red the FAQ rather than silently falsify it.
     """
     src = _read(SDK)
     m = _CAPTURE_TURN_CAP.search(src)
@@ -701,6 +803,25 @@ def _capture_turn_cap() -> int:
         "window move? The FAQ's source-retention answers are bound to it."
     )
     return int(m.group(1))
+
+
+def _marker_clauses(answer: str) -> list[str]:
+    """The CLAUSES in a FAQ answer that talk about the truncation marker.
+
+    Plain text via `_normalise` so the split is on rendered prose rather than on
+    markup (an `<a>` inside a clause would otherwise break it), split on
+    `_CLAUSE_SPLIT_RE` — see the note above on why a semicolon separates but a
+    comma does not.
+    """
+    return [
+        c
+        for c in _CLAUSE_SPLIT_RE.split(_normalise(answer))
+        if _MARKER_MENTION_RE.search(c)
+        or (
+            _MARKER_VERB_RE.search(c)
+            and _MARKER_DOMAIN_RE.search(c)
+        )
+    ]
 
 
 def _faq_answer(anchor: str) -> str:
@@ -737,8 +858,30 @@ def test_the_faq_source_retention_answers_disclose_the_capture_window() -> None:
 
     The window is read out of `tortoise/sdk.py`, so raising the cap without
     updating the copy, or wording the promise past the cap, is a red test.
+
+    #9608: disclosing the window and the marker is not enough — the marker is
+    CONDITIONAL. `_clip_capture_turn_content` returns an over-cap
+    whitespace-only turn UNMARKED (nothing readable was discarded), so
+    `#missed`'s "is kept with a truncation marker" was an absolute the clipper
+    refutes — the same self-defeating-claim failure #9515 / #9510 exist to stop.
+
+    ⛔ SO THE PIN IS THE INVARIANT, NOT A PHRASE (#9608 review): every CLAUSE in
+    either answer that mentions the marker must state the condition on the cut.
+    A banned-phrase list only catches the wordings it lists — the first version of
+    this guard passed a reworded absolute ("is stored with a truncation marker")
+    and red a true rewording, which is the rot `_RULING_REWRITES` exists to avoid.
     """
-    window = f"{_capture_turn_cap():,}"
+    cap = _capture_turn_cap()
+    assert cap >= _MARKER_WIDTH_FLOOR, (
+        f"_CAPTURE_TURN_CAP is {cap} — below the conservative "
+        f"{_MARKER_WIDTH_FLOOR}-character floor at which the window can still "
+        "reserve a marker that carries the original length for any turn the store "
+        "can physically hold (tortoise/sdk.py::_capture_truncation_marker is "
+        "37 + digits, and falls back to a length-free sentinel when the window "
+        "cannot hold it), so the FAQ's 'a truncation marker naming the turn's "
+        "original length' would be false for every readable cut (#9608)."
+    )
+    window = f"{cap:,}"
     for anchor in ("source-text", "missed"):
         answer = _faq_answer(anchor)
         assert window in answer, (
@@ -752,6 +895,23 @@ def test_the_faq_source_retention_answers_disclose_the_capture_window() -> None:
             "but not that a clipped turn is marked with its original length — "
             "the marker is what makes the stored turn honest to a reader."
         )
+        marker_clauses = _marker_clauses(answer)
+        assert marker_clauses, (
+            f"website/faq.html#{anchor} lost every clause that discloses the "
+            "truncation marker the capture path writes (#9608)."
+        )
+        for clause in marker_clauses:
+            assert _MARKER_CONDITION_RE.search(clause), (
+                f"website/faq.html#{anchor} states the truncation marker WITHOUT "
+                f"the condition that makes it true (#9608): {clause!r}. "
+                "tortoise/sdk.py::_clip_capture_turn_content returns an over-cap "
+                "WHITESPACE-ONLY turn UNMARKED — no readable text was discarded, "
+                "so there is nothing to mark and nothing was lost — which refutes "
+                "an unqualified 'a turn over the window is kept with a truncation "
+                "marker'. Reuse #source-text's predicate: 'a "
+                f"{_MARKER_CONDITIONAL} carries a truncation marker naming the "
+                "turn's original length'."
+            )
 
 
 #: #9510's ruling names each of these FAQ passages by anchor, quotes the
@@ -2346,7 +2506,8 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
     The stored turn is shaped once, on the way in: `_CAPTURE_TURN_CAP` (read from
     `tortoise/sdk.py`, not restated here) routes every writer through
     `_clip_capture_turn_content`, which cuts to the cap AND appends a marker
-    carrying the true original length ("no cut is silent"), and
+    carrying the true original length ("no cut is silent") — except a turn that
+    holds no non-whitespace at all, returned unmarked (#4897 / #9608) — and
     `_redact_turn_contents` replaces credential-shaped spans in place (#4911) —
     both before the write. So the absolute "the source is never rewritten" is
     false of the shipped capture path, and this page is the one that has to say

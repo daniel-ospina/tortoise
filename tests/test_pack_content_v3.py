@@ -37,11 +37,11 @@ REPO_PACKS_DIR = Path(__file__).resolve().parents[1] / "packs"
 @pytest.fixture(scope="module")
 def registry():
     """The real repo registry — every shipped pack (agent-ops joined dev,
-    marketing, product-strategy, project-management; venture #2725),
-    converted to manifest v3."""
+    marketing, product-strategy, project-management; venture #2725; portfolio
+    #9663), converted to manifest v3."""
     r = PackRegistry(REPO_PACKS_DIR)
     n = r.load_all()
-    assert n == 6, f"expected 6 packs to load, got {n}"
+    assert n == 7, f"expected 7 packs to load, got {n}"
     assert not r.errors, f"whole-registry compile must be clean: {r.errors}"
     return r
 
@@ -51,8 +51,8 @@ class TestWholeRegistryCompile:
 
     def test_all_shipped_packs_load_with_zero_errors(self, registry):
         assert set(registry.packs) == {
-            "agent-ops", "dev", "marketing", "product-strategy", "pm",
-            "venture",
+            "agent-ops", "dev", "marketing", "portfolio", "product-strategy",
+            "pm", "venture",
         }
         assert not registry.errors
 

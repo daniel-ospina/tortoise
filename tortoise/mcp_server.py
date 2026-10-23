@@ -158,9 +158,14 @@ def _validation_error_kind(exc: PydanticValidationError) -> str:
 def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
     """Map a dispatch exception to (status, error_kind).
 
-    validation_error → pydantic argument-validation failures (raised raw or
-        wrapped by fastmcp's ValidationError, whose __cause__ carries the
-        pydantic errors); error_kind = '<error_type>:<field>'.
+    validation_error → an ARGUMENT refusal: pydantic argument-validation
+        failures (raised raw or wrapped by fastmcp's ValidationError, whose
+        __cause__ carries the pydantic errors) with error_kind =
+        '<error_type>:<field>'; a `graph` argument that names no reachable
+        graph (`mcp_auth.GraphTargetError`, raised as a `ToolError` carrying its
+        own machine-readable `code`) with error_kind = that code, e.g.
+        `invalid_graph` — the caller's input, not a server fault, so it must
+        not be bucketed with `exec_error`.
     auth_error → AuthorizationError.
     exec_error → everything else; error_kind = the exception class name,
         unwrapping fastmcp's ToolError/FastMCPError wrapper to the underlying
@@ -183,6 +188,14 @@ def _classify_mcp_call_error(exc: BaseException) -> tuple[str, str | None]:
             kind_exc = kind_exc.__cause__
         else:
             break
+    if isinstance(kind_exc, _mcp_auth.GraphTargetError):
+        # #9340: the `graph` argument named no graph this caller may reach.
+        # That is a CALLER-side argument refusal, not a server fault: bucketing
+        # it as `exec_error / ToolError` made the class unmeasurable (and left
+        # `GraphTargetError.code` written by nobody), so "how often do
+        # connectors send an invalid graph" — the question this new surface most
+        # needs to answer — was unanswerable from the mcp_tool_call series.
+        return "validation_error", getattr(kind_exc, "code", None) or "invalid_graph"
     return "exec_error", type(kind_exc).__name__
 
 
@@ -1282,6 +1295,139 @@ def _schema_error_result(result, name: str, schema: dict) -> ToolResult:
     )
 
 
+def _take_graph_argument(name: str,
+                         arguments: dict[str, Any] | None) -> str | None:
+    """Strip a tool call's optional `graph` argument, or refuse it (#9340).
+
+    The graph is a TOOL ARGUMENT, not a token claim (the owner's 2026-10-22
+    decision on #9340): a graph is working context inside one workspace, so a
+    connector selects it per call and the token stays `(user, workspace,
+    scope)`. Resolution + authorisation live in `mcp_auth` and are re-read on
+    EVERY call — this function only decides whether the argument applies to
+    THIS tool and turns a refusal into a tool error.
+
+    Applied at the single dispatch point rather than inside each tool for two
+    reasons: the dispatch point is where every tenant call already crosses
+    (`_enforce_mcp_tool_scope` sits a few lines above), and a per-tool edit
+    would leave the 70-odd tools that never got one silently pinned to the
+    default graph — the exact defect #9340 names.
+
+    The key is POPPED IN PLACE, so the dict the middleware chain carries
+    downstream no longer holds it: without that, `call_tool` re-entry
+    (`run_middleware=False`) would see the argument again, and the tool body
+    would receive a keyword its signature does not declare.
+
+    The excluded tools REFUSE rather than ignore: a call that names a graph on
+    a tool that does not target graphs is under-specified in the other
+    direction, and quietly dropping the argument is how a caller concludes
+    "that is the graph I asked for" about a workspace-wide operation.
+    """
+    if not isinstance(arguments, dict) or "graph" not in arguments:
+        return None
+    ref = arguments.pop("graph")
+    if name in _mcp_auth.GRAPH_ARGUMENT_EXCLUDED:
+        raise ToolError(
+            f"`{name}` does not take a `graph` argument — it targets the "
+            "workspace or names its graph explicitly. Remove the argument.")
+    return ref
+
+
+async def _resolve_graph_argument(ref: str | None,
+                                  stack: contextlib.ExitStack) -> None:
+    """Resolve a stripped `graph` OFF the event loop, then scope the request.
+
+    `plan_graph_target` reads the reachable graph set (a control-plane query —
+    up to three synchronous PostgREST round trips), so it rides
+    `asyncio.to_thread`; a ContextVar set inside that thread would die with the
+    thread's context copy, so the plan is applied back here with
+    `use_graph_target`.
+
+    A selected CUSTOM graph also installs the RECORD tenant for the rest of the
+    request (`record_tenant_for_graph`), entered on the caller's `stack` so it
+    exits with the dispatch. Without it an armed record write under an org-wide
+    (OAuth) credential — the connection this feature exists for — would be
+    refused `no_tenant`, or, under a declared single-tenant env pair, filed
+    under a DIFFERENT graph than the data went to.
+    """
+    if ref is None:
+        return
+    # The read is BOUNDED by the same transport budget the dispatch itself
+    # spends (#3834): a degraded control plane must produce a legible, retryable
+    # refusal instead of silently consuming the caller's whole budget and then
+    # having the dispatch abandoned mid-write (a retry would duplicate it). On
+    # stdio there is no transport arrival, so the full bound applies — the same
+    # rule `_await_under_mcp_wait_bound` uses.
+    arrival = _wait_bound_arrival()
+    remaining = (float(_mcp_auth._TRANSPORT_WAIT_BOUND_S) if arrival is None else max(
+        0.0, _mcp_auth._TRANSPORT_WAIT_BOUND_S - (_time.monotonic() - arrival)))
+    # `asyncio.timeout`, NOT `wait_for`: `wait_for` raises `TimeoutError` for
+    # BOTH its own deadline and any builtin `TimeoutError` (`socket.timeout` IS
+    # `TimeoutError` on 3.12) escaping the lookup — a control-plane read that
+    # times out would be reported as a breach of OUR budget, discarding the
+    # real cause. `cm.expired()` is the only thing that distinguishes them (the
+    # same conflation `_await_under_mcp_wait_bound` guards for handler bodies).
+    budget = None
+    try:
+        # `to_thread` is this layer's existing idiom for a short blocking read
+        # (`mcp_auth` runs the geo check the same way); bounded above, so a slow
+        # control plane cannot hold a worker indefinitely.
+        async with asyncio.timeout(remaining) as budget:
+            plan = await asyncio.to_thread(
+                _mcp_auth.plan_graph_target, ref)
+    except TimeoutError:
+        if budget is None or not budget.expired():
+            # Raised INSIDE the lookup, not by this deadline: re-raise so the
+            # caller sees the real failure instead of a bogus "retry after Ns".
+            raise
+        raise ToolError(
+            f"{_mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE} (The graph lookup "
+            f"exceeded the wait budget.) Retry after "
+            f"{_mcp_auth._TRANSPORT_WAIT_RETRY_AFTER_S}s.") from None
+    except _mcp_auth.GraphTargetError as exc:
+        # ToolError → an is_error tool result carrying the actionable message
+        # (naming the graphs the caller CAN reach), the same shape the budget
+        # refusal above uses. The CAUSE is kept deliberately (`from exc`, not
+        # `from None`): `_classify_mcp_call_error` unwraps it to
+        # `GraphTargetError` and records the refusal as an ARGUMENT error
+        # (`validation_error / invalid_graph`) instead of an un-coded
+        # `exec_error / ToolError` no series can count.
+        raise ToolError(str(exc)) from exc
+    _mcp_auth.use_graph_target(plan)
+    tenant = _mcp_auth.record_tenant_for_graph(plan)
+    if tenant is not None:
+        from tortoise.record_writer import use_record_tenant
+
+        stack.enter_context(use_record_tenant(*tenant))
+
+
+def _dispatch_graph_name() -> str:
+    """The graph NAME a handler must address for THIS dispatch (#9340).
+
+    Some handlers name their graph themselves and hand the name to
+    `tortoise.navigation`, whose `db.select_graph(graph_name)` is what actually
+    picks the graph — `_get_org_sdk()`'s scoping alone cannot reach it. They
+    must take the name from HERE, or `graph=` is advertised on them and then
+    silently ignored: the call is scoped to the selected graph, the read lands
+    on the workspace default, and the caller gets HTTP 200 from the wrong
+    graph. That is the silent-wrong-graph class #9340 exists to close, so the
+    rule lives in one function rather than in each handler.
+
+    HTTP/self-host only — callers keep their stdio branch (it honours the
+    handler's own `graph_name` argument for operator use). The namespace can
+    only be non-None when `plan_graph_target` matched a `public.graphs` row
+    whose own `org_id` is THIS workspace (and refused a graph-bound credential
+    a re-target), so the value is the resolver's verified row, never caller
+    input — the #236 cross-tenant guard is intact.
+    """
+    # Read through `_mcp_auth` rather than a module-level import of the
+    # ContextVar: adding that global binding re-compiles
+    # `tortoise_session_capture`'s code object (its own local import of the
+    # same name compiles differently), which re-stamps an owner-reviewed
+    # `served_from` row for a handler this change does not touch.
+    return (_mcp_auth._current_graph_namespace.get()
+            or f"org_{_current_org_id.get()}")
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -1317,7 +1463,14 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
     # the tool body (see `_dispatch_safe_failures`).
     _safe_failure_token = _dispatch_safe_failures.set([])
     t0 = _time.perf_counter()
+    graph_scope = contextlib.ExitStack()
     try:
+        # #9340: scope this dispatch to the graph the CALL named (no-op when it
+        # named none). Inside the try so a refusal is classified and counted
+        # like every other tool-level failure rather than bypassing the
+        # telemetry seam.
+        await _resolve_graph_argument(
+            _take_graph_argument(name, arguments), graph_scope)
         result = await _await_under_mcp_wait_bound(
             name, arguments, version=version, task_meta=task_meta)
         # #3675: the items this call RETURNED. Counted here, before the status
@@ -1433,6 +1586,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # caller's context (None outside a dispatch), so the list cannot outlive
         # this call.
         _dispatch_safe_failures.reset(_safe_failure_token)
+        graph_scope.close()
         try:
             _emit_mcp_tool_call_telemetry(org_id, name, status, latency_ms,
                                           error_kind, result_count)
@@ -3124,10 +3278,12 @@ def tortoise_entity_profile(entity_id: str, hops: int = 2,
     """
     from tortoise.navigation import entityProfile
     proj = _get_org_sdk()._get_proj()
-    # #236: HTTP mode ignores user-supplied graph_name — org graph authoritative
-    # (cross-tenant injection guard). Stdio mode honors it (operator use).
+    # #236: HTTP mode ignores the USER-SUPPLIED graph_name — org graph
+    # authoritative (cross-tenant injection guard). Stdio honors it (operator
+    # use). #9340: the graph the call SELECTED still wins over the workspace
+    # default, or this tool advertises an argument it then ignores.
     if _transport_mode.get() == "http":
-        graph_name = f"org_{_current_org_id.get()}"
+        graph_name = _dispatch_graph_name()
     return _safe(entityProfile, proj.db, graph_name, entity_id,
                   hops=hops, pointKind=pointKind, confidenceMin=confidenceMin)
 
@@ -3140,9 +3296,10 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
     """
     from tortoise.navigation import tortoise_traverse as _traverse
     proj = _get_org_sdk()._get_proj()
-    # #236: HTTP mode ignores user-supplied graph_name (cross-tenant guard)
+    # #236: HTTP mode ignores the user-supplied graph_name (cross-tenant
+    # guard); #9340: the SELECTED graph is still honoured over the default.
     if _transport_mode.get() == "http":
-        graph_name = f"org_{_current_org_id.get()}"
+        graph_name = _dispatch_graph_name()
     return _safe(_traverse, proj.db, graph_name, entity_id, max_hops)
 
 
@@ -3265,14 +3422,24 @@ def tortoise_diary_read(agent_name: str, last_n: int = 10,
 
 def tortoise_list_graphs() -> list[str]:
     """List graph names. HTTP: only the calling org's own graphs (exact
-    `org_{org_id}` / legacy `team_{org_id}` equality — no cross-tenant
-    enumeration). Stdio: full list (operator context).
-    Alias → overview(section='graphs') (epic #888 W3)."""
+    `org_{org_id}` / legacy `team_{org_id}` equality, plus each of the org's
+    OTHER graphs' namespaces — no cross-tenant enumeration). Stdio: full list
+    (operator context).
+    Alias → overview(section='graphs') (epic #888 W3).
+
+    #9340: this is the DISCOVERY surface for the `graph` tool argument, so a
+    workspace that holds more than one graph must be able to see them here. It
+    used to return ONLY the tenant namespace, so a connector could not even
+    learn that a second graph existed — one half of the defect the argument
+    fixes. The extra names are taken from the org's OWN `graph_list` rows, not
+    from a namespace-prefix test: `org_<id>_` is also the prefix of a DIFFERENT
+    org whose id begins with `<id>_`, and a prefix test would leak that
+    tenant's graph name."""
     graphs = _safe(_get_org_sdk().list_graphs)
     if not isinstance(graphs, list):
         return graphs
     if _transport_mode.get() == "http":
-        from tortoise.mcp_auth import _current_org_id
+        from tortoise.mcp_auth import _current_org_id, reachable_graph_rows
         org_id = _current_org_id.get()
         # #3543: the tenant graph is `org_{org_id}` post-rename and
         # `team_{org_id}` before it; no data migration rewrites the stored
@@ -3280,6 +3447,13 @@ def tortoise_list_graphs() -> list[str]:
         # Same dual probe as hosted_api._graph_has_org_namespace — the sites
         # must agree or a legacy org's graphs become invisible here alone.
         own = {f"org_{org_id}", f"team_{org_id}"} if org_id else set()
+        if org_id:
+            # #9340: a control-plane failure here must not widen the answer.
+            # The tenant filter above already holds on its own, so a degraded
+            # read returns exactly the pre-#9340 list rather than everything.
+            with contextlib.suppress(Exception):
+                own |= {r["namespace"] for r in reachable_graph_rows(org_id)
+                        if r.get("namespace")}
         return [g for g in graphs if g in own]
     return graphs
 
@@ -3466,7 +3640,10 @@ def tortoise_analyze(question: str,
             # #236: HTTP mode must use the org graph, NOT the hardcoded
             # "tortoise" graph — that hardcode bypasses org isolation via
             # db.select_graph() (cross-tenant read). Stdio keeps "tortoise".
-            gname = f"org_{_current_org_id.get()}" if _transport_mode.get() == "http" else "tortoise"
+            # #9340: the SELECTED graph wins over the workspace default, or
+            # the anchors come from a different graph than the analysis runs on.
+            gname = (_dispatch_graph_name()
+                     if _transport_mode.get() == "http" else "tortoise")
             profile = entityProfile(proj.db, gname, entityId, hops=2)
             ids = {entityId}
             for category in profile.get("connected", {}).values():
