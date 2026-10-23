@@ -17584,8 +17584,10 @@ class TortoiseSDK:
         return "unidirectional" if op_type == "NAND" else "bidirectional"
 
     def _check_connection(self, index: int, conn: Any,
-                          violations: list[dict]) -> None:
-        """Check 4 — the connection contract (pure; no graph access).
+                          violations: list[dict],
+                          effective_route: str | None) -> None:
+        """Check 4 — the connection contract (pure of its own graph access;
+        the endpoint-kind answer, when one is needed, is handed IN).
 
         exactly one of relation/operator; from/to presence; to shape/emptiness
         (zero-target rows c8(i-iv)); operator/relation vocabulary; self-edge
@@ -17595,6 +17597,21 @@ class TortoiseSDK:
         direction/confidence/weight — plus ``mitigation`` since #5244, because
         a structural edge has no operator bridge to damp; operator route
         carries confidence/weight).
+
+        ``effective_route`` (#9173) is the route the write loop will ACTUALLY
+        take — the request PROMOTED by the endpoint-kind gate
+        (:meth:`_effective_route` / :meth:`_effective_connection_routes`,
+        owner ruling 2026-10-13, #8499). It scopes the multi-item-``to`` arm,
+        which is a DIRECT-edge rule (``create_direct_edge`` takes ONE target;
+        the operator route fans out). It is passed in rather than probed here
+        so the caller keeps its one graph read per bundle/connection — and
+        because Phase 2 has the resolved ids and no bundle to read refs from.
+        The parameter is REQUIRED (no default) on purpose: a default of
+        ``None`` would silently restore the pre-#9173 behaviour for any caller
+        that forgot it, and judging a REQUEST is exactly the defect it closes
+        (#8623, #9173). ``None`` is still accepted, and means "the caller has no
+        endpoints at all, so the request is all there is" — the route it yields
+        is the request, never a guess.
         """
         if not isinstance(conn, dict):
             return  # dict-ness already reported by check 1
@@ -17678,7 +17695,19 @@ class TortoiseSDK:
                                f"address the same endpoint (EP cavity risk)",
                 })
             route = self._connection_route(conn)
-            if route == "direct" and isinstance(tos, list) and len(tos) > 1:
+            # (#9173) DIRECT-edge-scoped, like the terminal guard below: the
+            # rule exists because `create_direct_edge` takes ONE target — and
+            # its own remedy says multi-input fan-out belongs on the operator
+            # route. A Point-bearing pair IS on the operator route without the
+            # caller writing anything (the endpoint-kind gate promotes it), so
+            # judging this arm by the REQUEST refused the very shape the remedy
+            # prescribes: measured at this head, the plain spelling refused and
+            # the identical connection with `reify: true` accepted and
+            # committed (the #8623 residual arm).
+            write_route = (route if effective_route is None
+                           else effective_route)
+            if write_route == "direct" and isinstance(tos, list) \
+                    and len(tos) > 1:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] multi-item 'to' "
@@ -17698,6 +17727,18 @@ class TortoiseSDK:
             if route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
                 # confidence/weight (they are plain direct-edge attributes).
+                # ⛔ #9173 review — DELIBERATELY left on the REQUEST route, not
+                # `write_route`: a promoted Point-bearing plain IMPL already
+                # passes these attributes through and `create_operator` DROPS
+                # them (measured at this head: a SINGULAR plain IMPL between
+                # Points with `confidence: 0.5` validates clean and writes an
+                # edge without it). Scoping this arm by the effective route
+                # would turn that silently-accepted bundle into a refusal — a
+                # new refusal for every existing caller, outside #9173's scope.
+                # The silent drop is a PRE-EXISTING defect on both route
+                # spellings, tracked as its own issue; when it is fixed this arm
+                # must move WITH the multi-item arm above, or the two rules stay
+                # inconsistent inside one function.
                 for key in ("confidence", "weight"):
                     if key in conn:
                         violations.append({
@@ -18081,7 +18122,8 @@ class TortoiseSDK:
                        f"id is {node_id!r}); {remedy}",
         }
 
-    def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
+    def _check_endpoints(self, bundle: dict, violations: list[dict],
+                         effective_routes: list[str] | None = None) -> None:
         """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
         cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
         cycle-17/18). A connection endpoint must carry one of the four
@@ -18093,6 +18135,33 @@ class TortoiseSDK:
         (superseded/retracted) endpoints (#2062/#2422). Bundle-local refs
         resolving to EXISTING (dedup-hit) terminal points are Phase-1
         violations (never a Phase-2 raise).
+
+        ⛔ Which connections are "direct-edge" is the EFFECTIVE route
+        (``effective_routes``, positionally aligned with
+        ``bundle['connections']``; ``None`` computes
+        :meth:`_effective_connection_routes` here), never the
+        ``_connection_route`` REQUEST: every leg scoped by ``route`` below is a
+        prediction about ``create_direct_edge``, and a Point-bearing pair never
+        reaches that primitive — the endpoint-kind gate (#8499) reifies it into
+        an operator, which accepts terminal endpoints and shares the node. Judging
+        by the request refused those connections outright and offered only
+        ``reify: true`` as an escape from a promotion that needed no anchor
+        (#8623's residual class, #9173).
+
+        ⛔ CONSEQUENCE, stated so a future reader is not misled: after #9173 the
+        **bundle-local dedup-hit guard** (the ``content_hash``/``content+kind``
+        leg at the bottom of this check, which resolves a ``points`` item ref)
+        is unreachable BY CONSTRUCTION — a `points` ref makes the pair
+        Point-bearing, so its effective route is always ``operator``. It is
+        retained, not deleted: it is a prediction about
+        ``create_direct_edge``, and narrowing the endpoint-kind gate (#8499) is
+        the only change that would make it live again.
+
+        The by-name / declared-status arms in the item loop are NOT that: they
+        are the ENTITY legs (``section == "entities"``), an Object/Subject/Event
+        pair keeps the direct route, and they stay live — they are what the
+        direct-edge terminal guard now governs, and they are pinned by
+        ``tests/test_ingest_event_endpoint.py``.
 
         #7925: the label set is the SAME on the operator route
         (reify/mitigation/part-whole → create_operator) and the direct route,
@@ -18243,13 +18312,21 @@ class TortoiseSDK:
                     local[item["ref"]] = (section, item)
         external: set[str] = set()
         conns: list[tuple[int, dict, str, list]] = []
+        # (#9173) The EFFECTIVE route, resolved ONCE per bundle: every leg
+        # scoped by `route` below predicts what the write PRIMITIVE will do,
+        # and the primitive is chosen by the endpoint-kind gate, not by the
+        # connection item. `_effective_connection_routes` runs one graph read
+        # for the whole bundle (bundle-local point refs resolve without one).
+        routes = (effective_routes if effective_routes is not None
+                  else self._effective_connection_routes(bundle))
         for i, conn in enumerate(bundle.get("connections") or []):
             if not isinstance(conn, dict) or "operator" not in conn:
                 continue
             frm = conn.get("from")
             tos = conn.get("to")
             to_list = tos if isinstance(tos, list) else [tos]
-            route = self._connection_route(conn)
+            route = routes[i] if i < len(routes) \
+                else self._connection_route(conn)
             for v in [frm] + to_list:  # noqa: RUF005
                 if isinstance(v, str) and v not in local:
                     external.add(v)
@@ -18583,6 +18660,11 @@ class TortoiseSDK:
                                        f"are rejected (#2422)",
                         })
         # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
+        # (#9173) Unreachable for bundle-local POINT refs: a `points` ref makes
+        # the pair Point-bearing, so `route` above is now the EFFECTIVE route
+        # (always 'operator' for such a pair) and this leg's `route != "direct"`
+        # guard skips it. Kept as the prediction of `create_direct_edge` it was
+        # written as — see `_check_endpoints`' docstring.
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue
@@ -18847,7 +18929,8 @@ class TortoiseSDK:
                     })
 
     def _check_endpoint_race(self, index: int, conn: dict,
-                             refs: dict[str, str], violations: list[dict]) -> None:
+                             refs: dict[str, str], violations: list[dict],
+                             effective_route: str | None = None) -> None:
         """Phase-2 defense-in-depth (check 3): re-verify endpoints right
         before the connection write — a node deleted/superseded between
         Phase-1 validation and this write is the race class this exists for.
@@ -18863,12 +18946,19 @@ class TortoiseSDK:
         only)."""
         if not isinstance(conn, dict) or "operator" not in conn:
             return
-        route = self._connection_route(conn)
         frm = conn.get("from")
         tos = conn.get("to")
         vals = []
         for v in ([frm] + (tos if isinstance(tos, list) else [tos])):
             vals.append(refs.get(v, v) if isinstance(v, str) else v)
+        # (#9173) The EFFECTIVE route: refs are resolved HERE, so the
+        # endpoint-kind gate can be asked before the write — which is what
+        # makes this a check on the primitive that will run rather than on the
+        # connection item the caller wrote. `effective_route` is that answer
+        # already resolved by the caller (one graph read per connection, shared
+        # with `_check_connection` and the write branch); `None` resolves it.
+        route = (effective_route if effective_route is not None
+                 else self._effective_route(conn, vals))
         external = {v for v in vals if isinstance(v, str)}
         info = self._fetch_endpoint_info(external)
         for v in vals:
@@ -18923,6 +19013,38 @@ class TortoiseSDK:
                                f" — new direct edges to terminal points are "
                                f"rejected (#2422)",
                 })
+
+    def _effective_route(self, conn: dict, node_ids: list[str]) -> str:
+        """The route this connection WILL be written as, given its resolved
+        (or, in Phase 1, resolved-as-far-as-knowable) endpoints: the
+        `_connection_route` REQUEST, promoted to ``'operator'`` when the
+        endpoint-kind gate (:meth:`_point_mediated_route`, owner ruling
+        2026-10-13, #8499) forbids the operator-less shape for these ids.
+
+        The shared declaration is the PROBE (:meth:`_point_bearing_ids`), so the
+        boolean question here and the per-id answer
+        :meth:`_effective_connection_routes` needs cannot drift apart. The
+        composition itself has two spellings, and BOTH must be kept in step:
+
+        - this one, for callers that hold resolved ids — the write loop (step 4),
+          ``_check_endpoint_race``, and ``_check_connection``'s Phase-2 call;
+        - :meth:`_effective_connection_routes`, for Phase 1, which must ALSO
+          resolve bundle-local refs (they have no node yet, so no graph probe can
+          see them, but step 2 mints each as a plain ``:Point``).
+
+        A divergence between the two is the failure mode that produces a Phase-2
+        raise on an already-partially-mutated graph, so a change to the gate
+        belongs in both.
+
+        ``node_ids`` may hold non-strings (a shape violation another check
+        owns); they are simply not probed.
+        """
+        route = self._connection_route(conn)
+        if route == "direct":
+            ids = [i for i in node_ids if isinstance(i, str)]
+            if ids and self._point_mediated_route(ids):
+                return "operator"
+        return route
 
     def _effective_connection_routes(self, bundle: dict) -> list[str]:
         """The EFFECTIVE route of EVERY connection item, positionally aligned
@@ -19034,7 +19156,8 @@ class TortoiseSDK:
             return True  # mitigation-reason conflict, same-label pairs
         return False
 
-    def _check_duplicates(self, bundle: dict, violations: list[dict]) -> None:
+    def _check_duplicates(self, bundle: dict, violations: list[dict],
+                          effective_routes: list[str] | None = None) -> None:
         """Check 7 — intra-bundle duplicate connections (§5.2.7).
 
         Identical duplicates (same from/to/operator with identical direction
@@ -19061,7 +19184,8 @@ class TortoiseSDK:
         # operator dedup key includes `label`, so both operators commit).
         # Resolved ONCE per bundle: the predicate is pairwise, and each probe
         # is a graph read.
-        routes = self._effective_connection_routes(bundle)
+        routes = (effective_routes if effective_routes is not None
+                  else self._effective_connection_routes(bundle))
         for a in range(len(ops)):
             for b in range(a + 1, len(ops)):
                 ia, ca = ops[a]
@@ -19203,10 +19327,23 @@ class TortoiseSDK:
                             self._check_kind(_value, i, violations)
         for i, conn in enumerate(bundle.get("connections") or []):
             self._check_item_shape("connections", i, conn, violations)
-            self._check_connection(i, conn, violations)
+        # (#9173) ONE effective-route resolution per bundle — the request
+        # PROMOTED by the endpoint-kind gate (#8499). Every Phase-1 rule that is
+        # scoped to the direct edge (the multi-item `to` arm in
+        # `_check_connection`, and the terminal/self-edge legs in
+        # `_check_endpoints` + `_check_duplicates`) reads THIS, because those
+        # legs predict what `create_direct_edge` will do and a Point-bearing
+        # pair never reaches it. Resolved once here so the three checks share
+        # one graph read instead of repeating it (#8623 did the same for the
+        # duplicate-conflict label arm).
+        effective_routes = self._effective_connection_routes(bundle)
+        for i, conn in enumerate(bundle.get("connections") or []):
+            self._check_connection(
+                i, conn, violations,
+                effective_routes[i] if i < len(effective_routes) else None)
         self._check_refs(bundle, violations)
-        self._check_endpoints(bundle, violations)
-        self._check_duplicates(bundle, violations)
+        self._check_endpoints(bundle, violations, effective_routes)
+        self._check_duplicates(bundle, violations, effective_routes)
         self._check_gated_status(bundle, promotion_policy, violations)
         return violations
 
@@ -19726,8 +19863,25 @@ class TortoiseSDK:
         for i, conn in enumerate(bundle.get("connections") or []):
             viols = []
             self._check_item_shape("connections", i, conn, viols)
-            self._check_connection(i, conn, viols)
-            self._check_endpoint_race(i, conn, refs, viols)
+            # (#9173) Phase 2 has the resolved ids, so the multi-item arm is
+            # judged by the route the write below will actually take — the
+            # same answer Phase 1 read from `_effective_connection_routes`.
+            # Passing the REQUEST here would make Phase 2 refuse a bundle
+            # Phase 1 accepted (the parity break this parameter closes).
+            # Resolved ONCE per connection and handed to both Phase-2 checks
+            # and to the write branch below: `_effective_route` is a graph
+            # read (`_point_bearing_ids`), and the three call sites ask the
+            # same question about the same ids.
+            _eff = None
+            if isinstance(conn, dict) and "operator" in conn:
+                _to_v = conn.get("to")
+                _ids = [refs.get(x, x) if isinstance(x, str) else x
+                        for x in [conn.get("from"),
+                                  *(_to_v if isinstance(_to_v, list)
+                                    else [_to_v])]]
+                _eff = self._effective_route(conn, _ids)
+            self._check_connection(i, conn, viols, _eff)
+            self._check_endpoint_race(i, conn, refs, viols, _eff)
             if viols:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             src = refs.get(conn["from"], conn["from"])
@@ -19763,8 +19917,10 @@ class TortoiseSDK:
                 # endpoint) and True for any Point-bearing one, so the
                 # operator-mediated structure is chosen where the ruling
                 # requires it.
-                _route = self._connection_route(conn)
-                if _route == "direct" and self._point_mediated_route([src, *dsts]):
+                _request_route = self._connection_route(conn)
+                _route = (_eff if _eff is not None
+                          else self._effective_route(conn, [src, *dsts]))
+                if _request_route == "direct" and _route == "operator":
                     self._append_warning(
                         f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
                         f"plain IMPL/NAND connection between :Point endpoints is "
@@ -19774,7 +19930,6 @@ class TortoiseSDK:
                         f"Point's relations claim. Reified automatically; pass "
                         f"`reify: true` to make the intent explicit."
                     )
-                    _route = "operator"
                 if _route == "direct":
                     edge_res = self.create_direct_edge(
                         op_type, src, dsts[0],
