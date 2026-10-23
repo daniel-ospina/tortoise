@@ -386,8 +386,8 @@ Non-Point entities skip EP annotation (no confidence breakdown in results).
 
 Kind values are expanded through pack registries before queries execute. When you search for a kind like `WorkItem`, the system automatically includes:
 
-- **subclassOf**: Subclasses registered in packs (e.g., `dev:issue`, `pm:task`)
-- **equivalentTo**: Bidirectional equivalents (e.g., `dev:issue` ↔ `pm:task`)
+- **subclassOf**: Subclasses registered in packs (e.g., `dev:issue`, `pm:issue`)
+- **equivalentTo**: Bidirectional equivalents (e.g., `dev:issue` ↔ `pm:issue`)
 
 This means `tortoise_search(query="auth bug", kind="WorkItem")` matches both dev and PM work items automatically. No manual kind expansion needed.
 
@@ -476,7 +476,7 @@ Packs declare what KINDS and RELATIONS can exist:
 sdk.list_relations()  # returns fromKind/toKind/mechanism triplets
 
 # What kinds does a pack declare (including subclass/equivalence expansion)?
-sdk.expand_kind("WorkItem")  # returns ["dev:issue", "pm:task", ...]
+sdk.expand_kind("WorkItem")  # returns ["WorkItem", "dev:issue", "pm:issue", ...]
 ```
 
 ## Discovery Checklist
