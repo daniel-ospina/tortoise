@@ -308,6 +308,98 @@ def test_a_duplicate_identity_is_measured_not_merely_described():
     assert any("one identity" in f["finding"] for f in result["findings"])
 
 
+def test_a_duplicate_written_as_a_point_is_still_a_duplicate():
+    """The gold's OWN measurable: ">1 node named Northwind means the duplicate
+    was written as a Point" (`inputs.json` `notes`).
+
+    The rule filtered the node set to Object/Subject, so the seeded Object plus a
+    same-name Point matched nothing and the input built to produce a duplicate
+    scored clean — a false PASS on the one number Step 3 reads as its acceptance
+    delta (#9695 review P1). `_same_identity` already keeps a claim apart from a
+    duplicate, so the layer test was doing no work of its own.
+    """
+    gold = _gold(
+        {
+            "id": "x",
+            "duplicate_expected": {"of": "Northwind Logistics", "max_nodes": 1},
+            "expect": [],
+        }
+    )
+    as_point = _record(
+        nodes=[
+            _node("Object", "Northwind Logistics", kind="other"),
+            _node("Point", "Northwind Logistics", kind="statement"),
+        ]
+    )
+    findings = axe.score(as_point, gold, "x")["findings"]
+    assert any("one identity" in f["finding"] for f in findings), (
+        "a duplicate Point is the gold's own measurable and must not read as clean"
+    )
+
+    # …and a CLAIM naming the company is still not a duplicate: the predicate, not
+    # the layer filter, is what separates them.
+    claim = _record(
+        nodes=[
+            _node("Object", "Northwind Logistics", kind="other"),
+            _node("Point", "Northwind Logistics will renew in January", kind="statement"),
+        ]
+    )
+    assert not [
+        f for f in axe.score(claim, gold, "x")["findings"] if "one identity" in f["finding"]
+    ]
+
+
+def test_one_duplicate_identity_is_charged_once_not_twice():
+    """ONE ACT, ONE FINDING: the item-level P1 and the graph-level count rule
+    both fired for a single duplicate, so a per-input delta reported one
+    regression as a P0 *and* a P1 (#9695 review P1).
+    """
+    gold = _gold(
+        {
+            "id": "x",
+            "duplicate_expected": {"of": "Northwind Logistics", "max_nodes": 1},
+            "expect": [
+                {
+                    "item": "Northwind Logistics",
+                    "layer": "object",
+                    "kind": ["other", "organization"],
+                }
+            ],
+        }
+    )
+    doc = _record(
+        nodes=[
+            _node("Object", "Northwind Logistics", kind="other"),
+            _node("Object", "Northwind Logistics Ltd", kind="other"),
+        ]
+    )
+    charges = [
+        f
+        for f in axe.score(doc, gold, "x")["findings"]
+        if "one identity" in f["finding"] or "duplicate nodes" in f["finding"]
+    ]
+    assert len(charges) == 1, (
+        f"one duplicate write must be charged once, got {[f['finding'] for f in charges]}"
+    )
+
+    # The item-level rule is NOT dead: on an input that declares no
+    # `duplicate_expected`, it is the only thing that sees a duplicate.
+    no_rule = _gold(
+        {
+            "id": "x",
+            "expect": [
+                {
+                    "item": "Northwind Logistics",
+                    "layer": "object",
+                    "kind": ["other", "organization"],
+                }
+            ],
+        }
+    )
+    still = axe.score(doc, no_rule, "x")["findings"]
+    assert any("duplicate nodes" in f["finding"] for f in still)
+
+
 def test_undeclared_kind_is_distinguished_from_a_declared_but_wrong_kind():
     """"A kind nothing declares is a kind nothing routes to" (issue step 2).
 
@@ -1056,10 +1148,28 @@ def test_fresh_refuses_a_symlink_so_the_typed_path_is_the_deleted_path(tmp_path)
 
 
 def test_a_uri_db_never_takes_the_destructive_path(tmp_path, monkeypatch):
-    """A docker:// URI names a server, not a local artifact — nothing to delete."""
+    """A docker:// URI names a server, not a local artifact — nothing to delete.
+
+    "Nothing to delete" is preserved by REFUSING, not by returning silently: a
+    silent return left `--fresh` a no-op that then seeded on top of the existing
+    graph, so a re-run's before-graph carried the fixture's own duplicate and the
+    eval charged it to the agent as its write failure (#9695 review P1).
+    """
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit) as refused:
+        step1_setup.prepare(
+            "docker://:pw@localhost:6379/eval", "duplicate_entity", fresh=True
+        )
+    assert "refusing --fresh" in str(refused.value)
+    # the refusal must still be a pure read: no marker, no db file, nothing written
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_uri_db_without_fresh_is_still_a_no_op(tmp_path, monkeypatch):
+    """Only the DESTRUCTIVE flag refuses; a plain URI seed is unchanged."""
     monkeypatch.chdir(tmp_path)
     step1_setup.prepare(
-        "docker://:pw@localhost:6379/eval", "duplicate_entity", fresh=True
+        "docker://:pw@localhost:6379/eval", "duplicate_entity", fresh=False
     )
     assert list(tmp_path.iterdir()) == []
 

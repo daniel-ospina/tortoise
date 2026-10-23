@@ -759,6 +759,11 @@ def score(record_doc: dict, gold: dict, input_id: str) -> dict:
             {"severity": sev, "item": item, "finding": what, "fix": fix}
         )
 
+    # The graph-wide duplicate-identity assertion, if this input states one. Read
+    # here rather than at its use site because the item loop below must know
+    # whether this identity is already charged by it (ONE ACT, ONE FINDING).
+    dup_rule = entry.get("duplicate_expected")
+
     for exp in entry.get("expect", []):
         item = exp["item"]
         layer = exp["layer"]
@@ -965,13 +970,25 @@ def score(record_doc: dict, gold: dict, input_id: str) -> dict:
         else:
             verdict = "OK"
         if dups:
-            add(
-                "P1",
-                item,
-                f"duplicate nodes for one identity: {len(dups) + 1} "
-                f"({[n['text'][:40] for n in [best, *dups]]})",
-                "a re-mention must UPDATE the existing node, never mint a second one",
+            # ONE ACT, ONE FINDING. `duplicate_expected` below asserts this same
+            # identity as a node COUNT, and it is the assertion the gold names as
+            # its measurable. Charging the write here as well reported ONE
+            # duplicate twice — a P1 for the item and a P0 for the count, both
+            # carrying the same "never mint a second one" fix — so the per-input
+            # delta Step 3 reads as its acceptance criterion showed one regression
+            # as two. The row's verdict still says DUP (the node WAS a duplicate);
+            # the finding is the count rule's to charge (#9695 review P1).
+            charged_by_count_rule = bool(
+                dup_rule and _same_identity(best["text"], dup_rule["of"])
             )
+            if not charged_by_count_rule:
+                add(
+                    "P1",
+                    item,
+                    f"duplicate nodes for one identity: {len(dups) + 1} "
+                    f"({[n['text'][:40] for n in [best, *dups]]})",
+                    "a re-mention must UPDATE the existing node, never mint a second one",
+                )
             verdict = verdict if verdict != "OK" else "DUP"
         item_rows.append(
             {
@@ -1074,21 +1091,27 @@ def score(record_doc: dict, gold: dict, input_id: str) -> dict:
         )
 
     # Duplicate identity — the gold's own measurable for the duplicate input.
-    dup_rule = entry.get("duplicate_expected")
     if dup_rule:
         # A second node for one identity means the NAME is duplicated — a
         # sentence that merely STARTS with the name ("Northwind Logistics
         # confirmed …") is a claim about it, not a second entity. So: same
-        # normalised name, or the name plus a legal-form suffix ("Ltd", "Inc"),
-        # and only on an entity layer. Without those two constraints the check
-        # reports every claim mentioning the company as a duplicate. The
-        # predicate is module level and shared with `_match`, so the two halves
-        # of the instrument cannot disagree about what "one identity" means.
+        # normalised name, or the name plus a legal-form suffix ("Ltd", "Inc").
+        # Without that constraint the check reports every claim mentioning the
+        # company as a duplicate. The predicate is module level and shared with
+        # `_match`, so the two halves of the instrument cannot disagree about
+        # what "one identity" means.
+        #
+        # NO LAYER FILTER. Restricting this to Object/Subject made the rule blind
+        # to the exact failure the gold names as its measurable — a duplicate
+        # written as a POINT (gold `notes`: ">1 node named Northwind means the
+        # duplicate was written as a Point") — so a graph carrying the seeded
+        # Object plus a same-name Point scored P0:0 and verdict OK: a false PASS
+        # on the one input built to produce it. `_same_identity` is what keeps a
+        # claim apart from a duplicate (`"Northwind Logistics will renew …"` has
+        # a non-legal-form residual and is rejected), so the layer test was doing
+        # no work the word-boundary test does not already do (#9695 review P1).
         same_identity = [
-            n
-            for n in nodes
-            if n["layer"] in ("Object", "Subject")
-            and _same_identity(n["text"], dup_rule["of"])
+            n for n in nodes if _same_identity(n["text"], dup_rule["of"])
         ]
         if len(same_identity) > dup_rule["max_nodes"]:
             add(

@@ -104,6 +104,22 @@ def _claim(target: Path, input_id: str) -> None:
 def prepare(db: str, input_id: str, *, fresh: bool) -> None:
     """Make ``db`` ready to seed, deleting an existing graph ONLY if it is ours."""
     if _is_uri(db):
+        # A server graph carries no marker file beside it, so this tool can never
+        # PROVE the graph it would delete is the one it seeded — the same reason
+        # `_delete_own_graph` refuses a path it cannot positively identify. It
+        # used to return here silently, which made `--fresh` a no-op that then
+        # seeded ON TOP of the existing graph: the fixture's own duplicate got
+        # charged to the agent as its write failure. Refusing is the fail-closed
+        # direction (#9695 review P1).
+        if fresh:
+            raise SystemExit(
+                f"refusing --fresh for --db {db!r}: a server graph ({db.split(':', 1)[0]}://) "
+                "cannot be identified as one this tool seeded — it has no marker "
+                f"file beside it (this tool writes {MARKER_SUFFIX} only for a "
+                "filesystem db).\n"
+                "NOTHING was deleted and NOTHING was seeded. Drop the graph "
+                "yourself, then re-run without --fresh."
+            )
         return
     given = Path(db).expanduser()
     target = given.resolve()
