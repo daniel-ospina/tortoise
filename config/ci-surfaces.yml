@@ -7821,7 +7821,7 @@ durations:
   test_blog_agent_delete_guard.py: 2.5
   test_blog_post_status_validation.py: 2.5  # #4311: analogue estimate (same Node type-stripping harness as test_blog_agent_delete_guard.py); refresh from the first post-merge junit artifact
   test_blog_indexnow.py: 2.5  # #9680: analogous estimate (same Node type-stripping harness); refresh from the first post-merge junit artifact
-  test_blog_publish_notify_admin.py: 2.5  # #9803: analogous estimate (same Node type-stripping harness); refresh from the first post-merge junit artifact
+  test_blog_publish_notify_admin.py: 18.2  # #9803: MEASURED locally (17 cases, one node process per case; the driver + floor probe are hoisted); refresh from the first post-merge junit artifact
   test_website_functions_typecheck.py: 2.0  # #4311: analogue estimate (measured 1.9s locally — JSON/YAML reads + the executed gate script); refresh from the first post-merge junit artifact
   test_capture_cost_measurement.py: 4.3
   test_capture_entity_attachment_3664.py: 5.9

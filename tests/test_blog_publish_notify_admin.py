@@ -65,6 +65,8 @@ import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from tests._verdict import NODE_FLOOR_STRIP_TYPES, require_node_floor
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -167,20 +169,42 @@ console.log(JSON.stringify({
 """
 
 
-def _run(case: dict) -> dict:
+_DRIVER_DIR: Path | None = None
+
+
+def _driver_path() -> Path:
+    """Write the driver ONCE, not once per case, and tolerate its removal.
+
+    A temp dir per call cost the same node start PLUS mkdir/rmtree, and the file is
+    constant. It is re-created if it disappeared (a cleaner, or a sibling test
+    module tidying a shared tmp root), so a missing file can never present as a
+    node loader error.
+    """
+    global _DRIVER_DIR
+    if _DRIVER_DIR is None or not (_DRIVER_DIR / "driver.mjs").is_file():
+        if _DRIVER_DIR is not None:
+            shutil.rmtree(_DRIVER_DIR, ignore_errors=True)
+        _DRIVER_DIR = Path(tempfile.mkdtemp(prefix="notify-publish-"))
+        (_DRIVER_DIR / "driver.mjs").write_text(_DRIVER)
+    return _DRIVER_DIR / "driver.mjs"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _node_floor():
+    """The floor probe spawns node too; once per module is enough, and it must run
+    BEFORE the first case rather than 17 times alongside them."""
     require_node_floor(NODE_FLOOR_STRIP_TYPES, what="the admin-editor publish notification guard", absent="fail")
-    driver = Path(tempfile.mkdtemp(prefix="notify-publish-")) / "driver.mjs"
-    driver.write_text(_DRIVER)
-    try:
-        proc = subprocess.run(
-            ["node", "--experimental-strip-types", str(driver), str(NOTIFY_FUNCTION), str(INDEXNOW_MODULE), json.dumps(case)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            cwd=str(REPO_ROOT),
-        )
-    finally:
-        shutil.rmtree(driver.parent, ignore_errors=True)
+    yield
+
+
+def _run(case: dict) -> dict:
+    proc = subprocess.run(
+        ["node", "--experimental-strip-types", str(_driver_path()), str(NOTIFY_FUNCTION), str(INDEXNOW_MODULE), json.dumps(case)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(REPO_ROOT),
+    )
     assert proc.returncode == 0, proc.stderr[-3000:]
     return json.loads(proc.stdout.strip().splitlines()[-1])
 

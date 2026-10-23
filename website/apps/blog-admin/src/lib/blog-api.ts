@@ -361,6 +361,10 @@ export async function purgePostCache(slug: string): Promise<void> {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
+        // Bounded like the server's own reads (3s row + 5s window): without this
+        // one request that never settles keeps its slot in `notifyInFlight`, and
+        // every later notification for that slug queues behind it and never runs.
+        signal: AbortSignal.timeout(15_000),
       });
     } catch {
       // fail-open — purge is best-effort correctness, never blocks the write
@@ -407,6 +411,10 @@ export async function notifyPublished(slug: string): Promise<void> {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
+        // Bounded like the server's own reads (3s row + 5s window): without this
+        // one request that never settles keeps its slot in `notifyInFlight`, and
+        // every later notification for that slug queues behind it and never runs.
+        signal: AbortSignal.timeout(15_000),
       });
       // The endpoint answers with an OUTCOME, and an outcome nobody reads is not
       // an improvement on a boolean: every arm other than `submitted` is

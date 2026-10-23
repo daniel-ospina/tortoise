@@ -551,7 +551,7 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   const becameLive =
     resultStatus === "published" &&
     (post.status !== "published" ||
-      (post.hold_for_review === true && patch.hold_for_review === false));
+      (post.hold_for_review !== false && patch.hold_for_review === false));
   if (becameLive) {
     waitUntil(
       notifyPublished({

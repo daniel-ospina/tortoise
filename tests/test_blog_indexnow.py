@@ -55,6 +55,7 @@ WEBSITE = REPO_ROOT / "website"
 POSTS_FUNCTION = WEBSITE / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 INDEXNOW_MODULE = WEBSITE / "functions" / "blog" / "_shared" / "indexnow.ts"
 ADMIN_NOTIFY_MODULE = WEBSITE / "functions" / "blog" / "api" / "notify-publish.ts"
+PATCH_HANDLER = WEBSITE / "functions" / "blog" / "api" / "posts" / "[[path]].ts"
 DEPLOY_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml"
 
 SITE = "https://tortoise.premiselabs.co"
@@ -136,7 +137,17 @@ for (const c of cases) {
         if (c.stateNoRow) return Response.json([]);
         return Response.json([{ indexnow_submitted_at: row.indexnow_submitted_at }]);
       }
-      if (method === 'GET') return Response.json([{ ...row }]);
+      if (method === 'GET') {
+        // HONOUR `select=` the way PostgREST does. A stub that always answers every
+        // column hides the fact that the pre-read and the trigger are ONE change:
+        // drop `hold_for_review` from the select at api/posts and `post.hold_for_review`
+        // is `undefined`, killing the hold-clear arm silently while every case stays
+        // green (same hazard the admin driver's projectRow was written against).
+        const m = /[?&]select=([^&]*)/.exec(u);
+        if (!m) return Response.json([{ ...row }]);
+        const fields = new Set(decodeURIComponent(m[1]).split(',').map((f) => f.trim()).filter(Boolean));
+        return Response.json([Object.fromEntries(Object.entries(row).filter(([k]) => fields.has(k)))]);
+      }
       if (method === 'POST') {
         const body = JSON.parse(String(init.body));
         Object.assign(row, body);
@@ -241,6 +252,25 @@ CASES: dict[str, dict] = {
     "hold_cleared_while_published": {
         "status": "published",
         "holdForReview": True,
+        "lastSubmittedAt": None,
+        "steps": [{"hold_for_review": False}],
+    },
+    # Published but HELD → a title edit that leaves the hold in place. Still a
+    # zero, and the case pins the `&& patch.hold_for_review === false` conjunct:
+    # without it a title edit on a held row submits a URL that still 404s.
+    "edit_while_published_held": {
+        "status": "published",
+        "holdForReview": True,
+        "lastSubmittedAt": None,
+        "steps": [{"title": "renamed while held"}],
+    },
+    # Published and live → a hold-clear patch (the hold is already clear). Still a
+    # zero, and THIS is what pins `post.hold_for_review !== false`: drop that
+    # conjunct and this patch fires`, because `patch.hold_for_review === false`
+    # alone is satisfied.
+    "hold_cleared_while_live": {
+        "status": "published",
+        "holdForReview": False,
         "lastSubmittedAt": None,
         "steps": [{"hold_for_review": False}],
     },
@@ -570,6 +600,21 @@ def test_the_admin_endpoints_logs_are_documented_and_balanced() -> None:
     )
 
 
+def test_the_patch_preread_selects_the_hold_column() -> None:
+    """The pre-read and the trigger are ONE change. The predicate is
+    NULL-permissive (`post.hold_for_review !== false`), deliberately — a NULL row
+    is not public — so dropping the column from the SELECT reads `undefined`,
+    which the predicate ACCEPTS. The hold-clear arm then silently stops firing and
+    no behavioural case can see it: the pair has to be pinned in the source.
+    """
+    src = PATCH_HANDLER.read_text(encoding="utf-8")
+    selects = re.findall(r"select=id,status,created_by,body[^&`]*", src)
+    assert selects, "the PATCH pre-read must name its columns explicitly"
+    assert all("hold_for_review" in s for s in selects), (
+        f"the PATCH pre-read must select hold_for_review — the trigger is two columns: {selects}"
+    )
+
+
 # ── V1: the key file is served from the site root ──────────────────────────
 def test_v1_the_key_file_is_served_at_the_site_root(results) -> None:
     """The key file exists, is named after the key, and carries ONLY the key.
@@ -659,7 +704,14 @@ def test_v3_no_submission_without_a_transition_and_never_twice_in_a_day(results)
     The issue's V3 expectation is "1 submission total, not 3" for that sequence;
     the zero cases are what make the same test discriminate on both axes.
     """
-    for name in ("edit_while_published_legacy", "edit_while_published_live", "unpublish_legacy", "draft_edit"):
+    for name in (
+        "edit_while_published_legacy",
+        "edit_while_published_live",
+        "edit_while_published_held",
+        "hold_cleared_while_live",
+        "unpublish_legacy",
+        "draft_edit",
+    ):
         res = results[name]
         assert res["statuses"] and all(s < 400 for s in res["statuses"]), (
             f"{name}: the PATCHes themselves must still succeed: {res['statuses']}"

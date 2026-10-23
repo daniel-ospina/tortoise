@@ -201,8 +201,10 @@ Google".
 **What fires it.** Two callers reach the same submission path — the agent API, and the console (which
 has four call sites across three user actions):
 
-1. **The agent API's publish transition** — `PATCH /blog/api/posts/:slug` with `status: "published"`
-   (`api/posts/[[path]].ts`).
+1. **The agent API's publish transition** — `PATCH /blog/api/posts/:slug` (`api/posts/[[path]].ts`).
+   Two arms, both "the row became publicly readable": a `status: "published"` transition, and
+   `hold_for_review: false` on a row that is already `published` and held (which changes no status but
+   makes the URL stop answering 404).
 2. **The console**, which writes status straight to Supabase with supabase-js and therefore never
    passes through the agent API. Every console write that can make a row publishable notifies, via
    `POST /blog/api/notify-publish { slug }` (#9803):
@@ -228,9 +230,9 @@ for it. The agent API and the console share `_shared/indexnow.ts`: one rule, bot
   `status: "published"` is a publish transition, but the notification belongs to the PATCH transition.
   Publish a draft with PATCH if you want the submission. (The **editor's** create-and-publish does
   notify — it goes through the endpoint above, which is why the bullet names the agent API.)
-- editing an article that is already published **through the agent API**. The editor's publish button
-  does notify on a re-publish — that is the explicit "this URL changed" case, and the 24-hour window
-  below is what makes it safe;
+- an edit through the **agent API** that leaves both `status` and `hold_for_review` unchanged. The
+  editor's publish button does notify on a re-publish — that is the explicit "this URL changed" case,
+  and the 24-hour window below is what makes it safe;
 - unpublishing;
 - re-publishing the same URL within 24 hours (`blog_posts.indexnow_submitted_at` records the last
   attempt);
