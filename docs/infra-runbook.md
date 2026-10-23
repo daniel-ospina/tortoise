@@ -452,20 +452,28 @@ them out (`record_projection` emits `DELETE` for `delete`/`merge` journal ops, a
 removes all ten tables). The artifact is cut from a snapshot taken after the manifest's row counts,
 so rows committed in that gap are legitimately in the artifact and not in the count. The drill
 therefore compares each table against the window `[min(before, after), max(before, cut, after)]`,
-where `before` is the pre-dump count, `cut` is a count taken as the artifact is cut, and `after` is
-a re-count taken once the dump has finished: below the floor is **loss** (rows that existed before
-the dump did not come back), above the ceiling is a restore carrying rows the source never had
-(duplication or a corrupt artifact). The ceiling is the **largest of the three reads the drill
-takes itself**, not one endpoint: rows can land after `before` and age out before `after`, so a
-healthy artifact may legitimately carry more than either endpoint shows — an endpoint ceiling
+where `before` is the pre-dump count, `cut` is a count taken immediately **before `pg_dump` starts**,
+and `after` is a re-count taken once the dump has finished: below the floor is **loss** (rows that
+existed before the dump did not come back), above the ceiling is a restore carrying rows no source
+read ever observed (duplication or a corrupt artifact). The ceiling is the **largest read the drill
+takes OUTSIDE the dump**, not one endpoint: rows can land after `before` and age out before `after`,
+so a healthy artifact may legitimately carry more than either endpoint shows — an endpoint ceiling
 refused that artifact with a sentence the run had already disproved by measuring the higher number.
 Comparing exactly against a pre-dump count — the earlier behaviour — red a perfectly healthy backup
 on any record with continuous writes, and a drill that reds every day on a healthy backup removes
 the one falsifier this exists for. The report names a table that moved with both bounds, e.g.
 `journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
 
+⚠️ **`cut` is not the artifact's snapshot count, and no arithmetic over these three reads is.** The
+artifact's snapshot instant falls *inside* the dump, between the `cut` read and the `after` read, so a
+row inserted in that gap and deleted before `after` is in the artifact and in none of the three reads:
+it lands above the ceiling and reds a healthy artifact with exit `3`. That is the one residual this
+bound cannot see; closing it needs the count read from the same snapshot `pg_dump` reads
+(`pg_export_snapshot` + `pg_dump --snapshot`), which is tracked in **#9795**, not implemented. So on a
+live record, read the table lines in the report before treating a single exit-3 run as an outage.
+
 The artifact's OWN `row_counts` are **never a baseline and never a bound**: the number is measured
-as the artifact is cut, so it is the drill's own reading of the source, not an independent claim.
+just before the dump, so it is the drill's own reading of the source, not an independent claim.
 Comparing it against a ceiling built from the same reading was a check that could never fire — the
 runbook used to list a refusal no run could produce — so it is gone. What decides the verdict is the
 comparison of the **restored** counts against the source reads; a manifest that inflates its own

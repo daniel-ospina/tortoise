@@ -123,6 +123,7 @@ caller's schedule, stated in `docs/infra-runbook.md`.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import ipaddress
 import json
@@ -753,6 +754,93 @@ def _default_connector(dsn: str):
     return psycopg2.connect(**kwargs)
 
 
+#: SQLSTATEs that mean "this cannot work until somebody edits a config".
+#: Authentication failures and a database that does not exist are the two faults a
+#: scheduler must NOT retry forever: libpq raises them on every attempt, and each
+#: attempt of this verb mints (and, on a keyless box, writes a plaintext) dump.
+_PERMANENT_CONNECT_SQLSTATES = frozenset({
+    "28000",  # invalid_authorization_specification
+    "28P01",  # invalid_password
+    "3D000",  # invalid_catalog_name — the database does not exist
+})
+
+
+def _connection_failure(
+    dsn: str, exc: BaseException, *, role: str = "record"
+) -> RecordBackupError:
+    """Classify a DRIVER failure as one of this module's own classes.
+
+    ⛔ A DRIVER FAILURE IS NOT A TRACEBACK (#9601 review cycle 9, P2). ``connector(dsn)``
+    stood outside every ``try`` in :func:`record_row_counts` and
+    :func:`reset_record_tables`, and :func:`_default_connector`'s last statement is a
+    bare ``psycopg2.connect(**kwargs)`` — so `connection refused`,
+    `password authentication failed` and `database "x" does not exist` left ``main()``
+    as an interpreter traceback. Two things went wrong with that, and both are the class
+    this verb spent four review cycles separating:
+
+    * **A permanent fault became "retry forever".** An uncaught exception exits ``1``,
+      which this verb's own table defines as "attempted and did not happen — try
+      again", on faults only a config edit clears (each attempt dumping, encrypting and
+      uploading first).
+    * **No documented sentence.** The runbook's table and the verb's docstring promise
+      one per class; a traceback is none of them.
+
+    So the driver's own SQLSTATE decides (``pgcode``), and the message carries only the
+    exception TYPE, that SQLSTATE, and the DSN's non-secret coordinates — never
+    ``str(exc)``, because a driver error can quote the connection string and this text
+    reaches the log stream (:func:`libpq_env`'s whole argument).
+    """
+    sqlstate = getattr(exc, "pgcode", None)
+    name = type(exc).__name__ + (f" {sqlstate}" if sqlstate else "")
+    where = _coordinates_for_message(dsn)
+    if sqlstate in _PERMANENT_CONNECT_SQLSTATES:
+        return RecordBackupUnavailable(
+            f"the {role} could not be reached ({name}) on {where} — a PERMANENT "
+            "fault (credentials, or a database that does not exist), so retrying "
+            "cannot clear it. Nothing ran and no verdict was produced."
+        )
+    return RecordBackupError(
+        f"the {role} could not be reached ({name}) on {where} — the session could "
+        "not be opened or did not survive, so nothing was measured and no verdict "
+        "was produced."
+    )
+
+
+def _coordinates_for_message(dsn: str) -> str:
+    """``user@host:port/database`` for an error sentence — never the credential.
+
+    Deliberately NOT :func:`libpq_env`: that one includes ``PGPASSWORD`` and refuses a
+    hostless DSN (raising while we are already building an error message would replace
+    the real failure with a parsing one).
+    """
+    try:
+        parts = _split_dsn(dsn)
+        host = parts.hostname or "<no host>"
+        try:
+            port = parts.port
+        except ValueError:
+            port = None
+        database = unquote(parts.path.lstrip("/")) or "<no database>"
+        user = unquote(parts.username) if parts.username else "<no user>"
+        return f"{user}@{host}:{port or 5432}/{database}"
+    except Exception:  # pragma: no cover - a DSN that cannot be read at all
+        return "the DSN the run was given"
+
+
+def _connect(connector: Connector, dsn: str, *, role: str = "record"):
+    """Open a session, naming a DRIVER failure in this module's classes.
+
+    The one gate both the count and the reset legs go through, so "the driver failed"
+    can never be a traceback on one path and a documented class on the other.
+    """
+    try:
+        return connector(dsn)
+    except RecordBackupError:
+        raise
+    except Exception as e:
+        raise _connection_failure(dsn, e, role=role) from e
+
+
 def record_row_counts(
     dsn: str,
     *,
@@ -774,9 +862,14 @@ def record_row_counts(
     """
     names = tuple(_require_table(t) for t in (tables or record_tables()))
     connector = connect or _default_connector
-    conn = connector(dsn)
+    conn = _connect(connector, dsn)
     try:
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
+        except Exception as e:
+            # `cursor()` is a round trip on some drivers, so it belongs to the same
+            # class as the connect it follows: a dead session must not be a traceback.
+            raise _connection_failure(dsn, e) from e
         try:
             # `set_config` rather than `SET`: a placeholder is only legal in a
             # function call, and a `SET` built by string formatting is how an
@@ -795,14 +888,24 @@ def record_row_counts(
                         "target must carry it before any data can land."
                     ) from e
                 counts[table] = int(row[0])
+        except RecordBackupError:
+            raise
+        except Exception as e:
+            # A session that dies BETWEEN statements (the server restarted, the
+            # connection was reaped) is the connector's failure class too — otherwise
+            # only the CONNECT is documented and the next statement is a traceback.
+            raise _connection_failure(dsn, e) from e
         finally:
             cur.close()
     finally:
         # Read-only session: roll back rather than commit, so a backup run
-        # cannot leave an open transaction holding locks on a live record.
-        try:
+        # cannot leave an open transaction holding locks on a live record. A
+        # teardown that fails on an already-dead session leaves nothing behind
+        # (nothing was committed), so it must not replace a real result — or a
+        # real error — with a traceback.
+        with contextlib.suppress(Exception):
             conn.rollback()
-        finally:
+        with contextlib.suppress(Exception):
             conn.close()
     return counts
 
@@ -1440,18 +1543,26 @@ def compare_row_counts(
 
     The floor is ``min(source, source_after)`` and the ceiling is
     ``max(source, source_after, source_high)`` per table. ``source_high`` is the
-    extra UPPER bound for a window whose endpoints cannot see a transient peak:
-    the record can take rows in and age them out between two samples, so a
-    healthy artifact may legitimately carry more rows than either endpoint shows
-    (#9601 review cycle 4, P1). It only ever RAISES the ceiling — never the
-    floor, and never the baseline — so it cannot excuse a loss. The floor is
-    unaffected by it.
+    extra UPPER bound that lets the window contain a peak a *sample* can see: the
+    record can take rows in and age them out between two reads, so a healthy
+    artifact may legitimately carry more rows than either endpoint shows (#9601
+    review cycle 4, P1). It only ever RAISES the ceiling — never the floor, and
+    never the baseline — so it cannot excuse a loss. The floor is unaffected by it.
+
+    ⛔ ``source_high`` IS NOT THE SNAPSHOT COUNT, and no arithmetic over these
+    reads can be (#9601 review cycle 9, P3). It is taken immediately before
+    ``pg_dump`` runs, so the artifact's snapshot instant falls between it and
+    ``source_after``: a row inserted in that gap and deleted before
+    ``source_after`` is in the artifact, in none of the reads, and lands ABOVE the
+    ceiling — a false exit 3 on a healthy artifact. See
+    :func:`run_restore_drill` and #9795 for the exact-count fix and why it is not
+    free.
 
     The window keeps the falsifier sharp in both directions: below the floor
     is LOSS (rows that existed before the dump did not come back), and above the
-    ceiling is a restore carrying rows the source never had (duplication or a
-    corrupt artifact). Only the ambiguity in the middle — the count-to-snapshot
-    gap — is tolerated, and the report NAMES the moved table with both bounds.
+    ceiling is a restore carrying rows no source read ever observed (duplication,
+    a corrupt artifact, or — the residual above — a transient peak inside the
+    dump). The report NAMES the moved table with both bounds.
     """
     names = tuple(tables or record_tables())
     rows: dict[str, dict[str, int]] = {}
@@ -1557,11 +1668,21 @@ def reset_record_tables(
     refuse_same_database(source_dsn, dsn, target_label="reset target")
     sql = "TRUNCATE " + ", ".join(f'public."{_require_table(t)}"' for t in record_tables())
     connector = connect or _default_connector
-    conn = connector(dsn)
+    # The same gate as the count leg, with the role named: a login failure on the
+    # SCRATCH target used to reach the operator as a traceback, and `--reset-scratch`
+    # is the mode an unattended job runs.
+    conn = _connect(connector, dsn, role="scratch target")
     try:
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
+        except Exception as e:
+            # `cursor()` is a round trip on some drivers, so it belongs to the same
+            # class as the connect it follows.
+            raise _connection_failure(dsn, e, role="scratch target") from e
         try:
             cur.execute(sql)
+        except RecordBackupError:
+            raise
         except Exception as e:
             raise RecordRestoreRefused(
                 f"could not empty the scratch record ({e}) — refusing to restore "
@@ -1570,9 +1691,15 @@ def reset_record_tables(
             ) from e
         finally:
             cur.close()
-        conn.commit()
+        try:
+            conn.commit()
+        except Exception as e:
+            # The TRUNCATE did not land: a session that died mid-commit is the same
+            # class as one that never opened, not a traceback out of an unattended job.
+            raise _connection_failure(dsn, e, role="scratch target") from e
     finally:
-        conn.close()
+        with contextlib.suppress(Exception):
+            conn.close()
 
 
 def run_restore_drill(
@@ -1598,17 +1725,28 @@ def run_restore_drill(
 
     The comparison is against the counts read from the SOURCE DATABASE before the
     dump (``before``) and is bounded above by the larger of two further source
-    reads: ``cut`` (taken as the artifact is cut) and ``after`` (taken once the
-    dump has finished). The record is live — it takes rows in and ages them out —
-    so a healthy artifact may legitimately carry a count that no single sample
-    shows, and the bound must be the maximum the drill OBSERVED rather than one
-    endpoint (#9601 review cycle 4, P1: a row that landed after ``before`` and
-    was deleted before ``after`` made ``max(before, after)`` refuse a healthy
-    artifact with a sentence this module had already disproved — it had measured
-    the higher number itself). All three reads are the DRILL's own measurement of
-    the source; the manifest's claim is never read as a bound here, and it is not
-    a check either — it IS ``cut``, so any ceiling built from these reads contains
-    it by construction (see :func:`compare_row_counts`).
+    reads: ``cut`` (taken immediately BEFORE ``pg_dump`` runs) and ``after``
+    (taken once the dump has finished). The record is live — it takes rows in and
+    ages them out — so a healthy artifact may legitimately carry a count that no
+    single sample shows, and the bound must be the maximum the drill OBSERVED
+    rather than one endpoint (#9601 review cycle 4, P1: a row that landed after
+    ``before`` and was deleted before ``after`` made ``max(before, after)`` refuse
+    a healthy artifact with a sentence this module had already disproved — it had
+    measured the higher number itself). All three reads are the DRILL's own
+    measurement of the source; the manifest's claim is never read as a bound here,
+    and it is not a check either — it IS ``cut``, so any ceiling built from these
+    reads contains it by construction (see :func:`compare_row_counts`).
+
+    ⚠️ ``cut`` is NOT "the count as the artifact is cut", and the bound is
+    therefore the largest read taken OUTSIDE the dump — not a measurement of the
+    dump's own snapshot (#9601 review cycle 9, P3). The artifact's snapshot
+    instant lies between the ``cut`` read and the ``after`` read, so a row
+    inserted in that gap and deleted before ``after`` is in the artifact and in
+    none of the three reads: it reds with exit 3 on a healthy artifact. Closing
+    that needs a count read from the SAME snapshot ``pg_dump`` reads
+    (``pg_export_snapshot`` + ``pg_dump --snapshot``); it is tracked in #9795
+    rather than claimed closed, so treat a single red run on a live record as a
+    reading to verify before it is treated as an outage.
 
     Refusals, in the order they matter:
 
@@ -1682,10 +1820,14 @@ def run_restore_drill(
     # of the comparison, so the two cannot come from different instants: reading
     # it inside `create_record_backup` left a gap in which a row could land after
     # this count and before that one, which is the same false refusal one
-    # millisecond narrower (#9601 review cycle 4, P1). It is an upper bound only —
-    # never a floor, never the baseline — so a manifest that inflates its own
-    # numbers cannot widen acceptance (the value bounded here is the one the drill
-    # measured, not the one the artifact declares).
+    # millisecond narrower (#9601 review cycle 4, P1). It is read immediately
+    # BEFORE `pg_dump` runs, which is why it cannot be called the artifact's
+    # snapshot count: the snapshot instant is inside the dump that follows, and a
+    # row inserted in between and aged out before the post-dump read is above
+    # every read this drill takes (#9601 review cycle 9, P3 — see #9795). It is an
+    # upper bound only — never a floor, never the baseline — so a manifest that
+    # inflates its own numbers cannot widen acceptance (the value bounded here is
+    # the one the drill measured, not the one the artifact declares).
     cut = record_row_counts(dsn, connect=connect)
     # ⛔ CUT THE ARTIFACT FIRST. Every statement below this line mutates the
     # SCRATCH target; nothing before it may depend on the scratch being empty.
@@ -1716,7 +1858,7 @@ def run_restore_drill(
     try:
         # The POST-DUMP RE-COUNT. Reading it here — after the artifact is durable —
         # is the fix for #9601 review cycle 2 (P1): `claimed` (the manifest's own
-        # counts) is measured as the artifact is cut, i.e. AFTER `before`, so on a
+        # counts) is measured just before `pg_dump` starts, i.e. AFTER `before`, so on a
         # live append-only record `claimed > before` is the ordinary concurrent-insert
         # signature — most of all for `journal_event`, which gets a row on every
         # capture turn. Comparing the later read against the earlier one therefore

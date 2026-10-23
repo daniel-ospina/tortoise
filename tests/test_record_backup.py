@@ -45,7 +45,9 @@ it.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
+import socket
 import sys
 from pathlib import Path
 
@@ -60,6 +62,87 @@ from tortoise.record_projection import THE_RECORD_TABLES
 KEY = bytes(range(32))
 DSN = "postgresql://record_user:s3cr3t-pw@db.projectref.supabase.co:5432/postgres"
 SCRATCH_DSN = "postgresql://record_user:s3cr3t-pw@db.scratchref.supabase.co:5432/postgres"
+
+
+# ── the resolver is a fixture, not the host (#9601 review cycle 9, P3) ──────
+
+#: The REAL probe, captured before the autouse fixture replaces it. The
+#: address-identity arms opt back into it with `real_address_math`.
+_REAL_DSN_ADDRESSES = rb._dsn_addresses
+
+
+def _canned_addresses(host: str) -> frozenset[str]:
+    """Deterministic stand-in for `record_backup._dsn_addresses`.
+
+    Every drill test here compares `db.projectref.supabase.co` against
+    `db.scratchref.supabase.co`, which `refuse_same_database` decides by ADDRESS —
+    and the real probe is a `socket.getaddrinfo` round trip, twice per drill plus
+    once per reset. That made this file non-hermetic in both directions: on a
+    wildcard/hijacking resolver (or a corporate search domain) both names answer
+    with ONE address and a HEALTHY drill is refused as "the SAME database", and on
+    a host with no DNS the guard silently takes the lexical fallback. Neither is a
+    property of the code under test, and this file's docstring claims it "runs in
+    the ordinary lanes".
+
+    One token per name, with the module's own loopback/wildcard collapse kept, so
+    the guard's semantics (not its resolver) is what the drill arms exercise. The
+    arms whose SUBJECT is address identity request `real_address_math` instead.
+    """
+    name = host.strip("[]").strip().lower()
+    try:
+        parsed = ipaddress.ip_address(name)
+    except ValueError:
+        return frozenset({f"name:{name}"})
+    if parsed.is_loopback or parsed.is_unspecified:
+        return frozenset({"loopback"})
+    mapped = getattr(parsed, "ipv4_mapped", None)
+    return frozenset({str(mapped or parsed)})
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_address_resolution(monkeypatch):
+    """No arm in this file may depend on the host's resolver."""
+    monkeypatch.setattr(rb, "_dsn_addresses", _canned_addresses)
+
+
+#: The answers the canned RESOLVER gives the address-identity arms.
+_RESOLVED = {
+    "localhost": ("127.0.0.1", "::1"),
+    "127.0.0.1": ("127.0.0.1",),
+    "::1": ("::1",),
+    "0.0.0.0": ("0.0.0.0",),
+    "::": ("::",),
+    "::ffff:127.0.0.1": ("::ffff:127.0.0.1",),
+    "::ffff:0.0.0.0": ("::ffff:0.0.0.0",),
+    "::ffff:0:0": ("::ffff:0:0",),
+}
+
+
+@pytest.fixture
+def real_address_math(monkeypatch):
+    """The REAL `_dsn_addresses`, over a canned resolver instead of the network.
+
+    ``monkeypatch`` does not count as a hermetic fixture, and neither does a real
+    resolver: these arms keep the normalisation code they exist to test while the
+    ANSWERS come from `_RESOLVED`. An autouse fixture is set up first, so this one
+    wins for the arms that request it.
+    """
+    monkeypatch.setattr(rb, "_dsn_addresses", _REAL_DSN_ADDRESSES)
+
+    def getaddrinfo(host, port, *args, **kwargs):
+        key = str(host).strip("[]").lower()
+        try:
+            answers = _RESOLVED[key]
+        except KeyError:
+            raise socket.gaierror(
+                socket.EAI_NONAME, "name or service not known") from None
+        return [
+            (socket.AF_INET6 if ":" in a else socket.AF_INET,
+             socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (a, 0))
+            for a in answers
+        ]
+
+    monkeypatch.setattr(rb.socket, "getaddrinfo", getaddrinfo)
 
 
 # ── doubles ────────────────────────────────────────────────────────────────
@@ -695,7 +778,7 @@ def test_the_drill_refuses_an_EQUIVALENT_scratch_spelling_and_never_resets(
         "the drill touched its scratch target after refusing it as the source")
 
 
-def test_the_drill_refuses_a_scratch_target_reached_by_another_NAME():
+def test_the_drill_refuses_a_scratch_target_reached_by_another_NAME(real_address_math):
     """#9601 review cycle 3 (P1): coordinate equality was still LEXICAL on the host.
 
     `localhost` and `127.0.0.1` are ONE server with two names, so a scratch DSN
@@ -1318,7 +1401,8 @@ def test_the_reset_refuses_the_shapes_libpq_RESOLVES_somewhere_else():
         )
 
 
-def test_the_reset_refuses_WILDCARD_addresses_and_the_other_loopback_family():
+def test_the_reset_refuses_WILDCARD_addresses_and_the_other_loopback_family(
+    real_address_math):
     """#9601 review cycle 8 (P1/P2): 'any' is not a server, and `::1` is `127.0.0.1`.
 
     Both measured end-to-end on a real socket before this fix:
@@ -1480,7 +1564,7 @@ def test_the_prune_keeps_the_documented_depth_by_default(monkeypatch):
     assert seen == [14], f"the verb pruned with {seen}, not the documented depth"
 
 
-def test_addresses_normalise_an_ipv4_mapped_ipv6_spelling():
+def test_addresses_normalise_an_ipv4_mapped_ipv6_spelling(real_address_math):
     """#9601 review cycle 7 (P1): `[::ffff:127.0.0.1]` IS `127.0.0.1`.
 
     Measured before this fix: the two spellings produced disjoint address sets, so
@@ -1952,6 +2036,42 @@ def test_the_documented_exit_1_contract_is_CLASS_aware_in_the_runbook_and_the_ve
     assert "check preconditions 3-4" in doc
 
 
+def test_the_ceiling_claims_only_what_the_three_source_reads_CAN_see():
+    """#9601 review cycle 9 (P3): `cut` is read BEFORE `pg_dump`, not as it is cut.
+
+    The bound is `max(before, cut, after)` and every one of those reads is taken
+    OUTSIDE the dump: the artifact's snapshot instant falls between the `cut` read
+    and the `after` read, so a row inserted in that gap and aged out before `after`
+    is in the artifact and in no read — it lands above the ceiling and reds a
+    healthy artifact with exit `3`. The module and the runbook called `cut` "a
+    count taken as the artifact is cut" and the bound "a window whose endpoints
+    cannot see a transient peak", which reads as if it WERE the snapshot count. A
+    future lane restoring the bound from that prose is the failure this pins; the
+    residual is #9795, and both artifacts must name it rather than imply it away.
+    """
+    root = Path(__file__).resolve().parent.parent
+    runbook = " ".join((root / "docs" / "infra-runbook.md").read_text().split())
+    source = " ".join((root / "tortoise" / "record_backup.py").read_text().split())
+
+    # The false claim, in both artifacts.
+    assert "taken as the artifact is cut" not in runbook, (
+        "the runbook still calls `cut` the count taken as the artifact is cut — it is "
+        "taken BEFORE pg_dump runs, and the snapshot instant is inside the dump")
+    # (The correction itself quotes the false claim, so pin the CLAIM's wording.)
+    assert "taken as the artifact is cut" not in source
+    assert "cannot see a transient peak" not in source, (
+        "the comment still promises the bound sees a transient peak — it sees only "
+        "peaks a SAMPLE observed, never one inside the dump window")
+
+    # The true one, named with the residual.
+    assert "before `pg_dump` starts" in runbook
+    assert "largest read the drill takes OUTSIDE the dump" in runbook
+    assert "no arithmetic over these three reads is" in runbook
+    assert "#9795" in runbook, "the residual must be named, not implied away"
+    assert "before ``pg_dump`` runs" in source
+    assert "#9795" in source
+
+
 def test_a_drill_mode_dump_failure_does_not_claim_the_record_is_backed_up(monkeypatch, capsys):
     """The failure the mode-based wording got wrong (#9601 review, P2).
 
@@ -2156,3 +2276,95 @@ def test_a_missing_client_binary_is_UNAVAILABLE_not_a_failed_backup(tmp_path):
 
     with pytest.raises(rb.RecordBackupUnavailable, match="client binaries"):
         rb.dump_record(DSN, tmp_path / "o.dump", run=_run)
+
+
+# ── a driver failure is a CLASS, never a traceback (#9601 review cycle 9) ───
+
+
+class _DriverError(RuntimeError):
+    """`psycopg2.OperationalError` without the optional dependency.
+
+    Same shape the module classifies on: a message that may quote the connection
+    string, and `pgcode` (None unless libpq gave us a SQLSTATE).
+    """
+
+    def __init__(self, message: str, pgcode: str | None = None) -> None:
+        super().__init__(message)
+        self.pgcode = pgcode
+
+
+def _raising(message: str, pgcode: str | None = None, seen: list[str] | None = None):
+    def connect(dsn):
+        if seen is not None:
+            seen.append(dsn)
+        raise _DriverError(message, pgcode)
+
+    return connect
+
+
+def test_a_driver_failure_of_the_COUNT_leg_is_a_documented_class_not_a_traceback():
+    """P2: `connector(dsn)` stood outside every `try`, so `OperationalError` escaped.
+
+    Every mode's FIRST act is this count leg, and `_default_connector`'s last
+    statement is a bare `psycopg2.connect(...)`. A refused connection / bad password
+    / absent database therefore left `main()` as an interpreter traceback: exit 1
+    ("try again") on faults only a config edit clears, and no sentence from the
+    class table the verb documents. Pre-fix this raises `_DriverError`.
+    """
+    with pytest.raises(rb.RecordBackupError) as excinfo:
+        rb.record_row_counts(DSN, connect=_raising("connection ... failed: refused"))
+    # A refused connection is RETRYABLE — not the permanent-fault class.
+    assert not isinstance(excinfo.value, rb.RecordBackupUnavailable), (
+        "a connection refused was classified as a permanent config fault")
+    message = str(excinfo.value)
+    assert "_DriverError" in message, "the driver's own type is what names the failure"
+    # The driver message can quote the connection string, and this text reaches the
+    # log stream — so it carries the TYPE and non-secret coordinates, never str(e).
+    assert "s3cr3t-pw" not in message
+    assert "record_user@db.projectref.supabase.co:5432/postgres" in message
+
+
+def test_a_driver_failure_of_the_RESET_leg_is_a_documented_class_not_a_traceback():
+    """The same hole on the leg that TRUNCATEs — `--reset-scratch` is unattended."""
+    seen: list[str] = []
+    with pytest.raises(rb.RecordBackupError) as excinfo:
+        rb.reset_record_tables(
+            SCRATCH_DSN, source_dsn=DSN, connect=_raising("login failed", seen=seen)
+        )
+    assert seen == [SCRATCH_DSN], "the connector must have been attempted exactly once"
+    assert "scratch target" in str(excinfo.value), (
+        "the sentence must name WHICH side could not be reached")
+    assert "s3cr3t-pw" not in str(excinfo.value)
+
+
+def test_a_PERMANENT_driver_fault_is_exit_2_so_a_scheduler_stops_retrying():
+    """P2, the consequence that matters: exit 2 is "could not run", not "retry".
+
+    `password authentication failed` (28P01) and `database does not exist` (3D000)
+    are raised on EVERY attempt, and each attempt dumps, encrypts and uploads first.
+    Uncaught they exited 1 = "attempted and did not happen — try again", forever.
+    """
+    with pytest.raises(rb.RecordBackupUnavailable) as excinfo:
+        rb.record_row_counts(DSN, connect=_raising("password authentication failed", "28P01"))
+    assert "PERMANENT" in str(excinfo.value)
+    assert "28P01" in str(excinfo.value)
+
+    with pytest.raises(rb.RecordBackupUnavailable) as missing_db:
+        rb.record_row_counts(DSN, connect=_raising('database "record" does not exist', "3D000"))
+    assert "3D000" in str(missing_db.value)
+
+
+@pytest.mark.parametrize("pgcode,expected", [(None, 1), ("28P01", 2)])
+def test_the_verb_exits_the_CLASS_code_when_the_count_leg_cannot_connect(
+        monkeypatch, capsys, pgcode, expected):
+    """The end-to-end half: the code a scheduler actually branches on.
+
+    Pre-fix this is not an exit code at all — the exception leaves `main()`.
+    """
+    monkeypatch.setattr(rb, "_default_connector", _raising("could not connect", pgcode))
+    rc = _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], patch_connector=False)
+    captured = capsys.readouterr()
+    assert rc == expected, f"stdout={captured.out!r} stderr={captured.err!r}"
+    assert "Traceback" not in captured.err
+    assert "could not be reached" in captured.err
+    assert "s3cr3t-pw" not in captured.err
