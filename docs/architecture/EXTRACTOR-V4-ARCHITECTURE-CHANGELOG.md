@@ -869,3 +869,15 @@ counted the steps wrong** — it read *"§4.4 declares the policy for the six pi
 declaration"*, while §4.0/§4.1 declare **EIGHT** (and §4.4 covers all eight), so the carried-over rule is
 *"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states a
 spelled or numeric step count other than §4.0's canonical one, or a `… declaration` ordinal other than the next one.
+
+
+## 2026-10-23 — §4.2's `S0a/S0b` verdict was stale in both directions
+
+The four-way dedup audit's closing sentence said *"`S0a NORMALIZE + HASH → S0b SOURCE DEDUP` is genuinely absent"*. That
+was true when measured and stopped being true when `tortoise/source_identity.py` landed (#5012/#5053 + `bc8b420d1`):
+the step is implemented (`normalize_source_url` / `resolve_source_key`), wired in `projection/entities.py`, and
+acceptance-tested by `tests/test_source_dedup_registration.py` — while the D-a row of that same table (URL-keyed only)
+is the part that is still absent. The passage now states the design in the present tense with that division, and the
+measurement history lives here rather than in the design document (#8542's rule). `config/v4-mechanisms.yml` carries
+`source_dedup` as `implemented` and its declaration marker sits on this passage, so a stale
+verdict there would be a row saying "shipped" anchored to a document saying "absent".

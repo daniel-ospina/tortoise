@@ -160,6 +160,32 @@ def test_provenance_chain_says_current_when_the_note_matches():
         sdk.close()
 
 
+def test_provenance_chain_says_unknown_for_a_whitespace_only_version():
+    """#9784 review finding B-F1. Input: the source's `contentHash` is `"   "`
+    and the `references` note carries the same whitespace.
+
+    `create_source(url, kind, contentHash="   ")` is accepted, and
+    `_anchor_on_create` nulls only the EMPTY string, so `"   "` is stamped on a
+    derivation edge. Truthiness sees two non-empty strings, compares them EQUAL
+    and answers `current` — a false-fresh on a version nobody recorded, and one
+    that `tools/source_currency.py` calls `unknown` for the same link. FAILS IF
+    this reader does not apply the same blank-is-absent rule: two readers
+    disagreeing about one pair is the drift §4.6's "a read" rule forbids.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = _point_and_source(sdk, current="   ")
+        _annotate(proj, "doc-1", "   ")
+        row = sdk.get_provenance_chain("pt_1")[0]
+        assert row["linkCurrency"] == "unknown", (
+            f"a whitespace-only version read as {row['linkCurrency']!r} — it is "
+            "absent, not a version")
+        assert row["linkRecordedVersion"] == "", row
+        assert row["sourceCurrentVersion"] == "", row
+    finally:
+        sdk.close()
+
+
 def test_provenance_chain_says_unknown_when_the_link_carries_no_note():
     """A containment link deliberately carries no note. FAILS IF an unnoted link
     is reported as ``current`` — that is the false-current the note exists to
