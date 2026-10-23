@@ -855,6 +855,15 @@ def explain_instance_unavailable(
 #: engine's variant spelling without the `OOM` prefix. Only the distinctive
 #: clause is matched (never a bare `maxmemory`, which a `CONFIG GET` reply or a
 #: caller's own message can carry).
+#:
+#: ⚠️ THIS REGEX HAS TWO JOBS, and the second one is load-bearing (#7357): it
+#: decides family MEMBERSHIP (the text arm of
+#: :func:`is_memory_ceiling_refusal`), and it is the CEILING EVIDENCE for
+#: :func:`_chain_names_the_ceiling` — the only thing that licenses a note to
+#: assert `maxmemory` at all. Loosening it (e.g. matching a bare `maxmemory`)
+#: silently re-arms the exact over-claim this issue closed; narrowing it
+#: demotes a genuinely-named ceiling to the hedge arm. Change it for both
+#: readers or not at all.
 _MEMORY_CEILING_RE = re.compile(
     r"command not allowed when used memory\s*>\s*['\"]?maxmemory", re.IGNORECASE)
 
@@ -936,6 +945,103 @@ def is_memory_ceiling_refusal(exc: BaseException) -> bool:
     return False
 
 
+def _chain_names_the_ceiling(exc: BaseException) -> bool:
+    """True when some link of *exc* NAMES the dataset ceiling in its own text.
+
+    #7357: :func:`is_memory_ceiling_refusal` admits the exception CLASS, and
+    redis-py mints ``OutOfMemoryError`` for **every** reply whose text starts
+    with ``OOM``. So the class establishes that the instance ANSWERED with a
+    memory refusal — NOT that a ``maxmemory`` exists, was read, or was reached.
+    ``OOM failed to allocate 1GB`` is an allocation failure; an instance with
+    ``maxmemory 0`` has no dataset ceiling at all. Only this predicate may
+    license the ceiling sentence, which is why it is separate from the family
+    predicate: the family is what the caller must be told about, and the
+    ceiling is a claim that needs evidence the family does not carry.
+
+    Walks the EXPLICIT chain — the top link, then ``__cause__``. It does NOT
+    follow an implicit ``__context__``: a context link is not ATTRIBUTABLE to the
+    failure being explained. Measured shape (#7357 cycle 4): an
+    ``OutOfMemoryError("OOM failed to allocate 1GB")`` raised inside an
+    ``except ResponseError("command not allowed when used memory > 'maxmemory'")``
+    block inherits that sentence implicitly, and asserting the ceiling from it
+    would be the same over-claim one level of indirection out. ``raise ... from``
+    is the author stating causality, so ``__cause__`` is evidence and an implicit
+    context is not. (The FAMILY predicate, :func:`is_memory_ceiling_refusal`,
+    keeps walking ``__context__``: there the question is "is this the family",
+    where a wider walk is the safe direction. Here the question is "may I assert
+    a ``maxmemory``", where it is not.)
+
+    ⚠️ RESIDUAL, recorded so it is not re-derived: ``__context__`` is ALSO the
+    shape a wrapper takes when it re-raises WITHOUT ``raise ... from`` — the
+    common no-``B904`` wrapping — and that half is the half production travels
+    for the transport seam (#6977). So a wrapper placed between the wire and this
+    seam that dropped the inner text and omitted ``from`` would demote a named
+    ceiling to the hedge. That is the SAFE direction (the hedge asserts no
+    ceiling and still names the read and the conditional remedy), and it is not
+    reachable on today's paths: redis-py mints the class straight from the parsed
+    reply, falkordb re-raises the same object, and ``cypher_guard`` re-raises
+    bare. Matches ``_MEMORY_CEILING_RE`` against the message HEAD only, so an
+    already-explained message never names the ceiling a second time.
+    """
+    seen: set[int] = set()
+    link: BaseException | None = exc
+    try:
+        while link is not None and id(link) not in seen:
+            seen.add(id(link))
+            if _MEMORY_CEILING_RE.search(
+                    str(link).partition(_LEGIBLE_OPENER)[0]):
+                return True
+            link = link.__cause__
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        # ⚠️ THIS WALKS *EVERY* LINK, so unlike `is_memory_ceiling_refusal` (which
+        # only stringifies `ResponseError` links) it can read a caller-supplied
+        # `__str__` that raises. Same rule as `is_instance_unavailable`'s P1: a
+        # legibility predicate must never REPLACE the exception it explains.
+        # An unreadable link establishes nothing, and "not established" is the
+        # HEDGE arm — the fail-safe direction, because the hedge asserts no
+        # ceiling (measured shape: `OutOfMemoryError("OOM …")` whose
+        # `__cause__.__str__` raises). Without this belt the raise reaches
+        # `cypher_guard._note_instance_outage`, whose own belt swallows it and
+        # hands the caller the raw illegible message with NO note at all — the
+        # #7357 defect, for exactly that exception.
+        return False
+    return False
+
+
+#: How far BELOW a non-zero `maxmemory` a reading may sit and still be the
+#: ceiling — the ONE authority for "the ceiling was reached" (#7357 / #7392).
+#:
+#: The reading is taken AFTER the refusal, and `used_memory` includes transient
+#: client buffers that are released when the refused reply is written. MEASURED
+#: on falkordb 4.20.6 at a 16 MiB `noeviction` ceiling: immediately after the
+#: server's own `used memory > 'maxmemory'` answer the reading sits **3.5-56 KiB
+#: BELOW** the cap while the instance is still refusing at it. So a 1-byte or
+#: 4 KiB shortfall is the reading, not a different cause, and only a shortfall
+#: WIDER than this tolerance is evidence that the ceiling is not the explanation.
+#:
+#: ⚠️ ONE IMPLEMENTATION, ONE DESCRIPTION (#7357 review P2/P3):
+#: `_write_refusal_message` CALLS this function; the SDK's hedge note DESCRIBES
+#: the same rule, because it holds an exception and not a reading. They must move
+#: together when these numbers do, and the note's wording is pinned where it is
+#: ASSERTED — `test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read`
+#: in `tests/test_7357_memory_ceiling_legibility.py` (a test that never reads the
+#: note cannot pin its prose; the drift-value test cannot either).
+#:
+#: The 1 % arm is a HEURISTIC and is capped at 1 MiB so it cannot scale
+#: unbounded: at 1 TiB it would swallow 10 GiB of genuine headroom and print the
+#: ceiling sentence for a reading far from it — the over-claim direction, which is
+#: the unsafe one (its remedy is `--maxmemory`). The false-negative direction is
+#: safe, because the below-ceiling branch withholds nothing and asks for a
+#: re-read.
+#:
+#: A tolerance larger than the ceiling's own scale is meaningless (`0 B of 4 KiB`
+#: would print "reached" for every reading); callers that compare against a tiny
+#: cap must use their own scale guard, as `_write_refusal_message` does.
+def ceiling_reading_drift(cap: int) -> int:
+    """Bytes of measured shortfall below *cap* that still count as REACHED."""
+    return max(64 << 10, min(cap // 100, 1 << 20))
+
+
 #: #2981's ownership constraint for a memory-ceiling refusal, as ONE authority.
 #:
 #: `tortoise/projection/__init__.py::_write_refusal_message` states this policy
@@ -958,6 +1064,21 @@ MEMORY_CEILING_OWNERSHIP_CONSTRAINT = (
     "GRAPH.DELETE cannot be undone, and a name you cannot attribute is not "
     "yours to delete. Never delete the production graph tortoise or a "
     "tortoise_restored* snapshot, and do NOT FLUSHALL."
+)
+
+
+#: Where the ceiling knob lives, per instance class — the ONE copy both arms of
+#: :func:`explain_memory_ceiling` use (#7357). #9532 cycle 2/3 P1 is why it names
+#: BOTH homes: the SDK emits the note on managed instances too (FalkorDB Cloud —
+#: no container, no `REDIS_ARGS`), so a container-only lever would prescribe an
+#: action that cannot be taken. Two arms of one note advising the same knob in
+#: different words is the drift #2981 rules out, one function apart.
+_CEILING_REMEDY_HOMES = (
+    "Where that setting lives depends on the "
+    "instance: on a container this repo starts it is the `--maxmemory` in "
+    "its `REDIS_ARGS`, and on a MANAGED instance (FalkorDB Cloud) it is the "
+    "provider's plan/console setting — there is no container there to pass "
+    "a flag to."
 )
 
 
@@ -1020,12 +1141,91 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
     keeps the engine sentence at position 0, leaves the exception TYPE alone (a
     wrapper would re-bucket it in ``_classify_db_failure``), and is idempotent
     through :data:`_LEGIBLE_OPENER`.
+
+    ⚠️ **THE CEILING IS A CLAIM, AND IT NEEDS EVIDENCE THE CLASS DOES NOT
+    CARRY** (#7357, measured 2026-10-22 on `origin/main` 02e18e752). The note
+    used to assert "it has reached its configured dataset limit (`maxmemory`)"
+    for every ``OutOfMemoryError``, while the classifier admits the class and
+    redis-py mints that class for **every** reply starting with ``OOM`` — so
+    ``OutOfMemoryError("OOM failed to allocate 1GB")``, and even
+    ``OutOfMemoryError("")``, were told they had reached a ceiling that nothing
+    in the exception had read. On an instance with ``maxmemory 0`` (measured on
+    the shared container: no ceiling at all; the CI provisioner passes none)
+    that sentence prescribes raising a setting that does not exist — the same
+    "advice that cannot be acted on" defect this issue is about, pointing at the
+    diagnosis instead of the symptom.
+
+    So the note BRANCHES on :func:`_chain_names_the_ceiling`, i.e. on whether
+    the exception's own text carries the engine's ceiling sentence. When it
+    does, the ceiling note below is unchanged (the sentence is the evidence).
+    When it does not, the note states what the message DOES establish — an
+    answered memory refusal, so not a dead instance, not graph damage, not data
+    loss — names the ceiling only as a CONDITIONAL to be read from the
+    instance, and does NOT claim the refused command was rejected before it ran,
+    because that was measured for the ``denyoom``/``maxmemory`` refusal and not
+    for the allocation-failure shape.
+
+    ⚠️ **IT CANNOT RAISE OVER THE CALLER'S ERROR.** Both the family predicate and
+    ``str(exc)`` read caller-supplied data: ``is_memory_ceiling_refusal``
+    stringifies ``ResponseError`` links, and a caller-defined ``OutOfMemoryError``
+    subclass can carry a ``__str__`` that raises. A legibility helper that
+    replaced the exception it explains would hand the caller a traceback instead
+    of the failure (the module's P1 rule on :func:`is_instance_unavailable`), so
+    the whole body is belted: an unreadable MESSAGE degrades to ``None`` (the raw
+    engine sentence, unannotated) because there is nothing to append to. An
+    unreadable CHAIN degrades further along — to the hedge, which still tells the
+    caller something — because :func:`_chain_names_the_ceiling` establishes no
+    ceiling and therefore has a safe answer.
     """
+    try:
+        return _explain_memory_ceiling(exc)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        logger.debug("memory-ceiling note failed", exc_info=True)
+        return None
+
+
+def _explain_memory_ceiling(exc: BaseException) -> str | None:
+    """The body of :func:`explain_memory_ceiling`, belted by its caller."""
     if not is_memory_ceiling_refusal(exc):
         return None
     text = str(exc)
     if _LEGIBLE_OPENER in text:
         return None
+    if not _chain_names_the_ceiling(exc):
+        explains = (
+            "the INSTANCE ANSWERED, and what it answered was a MEMORY "
+            "refusal whose reply names no dataset ceiling — so a `maxmemory` "
+            "ceiling must not be read into it. What IS established: this is "
+            "an ANSWERED capacity refusal, not the engine's 'graph was "
+            "deleted or replaced' abort, not a dead or restarting instance, "
+            "and not evidence that the graph or its data was lost. What is "
+            "NOT established: that this instance has a configured "
+            "`maxmemory`, that it has reached one, or that the refusal "
+            "preceded execution. The driver mints `OutOfMemoryError` for "
+            "EVERY reply beginning with `OOM` — a policy refusal and an "
+            "allocation failure alike — and an instance reporting "
+            "`maxmemory 0` has no dataset ceiling at all: the pressure MAY "
+            "come from host/kernel memory, an in-instance per-query cap, this "
+            "command's own allocation, or elsewhere — that list is not closed. "
+            "So read the instance's `INFO memory` "
+            "before acting, and re-read while the refusal is repeating. If it "
+            "reports `maxmemory 0`, there is no ceiling to raise — and "
+            "re-issuing the same command unchanged will likely be refused the "
+            "same way. If it reports a non-zero `maxmemory` and `used_memory` "
+            "is at it, ABOVE it, or within a small drift below it, THAT is the "
+            "ceiling "
+            "and the next action is to raise it — a reading taken after the "
+            "refusal sits slightly under the cap (measured: 3.5-56 KiB), so a "
+            "near-miss is the reading and not a different cause, and a reading "
+            "above the cap (the ordinary shape after the ceiling is lowered on "
+            "a busy instance) is the ceiling too. "
+            + _CEILING_REMEDY_HOMES
+            + " Read back before re-issuing anything that mutates — this "
+            "message does not establish that the refusal preceded execution. "
+            + MEMORY_CEILING_OWNERSHIP_CONSTRAINT
+            + " See #2981."
+        )
+        return text + _LEGIBLE_OPENER + explains
     explains = (
         "the INSTANCE ANSWERED, and what it answered was a MEMORY-CEILING "
         "refusal: it has reached its configured dataset limit (`maxmemory`) and "
@@ -1038,11 +1238,9 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
         "write: a refused GRAPH.QUERY `CREATE` left the graph at 0 nodes). "
         "Re-issuing it now will be refused the same way — the next action is to "
         "raise the instance's `maxmemory` ceiling (the Redis-side bound on the "
-        "DATASET), then re-issue. Where that setting lives depends on the "
-        "instance: on a container this repo starts it is the `--maxmemory` in "
-        "its `REDIS_ARGS`, and on a MANAGED instance (FalkorDB Cloud) it is the "
-        "provider's plan/console setting — there is no container there to pass "
-        "a flag to. ONLY a `tools/test_lane.py` container derives that ceiling "
+        "DATASET), then re-issue. "
+        + _CEILING_REMEDY_HOMES
+        + " ONLY a `tools/test_lane.py` container derives that ceiling "
         "from `FALKORDB_CONTAINER_MEMORY` (3/4 of it); the others set it "
         "themselves — the dev container pins 512mb and the CI provisioner "
         "passes none — so raising `FALKORDB_CONTAINER_MEMORY` alone moves the "
