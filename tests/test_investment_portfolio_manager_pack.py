@@ -38,6 +38,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlparse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -389,30 +390,67 @@ class TestClashRules:
         assert "boundedBy" in by_pred["constrainedBy"]["nearMisses"]
         assert "constrainedBy" in by_pred["boundedBy"]["nearMisses"]
 
+    #: Declared synonyms deliberately NOT in the trigger row, each with the
+    #: reason. A missing trigger is CHEAP here: with nothing else matching, the
+    #: selector falls back to ALL packs, so the overlay is still injected — while
+    #: a spurious trigger is EXPENSIVE, because one match suppresses that
+    #: fallback and strips every other pack's kinds from the prompt.
+    NON_TRIGGER_SYNONYMS: ClassVar[dict[str, str]] = {
+        "target weight": (
+            "generic in engineering prose ('target weight for the casing'); the "
+            "declared compounds 'policy weight' / 'benchmark weight' / "
+            "'reference weight' carry the same meaning without the collision"),
+        # The trigger rows are English throughout (`_PACK_TRIGGERS` has no
+        # pt-BR entry in any pack); a pt-BR mention reaches the pack through its
+        # own synonym layer at classification, not through story selection.
+        "peso alvo": "pt-BR: story selection in `_PACK_TRIGGERS` is English-only",
+    }
+
     def test_compact_mode_can_gate_the_namespace_by_story(self, pack):
         """The namespace has a `_PACK_TRIGGERS` row, so compact-mode story
         selection gates it instead of injecting it WHOLE into every prompt (the
         fail-open fallback `_select_pack_kinds` documents).
 
-        Two directions, because a row alone is not a gate, and one wrong
+        Three directions, because a row alone is not a gate, and one wrong
         trigger word is worse than no row: `_select_pack_kinds` matches
         SUBSTRINGS, and a single spurious match suppresses the all-packs
         fallback — so a false-positive trigger does not add a section, it DROPS
         every other pack's kinds.
+
+        The assertion that matters is NARROWING (`set(hit) != set(pack_kinds)`):
+        a bare "is the namespace present?" check is satisfied by the all-packs
+        fallback for ANY synonym the row omits, which is how a missing trigger
+        passed review twice.
         """
         from tortoise.extractor_v2 import _PACK_TRIGGERS, _select_pack_kinds
 
         assert f"{NS}:" in _PACK_TRIGGERS
         assert all(isinstance(t, str) and t for t in _PACK_TRIGGERS[f"{NS}:"])
-        pack_kinds = {
-            f"{NS}:mandate": "m", f"{NS}:allocationTarget": "a",
-            "dev:issue": "d", "venture:tranche": "t",
-        }
+
+        # The row is derived from the manifest, not from memory: every entry is
+        # the namespace's own name or a declared synonym carrying a space or a
+        # hyphen (a single generic word is exactly the substring trap).
+        declared = {syn.lower()
+                    for spec in RAW["ontology"]["kindDefs"].values()
+                    for syn in (spec.get("synonyms") or [])}
+        compound = {w for w in declared
+                    if (" " in w or "-" in w) and w.isascii()}
+        assert compound, "the manifest must declare compound synonyms"
+        expected = (compound - set(self.NON_TRIGGER_SYNONYMS)) | {NS}
+        assert set(_PACK_TRIGGERS[f"{NS}:"]) == expected, (
+            set(_PACK_TRIGGERS[f"{NS}:"]) ^ expected)
+
+        # The REAL catalogue, so a sibling namespace collision (agent-ops's
+        # "policy") is visible: a four-entry fixture hides exactly the failure
+        # this row exists to avoid.
+        pack_kinds = v2._build_master_from_brief(
+            compile_value_brief())["pack_kinds"]
 
         hit = _select_pack_kinds(
-            "the board reviewed the mandate and the target weight", pack_kinds)
-        assert f"{NS}:mandate" in hit
-        assert "dev:issue" not in hit
+            "the board reviewed the allocation target last week", pack_kinds)
+        assert f"{NS}:mandate" in hit, list(hit)
+        assert set(hit) != set(pack_kinds), "that is the all-packs fallback"
+        assert "dev:issue" not in hit, list(hit)
 
         # An unrelated story that DOES match another pack — so the result is a
         # real selection, not the all-packs fallback (which would make the
@@ -433,27 +471,27 @@ class TestClashRules:
 
         # Bare generic words are the OTHER half of the same trap: an overlay
         # trigger must match the mentions the pack DECLARES, and only those.
-        # `mandate`/`allocation` alone are generic English ("the team's mandate
-        # is to ship the CLI", "resource allocation across the fleet"), and a
-        # match there strips every other pack's kinds from the prompt.
-        for generic in ("the team's mandate is to ship the CLI",
-                        "resource allocation across the fleet"):
-            got = _select_pack_kinds(f"{generic} during this deploy", pack_kinds)
-            assert not [k for k in got if k.startswith(f"{NS}:")], (generic, got)
+        # Each of these is a real-world sentence with no portfolio subject, and
+        # each has to leave the selection to the packs that story is about.
+        for story in ("the team's mandate is to ship the CLI during this deploy",
+                      "resource allocation across the fleet during this deploy",
+                      "the accessibility audit found a visual impairment in the "
+                      "keyboard navigation flow, so fix the UI test"):
+            got = _select_pack_kinds(story, pack_kinds)
+            assert not [k for k in got if k.startswith(f"{NS}:")], (story, got)
+            assert set(got) != set(pack_kinds), (
+                "the story must match some OTHER pack, or the all-packs "
+                "fallback makes this assertion vacuous")
 
-        # …and every multi-word mention the manifest declares as a `synonym`
-        # must SELECT the namespace, or the row cannot fire on the vocabulary
-        # the pack ships. Single words are skipped: `mark`/`valuation` are
-        # deliberately not triggers (they ride inside "marketing"/"evaluation").
-        declared = {syn.lower()
-                    for spec in RAW["ontology"]["kindDefs"].values()
-                    for syn in (spec.get("synonyms") or [])}
-        multiword = sorted(w for w in declared if " " in w and w.isascii())
-        assert multiword, "the manifest must declare multi-word synonyms"
-        for mention in multiword:
-            got = _select_pack_kinds(
-                f"the board reviewed the {mention} last week", pack_kinds)
+        # …and every compound synonym the pack declares (minus the recorded
+        # exceptions) must NARROW to the namespace, not merely appear in the
+        # fallback — including the ones a sibling would otherwise win
+        # ("policy statement" contains agent-ops's "policy").
+        for mention in sorted(compound - set(self.NON_TRIGGER_SYNONYMS)):
+            story = f"the board reviewed the {mention} last week during the deploy"
+            got = _select_pack_kinds(story, pack_kinds)
             assert [k for k in got if k.startswith(f"{NS}:")], (mention, got)
+            assert set(got) != set(pack_kinds), (mention, "all-packs fallback")
 
 
 # ── 4. Core extraction unchanged with the pack OFF ────────────────────────
@@ -649,6 +687,41 @@ class TestKindsAreMintable:
         sdk.create_operator("IMPL", vm2["node"]["id"], [position["id"]],
                             label="marks", semantics="related")
         assert sdk.validate_domain(NS)["ok"] is True
+
+    @requires_db
+    def test_a_mis_wired_mark_is_an_orphan(self, sdk):
+        """A mark attached to the WRONG thing is as unusable as an unattached
+        one: the manifest declares ONE relation (`marks` → `venture:investment`),
+        so a `producedBy` operator pointing at a mandate answers a different
+        question — and a rule that accepted "some IMPL operator to some Object"
+        would report it clean while claiming the mark reaches a position.
+        """
+        sdk.create_entity("object", "Mandate M-7",
+                          objectKind=f"{NS}:mandate", is_episodic=False)
+
+        # (a) an IMPL operator with the WRONG label
+        wrong_rel = sdk.create_entity("event", "VM wrong-relation",
+                                      eventKind=f"{NS}:valuationMark")
+        sdk.create_operator("IMPL", wrong_rel["node"]["id"],
+                            [sdk._get_proj().g.query(
+                                "MATCH (o:Object {name:'Mandate M-7'}) "
+                                "RETURN o.id").result_set[0][0]],
+                            label="producedBy", semantics="related")
+
+        # (b) the RIGHT label on the WRONG kind of target
+        wrong_target = sdk.create_entity("event", "VM wrong-target",
+                                          eventKind=f"{NS}:valuationMark")
+        sdk.create_operator("IMPL", wrong_target["node"]["id"],
+                            [sdk._get_proj().g.query(
+                                "MATCH (o:Object {name:'Mandate M-7'}) "
+                                "RETURN o.id").result_set[0][0]],
+                            label="marks", semantics="related")
+
+        verdict = sdk.validate_domain(NS)
+        flagged = {v["ref"] for v in verdict["violations"]
+                   if v["rule"] == "orphaned_valuation_mark"}
+        assert flagged == {wrong_rel["node"]["id"], wrong_target["node"]["id"]}, (
+            flagged)
 
     @requires_db
     def test_a_superseded_mandate_is_not_an_undeclared_status(self, sdk):

@@ -355,6 +355,13 @@ _PORTFOLIO_DOMAIN = "portfolio"
 #: (not inlined) because the exemption is a decision, not a test.
 _OBJECT_UNSET_STATUSES = frozenset({"live"})
 
+#: The kind and relation a valuation mark must reach, read off the pack's own
+#: declarations (`packs/investment-portfolio-manager/manifest.yaml`: `marks` →
+#: `venture:investment`) rather than invented here — a second copy of the
+#: manifest's contract is the drift this pack exists to avoid.
+POSITION_KIND = "venture:investment"
+MARK_RELATION = "marks"
+
 
 def _portfolio_declared_statuses() -> dict[str, list[str]]:
     """``{bare kind: declared statuses}`` from the loaded `portfolio` pack.
@@ -396,11 +403,13 @@ def validate_portfolio_shape(graph) -> list[dict]:
          connector fold no longer applies to it), so an out-of-vocabulary status
          is a state nothing declared — and every "what is the current position?"
          read misses it.
-      2. ``orphaned_valuation_mark`` — a `portfolio:valuationMark` Event
-         attached to no position, by EITHER declared shape (see the query
-         below). The manifest declares the mark as an occurrence ABOUT a
-         position (`marks`); an unattached one records that a mark happened and
-         can never be joined back to what it marked.
+      2. ``orphaned_valuation_mark`` — a `portfolio:valuationMark` Event not
+         attached to a POSITION (a `venture:investment`), by the declared
+         relation (`marks`, an operator edge) or by the structural
+         ``aboutObject`` form some callers use. An unattached one records that a
+         mark happened and can never be joined back to what it marked; one
+         attached to the WRONG thing (a `producedBy` operator pointing at a
+         mandate) answers the wrong question and is just as unusable.
 
     One batched query per rule (no N+1), each anchored on a LABEL — and the
     claim stops there. ``objectKind``/``eventKind`` are properties with no index,
@@ -454,22 +463,33 @@ def validate_portfolio_shape(graph) -> list[dict]:
             })
 
     mark_kind = f"{_PORTFOLIO_DOMAIN}:valuationMark"
-    # BOTH declared shapes count as "attached". The manifest declares `marks`
-    # with ``mechanism: IMPL``, and a mechanism resolves to the OPERATOR write
-    # path (``pack_registry.relation_write_paths``) — ``create_operator(op_type=
-    # 'IMPL', label='marks', ...)`` writes ``(e)-[:INPUT]->(:Point)-[:IMPL]->
-    # (o)``, NOT ``aboutObject``. Checking only ``aboutObject`` would call a mark
-    # wired exactly as the manifest declares it an orphan, i.e. forbid the
-    # relation that admits the kind. ``aboutObject`` is accepted too because it
-    # is the structural form some callers use and it is just as attached.
+    # A mark is attached when it reaches a POSITION either way round:
+    #   * the DECLARED relation. The manifest declares `marks` with
+    #     ``mechanism: IMPL``, and a mechanism resolves to the OPERATOR write
+    #     path (``pack_registry.relation_write_paths``) —
+    #     ``create_operator(op_type='IMPL', label='marks', ...)`` writes
+    #     ``(e)-[:INPUT]->(op:Point)-[:IMPL]->(o)``, NOT ``aboutObject``.
+    #     Checking only ``aboutObject`` would call a mark wired exactly as
+    #     declared an orphan. The operator's own ``label`` is REQUIRED here
+    #     (``create_operator`` writes it, ``sdk.create_operator`` →
+    #     ``label:$label``): otherwise any IMPL operator — ``producedBy`` to a
+    #     mandate — would pass and the rule would only answer "touches some
+    #     Object".
+    #   * the STRUCTURAL ``aboutObject`` form some callers use, which is just as
+    #     attached (it is not a declared relation, and is accepted as such).
+    # Both legs require the target to be a ``venture:investment`` — the
+    # manifest's declared ``toKind`` — because a mark that values something else
+    # is not a mark on a position.
     rows = graph.g.query(
         "MATCH (e:Event) WHERE e.eventKind = $kind "
-        "OPTIONAL MATCH (e)-[:aboutObject]->(o1:Object) "
-        "OPTIONAL MATCH (e)-[:INPUT]->(:Point)-[:IMPL]->(o2:Object) "
+        "OPTIONAL MATCH (e)-[:aboutObject]->(o1:Object {objectKind: $position}) "
+        "OPTIONAL MATCH (e)-[:INPUT]->(op:Point {label: $rel})"
+        "-[:IMPL]->(o2:Object {objectKind: $position}) "
         "WITH e, count(DISTINCT o1) + count(DISTINCT o2) AS targets "
         "WHERE targets = 0 "
         "RETURN e.id, e.name",
-        params={"kind": mark_kind},
+        params={"kind": mark_kind, "position": POSITION_KIND,
+                "rel": MARK_RELATION},
     ).result_set
     for node_id, name in rows:
         violations.append({
@@ -482,9 +502,9 @@ def validate_portfolio_shape(graph) -> list[dict]:
                 f"marks, so the mark cannot be joined back to what it valued"
             ),
             "fix": (
-                "record the declared `marks` relation: create_operator("
-                "'IMPL', <mark>, [<the venture:investment it values>], "
-                "label='marks', semantics='related')"
+                f"record the declared `{MARK_RELATION}` relation: "
+                "create_operator('IMPL', <mark>, [<the venture:investment it "
+                f"values>], label='{MARK_RELATION}', semantics='related')"
             ),
         })
     return violations

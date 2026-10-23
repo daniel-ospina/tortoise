@@ -660,8 +660,8 @@ def _build_master_from_brief(brief: dict,
     # rather than folded into ``pack_kinds``' string values — every existing
     # consumer of ``pack_kinds`` (``master_kind_forms``, the write gates, the
     # compact selector) treats a value as the kind's description string, and a
-    # props-less kind must render byte-identically. Empty for every shipped
-    # pack today, so the render is unchanged unless a pack declares one.
+    # props-less kind must render byte-identically. The other six shipped packs
+    # declare nothing; since #9663 `portfolio:allocationTarget` does.
     pack_values: dict[str, list] = {}
     # #4894: the brief's RESERVED, non-kind sections are skipped by the SAME
     # set ``value_extractor`` uses to keep them out of the objectKind
@@ -825,17 +825,30 @@ _PACK_TRIGGERS = {
     # must be one that cannot ride inside an unrelated word. `valuation` was the
     # first draft and matched "evaluation" — which made an unrelated story
     # select `portfolio:*` AND (because one match suppresses the all-packs
-    # fallback) drop every other pack's kinds from the compact prompt. The same
-    # trap made bare `mandate` (the team's mandate is to ship the CLI) and bare
-    # `allocation` (resource allocation across the fleet) fire on unrelated
-    # stories and strip every OTHER pack. So: compound forms only, drawn from the
-    # pack's own `synonyms` — a trigger that cannot fire on the mentions the pack
-    # declares is as wrong as one that fires on mentions it does not.
+    # fallback) drop every other pack's kinds from the compact prompt. Bare
+    # `mandate`, `allocation` and `impairment` reproduce that on "the team's
+    # mandate…", "resource allocation…", "a visual impairment…".
+    #
+    # So each entry is either this namespace's own name or a SYNONYM the pack
+    # declares with a space or a hyphen in it. Two consequences are deliberate:
+    #   * a synonym can be missing here and cost nothing — with no other
+    #     trigger the selector falls back to ALL packs, so the overlay is still
+    #     injected (and a genuine mention almost always carries `portfolio` or
+    #     `allocation target` anyway); a spurious entry, by contrast, STRIPS
+    #     every other pack;
+    #   * `target weight` is therefore left out (generic in engineering prose:
+    #     "target weight for the casing"). `tests/test_investment_portfolio_
+    #     manager_pack.py` pins the row against the manifest's own synonyms, so
+    #     this is a recorded choice, not an omission.
+    # And a row missing a synonym the pack DOES declare is a real loss when a
+    # sibling matches: `policy statement` used to lose the overlay to
+    # `agent-ops:`'s "policy".
     "portfolio:": ("portfolio", "investment mandate", "investment policy",
-                   "mandate limits", "investment guidelines",
-                   "allocation target", "target allocation", "target weight",
-                   "policy weight", "benchmark weight", "valuation mark",
-                   "fair value mark", "impairment", "write-down"),
+                   "policy statement", "mandate limits",
+                   "investment guidelines", "allocation target",
+                   "target allocation", "policy weight", "benchmark weight",
+                   "reference weight", "valuation mark", "fair value mark",
+                   "write-down", "write-up"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
@@ -1058,9 +1071,10 @@ def _values_suffixes(master: dict | None) -> dict[str, str]:
     """kind → `` [values: name(valueKind[, required][, many]), …]`` (#2818).
 
     Only kinds that DECLARE value fields appear, so every ``- kind — desc``
-    line for a props-less kind is byte-identical to pre-#2818 (``{}`` for the
-    whole shipped catalog today). Shared by the verbose and compact renders so
-    the two prompt modes spell a declaration the same way.
+    line for a props-less kind is byte-identical to pre-#2818 (the other six
+    shipped packs declare nothing; since #9663 ``portfolio:allocationTarget``
+    does, so ``{}`` is no longer the whole catalogue). Shared by the verbose and
+    compact renders so the two prompt modes spell a declaration the same way.
     """
     from tortoise.pack_values import value_field_annotations
     master = master or {}
