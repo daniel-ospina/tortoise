@@ -331,7 +331,14 @@ for (const f of files) {
       //  * null-image — already carries the real author with no avatar, which
       //                 ONLY pass 2 can fill (pass 1's guard is 'Tortoise team');
       //  * named      — a deliberately different author WITH an image, so an
-      //                 over-broad guard (either pass) reds.
+      //                 over-broad AUTHOR guard (either pass) reds. It cannot
+      //                 red on pass 2's image clause: its author is not
+      //                 'Daniel Ospina', so the author conjunct excludes it
+      //                 however the image clause is written;
+      //  * custom-image — the SHIPPED author with a deliberately DIFFERENT
+      //                 avatar. That is the only shape pass 2's
+      //                 `AND author_image_url IS NULL` protects, and the only
+      //                 row that reds if that conjunct is deleted.
       await db.exec(`
         INSERT INTO public.blog_posts
           (slug, title, author, status, created_at, updated_at, created_by, reviewed_by)
@@ -348,6 +355,11 @@ for (const f of files) {
         VALUES ('1383b-preseed-named', '1383b preseed named', 'Someone Else',
                 'https://example.com/someone-else.jpg', 'draft',
                 '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+        INSERT INTO public.blog_posts
+          (slug, title, author, author_image_url, status, created_at, updated_at)
+        VALUES ('1383b-preseed-custom-image', '1383b preseed custom image',
+                'Daniel Ospina', 'https://example.com/custom.jpg', 'draft',
+                '2026-06-06T00:00:00Z', '2026-06-06T00:00:00Z');
       `);
     }
     await db.exec(sql);

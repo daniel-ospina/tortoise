@@ -10,7 +10,7 @@
 -- ORIGINAL migration's backfill ran. It cannot prove the REPAIR carries it —
 -- on this database 20261021000001 already backfilled everything, so a
 -- 20261023000001 whose UPDATEs were deleted would print nothing. The harness
--- therefore seeds the THREE rows below IMMEDIATELY BEFORE this migration is
+-- therefore seeds the FOUR rows below IMMEDIATELY BEFORE this migration is
 -- applied (validate.mjs, the #4216/#3036/#3027 precedent), so each assertion
 -- here reads what THIS migration did and reddens if the matching statement is
 -- deleted:
@@ -22,13 +22,29 @@
 --                                  updated_at → proves pass 2 ran (pass 1's
 --                                  guard cannot touch it);
 --   * `1383b-preseed-named`      — a deliberately different author WITH an
---                                  image → proves neither pass is over-broad.
+--                                  image → covers the AUTHOR guard of both
+--                                  passes (pass 1's `author = 'Tortoise team'`
+--                                  and pass 2's `author = 'Daniel Ospina'`).
+--                                  It CANNOT cover pass 2's image clause: its
+--                                  author is not 'Daniel Ospina', so the author
+--                                  conjunct excludes it however the image
+--                                  clause is written.
+--   * `1383b-preseed-custom-image` — the SHIPPED author WITH a deliberately
+--                                  different image → covers pass 2's `AND
+--                                  author_image_url IS NULL` conjunct, and
+--                                  nothing else: only that clause keeps this
+--                                  row's avatar from being overwritten.
 --
 -- The ATOMICITY claim itself is not assertable from SQL (a migration's text is
--- history by the time a suite runs): validate.mjs's forward-repair drill
--- executes this file's FIRST top-level statement alone — the exact thing a
--- per-statement autocommit apply does before it stops — and requires the
--- trigger to still be enabled afterwards.
+-- history by the time a suite runs). validate.mjs proves it with TWO different
+-- drills, and they are not interchangeable:
+--   * drill A, the PREFIX drill — replays this file ONE TOP-LEVEL STATEMENT AT A
+--     TIME and requires the trigger still ENABLED after EVERY prefix. The
+--     every-prefix form is the point: on the four-statement shape the FIRST
+--     statement is an `ADD COLUMN`, so a first-statement-only check proves
+--     nothing;
+--   * drill B, the FORWARD-REPAIR drill — constructs the damaged state (trigger
+--     disabled, rows never backfilled) and executes the WHOLE file over it.
 -- ============================================================================
 
 CREATE SCHEMA IF NOT EXISTS tests;
@@ -72,12 +88,27 @@ SELECT tests.assert(
     = '2026-04-04 00:00:00+00'::timestamptz,
   '1383b: ...and pass 2 did not bump updated_at either');
 
--- ── 3. Neither pass is over-broad ─────────────────────────────────────────
+-- ── 3. Neither pass is over-broad — clause by clause ────────────────────────
 SELECT tests.assert(
   (SELECT author FROM public.blog_posts WHERE slug = '1383b-preseed-named') = 'Someone Else'
   AND (SELECT author_image_url FROM public.blog_posts WHERE slug = '1383b-preseed-named')
     = 'https://example.com/someone-else.jpg',
-  '1383b: a deliberately-set author and image are preserved (the guards are not over-broad)');
+  '1383b: a deliberately different author WITH an image is preserved — covers the AUTHOR guard of both passes');
+
+-- The row above cannot speak for pass 2's IMAGE clause: its author is not
+-- 'Daniel Ospina', so the author conjunct excludes it whatever the image clause
+-- says. This row carries the SHIPPED author and a CUSTOM avatar, so
+-- `AND author_image_url IS NULL` is the only clause keeping it out — deleting
+-- that conjunct overwrites its avatar with the shipped one and reddens HERE.
+SELECT tests.assert(
+  (SELECT author_image_url FROM public.blog_posts WHERE slug = '1383b-preseed-custom-image')
+    = 'https://example.com/custom.jpg',
+  '1383b: a post by the shipped author with a DELIBERATELY different avatar keeps it (deleting pass 2''s `AND author_image_url IS NULL` reddens here)');
+
+SELECT tests.assert(
+  (SELECT updated_at FROM public.blog_posts WHERE slug = '1383b-preseed-custom-image')
+    = '2026-06-06 00:00:00+00'::timestamptz,
+  '1383b: ...and no pass bumped that row''s updated_at');
 
 -- ── 4. The trigger ends ENABLED ───────────────────────────────────────────
 -- `tgenabled = 'O'` is "enabled, fires on origin". Deleting the ENABLE

@@ -40,11 +40,15 @@
 --   * the trigger is ENABLED again,
 --   * and the block is the ONLY top-level statement in this file, so there is
 --     no boundary a per-statement apply can stop at. That shape is ENFORCED,
---     not just asserted here: `supabase/tests/pglite/validate.mjs` executes
---     this file's FIRST top-level statement ALONE — the exact thing a
---     per-statement autocommit apply does before it stops — and then requires
---     the trigger to still be enabled. It reddens on the four-statement form
---     above.
+--     not just asserted here: `supabase/tests/pglite/validate.mjs` replays this
+--     file ONE TOP-LEVEL STATEMENT AT A TIME — what a per-statement autocommit
+--     apply does — and requires the trigger to still be ENABLED after EVERY
+--     prefix. It is the every-prefix form deliberately: a stop at the FIRST
+--     statement of the four-statement shape above proves nothing, because that
+--     statement is an `ADD COLUMN` and leaves the trigger on. It reddens on the
+--     four-statement form at the prefix that commits the DISABLE.
+--     (validate.mjs drill A = this prefix replay; drill B = the forward repair,
+--     which executes the WHOLE file over a hand-built damaged state.)
 --
 -- ⛔ The mechanism that makes this safe is ONE-STATEMENT ATOMICITY, not an
 -- assertion. There is deliberately no post-condition re-read of
