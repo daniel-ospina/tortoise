@@ -5885,12 +5885,14 @@ tier1:
 # `docs/architecture/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
 # exactly the change that can delete, rename or forge one with the gate absent
 # from the tier-1 arm. Same no-DB, doc/`ast` shape as the guards above.
-# ⚠️ #9778 review (P1): the docs-only diff really does reach this entry —
-# EXTRACTOR-V4-ARCHITECTURE.md takes `select()`'s early return (tier1 only) and
-# STORAGE-ARCHITECTURE.md matches the `api` entry, while `core` is added only
-# when NOTHING matched. Registered in `core` alone the gate was asleep on the
-# exact diff class that can red it (#1349/#3332/#3616 silent-drop class); pinned
-# by `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
+# ⚠️ #9778 review (P1): the docs-only diff really does reach this entry, and the
+# mechanism differs by DOCUMENT — measured with `tools/ci_selection.py`:
+# EXTRACTOR-V4-ARCHITECTURE.md takes `select()`'s early return (`surfaces=[]`,
+# 60 files) while STORAGE-ARCHITECTURE.md matches the `onboarding` entry
+# (`surfaces=['onboarding']`, 131 files), and `core` is added only when NOTHING
+# matched. Registered in `core` alone the gate was asleep on the exact diff class
+# that can red it (#1349/#3332/#3616 silent-drop class); pinned by
+# `tests/test_ci_selection.py::test_docs_scanning_gates_stay_in_tier1`.
 - test_v4_declared_mechanisms.py
 # #8495: the same document's per-step FAILURE-POLICY guard (`core` above) — same
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or

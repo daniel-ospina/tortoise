@@ -152,6 +152,12 @@ DECLARED_IDS = (
 ARCH_DOCS = ROOT / "docs" / "architecture"
 MARKER_TOKEN = "v4-mechanism:"
 MARKER_COMMENT = re.compile(r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s*$")
+#: The CONVENTION written down: an angle-bracketed placeholder id. It names no
+#: mechanism, so it is neither a declaration nor a defect — skipped, which is
+#: what lets a scanned document explain the convention without satisfying a row
+#: (#9778 review). It can never make a row pass: a row whose only marker is the
+#: placeholder is reported as UNMARKED by `membership_errors`.
+PLACEHOLDER_ID = re.compile(r"^\s*v4-mechanism:\s*<[^<>\s]+>\s*$")
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
 IMPLEMENTED = "implemented"
 NOT_IMPLEMENTED = "not-implemented"
@@ -238,11 +244,10 @@ def _prose_only(text: str) -> str:
     counts wherever it appears, code block included — a declaration sitting in a
     fenced example is still a declaration a reader of that document meets.
 
-    The cost is named rather than hidden: an EXAMPLE that is comment-shaped but
-    names no id (`<!-- v4-mechanism: <id> -->`) cannot be told from a neutered
-    marker, so it is reported. Write the convention down in
-    `config/v4-mechanisms.yml`, which is not scanned, and keep scanned design
-    documents to real declarations.
+    The line is drawn on MEANING, not on shape: an angle-bracketed placeholder
+    id (`<!-- v4-mechanism: <id> -->`) is the convention written down and is
+    skipped (:data:`PLACEHOLDER_ID`); anything else comment-shaped that names no
+    usable id is reported, because a neutered marker must not read as absent.
     """
     return text
 
@@ -256,20 +261,23 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     (`span_link`, `state_value_carve_out`) — that is a declaration, not a
     duplicate defect, so repeats are collected rather than refused.
 
-    FAIL CLOSED on the shapes that would otherwise be silent: an HTML COMMENT
-    that carries the token but does not name a mechanism id
-    (`<!-- v4-mechanism: -->`, or a placeholder like `<id>`) is reported rather
-    than skipped — a malformed declaration is not an absent one, and treating it
-    as absent is how a marker gets neutered by a typo. An UNTERMINATED comment
-    opener is reported too, for the same reason. The token in ordinary PROSE is
-    not a declaration (see :func:`_prose_only` for where the line is drawn and
-    why it is drawn there rather than by parsing markdown). A missing documents
-    directory is reported: an unreadable surface is a verdict, not an empty set
-    (the same polarity as `_defined_names` returning ``None``).
+    FAIL CLOSED on the shapes that would otherwise be silent: a MALFORMED
+    `v4-mechanism:` comment — one that neither names a mechanism id nor is the
+    convention placeholder described two paragraphs below (`<!-- v4-mechanism:
+    -->`, `Foo`, a hyphenated id) — is reported rather than skipped: a malformed
+    declaration is not an absent one, and treating it as absent is how a marker
+    gets neutered by a typo. An UNTERMINATED comment opener is reported too, for
+    the same reason. The token in ordinary PROSE is not a declaration (see
+    :func:`_prose_only` for where the line is drawn and why it is drawn there
+    rather than by parsing markdown). A missing documents directory is reported:
+    an unreadable surface is a verdict, not an empty set (the same polarity as
+    `_defined_names` returning ``None``).
 
     The CONVENTION itself — an angle-bracketed placeholder id
-    (``<!-- v4-mechanism: <id> -->``, which is how the rule is written down) —
-    is skipped: it names no mechanism, so counting it as a declaration made
+    (``<!-- v4-mechanism: <id> -->``, which is how the rule is written down, and
+    any other body that is one bracket-delimited run with no inner space, such as
+    ``<span_link>``: the exemption is on the bracket, not on the word) — is
+    skipped: it names no mechanism, so counting it as a declaration made
     describing the rule in a scanned document a red gate (#9778 review P3).
 
     The second return value is the violation list, so one caller can report the
@@ -297,6 +305,8 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
         for body in comments:
             if MARKER_TOKEN not in body:
                 continue
+            if PLACEHOLDER_ID.match(body):
+                continue  # the convention itself, not a declaration
             match = MARKER_COMMENT.match(body)
             if match is None:
                 errors.append(
@@ -1091,11 +1101,24 @@ def test_membership_fails_closed_on_a_malformed_marker(tmp_path) -> None:
     assert any("malformed" in e for e in errors), errors
 
 
-def test_membership_fails_closed_on_a_placeholder_id(tmp_path) -> None:
-    """`<id>` is a template, not a mechanism — and is not silently dropped."""
+def test_a_placeholder_id_is_the_convention_not_a_declaration(tmp_path) -> None:
+    """`<id>` names no mechanism: not a marker, and not a defect either.
+
+    A scanned document may explain the convention. The placeholder is therefore
+    skipped — and it can never make a row pass, because the row's own marker is
+    then absent and `membership_errors` reports it as UNMARKED (asserted here as
+    the second half, so skipping can never become a fail-open).
+    """
     docs = _docs(tmp_path, a__md="<!-- v4-mechanism: <id> -->\n")
     errors = membership_errors([_row("x")], docs)
-    assert any("does not name a mechanism id" in e for e in errors), errors
+    assert not any("does not name a mechanism id" in e for e in errors), errors
+    assert any("UNMARKED row" in e for e in errors), errors
+    # With the real marker alongside it, the document is clean.
+    docs = _docs(
+        tmp_path,
+        a__md="<!-- v4-mechanism: <id> -->\n<!-- v4-mechanism: x -->\n",
+    )
+    assert membership_errors([_row("x")], docs) == []
 
 
 def test_membership_ignores_the_token_in_prose(tmp_path) -> None:
@@ -1115,9 +1138,8 @@ def test_a_marker_inside_a_code_block_still_counts(tmp_path) -> None:
     The alternative — stripping fenced/inline code — was a half-implemented
     markdown parser (review cycle 2, P2): `~~~` fences, indented blocks and
     double-backtick spans survived it, so the same marker counted in some code
-    shapes and not others. Counting the text uniformly is the rule; the
-    consequence (a comment-shaped EXAMPLE must not be written into a scanned
-    doc — put it in the registry) is stated in `_prose_only`.
+    shapes and not others. Counting the text uniformly is the rule; a
+    placeholder id is exempted by MEANING instead (:data:`PLACEHOLDER_ID`).
     """
     docs = _docs(tmp_path, a__md="```\n<!-- v4-mechanism: x -->\n```\n")
     assert membership_errors([_row("x")], docs) == []
