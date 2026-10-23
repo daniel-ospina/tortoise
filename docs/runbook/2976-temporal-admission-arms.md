@@ -14,7 +14,7 @@ related:
   - "#2165 (deterministic temporal assembler, lane 2)"
 ---
 
-# #2976 — TR admission measurement
+## #2976 — TR admission measurement
 
 > Three admission arms over ONE ingest of the pinned 55-question temporal subset
 > (52 answerable), same reader prompt, same rendering, one grader.
@@ -24,7 +24,7 @@ related:
 
 ## 1. Headline
 
-| arm | answerable-correct / 52 | reader refusals | context tokens (median) | window items | window sessions | questions with gold admitted |
+| arm | correct / 52 | refusals | ctx tokens (median) | items | sessions | gold admitted |
 |---|---|---|---|---|---|---|
 | **issue baseline** (committed `#2578` A-default, PRE-`#2978` code, re-graded) | **9 / 52 (17.3%)** | 52 / 52 | **97** | 12 | — | 0 / 55 (committed facts) |
 | **today's baseline** (main, same knobs) | **31 / 52 (59.6%)** | 7 / 52 | 2 171 | 12 | 4 | 51 / 52 |
@@ -45,7 +45,7 @@ is left OFF.
 
 ## 2. The issue's premise is HALF stale — and that is the finding
 
-#2976 quotes two defects. Re-measured on today's `main`:
+Issue #2976 quotes two defects. Re-measured on today's `main`:
 
 1. **"Gold at rank 41–120 never enters a 12-item window" — no longer reproduces.**
    On the pinned subset the gold is admitted on **51 / 52** questions under the
