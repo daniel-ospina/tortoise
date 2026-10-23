@@ -81,7 +81,7 @@ BEGIN
 
   IF trigger_state IS NULL THEN
     RAISE EXCEPTION
-      'blog_posts_set_updated_at does not exist on public.blog_posts — refusing to run an attribution backfill that cannot leave updated_at enabled';
+      'blog_posts_set_updated_at does not exist on public.blog_posts — refusing to run an attribution backfill that could not leave updated_at enabled';
   END IF;
 
   EXECUTE 'ALTER TABLE public.blog_posts DISABLE TRIGGER blog_posts_set_updated_at';
