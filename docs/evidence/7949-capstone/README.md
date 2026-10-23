@@ -398,7 +398,7 @@ produce is a **before** arm: E1's criterion is a
 *ratio between two arms*, and two independent captures would confound the gate with LLM
 non-determinism — which is exactly why the bare-definite share is not quoted as a trend: the same
 probe on the same corpus has produced double-digit bare counts on one pass and zero on the next
-(7/46 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is **not
+(6/50 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is **not
 committed** — superseding DELETES the file it replaces, so that observation is provenance, not an
 artifact this bundle can check).
 So E1 needs the controlled design #9076 built — one extraction, both arms applied to the SAME
