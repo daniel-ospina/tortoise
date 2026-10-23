@@ -97,7 +97,9 @@ response_fields:
   emitted_when: '#2350 — the hit is a Point carrying a validity window, and the START''s precision: year|month|day,
     or null where the stored start is PRESENT but names no instant (`""`, `TBD`, `not-a-date` — the #6140 ruling
     makes that "no start was recorded", so there is no granularity to claim; #9201). A legacy bare-ISO (orderable)
-    start reads as day; a caller-declared token wins. Emitted with the same block as valid_to_precision and end_state,
+    start reads as day; a caller-DECLARED token is reported only once that bound itself ORDERS — since #9244 a
+    declaration annotates a bound, it cannot summon one, so a token declared on an unorderable start still reads
+    null. Emitted with the same block as valid_to_precision and end_state,
     whenever valid_from / valid_to / valid_from_precision / valid_to_precision is present'
   unchanged_when_off: n/a — not flag-gated; an undated hit stays byte-identical (no window keys at all), never a
     defaulted value
@@ -105,8 +107,11 @@ response_fields:
   field: valid_to_precision
   emitted_when: '#2350 — the end precision of the hit''s validity window: year|month|day, the end-only `unknown`
     marker (the window ENDED but is un-datable), or null where the stored end is PRESENT but names no instant (`TBD`
-    — no granularity to claim; #9201). ABSENT (not null) when the window has no end at all, so the open shape stays
-    distinguishable. Emitted with the same block as valid_from_precision and end_state'
+    — no granularity to claim; #9201, and #9244 for a caller-DECLARED token: a declaration annotates a bound, it
+    cannot summon one — the same gate the start row records, applied to BOTH ends; null here does NOT change
+    end_state, which stays `known` for a dated-but-un-datable end, #9202). ABSENT (not null) when the window has no
+    end at all, so the open shape stays distinguishable. Emitted with the same block as valid_from_precision and
+    end_state'
   unchanged_when_off: n/a — not flag-gated; absent when the point has no end, so an open-ended hit stays byte-identical
 - response: tortoise_search
   field: end_state
