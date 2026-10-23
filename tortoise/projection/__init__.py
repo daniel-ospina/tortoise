@@ -11017,29 +11017,30 @@ class FalkorProjection(
         # sentence in the exception, and a class-only refusal is told what the
         # message does establish plus how to READ whether a ceiling exists.
         #
-        # ⚠️ WHAT IS BOUND BETWEEN THE PAIR, precisely, so this cannot be read
-        # as more than it is: (1) the #2981 PROHIBITION, via the shared constant;
-        # (2) the knob's two HOMES, via `_CEILING_REMEDY_HOMES`; and (3) the
-        # "reached" DECISION, via the shared `ceiling_reading_drift` — added on
-        # review of #7357, because the note's operator advice had said "has
-        # reached" with no tolerance while this branch knew a real ceiling reads
-        # up to 56 KiB under the cap, which withdrew the remedy at a genuine
-        # ceiling. What is deliberately NOT bound is the probe SENTENCE itself:
-        # this message has already READ `INFO memory` (its three branches above
-        # are the readings), while the SDK note has only an exception and must
-        # tell the caller to go and read — so they say different things about
-        # the same rule on purpose, and neither asserts a `maxmemory` it did not
-        # read. NOR is this message's `cap <= 2 * drift` SCALE GUARD bound: a cap
-        # whose own tolerance exceeds it makes the bias branch unreachable, and
-        # only a reader that HOLDS a reading can decide that — the note, holding
-        # none, cannot and does not claim it.
-        #
-        # ⚠️ What is STILL not agreed is the classification, not the claim:
-        # `_WRITE_REFUSAL_MARKERS` does not match a class-only `OOM …` reply,
-        # so such a refusal can still fall
-        # through to the rebuild advice in `_backend_failure_message` — the
-        # #2981 direction. That is a separate seam with its own measurement,
-        # deliberately not widened here.
+        # ⚠️ WHAT THIS PAIR ACTUALLY SHARES, enumerated, so this cannot be read
+        # as more than it is (#7357, cycle 4 — an earlier draft of this comment
+        # said more than the code held):
+        #   BOUND: the #2981 PROHIBITION, composed from the one constant in
+        #     `tortoise/retry.py`.
+        #   BOUND: the "ceiling was REACHED" rule, via `ceiling_reading_drift`
+        #     — this message CALLS it, the SDK note DESCRIBES it (it holds an
+        #     exception, not a reading), and one test pins both.
+        #   NOT BOUND: the knob's HOMES. `_CEILING_REMEDY_HOMES` is composed by
+        #     the note ONLY; this message carries its own wording of the same
+        #     two homes in four places. A third home must be added to all of
+        #     them, and nothing reddens if it is not.
+        #   NOT BOUND: the `cap <= 2 * drift` SCALE GUARD below, which only a
+        #     reader HOLDING a reading can apply. At a cap small enough for it
+        #     to fire (under ~128 KiB) this message says "does not show the
+        #     ceiling being reached" where the note's advice would still say to
+        #     raise it. Unreachable with any instance this repo runs — the
+        #     smallest is the 1 MiB lane container — and left stated rather than
+        #     papered over.
+        #   NOT BOUND: the CLASSIFICATION. `_WRITE_REFUSAL_MARKERS` does not
+        #     match a class-only `OOM …` reply, so such a refusal can still fall
+        #     through to the rebuild advice in `_backend_failure_message` — the
+        #     #2981 direction. A separate seam with its own measurement,
+        #     deliberately not widened here.
         return (
             "DB refused writes on open: the graph is INTACT but "
             f"{lead}. This is NOT "

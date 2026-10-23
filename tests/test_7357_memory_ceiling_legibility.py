@@ -695,21 +695,30 @@ def test_the_reached_decision_has_one_authority():
     # P2): a new branch in the projection doing the arithmetic inline leaves the
     # import in place, the name resolving, and the `def` count at 1 — every
     # assertion above green while two tolerances drive one decision, the exact
-    # drift this PR closes. So the FORMULA is scanned, normalised, across the
-    # package: quotes, backslashes, brackets and whitespace are squashed on both
-    # sides first, because this repo splits prose and expressions across lines
-    # and a reflow must not evade the guard (its own self-test is the sibling
-    # `_ownership_constraint_holders`, which had this same line-local bug).
+    # drift this PR closes. So the DISTINCTIVE HALF of the expression is scanned,
+    # normalised, across the package: quotes, brackets and whitespace are
+    # squashed on both sides first, because this repo splits expressions across
+    # lines and a reflow must not evade the guard.
+    #
+    # It keys on `min(cap // 100, …)` rather than on the whole formula, because
+    # the whole-formula spelling is what a copy-paste DUPLICATE would keep while
+    # a re-typed variant (`max(65536, min(cap // 100, 1048576))`) would not —
+    # and the literal `1 << 20` alone is no use (four unrelated modules use it).
+    # It keys on `min(...)` and not on a bare `cap // 100`, which the tiny-cap
+    # guard below legitimately carries. Counted, not just file-matched, so a
+    # second copy inside `retry.py` itself is caught too.
     import re
     squash = lambda text: re.sub(r"[\s\"'()\\`]+", "", text)  # noqa: E731
-    formula = squash("max(64 << 10, min(cap // 100, 1 << 20))")
+    needle = squash("min(cap // 100")
     holders = [
         str(p.relative_to(root)) for p in sorted(root.rglob("*.py"))
-        if formula in squash(p.read_text(encoding="utf-8"))
+        if needle in squash(p.read_text(encoding="utf-8"))
     ]
     assert holders == ["retry.py"], (
-        "the tolerance must have ONE implementation, inside "
+        "the tolerance's 1% arm must have ONE implementation, inside "
         f"ceiling_reading_drift — not a second decision site: {holders}")
+    assert squash(retry_src).count(needle) == 1, (
+        "a second copy of the 1% arm inside retry.py is still two tolerances")
 
 
 def test_the_evidence_walk_cannot_replace_the_exception_it_explains():
@@ -765,6 +774,42 @@ def test_an_unreadable_message_degrades_to_no_note_rather_than_a_raise():
             raise RuntimeError("boom")
 
     assert explain_memory_ceiling(_ExplodingResponse("anything")) is None
+
+
+def test_an_implicit_context_is_not_ceiling_evidence():
+    """A handled prior failure's sentence is not this failure's evidence.
+
+    #7357 cycle 4, measured: `OutOfMemoryError("OOM failed to allocate 1GB")`
+    raised inside an `except ResponseError("command not allowed when used memory
+    > 'maxmemory'")` block inherits that sentence through Python's IMPLICIT
+    `__context__` chaining. The ceiling there belongs to a different, already
+    handled failure — so asserting it is the same over-claim one level of
+    indirection out, in the arm whose whole job is to stop that.
+
+    `raise ... from` IS the author stating causality, so `__cause__` still
+    licenses the assertion; the FAMILY predicate keeps walking `__context__`
+    (there a wider walk is the safe direction — it only widens what is told to
+    the caller, not what is claimed about the instance).
+
+    NON-VACUOUS: walk `__context__` in `_chain_names_the_ceiling` and the first
+    assertion reddens (the ceiling sentence comes back).
+    """
+    prior = redis_exc.ResponseError(
+        "command not allowed when used memory > 'maxmemory'.")
+    failure = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    failure.__context__ = prior
+    assert failure.__suppress_context__ is False, (
+        "the fixture must be the IMPLICIT chain, not `from None`")
+    assert is_memory_ceiling_refusal(failure) is True, (
+        "membership still walks the context — that is the family question")
+    hedged = explain_memory_ceiling(failure) or ""
+    assert "it has reached its configured dataset limit" not in hedged
+
+    # …while an EXPLICIT cause still licenses it.
+    explicit = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    explicit.__cause__ = _ceiling_error()
+    assert "it has reached its configured dataset limit" in (
+        explain_memory_ceiling(explicit) or "")
 
 
 # ── the wiring, through a real guarded client ───────────────────────────────

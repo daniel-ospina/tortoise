@@ -958,11 +958,20 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
     predicate: the family is what the caller must be told about, and the
     ceiling is a claim that needs evidence the family does not carry.
 
-    Walks the chain exactly as :func:`is_memory_ceiling_refusal` does
-    (``__cause__``, then ``__context__`` unless suppressed, id-deduplicated), so
-    the link that made the exception a member of the family is also the link
-    that may establish the ceiling. Matches ``_MEMORY_CEILING_RE`` against the
-    message HEAD only — an already-explained message is never naming the
+    Walks the EXPLICIT chain — the top link, then ``__cause__``. It does NOT
+    follow an implicit ``__context__``, and that is the point (#7357 cycle 4):
+    ``__context__`` records a failure that was already HANDLED, so a ceiling
+    sentence there belongs to a DIFFERENT failure. Measured shape: an
+    ``OutOfMemoryError("OOM failed to allocate 1GB")`` raised inside an
+    ``except ResponseError("command not allowed when used memory > 'maxmemory'")``
+    block inherits that sentence implicitly, and asserting the ceiling from it
+    would be the same over-claim one level of indirection out. ``raise ... from``
+    is the author stating causality, so ``__cause__`` is evidence and
+    ``__context__`` is not. (The FAMILY predicate, :func:`is_memory_ceiling_refusal`,
+    keeps walking ``__context__``: there the question is "is this the family",
+    where a wider walk is the safe direction. Here the question is "may I assert
+    a ``maxmemory``", where it is not.) Matches ``_MEMORY_CEILING_RE`` against
+    the message HEAD only, so an already-explained message never names the
     ceiling a second time.
     """
     seen: set[int] = set()
@@ -973,12 +982,7 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
             if _MEMORY_CEILING_RE.search(
                     str(link).partition(_LEGIBLE_OPENER)[0]):
                 return True
-            if link.__cause__ is not None:
-                link = link.__cause__
-            elif link.__suppress_context__:
-                link = None
-            else:
-                link = link.__context__
+            link = link.__cause__
     except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
         # ⚠️ THIS WALKS *EVERY* LINK, so unlike `is_memory_ceiling_refusal` (which
         # only stringifies `ResponseError` links) it can read a caller-supplied
@@ -1006,12 +1010,11 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
 #: 4 KiB shortfall is the reading, not a different cause, and only a shortfall
 #: WIDER than this tolerance is evidence that the ceiling is not the explanation.
 #:
-#: ⚠️ TWO READERS, ONE RULE (#7357 review P2): `_write_refusal_message` decides
-#: "reached" from an `INFO memory` reading it took itself, and the SDK's hedge
-#: note TELLS an operator how to decide it. They disagreed — the operator advice
-#: said "has reached" with no tolerance, so at a real ceiling reading 40 KiB
-#: under the cap it withdrew the remedy — which is the drift #2981 rules out.
-#: Both now call this.
+#: ⚠️ ONE IMPLEMENTATION, ONE DESCRIPTION (#7357 review P2/P3):
+#: `_write_refusal_message` CALLS this function; the SDK's hedge note DESCRIBES
+#: the same rule, because it holds an exception and not a reading. They must move
+#: together when these numbers do — the note's "within a small drift BELOW it"
+#: is pinned by `test_the_reached_decision_has_one_authority`.
 #:
 #: The 1 % arm is a HEURISTIC and is capped at 1 MiB so it cannot scale
 #: unbounded: at 1 TiB it would swallow 10 GiB of genuine headroom and print the
