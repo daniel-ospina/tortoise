@@ -196,7 +196,9 @@ RECORD_MIGRATION_FILES = [REPO_ROOT / "supabase" / "migrations" / name
 #: rolls back the role, the grants and the nine other policies, leaving the
 #: armed leg exactly as unarmed as before and failing as `42P01` instead of the
 #: `InsufficientPrivilege` the re-apply exists to remove. Measured on
-#: postgres:16.15 (#9800 review P2), so the table's own migration is entry 2.
+#: postgres:16.15 (#9800 review P2), so `20261023000001_record_session_narrative.sql`
+#: precedes the tenancy file in the list below (named, not numbered: an index
+#: goes stale the next time an entry is prepended, as this commit did).
 #:
 #: ⚠️ `creates` IS NOT THE "NEVER ASK THE DB" RULE BEING BROKEN. That rule is
 #: about SHAPE (a stale container answering "already fine" about a column
@@ -251,13 +253,35 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
 #: :data:`RECORD_REAPPLY_STEPS`, as `name -> why`. Empty is the healthy state and
 #: a real reason is the only thing that may enter it — the point is that the
-#: decision can never be SILENT. The closure test below keeps this honest: a new
-#: record migration must either be re-applied or be named here with its reason,
-#: which is exactly the axis the two omissions behind #9800's reopened P2 sat
-#: on: both migrations say "idempotent on re-apply" in their own headers and
-#: both sort BEFORE the set's first entry, so a pre-#9638 container never reached
-#: them and nothing in the helper said so.
-RECORD_REAPPLY_EXCLUDED: dict[str, str] = {}
+#: decision can never be SILENT. The closure test below keeps this honest: every
+#: record migration sorting after the one that CREATES `public.journal_event`
+#: must either be re-applied or be named here with its reason, which is exactly
+#: the axis the two omissions behind #9800's reopened P2 sat on: both migrations
+#: say "idempotent on re-apply" in their own headers and both sort BEFORE the
+#: set's first entry, so a pre-#9638 container never reached them and nothing in
+#: the helper said so.
+#:
+#: ⚠️ THE BASE SHAPE'S OWN FILES ARE THE FOUR `20261012…0002-0005` ENTRIES. The
+#: shortcut only takes the already-migrated branch when `public.journal_event`
+#: EXISTS, and that relation is created by `20261012000001`; the four files here
+#: carve up the SAME release (event stream, semantic, epistemic, procedural) and
+#: ship with it, so a container holding the journal holds them. Naming them is
+#: not ceremony: the closure test classifies "forward amendment" by FILE ORDER
+#: from the journal's creator, so leaving them out would make a future
+#: `20261012000006_…` look like part of the base batch and it would be silently
+#: omitted — the reviewer's own measured escape (#9800 review of 0356d5d25, P3).
+#: A record migration numbered on the base day but sorting after these therefore
+#: has to be re-applied or excluded HERE, with a reason.
+RECORD_REAPPLY_EXCLUDED: dict[str, str] = {
+    "20261012000002_record_semantic.sql":
+        "base shape — created by the release that creates `journal_event`",
+    "20261012000003_record_epistemic.sql":
+        "base shape — created by the release that creates `journal_event`",
+    "20261012000004_record_procedural.sql":
+        "base shape — created by the release that creates `journal_event`",
+    "20261012000005_record_org_purge_rpc.sql":
+        "base shape — created by the release that creates `journal_event`",
+}
 
 #: The minimum Supabase-shaped substrate the record migrations need: the three
 #: roles they GRANT to, and the two control-plane tables their tenancy FKs
@@ -2492,7 +2516,7 @@ def test_the_dream_drain_carries_the_enqueueing_requests_tenant(monkeypatch):
 
 
 def _strip_sql_comments(text: str) -> str:
-    """The STATEMENTS of a migration file, with its prose removed.
+    r"""The STATEMENTS of a migration file, with its prose removed.
 
     These files are ~70% prose *about* their own SQL (the tenancy migration
     explains at length why it does NOT grant `DELETE` on `journal_event`), so a
@@ -2503,19 +2527,61 @@ def _strip_sql_comments(text: str) -> str:
     alone leaves `/* … */` and a trailing `-- …` after a statement intact, and
     the derivation below feeds a DROP list — so a comment naming a table would
     become a phantom relation and red the required zero-skip Postgres job on an
-    honest diff (#9800 review of d05243806, P3). It tracks single-quoted
-    literals (``''`` escapes) and RECURSES into `$tag$ … $tag$` bodies, so a
-    `--` or `/*` INSIDE a literal survives — the over-stripping that matters,
-    since an under-derivation is the loud failure (`declared <= set(dropped)`)
-    while a weakened positive assertion is not — and one inside a PL/pgSQL body
-    (where it is a comment too) does not.
+    honest diff (#9800 review of d05243806, P3). What it tells apart:
+
+    * `-- …` to end of line, and `/* … */` with DEPTH (Postgres nests block
+      comments, so closing at the first `*/` would let
+      `/* a /* b */ CREATE TABLE public.phantom (…); */` leak a phantom —
+      measured, #9800 review of 0356d5d25, P3);
+    * `'…'` literals with ``''`` escapes, and `E'…'` escape strings where `\`
+      quotes the next character (mis-ending one of those lets the `--` that
+      follows eat real SQL, which SHORTENS what the assertions read);
+    * `"…"` quoted identifiers — a `--` inside one is part of the name;
+    * `$tag$ … $tag$` bodies, which are RECURSED into rather than kept opaque: a
+      `DO $$ … $$` body is PL/pgSQL, where `--` and `/* */` are comments too.
+      The recursion still preserves a quoted `EXECUTE 'CREATE TABLE public.x'`
+      — a table that really exists, so matching it is correct over-derivation,
+      not a phantom.
     """
     out: list[str] = []
     i, n = 0, len(text)
     while i < n:
-        if text[i] == "'":
+        if text.startswith("--", i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            i = j
+        elif text[i] == '"':
             j = i + 1
             while j < n:
+                if text[j] == '"':
+                    if j + 1 < n and text[j + 1] == '"':
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            out.append(text[i:j])
+            i = j
+        elif text[i] == "'" or (text[i] in "eE" and i + 1 < n
+                                 and text[i + 1] == "'"):
+            escape = text[i] in "eE"
+            if escape:
+                out.append(text[i])
+                i += 1
+            j = i + 1
+            while j < n:
+                if escape and text[j] == "\\":
+                    j += 2
+                    continue
                 if text[j] == "'":
                     if j + 1 < n and text[j + 1] == "'":
                         j += 2
@@ -2532,20 +2598,8 @@ def _strip_sql_comments(text: str) -> str:
                 out.append(text[i:])
                 i = n
             else:
-                # RECURSE, do not keep the body opaque: a `DO $$ … $$` body is
-                # PL/pgSQL, where `--` and `/* */` are comments too, so an
-                # opaque body would let a comment inside one name a table. The
-                # recursion still preserves a quoted `EXECUTE 'CREATE TABLE
-                # public.x'` — a table that really exists, so matching it is
-                # correct over-derivation, not a phantom.
                 out.append(tag + _strip_sql_comments(text[i + len(tag):end]) + tag)
                 i = end + len(tag)
-        elif text.startswith("--", i):
-            end = text.find("\n", i)
-            i = n if end < 0 else end
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
-            i = n if end < 0 else end + 2
         else:
             out.append(text[i])
             i += 1
@@ -2553,18 +2607,31 @@ def _strip_sql_comments(text: str) -> str:
 
 
 def _journal_event_privileges(sql: str) -> set[str]:
-    """The privileges a migration GRANTS on `public.journal_event`, as a SET.
+    """The privileges GRANTed on `journal_event` to `tortoise_record_app`.
 
-    A set rather than a substring, because the substring form under-reads what
+    A SET rather than a substring, because the substring form under-reads what
     it claims: `GRANT ALL ON public.journal_event` grants UPDATE and DELETE
     while `"DELETE ON public.journal_event" not in sql` passes it, and
-    `GRANT UPDATE ON public.journal_event` passes it too. The granted words are
-    the thing the append-only asymmetry is about, so they are parsed.
+    `GRANT UPDATE ON public.journal_event` passes it too.
+
+    The grammar the spellings vary over is handled explicitly — the optional
+    `TABLE` keyword (`GRANT … ON TABLE public.x`), the optional schema, a quoted
+    `"journal_event"`, and a multi-word privilege (`ALL PRIVILEGES`) — and the
+    GRANTEE is matched, not just the target: without that, re-pointing the grant
+    at `authenticated` would keep the set at SELECT+INSERT while the role this
+    guard exists for lost its grant (#9800 review of 0356d5d25, P3).
+
+    The authoritative check is `has_table_privilege('tortoise_record_app',
+    'public.journal_event', …)` in the Postgres leg below; this is the DB-free
+    half, and it deliberately reads only this one relation.
     """
     granted: set[str] = set()
-    for privileges in re.findall(
-            r"GRANT\s+([A-Za-z][A-Za-z,\s]*?)\s+ON\s+public\s*\.\s*journal_event\b",
+    for privileges, grantees in re.findall(
+            r"GRANT\s+([A-Za-z][A-Za-z,\s]*?)\s+ON\s+(?:TABLE\s+)?"
+            r"(?:public\s*\.\s*)?\"?journal_event\"?\s+TO\s+([^;]+);",
             sql, re.IGNORECASE):
+        if "tortoise_record_app" not in grantees:
+            continue
         granted |= {word.strip().upper()
                     for word in privileges.split(",") if word.strip()}
     return granted
@@ -2576,23 +2643,40 @@ def test_the_sql_stripper_reads_sql_not_prose():
     It guards a DROP list and three substring assertions, so both directions are
     a defect: an unstripped comment can invent a table (false red on the
     required Postgres job) and an over-eager strip can weaken a guard to nothing.
+    Each form below is one a reviewer MEASURED against the previous version
+    (#9800 review of 0356d5d25, P3) — nested block comments leaked a phantom;
+    a quoted identifier and an `E'…'` string over-stripped real SQL.
     """
     kept = _strip_sql_comments(
         "CREATE TABLE public.real_one (\n"      # plain SQL
         "    -- CREATE TABLE public.line_comment\n"   # full-line `--`
         ");  -- CREATE TABLE public.trailing\n"    # trailing `--`
         "/* CREATE TABLE public.block */\n"        # `/* */`
+        # Postgres NESTS block comments: this whole span is one comment.
+        "/* outer /* inner */ CREATE TABLE public.nested (id int); */\n"
         "SELECT 'a -- not a comment', 'it''s /* fine */';\n"  # literals
+        # A `--` inside a QUOTED IDENTIFIER is part of the name, not a comment.
+        'ALTER TABLE public.real_one RENAME COLUMN a TO "weird--name";\n'
+        # An `E'…'` string: the backslash-escaped quote does not end it, so the
+        # `--` after the statement is a comment and `after_estring` is prose.
+        "SELECT E'it\\'s', 1;  -- CREATE TABLE public.after_estring\n"
         "DO $$ BEGIN -- CREATE TABLE public.in_body\n END $$;\n")
     assert "CREATE TABLE public.real_one" in kept, "real SQL must survive"
-    for phantom in ("line_comment", "trailing", "block", "in_body"):
+    for phantom in ("line_comment", "trailing", "block", "nested",
+                    "after_estring", "in_body"):
         assert phantom not in kept, (
             f"`{phantom}` is comment prose; a name it carries would enter the "
             "DB leg's DROP list as a relation nothing creates")
+    assert "ALTER TABLE public.real_one RENAME COLUMN a TO \"weird--name\"" in kept, (
+        "a `--` inside a quoted identifier is part of the NAME; truncating it "
+        "leaves a half statement whose assertion reads nothing")
     assert "'a -- not a comment'" in kept, (
         "`--` inside a single-quoted literal is DATA, and stripping it would "
         "truncate a statement whose assertion depends on it")
     assert "'it''s /* fine */'" in kept, "a `/*` inside a literal is data too"
+    assert "E'it\\'s', 1;" in kept, (
+        "an `E'…'` string ends at its UNESCAPED quote; ending it early lets the "
+        "following `--` eat real SQL")
 
 
 def test_the_journal_event_privilege_pin_is_a_set():
@@ -2610,7 +2694,13 @@ def test_the_journal_event_privilege_pin_is_a_set():
     assert _journal_event_privileges(append_only) == {"SELECT", "INSERT"}
 
     for escape in ("GRANT ALL ON public.journal_event TO tortoise_record_app;",
-                   "GRANT UPDATE ON public.journal_event TO tortoise_record_app;"):
+                   "GRANT UPDATE ON public.journal_event TO tortoise_record_app;",
+                   # The spellings the previous regex could not see at all
+                   # (#9800 review of 0356d5d25, P3, each measured green there).
+                   "GRANT ALL ON TABLE public.journal_event TO tortoise_record_app;",
+                   "GRANT ALL PRIVILEGES ON public.journal_event TO tortoise_record_app;",
+                   "GRANT ALL ON public.\"journal_event\" TO tortoise_record_app;",
+                   "GRANT ALL ON journal_event TO tortoise_record_app;"):
         assert "DELETE ON public.journal_event" not in escape, (
             "premise: this grant is invisible to the substring assertion")
         assert _journal_event_privileges(append_only + "\n" + escape) != {
@@ -2623,6 +2713,14 @@ def test_the_journal_event_privilege_pin_is_a_set():
                 "TO tortoise_record_app;")
     assert "DELETE ON public.journal_event" in explicit
     assert _journal_event_privileges(explicit) != {"SELECT", "INSERT"}
+
+    # The GRANTEE is part of the claim: re-pointing the same grant at another
+    # role must read as "the app role has NO grant", not as the same set — the
+    # exact-text assertion this replaced would have caught that and a
+    # grantee-blind parser does not.
+    assert _journal_event_privileges(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON public.journal_event "
+        "TO authenticated;") == set()
 
     # Adding the append-only grant to a file that had none is a CHANGE, not a
     # no-op: the empty set is what the pre-#9554 re-apply set produced, and it
@@ -2779,26 +2877,28 @@ def test_ensure_record_schema_applies_everything_on_a_fresh_container():
         assert path.read_text(encoding="utf-8") in executed, path.name
 
 
-def _base_shape_release() -> str:
-    """The release that CREATED `journal_event` — the shortcut's base shape.
+def _base_record_migration() -> str:
+    """The migration that CREATES `journal_event` — the shortcut's hinge.
 
     `_ensure_record_schema` decides "already migrated" from
-    `to_regclass('public.journal_event')`, so the release that created that
-    relation is the earliest record schema a stale container is guaranteed to
-    have: `journal_event` present ⇒ those files ran (they ship together). Every
-    record migration from a LATER release is a FORWARD amendment, and a
-    container older than the amendment does not carry it.
+    `to_regclass('public.journal_event')`, so that relation's creator is the
+    earliest record file a stale container is guaranteed to have run. Anything
+    sorting AFTER it in `RECORD_MIGRATIONS` is a forward amendment it may not
+    carry.
 
-    Returned as the migration's date prefix (the first eight characters of the
-    filename, which is the release boundary in this series), derived from the
-    file that creates the relation rather than restated.
+    FILE ORDER, deliberately, not a date prefix: a migration numbered on the
+    base release's own day but shipping later (`…12000006_…`) is still a forward
+    amendment, and a date comparison would file it under "base" and omit it
+    silently (#9800 review of 0356d5d25, P3 — measured with such a file). The
+    base release's own siblings are therefore named in
+    `RECORD_REAPPLY_EXCLUDED` rather than skipped by a heuristic.
     """
     for path in RECORD_MIGRATION_FILES:
         if re.search(
                 r"CREATE\s+TABLE[^;]*?\bpublic\s*\.\s*journal_event\b",
                 _strip_sql_comments(path.read_text(encoding="utf-8")),
                 re.IGNORECASE | re.DOTALL):
-            return path.name[:8]
+            return path.name
     raise AssertionError(
         "derivation failure: no record migration creates `public.journal_event`, "
         "so the base shape this test measures from is not on disk")
@@ -2808,22 +2908,22 @@ def test_the_reapply_set_covers_every_record_migration_after_the_base_shape():
     """The re-apply set must be CLOSED over the forward amendments (#9800 P2).
 
     A container is only "already migrated" as far as `journal_event`. Every
-    record migration from a later release is a forward amendment such a
-    container may not have — while the schema readers (`table_columns()`,
-    `refused_props_names()`) parse the FILES, so they emit columns and refusals
-    the container does not carry. Concretely: a money-bearing Point gets
-    `amount_minor` in its INSERT and the row is lost to `42703` while the
-    capture receipt still reports ok (#2782, the same class as the narrowing
-    below it, #9602 P2-2), and a pre-#8263 container has no DB-side `subject`
-    refusal behind the projection's own drop.
+    record migration sorting after the file that creates it is a forward
+    amendment such a container may not have — while the schema readers
+    (`table_columns()`, `refused_props_names()`) parse the FILES, so they emit
+    columns and refusals the container does not carry. Concretely: a
+    money-bearing Point gets `amount_minor` in its INSERT and the row is lost to
+    `42703` while the capture receipt still reports ok (#2782, the same class as
+    the narrowing below it, #9602 P2-2), and a pre-#8263 container has no
+    DB-side `subject` refusal behind the projection's own drop.
 
-    Derived, not restated: every post-base record migration is either on the
+    Derived, not restated: every post-hinge record migration is either on the
     re-apply list or named in `RECORD_REAPPLY_EXCLUDED` WITH a reason, so the
     decision cannot be silent — which is how the two omissions that reopened
     this P2 happened.
     """
-    base = _base_shape_release()
-    post_base = [p.name for p in RECORD_MIGRATION_FILES if p.name[:8] > base]
+    base = _base_record_migration()
+    post_base = [p.name for p in RECORD_MIGRATION_FILES if p.name > base]
     assert post_base, "derivation failure: nothing sorts after the base shape"
 
     applied = [path.name for path, _ in RECORD_REAPPLY_STEPS]
@@ -3005,6 +3105,21 @@ def test_ensure_record_schema_reaches_the_forward_amendments_it_owes():
             assert "status" in row[0] and "embedding" in row[0], (
                 "the re-applied refusal must be the FULL set: a partial one "
                 f"re-opens `embedding` (got {row[0]})")
+
+            # The AUTHORITATIVE half of the privilege pin (#9800 review of
+            # 0356d5d25, P3): whatever spelling the file uses, ask Postgres what
+            # the boundary role can actually do to the append-only journal.
+            for privilege, expected in (("SELECT", True), ("INSERT", True),
+                                        ("UPDATE", False), ("DELETE", False),
+                                        ("TRUNCATE", False)):
+                cur.execute(
+                    "SELECT has_table_privilege('tortoise_record_app', "
+                    "'public.journal_event', %s)", (privilege,))
+                assert cur.fetchone()[0] is expected, (
+                    f"the app role's {privilege} on `public.journal_event` is "
+                    f"{not expected}: UPDATE/DELETE/TRUNCATE would let it "
+                    "rewrite or erase the journal the append-only trigger "
+                    "reserves to app.record_journal_purge")
     finally:
         conn.rollback()
         conn.close()
