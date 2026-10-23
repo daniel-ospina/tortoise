@@ -197,7 +197,16 @@ fi
 #     above "OK (no blocking drift)").
 if [ -n "$REPO_AHEAD" ] && { [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; }; then
   echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
-  echo "        the objects. Bookkeeping drift (DDL applied outside 'supabase db push',"
+  echo "        the objects."
+fi
+# The SENTENCE BELOW names the report it explains, so it prints only on the branch
+# whose report IS the repo-ahead list. On a duplicate-prefix report it would say
+# bookkeeping drift "produces exactly this report" about a report bookkeeping drift
+# cannot produce (a colliding prefix), re-opening the misread this note closes:
+# that the remedy is to record a version, when the remedy is to rename a file
+# (round-5 review finding, #9613).
+if [ -n "$BLOCKING" ]; then
+  echo "        Bookkeeping drift (DDL applied outside 'supabase db push',"
   echo "        so the version was never recorded) produces exactly this report (#9613)."
 fi
 if [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; then
@@ -223,11 +232,18 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "    1. rename ONE duplicate file to a free prefix that sorts AFTER $REMOTE_MAX;"
     echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
     echo "       already applied but unrecorded -> supabase migration repair --linked"
-    echo "       --status applied <version>);"
+    echo "       --status applied <version> — OWNER ACTION, a lane must not run prod DDL"
+    echo "       or repair, #2240);"
     echo "    3. then apply via supabase-deploy dispatch."
   else
     echo "  Remediation: pure-prefix rename ONE file to the next free prefix (content unchanged) —"
-    echo "    e.g. git mv ${v}_a.sql ${v}_b.sql → <next-free>_a.sql, then apply via supabase-deploy dispatch."
+    # ⛔ The operand must be a file that EXISTS and the destination must be free.
+    # The pre-#9613 line was `git mv ${v}_a.sql ${v}_b.sql`: `${v}_b.sql` is the
+    # OTHER duplicate, so that command fails with "destination exists" (rc 128),
+    # and its `→ <next-free>_a.sql` tail named a destination the command never
+    # used — the one line printed as the remedy aborted for the operator. Rename
+    # the SECOND file to a free prefix and leave `${v}_a.sql` in place.
+    echo "    e.g. git mv ${v}_b.sql <next-free>_b.sql, then apply via supabase-deploy dispatch."
   fi
   exit 1
 fi

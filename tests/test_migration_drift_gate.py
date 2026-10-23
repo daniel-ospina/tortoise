@@ -428,6 +428,16 @@ def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
     assert "db diff --linked" in out, out
     assert "migration list --linked" in out, out
     assert "#1001" in out, out
+    # The DIAGNOSIS is presence-pinned HERE, on the ordinary BLOCKING report: a
+    # mutant deleting the `$BLOCKING` disjunct of its guard left all 35 tests
+    # green before this assertion existed, and the report it dropped the note from
+    # is the one #9613 exists for (round-5 review finding).
+    assert "note: 'repo-ahead' means prod has no" in out, out
+    assert "produces exactly this report" in out, out
+    # The inline owner qualifier is pinned LITERALLY: the alert wrapper embeds only
+    # the report's last 6000 bytes, so a back-reference to the note above can be cut
+    # while the pointer survives (round-5 review finding).
+    assert "(OWNER ACTION — a lane must not run prod DDL or repair, #2240)" in out, out
     # ... and it is owner-only: #2240 forbids a LANE running prod DDL or repair,
     # and rules out auto-dispatch on this path (docs/infra-runbook.md §8.6 states
     # the same bound for the audience that reads this gate's output).
@@ -449,9 +459,38 @@ def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
     assert r.returncode == 1, r.stdout
     assert "duplicate" in r.stdout.lower(), r.stdout
     assert "schema_migrations ROW" in r.stdout, r.stdout
-    # The #2240 owner bound rides the same shared note, so every repair site
-    # (duplicate+rename, out-of-order, ordinary pending) carries it once.
+    # The #2240 owner bound rides the OWNER BOUND statement (a separate one from
+    # the repo-ahead diagnosis since round 4), so every red exit carries it; the
+    # two repair SITES also carry an inline qualifier, because the alert wrapper
+    # keeps only the report's last 6000 bytes.
     assert "#2240" in r.stdout, r.stdout
+
+
+def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
+    """The `$DUP_LOCAL_VERSIONS` disjunct of the DIAGNOSIS gate is load-bearing too.
+
+    Index-only duplicate pair whose version is NOT recorded: BLOCKING is empty
+    (index-only is warn class), DUP and repo-ahead are set. The two-line caveat
+    must still print — that branch is where a DDL-free repair is most tempting.
+    The "produces exactly this report" sentence must NOT: this report is a
+    duplicate-prefix report, which bookkeeping drift cannot produce (round-5
+    review findings — measured: deleting the disjunct left the suite green).
+    """
+    r = _run_fixture(
+        {
+            "20260813000005_a.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_b.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+        },
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    assert "note: 'repo-ahead' means prod has no" in r.stdout, r.stdout
+    assert "produces exactly this report" not in r.stdout, r.stdout
+    # The rename example must be runnable: the SECOND duplicate moves to a free
+    # prefix, and the destination it names is the one it uses.
+    assert "git mv 20260813000005_b.sql <next-free>_b.sql" in r.stdout, r.stdout
+    assert "git mv 20260813000005_a.sql 20260813000005_b.sql" not in r.stdout, r.stdout
 
 
 def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
@@ -566,17 +605,17 @@ def test_in_order_report_never_executes_supabase():
       metacharacters. The OUT OF ORDER branch's `supabase db push --include-all`
       is that shape: backticked, the stub runs and the marker appears — which is
       why `test_report_never_executes_supabase` is mutation-provable.
-    * NEITHER line in THIS branch is that shape, so the marker proves nothing
-      about them: the `db push --linked --include-all` line ends in a
-      parenthetical, and the repair line carries `<version>` (parsed as a
-      redirect with a missing target). Backticking either makes bash report a
-      syntax error INSIDE the command substitution at run time, the `echo` still
-      runs and prints a line with a hole, and the script continues with an
-      unchanged exit status — nothing executes, and no marker appears.
-    * So this fixture's real value is the printed-text assertions below, and the
-      repair line must be pinned to its LITERAL suffix (with ` <version>`) or a
-      backticked mutant leaves the assertion satisfiable by the `applied` prefix
-      and the suite stays green.
+    * The `db push --linked --include-all` line in THIS branch is that shape too
+      (measured: backticked, the stub runs and the marker IS written — a trailing
+      parenthetical after the closing backtick does not make the substitution
+      inert). So the marker is a real guard for this line as well.
+    * The REPAIR line is the one the marker cannot prove: `<version>` is parsed as
+      a redirect with a missing target, so a backticked mutant makes bash report a
+      syntax error inside the command substitution, the `echo` still runs and
+      prints a line with a hole, and the exit status is unchanged — nothing
+      executes, no marker appears. That line is pinned instead by the LITERAL
+      suffix assertion below (with ` <version>`); with the looser `... applied`
+      pin a backticked mutant left the suite green (measured: 0 failed / 35).
     """
     r, marker = _run_with_supabase_stub(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
