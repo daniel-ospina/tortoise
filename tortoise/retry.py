@@ -959,20 +959,29 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
     ceiling is a claim that needs evidence the family does not carry.
 
     Walks the EXPLICIT chain — the top link, then ``__cause__``. It does NOT
-    follow an implicit ``__context__``, and that is the point (#7357 cycle 4):
-    ``__context__`` records a failure that was already HANDLED, so a ceiling
-    sentence there belongs to a DIFFERENT failure. Measured shape: an
+    follow an implicit ``__context__``: a context link is not ATTRIBUTABLE to the
+    failure being explained. Measured shape (#7357 cycle 4): an
     ``OutOfMemoryError("OOM failed to allocate 1GB")`` raised inside an
     ``except ResponseError("command not allowed when used memory > 'maxmemory'")``
     block inherits that sentence implicitly, and asserting the ceiling from it
     would be the same over-claim one level of indirection out. ``raise ... from``
-    is the author stating causality, so ``__cause__`` is evidence and
-    ``__context__`` is not. (The FAMILY predicate, :func:`is_memory_ceiling_refusal`,
+    is the author stating causality, so ``__cause__`` is evidence and an implicit
+    context is not. (The FAMILY predicate, :func:`is_memory_ceiling_refusal`,
     keeps walking ``__context__``: there the question is "is this the family",
     where a wider walk is the safe direction. Here the question is "may I assert
-    a ``maxmemory``", where it is not.) Matches ``_MEMORY_CEILING_RE`` against
-    the message HEAD only, so an already-explained message never names the
-    ceiling a second time.
+    a ``maxmemory``", where it is not.)
+
+    ⚠️ RESIDUAL, recorded so it is not re-derived: ``__context__`` is ALSO the
+    shape a wrapper takes when it re-raises WITHOUT ``raise ... from`` — the
+    common no-``B904`` wrapping — and that half is the half production travels
+    for the transport seam (#6977). So a wrapper placed between the wire and this
+    seam that dropped the inner text and omitted ``from`` would demote a named
+    ceiling to the hedge. That is the SAFE direction (the hedge asserts no
+    ceiling and still names the read and the conditional remedy), and it is not
+    reachable on today's paths: redis-py mints the class straight from the parsed
+    reply, falkordb re-raises the same object, and ``cypher_guard`` re-raises
+    bare. Matches ``_MEMORY_CEILING_RE`` against the message HEAD only, so an
+    already-explained message never names the ceiling a second time.
     """
     seen: set[int] = set()
     link: BaseException | None = exc
@@ -1013,8 +1022,10 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
 #: ⚠️ ONE IMPLEMENTATION, ONE DESCRIPTION (#7357 review P2/P3):
 #: `_write_refusal_message` CALLS this function; the SDK's hedge note DESCRIBES
 #: the same rule, because it holds an exception and not a reading. They must move
-#: together when these numbers do — the note's "within a small drift BELOW it"
-#: is pinned by `test_the_reached_decision_has_one_authority`.
+#: together when these numbers do, and the note's wording is pinned where it is
+#: ASSERTED — `test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read`
+#: in `tests/test_7357_memory_ceiling_legibility.py` (a test that never reads the
+#: note cannot pin its prose; the drift-value test cannot either).
 #:
 #: The 1 % arm is a HEURISTIC and is capped at 1 MiB so it cannot scale
 #: unbounded: at 1 TiB it would swallow 10 GiB of genuine headroom and print the

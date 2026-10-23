@@ -659,8 +659,9 @@ def test_the_reached_decision_has_one_authority():
     is about, pointing the other way.
 
     NON-VACUOUS: re-inlining the tolerance in either place reddens the
-    structural assertions, and dropping the drift from the note reddens the
-    previous test.
+    structural assertions; dropping the drift sentence from the note reddens
+    `test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read`
+    (this test does not read the note, so it cannot pin the note's prose).
     """
     from pathlib import Path
 
@@ -801,7 +802,9 @@ def test_an_implicit_context_is_not_ceiling_evidence():
     assert failure.__suppress_context__ is False, (
         "the fixture must be the IMPLICIT chain, not `from None`")
     assert is_memory_ceiling_refusal(failure) is True, (
-        "membership still walks the context — that is the family question")
+        "still the family — but BY CLASS on the top link here; the CONTEXT half "
+        "of the family walk is pinned where the top link cannot match: "
+        "tests/test_7357_transport_legibility.py")
     hedged = explain_memory_ceiling(failure) or ""
     assert "it has reached its configured dataset limit" not in hedged
 

@@ -11024,7 +11024,8 @@ class FalkorProjection(
         #     `tortoise/retry.py`.
         #   BOUND: the "ceiling was REACHED" rule, via `ceiling_reading_drift`
         #     — this message CALLS it, the SDK note DESCRIBES it (it holds an
-        #     exception, not a reading), and one test pins both.
+        #     exception, not a reading). The note's WORDING is pinned by the
+        #     hedge-arm test, not by the drift-value test.
         #   NOT BOUND: the knob's HOMES. `_CEILING_REMEDY_HOMES` is composed by
         #     the note ONLY; this message carries its own wording of the same
         #     two homes in four places. A third home must be added to all of
