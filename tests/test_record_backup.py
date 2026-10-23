@@ -738,8 +738,9 @@ def test_the_drill_tolerates_rows_written_after_the_dump_and_names_the_window():
     def connect(dsn):
         if dsn == DSN:
             reads["source"] += 1
-            # 1 = the vacuity count, 2 = the manifest count (the artifact's own
-            # numbers), 3 = the post-dump probe. Rows land between 2 and 3.
+            # 1 = the vacuity count, 2 = the count taken as the artifact is cut
+            # (which is also the manifest's `row_counts`), 3 = the post-dump
+            # re-count. Rows land between 2 and 3.
             if reads["source"] >= 3:
                 db.source = {**db.source, "journal_event": 515}
         return real_connect(dsn)
@@ -777,9 +778,9 @@ def test_the_drill_does_not_red_when_a_row_lands_between_the_two_source_reads():
     db = FakeDB(SOURCE_COUNTS)
     reads = {"source": 0}
     real_connect = db.connect
-    # The row is committed BEFORE the read it precedes, so the manifest's own
-    # count (read #2, inside `create_record_backup`) already sees it — and so does
-    # the dump, and so does the post-dump ceiling (read #3).
+    # The row is committed BEFORE the read it precedes, so the count taken as the
+    # artifact is cut (read #2) already sees it — and so does the dump, and so
+    # does the post-dump re-count (read #3).
     artifact_counts = {**SOURCE_COUNTS, "journal_event": 515}
 
     def connect(dsn):
@@ -842,7 +843,9 @@ def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
     backup. A ceiling of `after` alone read that as an impossible artifact and
     refused with exit 2 — a false red on the daily drill, and one that also
     stopped retention, because the prune runs only on exit 0. The ceiling is the
-    larger of the two source reads, so a legitimate deletion cannot red it.
+    largest of the source reads the drill takes itself, so a legitimate deletion
+    cannot red it (and `max(before, after)` alone was still not enough — see the
+    transient-peak test below, cycle 4).
     """
     db = FakeDB(SOURCE_COUNTS)
     real_connect = db.connect
@@ -868,6 +871,120 @@ def test_a_NET_DELETION_during_the_dump_is_not_an_impossible_artifact():
     assert report["tables"]["journal_event"] == {
         "source": 512, "source_after": 500, "restored": 512,
     }
+
+
+def test_the_drill_does_not_red_when_rows_land_before_the_CUT_and_age_out_by_the_ceiling():
+    """#9601 review cycle 4 (P1): a transient peak neither endpoint can see.
+
+    The drill reads the source three times — before the dump, as the artifact is
+    CUT, and once the dump has finished — and a live record makes all three
+    numbers different: rows land after `before` (so the artifact's snapshot holds
+    515 journal rows) and are aged out before the post-dump re-count (500). An
+    endpoint ceiling — `max(before, after)` = 512 — therefore refused the healthy
+    artifact with exit 2 and the sentence *"the source never held more than
+    512"*, which this same run had already DISPROVED by measuring 515. The
+    ceiling is the largest of the three reads the drill takes itself, so an
+    honest artifact's claim is accepted; the sibling test above pins that the
+    check still bites above every one of them.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    reads = {"source": 0}
+    real_connect = db.connect
+    peak = {**SOURCE_COUNTS, "journal_event": 515}
+    aged_out = {**SOURCE_COUNTS, "journal_event": 500}
+
+    def connect(dsn):
+        if dsn == DSN:
+            reads["source"] += 1
+            # 1 = the vacuity count, 2 = the count taken as the artifact is cut,
+            # 3 = the post-dump re-count.
+            if reads["source"] >= 2:
+                db.source = dict(peak)
+            if reads["source"] >= 3:
+                db.source = dict(aged_out)
+        return real_connect(dsn)
+
+    report = rb.run_restore_drill(
+        DSN, MemoryStorage(), SCRATCH_DSN,
+        run=FakeRunner(on_restore=lambda: db.scratch.update(peak)),
+        connect=connect, key=KEY,
+    )
+    assert reads["source"] >= 3, "the deletion must land before the post-dump re-count"
+    assert report["verdict"] == "RESTORED"
+    assert report["tables"]["journal_event"] == {
+        "source": 512, "source_after": 500, "restored": 515,
+    }
+
+
+def test_an_artifact_with_no_row_counts_claim_uses_the_SAME_ceiling(monkeypatch):
+    """The second symptom of the same bound: an older artifact carries no claim.
+
+    With no `row_counts` the cross-check is skipped, so the VERIFY window is the
+    only comparison left — and building it from `(before, after)` alone re-ran
+    the identical false red as exit 3: *"journal_event (source 500..512 →
+    restored 515). The artifact is NOT proven restorable"* — a data-loss incident
+    naming no loss, on a run that lost nothing. Both comparisons now take the one
+    upper bound the drill measured (`cut`), so they cannot disagree.
+    """
+    db = FakeDB(SOURCE_COUNTS)
+    reads = {"source": 0}
+    real_connect = db.connect
+    peak = {**SOURCE_COUNTS, "journal_event": 515}
+    aged_out = {**SOURCE_COUNTS, "journal_event": 500}
+
+    real = rb.create_record_backup
+
+    def unclaimed(*args, **kwargs):
+        manifest = real(*args, **kwargs)
+        manifest.pop("row_counts", None)  # an older, hand-restored manifest
+        return manifest
+
+    monkeypatch.setattr(rb, "create_record_backup", unclaimed)
+
+    def connect(dsn):
+        if dsn == DSN:
+            reads["source"] += 1
+            if reads["source"] >= 2:
+                db.source = dict(peak)
+            if reads["source"] >= 3:
+                db.source = dict(aged_out)
+        return real_connect(dsn)
+
+    report = rb.run_restore_drill(
+        DSN, MemoryStorage(), SCRATCH_DSN,
+        run=FakeRunner(on_restore=lambda: db.scratch.update(peak)),
+        connect=connect, key=KEY,
+    )
+    assert report["verdict"] == "RESTORED"
+    assert report["tables"]["journal_event"] == {
+        "source": 512, "source_after": 500, "restored": 515,
+    }
+
+
+def test_a_pooler_SCRATCH_dsn_is_a_configuration_fault_and_mints_nothing():
+    """#9601 review cycle 4 (P2): the scratch side is validated BEFORE the dump.
+
+    `restore_record_backup` refuses a pooler target — but it runs AFTER the
+    upload, and the drill's post-publish wrap re-classified that
+    `RecordBackupUnavailable` as `RecordRestoreFailed` = exit 1 = "retry", while
+    the runbook's exit table promises `2` for a pooler DSN. So every retry dumped,
+    encrypted, uploaded and pruned again, forever, on a permanent config fault.
+    """
+    storage = MemoryStorage()
+    runner = FakeRunner()
+    db = FakeDB(SOURCE_COUNTS)
+    pooler = "postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    with pytest.raises(rb.RecordBackupUnavailable) as excinfo:
+        rb.run_restore_drill(
+            DSN, storage, pooler, run=runner, connect=db.connect, key=KEY,
+        )
+    # The permanent-config class, NOT the post-publish "retry" class.
+    assert not isinstance(excinfo.value, rb.RecordRestoreFailed)
+    message = str(excinfo.value).lower()
+    assert "pooler" in message and "scratch" in message
+    # Nothing was dumped and nothing was minted — the refusal costs one count.
+    assert runner.calls == []
+    assert storage.list("") == []
 
 
 def test_a_lost_table_is_STILL_red_on_a_record_that_moved():
@@ -965,6 +1082,37 @@ def test_the_scratch_reset_truncates_the_record_tables_and_nothing_else():
     # the statement never names them, so a reset cannot take the control plane
     # with it.
     assert "public.graphs" not in seen[0] and "public.organizations" not in seen[0]
+
+
+def test_a_REFUSED_drill_does_not_truncate_the_scratch_evidence(monkeypatch):
+    """#9601 review cycle 4 (P3): `--reset-scratch` must not destroy a RED drill.
+
+    The reset is opt-in precisely because an automatic truncate would erase the
+    leftover state of a RED drill — the evidence an operator needs. It used to run
+    BETWEEN the post-dump re-count and the artifact cross-check, so a run that then
+    REFUSED had already emptied the scratch target on its way to the refusal. It
+    now runs after the cross-check and immediately before the restore.
+    """
+    db = FakeDB(
+        SOURCE_COUNTS,
+        scratch=dict.fromkeys(THE_RECORD_TABLES, 0) | {"journal_event": 9},
+    )
+    real = rb.create_record_backup
+
+    def overclaiming(*args, **kwargs):
+        manifest = real(*args, **kwargs)
+        manifest["row_counts"] = {**manifest["row_counts"], "journal_event": 10_000}
+        return manifest
+
+    monkeypatch.setattr(rb, "create_record_backup", overclaiming)
+    with pytest.raises(rb.RecordRestoreRefused, match="never held"):
+        rb.run_restore_drill(
+            DSN, MemoryStorage(), SCRATCH_DSN,
+            run=FakeRunner(on_restore=db.populate_scratch_from_source),
+            connect=db.connect, key=KEY, reset_scratch=True,
+        )
+    # The previous run's rows are still there — the refusal preserved the evidence.
+    assert db.scratch["journal_event"] == 9
 
 
 def test_the_drill_reds_when_the_restored_record_is_short():
@@ -1206,6 +1354,26 @@ def test_the_verb_exits_2_on_a_pooler_dsn_and_dumps_nothing(monkeypatch, capsys)
     assert _cli(monkeypatch, ["record-backup", "--record-dsn", pooler], storage=storage) == 2
     assert storage.list("") == []
     assert "pooler" in capsys.readouterr().err.lower()
+
+
+def test_the_verb_exits_2_on_a_pooler_SCRATCH_dsn_and_mints_nothing(monkeypatch, capsys):
+    """#9601 review cycle 4 (P2), read the way a scheduler reads it.
+
+    The drill's scratch DSN is a pre-dump precondition, so a pooler there is the
+    same permanent config fault as a pooler source: exit `2`, no artifact minted.
+    Pre-fix this exited `1` ("retry") — after publishing an artifact — so a
+    scheduler re-dumped and re-uploaded on every attempt.
+    """
+    storage = MemoryStorage()
+    pooler = "postgresql://u:p@aws-0-us-east-1.pooler.supabase.com:5432/postgres"
+    assert _cli(
+        monkeypatch,
+        ["record-backup", "--record-dsn", DSN, "--scratch-dsn", pooler],
+        storage=storage,
+    ) == 2
+    assert storage.list("") == []
+    err = capsys.readouterr().err.lower()
+    assert "pooler" in err and "scratch" in err
 
 
 def test_the_verb_exits_2_when_the_backup_key_is_unconfigured(monkeypatch, capsys):

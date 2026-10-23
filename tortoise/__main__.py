@@ -817,7 +817,9 @@ def _cmd_record_backup(args):
           tenancy rows its foreign keys reference): a missing parent row never
           clears on a retry
       ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
-          a pooler DSN, `TORTOISE_BACKUP_KEY` absent or malformed, a populated
+          a pooler DSN (the **source's** or the drill's **scratch** one — the
+          scratch side is checked before anything is dumped), `TORTOISE_BACKUP_KEY`
+          absent or malformed, a populated
           scratch target, an empty record to drill, an artifact whose integrity
           or shape pin does not verify (no verdict was produced — and NOT a
           green one), or a ``--keep`` that would delete every artifact

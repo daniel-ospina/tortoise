@@ -392,7 +392,7 @@ Exit codes (a scheduler's only signal):
 |---|---|
 | `0` | backup published — and in drill mode, the restore **verified** against the source |
 | `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the mode: in **backup mode** (no `--scratch-dsn`) the record is NOT backed up — **retry**. In **drill mode** the artifact is published *before* the restore is attempted, so the record IS backed up and only the restore is **NOT proven** — retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry |
-| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN, a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, an artifact whose own `row_counts` claim **more rows than the source ever held** (checked against the post-dump ceiling, so a live record's ordinary concurrent writes can never trigger it), or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity or shape pin does not verify**, an artifact whose own `row_counts` claim **more rows than the source was ever observed to hold** (checked against the largest of the drill's own source counts, so a live record's ordinary concurrent writes — and its ordinary deletes — can never trigger it), or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults |
 | `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
 
 Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
@@ -435,29 +435,39 @@ proven restorable"*, and only the drill mode proves it. Run the drill on a sched
 ### `--reset-scratch` — what makes a scheduled drill repeatable
 
 With `--reset-scratch`, the verb `TRUNCATE`s the record's **own nine tables** on the scratch DSN
-only, in one statement, before restoring. It is opt-in because an automatic truncate would destroy
-the leftover state of a RED drill — the evidence an operator needs — with nothing to show for it. It
+only, in one statement, **after** the artifact cross-check and immediately before restoring. It is
+opt-in because an automatic truncate would destroy the leftover state of a RED drill — the evidence
+an operator needs — with nothing to show for it; for the same reason it never runs on a run that
+refuses, so a refused drill leaves the last run's evidence in place. It
 can never touch the record itself: a scratch DSN equal to the source is refused first, and no
 `CASCADE` is used, so the tenancy rows the FKs need (`organizations`, `graphs`) are left alone.
 
 ### What the comparison tolerates, and why
 
-The record is a **live** system of record. The artifact is cut from a snapshot taken after the
-manifest's row counts, so rows committed in that gap are legitimately in the artifact and not in the
-count. The drill therefore compares each table against the window `[min(before, after),
-max(before, after)]`, where `after` is a re-count taken once the dump has finished: below the floor is
-**loss** (rows that existed before the dump did not come back), above the ceiling is a restore
-carrying rows the source never had (duplication or a corrupt artifact). Comparing exactly against a
-pre-dump count — the earlier behaviour — red a perfectly healthy backup on any record with continuous
-writes, and a drill that reds every day on a healthy backup removes the one falsifier this exists
-for. The report names a table that moved with both bounds, e.g.
+The record is a **live** system of record, and it is not append-only: it takes rows in and it ages
+them out (`record_projection` emits `DELETE` for `delete`/`merge` journal ops, and the erasure RPC
+removes all nine tables). The artifact is cut from a snapshot taken after the manifest's row counts,
+so rows committed in that gap are legitimately in the artifact and not in the count. The drill
+therefore compares each table against the window `[min(before, after), max(before, cut, after)]`,
+where `before` is the pre-dump count, `cut` is a count taken as the artifact is cut, and `after` is
+a re-count taken once the dump has finished: below the floor is **loss** (rows that existed before
+the dump did not come back), above the ceiling is a restore carrying rows the source never had
+(duplication or a corrupt artifact). The ceiling is the **largest of the three reads the drill
+takes itself**, not one endpoint: rows can land after `before` and age out before `after`, so a
+healthy artifact may legitimately carry more than either endpoint shows — an endpoint ceiling
+refused that artifact with a sentence the run had already disproved by measuring the higher number.
+Comparing exactly against a pre-dump count — the earlier behaviour — red a perfectly healthy backup
+on any record with continuous writes, and a drill that reds every day on a healthy backup removes
+the one falsifier this exists for. The report names a table that moved with both bounds, e.g.
 `journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
 
-The artifact's OWN `row_counts` are a **cross-check, never the baseline**: they are read after
-`before`, so the only disagreement they can legitimately establish is one-sided — an artifact
-claiming more rows than the source held *after* the dump, which is a refusal (exit `2`, nothing
-restored), not a data-loss verdict. Comparing them against the pre-dump count was a false incident
-on every live record (#9601 review cycle 2).
+The artifact's OWN `row_counts` are a **cross-check, never the baseline**: the number is measured as
+the artifact is cut, so the only disagreement it can legitimately establish is one-sided — an
+artifact claiming more rows than the source was ever *observed* to hold, which is a refusal (exit
+`2`, nothing restored), not a data-loss verdict. The bound it is checked against is the drill's own
+measurement, so a manifest that inflated its own count cannot widen the acceptance window.
+Comparing the claim against the pre-dump count was a false incident on every live record (#9601
+review cycle 2).
 
 ### Retention
 

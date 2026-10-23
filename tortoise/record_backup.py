@@ -315,7 +315,7 @@ def _split_dsn(dsn: str):
     return parts
 
 
-def require_direct_dsn(dsn: str) -> str:
+def require_direct_dsn(dsn: str, *, label: str = "record") -> str:
     """Refuse a POOLER DSN for a dump/restore session; return the DSN unchanged.
 
     The vendor's own guidance routes backup/restore to the direct connection,
@@ -327,13 +327,18 @@ def require_direct_dsn(dsn: str) -> str:
 
     Cheap to satisfy (a second, direct connection string) and impossible to
     notice afterwards — hence a refusal with the fix in the message.
+
+    ``label`` names WHICH DSN was refused (`record` or `scratch`), so a drill
+    told that its **scratch** connection string is a pooler does not go and check
+    the source's (`#9601` review cycle 4, P2: the scratch side is now validated
+    before an artifact is minted, and the message has to say which side it means).
     """
     parts = _split_dsn(dsn)
     host = (parts.hostname or "").lower()
     for marker in _POOLER_HOST_MARKERS:
         if host.endswith(marker) or f".{marker}" in host:
             raise RecordBackupUnavailable(
-                f"the record DSN host {host!r} is a POOLER. A dump/restore "
+                f"the {label} DSN host {host!r} is a POOLER. A dump/restore "
                 "session must use the DIRECT connection string — the pooler "
                 "loses session state between transactions, so an artifact taken "
                 "through it can be silently short. Re-run with the direct DSN "
@@ -345,7 +350,7 @@ def require_direct_dsn(dsn: str) -> str:
         raise RecordBackupUnavailable(f"the record DSN has an unreadable port: {e}") from e
     if port == _TRANSACTION_POOLER_PORT:
         raise RecordBackupUnavailable(
-            f"the record DSN uses port {_TRANSACTION_POOLER_PORT} (the "
+            f"the {label} DSN uses port {_TRANSACTION_POOLER_PORT} (the "
             "transaction-mode pooler). A dump/restore session must use the "
             "DIRECT connection — see require_direct_dsn's docstring."
         )
@@ -673,6 +678,7 @@ def create_record_backup(
     workdir: str | os.PathLike[str] | None = None,
     key: bytes | None = None,
     pg_dump: str = "pg_dump",
+    counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Dump, encrypt and upload the record; return the plaintext manifest.
 
@@ -680,6 +686,17 @@ def create_record_backup(
     the row counts measured at dump time (so an operator can tell a thin
     artifact from a thin record), the table set, and the non-secret source
     coordinates. It carries no credentials and no row contents.
+
+    ``counts`` lets the caller supply the measurement the manifest records
+    instead of this function taking its own — the DRILL passes the count it read
+    as the artifact was cut (#9601 review cycle 4, P1). Without that, the
+    manifest's number came from a read taken AFTER the drill's own pre-dump read
+    and BEFORE its post-dump re-count, so a record that took rows in and aged
+    them out inside the dump window produced a claim no endpoint of the drill's
+    window could explain — a false refusal on a healthy artifact. Using ONE
+    measurement for both the artifact's claim and the drill's ceiling removes the
+    gap between them; the claim is still never used as a BOUND (see
+    :func:`run_restore_drill`).
 
     ``storage`` is the same duck-typed protocol the graph archives use
     (`upload`/`download`/`list`/`delete`), so a deployment already carrying
@@ -690,7 +707,10 @@ def create_record_backup(
     # a caller that passed `key=` has already satisfied the precondition.
     if key is None:
         require_backup_key()
-    counts = record_row_counts(dsn, connect=connect)
+    if counts is None:
+        counts = record_row_counts(dsn, connect=connect)
+    else:
+        counts = {str(t): int(n) for t, n in counts.items()}
     backup_id = _backup_id()
     tmp = tempfile.mkdtemp(prefix="record-backup-", dir=str(workdir) if workdir else None)
     try:
@@ -1073,6 +1093,7 @@ def compare_row_counts(
     *,
     tables: tuple[str, ...] | None = None,
     source_after: dict[str, int] | None = None,
+    source_high: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Compare two per-table count maps; return a report with named mismatches.
 
@@ -1088,8 +1109,16 @@ def compare_row_counts(
     writes — and a drill that reds every day on a healthy backup trains the
     operator to ignore the one signal the design exists to produce.
 
-    The window is ``[min(source, source_after), max(source, source_after)]`` per
-    table, and it keeps the falsifier sharp in both directions: below the floor
+    The floor is ``min(source, source_after)`` and the ceiling is
+    ``max(source, source_after, source_high)`` per table. ``source_high`` is the
+    extra UPPER bound for a window whose endpoints cannot see a transient peak:
+    the record can take rows in and age them out between two samples, so a
+    healthy artifact may legitimately carry more rows than either endpoint shows
+    (#9601 review cycle 4, P1). It only ever RAISES the ceiling — never the
+    floor, and never the baseline — so it cannot excuse a loss. The floor is
+    unaffected by it.
+
+    The window keeps the falsifier sharp in both directions: below the floor
     is LOSS (rows that existed before the dump did not come back), and above the
     ceiling is a restore carrying rows the source never had (duplication or a
     corrupt artifact). Only the ambiguity in the middle — the count-to-snapshot
@@ -1102,11 +1131,18 @@ def compare_row_counts(
         want = int(source.get(table, -1))
         got = int(restored.get(table, -1))
         later = int(source_after.get(table, want)) if source_after is not None else want
-        floor, ceiling = min(want, later), max(want, later)
+        high = int(source_high.get(table, later)) if source_high is not None else later
+        floor, ceiling = min(want, later), max(want, later, high)
         rows[table] = {"source": want, "source_after": later, "restored": got}
         if not (floor <= got <= ceiling):
             mismatches.append(
-                {"table": table, "source": want, "source_after": later, "restored": got}
+                {
+                    "table": table,
+                    "source": want,
+                    "source_after": later,
+                    "source_high": high,
+                    "restored": got,
+                }
             )
     return {
         "equal": not mismatches,
@@ -1121,22 +1157,28 @@ def verify_restore(
     restored: dict[str, int],
     *,
     source_after: dict[str, int] | None = None,
+    source_high: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """`compare_row_counts`, but a mismatch RAISES with the tables named.
 
     ``source_after`` is the post-dump re-count: pass it whenever the source can
     be written to (see :func:`compare_row_counts`), so the drill measures what
     the artifact could legitimately contain rather than what a count taken
-    before the dump saw.
+    before the dump saw. ``source_high`` is the ceiling the caller already used
+    for its own artifact cross-check, so the two comparisons cannot disagree
+    about how many rows the record could have held.
     """
-    report = compare_row_counts(source, restored, source_after=source_after)
+    report = compare_row_counts(
+        source, restored, source_after=source_after, source_high=source_high
+    )
     if not report["equal"]:
         def _named(m: dict[str, Any]) -> str:
-            if m["source"] == m["source_after"]:
-                return f"{m['table']} (source {m['source']} → restored {m['restored']})"
+            low = min(m["source"], m["source_after"])
+            high = max(m["source"], m["source_after"], m.get("source_high", m["source_after"]))
+            if low == high:
+                return f"{m['table']} (source {low} → restored {m['restored']})"
             return (
-                f"{m['table']} (source {min(m['source'], m['source_after'])}"
-                f"..{max(m['source'], m['source_after'])} → restored {m['restored']})"
+                f"{m['table']} (source {low}..{high} → restored {m['restored']})"
             )
 
         named = ", ".join(_named(m) for m in report["mismatches"])
@@ -1213,9 +1255,16 @@ def run_restore_drill(
     the numbers come from the two databases, not from the manifest.
 
     The comparison is against the counts read from the SOURCE DATABASE before the
-    dump (``before``) and is bounded above by a re-count taken after the dump:
-    the record is live, so rows committed in that gap are in the artifact and not
-    in the count, and comparing exactly would red a healthy backup every day (see
+    dump (``before``) and is bounded above by the larger of two further source
+    reads: ``cut`` (taken as the artifact is cut) and ``after`` (taken once the
+    dump has finished). The record is live — it takes rows in and ages them out —
+    so a healthy artifact may legitimately carry a count that no single sample
+    shows, and the bound must be the maximum the drill OBSERVED rather than one
+    endpoint (#9601 review cycle 4, P1: a row that landed after ``before`` and
+    was deleted before ``after`` made ``max(before, after)`` refuse a healthy
+    artifact with a sentence this module had already disproved — it had measured
+    the higher number itself). All three reads are the DRILL's own; the artifact's
+    claim is what gets checked, never what bounds it (see
     :func:`compare_row_counts`).
 
     Refusals, in the order they matter:
@@ -1225,12 +1274,18 @@ def run_restore_drill(
       a REFUSAL (no verdict), never a mismatch: nothing ran;
     * a scratch DSN **equal to the source** — the restore (and a
       ``reset_scratch``) would destroy the record it is supposed to protect;
+    * a scratch DSN that can never be restored into (a **pooler**) — refused
+      BEFORE the artifact is minted (#9601 review cycle 4, P2). The restore leg
+      checks the same precondition, but by then the dump, the encryption and the
+      upload have all happened, and the post-publish wrap re-classified that
+      PERMANENT config fault as "retry" — so a scheduler minted a fresh artifact
+      on every attempt while the runbook's exit table promised `2`;
     * an artifact whose own ``row_counts`` claim **more rows than the source held
-      after the dump** cross-checked against the post-dump ceiling, never against
-      ``before`` (#9601 review cycle 2, P1): the manifest's count is read after
-      ``before``, so on a live record it is legitimately the LARGER number, and
-      comparing it against ``before`` red a healthy backup on the documented
-      daily schedule;
+      at any point the drill measured** — cross-checked against the maximum of
+      ``before``, ``cut`` and ``after``, never against ``before`` alone (#9601
+      review cycle 2, P1): the manifest's count is read after ``before``, so on a
+      live record it is legitimately the LARGER number, and comparing it against
+      ``before`` red a healthy backup on the documented daily schedule;
     * a non-empty scratch target (refused inside
       :func:`restore_record_backup`) — unless ``reset_scratch`` emptied it first.
 
@@ -1319,27 +1374,57 @@ def run_restore_drill(
             "database, so this drill would prove nothing. Measure against a record "
             "that holds data."
         )
+    # ⛔ THE SCRATCH SIDE'S PRECONDITIONS ARE CHECKED HERE, BEFORE THE ARTIFACT
+    # EXISTS (#9601 review cycle 4, P2). `restore_record_backup` and
+    # `reset_record_tables` each re-check them, but they run AFTER the upload, and
+    # the wrap below turns a `RecordBackupUnavailable` raised there into
+    # `RecordRestoreFailed` = exit 1 = "retry". A pooler scratch DSN is a
+    # PERMANENT config fault: retrying it dumps, encrypts, uploads and prunes
+    # again, forever, on a schedule whose exit table promises 2. Nothing has been
+    # read from the source beyond a count and nothing has been dumped, so
+    # refusing here costs one count and mints nothing.
+    require_direct_dsn(scratch_dsn, label="scratch")
+    # ⛔ THE CUT MEASUREMENT — the artifact's own claim, taken by the DRILL. It is
+    # read once and used for BOTH the manifest's `row_counts` and the upper bound
+    # of the comparison, so the two cannot come from different instants: reading
+    # it inside `create_record_backup` left a gap in which a row could land after
+    # this count and before that one, which is the same false refusal one
+    # millisecond narrower (#9601 review cycle 4, P1). It is an upper bound only —
+    # never a floor, never the baseline — so a manifest that inflates its own
+    # numbers cannot widen acceptance (the value bounded here is the one the drill
+    # measured, not the one the artifact declares).
+    cut = record_row_counts(dsn, connect=connect)
     # ⛔ CUT THE ARTIFACT FIRST. Every statement below this line mutates the
     # SCRATCH target; nothing before it may depend on the scratch being empty.
     manifest = create_record_backup(
-        dsn, storage, run=run, connect=connect, workdir=workdir, key=key, pg_dump=pg_dump
+        dsn,
+        storage,
+        run=run,
+        connect=connect,
+        workdir=workdir,
+        key=key,
+        pg_dump=pg_dump,
+        counts=cut,
     )
-    # The CEILING is read INSIDE the post-publish leg below; see the comment on
-    # the first statement of that `try` for why its position is the fix.
+    # The post-dump re-count (`after`) is read INSIDE the post-publish leg below;
+    # see the comment on the first statement of that `try` for why its position is
+    # part of the fix.
     backup_key = f"{RECORD_BACKUP_PREFIX}{manifest['backup_id']}/{DUMP_OBJECT}"
     # ⛔ FROM HERE THE ARTIFACT IS DURABLE, so a failure is no longer "the backup
     # did not happen" (#9601 review cycle 3, P2). Re-raising it as a plain
     # RecordBackupError made the verb print "the record is NOT backed up — retry"
     # while a complete, checksummed artifact sat in `record-backups/`, and it told
     # an operator to retry the one class here that retrying cannot clear (a
-    # scratch target missing the tenancy rows its FKs reference). The refusals and
-    # the verify verdict keep their own classes: they are NOT "attempted and did
-    # not happen", and the caller maps them to exit 2 / exit 3.
+    # scratch target missing the tenancy rows its FKs reference). The refusals,
+    # the verify verdict AND `RecordBackupUnavailable` keep their own classes: they
+    # are NOT "attempted and did not happen", and the caller maps them to exit 2 /
+    # exit 3 (#9601 review cycle 4, P2 — the permanent config fault was the one
+    # class swallowed here, so a pooler scratch DSN told a scheduler to retry).
     try:
-        # The CEILING, read as soon as the artifact is cut. Its POSITION is the fix
-        # for #9601 review cycle 2 (P1): `claimed` (the manifest's own counts) is
-        # measured *inside* `create_record_backup`, i.e. AFTER `before`, so on a live
-        # append-only record `claimed > before` is the ordinary concurrent-insert
+        # The POST-DUMP RE-COUNT. Reading it here — after the artifact is durable —
+        # is the fix for #9601 review cycle 2 (P1): `claimed` (the manifest's own
+        # counts) is measured as the artifact is cut, i.e. AFTER `before`, so on a
+        # live append-only record `claimed > before` is the ordinary concurrent-insert
         # signature — most of all for `journal_event`, which gets a row on every
         # capture turn. Comparing the later read against the earlier one therefore
         # red a HEALTHY backup on the documented daily schedule, on a run whose
@@ -1347,12 +1432,10 @@ def run_restore_drill(
         # no `mismatches` here — printed `{"verdict": "MISMATCH", "mismatches": []}`:
         # a loss verdict naming no loss. What the cross-check can legitimately
         # decide is one-sided: an artifact may not claim more rows than the source
-        # held during the run (the larger of the two reads — see the per-table
+        # held during the run (the largest of the three reads — see the per-table
         # ceiling below), and that disagreement is a REFUSAL (exit 2, no
         # verdict), not a data-loss incident.
         after = record_row_counts(dsn, connect=connect)
-        if reset_scratch:
-            reset_record_tables(scratch_dsn, connect=connect)
         # The source numbers are the ones READ FROM THE SOURCE DATABASE (`before`),
         # never the artifact's own claim about itself (#9601 review cycle 1, P2):
         # `compare_row_counts` accepts a window `[min(source, after), max(...)]`, so a
@@ -1369,19 +1452,31 @@ def run_restore_drill(
             )
         for table in source:
             want = None if not claimed else claimed.get(table)
-            # The CEILING is the LARGER of the two source reads, never the later one
-            # alone (#9601 review cycle 3, P1). The record is NOT append-only: a
-            # `delete`/`merge` journal op emits `DELETE` on
-            # `point`/`subject`/`object`/`node_identity`/`relation`
-            # (`record_projection.py`), and the erasure RPC removes all nine tables.
-            # A NET DELETION inside the dump window therefore leaves `after` BELOW
-            # the artifact's own count on a perfectly healthy backup, and an
-            # `after`-only ceiling read that as an impossible artifact and refused
-            # (exit 2) with a diagnosis that was simply false — the record DID hold
-            # those rows. Taking the maximum keeps the check one-sided (an artifact
-            # still cannot claim more than the record ever held during the run)
-            # without reading a legitimate deletion as an impossible artifact.
-            seen = [int(n) for n in (source.get(table), after.get(table)) if n is not None]
+            # The CEILING is the LARGEST of the three source reads — `before`, `cut`
+            # and `after` — never one endpoint alone, and never the artifact's own
+            # claim (#9601 review cycles 3 and 4, P1). Two facts make an endpoint a
+            # false bound:
+            #
+            # * the record is NOT append-only — a `delete`/`merge` journal op emits
+            #   `DELETE` on `point`/`subject`/`object`/`node_identity`/`relation`
+            #   (`record_projection.py`) and the erasure RPC removes all nine tables,
+            #   so a NET DELETION inside the dump window leaves `after` BELOW the
+            #   artifact's own count on a perfectly healthy backup (cycle 3);
+            # * the record MOVES — rows can land after `before` and age out before
+            #   `after`, so an artifact that legitimately carries 515 rows sits above
+            #   BOTH endpoints (512, 500) and an endpoint-bound ceiling refused with
+            #   the diagnosis "the source never held more than 512" — a sentence this
+            #   very run had already disproved by measuring 515 (cycle 4).
+            #
+            # Taking the maximum keeps the check one-sided (an artifact still cannot
+            # claim more than the record was ever observed to hold) and every input
+            # is the drill's own measurement, so a manifest that inflates `row_counts`
+            # cannot widen it.
+            seen = [
+                int(n)
+                for n in (source.get(table), cut.get(table), after.get(table))
+                if n is not None
+            ]
             ceiling = max(seen) if seen else None
             if want is not None and ceiling is not None and int(want) > ceiling:
                 raise RecordRestoreRefused(
@@ -1390,6 +1485,13 @@ def run_restore_drill(
                     "carry rows the record never held, so the drill produced no "
                     "verdict (nothing was restored)"
                 )
+        # The scratch reset runs AFTER the cross-check, never before it (#9601 review
+        # cycle 4, P3): a refusing artifact used to TRUNCATE the scratch target on its
+        # way to the refusal, destroying exactly the leftover state of a RED drill
+        # that this docstring says the reset must not destroy. Nothing between the
+        # cross-check and here reads the scratch target.
+        if reset_scratch:
+            reset_record_tables(scratch_dsn, connect=connect)
         restored = restore_record_backup(
             storage,
             backup_key,
@@ -1400,13 +1502,24 @@ def run_restore_drill(
             key=key,
             pg_restore=pg_restore,
         )
-    except (RecordRestoreRefused, RecordRestoreVerifyError):
+    except (RecordRestoreRefused, RecordRestoreVerifyError, RecordBackupUnavailable):
+        # `RecordBackupUnavailable` is a PERMANENT config fault and keeps its own
+        # class (#9601 review cycle 4, P2): it is not "the drill ran and did not
+        # finish", it is "this box cannot run it", and the verb maps it to exit 2.
+        # Re-wrapping it as `RecordRestoreFailed` (exit 1) told a scheduler to retry
+        # a pooler DSN forever — minting a fresh artifact on every attempt.
         raise
     except RecordBackupError as e:
         raise RecordRestoreFailed(
             str(e), backup_id=manifest["backup_id"], backup_key=backup_key
         ) from e
-    report = verify_restore(source, restored["restored"], source_after=after)
+    # ONE upper bound for both comparisons (#9601 review cycle 4, P1): the verify
+    # window and the artifact cross-check above must not disagree about how many
+    # rows the record could have held — when they did, an artifact carrying no
+    # `row_counts` claim (an older or hand-built manifest, which skips the
+    # cross-check) was verified against `[after, before]` alone and red as a
+    # data-loss incident on a run that lost nothing.
+    report = verify_restore(source, restored["restored"], source_after=after, source_high=cut)
     return {
         "verdict": "RESTORED",
         "backup_id": manifest["backup_id"],
