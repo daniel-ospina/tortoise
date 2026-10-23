@@ -77,10 +77,12 @@ that distinction behind a green exit code.
 
 A PARTIAL RESTORE IS NOT AN ABSENCE
 -----------------------------------
-``--limit`` bounds how many nodes are written; it declares ``coverage=partial``
-ONLY when the bound actually cut the record's keys. A bound at or above the
-record's node count still covers every key and therefore declares ``complete``
-(``bounded`` is not a state, it is a flag) — see §9's "bounded vs partial" bullet.
+``--limit`` bounds how many nodes are written, and it does not by itself decide the
+declaration: a bound at or above the record's node count still covers every key the
+plan could write and therefore declares ``complete`` (``bounded`` is not a state, it is
+a flag). ``coverage`` follows the COUNTS, so a ``partial`` declaration also arises at
+any bound when the record carried a row the cache cannot address (a blank-keyed
+``:Session`` — see ``refused_keys``) — see §9's "bounded vs partial" bullet.
 When the plan does fall short, the unwritten keys read as **``not-hot``** (§17.3):
 a residency miss that ``degraded`` on read, never ``empty``. The outcome carries
 ``unwritten_keys`` so an operator sees the count rather than inferring a

@@ -16974,10 +16974,12 @@ class FalkorProjection(
           ``tortoise/cache_projection.py``).
         * **The declaration follows the writes.** ``coverage`` is `complete`
           **iff** every record key was materialised; ``limit`` bounds how many
-          nodes are written, and a bounded run declares `partial` ONLY when the
-          bound actually cut the record's keys — a bound at or above the record's
-          node count still covers every key and therefore declares `complete`,
-          so `bounded` is a FLAG, not a state (#9604 review). That is the seam
+          nodes are written, and a bounded run does not declare `partial` merely for
+          being bounded — a bound at or above the record's node count covers every key
+          the plan could write and therefore declares `complete`, so `bounded` is a
+          FLAG, not a state (#9604 review). `coverage` follows the WRITES, so a record
+          row the projection REFUSES (a blank-keyed `:Session`, #9599) makes the
+          declaration `partial` at any bound. That is the seam
           through which the
           completeness marker (#7952) can FIRE — it is not an eviction policy
           (§2.0 holds the FalkorDB limit high; the trigger for partiality is

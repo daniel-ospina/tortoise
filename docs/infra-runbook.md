@@ -2590,10 +2590,11 @@ python -m tortoise record-restore \
     --org <org_id> --graph <graph_id> \
     --cache-graph <the graph to restore>
 
-# Bounded run (writes at most N nodes, N >= 1). ⛔ `bounded` is set on EVERY
-# bounded run; `coverage` follows the COUNTS, not the flag — a bound at or above
-# the record's node count is coverage=complete with unwritten_keys: 0 (see the
-# "`bounded` vs partial — the flag is not the state" bullet below):
+# Bounded run (writes at most N nodes, N >= 1). ⛔ `bounded` is set on EVERY bounded
+# run, and `coverage` follows the COUNTS, not the flag: a bound at or above the record's
+# node count is `complete` UNLESS the record carried rows the projection refused (a
+# blank-keyed `:Session`), which is `partial` at any bound (see the "`bounded` vs
+# partial — the flag is not the state" bullet below):
 python -m tortoise record-restore … --limit 500
 # Machine-readable:
 python -m tortoise record-restore … --json
@@ -2679,10 +2680,12 @@ states have their own reason string, and neither is an absence (§17.3):
   residency miss — never an absence. Fixing it is a change to what the record
   carries (the `search_keys` refusal), not a re-run.
 - **`bounded` vs partial — the flag is not the state.** `--limit` sets
-  `bounded: true` on EVERY bounded run, including one whose bound is at or above
-  the record's node count; such a run is `coverage=complete` with
-  `unwritten_keys: 0`. Read the counts, not the flag. (`--limit` below `1` is
-  refused outright: it would wipe and write nothing.)
+  `bounded: true` on EVERY bounded run, and the flag decides nothing: a bound at or above the record's node count covers every key the plan could write and therefore declares `complete`;
+  `coverage` is derived from the COUNTS, so a run whose bound did not cut the plan but
+  whose record carried a row the cache cannot address (a blank-keyed `:Session` —
+  `refused_keys`, exit 0) declares `partial` at ANY bound, with
+  `declared_partial` naming the shortfall. Read the counts, not the flag. (`--limit`
+  below `1` is refused outright: it would wipe and write nothing.)
 - **`--allow-empty` over an empty record** — the one state where the declaration
   says `partial` and nothing is short: no record keys exist, so the declaration
   claims none hot (`declared_partial` is empty, `unwritten_keys` is 0) and the
@@ -2715,7 +2718,7 @@ part of this section, and its status is stated rather than implied:
 
 | drill step | status |
 |---|---|
-| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (38 pins / 39 collected cases, live cache graph included) |
+| verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (41 pins / 42 collected cases, live cache graph included) |
 | a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 

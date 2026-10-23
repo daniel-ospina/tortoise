@@ -11440,8 +11440,10 @@ def main(argv: list[str] | None = None) -> int:
     rr2.add_argument("--limit", type=int, default=None,
                      help="Write at most N nodes (N >= 1). A bounded run is "
                           "`bounded`, NOT necessarily partial: a bound at or "
-                          "above the record's node count still declares "
-                          "coverage=complete. Read `unwritten_keys` / "
+                          "above the record's node count covers every key the "
+                          "plan could write and declares coverage=complete "
+                          "(a record row the cache cannot address makes it "
+                          "partial at any bound). Read `unwritten_keys` / "
                           "`relations_not_written` (reported as "
                           "`declared_partial`), not the flag or the bound")
     rr2.add_argument("--allow-empty", action="store_true",
