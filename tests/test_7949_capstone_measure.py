@@ -447,6 +447,44 @@ def test_the_shipped_measurement_log_is_structurally_clean():
     assert codes == ["V9"], codes
 
 
+def test_the_durations_row_quotes_the_case_count_it_weights():
+    """The shard weight's provenance must describe the file that SHIPS.
+
+    #9823 review: the ``durations`` row quoted a 2.5 s / **24 cases** reading
+    for a file that had already grown past it (39 at the pre-merge head, 40
+    now) — a measurement of a smaller file used as the input to shard packing,
+    and a body sentence ``pytest`` can no longer reproduce. The sibling row for
+    ``test_7949_capstone_verdict_check.py`` is pinned the same way
+    (``test_the_durations_row_quotes_the_test_count_it_weights``); this is the
+    same guard for the row nothing covered, so it cannot re-stale silently the
+    next time the file grows.
+
+    Non-vacuity: at the pre-fix head the row said 24 cases for a 39-case file,
+    so this reds.
+    """
+    manifest = (_REPO / "config" / "ci-surfaces.yml").read_text()
+    row = next((ln for ln in manifest.splitlines()
+                if ln.strip().startswith(
+                    "test_7949_capstone_measure.py:")), None)
+    assert row is not None, "the durations row is the weight this test guards"
+    # The COMMENT-ONLY tail, exactly as the refresher reads it (`tools/ci_timing.py`
+    # matches `^[ \t]*#\s*unmeasured\b` against the tail it CLEARS on refresh).
+    tail = row.split("#", 1)[1] if "#" in row else ""
+    unmeasured = bool(re.match(r"[ \t]*unmeasured\b", tail))
+    refreshed_or_unmeasured = unmeasured or not tail.strip()
+    quoted = re.search(r"(\d+)\s+cases", row)
+    if quoted is None:
+        assert refreshed_or_unmeasured, (
+            "a hand-written durations note must quote the measured case count, "
+            f"or LEAD with `# unmeasured` (the refresher owns that tail): {row}")
+        return
+    shipped = len(re.findall(r"^def test_",
+                             Path(__file__).read_text(), re.MULTILINE))
+    assert int(quoted.group(1)) == shipped, (
+        f"the durations row quotes {quoted.group(1)} cases; the file ships "
+        f"{shipped} — re-measure and move the count and the weight together")
+
+
 # ── the measured arm: forced, read back, restored (#9089 round 5 F2) ──────
 #
 # The shipped probe PRINTED an arm it never set — `grep os.environ[...] =` found
