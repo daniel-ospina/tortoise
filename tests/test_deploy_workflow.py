@@ -2595,11 +2595,26 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
     # the manifest is not in its path set. Pre-#9548-P2 the note said it did.
     returned = re.search(r"it now returns(.*?)comment\.", note, re.S)
     assert returned, "the note no longer states what the baseline command returns"
-    assert "manifest" not in returned.group(1), (
+    claim = returned.group(1)
+    assert "manifest" not in claim, (
         "the note credits the baseline census command with the manifest "
         "declaration, but `.github/scripts/fly-managed-secrets.txt` is not in "
         "that command's path set — a later lane re-running the census then "
         "finds the note false (#9548 review P2)"
+    )
+    # ⛔ THE WORD IS NOT THE CLAIM. The assertion above pins the token
+    # "manifest"; a note that makes the SAME false provenance claim by naming
+    # the file instead — "…the `.github/scripts/fly-managed-secrets.txt`
+    # declaration…" — walked straight past it (measured: that mutation left this
+    # test green). The referent is the FILE, so bind the claim to the file: its
+    # path and its basename must both be absent from "what the baseline census
+    # returns". A reworded claim is exactly how the false provenance comes back.
+    assert manifest not in claim and Path(manifest).name not in claim, (
+        "the note's 'what the baseline census returns' claim names the manifest "
+        "declaration by PATH — `.github/scripts/fly-managed-secrets.txt` is not "
+        "in that command's path set, so a later lane re-running the census finds "
+        "the note false (#9548 review P2). Rewording the claim does not make it "
+        "true; asserting the word alone lets a reworded one through"
     )
     # Claim 2: the surface it DOES live on is named, so the reader has a command
     # that reaches it ...

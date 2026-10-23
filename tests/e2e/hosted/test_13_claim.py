@@ -258,6 +258,15 @@ def claim_server(tmp_path_factory):
         "BACKUP_WATCHER_DISABLED": "1",
         "TORTOISE_PRICING_PATH": str(Path(__file__).resolve().parent / "fixtures" / "pricing-e2e.json"),
         "TORTOISE_AUDIT_DSN": "",
+        # #9548: this fixture boots the FULL production app, whose `_emit` calls
+        # `record_writer.write_live_record`, and record arming is PRESENCE-based —
+        # so an inherited DSN (an operator shell, a sourced `.env`, the runbook's
+        # own step) makes a "hermetic" run write journal_event/point rows into the
+        # REAL record. `conftest.py` scrubs this for the shared harness boot; this
+        # second boot path builds its own env and inherited it silently. Blank
+        # (never popped): `_load_dotenv` refills ABSENT keys from the repo `.env`,
+        # so a popped key would come straight back.
+        "TORTOISE_RECORD_DSN": "",
     }
     for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI", "STRIPE_SECRET_KEY",
                 "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_IDS", "GITHUB_CLIENT_ID"):

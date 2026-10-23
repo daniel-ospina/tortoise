@@ -61,7 +61,13 @@ def _boot_selfhost(tmpdir: str):
     # #303 (review r2): blank-not-pop — mcp_server._load_dotenv refills only
     # ABSENT keys from the repo .env in the fresh child, so a popped URI
     # would be re-populated and silently beat TORTOISE_DB_PATH.
-    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI"):
+    # #9548: `TORTOISE_RECORD_DSN` joins the list for the same two reasons and
+    # a third. Same blank-not-pop mechanics, and the same consequence as the
+    # shared harness boot (`conftest.py` scrubs it there): this child runs the
+    # real app, arming is presence-based, so an inherited DSN makes a hermetic
+    # run write rows into the REAL record. This boot path builds its own env and
+    # would otherwise be the one blind spot left in the directory.
+    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI", "TORTOISE_RECORD_DSN"):
         env[var] = ""
     env.update({
         "TORTOISE_DB_PATH": os.path.join(tmpdir, "selfhost.db"),
