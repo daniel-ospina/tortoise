@@ -1013,18 +1013,18 @@ def _bounds_an_instant(value: object) -> bool:
     acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
     instant here too (1970-01-01T00:00:00Z).
 
-    ⚠️ This branch is unreachable from ``_validity_marker`` TWICE over, and the
-    second way is a KNOWN residual, not a guarantee: a TRUTHY numeric raises at
-    ``(raw_vf or "").strip()`` (#9741), while a FALSEY one (``0``/``False``) is
-    dropped before the gate by ``(raw_vf or "")`` — so an epoch-``0`` start
-    renders NO window marker at all while ``valid_from_precision`` reads
-    ``"day"``. That truthiness trap is the same one
+    ⚠️ This branch is unreachable from ``_validity_marker`` twice over, and the
+    second way is a KNOWN residual, not a guarantee (#9741): a TRUTHY numeric
+    raises ``AttributeError`` at ``(raw_vf or "").strip()``, while a FALSEY one
+    (``0`` / ``0.0`` / ``False``) short-circuits on that ``or ""`` — so an epoch-``0``
+    start renders NO marker at all while ``valid_from_precision`` reads ``"day"``
+    (epoch 0 IS an instant). That truthiness trap is the same one
     ``sdk._supersede_window_start`` records fixing; how a numeric bound is
     WRITTEN and RENDERED is #9741's contract question, not this gate's. The
     branch exists so that #9741 handing the raw bound through cannot turn the
     parity above into an ``OverflowError`` on the read path — when it lands, the
-    marker will start consulting numerics and this docstring's scope widens
-    back. ``tests/test_2350_validity_precision.py``
+    marker starts consulting numerics and this docstring's scope widens back.
+    ``tests/test_2350_validity_precision.py``
     ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the residual
     so that change cannot pass silently.
     """
