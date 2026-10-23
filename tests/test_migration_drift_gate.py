@@ -254,7 +254,12 @@ def test_duplicate_free_but_pending_blocks_normally():
 # revision in a THROWAWAY worktree — never by overwriting the tracked script,
 # which mutates the tree under review and races a concurrent reviewer (see the
 # ⛔ repo-ahead block below for the recipe and the measured incident):
-#     git worktree add /tmp/pre4278 877fa52d1 && cd /tmp/pre4278
+#     git worktree add /tmp/pre4278 877fa52d1
+#     cp tests/test_migration_drift_gate.py /tmp/pre4278/tests/   # REQUIRED: at
+#         # 877fa52d1 this file holds 14 tests and NONE of the named ones, so the
+#         # -k selects nothing (pytest exit 5 = "nothing ran", not a red)
+#     cd /tmp/pre4278 && TORTOISE_TEST_CARVE_OUT=1 uv run pytest \
+#         tests/test_migration_drift_gate.py
 # Do not use `HEAD`, which already contains the fix.
 # `test_clean_run_has_no_remediation_markers`
 # and `test_duplicate_branch_never_executes_supabase` are guards rather than
@@ -356,10 +361,11 @@ def test_in_order_block_still_instructs_apply():
 # ⛔ To measure the "before" side, use a THROWAWAY COPY — never overwrite the
 # script in a working tree:
 #     git worktree add /tmp/pre9613 origin/main
+#     cp tests/test_migration_drift_gate.py /tmp/pre9613/tests/   # REQUIRED: the
+#         # new tests do not exist at origin/main, so a -k filter selects nothing
+#         # and pytest exits 5 — which reads as "nothing to see", not as a red
 #     cd /tmp/pre9613 && TORTOISE_TEST_CARVE_OUT=1 uv run pytest \
-#         tests/test_migration_drift_gate.py -k "<new test>"
-# # or: cp -a . /tmp/pre9613 && (cd /tmp/pre9613 && git checkout origin/main -- \
-#         .github/scripts/check-migration-drift)
+#         tests/test_migration_drift_gate.py
 # Writing `origin/main`'s script over the tracked file in place mutates the PR
 # under review and RACES a concurrent reviewer: measured on this PR, a peer's
 # suite read the reverted script mid-run and reported 3 failed where the branch
@@ -466,7 +472,13 @@ def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
     )
     assert r.returncode == 1, r.stdout
     assert "duplicate" in r.stdout.lower(), r.stdout
-    assert "schema_migrations ROW" in r.stdout, r.stdout
+    # The repo-ahead DIAGNOSIS is deliberately absent here: the version IS
+    # recorded and there is no repo-ahead to explain, so "bookkeeping drift
+    # produces exactly this report" would be false (round-4 review finding).
+    assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
+    # What must survive is the OWNER bound — and it is the ONLY thing pinning the
+    # `$DUP_LOCAL_VERSIONS` disjunct of that guard, since BLOCKING is empty here.
+    assert "OWNER ACTION" in r.stdout, r.stdout
     assert "#2240" in r.stdout, r.stdout
 
 
@@ -548,14 +560,23 @@ def test_in_order_report_never_executes_supabase():
     which is the reason this fixture is added rather than widened (#9613 review
     finding).
 
-    What the marker proves, exactly: mutation-verified for the `db push` line —
-    wrap it in backticks and the stub runs (marker written). NOT for the repair
-    line: bash rejects the substitution at PARSE time (the `<version>` is parsed
-    as a redirect with a missing target, so the whole `echo` is a syntax error),
-    which means a backticked mutant executes nothing and prints an empty line.
-    That line's regression is therefore caught by the printed-text assertion
-    below, not by the marker — stated so the next reader does not read a
-    stronger guarantee than the test gives.
+    What the marker proves, exactly, measured on mutants (#9613 review, round 4):
+
+    * The marker is only reachable for command text carrying no bash
+      metacharacters. The OUT OF ORDER branch's `supabase db push --include-all`
+      is that shape: backticked, the stub runs and the marker appears — which is
+      why `test_report_never_executes_supabase` is mutation-provable.
+    * NEITHER line in THIS branch is that shape, so the marker proves nothing
+      about them: the `db push --linked --include-all` line ends in a
+      parenthetical, and the repair line carries `<version>` (parsed as a
+      redirect with a missing target). Backticking either makes bash report a
+      syntax error INSIDE the command substitution at run time, the `echo` still
+      runs and prints a line with a hole, and the script continues with an
+      unchanged exit status — nothing executes, and no marker appears.
+    * So this fixture's real value is the printed-text assertions below, and the
+      repair line must be pinned to its LITERAL suffix (with ` <version>`) or a
+      backticked mutant leaves the assertion satisfiable by the `applied` prefix
+      and the suite stays green.
     """
     r, marker = _run_with_supabase_stub(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
@@ -565,7 +586,10 @@ def test_in_order_report_never_executes_supabase():
     assert not marker.exists(), "the report EXECUTED supabase instead of printing it"
     # Both command lines really are present in this branch, or the guard is vacuous.
     assert "supabase db push --linked --include-all" in r.stdout, r.stdout
-    assert "migration repair --linked --status applied" in r.stdout, r.stdout
+    # Literal suffix on purpose: `... applied` alone is still a substring of a
+    # backticked mutant (the `<version>` is what vanishes), so a looser pin
+    # leaves that regression uncovered (measured: 0 failed / 35).
+    assert "migration repair --linked --status applied <version>" in r.stdout, r.stdout
 
 
 def test_report_never_executes_supabase():
@@ -686,6 +710,7 @@ def test_clean_run_has_no_remediation_markers():
         "PENDING AFTER",
         "include-all",
         "note: 'repo-ahead' means prod has no",
+        "OWNER ACTION",
     ):
         assert marker not in r.stdout, f"{marker!r} leaked into a clean run: {r.stdout}"
 
@@ -703,6 +728,7 @@ def test_warn_only_run_is_green_and_carries_no_red_diagnosis_note():
     assert "OK (no blocking drift)" in r.stdout, r.stdout
     assert "warn-only" in r.stdout.lower(), r.stdout
     assert "note: 'repo-ahead' means prod has no" not in r.stdout, r.stdout
+    assert "OWNER ACTION" not in r.stdout, r.stdout
 
 
 # ── #6136 regression: early-exit pipeline consumers under `set -euo pipefail` ──
