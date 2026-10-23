@@ -2882,7 +2882,7 @@ def scan_branch_surface(
     remote_namespaces: set[str] | None = None,
     targeted_terminal: dict[str, str] | None = None,
     counts: object = None,
-    stale: "StaleHolder | None" = None,
+    stale: StaleHolder | None = None,
     tip_age: object = None,
 ) -> None:
     """NUMBER matching only — the lexical arm is gone (#3504).
@@ -3159,7 +3159,7 @@ def scan_worktree_surface(
     merged_head_shas: set[str], ancestor_merged: set[str] | None,
     main_tip: str | None, first_parent: set[str] | None,
     counts: object = None,
-    stale: "StaleHolder | None" = None,
+    stale: StaleHolder | None = None,
     tip_age: object = None,
 ) -> None:
     """Untruncated worktree scan — NUMBER match on the full path and branch.

@@ -603,7 +603,9 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
     s1 = sum(_stage_calls(s, "s1") for s in stats)
     s2 = sum(_stage_calls(s, "s2") for s in stats)
     queries = _stat_total(stats, "search_queries")
-    degraded = [run["session_id"] for run, s in zip(runs, stats)
+    # `stats` is built one-per-run from `runs`, so `strict=True` states the
+    # invariant instead of leaving a short zip to pass silently.
+    degraded = [run["session_id"] for run, s in zip(runs, stats, strict=True)
                 if s.get("search_degraded")]
     endpoints = _stat_total(stats, "operator_endpoints_minted")
 
