@@ -1254,8 +1254,8 @@ def test_set_point_baseline_refuses_an_id_that_names_no_node(sdk):
     assert sdk._get_proj().g.query(
         "MATCH (n) WHERE n.id = 'ghost-9262' RETURN n.id").result_set == []
     # …and the refusal did not silence the writer: the same call on a point
-    # that exists still stores, so the guard can never become unsatisfiable
-    # (#8175's trap).
+    # that exists still stores, so the refusal cannot become a gate that can
+    # never be satisfied.
     p = sdk.create_point("statement", "Real claim", status="live")
     assert sdk.set_point_baseline(p["id"], 5.0, 2.0)["claim_id"] == p["id"]
     assert sdk._evidence[p["id"]] == (5.0, 2.0)
