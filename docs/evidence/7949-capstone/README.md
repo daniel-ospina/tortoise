@@ -124,8 +124,10 @@ THIS run's counts into it with a typed `= 1.000000` — so the record stated a h
 never happened (`141/141` rather than that run's `132/132`), and would have printed
 `140/141 = 1.000000` on a run that lost a link. The prose now states the circularity as a
 CONSTRUCTION (a denominator defined by the link it reports can only read `1.000000`) with no live
-count in the historical claim, and the composition line discloses that the `132/132` figure's log is
-not committed because superseding deleted it. **No measured number moved** — neither corrected span
+count in the historical claim, and the composition line now names where the `132/132` figure can be
+retrieved (`git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log`):
+superseding DELETES the tree entry, not the history — what it does cost is citability as a row's
+`evidence`, which V4 resolves against the tree. **No measured number moved** — neither corrected span
 carries a figure belonging to this run; only that explanatory clause is different, and the probe at
 this head (now `e3_row_note`) emits the corrected form.
 
@@ -398,9 +400,10 @@ produce is a **before** arm: E1's criterion is a
 *ratio between two arms*, and two independent captures would confound the gate with LLM
 non-determinism — which is exactly why the bare-definite share is not quoted as a trend: the same
 probe on the same corpus has produced double-digit bare counts on one pass and zero on the next
-(6/50 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is **not
-committed** — superseding DELETES the file it replaces, so that observation is provenance, not an
-artifact this bundle can check).
+(6/50 in the shipped log; **0/59** at the superseded stamp `7c9c34d84`, whose log is not in the tree
+— retrievable with `git show 8a8bbcba2:docs/evidence/7949-capstone/capstone-measured-7c9c34d8.log`,
+because superseding DELETES the tree entry and not the history; what it costs is citability as a
+row's `evidence`, which V4 resolves against the tree).
 So E1 needs the controlled design #9076 built — one extraction, both arms applied to the SAME
 candidate population (`assert_one_gate_population`) — pointed at `tests/eval/write_path` and made
 to persist. That is work, and it is recorded here rather than approximated by a ratio of two runs

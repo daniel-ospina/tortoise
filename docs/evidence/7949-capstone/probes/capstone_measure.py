@@ -1066,9 +1066,13 @@ def point_composition_line(composition: dict | None) -> str:
         f"itself, because a denominator filtered on the link cannot move when the "
         f"link is lost (measured on the superseded `8a8bbcba` run: the earlier "
         f"reading of this figure was 132/132 = 1.000000 while 9 Points sat in "
-        f"'other' — and that run's log is NOT committed, because superseding "
-        f"DELETES the file it replaces, so the figure is provenance this bundle "
-        f"records rather than an artifact it can hand you). TWO classes are "
+        f"'other' — and that run's log is retrievable, not lost: superseding "
+        f"DELETES the TREE entry it replaces, never the history, so "
+        f"`git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log` "
+        f"still yields it. What the deletion does cost is citability as a row's "
+        f"`evidence`, which V4 resolves against the TREE: the figure is "
+        f"provenance you can CHECK from the commit, not a file this bundle can "
+        f"hand you). TWO classes are "
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
         f"in the denominator, with their anchored counts stated: turn rows carry "
         f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
@@ -1103,8 +1107,12 @@ def e3_row_note(*, composition: dict | None, e3_result: dict, graph: str,
     So the clause now states the circularity as a CONSTRUCTION — a denominator
     defined by the link it reports can only ever read 1.0 — with no number taken
     from the current run and no invented ratio. The numbers of the earlier run
-    are provenance the bundle README carries (its log was deleted by superseding,
-    so the tree cannot check them); the note does not restate them.
+    are provenance the bundle README carries, and they are CHECKABLE rather than
+    exempt: superseding deletes the TREE entry, not the history, so the log is
+    still retrievable with
+    ``git show 6020cbd5f:docs/evidence/7949-capstone/capstone-measured-8a8bbcba.log``
+    (what it cannot be is a row's ``evidence``, which V4 resolves against the
+    tree); the note does not restate them.
     """
     block = composition or {}
     # NOTE the names: this is the WRITER class (claims + other), NOT the claims
