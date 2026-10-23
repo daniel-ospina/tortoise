@@ -527,13 +527,20 @@ def test_a_token_mint_failure_leaves_every_runner_untouched(tmp_path: Path):
 
 # ── 5e. the arch refusal is an INSTALL guard, not a decommissioning gate ─────────────────────
 def test_the_arch_refusal_governs_install_but_not_uninstall(tmp_path: Path):
-    """A non-x86_64 host cannot INSTALL — and can still UNINSTALL. That is the documented contract.
+    """A non-x86_64 host cannot INSTALL — and the arch guard does not refuse UNINSTALL.
 
     The guard sat ABOVE the uninstall block, so `--uninstall` on an aarch64 host (this fleet's
     Apple-Silicon box, and the five ARM64 pool runners) exited 2 and removed nothing: a runner
     could not be decommissioned from the host it was installed on, while the runbook claimed the
-    refusal "still governs every INSTALL". Only an install registers an arch label and runs the
-    x64 listener binary; removal downloads nothing and registers nothing.
+    refusal "still governs every INSTALL".
+
+    ⚠️ WHAT THIS PROVES, AND WHAT IT DOES NOT. The `config.sh` below is a STUB that exits 0, so the
+    final arm proves that the GUARD no longer refuses the removal on a foreign arch — NOT that a
+    real deregistration succeeds there. It does not: the runner package's `config.sh remove` execs
+    `./bin/Runner.Listener`, an x86-64 ELF, so on aarch64 the exec fails and the runner stays
+    registered (the runbook's `--uninstall` bullet states this, and the installer surfaces the
+    captured output). Testing the real failure would need either the real x64 package on the host
+    or an `exec format error` stub; the stub here is deliberately the matching-arch case.
 
     Non-vacuity, measured on the pre-fix installer: the same `--uninstall --dry-run` exited **2**
     with "this installer is for x86_64 hosts" and planned nothing; post-fix it plans the removal
@@ -561,7 +568,8 @@ def test_the_arch_refusal_governs_install_but_not_uninstall(tmp_path: Path):
     assert "would stop and uninstall" in plan.stderr and "x86_64 hosts" not in plan.stderr, plan.stderr
     assert runner.is_dir(), "a dry run removed the directory"
 
-    # …and the removal itself completes, so the runner can be decommissioned from this host
+    # …and the removal completes when the deregistration can run (the stub stands in for a
+    # matching-arch `config.sh remove`; see this test's docstring for what that does NOT prove).
     _stub_tool(runner, "config.sh", "exit 0")
     done = _run("--uninstall", "--count", "1", env={**env, "CI_RUNNER_BASE": str(runner)})
     assert done.returncode == 0, f"a non-x86_64 host must be able to decommission a runner: {done.stderr}"

@@ -271,10 +271,18 @@ fi
 # non-x86_64 host `--uninstall` was refused (exit 2) and nothing was removed: a runner could not
 # be decommissioned from the box it was installed on, and the runbook said the opposite ("still
 # governs every INSTALL"). Only INSTALLING registers a runner with THIS arch's label
-# (`self-hosted-x64`) and runs the x64 listener binary; removing one downloads nothing, registers
-# nothing, and needs no x64 binary. `--status`, `--repair-labels` and `--print-labels` already run
-# above this line for the same reason. The destructive path is guarded by `is_runner_install`,
-# never by the arch.
+# (`self-hosted-x64`); `--status`, `--repair-labels` and `--print-labels` reach only `gh` and are
+# arch-free. The destructive path is guarded by `is_runner_install`, never by the arch.
+#
+# ⚠️ BUT DEREGISTRATION IS **NOT** ARCH-FREE, and this line used to say it was. The runner
+# package's own `config.sh` execs the listener for BOTH verbs — `./bin/Runner.Listener "$@"` when
+# `$1 = remove` (pinned package `actions-runner-linux-x64-2.338.1/config.sh:76-81`) — and that
+# binary is an x86-64 ELF. On a foreign arch the exec fails, the failure is swallowed by the
+# `>/dev/null 2>&1` below, and the run cannot deregister: the unit is already gone by then (it is
+# removed first, deliberately), so the box is left half-decommissioned — unit gone, registration
+# alive. The failed-deregistration branch now surfaces the captured stderr and says so. To
+# decommission from a non-x86_64 host: remove the unit here, then deregister from an x86_64 host or
+# delete the runner through the API.
 if [ "$MODE" = install ]; then
   # `CI_RUNNER_ARCH` is a seam, so the refusal can be exercised on a host of either arch (the
   # guarded box is not always the box reading this code). Nothing here is made safer by it: anyone
@@ -414,10 +422,15 @@ if [ "$MODE" = uninstall ]; then
     # in `$d`), the re-run then reported "nothing to uninstall", and the caller was told `0` — against
     # this file's own EXIT contract (`3 OPERATION failed — … config.sh …`) and the runbook's copy of
     # it. Leave the target INTACT, report it, and let the retry retry.
-    if ( cd "$d" && ./config.sh remove --token "$tok" --unattended >/dev/null 2>&1 ); then
+    if out="$( cd "$d" && ./config.sh remove --token "$tok" --unattended 2>&1 )"; then
       say "deregistered $name"
     else
-      say "WARNING: could not deregister $name — LEFT $d and its registration intact so this can be retried; it may still be listed in the repo, check --status"; rc=3; continue
+      # ⚠️ THE CAPTURED OUTPUT IS THE ONLY WAY TO TELL THE TWO CAUSES APART, and the second one is
+      # not retryable: `config.sh remove` execs `./bin/Runner.Listener`, an x86-64 ELF, so on a
+      # foreign arch it dies with an exec-format error no re-run on that host can fix. Swallowing the
+      # output (`>/dev/null 2>&1`) turned both causes into the same "check --status" sentence.
+      last="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -1)"
+      say "WARNING: could not deregister $name — LEFT $d and its registration intact so this can be retried; it may still be listed in the repo, check --status${last:+ (last output: $last)}"; rc=3; continue
     fi
     if ! sudo rm -rf "$d"; then
       # ⛔ THE DELETE IS THE LAST DESTRUCTIVE STEP AND ITS STATUS IS THE ONE THAT USED TO BE
