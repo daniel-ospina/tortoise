@@ -18279,6 +18279,59 @@ class TortoiseSDK:
                 out[event_id] = entry
         return out
 
+    def _find_terminal_key_holder(self, kind: str, key: str | None) -> str | None:
+        """The KEY-identity half of :meth:`_find_terminal_dedup_hit`, alone.
+
+        #8400/#9173: a ``points`` item carrying a ``key`` that a TERMINAL point
+        holds is NOT a direct-edge question. ``create_point``'s key-first dedup
+        resolves that point whatever the content, so the write path FOLDS onto
+        it — measured on the #9173 tree: a retracted point came back with
+        ``batch_id`` stamped and ``updatedAt`` moved (status still
+        ``retracted``). The bundle therefore MUTATES a terminal node, which is
+        the hazard #8400 P1 exists to stop.
+
+        This is why the leg must not inherit #9173's route scoping. #9173 was
+        right that every ``create_direct_edge``-predicting leg belongs to the
+        EFFECTIVE route (a Point-bearing pair is promoted to the operator route
+        and never reaches that primitive). This leg predicts a POINT WRITE, and
+        every route reaches one — scoping it by ``route == "direct"`` left it
+        dead for exactly the bundles it protects, because a ``points`` ref makes
+        the pair Point-bearing by construction.
+
+        The CONTENT-dedup legs stay route-scoped in :meth:`_find_terminal_dedup_hit`
+        — #9173 deliberately made wiring an operator to a terminal point legal,
+        and that is the class its scoping governs. Only the key IDENTITY is
+        unconditional here: the key holder is the SAME node, so there is no edge
+        question to ask.
+
+        ⚠️ RESIDUAL, stated so this helper is not read as closing more than it
+        does: a CONTENT (or hash) fold onto a terminal point is still reachable
+        from an ingest and still mutates it — ``create_point(dedup=True)``
+        resolves content unconditionally, so a fresh key (or none) with the
+        SAME content as a retracted point folds onto it and stamps
+        ``batch_id`` — and moves ``updatedAt`` when the item carries props —
+        exactly as the key case did (measured on this tree; an intra-bundle pair
+        can fold onto a terminal point it minted one statement earlier). That
+        half is NOT closed by this change
+        and not claimed to be; it is #9173's accepted trade and needs its own
+        decision rather than a silent widening of this guard.
+
+        Composition is the writer's own (``_find_points_by_key`` key-first, the
+        shared ``_terminal_expression`` predicate), so guard and writer cannot
+        disagree about which node the fold lands on.
+        """
+        if not (isinstance(key, str) and key.strip()):
+            return None
+        key_hits = self._find_points_by_key(key, pointKind=kind)
+        if not key_hits:
+            return None
+        rows = self._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND "
+            f"{_terminal_expression('n')} RETURN n.id LIMIT 1",
+            params={"ids": key_hits},
+        ).result_set
+        return rows[0][0] if rows else None
+
     def _find_terminal_dedup_hit(self, content: str, kind: str,
                                  key: str | None = None) -> str | None:
         """Read-only NFC-keyed dedup MATCH (mirrors create_point's dedup key)
@@ -19342,6 +19395,44 @@ class TortoiseSDK:
                                    f"{hit!r} (dedup hit) — new direct edges to "
                                    f"terminal points are rejected",
                     })
+
+        # #8400 (RESTORED after #9173): the KEY-identity terminal guard is a
+        # prediction about a POINT WRITE, not about `create_direct_edge`, so it
+        # runs on EVERY route and over EVERY `points` item — connection or not.
+        #
+        # The leg above is dead by construction (#9173's own note says so): a
+        # `points` ref makes the pair Point-bearing, so the effective route is
+        # always `operator` and the `route != "direct"` gate skips it. That is
+        # correct for the CONTENT-dedup prediction it carries. It was NOT
+        # correct for the key IDENTITY, which `create_point` folds onto
+        # unconditionally — measured on this tree: a bundle whose `points` item
+        # carried a retracted point's key left that point with `batch_id`
+        # stamped and `updatedAt` moved (status still `retracted`). Scoping the
+        # key leg by route is what let a terminal point be mutated by an
+        # ingest that Phase 1 had certified.
+        #
+        # A points item is checked here whether or not a connection references
+        # it: step 3 writes every point item, so the fold (and the mutation)
+        # happens either way.
+        for j, pitem in enumerate(bundle.get("points") or []):
+            if not isinstance(pitem, dict):
+                continue
+            pkey = _item_dedup_key(pitem)
+            if not (isinstance(pkey, str) and pkey.strip()):
+                continue
+            pkind = pitem.get("kind") or "statement"
+            holder = self._find_terminal_key_holder(pkind, pkey)
+            if holder:
+                violations.append({
+                    "section": "points", "index": j,
+                    "message": f"ingest: points[{j}] (ref {pitem.get('ref')!r}) "
+                               f"key {pkey!r} is held by terminal point "
+                               f"{holder!r} (dedup hit) — create_point would "
+                               f"fold onto it and MUTATE a terminal point, so "
+                               f"the bundle is rejected at validation; pass a "
+                               f"fresh key with dedup=False to mint a second "
+                               f"point (#8400)",
+                })
 
     def _check_endpoint_race(self, index: int, conn: dict,
                              refs: dict[str, str], violations: list[dict],

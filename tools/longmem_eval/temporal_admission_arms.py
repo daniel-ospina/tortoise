@@ -54,7 +54,9 @@ import sys
 # 3.11 user sees.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
-        "tools/longmem_eval.temporal_admission_arms requires Python >= 3.12"
+        f"tools/longmem_eval/temporal_admission_arms.py requires Python >= 3.12 "
+        f"(got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python -m tools.longmem_eval.temporal_admission_arms`"
     )
 
 import argparse

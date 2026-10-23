@@ -326,7 +326,8 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     (
         STORAGE,
         "STORAGE states the re-inference engine as open with its acceptance criterion",
-        "**Open — the re-inference engine**: its acceptance is **A2 of `#5038`**",
+        "**Open — the re-inference engine**: owned by **`#9786`** (which carries "
+        "A2 of `#5038`",
     ),
 )
 

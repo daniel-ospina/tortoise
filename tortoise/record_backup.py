@@ -140,6 +140,7 @@ from pathlib import Path
 from typing import Any, Callable  # noqa: UP035
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from .config import parse_uri_userinfo
 from .hosted_backup import decrypt_backup_with_rotation, encrypt_backup
 from .record_projection import THE_RECORD_TABLES
 
@@ -451,10 +452,16 @@ def libpq_env(dsn: str) -> dict[str, str]:
             env["PGPORT"] = str(parts.port)
     except ValueError as e:
         raise RecordBackupUnavailable(f"the record DSN has an unreadable port: {e}") from e
-    if parts.username:
-        env["PGUSER"] = unquote(parts.username)
-    if parts.password:
-        env["PGPASSWORD"] = unquote(parts.password)
+    # #3039: userinfo is percent-DECODED by the ONE shared rule, never read
+    # straight off the urlparse result — a password containing `@`, `:`, `/`,
+    # `?`, `#` or `%` reaches libpq as a literal `%XX` otherwise, and the
+    # failure surfaces as a misleading auth error. `_split_dsn` still supplies
+    # the non-secret coordinates (host/port/path) this function reasons about.
+    _user, _password = parse_uri_userinfo(dsn)
+    if _user:
+        env["PGUSER"] = _user
+    if _password:
+        env["PGPASSWORD"] = _password
     database = unquote(parts.path.lstrip("/"))
     if not database:
         # #9601 review cycle 1 (P1): the DUMP leg was the one that let a DSN
@@ -865,7 +872,9 @@ def _coordinates_for_message(dsn: str) -> str:
         except ValueError:
             port = None
         database = unquote(parts.path.lstrip("/")) or "<no database>"
-        user = unquote(parts.username) if parts.username else "<no user>"
+        # #3039: the shared decoding rule, not a raw `.username` read.
+        _user, _ = parse_uri_userinfo(dsn)
+        user = _user or "<no user>"
         return f"{user}@{host}:{port or 5432}/{database}"
     except Exception:  # pragma: no cover - a DSN that cannot be read at all
         return "the DSN the run was given"
@@ -1100,8 +1109,10 @@ def _source_of(dsn: str) -> dict[str, str]:
     database = unquote(parts.path.lstrip("/"))
     if database:
         out["database"] = database
-    if parts.username:
-        out["user"] = unquote(parts.username)
+    # #3039: the shared decoding rule, not a raw `.username` read.
+    _user, _ = parse_uri_userinfo(dsn)
+    if _user:
+        out["user"] = _user
     return out
 
 

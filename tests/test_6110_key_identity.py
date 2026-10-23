@@ -329,6 +329,33 @@ class TestPhase1GuardSeesTheKeyIdentity:
         )
         assert after.get("updatedAt") == before.get("updatedAt")
 
+    def test_key_held_by_terminal_point_is_a_violation_with_no_connection(self, sdk):
+        """#8400/#9173: step 3 writes EVERY `points` item, so the fold onto a
+        terminal key holder happens with NO connection in the bundle.
+
+        This is the arm that keeps the refusal where it belongs. #9173 scoped
+        every surviving instance inside a per-CONNECTION, `route == "direct"`
+        leg — which is dead for any `points` ref by construction — so an
+        assertion that only ever installs a connection (the sibling above)
+        cannot tell the unconditional guard from the dead one.
+        """
+        k = "#8400 terminal key holder, no connection"
+        terminal = sdk.create_point("statement", "ORIGINAL-NOCONN", key=k,
+                                    dedup=True)["id"]
+        sdk.retract_point(terminal)
+        before = sdk.get_point(terminal)
+
+        with pytest.raises(BundleValidationError, match="dedup hit"):
+            sdk.ingest({"points": [{"ref": "p1", "kind": "statement",
+                                     "content": "CHANGED-NOCONN", "key": k}]})
+
+        after = sdk.get_point(terminal)
+        assert after.get("batch_id") is None, (
+            "the fold stamped the retracted point with no connection in the "
+            "bundle — the guard is still connection-scoped (#8400)"
+        )
+        assert after.get("updatedAt") == before.get("updatedAt")
+
     def test_key_held_by_live_point_folds_and_wires(self, sdk):
         """The guard must NOT over-reject: a key holder that is still live is
         a legal dedup hit — the writer folds onto it and the edge is wired."""
