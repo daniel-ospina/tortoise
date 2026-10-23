@@ -537,14 +537,70 @@ def test_a_stats_home_for_the_classify_surface_also_counts():
     assert "S2.3" in observed, observed
 
 
+def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
+    """PRESENT is not RAN — the confusion that made 8/8 reachable with both flags OFF.
+
+    `extract_session_v2` emits `result["vet"]` and `result["classify_later"]`
+    UNCONDITIONALLY — on the FLAG-OFF arm and on the early-return path the block
+    is `{"enabled": False, "s2": {}, "union": {}}` (`:7928-7932`,
+    `:8278-8292`). An acceptance test of "a non-empty dict" therefore takes an OFF
+    block as the witness for "the S2.2 VET pass RAN" and prints
+    `step S2.2 WITNESSED … enabled=false, s2={}`. That is the hazard, not
+    pedantry: the moment #9116 copies the sibling key at the meta fold — exactly
+    what this bundle instructs — both steps become WITNESSED on EVERY run,
+    including one measured with the flags OFF, which is the "OFF population under
+    an ON label" failure one layer up. And `V5` ("ALL eight steps observed in one
+    pass") is the epic's only closing gate for the step count.
+
+    Measured from the reviewer's reproduction: with
+    `surfaces={"vet": {"enabled": False, …}, "classify_later": {"enabled": False, …}}`
+    this returned 8/8 observed. It must return 6/8.
+    """
+    runs = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
+                 surfaces={"vet": {"enabled": False, "s2": {}, "union": {}},
+                           "classify_later": {"enabled": False, "s2": {},
+                                              "union": {},
+                                              "restamp_overrides": 0,
+                                              "slot_rekeys": 0}})]
+    observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
+    assert "S2.2" not in observed and "S2.3" not in observed, observed
+    assert len(observed) == len(measure.STEPS) - 2, (
+        f"an OFF surface was counted as a witness: {sorted(observed)}")
+    for step in ("S2.2", "S2.3"):
+        assert "did NOT run" in unobserved[step], unobserved[step]
+        assert "enabled` reads False" in unobserved[step], unobserved[step]
+    # The refusal names WHERE the OFF block was found, so a reader can tell
+    # "absent" (the #9116 cause) from "present and off" (this cause).
+    assert "receipt['vet']" in unobserved["S2.2"], unobserved["S2.2"]
+    assert "tortoise/sdk.py:12401" not in unobserved["S2.2"], unobserved["S2.2"]
+
+
+def test_the_witness_rule_prefers_the_flag_and_fails_closed_on_contradiction():
+    """The rule, stated: `enabled: true` wins; `enabled: false` can never be outvoted.
+
+    A block that carries no `enabled` field at all is the one shape where non-empty
+    `s2`/`union` is the only positive evidence available — so it counts. A block
+    that says OFF while carrying S2 counters contradicts itself, and a
+    self-contradicting surface is not evidence of anything (fail closed).
+    """
+    assert measure._pass_ran({"enabled": True, "s2": {}}) is True
+    assert measure._pass_ran({"enabled": False, "s2": {}, "union": {}}) is False
+    assert measure._pass_ran({"enabled": False, "s2": {"kept": 2}}) is False
+    assert measure._pass_ran({"s2": {"kept": 2}}) is True
+    assert measure._pass_ran({"s2": {}, "union": {}}) is None
+
+
 def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     """The cause is MEASURED, and it names the layer that actually drops it.
 
     The shipped constant said "the receipt's stats carries 20 keys" — a number
     nothing counted — and blamed `extract_session_v2`, which in fact BUILDS
     `result["vet"]` (:8288-8292) and `result["classify_later"]` (:8278-8285). The
-    drop is the meta fold at `tortoise/sdk.py:12196`. Getting that wrong sends the
-    next lane to the wrong file.
+    drop is the meta fold at `tortoise/sdk.py:12401` — the cite was `:12196` until
+    this round, which at this PR's base is a comment line 200 lines away, so the
+    bundle was sending the #9116 fixer into unrelated code. Getting it wrong sends
+    the next lane to the wrong file; getting the ARITHMETIC wrong sends it to a
+    claim nothing supports.
     """
     stats = {"edus": 10, "chunks": 1, "search_queries": 5,
              "search_degraded": False, "operator_endpoints_minted": 0,
@@ -556,10 +612,11 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert "S2.2" not in observed
     cause = unobserved["S2.2"]
     assert f"inspected {len(stats)} stats key(s)" in cause, cause
-    assert "tortoise/sdk.py:12196" in cause, cause
+    assert "tortoise/sdk.py:12401" in cause, cause
     assert "tortoise/extractor_v2.py:8288-8292" in cause, cause
+    assert "tortoise/sdk.py:12196" not in cause, cause
     assert "20 keys" not in cause, cause
-    assert "tortoise/sdk.py:12196" in unobserved["S2.3"], unobserved["S2.3"]
+    assert "tortoise/sdk.py:12401" in unobserved["S2.3"], unobserved["S2.3"]
 
 
 def test_every_step_is_witnessed_or_given_a_cause():
@@ -571,15 +628,40 @@ def test_every_step_is_witnessed_or_given_a_cause():
 
 # ── E3's Point denominator is disclosed, not silently mixed (F4) ──────────
 
-def test_the_point_composition_disclosure_is_derived_and_shows_both_readings():
-    line = measure.point_composition_line(
-        {"points": 311, "turn_rows": 159, "extraction_claims": 126,
-         "operator_points": 26, "other_points": 0,
-         "claim_denominator": 152, "claim_anchored": 126})
-    for fragment in ("turn_rows=159", "extraction_claims=126",
-                     "operator_points=26", "total=311",
-                     "126/152 = 0.828947", "BY CONSTRUCTION",
-                     "tortoise/sdk.py:2306-2331"):
+def test_the_derivation_only_figure_divides_by_the_class_that_can_derive():
+    """The figure was 126/152 = 0.828 — a shortfall no Point in the run could close.
+
+    `claim_denominator` summed extraction claims **+ operator Points**, and no
+    operator Point can carry an `extractedFrom` link: `create_operator` writes
+    IMPL/NAND/INPUT only. Measured on the run that shipped that line
+    (`extractedFrom=140/140` beside `operator_points=29`, 0 anchored) and again on
+    the run that replaced it (`extractedFrom=132/132`, 0 of 29 anchored). The 17%
+    short reading was therefore an artefact of the DENOMINATOR, printed beside a
+    frozen denominator — exactly where #9736 reads it for the
+    re-register-vs-reopen choice. The derivation figure is taken over
+    `extraction_claims` now, and the incapable classes are named with their own
+    anchored counts instead of being folded in.
+
+    Non-vacuity: on the pre-fix line the denominator is 152 and the figure reads
+    `126/152 = 0.828947`, so both the figure assertion and the `126/152` absence
+    assertion red there.
+    """
+    composition = {"points": 311, "turn_rows": 159, "turn_rows_anchored": 0,
+                   "extraction_claims": 126, "extraction_claims_anchored": 126,
+                   "operator_points": 26, "operator_points_anchored": 0,
+                   "other_points": 0}
+    assert measure.derivation_only(composition) == (126, 126, 1.0)
+    line = measure.point_composition_line(composition)
+    assert "126/126 = 1.000000" in line, line
+    assert "126/152" not in line, line
+    assert "0.828947" not in line, line
+    for fragment in ("turn_rows=159 (anchored 0)",
+                     "extraction_claims=126 (anchored 126)",
+                     "operator_points=26 (anchored 0)",
+                     "total=311", "STRUCTURALLY INCAPABLE",
+                     "create_operator", "never writes extractedFrom",
+                     "BY CONSTRUCTION", "tortoise/sdk.py:2367"):
         assert fragment in line, (fragment, line)
+    assert "2306-2331" not in line, line
     assert measure.derivation_only({}) == (0, 0, None)
     assert measure.derivation_only(None) == (0, 0, None)

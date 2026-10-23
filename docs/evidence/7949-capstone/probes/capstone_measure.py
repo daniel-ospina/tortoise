@@ -57,10 +57,22 @@ claim nothing supports. They are still UNWITNESSABLE through
 first attributed: ``extract_session_v2`` DOES build the surfaces
 (``result["classify_later"]`` at ``tortoise/extractor_v2.py:8278-8285`` and
 ``result["vet"]`` at ``:8288-8292``); they are dropped at the meta fold,
-``tortoise/sdk.py:12196`` (``"stats": out.get("stats") or {}`` — the sibling key
-is never copied). That is #9116, cited rather than worked around: working around
+``tortoise/sdk.py:12401`` (``"stats": out.get("stats") or {}`` inside
+``_extract_session_v2`` — the sibling key is never copied). That is #9116, cited
+rather than worked around: working around
 it would mean reading a wrapper's state, which is the instrumentation E4's row
 forbids.
+
+📌 CITE CONVENTION (this bundle). Every ``file:line`` is re-derived from the tree
+at the head the bundle is stamped at, and is paired with the SYMBOL it names —
+plus, for the ``sdk.py`` cites, a short quote of the line — so a number that
+stops resolving is self-detecting. The SYMBOL is authoritative and the number is
+a convenience; where a cite cannot be pinned without drift it is symbol-only on
+purpose. ``tests/test_7949_capstone_measure.py`` pins the cite each cause string
+and the composition line carry, so one cannot be dropped or silently re-worded;
+the number's RESOLUTION is checked against the tree at the moment it is
+re-derived (``grep -n`` at the stamped head), which is the only check that can be
+made without pinning a line that ``main`` is free to move.
 
 ⛔ WHERE THE LOG GOES. NOT over ``capstone.log``. That file is the shipped REFUSAL
 record, its add-commit predates the pre-registration, and
@@ -136,8 +148,9 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2168-2192``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:12477`` (``(Source)-[:references]->(sessionCaptured
-#: Event)``). The anchor is on the same link, but the DERIVED node is its TARGET.
+#: path at ``tortoise/sdk.py:12682`` (``proj.link_source_to_event(source_key,
+#: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
+#: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
 ANCHOR_IN = ("references",)
 
@@ -150,7 +163,9 @@ E3_RULE = (
     "((Point)-[:extractedFrom]->(GraphEvent|Event)), while references points AT "
     "the derived node ((Source)-[:references]->(Event|Document) — "
     "tortoise/projection/edges.py:2168-2192 link_source_to_event, reached from "
-    "the capture path at tortoise/sdk.py:12477). The anchor is a property of the "
+    "the capture path at tortoise/sdk.py:12682 "
+    "(proj.link_source_to_event(source_key, event_id))). The anchor is a "
+    "property of the "
     "DERIVATION LINK (tortoise/projection/edges.py:494-503 "
     "_anchor_on_create/_DERIVATION_ANCHOR_SET), and the references target labels "
     "are _DERIVATION_REFERENCES_LABELS (edges.py:467: Event, Document). A "
@@ -173,10 +188,17 @@ ARM_OFF = ("TORTOISE_VALUE_GATE",)
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2306-2331`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2367`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
+#:
+#: ⚠️ ``is_operator`` Points are NOT in the derivation figure, and that is a
+#: correction rather than a choice: ``create_operator`` (``tortoise/sdk.py``, the
+#: IMPL/NAND/INPUT writer) never stamps ``extractedFrom``, so the class is
+#: structurally incapable of the link and summing it into the denominator reads
+#: as a shortfall nothing can close. The class is printed WITH its anchored count
+#: so the claim is checkable rather than asserted.
 POINT_COMPOSITION_CYPHER = (
     "MATCH (n:Point) "
     "OPTIONAL MATCH (n)-[xf:extractedFrom]->() "
@@ -201,17 +223,24 @@ POINT_COMPOSITION_CYPHER = (
     "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
     "AND NOT coalesce(n.is_operator, false) AND deriv = 0 "
     "THEN 1 ELSE 0 END) AS other_points, "
-    # The ANCHORABLE denominator = extraction claims + operator Points: the two
-    # classes whose writers are supposed to derive from a version. Turn rows are
-    # excluded (no derivation link by construction) and so is `other`, which is
-    # disclosed on its own class line rather than folded in.
+    # The anchored count PER CLASS. The derivation-only figure is taken over
+    # `extraction_claims` ALONE, because it is the only class whose writer can
+    # stamp a derivation link: turn rows carry none BY CONSTRUCTION, and
+    # `create_operator` writes IMPL/NAND/INPUT and never `extractedFrom`. The
+    # per-class anchored counts are RETURNED so the printed line can STATE that
+    # instead of asserting it — a denominator that folds in a class which can
+    # never carry the link reports a coverage shortfall nothing can close.
     "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
-    "AND (deriv > 0 OR coalesce(n.is_operator, false)) "
-    "THEN 1 ELSE 0 END) AS claim_denominator, "
-    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
-    "AND (deriv > 0 OR coalesce(n.is_operator, false)) "
+    "AND NOT coalesce(n.is_operator, false) AND deriv > 0 "
     "AND (deriv_anchored > 0 OR in_anchored > 0) "
-    "THEN 1 ELSE 0 END) AS claim_anchored"
+    "THEN 1 ELSE 0 END) AS extraction_claims_anchored, "
+    "sum(CASE WHEN coalesce(n.is_episodic, false) "
+    "AND (deriv_anchored > 0 OR in_anchored > 0) "
+    "THEN 1 ELSE 0 END) AS turn_rows_anchored, "
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND coalesce(n.is_operator, false) "
+    "AND (deriv_anchored > 0 OR in_anchored > 0) "
+    "THEN 1 ELSE 0 END) AS operator_points_anchored"
 )
 
 
@@ -717,22 +746,90 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     return results
 
 
-def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str]:
-    """The first non-empty ``key`` surface a run actually CARRIES, and where.
+#: The two stat keys a #9116 surface carries when its pass RAN. Consulted ONLY
+#: for a block that has no ``enabled`` field at all — the two shapes the extractor
+#: emits both carry one, and for those the flag is the deciding word.
+_WITNESS_STATS = ("s2", "union")
+
+
+def _pass_ran(block: dict) -> bool | None:
+    """Does this block SAY its pass ran? ``True`` / ``False`` / ``None`` (silent).
+
+    ⛔ A surface EXISTING is not evidence that the pass RAN, and this is exactly
+    where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
+    and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
+    the early-return path the block is ``{"enabled": False, "s2": {}, "union":
+    {}}`` (:7928-7932, :8278-8292) — so an acceptance test of "a non-empty dict"
+    reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
+    ``enabled=false, s2={}`` beside the word WITNESSED.
+
+    The rule applied here, in this order:
+
+    1. ``enabled is True`` → the pass ran. This is the extractor's OWN statement
+       that the gate was open for this pass (``vet_enabled`` reads the flag at
+       call time), and it is the only field that separates the ON population from
+       the OFF one.
+    2. ``enabled is False`` → the pass did NOT run, and non-empty stats cannot
+       outvote the flag. A block that says OFF while carrying S2 counters would be
+       a surface contradicting itself, so it fails CLOSED (never a witness).
+    3. No ``enabled`` field at all → non-empty ``s2``/``union`` is the only
+       positive evidence available; empty means silent, which is not a witness.
+    """
+    enabled = block.get("enabled")
+    if enabled is True:
+        return True
+    if enabled is False:
+        return False
+    return True if any(block.get(key) for key in _WITNESS_STATS) else None
+
+
+def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
+    """The first ``key`` surface a run CARRIES that SAYS its pass ran, and where.
 
     Looks where the surface would legitimately land — the extractor's top-level
     key on the receipt, then the stats block — and NOWHERE else: a witness read
     off a wrapper's state is the instrumentation E4's row forbids.
+
+    Returns ``(block, where, refusal)``. ``block`` is non-``None`` only when a
+    surface in that place states the pass ran (:func:`_pass_ran`); otherwise
+    ``where`` still names the place a surface WAS found and ``refusal`` says why
+    it is not a witness (``""`` when no surface was found at all). A positive
+    witness anywhere outranks a refusal elsewhere; a refusal outranks silence.
     """
+    refused: tuple[str, str] | None = None
+    silent: tuple[str, str] | None = None
     for run in runs:
         surfaces = run.get("surfaces") or {}
-        block = surfaces.get(key)
-        if isinstance(block, dict) and block:
-            return block, f"receipt[{key!r}] (session {run['session_id']})"
-        block = (run.get("stats") or {}).get(key)
-        if isinstance(block, dict) and block:
-            return block, f"stats[{key!r}] (session {run['session_id']})"
-    return None, ""
+        candidates = (
+            (f"receipt[{key!r}]", surfaces.get(key)),
+            (f"stats[{key!r}]", (run.get("stats") or {}).get(key)),
+        )
+        for where_prefix, block in candidates:
+            if not isinstance(block, dict) or not block:
+                continue
+            where = f"{where_prefix} (session {run['session_id']})"
+            ran = _pass_ran(block)
+            if ran is True:
+                return block, where, ""
+            reason = (
+                f"the {key!r} surface IS present at {where} but its own "
+                f"`enabled` reads {block.get('enabled')!r} "
+                f"({_summary(block)}) — a block that says the pass did NOT run "
+                f"is not evidence that it did")
+            if ran is False:
+                refused = refused or (where, reason)
+            else:
+                silent = silent or (
+                    where,
+                    f"a {key!r} surface IS present at {where} but carries "
+                    f"neither `enabled: true` nor a non-empty "
+                    f"{'/'.join(_WITNESS_STATS)} ({_summary(block)}), so it does "
+                    f"not say the pass ran")
+    if refused:
+        return None, refused[0], refused[1]
+    if silent:
+        return None, silent[0], silent[1]
+    return None, "", ""
 
 
 def _summary(block: dict) -> str:
@@ -784,23 +881,32 @@ def anchor_census_cypher(label: str) -> str:
 
 
 def derivation_only(composition: dict | None) -> tuple[int, int, float | None]:
-    """E3's figure over the ANCHORABLE Points only — ``(anchored, total, share)``.
+    """E3's figure over the ONLY Point class that can carry a derivation link.
 
-    E3's frozen denominator counts ``Point + Object + Event``, and the Point half
-    includes the mechanical turn rows that carry no derivation link BY
-    CONSTRUCTION (one per corpus turn). Counting them is defensible under "all
-    derived nodes" (the wording is not this probe's to change), but a reader who
-    takes the row's unanchored count as "extraction claims that lost provenance"
-    is reading it wrong — so the anchorable half is reported beside it. #9736 must
-    choose between re-registering the metric and reopening the model; both
-    readings are on the record so neither choice is made blind.
+    Returns ``(anchored, total, share)`` over ``extraction_claims``.
 
-    ``claim_denominator`` is extraction claims **+ operator Points** — the two
-    classes whose writers are supposed to derive from a version.
+    ⛔ THE DENOMINATOR THIS REPLACED WAS WRONG, and the error was in the direction
+    that misleads. It summed extraction claims **+ operator Points** and printed
+    ``claim_anchored/claim_denominator`` — ``140/169 = 0.828402`` on the run that
+    shipped that line, ``132/161 = 0.819876`` on the run that replaced it, both
+    printed beside the frozen denominator — a figure reading as "derivation
+    coverage is still ~17-18% short". Nothing could ever close that remainder:
+    the operator writer is ``create_operator`` (``tortoise/sdk.py`` — the
+    IMPL/NAND/INPUT operator writer), it never writes an ``extractedFrom`` link,
+    and the graph said so on both runs (``extractedFrom`` 140/140 with
+    ``extraction_claims`` 140, and 0 of 29 operator Points anchored).
+    So the number invited #9736 to read a derivations-only metric as short when
+    every Point that CAN derive was anchored.
+
+    The classes that are STRUCTURALLY INCAPABLE of an ``extractedFrom`` link are
+    therefore excluded and named, not folded in: turn rows (``_TURN_WRITE_CYPHER``
+    writes ``is_episodic=true`` and wires only ``CONTAINS``) and operator Points
+    (``create_operator`` writes IMPL/NAND/INPUT). What remains is exactly the
+    class the metric is about.
     """
     block = composition or {}
-    total = int(block.get("claim_denominator") or 0)
-    anchored = int(block.get("claim_anchored") or 0)
+    total = int(block.get("extraction_claims") or 0)
+    anchored = int(block.get("extraction_claims_anchored") or 0)
     return anchored, total, ((anchored / total) if total else None)
 
 
@@ -808,10 +914,16 @@ def point_composition_line(composition: dict | None) -> str:
     """The per-class Point decomposition, DERIVED from the census — never typed."""
     block = composition or {}
     anchored, total, share = derivation_only(block)
+    claims = int(block.get("extraction_claims") or 0)
+    claims_anchored = int(block.get("extraction_claims_anchored") or 0)
+    operators = int(block.get("operator_points") or 0)
+    operators_anchored = int(block.get("operator_points_anchored") or 0)
+    turns = int(block.get("turn_rows") or 0)
+    turns_anchored = int(block.get("turn_rows_anchored") or 0)
     classes = (
-        f"turn_rows={int(block.get('turn_rows') or 0)} "
-        f"extraction_claims={int(block.get('extraction_claims') or 0)} "
-        f"operator_points={int(block.get('operator_points') or 0)} "
+        f"turn_rows={turns} (anchored {turns_anchored}) "
+        f"extraction_claims={claims} (anchored {claims_anchored}) "
+        f"operator_points={operators} (anchored {operators_anchored}) "
         f"other={int(block.get('other_points') or 0)} "
         f"(total={int(block.get('points') or 0)} Point nodes)")
     figure = (f"{anchored}/{total}" +
@@ -819,12 +931,18 @@ def point_composition_line(composition: dict | None) -> str:
     return (
         f"e3 point composition: {classes} — each class read off the property its "
         f"WRITER stamps (is_episodic for turn rows, is_operator for operator "
-        f"Points, an extractedFrom edge for extraction claims); turn rows carry "
-        f"NO derivation link BY CONSTRUCTION (_write_capture_turns, "
-        f"tortoise/sdk.py:2306-2331, wired only by CONTAINS), so they can never "
-        f"anchor and their count is not a provenance shortfall. derivation-only "
-        f"figure: {figure} (anchorable Points = extraction claims + operator "
-        f"Points; the frozen 'all derived nodes' reading above is unchanged)")
+        f"Points, an extractedFrom edge for extraction claims). TWO classes are "
+        f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
+        f"in the derivation figure: turn rows carry none BY CONSTRUCTION "
+        f"(_TURN_WRITE_CYPHER in _write_capture_turns, "
+        f"tortoise/sdk.py:2367, t.is_episodic=true, wired only by CONTAINS), and "
+        f"operator Points are written by create_operator (tortoise/sdk.py — the "
+        f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
+        f"(measured: {operators_anchored} of {operators} anchored). 'other' is "
+        f"the residual class with no extractedFrom edge at all, disclosed here "
+        f"rather than folded in. derivation-only figure (over extraction claims, "
+        f"the ONLY class that can derive): {figure}. The frozen 'all derived "
+        f"nodes' reading above is unchanged")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -903,11 +1021,24 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.1"] = ("stats.llm.by_stage carries no 's2' roll-up — the "
                               "S2 map issued no call")
 
-    vet_block, vet_where = _witness_block(runs, "vet")
+    vet_block, vet_where, vet_refusal = _witness_block(runs, "vet")
     if vet_block is not None:
         observed["S2.2"] = (
             f"the VET pass surfaced its own evidence: {vet_where} "
             f"— {_summary(vet_block)}")
+    elif vet_refusal:
+        # PRESENT but it does not say the pass ran. This is the shape a
+        # present-and-OFF surface lands in once #9116 copies the key, and it must
+        # never be accepted as a witness for "the S2.2 VET pass ran" — the block
+        # the extractor emits on a FLAG-OFF arm would otherwise make every step
+        # observed on a run whose flags were off.
+        unobserved["S2.2"] = (
+            f"UNOBSERVED — {vet_refusal}. The arm forced TORTOISE_VET=1 "
+            f"in-process (read back from os.environ; the `arm:` line above is "
+            f"that read-back), so a surface reading enabled=false either did "
+            f"not run for this pass or contradicts the arm — the probe will not "
+            f"score an OFF block as a witness for a pass that RAN. The step "
+            f"stays unobserved until a surface says enabled=true")
     else:
         unobserved["S2.2"] = (
             f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process (read back "
@@ -915,32 +1046,41 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"pass RAN and its surface EXISTS one layer down: "
             f"extract_session_v2 sets result['vet'] at "
             f"tortoise/extractor_v2.py:8288-8292. It is DROPPED one layer up, at "
-            f"the meta fold tortoise/sdk.py:12196 (\"stats\": out.get(\"stats\") "
-            f"or {{}} — the sibling key is not copied). Measured on this run: "
+            f"the meta fold tortoise/sdk.py:12401 (\"stats\": out.get(\"stats\") "
+            f"or {{}} inside _extract_session_v2 — the sibling key is not "
+            f"copied). Measured on this run: "
             f"inspected {stats_key_total} stats key(s) across {len(ran)} "
             f"receipt(s) [{', '.join(stats_keys) or 'none'}] and "
             f"{len(receipt_keys)} receipt top-level key(s) "
             f"[{', '.join(receipt_keys) or 'none'}]; 'vet' is in neither. "
-            f"#9116 is the seam, and tortoise/sdk.py:12196 is the line its fix "
+            f"#9116 is the seam, and tortoise/sdk.py:12401 is the line its fix "
             f"must target; reading a wrapper instead is the instrumentation "
             f"E4's row forbids")
 
-    classify_block, classify_where = _witness_block(runs, "classify_later")
+    classify_block, classify_where, classify_refusal = _witness_block(
+        runs, "classify_later")
     if classify_block is not None:
         observed["S2.3"] = (
             f"the S2.3 classify pass surfaced its own evidence: "
             f"{classify_where} — {_summary(classify_block)}")
+    elif classify_refusal:
+        unobserved["S2.3"] = (
+            f"UNOBSERVED — {classify_refusal}. The arm forced "
+            f"TORTOISE_CLASSIFY_LATER=1 in-process (read back from os.environ), "
+            f"so an OFF block is not a witness for a pass that RAN — the step "
+            f"stays unobserved until a surface says enabled=true")
     else:
         unobserved["S2.3"] = (
             f"UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process "
             f"(read back from os.environ), so the pass RAN and its surface "
             f"EXISTS one layer down: extract_session_v2 sets "
             f"result['classify_later'] at tortoise/extractor_v2.py:8278-8285. It "
-            f"is DROPPED at the same meta fold, tortoise/sdk.py:12196. Measured "
-            f"on this run: the same {stats_key_total} stats key(s) and "
+            f"is DROPPED at the same meta fold, tortoise/sdk.py:12401 "
+            f"(\"stats\": out.get(\"stats\") inside _extract_session_v2). "
+            f"Measured on this run: the same {stats_key_total} stats key(s) and "
             f"{len(receipt_keys)} receipt top-level key(s) inspected above carry "
             f"no 'classify_later'. #9116 is the seam; "
-            f"tortoise/sdk.py:12196 is the line its fix must target")
+            f"tortoise/sdk.py:12401 is the line its fix must target")
 
     if queries and not degraded:
         observed["S3"] = (f"the graph was searched on the real backend: "
@@ -1045,11 +1185,13 @@ def census(uri: str) -> dict:
         key: int(composition_rows[0][index] or 0)
         for index, key in enumerate(
             ("points", "turn_rows", "operator_points", "extraction_claims",
-             "other_points", "claim_denominator", "claim_anchored"))
+             "other_points", "extraction_claims_anchored",
+             "turn_rows_anchored", "operator_points_anchored"))
     } if composition_rows else {
         "points": 0, "turn_rows": 0, "operator_points": 0,
         "extraction_claims": 0, "other_points": 0,
-        "claim_denominator": 0, "claim_anchored": 0}
+        "extraction_claims_anchored": 0, "turn_rows_anchored": 0,
+        "operator_points_anchored": 0}
 
     relationship_counts: dict[str, int] = {}
     relationship_anchored: dict[str, int] = {}
@@ -1634,8 +1776,8 @@ def main(argv: list[str] | None = None) -> int:
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
                            derived=census_data["derived_total"], bars=bars)
     composition = census_data.get("point_composition") or {}
-    claim_anchored, claim_den, derivation_share = derivation_only(composition)
-    derivation = (f"{claim_anchored}/{claim_den}" +
+    claims_anchored, claim_den, derivation_share = derivation_only(composition)
+    derivation = (f"{claims_anchored}/{claim_den}" +
                   (f" = {derivation_share:.6f}"
                    if derivation_share is not None else ""))
     e3 = {
@@ -1655,15 +1797,25 @@ def main(argv: list[str] | None = None) -> int:
                  f"cannot pick). COMPOSITION of the {composition.get('points', 0)} "
                  f"Point nodes the denominator also counts: "
                  f"{composition.get('turn_rows', 0)} mechanical turn rows + "
-                 f"{composition.get('extraction_claims', 0)} extraction claims + "
-                 f"{composition.get('operator_points', 0)} operator Points + "
-                 f"{composition.get('other_points', 0)} other, each class read off "
-                 f"the property its writer stamps. The turn rows carry NO "
-                 f"derivation link BY CONSTRUCTION (tortoise/sdk.py:2306-2331, "
-                 f"wired only by CONTAINS), so counting them is defensible under "
-                 f"'all derived nodes' but they can never anchor and are not a "
-                 f"provenance shortfall; the DERIVATION-ONLY figure over the "
-                 f"anchorable Points is {derivation}. #9736 must choose between "
+                 f"{composition.get('extraction_claims', 0)} extraction claims "
+                 f"({composition.get('extraction_claims_anchored', 0)} anchored) "
+                 f"+ {composition.get('operator_points', 0)} operator Points "
+                 f"({composition.get('operator_points_anchored', 0)} anchored) "
+                 f"+ {composition.get('other_points', 0)} other, each class read "
+                 f"off the property its writer stamps. TWO of those classes "
+                 f"cannot carry a derivation link AT ALL and are named rather "
+                 f"than folded into the figure: the turn rows carry none BY "
+                 f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
+                 f"tortoise/sdk.py:2367, t.is_episodic=true, wired only by "
+                 f"CONTAINS), and the operator Points are written by "
+                 f"create_operator (tortoise/sdk.py — the IMPL/NAND/INPUT "
+                 f"operator writer), which never writes extractedFrom. So "
+                 f"counting them under 'all derived nodes' is defensible but "
+                 f"they can never anchor and are not a provenance shortfall, and "
+                 f"a denominator summing them would report a shortfall nothing "
+                 f"could close. The DERIVATION-ONLY figure — over extraction "
+                 f"claims, the ONLY class that can derive — is {derivation}. "
+                 f"#9736 must choose between "
                  f"re-registering the metric and reopening the model, and this "
                  f"row reports BOTH readings so neither choice is made on a "
                  f"denominator whose composition was hidden"),
