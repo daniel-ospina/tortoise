@@ -686,8 +686,11 @@ def test_get_confidence_dirty_claim_still_gates_its_dream(sdk):
 # ``pointKind <> 'assessment'`` source-assessment exclusion) silently became a
 # blind spot in the gate. The audit keeps its own selection (it is a guidance
 # surface, not the gate), but its non-operator predicate is now the GATE's —
-# absence-or-false with NO ``op_type`` conjunct (EP's factor-input arm has no
-# non-operator filter, so an ``op_type``-bearing node is a participant), so the
+# absence-or-false with NO ``op_type`` conjunct (EP's factor-input arm applies
+# this same absence-or-false predicate since #9269, so the hybrid —
+# ``is_operator = false`` WITH ``op_type`` — and the legacy property-ABSENT
+# point pass on BOTH sides and stay participants; the ``op_type``-bearing
+# OPERATOR, ``is_operator = true``, is a participant on NEITHER side), so the
 # guidance the error message points at lists every node the gate names.
 # MEASURED before the fix (this suite's fixture, a ``credibility="gold"``
 # anchor): a legacy evidence Point whose ``is_operator`` property is ABSENT — a
