@@ -601,10 +601,12 @@ def restart_runner(runner: LocalRunner) -> tuple[str, str]:
     manager = service_manager()
     if manager == "systemd":
         rc, out = _run(_systemctl(["restart", runner.unit]), timeout=180)
-        return (
-            "ok" if rc == 0 else "failed",
-            f"systemctl restart {runner.unit} rc={rc} {out[:200]}",
-        )
+        # ⛔ COULD NOT BE INVOKED IS NOT "STILL OFFLINE". 127 is `_run`'s own code for "the command
+        # did not run" (missing binary, refused escalation), which tells us NOTHING about the
+        # runner. Read as `failed`, it sends the caller to `--replace` on the strength of an
+        # attempt that never happened.
+        status = "ok" if rc == 0 else ("unsupported" if rc == 127 else "failed")
+        return status, f"systemctl restart {runner.unit} rc={rc} {out[:200]}"
     if manager == "launchd":
         svc = runner.directory / "svc.sh"
         if not svc.exists():
@@ -614,10 +616,19 @@ def restart_runner(runner: LocalRunner) -> tuple[str, str]:
                 "(a launchd agent is restarted by the runner's own svc.sh) — NOT treated as "
                 "offline, so nothing is re-registered",
             )
-        rc, out = _run([*_sudo_prefix(), str(svc), "stop"], timeout=180)
+        # ⛔ NO `sudo` HERE. A launchd agent lives in the USER's gui domain, and `svc.sh` drives
+        # launchctl for that user: escalation is wrong twice over — root cannot address
+        # `gui/<uid>`, and on a box without passwordless sudo `sudo -n` fails outright (rc 1),
+        # which the caller would then read as a failed restart and answer with `--replace`
+        # (measured on the dev box: "sudo: a password is required", rc=1, on the shipped default).
+        rc, out = _run([str(svc), "stop"], timeout=180)
+        if rc == 127:
+            return "unsupported", f"svc.sh could not be invoked ({out[:200]})"
         if rc != 0:
             return "failed", f"svc.sh stop {runner.name} rc={rc} {out[:200]}"
-        rc, out = _run([*_sudo_prefix(), str(svc), "start"], timeout=180)
+        rc, out = _run([str(svc), "start"], timeout=180)
+        if rc == 127:
+            return "unsupported", f"svc.sh could not be invoked ({out[:200]})"
         return "ok" if rc == 0 else "failed", f"svc.sh restart {runner.name} rc={rc} {out[:200]}"
     return (
         "unsupported",
@@ -732,12 +743,11 @@ def enable_unit(directory: Path, name: str, repo: str) -> list[str]:
     if manager == "launchd":
         if not svc.exists():
             return [f"launchd host and {svc} is absent — the runner cannot be enabled as a service"]
-        rc, out = _run(
-            [*_sudo_prefix(), str(svc), "install", os.environ.get("USER") or "root"], timeout=180
-        )
+        # NO `sudo` on launchd: the agent is per-USER (see `restart_runner`).
+        rc, out = _run([str(svc), "install", os.environ.get("USER") or "root"], timeout=180)
         if rc != 0:
             failures.append(f"svc.sh install rc={rc} {out[-200:]}")
-        rc, out = _run([*_sudo_prefix(), str(svc), "start"], timeout=180)
+        rc, out = _run([str(svc), "start"], timeout=180)
         if rc != 0:
             failures.append(f"svc.sh start rc={rc} {out[-200:]}")
         return failures
