@@ -3451,63 +3451,20 @@ jobs:
         # armed-but-skipping job are indistinguishable from the outside.
         # Read from the junit XML, not from the log text: a count in a summary
         # line is a rendering, an attribute is the result.
+        #
+        # The DECISION lives in `.github/scripts/record-postgres-leg-gate.py`,
+        # not in this string (#9772 review P2). An inline heredoc is only
+        # pinnable by substrings of its own text, and the substring pin this
+        # step used to carry (`"skipped" in runs and "exit 1" in runs`) stayed
+        # GREEN after the clause that fails the job on a real skip was deleted
+        # — so the pin could not tell "asserts zero skips" from "prints a skip
+        # count". As a script it is exercised against fixture XMLs
+        # (`tests/test_9078_record_written_by_production_path.py` §8): a real
+        # skip reds, a strict xfail does not, a green run passes.
         if: always()
         run: |
           SCRATCH="${RUNNER_TEMP:-/tmp}/record-postgres"
-          if [ ! -f "$SCRATCH/junit.xml" ]; then
-            echo "::error::no junit XML at $SCRATCH/junit.xml — the armed leg produced no result to certify (#9551)"
-            exit 1
-          fi
-          python3 - "$SCRATCH/junit.xml" <<'PY'
-          import sys
-          import xml.etree.ElementTree as ET
-
-          root = ET.parse(sys.argv[1]).getroot()
-          # The root is <testsuites> on this pytest, and <testsuite> on the
-          # xunit1 shape it is asked for — so count over EVERY suite rather than
-          # reading the root's attributes. A first-match read of the root
-          # returned None here and reported "0 tests collected" on a green run
-          # (`int(None or 0)`), i.e. a rendering artifact dressed as a result.
-          suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
-          tests = sum(int(s.get("tests") or 0) for s in suites)
-          failed = sum(int(s.get("failures") or 0) + int(s.get("errors") or 0)
-                       for s in suites)
-          # Count skipped TESTCASES, and only the ones that skipped for real. A
-          # strict xfail is recorded as `<skipped type="pytest.xfail">` and is
-          # included in the suite's `skipped` attribute — and one of the two
-          # armed legs carries an xfail pinned to a MEASURED engine defect
-          # (`_fold_refuses_captured_points`). Counting the attribute would
-          # red this required job on the day that defect returns, blaming a
-          # database that armed correctly.
-          skipped = xfailed = 0
-          for case in root.iter("testcase"):
-              node = case.find("skipped")
-              if node is None:
-                  continue
-              if node.get("type") == "pytest.xfail":
-                  xfailed += 1
-              else:
-                  skipped += 1
-          # The two legs this job exists for, by name: a deselect is not a pass.
-          armed = [c for c in root.iter("testcase")
-                   if c.get("name", "").startswith("test_the_public_capture_path")]
-          print(f"tests={tests} skipped={skipped} xfailed={xfailed} failed={failed} "
-                f"armed_capture_legs={len(armed)} (skipped={sum(1 for c in armed if c.find('skipped') is not None)})")
-          problems = []
-          if tests == 0:
-              problems.append("0 tests collected — nothing was certified")
-          if skipped:
-              problems.append(f"{skipped} leg(s) SKIPPED — the record database "
-                              "did not arm, or the driver is missing (#9551)")
-          if len(armed) < 2:
-              problems.append(f"only {len(armed)} of the 2 armed capture legs "
-                              "ran — the Postgres proof was deselected (#9551)")
-          if failed:
-              problems.append(f"{failed} failing/erroring leg(s) — see the run step")
-          for p in problems:
-              print(f"::error::{p}")
-          sys.exit(1 if problems else 0)
-          PY
+          python3 .github/scripts/record-postgres-leg-gate.py "$SCRATCH/junit.xml"
       - name: Stop Postgres (#9551)
         if: always()
         uses: ./.github/actions/postgres-teardown
