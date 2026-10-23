@@ -244,14 +244,51 @@ closed at both layers:
   The other class-1 families are still **not**
   materialized, each for its own reason: `about*` needs `_create_about_edges`'
   live name→label cascade (and `EntityLinked` already carries it whenever the
-  capture resolved it); `mitigated_by` is emitted as a PAIR with the operator's
-  `IMPL`/`INPUT` (`edges.py::_create_edges`), so half of it would leave the edge
-  census disagreeing with the journal's; `TAGGED` has no record `tag` node for
+  capture resolved it); `TAGGED` has no record `tag` node for
   `relation.tgt_key` to key on.
+  **Updated by #9553 (R5 class 3, operator topology):** `mitigated_by` — and the
+  `IMPL`/`NAND`/`hasPart` edge and reverse `INPUT` it is emitted WITH — now land
+  as `relation` rows (`record_projection._operator_relation_statements`, declared
+  by `_OPERATOR_RELATION_RECORDS` for the same four `apply()` arms). The carrier
+  is the Point's own `{op_type, inputs}` descriptor, which is what
+  `edges.py::_create_edges` reads; the record mirrors it VALUE FOR VALUE — the
+  `op_type`→predicate map (four composition spellings → `hasPart`), the reverse
+  `INPUT`, and the two mitigation gates (`is_non_operator_payload` AND
+  `has_usable_mitigation_strength`, restated because the module loads STANDALONE
+  and pinned value-for-value). Three parity details: the endpoints are resolved
+  across the **four** epistemic labels (#7902 — an operator input may be a
+  `Subject`/`Object`/`Event`, so `relation.src_label` comes from the record's own
+  node rows rather than being assumed `Point`, which is why these rows are built
+  by a statement whose LABELS are subselect columns); each label resolves to its
+  CANONICAL key (`Point`/`Event` → `node_key`, `Subject`/`Object` → `name`),
+  because `relation.src_key` is a `node_identity` FK and the raw journal id for a
+  Subject would address a phantom identity; and the conflict path is
+  `DO NOTHING`, not `DO UPDATE` — the fold writes `{idx}` on the typed/reverse
+  edges and nothing at all on `mitigated_by`, so there is no attribute to
+  correct. ⛔ The input gate is `_writable_id`'s (`_writable_epistemic_id`), NOT
+  the blank-refusing `_writable_endpoint_id` the CONTAINS/extractedFrom families
+  use, and the difference is deliberate: those two address an endpoint with an
+  INLINE indexed property match, where FalkorDB's equality filter misses a
+  whitespace-only key (**#9599**), while `_create_edges` probes an operator input
+  with a label-disjunctive `WHERE` — a SCAN — and lands the edges for a blank key
+  (measured through the fold). Reusing the stricter rule here would make the
+  record poorer than the graph on the very edge this change carries. Residuals, stated: an input the fold STUBS (a short id that does not
+  resolve) lands no row, because a stub has no record row to resolve from — the
+  same `absent` verdict as every other relation — and a snapshot whose `operator`
+  key is ABSENT on a promote arm lands none, exactly as
+  `_promotion_point_with_operator` synthesizes only for `OperatorPromoted`; a
+  snapshot whose key is PRESENT but holds `None` (or any non-`dict`) lands none
+  too, because the fold's synthesis gate is `"operator" in p` and `_create_edges`
+  refuses a non-`dict` — the record follows both, so it can never be richer than
+  the graph on a corrupt record. One stated BOUND, and the record is the POORER
+  side of it: the fold matches `s` to EVERY node holding an input id and MERGEs
+  an edge pair per node, while the record files one row under the first label in
+  `EPISTEMIC_LABELS`. Ids are per-node ULIDs, so a duplicated id needs a
+  hand-written graph; the row is absent-but-one rather than wrong.
   The remaining R5 classes are still **not** materialized and are named
   where the producer lives: the rest of the point-property set (`about*`,
-  `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural
-  predicates whose `DirectEdgeCreated` fold works but has **no producer**.
+  `TAGGED`) and the structural predicates whose `DirectEdgeCreated` fold works
+  but has **no producer**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.
 * **It adds no migration-safety surface** (owner scope ruling, 2026-10-10).
 * **It changes no public surface.** No MCP tool and no public SDK method is added,
