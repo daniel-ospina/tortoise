@@ -223,6 +223,7 @@ class Env:
         svc_start_rc: int = 0,
         svc_mark: str = "",
         provisioner_absent: bool = False,
+        sudo_fails: bool = False,
     ) -> None:
         self.tmp = tmp
         self.root = tmp / "opt"
@@ -233,6 +234,11 @@ class Env:
         self.systemctl = _exe(self.bin / "systemctl", SYSTEMCTL_FAKE)
         self.provisioner = _exe(self.bin / "provision.sh", PROVISIONER_FAKE)
         self.ps = _exe(self.bin / "ps", f"#!/usr/bin/env bash\necho 'ps: boom' >&2\nexit {ps_rc}\n")
+        # A `sudo` that refuses (no passwordless sudo — the shipped default on a dev box).
+        self.sudo = _exe(
+            self.bin / "sudo",
+            "#!/usr/bin/env bash\necho 'sudo: a password is required' >&2\nexit 1\n",
+        )
         self.meminfo = _meminfo(tmp / "meminfo", mem_mb, omit=omit_memavailable)
         self.pool_tsv = _pool(tmp / "pool.tsv", pool or [])
         self.restart_marker = tmp / "restarted"
@@ -245,6 +251,7 @@ class Env:
         self.svc_start_rc = svc_start_rc
         self.svc_mark = svc_mark
         self.provisioner_absent = provisioner_absent
+        self.sudo_fails = sudo_fails
         self.state_dir = tmp / "state"
         self.alive_file = tmp / "alive.txt"
         self.busy_file = tmp / "busy.txt"
@@ -303,7 +310,10 @@ class Env:
                 "RUNNER_AUTOSCALE_STATE_DIR": str(self.state_dir),
                 "RUNNER_AUTOSCALE_RUNNER_ROOT": str(self.root),
                 "RUNNER_AUTOSCALE_PS": str(self.ps),
-                "RUNNER_AUTOSCALE_NO_SUDO": "1",
+                # The suite normally runs rootless; `sudo_fails` keeps the escalation word in the
+                # argv so the case where `sudo -n` cannot run is exercised (it must never be read
+                # as "the restart failed").
+                **({} if self.sudo_fails else {"RUNNER_AUTOSCALE_NO_SUDO": "1"}),
                 "RUNNER_AUTOSCALE_ONLINE_WAIT_S": "0",  # no real sleeping in the suite
                 "RUNNER_AUTOSCALE_POLL_S": "1",
                 "POOL_TSV": str(self.pool_tsv),
@@ -332,6 +342,8 @@ class Env:
             env["RUNNER_AUTOSCALE_SERVICE"] = self.service
         else:
             env.pop("RUNNER_AUTOSCALE_SERVICE", None)
+        if self.sudo_fails:
+            env["PATH"] = f"{self.bin}{os.pathsep}{env.get('PATH', '/usr/bin:/bin')}"
         if self.alive_seam:
             env["RUNNER_AUTOSCALE_ALIVE_DIRS"] = str(self.alive_file)
         else:
@@ -1109,6 +1121,28 @@ def test_a_launchd_host_without_svc_sh_is_unknown_never_offline(env):
     assert "service manager" in rec["error"], rec["error"]
     assert e.config() == "", f"nothing may be re-registered on an unknown state: {e.config()}"
     assert e.restarted() == []
+
+
+def test_launchd_never_escalates_so_a_passwordless_sudo_gap_cannot_force_a_replace(env):
+    """⛔ The shipped default is `sudo -n`, and a launchd agent is PER-USER: root cannot address
+    `gui/<uid>`, and on a box without passwordless sudo `sudo -n` exits 1 without running
+    anything. Prefixing `svc.sh` with it turned "could not be attempted" into "restart failed" →
+    `config.sh --replace` — the destructive action the F1 fix exists to prevent, on the default
+    configuration the suite never exercised (every fixture sets RUNNER_AUTOSCALE_NO_SUDO=1).
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        svc_sh=True,
+        service="launchd",
+        svc_mark="r1",
+        sudo_fails=True,
+    )
+    rec = e.record()
+    assert rec["_rc"] == 0, rec
+    assert any(a.startswith("restart r1") and "svc.sh" in a for a in rec["actions"]), rec["actions"]
+    assert any("came back online" in a for a in rec["actions"]), rec["actions"]
+    assert e.config() == "", f"a per-user svc.sh must not be escalated: {e.config()}"
 
 
 def test_a_launchd_host_enables_the_unit_through_svc_sh(env):
