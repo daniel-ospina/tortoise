@@ -1728,6 +1728,14 @@ class _EntityHandlers:
         # contract. ``validToPrecision='unknown'`` is the 3-state end's
         # closed-unknown marker and must survive rebuild verbatim.
         "validFromPrecision", "validToPrecision",
+        # #2351 (epic #2349 E-derived): the asserted-vs-derived CLAIM CLASS
+        # (`sdk.create_point(claim_class=…)`, ``tortoise/claim_class.py``).
+        # Written on the node ONLY for ``derived`` (absence IS ``asserted``, so
+        # the marker is migration-free), carried on the PointAdded snapshot and
+        # restored through this same open-set passthrough. Declared so the
+        # shared live+replay writer does not log a FALSE `"Point prop %r is not
+        # declared"` drift warning for every derived claim on every rebuild.
+        "claimClass",
         # #6151 defect 2: the #2199 system-default provision, recorded on a
         # decide part BORN live (no explicit status). `_apply_source_
         # inheritance` re-injects the default ONLY where this marker says one

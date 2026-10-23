@@ -1264,6 +1264,17 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # as tools/queue_resweep.py above. Pinned by
              # tests/test_ci_selection.py::test_install_queue_reconcile_schedule_tool_change_selects_core_not_tier1.
              "tools/install-queue-reconcile-schedule.sh",
+             # #9639: the x86_64 runner installer owns
+             # tests/test_ci_runner_x64_install.py, which is registered `core` (and `carve_out`),
+             # but `tools/` is swallowed by NON_PYTHON_PREFIXES and no SOURCE_PATTERNS entry
+             # matches an installer path — so an INSTALLER-ONLY change selected NO surface, took
+             # the docs-only early return and fell back to tier-1 smoke, where that test is not
+             # registered. The label invariant (this arch's marker only, no `ubuntu-<version>`
+             # pin, `auto` reads the gate's state instead of assuming it) and the headroom
+             # guards would then never run on the PR that edits them. Same #1349/#3332/#3616
+             # silent-drop class as the queue-reconcile installer above. Pinned by
+             # tests/test_ci_selection.py::test_install_ci_runner_x64_tool_change_selects_core_not_tier1.
+             "tools/install-ci-runner-x64.sh",
              # PR #8427 review Finding 4: tools/graph_write_repair.py and its
              # launchd installer own tests/test_graph_write_repair.py (registered
              # `core`) -- the probe classification that authorises a repair, the

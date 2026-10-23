@@ -367,6 +367,314 @@ def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
     assert row[3] == "turn-2813", row
 
 
+def _money_payload(content: str, *, quote: str = "",
+                   pid: str = "pt_2817_money") -> dict:
+    """One v2 payload point carrying ``content``; ``quote`` is the E3 excerpt."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": pid,
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": quote,
+            "status": "draft",
+        }],
+        "operators": [],
+    }
+
+
+def _read_money_row(sdk, pid: str) -> list:
+    return list(sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
+        "n.verbatim, n.asOf",
+        params={"id": pid},
+    ).result_set[0])
+
+
+def test_capture_derives_the_money_value_onto_the_node(sdk, monkeypatch):
+    """#2817 (route 2): the S5 derivation must reach the GRAPH, not just exist.
+
+    The derive half landed in ``tortoise/value_normalizer.py`` (#9004) and the
+    Point lane DECLARES the five money keys (#8976), but the capture seam
+    filtered the point dict down to ``_CAPTURE_PASSTHROUGH_PROPS`` — which the
+    money keys are not in and must not be in — so a typed amount reached no
+    node at all. RED before the fix: ``n.amountMinor`` is ``None`` (the
+    KeyError-free form of "the value was dropped").
+
+    The response shape is deliberately unchanged: a money value is a graph
+    structural field read back with ``money.read_money_value`` (design §7.1 —
+    server-written, never a client field), so it is not advertised on the
+    capture receipt.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "The tranche released EUR 800 last week.",
+        quote="the tranche released EUR 800"))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    pid = res["points"][0]["id"]
+    amount, currency, exponent, verbatim, as_of = _read_money_row(sdk, pid)
+    assert amount == 80_000, (amount, currency, exponent, verbatim, as_of)
+    assert currency == "EUR"
+    assert exponent == 2
+    assert verbatim == "800"
+    assert as_of is None                      # no asserted date in the claim
+    assert verbatim in "The tranche released EUR 800 last week."
+    # No response widening: the receipt still describes only the passthrough
+    # subset, so a create (stores, does not advertise) and a dedup hit (writes
+    # nothing) stay symmetric.
+    assert "amountMinor" not in res["points"][0]["props"], res["points"][0]
+
+
+def test_capture_derives_money_from_content_not_the_200_char_quote(
+        sdk, monkeypatch):
+    """The derivation source is the stored CLAIM, never the ``quote`` excerpt.
+
+    ``quote`` is cut at 200 chars in the extractor. A value straddling that cut
+    types the truncated PREFIX — and the resulting ``verbatim`` is still a
+    byte-exact substring, so the §6/T1 traceability check would PASS on a wrong
+    reading (the 1000x-class defect this issue exists to prevent, reintroduced
+    by truncation).
+
+    Two arms, both RED if a lane ever switches the source to ``quote``:
+      * a money value past char 200 of a long claim still types correctly;
+      * a money value present ONLY in ``quote`` types nothing.
+    """
+    filler = "the pilot ran and the notes stayed inconclusive " * 6
+    long_content = f"{filler}and then the tranche released EUR 800"
+    assert len(long_content) > 200
+    assert long_content.index("EUR 800") > 200
+
+    _install_fake_extract(monkeypatch, _money_payload(
+        long_content, quote=long_content[:200]))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    amount = _read_money_row(sdk, res["points"][0]["id"])[0]
+    assert amount == 80_000, amount
+
+    # ...and the quote is NOT a source: money in the excerpt alone types nothing.
+    _install_fake_extract(monkeypatch, _money_payload(
+        "the pilot phase stayed inconclusive", quote="EUR 800 released",
+        pid="pt_2817_quote_only"))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert _read_money_row(sdk, res["points"][0]["id"])[0] is None, res["points"]
+
+
+def test_capture_keeps_the_claim_when_the_derived_amount_is_unstorable(
+        sdk, monkeypatch):
+    """#2817 (review P1): a DERIVED value must never sink the record it came
+    from. An ``amountMinor`` above the store's INT64 domain is refused by
+    ``_sanitize_props`` (#4647), and before this fix that refusal cost the
+    whole POINT — the claim was never written and the capture reported
+    `ok=False` (a partially-written session reported as failed).
+
+    The value is now refused at the Layer-1 boundary (``money.py``), so the
+    normalizer abstains, the point is written with its prose intact, and the
+    abstention is VISIBLE on the receipt — never a silent guess, never a lost
+    claim.
+    """
+    content = "The facility size was EUR 123456789012345678 for the year."
+    _install_fake_extract(monkeypatch, _money_payload(content))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert res["extracted"] == 1, res
+    pid = res["points"][0]["id"]
+    assert _read_money_row(sdk, pid)[0] is None, _read_money_row(sdk, pid)
+    stored_content = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content", params={"id": pid},
+    ).result_set[0][0]
+    assert stored_content == content
+    assert any("refused_by_layer1" in w for w in res["warnings"]), res[
+        "warnings"]
+
+
+def test_capture_never_types_an_ambiguous_amount(sdk, monkeypatch):
+    """The seam inherits the design's abstention (Option A, #2817):
+    ``R$ 1.234,56`` is NOT typed at all — never as ``1.234`` — and the raw
+    prose stays exactly as the extractor wrote it (prose is load-bearing)."""
+    _install_fake_extract(monkeypatch, _money_payload(
+        "R$ 1.234,56 was committed to the tranche."))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    pid = res["points"][0]["id"]
+    assert _read_money_row(sdk, pid)[0] is None, _read_money_row(sdk, pid)
+    stored_content = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content", params={"id": pid},
+    ).result_set[0][0]
+    assert stored_content == "R$ 1.234,56 was committed to the tranche."
+
+
+# ── #2817 review F1/F2: the money abstention CHANNEL at the capture seam ───
+#: A point whose claim carries a bare number and no currency anchor. Every one
+#: of these drops as ``no_currency_anchor`` — the design's named abstention
+#: (§6/T3) — which the seam MUST report.
+_UNANCHORED_CLAIMS = (
+    "the tranche released 800 last week",
+    "the policy covers all 800 accounts",
+    "800 people were hired",
+)
+
+
+def _money_channel(*contents: str) -> dict:
+    """The v2 payload for ``contents`` — one point per claim."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": f"pt_2817_f1_{i}",
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": content[:200],
+            "status": "draft",
+        } for i, content in enumerate(contents)],
+        "operators": [],
+    }
+
+
+def _money_warnings(res: dict) -> list[str]:
+    return [w for w in res.get("warnings") or []
+            if "value-normalizer" in w]
+
+
+def test_a_money_derivation_failure_stays_point_local(sdk, monkeypatch):
+    """#2817 review F1 (P3): the derivation sits inside the per-point guard.
+
+    The abstention path is the ONE conversion that keeps a store-refused amount
+    from raising into the capture loop (``value_normalizer``'s
+    ``except MoneyValueError``), and the seam must not be able to undo that: the
+    derive call has to sit INSIDE the loop's ``try``, so a raise costs the point
+    it belongs to and nothing else. Above the ``try`` it would escape the whole
+    points loop after the Session and its turns were already written — no
+    receipt, no ``errors`` entry, the partial-write shape #2817 removed.
+
+    RED with the call above the ``try``: the exception propagates out of
+    ``capture_session`` and the healthy sibling point is never written.
+    """
+    import tortoise.sdk as _sdk_module
+
+    real = _sdk_module.normalize_money_props
+
+    def _boom(text, **kwargs):
+        if "explode" in text:
+            raise ValueError("derivation exploded")
+        return real(text, **kwargs)
+
+    monkeypatch.setattr(_sdk_module, "normalize_money_props", _boom)
+    _install_fake_extract(monkeypatch, _money_channel(
+        "the tranche released EUR 800 last week",
+        "the explode claim reached the seam"))
+
+    res = sdk.capture_session(CONV)          # must NOT raise
+    written = [p["text"] for p in res["points"]]
+    assert written == ["the tranche released EUR 800 last week"], res["points"]
+    assert any("derivation exploded" in e for e in res["errors"]), res["errors"]
+
+
+def test_capture_reports_money_abstentions_once_per_capture(sdk, monkeypatch):
+    """#2817 review F1: ONE bounded summary entry, never one line per point.
+
+    Three claims each carrying a bare number used to append three separate
+    ``value-normalizer: no typed money value (...)`` lines, so the capture
+    receipt's length was a function of how many points happened to mention a
+    number. It is now one aggregated entry carrying the TRUE count — bounded
+    structurally (one entry per capture, at most one bucket per closed-set
+    reason), which is the #5654 shape used by the supersession channel in the
+    same function.
+
+    RED before the fix: three entries, none of them carrying the total.
+    """
+    _install_fake_extract(monkeypatch,
+                          _money_channel(*_UNANCHORED_CLAIMS))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert res["extracted"] == 3, res
+    channel = _money_warnings(res)
+    assert len(channel) == 1, channel
+    assert "3 point(s)" in channel[0], channel
+    assert "no_currency_anchor \u00d73" in channel[0], channel
+
+
+def test_capture_keeps_the_named_abstention_reportable_through_the_seam(
+        sdk, monkeypatch):
+    """#2817 review F2: the seam's ``warn_on`` is pinned FROM THE RECEIPT.
+
+    If the seam passed ``warn_on=frozenset()`` — silencing §6/T3's named
+    abstention, the one reason the design requires be reported — no test would
+    go red. This one does: ``no_currency_anchor`` must reach ``res["warnings"]``
+    for a claim that carries a number it could not type.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "1.234,56 last quarter"))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    channel = _money_warnings(res)
+    assert len(channel) == 1, channel
+    assert "no_currency_anchor" in channel[0], channel
+
+
+def test_capture_says_nothing_about_a_claim_with_no_number(
+        sdk, monkeypatch):
+    """The OTHER direction of the same pin (#2817 review F1/F2): ``no_candidate``
+    is suppressed at the seam, because it fires on every numberless sentence
+    and would drown a receipt that was previously ``warnings: []``.
+
+    Drives a claim with no digit at all: if the seam ever passed
+    ``warn_on=None`` (report every reason), this reds.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "we plan to hire engineers and revisit the plan"))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert _money_warnings(res) == [], res.get("warnings")
+
+
+def test_capture_money_receipt_is_the_same_on_a_dedup_hit(sdk, monkeypatch):
+    """#2817 review F1: the receipt is not a function of GRAPH STATE.
+
+    The derivation used to sit inside the create branch, so the first session
+    to carry a claim warned and the second (a content-hash hit on the same
+    content) did not — for byte-identical content. The abstention is now
+    counted on every payload point, so both receipts are identical.
+
+    RED before the fix: ``[]`` (or nothing) on the second capture.
+    """
+    content = _UNANCHORED_CLAIMS[0]
+    _install_fake_extract(monkeypatch, _money_payload(content))
+
+    first = sdk.capture_session(CONV)
+    assert first["ok"] is True, first
+    assert first["points"][0]["dedup"] == "new", first["points"]
+
+    second = sdk.capture_session(CONV)
+    assert second["ok"] is True, second
+    # The second capture resolved to the existing canonical — no prop writes.
+    assert second["points"][0]["dedup"] == "content_hash_hit", second["points"]
+    assert second["points"][0]["id"] == first["points"][0]["id"], (
+        first["points"], second["points"])
+
+    assert _money_warnings(first), first.get("warnings")
+    assert _money_warnings(second) == _money_warnings(first), (
+        first.get("warnings"), second.get("warnings"))
+
+
 def _passthrough_payload(content: str) -> dict:
     """The v2 payload shape the #2813/#2949 tests drive — one point carrying
     all four E3 passthrough fields."""
