@@ -652,6 +652,26 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # the fixture-param monkeypatch auto-restores (no lane leak).
     "test_9192_tenant_armed_by_request.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #9080/#7949 capstone: the probe's G2/G3 gates ARE an env decision —
+    # `backend_is_searchable()` must refuse the embedded lane (S3 never searches
+    # there) and accept docker/redis, and no gate may be tested by inheriting the
+    # developer's ambient URI. So the suite sets the two supported URI shapes and
+    # strips the variable for the "no backend configured" case: the env control IS
+    # the test input (DELIBERATE_URI for the setenv sites,
+    # DELIBERATE_EMBEDDED_LANE for the delenv sites), and every site is a
+    # function-scoped `monkeypatch`, auto-undone at teardown (no lane leak).
+    "test_7949_capstone_verdict_check.py": [
+        r'monkeypatch\.(?:setenv|delenv)\(\s*"TORTOISE_DB_URI"'],
+    # ⛔ NO second `test_9079_event_writers_journal.py` row here. This branch had
+    # added the BROAD form (`r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'`) at
+    # this anchor, while `main` carries the NARROW one above and deliberately
+    # removed the broad row for good reason: Python's last-wins dict semantics
+    # mean the LATER (broad) row WINS — a duplicate key is an active override,
+    # not a harmless no-op — and ruff flagged it `F601`, so
+    # the merge product was TWO identical keys — a repo-wide `ruff check .` red
+    # (#9089 review) — and, had ruff allowed it, this row winning would have
+    # silently RE-WIDENED the exemption `main` narrowed. Removing it changes no
+    # exemption: `main`'s row covers the site.
     # #5052/#7871: the claim pilot's CLI contract test delenvs the store URI (and
     # the hosted URL) to exercise the UNSET-STORE REFUSAL — `main acquire` must
     # return rc 2 ("cannot answer") rather than let the SDK fall back to a default

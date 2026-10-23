@@ -16893,8 +16893,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract +
-    budget adjudication on the reconciled net-new delta (soft 15 → WARN
+    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract,
+    org points ceiling, per-org ingest budget (#4051: 429 + Retry-After)
+    and budget adjudication on the reconciled net-new delta (soft 15 → WARN
     telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
     [5] the four-node chain + entities + operators + supersede_point +
     Session counters → [6] metering (write_ops +1 non-duplicate;
@@ -16906,8 +16907,12 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
     (retry once; code calibration_mismatch / commit_id_mismatch) OR an
     inverted supersede window (code supersede_window_inverted — #5363, a
-    deterministic payload refusal, NOT retryable) · 429
-    dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
+    deterministic payload refusal, NOT retryable) · 429 in TWO shapes, told
+    apart by `detail.code`: the dedicated 300/min/key bucket (R-13), and the
+    per-org ingest budget (#4051) with `detail.code = "ingest_rate_limited"`,
+    `detail.scope`, and a `Retry-After` the client MUST honour and then retry —
+    that one is a throttle, not a refusal of the data · 500 fail-closed,
+    redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
     # consent gate — session_recording is default-ON (ToS-covered) with an
@@ -17168,16 +17173,23 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # never 402 (#1727, pinned by
         # `test_replay_does_not_consume_the_budget`).
         #
-        # ⛔ SCOPE, stated precisely because overstating a gate is worse than the
-        # gap it leaves: the refusal is NOT write-free. `store.acquire(...)`
-        # above merges the `:CommitRecord` idempotency anchor BEFORE any gate in
-        # this handler (as it does for the pre-existing sessions and points
-        # gates), so a 429 leaves one `status='partial'` record — replay-safe,
-        # counted by no quota, and deliberately not charged (a refused charge is
-        # not appended to the window). It is bounded by the per-key rate limit
-        # and it is the same residual every gate on this path already carries;
-        # it is recorded here so the next reader does not take "pre-write" to
-        # mean "mints nothing".
+        # SCOPE, stated precisely because overstating a gate is worse than the
+        # gap it leaves: the refusal is not COMPLETELY write-free, but it no
+        # longer changes anything the client can observe. `store.acquire(...)`
+        # above merges this attempt's `:CommitRecord` BEFORE any gate in this
+        # handler, and a leftover `status='partial'` record is not neutral —
+        # `plan_commit`/`is_first_adjudication` read ANY existing record as a
+        # previous attempt, so it would make the documented
+        # backoff-and-retry a RE-adjudication without the first-adjudication
+        # hard-25 band (measured: a 26-net-new payload holds 26 on a clean
+        # graph but WRITES all 26 after a 429 left the record). The refusal
+        # therefore discards the record it just created
+        # (`store.discard_attempt`, only while its status is `partial`,
+        # `write_ops_billed` is 0 and no value nodes were declared), so a 429
+        # leaves the graph exactly as it was and the retry is a genuine first
+        # attempt. What remains is bounded and uncharged either way: the
+        # refused charge is not appended to the window, and the per-key rate
+        # limit bounds the request itself.
         #
         # CHARGE = max(payload bytes, nodes it will mint × 1024). The payload
         # term stops a `summary`/`story_arc` (uncapped by Layer-1) from adding
@@ -17194,6 +17206,18 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
                                        commit_ingest_charge_bytes(payload))
         if not admission.allowed:
             retry_after = max(1, math.ceil(admission.retry_after))
+            # #4051 — the refusal must not change the RETRY's adjudication.
+            # `store.acquire` above merged this attempt's `:CommitRecord`, and
+            # `plan_commit`/`is_first_adjudication` read ANY existing record as
+            # a previous attempt — so leaving it would make the client's
+            # documented backoff-and-retry a RE-adjudication, dropping the
+            # first-adjudication hard-25 band: measured, a 26-net-new payload
+            # holds 26 on a clean graph but WRITES all 26 after a 429 left the
+            # record. Delete only what THIS attempt created (`created`) and
+            # only while it is still write-free, so the retry is a genuine
+            # first attempt and a real mid-write `partial` is untouched.
+            if created:
+                store.discard_attempt(payload.client_commit_id)
             # #5425's seam, not a hand-appended sentence: it terminates the
             # prose and appends the ONE contact path. A throttle is not a
             # ceiling to buy out of — it names its own next step ("retry

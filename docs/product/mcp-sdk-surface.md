@@ -69,9 +69,9 @@ Daniel's review is what carries the approval.
 | SDK methods, by who reaches them | Count |
 |---|---|
 | agent-reachable | 86 |
-| internal | 21 |
+| internal | 22 |
 | control-plane | 2 |
-| no-caller-found | 41 |
+| no-caller-found | 40 |
 | **total** | **150** |
 
 ---
@@ -460,10 +460,11 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.recall_gaps` | reached by no registered MCP tool; caller categories: mcp-handler | tooling, docs | **review** | no MCP tool binds it; callers: mcp-handler |
 | `TortoiseSDK.recall_subgraph` | reached by no registered MCP tool; caller categories: mcp-handler | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: mcp-handler |
 
-### internal — 21
+### internal — 22
 
 | Method | Does / depends on | Used by | Recomm. | Rationale |
 |---|---|---|---|---|
+| `TortoiseSDK.capture_session` | reached by no registered MCP tool; caller categories: documentation | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: documentation |
 | `TortoiseSDK.delete_point` | reached by no registered MCP tool; caller categories: documentation, engine, other-tooling | tooling, skill-docs, docs | **review** | no MCP tool binds it; callers: documentation, engine, other-tooling |
 | `TortoiseSDK.apikey_verify` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
 | `TortoiseSDK.calibration_passed` | reached by no registered MCP tool; caller categories: engine | tooling, docs | **review** | no MCP tool binds it; callers: engine |
@@ -493,7 +494,7 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.apikey_revoke` | reached by no registered MCP tool; caller categories: tenant-rest | tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 | `TortoiseSDK.graph_delete` | reached by no registered MCP tool; caller categories: tenant-rest | eval-harness, tooling, docs | **review** | no MCP tool binds it; callers: tenant-rest |
 
-### no-caller-found — 41
+### no-caller-found — 40
 
 | Method | Does / depends on | Used by | Recomm. | Rationale |
 |---|---|---|---|---|
@@ -501,7 +502,6 @@ Grouped by **who reaches them**. This is the ranking that matters for cutting: e
 | `TortoiseSDK.backfill_about_entities` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.backfill_sources` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.batch_create_points` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
-| `TortoiseSDK.capture_session` | reached by no registered MCP tool; caller categories: none outside tests | eval-harness, tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.cleanup_expired_invitations` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.commit_session` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
 | `TortoiseSDK.complete_source` | reached by no registered MCP tool; caller categories: none outside tests | tooling, docs | **review** | no MCP tool binds it, and no caller outside tests was found |
@@ -585,8 +585,8 @@ designates as canonical.
 ## On the numbers alone
 
 - **0 entries declare an SDK method that does not exist.**
-- **41 SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no tool handler, which is what `no-caller-found` means here. Of those, **11** are called from the tenant REST surface, so they are reachable by a client but not by an agent inside the gate; the remaining 30 have no caller outside tests at all.
-- **21 SDK methods are reachable only from our own engine, our tooling, or the tenant REST surface** — reachable by something, but by no agent path inside the gate. (Methods reachable ONLY from tenant REST are counted in the class above, not here.)
+- **40 SDK methods are reached by no agent path** — no MCP tool, no CLI verb, no tool handler, which is what `no-caller-found` means here. Of those, **11** are called from the tenant REST surface, so they are reachable by a client but not by an agent inside the gate; the remaining 29 have no caller outside tests at all.
+- **22 SDK methods are reachable only from our own engine, our tooling, or the tenant REST surface** — reachable by something, but by no agent path inside the gate. (Methods reachable ONLY from tenant REST are counted in the class above, not here.)
 - **Only 3 tools are referenced by an eval harness** (`tortoise_recall`, `tortoise_search`, `tortoise_check_structure`) — so almost none of this surface is covered by an evaluation.
 
 ## The surface size — measured, and argued to you
