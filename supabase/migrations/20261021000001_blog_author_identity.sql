@@ -49,48 +49,75 @@ COMMENT ON COLUMN public.blog_posts.author IS
 -- ---------------------------------------------------------------------------
 -- Backfill: attribution only.
 --
--- The updated_at trigger is disabled for the duration and re-enabled at the end
--- of this section. An attribution fix is NOT an editorial edit: bumping
--- updated_at would print "Updated <today>" beside every backfilled byline (the
--- article page renders it whenever updated_at != published_at) and open the
--- 30-minute no-cache window (`isRecentlyEdited`) on each of them.
+-- An attribution fix is NOT an editorial edit: bumping updated_at would print
+-- "Updated <today>" beside every backfilled byline (the article page renders it
+-- whenever the formatted dates differ) and open the 30-minute no-cache window
+-- (`isRecentlyEdited`) on each of them.
 --
--- ⛔ ATOMICITY HERE IS A PRECONDITION OF THE APPLY PATH, NOT A PROPERTY OF THIS
--- FILE. The DISABLE … ENABLE pair is only in ONE transaction when the whole file
--- is sent as ONE simple query — `supabase db push`, the Management API's
--- single-query endpoint, and the PGlite harness's `db.exec` all do (each wraps
--- the batch in one implicit transaction). A bare `psql -f file.sql` does NOT: it
--- autocommits PER STATEMENT, so if an UPDATE fails (a lock timeout, a dropped
--- connection, an operator Ctrl-C) the DISABLE is already committed and the
--- ENABLE is never reached — leaving blog_posts_set_updated_at off for every blog
--- write afterwards, silently ("Updated …" stops moving, the 30-minute no-cache
--- window never opens again, and nothing reports it).
+-- The updated_at trigger is a BEFORE UPDATE trigger, so no statement can
+-- preserve updated_at itself — it MUST be disabled across the updates, which
+-- makes the DISABLE→ENABLE window load-bearing.
 --
--- Apply this file with `psql --single-transaction -v ON_ERROR_STOP=1 …`, or via
--- the CLI / the workflow — never a bare `psql -f`. Do NOT add BEGIN;/COMMIT;
--- instead: the CLI has already opened a transaction, so a nested BEGIN only
--- warns, and the inner COMMIT would END the CLI's transaction early.
--- `supabase/tests/20261021000001_blog_author_identity.sql` asserts the trigger is
--- ENABLED (`pg_trigger.tgenabled = 'O'`) after this migration, so removing the
--- ENABLE below reddens in the harness.
+-- ⛔ That window must not be able to outlive a failure. A bare
+-- DISABLE … ENABLE pair is only atomic when the whole file is sent as ONE
+-- simple query (`supabase db push`, the Management API's single-query endpoint,
+-- and the PGlite harness's `db.exec` all do; a bare `psql -f file.sql` does NOT
+-- — it autocommits per statement). A truncated batch persisting its leading
+-- statements has been measured in the sibling DMeer repo (DMeer
+-- `supabase/migrations/README.md`, the `20260925000002_revoke_businesses_insert_921.sql`
+-- row). Left disabled, `blog_posts_set_updated_at` freezes JSON-LD dateModified
+-- and permanently defeats the 30-minute no-cache window — silently.
+--
+-- So the backfill does not depend on the apply path: it is ONE `DO` statement,
+-- there is no boundary a partial apply can stop at, and it ends by re-reading
+-- pg_trigger.tgenabled and RAISING if it is anything but 'O' — fail-closed, and
+-- checked AFTER the enable.
+--
+-- Apply via the CLI / the workflow / `psql --single-transaction -v ON_ERROR_STOP=1`,
+-- never a bare `psql -f`. Do NOT add BEGIN;/COMMIT; inside: the CLI has already
+-- opened a transaction, so a nested BEGIN only warns and an inner COMMIT would
+-- end the CLI's transaction early. `supabase/tests/20261021000001_blog_author_identity.sql`
+-- independently asserts the trigger is ENABLED (`tgenabled = 'O'`) afterwards.
 -- ---------------------------------------------------------------------------
-ALTER TABLE public.blog_posts DISABLE TRIGGER blog_posts_set_updated_at;
+DO $$
+DECLARE
+  trigger_state "char";
+BEGIN
+  EXECUTE 'ALTER TABLE public.blog_posts DISABLE TRIGGER blog_posts_set_updated_at';
 
-UPDATE public.blog_posts
-   SET author           = 'Daniel Ospina',
-       author_image_url = 'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg'
- WHERE author = 'Tortoise team';
+  UPDATE public.blog_posts
+     SET author           = 'Daniel Ospina',
+         author_image_url = 'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg'
+   WHERE author = 'Tortoise team';
 
--- Second pass: posts that ALREADY carried the byline but never had an avatar
--- (they were written after the name was set and before the column existed, so
--- the guard above skips them and they would render name-only — a byline with
--- an avatar on 4 posts and none on 2). Guarded on `author = 'Daniel Ospina'
--- AND author_image_url IS NULL`, so a post with a deliberately different
--- author, or one whose image is set, is still untouched. Idempotent: a re-run
--- matches nothing.
-UPDATE public.blog_posts
-   SET author_image_url = 'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg'
- WHERE author = 'Daniel Ospina'
-   AND author_image_url IS NULL;
+  -- Second pass: posts that ALREADY carried the byline but never had an avatar
+  -- (they were written after the name was set and before the column existed, so
+  -- the guard above skips them and they would render name-only — a byline with
+  -- an avatar on 4 posts and none on 2). Guarded on `author = 'Daniel Ospina'
+  -- AND author_image_url IS NULL`, so a post with a deliberately different
+  -- author, or one whose image is set, is still untouched.
+  --
+  -- Stated behaviour, not silence: the admin CAN blank an avatar
+  -- (`author_image_url.trim() || null`), so a NULL here is a reachable state.
+  -- Re-applying this migration onto a live database would therefore RE-FILL a
+  -- deliberately blanked avatar for these rows (verified: clear → re-apply →
+  -- URL returns). Accepted, because migrations are applied ONCE — the drill
+  -- harness re-applies onto a fresh database with no edited content — and
+  -- because the alternative (guessing which NULLs are deliberate) is worse. If
+  -- this file is ever re-run against live data, that re-fill is what it does.
+  UPDATE public.blog_posts
+     SET author_image_url = 'https://tortoise.premiselabs.co/blog/author-daniel-ospina.jpg'
+   WHERE author = 'Daniel Ospina'
+     AND author_image_url IS NULL;
 
-ALTER TABLE public.blog_posts ENABLE TRIGGER blog_posts_set_updated_at;
+  EXECUTE 'ALTER TABLE public.blog_posts ENABLE TRIGGER blog_posts_set_updated_at';
+
+  SELECT tgenabled INTO trigger_state
+    FROM pg_trigger
+   WHERE tgname = 'blog_posts_set_updated_at'
+     AND tgrelid = 'public.blog_posts'::regclass;
+
+  IF trigger_state IS DISTINCT FROM 'O' THEN
+    RAISE EXCEPTION 'blog_posts_set_updated_at is not enabled (tgenabled=%) — refusing to commit a backfill that would silence updated_at', trigger_state;
+  END IF;
+END $$;
