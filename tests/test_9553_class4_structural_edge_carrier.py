@@ -2,25 +2,18 @@
 
 `tortoise/projection/edges.py::_EdgeHandlers.create_edge` mints
 `MATCH (s:L {k:$sv}) MATCH (t:M {k:$tv}) MERGE (s)-[:<predicate>]->(t)` — the
-lane `sdk.create_edge` and its three typed wrappers
+lane the SDK edge door and its three typed wrappers
 (`create_owned_by`/`create_managed_by`/`create_authored_by`) funnel onto. It
-emits **no journal record**, so the replay engine's `DirectEdgeCreated` pass-2b
-fold has nothing to re-create, and every structural predicate that is not
-snapshot-carried is GONE after a rebuild.
+emits **no journal record itself** (and the typed wrappers are called on the
+projection from `sdk.py`'s entity wiring, so they never reach the door), so
+before #9553 every structural predicate that is not snapshot-carried was GONE
+after a rebuild.
 
-That gap is disclosed at the point of the gap and in the #9079 lane's own
-declaration, and this suite is its falsifier:
-
-    record_projection.py (class-2 set, "⛔ NOT covered here"):
-      "the structural predicates `ownedBy`/`hasPart`/`dependsOn`/`references`
-       and friends, which have a working `DirectEdgeCreated` fold and NO
-       producer (class 4 — a producer-side change in `sdk.py`, not a
-       projection one)."
-
-    tests/test_9079_edge_lane_declared.py (module docstring):
-      "measured at this head, `rebuild_all` over a journal holding such edges
-       reports `edges: 0` and the edges are gone. This lane discloses that gap;
-       it does not bless it."
+That gap was disclosed at the point of the gap — the pre-#9553
+`record_projection.py` text ("… which have a working `DirectEdgeCreated` fold
+and NO producer (class 4 — a producer-side change in `sdk.py`, not a projection
+one)") — and is now stated, with its bounds, in `projection/edges.py`'s
+declaration block. This suite is its falsifier:
 
 The two halves the R5 target needs are therefore:
 
@@ -284,3 +277,26 @@ def test_bound_a_self_edge_is_minted_live_and_never_replayed(env):
     assert _edge_count(proj, "related", widget["id"], widget["id"]) == 0, (
         "the fold now re-creates self-edges — the E2E-11.6 no-self contract "
         "changed, so this bound (and the emission's skip) must be re-derived")
+
+
+def test_bound_an_edge_at_a_superseded_endpoint_is_not_restored(env):
+    """BOUND: the structural predicates are not in `SUPERSEDE_STRUCTURAL_RELS`,
+    so `supersede_point` journals no `DirectEdgeRepoint`; the fold then drops the
+    creation (the endpoint is in `succ`). Live keeps the edge at the dead
+    endpoint, replay loses it."""
+    sdk, events = env
+    p1 = sdk.create_point("statement", "edge at a doomed endpoint A")
+    p2 = sdk.create_point("statement", "endpoint B")
+    p3 = sdk.create_point("statement", "successor of A")
+    assert sdk.create_edge("dependsOn", p1["id"], p2["id"])["created"] is True
+
+    proj = sdk._get_proj()
+    sdk.supersede_point(p1["id"], p3["id"])
+    assert _edge_count(proj, "dependsOn", p1["id"], p2["id"]) == 1, (
+        "the live supersede moved the edge — this bound no longer describes "
+        "the behaviour")
+
+    proj.rebuild_all(str(events), confirm_destructive=True)
+    assert _edge_count(proj, "dependsOn", p1["id"], p2["id"]) == 0, (
+        "an edge at a superseded endpoint now survives a rebuild — the bound in "
+        "projection/edges.py and record_projection.py must be closed with it")

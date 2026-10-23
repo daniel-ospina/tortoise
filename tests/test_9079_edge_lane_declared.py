@@ -31,11 +31,14 @@ for the argument. Its two measured legs:
 
 * `DERIVABLE_STRUCTURAL_RELS` are snapshot-carried — replay resurrects them from
   the endpoint Point's immutable record (`entities._upsert_point_edges`);
-* every other allowlisted predicate has **no replay carrier**: measured at this
-  head, `rebuild_all` over a journal holding such edges reports `edges: 0` and
-  the edges are gone. **This lane discloses that gap; it does not bless it** —
-  the gap is on `origin/main` today, undeclared, and the carrier belongs to the
-  record-store work (`#7879`), not to a declaration child.
+* the predicates the door does not reach have **no replay carrier**: at the
+  pre-#9553 head, `rebuild_all` over a journal holding such edges reported
+  `edges: 0` and the edges were gone. **This lane discloses that gap; it does
+  not bless it.** Since #9553 the PUBLIC SDK door carries them for epistemic
+  endpoints; still uncarried are the typed wrappers / node-property lane,
+  `:Source` endpoints, self-edges, an edge at a later-superseded endpoint, and
+  the other direct `proj.create_edge` callers (see `projection/edges.py`'s
+  declaration block, which lists all five).
 
 ⛔ WHAT THIS SUITE DOES **NOT** CLAIM:
 * it does not claim `_EdgeHandlers` holds only this lane's writers. The

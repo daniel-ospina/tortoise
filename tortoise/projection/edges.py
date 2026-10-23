@@ -799,7 +799,14 @@ def source_change_notices(g, source_refs, current_versions: dict[str, str] | Non
 #          refuses to re-create one (`E2E-11.6` no-self contract), so live and
 #          replay disagree by design. Pre-existing, and the emission skips it
 #          rather than writing a record the fold will drop.
-#       4. **every other direct `proj.create_edge` caller** — the ingest
+#       4. **an edge at an endpoint that is later superseded.** The record is
+#          emitted, but `dependsOn`/`wasDerivedFrom`/… are not in
+#          `SUPERSEDE_STRUCTURAL_RELS`, so `supersede_point` journals no
+#          `DirectEdgeRepoint` and the fold drops the creation (the endpoint is
+#          in `succ`). MEASURED: live keeps the edge at the dead endpoint,
+#          post-rebuild 0. Closing it means adding the structural family to the
+#          supersede transfer — R5 scope, not this change's.
+#       5. **every other direct `proj.create_edge` caller** — the ingest
 #          bundle-connection writer (`sdk.py`, inside `ingest`), the
 #          approver/event writes (`performs`/`uses`/`produces`) and the
 #          `wasDerivedFrom` writer. Their emission is the same pass and belongs

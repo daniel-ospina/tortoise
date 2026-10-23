@@ -1838,9 +1838,11 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #: `proj.create_owned_by` directly, so the door's emission never runs); any edge
 #: with a `:Source` endpoint (the fold's id sweep covers `EPISTEMIC_LABELS` only,
 #: so a `references`/`aboutSource` record is skipped at replay); self-edges (the
-#: fold refuses to re-create them); and the other direct `proj.create_edge`
-#: callers. `projection/edges.py`'s declaration block carries the same list at
-#: the point of enforcement.
+#: fold refuses to re-create them); an edge at an endpoint that is LATER
+#: SUPERSEDED (no `DirectEdgeRepoint`: the structural predicates are not in
+#: `SUPERSEDE_STRUCTURAL_RELS`, so the fold drops the creation against `succ`);
+#: and the other direct `proj.create_edge` callers. `projection/edges.py`'s
+#: declaration block carries the same list at the point of enforcement.
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
