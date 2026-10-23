@@ -17190,18 +17190,31 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
                                        commit_ingest_charge_bytes(payload))
         if not admission.allowed:
             retry_after = max(1, math.ceil(admission.retry_after))
+            # #5425's seam, not a hand-appended sentence: it terminates the
+            # prose and appends the ONE contact path. A throttle is not a
+            # ceiling to buy out of — it names its own next step ("retry
+            # shortly") and the header says how long. The SENTENCE follows
+            # `scope`: in the shared-overflow regime the caller's own `used`
+            # can be 0 (the instance's shared capacity is what is spent), so
+            # saying "by this team" would blame a tenant that wrote nothing.
+            message = (
+                "The shared ingest allowance for this instance is saturated "
+                "— retry shortly"
+                if admission.scope == "process" else
+                "Too much data is being written by this team right now — "
+                "retry shortly")
             raise HTTPException(
                 status_code=429,
                 detail={
                     "code": "ingest_rate_limited",
-                    # #5425's seam, not a hand-appended sentence: it terminates
-                    # the prose and appends the ONE contact path. A throttle is
-                    # not a ceiling to buy out of — it names its own next step
-                    # ("retry shortly") and the header says how long.
-                    "message": with_limit_contact(
-                        "Too much data is being written by this team right "
-                        "now — retry shortly"),
-                    "scope": "org",
+                    "message": with_limit_contact(message),
+                    # "org" = the caller's own allowance; "process" = the ONE
+                    # shared overflow bucket an instance falls back to when its
+                    # owned store is full of active orgs (bounded flood
+                    # regime). `used` is the caller's own spend in either case,
+                    # so `used: 0` with `scope: "process"` is a refusal about
+                    # the instance, never about the caller's traffic.
+                    "scope": admission.scope,
                     "resource": "commit_ingest_bytes",
                     "used": admission.used,
                     "limit": admission.limit,

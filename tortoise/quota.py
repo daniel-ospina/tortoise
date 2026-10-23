@@ -235,9 +235,19 @@ MAX_PROVENANCE_REFS = 500
 # recorded "storage is free" position — an owner ruling (#4495/#5331), not
 # something this lane may take. #4051's own triage names this rate bound the
 # only legitimate slice that needs no ruling.
+#: The SHIPPED default allowance — the figure the public contract states
+#: (``docs/INGEST_CONTRACT.md`` §9, ``docs/capacity.md`` §3: 10 MiB / 60 s / org).
+#: Named separately from the resolved constant for ONE reason: the knob below is
+#: read at import, and the contract ADVERTISES it — so an operator shell or CI
+#: job that exports ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` must not red a test
+#: that is asserting the default it never changed. The tests pin THIS constant
+#: (so a silent retune of the documented figure still fails) and opt the
+#: endpoint check onto it explicitly.
+COMMIT_INGEST_DEFAULT_BYTES_PER_MIN = 10 * 1024 * 1024
+
 MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG = max(1, int(
     os.environ.get("TORTOISE_COMMIT_INGEST_BYTES_PER_MIN", "") or
-    10 * 1024 * 1024))
+    COMMIT_INGEST_DEFAULT_BYTES_PER_MIN))
 
 # ── Default limits ──────────────────────────────────────────────────────────
 # max_points/max_api_keys have NO constant here — they resolve from
@@ -1249,13 +1259,24 @@ _commit_ingest_lock = threading.Lock()
 
 
 class IngestAdmission(collections.namedtuple(
-        "IngestAdmission", "allowed used limit retry_after")):
+        "IngestAdmission", "allowed used limit retry_after scope")):
     """One per-org ingest-budget decision — allowed, and the numbers compared.
 
     A decision, not a predicate, because the 429 must report ``used``/``limit``
     and a ``Retry-After`` that come from the SAME read that refused (#4614:
     a refusal is a structured state; a second read could disagree with the
     first under concurrency).
+
+    ``scope`` names WHICH allowance the decision was made against:
+
+    * ``"org"`` — the org's own bucket. ``used`` is the org's own spend and the
+      numbers in the refusal describe the caller's traffic.
+    * ``"process"`` — the SHARED overflow bucket, used only when the owned
+      store is full of active orgs (the fail-closed flood regime). ``used`` is
+      still THIS org's own spend in it, which can legitimately be ``0``: the
+      refusal is then about the instance's shared capacity, not about anything
+      the caller wrote. A client branching on ``used >= limit`` would misread
+      that as its own overrun, so the scope — not the number — is the signal.
     """
 
     __slots__ = ()
@@ -1321,14 +1342,15 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
       refusal therefore never names another tenant's bytes, and a fresh org
       refused because the shared bucket is spent reports ``used`` 0 (the truth:
       it spent nothing; the store is full, which is the fail-closed overflow
-      class both stores accept);
+      class both stores accept) — and the returned ``scope`` is ``"process"``,
+      so a client never reads ``used: 0`` as an overrun of its own;
     * an org is STICKY in the overflow while its own charges are in-window, so
       freeing one slot cannot hand it a second full allowance.
     """
     limit = MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG
     charge = max(0, int(charge_bytes))
     if not org_id:
-        return IngestAdmission(True, 0, limit, 0.0)
+        return IngestAdmission(True, 0, limit, 0.0, "org")
     now_ts = time.monotonic()
     with _commit_ingest_lock:
         store = _commit_ingest_budget
@@ -1364,6 +1386,7 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
         bucket_used = sum(e[2] for e in bucket)
         used = (bucket_used if key != _COMMIT_INGEST_OVERFLOW_KEY
                 else sum(e[2] for e in bucket if e[1] == org_id))
+        scope = ("process" if key == _COMMIT_INGEST_OVERFLOW_KEY else "org")
         # ADMIT when the window has room, and ALSO when this single request is
         # bigger than the whole allowance AND the window is empty (the
         # over-sized case: see the docstring — once per window, never forever).
@@ -1372,13 +1395,13 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
             bucket.append((now_ts, org_id, charge))
             store[key] = bucket
             store.move_to_end(key)
-            return IngestAdmission(True, used + charge, limit, 0.0)
+            return IngestAdmission(True, used + charge, limit, 0.0, scope)
         oldest = bucket[0][0] if bucket else now_ts
         retry_after = max(0.0, _COMMIT_INGEST_WINDOW_S - (now_ts - oldest))
         # Keep the pruned bucket so the org's remaining window still ages out.
         if bucket:
             store[key] = bucket
-        return IngestAdmission(False, used, limit, retry_after)
+        return IngestAdmission(False, used, limit, retry_after, scope)
 
 
 def _reset_commit_ingest_budget_for_tests() -> None:

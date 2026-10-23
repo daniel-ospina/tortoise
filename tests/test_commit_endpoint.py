@@ -2820,24 +2820,35 @@ class TestCommitOrgIngestBound:
         """
         import tortoise.quota as quota_mod
         unit = self._charge()
-        self._allow(monkeypatch, unit)
+        self._allow(monkeypatch, 2 * unit)
         # One slot for the whole store, so TEST_ORG_ID cannot own one and is
         # charged to the shared overflow instead.
         monkeypatch.setattr(quota_mod, "_COMMIT_INGEST_MAX_ORGS", 1)
         assert quota_mod.commit_ingest_admit("org-owner", 1).allowed is True
-        assert self._empty_commit(client, "sIngestOvA").status_code == 200, (
+        # ANOTHER org spends half the overflow first, so this org's own `used`
+        # and the shared bucket's total are DIFFERENT numbers — otherwise every
+        # assertion below is satisfied by both the shared and the per-org
+        # reading of the refusal.
+        assert quota_mod.commit_ingest_admit("org-other", unit).allowed is True
+        r1 = self._empty_commit(client, "sIngestOvA")
+        assert r1.status_code == 200, (
             "the overflow-routed commit was refused — the store is not full")
-        assert self._empty_commit(client, "sIngestOvB").status_code == 429
+        r2 = self._empty_commit(client, "sIngestOvB")
+        assert r2.status_code == 429
+        # ...and the refusal names THIS org's spend, not the shared bucket's.
+        assert r2.json()["detail"]["used"] == unit
+        assert r2.json()["detail"]["scope"] == "process", (
+            "an overflow refusal must say it is about the instance's shared "
+            "allowance, not the caller's org budget")
         # A slot frees (what `_commit_ingest_reclaim` does to an aged-out
         # bucket) while this org's OWN overflow charges are still in-window.
         quota_mod._commit_ingest_budget.pop("org-owner")
-        r = self._empty_commit(client, "sIngestOvC")
-        assert r.status_code == 429, (
+        r3 = self._empty_commit(client, "sIngestOvC")
+        assert r3.status_code == 429, (
             "a slot freed and the overflow-routed org got a SECOND full "
             "allowance inside the same window — the overflow is not sticky "
             "per org")
-        # ...and the refusal names THIS org's spend, not the shared bucket's.
-        assert r.json()["detail"]["used"] == unit
+        assert r3.json()["detail"]["used"] == unit
 
     def test_overflow_refusal_reports_this_orgs_own_spend(self, monkeypatch):
         """A refusal from the SHARED overflow must name what THIS org spent.
@@ -2857,27 +2868,37 @@ class TestCommitOrgIngestBound:
         assert adm.used == 300, (
             f"the refusal reports {adm.used} bytes but this org spent 300 — "
             "the rest belongs to another tenant sharing the overflow bucket")
+        assert adm.scope == "process"
 
     def test_a_fresh_org_takes_a_free_slot_while_the_overflow_is_warm(
             self, monkeypatch):
         """The stickiness is PER ORG, never store-wide.
 
-        A store-wide rule would deny EVERY fresh tenant for the rest of the
-        window once the overflow held any charge — a new-customer denial
-        reachable with an empty owned store. Guards the other direction of
-        `test_sticky_overflow_blocks_a_second_budget`.
+        A store-wide rule would deny EVERY fresh tenant once the overflow is
+        spent — a new-customer denial reachable with a free owned slot. Guards
+        the other direction of `test_sticky_overflow_blocks_a_second_budget`.
+
+        Both discriminators are needed (measured against the mutation
+        `sticky = overflow is not None and len(overflow) > 0`): the overflow is
+        spent to its LIMIT (a merely warm overflow still admits the fresh org,
+        just into the shared bucket), and the assertion reads WHICH bucket it
+        was charged to (allowed/used are identical under both routings).
         """
         import tortoise.quota as quota_mod
         self._allow(monkeypatch, 1000)
         monkeypatch.setattr(quota_mod, "_COMMIT_INGEST_MAX_ORGS", 1)
         assert quota_mod.commit_ingest_admit("org-owner", 1).allowed is True
-        assert quota_mod.commit_ingest_admit("org-y", 100).allowed is True
+        assert quota_mod.commit_ingest_admit("org-y", 1000).allowed is True
         quota_mod._commit_ingest_budget.pop("org-owner")  # a slot frees
         adm = quota_mod.commit_ingest_admit("org-fresh", 500)
         assert adm.allowed is True, (
             "a fresh org with no overflow charges of its own was refused the "
             "free slot — the overflow rule is store-wide, not per org")
         assert adm.used == 500
+        assert (quota_mod._commit_ingest_budget.get("org-fresh") or None), (
+            "the fresh org was charged to the SHARED overflow instead of "
+            "taking the free owned slot — the stickiness leaked to store-wide")
+        assert adm.scope == "org"
 
     def test_replay_does_not_consume_the_budget(self, client, monkeypatch):
         """A fully_written re-POST writes nothing, so it must not be charged
@@ -2896,16 +2917,30 @@ class TestCommitOrgIngestBound:
         assert r2.json()["duplicate"] is True
         assert TestCommitPointsGate._chain_counts("sIngestReplay") == (1, 1, 1)
 
-    def test_default_allowance_admits_a_normal_commit(self, client):
-        """The gate must be invisible to ordinary traffic: with the shipped
-        allowance (NOT monkeypatched), the empty commit — the zero-budget
-        payload `test_empty_commit_ok_zero_budget` pins — still 200s."""
+    def test_default_allowance_admits_a_normal_commit(self, client,
+                                                      monkeypatch):
+        """The gate must be invisible to ordinary traffic: at the SHIPPED
+        default allowance the empty commit — the zero-budget payload
+        `test_empty_commit_ok_zero_budget` pins — still 200s.
+
+        Review cycle 3: the previous form asserted the RESOLVED constant, while
+        `quota.py` reads ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` at import and
+        `docs/INGEST_CONTRACT.md` §9 advertises that knob — so any shell or CI
+        job that exported the documented variable failed a test unrelated to
+        its change. The DOCUMENTED default is still pinned, now on the named
+        constant (`COMMIT_INGEST_DEFAULT_BYTES_PER_MIN`) that the knob defaults
+        to, and the endpoint leg opts onto that same figure so an ambient
+        override cannot red — or mask — the behaviour it pins.
+        """
         import tortoise.quota as quota_mod
         # Pin the SHIPPED figure, not a floor: the docs promise 10 MiB
         # (`docs/INGEST_CONTRACT.md` §9, `docs/capacity.md` §3), so a silent
-        # retune must fail here rather than only in a doc drift report.
-        # (Review cycle 2: `>= 1_000_000` would still pass at 1 MiB.)
-        assert quota_mod.MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG == 10 * 1024 * 1024
+        # retune of the default must fail here rather than only in a doc drift
+        # report. (Review cycle 2: `>= 1_000_000` would still pass at 1 MiB.)
+        assert quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN == 10 * 1024 * 1024
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG",
+            quota_mod.COMMIT_INGEST_DEFAULT_BYTES_PER_MIN)
         r = self._empty_commit(client, "sIngestDefault")
         assert r.status_code == 200, r.text
         assert r.json()["nodes_created"] == 0
@@ -2975,36 +3010,167 @@ class TestCommitOrgIngestBound:
         the fail-OPEN direction for a throttle — a charge cheaper than the
         write — so the bound is pinned against the graph itself. The allowance
         is set wide on purpose: this test is about the SHAPE, not the limit.
+
+        ⛔ Review cycle 3 found this leg measuring a commit that minted NOTHING
+        in the lane it claimed to pin: it re-sent the SAME point ids and
+        content, so both points reconciled as `merge` (`MATCH … SET
+        p.updatedAt`, zero nodes) and the 5-node cushion hid the entire points
+        term — the cycle-2 regression this test exists for passed it. The
+        measured commit therefore now carries NEW ids, NEW content and a NEW
+        entity name, and the `minted >= …` assertion below pins that the nodes
+        under test were really minted.
         """
         from tortoise.commit_schema import (
             CommitPayload,
             declared_commit_write_count,
         )
         self._allow(monkeypatch, 64 * 1024 * 1024)
-        raw = _raw_payload(2, session_id="sIngestBound")
-        declared = declared_commit_write_count(
-            CommitPayload(**{**raw, "client_commit_id": "0" * 64}))
+
+        def declared_of(raw: dict) -> int:
+            return declared_commit_write_count(
+                CommitPayload(**{**raw, "client_commit_id": "0" * 64}))
 
         def node_total() -> int:
             return int(_team_sdk()._get_proj().g.query(
                 "MATCH (n) RETURN count(n)").result_set[0][0])
 
+        def measured(raw: dict) -> tuple[int, int]:
+            """(declared, minted) for ONE commit, measured off the graph."""
+            before = node_total()
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+            return declared_of(raw), node_total() - before
+
         # Measured on a STEADY-STATE commit: the very first write to a graph
         # also creates the event store's one-time metadata singletons
         # (`:GraphEventMeta`, `:EpMeta`, `:Meta`), which are per-GRAPH
         # constants rather than per-request growth — the loop #4051 describes
-        # repeats this shape, not that one. So commit once to absorb them and
-        # measure the second.
-        assert _commit(client, raw).status_code == 200
-        before = node_total()
-        second = _commit(client, _raw_payload(2, session_id="sIngestBound2"))
-        assert second.status_code == 200, second.text
-        minted = node_total() - before
-        assert minted > 0
-        assert declared >= minted, (
-            f"the charge declared {declared} nodes but the commit minted "
-            f"{minted} — the throttle would be cheaper than the write, which "
-            "is the fail-open direction (#4051)")
+        # repeats this shape, not that one. So commit once to absorb them.
+        assert _commit(client, _raw_payload(
+            2, session_id="sIngestBound")).status_code == 200
+
+        # ── (a) NEW points + a NEW entity: the shape cycle 3's false PASS
+        # was supposed to measure. Different ids, different content, and an
+        # entity name (`Beta`) the graph does not hold yet, so the points and
+        # their `PointAdded` events are really minted. ──
+        declared_new, minted_new = measured(_raw_payload(
+            2, session_id="sIngestBoundNew2",
+            points=[_point(2, about_entities=["Beta"]),
+                    _point(3, about_entities=["Beta"])],
+            entities=[{"name": "Beta", "kind": "Project",
+                       "passes_frequency_gate": True}],
+        ))
+        assert minted_new >= 10, (
+            f"the measured commit minted {minted_new} nodes — it must mint the "
+            "2 Points, their 2 `PointAdded` events, the new `:Object`, the "
+            "4-node chain and the provenance `:Source`; a lower delta means "
+            "the points reconciled as merges and this leg pins nothing")
+        assert declared_new >= minted_new, (
+            f"the charge declared {declared_new} nodes but the commit minted "
+            f"{minted_new} — the throttle would be cheaper than the write, "
+            "which is the fail-open direction (#4051)")
+
+        # ── (b) SUPERSEDE: the same ids with CHANGED content. The write phase
+        # mints the successor Point + its `PointAdded` AND the predecessor's
+        # `PointSuperseded` (3 nodes/entry), where the pre-cycle-3 flat rate
+        # charged 2. Measured absolutely: the entity `Alpha` and the two
+        # superseded points already exist, so this leg has no cushion to hide
+        # a one-node deficit behind. ──
+        declared_sup, minted_sup = measured(_raw_payload(
+            2, session_id="sIngestBoundSup2",
+            points=[_point(2, content="revised 2"),
+                    _point(3, content="revised 3")],
+        ))
+        assert minted_sup > 0
+        assert declared_sup >= minted_sup, (
+            f"a SUPERSEDING point is charged {declared_sup} nodes but the "
+            f"commit minted {minted_sup} — charging `2` per `points[]` entry "
+            "misses the predecessor's `PointSuperseded` event (the fail-open "
+            "direction, #4051)")
+
+    def test_a_mitigates_operator_is_charged_for_its_second_event(
+            self, client, monkeypatch):
+        """A `MITIGATES` bridge-attack mints THREE nodes, not two.
+
+        `sdk.mitigate_operator` CREATEs the mitigation `:Point` and then emits
+        BOTH `PointAdded` and `OperatorAdded` for it — two durability records,
+        where an `IMPL`/`NAND` entry (`sdk.create_operator`) leaves one. The
+        mitigation Point is in no other lane (it is not a `points[]` entry), so
+        an under-charged operator lane is a straight fail-open.
+
+        The discrimination is MARGINAL on purpose: the two payloads are
+        identical except for the extra `MITIGATES` record, so the difference
+        isolates that one entry. An absolute `declared >= minted` leg cannot
+        see a one-node deficit here — the flat 3-per-point rate deliberately
+        carries a ≥2-node cushion over a `new` point — which is exactly the
+        false-PASS shape review cycle 3 called out. Measured: the mitigation
+        adds 3 nodes; charged pre-fix: 2 -> red; charged now: 3 -> green.
+        """
+        from tortoise.commit_schema import (
+            CommitPayload,
+            declared_commit_write_count,
+        )
+        self._allow(monkeypatch, 64 * 1024 * 1024)
+
+        def declared_of(raw: dict) -> int:
+            return declared_commit_write_count(
+                CommitPayload(**{**raw, "client_commit_id": "0" * 64}))
+
+        def node_total() -> int:
+            return int(_team_sdk()._get_proj().g.query(
+                "MATCH (n) RETURN count(n)").result_set[0][0])
+
+        def measured(raw: dict) -> tuple[int, int]:
+            before = node_total()
+            r = _commit(client, raw)
+            assert r.status_code == 200, r.text
+            return declared_of(raw), node_total() - before
+
+        # Absorb the per-graph singletons first (`_GraphEventMeta` etc.).
+        assert _commit(client, _raw_payload(
+            1, session_id="sIngestMitBound")).status_code == 200
+
+        impl_only = _raw_payload(3, session_id="sIngestMitA", points=[
+            _point(20, content="it is cheap"),
+            _point(21, content="option A"),
+            _point(22, content="we can raise the price"),
+        ], operators=[
+            {"src": _point(20)["id"], "dst": _point(21)["id"],
+             "op_type": "IMPL", "direction": "unidirectional"},
+        ])
+        with_mitigates = _raw_payload(3, session_id="sIngestMitB", points=[
+            _point(30, content="it is expensive"),
+            _point(31, content="option B"),
+            _point(32, content="we can cut the price"),
+        ], operators=[
+            {"src": _point(30)["id"], "dst": _point(31)["id"],
+             "op_type": "IMPL", "direction": "unidirectional"},
+            {"src": _point(32)["id"], "dst": _point(31)["id"],
+             "op_type": "MITIGATES",
+             "target": {"src": _point(30)["id"], "dst": _point(31)["id"],
+                        "op_type": "IMPL"},
+             "strength": 0.4},
+        ])
+
+        declared_a, minted_a = measured(impl_only)
+        declared_b, minted_b = measured(with_mitigates)
+        # The bound must hold on BOTH shapes...
+        assert declared_a >= minted_a, (declared_a, minted_a)
+        assert declared_b >= minted_b, (
+            f"the mitigation-bearing commit declared {declared_b} nodes but "
+            f"minted {minted_b} — the throttle would be cheaper than the "
+            "write (#4051)")
+        # ...and the MITIGATES entry itself must carry its own 3 nodes.
+        extra_minted = minted_b - minted_a
+        extra_declared = declared_b - declared_a
+        assert extra_minted == 3, (
+            f"the MITIGATES record minted {extra_minted} nodes, not 3 (the "
+            "mitigation `:Point` + its `PointAdded` + its `OperatorAdded`) — "
+            "this leg is measuring something other than the mitigation lane")
+        assert extra_declared >= extra_minted, (
+            f"a MITIGATES entry is charged {extra_declared} nodes but writes "
+            f"{extra_minted} — the operator lane under-charges the "
+            "bridge-attack, the fail-open direction (#4051)")
 
 
 class TestDeclaredCommitWriteCount:
@@ -3035,9 +3201,11 @@ class TestDeclaredCommitWriteCount:
         assert declared_commit_write_count(p) == 5
 
     def test_each_collection_entry_is_charged_once(self):
-        """Flat lanes cost one node per entry; the point/operator/
-        supersession lanes cost TWO (the node plus the `:GraphEvent`
-        durability record it leaves — `_COMMIT_EVENT_RECORD_LANES`)."""
+        """Flat lanes cost one node per entry; `points[]` costs THREE (the
+        upper bound over the `new`=2 / `supersede`=3 / `merge`=0 reconcile
+        actions), `operators[]` TWO for `IMPL`/`NAND`, and `supersessions[]`
+        TWO. See `_COMMIT_POINT_ENTRY_NODES` and friends in
+        `tortoise/commit_schema.py`."""
         from tortoise.commit_schema import declared_commit_write_count
         p = self._payload(
             points=[_point(0), _point(1)],
@@ -3050,8 +3218,37 @@ class TestDeclaredCommitWriteCount:
             sources=[{"url": "https://example.test/a",
                       "sourceKind": "web"}],
         )
-        # 4 fixed + (2 points × 2) + 1 entity + 3 events + 1 source
-        assert declared_commit_write_count(p) == 4 + 4 + 1 + 3 + 1
+        # 4 fixed + (2 points × 3) + 1 entity + 3 events + 1 source
+        assert declared_commit_write_count(p) == 4 + 6 + 1 + 3 + 1
+
+    def test_a_mitigates_entry_is_charged_three_and_an_impl_two(self):
+        """The operator lane's rate follows the WIRE `op_type`: a `MITIGATES`
+        bridge-attack costs 3 nodes (`mitigate_operator` emits `PointAdded`
+        AND `OperatorAdded` for its mitigation Point), an `IMPL`/`NAND` 2
+        (`create_operator` emits `OperatorAdded` only)."""
+        from tortoise.commit_schema import declared_commit_write_count
+        base = self._payload(points=[_point(0), _point(1), _point(2)])
+        impl = self._payload(
+            points=[_point(0), _point(1), _point(2)],
+            operators=[{"src": _point(0)["id"], "dst": _point(1)["id"],
+                        "op_type": "IMPL"}],
+        )
+        mitigates = self._payload(
+            points=[_point(0), _point(1), _point(2)],
+            operators=[
+                {"src": _point(0)["id"], "dst": _point(1)["id"],
+                 "op_type": "IMPL"},
+                {"src": _point(2)["id"], "dst": _point(1)["id"],
+                 "op_type": "MITIGATES",
+                 "target": {"src": _point(0)["id"], "dst": _point(1)["id"],
+                            "op_type": "IMPL"},
+                 "strength": 0.4},
+            ],
+        )
+        assert (declared_commit_write_count(impl)
+                - declared_commit_write_count(base)) == 2
+        assert (declared_commit_write_count(mitigates)
+                - declared_commit_write_count(impl)) == 3
 
     def test_the_node_floor_is_the_pricing_cost_basis(self):
         """The floor is the repo's own per-node figure, not a new number.
