@@ -561,6 +561,27 @@ def _no_ambient_record_arming(monkeypatch):
     record_writer._close_live_breaker()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_commit_ingest_budget():
+    """#4051: start every test with an empty per-org commit ingest window.
+
+    The window is PROCESS state keyed by ``org_id`` (``quota._commit_ingest
+    _budget``), and most of the suite authenticates as the same ``team-001``
+    org — so without a reset an earlier test's charges would spend a later
+    test's minute and the 429 would land on the wrong test. Same rationale as
+    ``_reset_ask_budget_for_tests`` for the ask lane's bucket.
+
+    It RESETS the window and does not change the allowance: a test that wants a
+    small window monkeypatches
+    ``quota.MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG`` itself, and the rate-bound
+    tests in ``test_commit_endpoint.py`` do.
+    """
+    from tortoise.quota import _reset_commit_ingest_budget_for_tests
+    _reset_commit_ingest_budget_for_tests()
+    yield
+    _reset_commit_ingest_budget_for_tests()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.

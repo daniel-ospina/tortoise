@@ -815,7 +815,7 @@ def _cmd_record_backup(args):
           * a failure AFTER the artifact was published raises
             ``RecordRestoreFailed`` and names the artifact id — the record IS
             backed up and only the restore is NOT proven: retry, and if it
-            repeats check preconditions 3-4 (the scratch target's schema and
+            repeats check preconditions 4-5 (the scratch target's schema and
             the tenancy rows its foreign keys reference): a missing parent row
             never clears on a retry;
           * any other ``RecordBackupError`` means NOTHING was published (the
@@ -828,6 +828,12 @@ def _cmd_record_backup(args):
           scratch target, an empty record to drill, an artifact whose integrity,
           shape pin or decryption does not verify (no verdict was produced — and
           NOT a green one), or a ``--keep`` that would delete every artifact.
+          A **source role that cannot bypass RLS** is here too (#9801): the
+          record's own DSN is an app role (`NOBYPASSRLS`, R6), under which every
+          per-table count reads zero and `pg_dump` cannot read the tables at all.
+          It is a configuration fault — arm `TORTOISE_RECORD_BACKUP_DSN` — and
+          the refusal names the role and the variable, never "the record is
+          EMPTY".
           A permanent fault discovered AFTER the upload names the published
           artifact instead of claiming nothing was backed up: in drill mode the
           artifact is durable and only the drill did not run.
@@ -847,6 +853,7 @@ def _cmd_record_backup(args):
     import os
 
     from tortoise.record_backup import (
+        RECORD_BACKUP_DSN_ENV,
         RECORD_BACKUP_KEEP,
         RecordBackupError,
         RecordBackupUnavailable,
@@ -863,8 +870,42 @@ def _cmd_record_backup(args):
     # never re-spelled here, so this verb cannot drift from the writer's notion
     # of "armed" and a non-Postgres value is reported as the MISCONFIGURATION it
     # is rather than as an unreadable record (an outage).
+    #
+    # ⛔ THE BACKUP HAS ITS OWN SURFACE (#9801). R6 arms the record as
+    # `tortoise_record_app` — `NOBYPASSRLS` — and a dump/restore must see EVERY
+    # tenant; R6 names the database-level backup as one of the three purposes a
+    # bypassing role may serve. So the precedence is: the explicit flag, then
+    # `TORTOISE_RECORD_BACKUP_DSN`, then the record's own DSN (unchanged
+    # behaviour for a deployment that has not split them — `require_bypassing_role`
+    # turns the resulting mismatch into a refusal that names the role, instead of
+    # a drill reporting a populated record as EMPTY).
+    env_backup = os.environ.get(RECORD_BACKUP_DSN_ENV)
+    #: Which surface the DSN is about to come from, handed to `record_dsn` so a
+    #: malformed value is attributed to the RIGHT arm in the sentence itself.
+    #: `record_dsn`'s default message names `TORTOISE_RECORD_DSN`, and pointing an
+    #: operator at the app-role variable for a value they set on the backup surface
+    #: is the same "say which one" failure the role refusal exists to end (#9801).
+    dsn_surface = "--record-dsn" if args.record_dsn is not None else ""
+    if args.record_dsn is None and env_backup is not None and not env_backup.strip():
+        # Set-but-blank is the shape a cron line takes when its environment is
+        # gone. Falling through to TORTOISE_RECORD_DSN here would silently run
+        # the backup as the APP role — the defect this surface exists to close.
+        print(f"Error: {RECORD_BACKUP_DSN_ENV} is set but names nothing — a "
+              "backup DSN that is empty cannot be used, and falling back to the "
+              "record's own (app-role) DSN would publish nothing. Nothing was "
+              "backed up, and no verdict was produced.", file=sys.stderr)
+        return 2
+    if args.record_dsn is None and env_backup:
+        args.record_dsn = env_backup.strip()
+        dsn_surface = RECORD_BACKUP_DSN_ENV
     try:
-        dsn = record_dsn(args.record_dsn)
+        # ⛔ THE SURFACE IS NAMED IN THE SENTENCE, NOT APPENDED TO IT (#9801).
+        # `record_dsn`'s message hardcodes `TORTOISE_RECORD_DSN`; a value the
+        # operator set on the BACKUP surface would therefore be reported against
+        # the app-role variable and then followed by an appended attribution —
+        # two surfaces named in one sentence, the wrong one first, and the
+        # appended clause running on from a message with no closing period.
+        dsn = record_dsn(args.record_dsn, surface=dsn_surface or None)
     except RecordWriteError as e:
         print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
         return 2
@@ -905,7 +946,8 @@ def _cmd_record_backup(args):
               "produced.", file=sys.stderr)
         return 2
     if not dsn:
-        print("Error: no record DSN — pass --record-dsn or set "
+        print("Error: no record DSN — pass --record-dsn, or set "
+              f"{RECORD_BACKUP_DSN_ENV} (the backup role) or "
               "TORTOISE_RECORD_DSN. Nothing was backed up, and no restore was "
               "proven.", file=sys.stderr)
         return 2
@@ -992,7 +1034,7 @@ def _cmd_record_backup(args):
               f"restore was attempted, so the record IS backed up but this "
               f"restore was NOT proven. Retry; if it keeps failing, check the "
               f"scratch target's schema and the tenancy rows its foreign keys "
-              f"reference (runbook preconditions 3-4) — a missing parent row "
+              f"reference (runbook preconditions 4-5) — a missing parent row "
               f"never clears on a retry.", file=sys.stderr)
         return 1
     except RecordBackupError as e:
@@ -11740,10 +11782,15 @@ def main(argv: list[str] | None = None) -> int:
              "counts match. Exit 0 backed up+verified / 3 drill RED / 2 could "
              "not run / 1 backup failed")
     rb.add_argument("--record-dsn", default=None,
-                    help="Postgres record DSN (default: $TORTOISE_RECORD_DSN). "
-                         "Must be the DIRECT connection, not the pooler: a "
-                         "dump/restore session through a transaction pooler can "
-                         "be silently short, so a pooler DSN is refused (exit 2)")
+                    help="Postgres DSN for the dump/restore (default: "
+                         "$TORTOISE_RECORD_BACKUP_DSN, falling back to "
+                         "$TORTOISE_RECORD_DSN when that is unset). It must be a "
+                         "role that BYPASSES RLS — a backup must see every tenant, "
+                         "and the record's own app role (NOBYPASSRLS) is refused "
+                         "with exit 2 (#9801). It must also be the DIRECT "
+                         "connection, not the pooler: a dump/restore session "
+                         "through a transaction pooler can be silently short, so "
+                         "a pooler DSN is refused (exit 2)")
     rb.add_argument("--scratch-dsn", default=None,
                     help="Drill mode: an EMPTY scratch Postgres DSN to restore "
                          "the artifact into and compare row counts against the "

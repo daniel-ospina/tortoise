@@ -446,6 +446,38 @@ the `{error}`-only shape whose retry action is different.
 - **The cap is CUMULATIVE, not rate-based.** It is the team's total node
   count against the tier limit (`max_points` ← `graph_size_cap`). Backoff
   cannot clear it — only raising the limit (or pruning) does.
+- **One bound IS rate-based — and backoff DOES clear it (429).** `POST
+  /v1/sessions/commit` also carries a **per-team ingest budget**: a rolling
+  60-second allowance of `10 MiB` of writes per team, per instance (the window
+  is process state; today the service runs one worker, so per-instance and
+  per-team are the same figure). A request is charged the larger of (a) the
+  bytes of the re-serialized §6.1 **request body** — the whole validated
+  payload, including `sources`, `provenance_refs` and `telemetry`, so it is
+  never less than the canonical form used for `client_commit_id` — and (b) the
+  nodes it will write × 1024, where (b) is a declared **upper bound** on the
+  nodes the request leaves behind (a node plus its `:GraphEvent` record for
+  every point/operator/supersession — three for a superseding point, three for
+  a `MITIGATES` bridge-attack — plus the fixed record/session/source/event
+  chain), never an under-count. Exceeding the allowance answers **429** with a
+  `Retry-After` header and `detail.code = "ingest_rate_limited"`; `detail.used`
+  is always **your** spend in the window, and `detail.scope` says which
+  allowance refused you — `"org"` (your team's own budget) or `"process"` (the
+  instance's shared fallback bucket, used only while its per-team store is
+  saturated by a flood; there `used` can legitimately be `0`, because the
+  refusal is about the instance and not about anything you wrote). This is a
+  **throttle, not a cap**: it never refuses your data, the window self-heals
+  within 60 s, and the correct action is **backoff-and-retry** — the opposite
+  of the cumulative `ERR_QUOTA` advice above. (The repo's bundled SDK does not
+  yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
+  should honour `Retry-After` itself.) It exists because the removal of the
+  flat session cap (#4010 — sessions are unlimited for every tier, by owner
+  ruling) left that lane total-unbounded: a commit writes `:Session`, a
+  transcript `:Source` and an `:Event`, and none of those labels is in the
+  points count, so the points gate cannot see it. Graph **bytes**, not nodes,
+  are the unit because that is the ruled storage unit (#4495/#5331). Operators
+  can retune the allowance with `TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`. **The
+  capture lane (`POST /v1/sessions`) is not covered by this budget** — its
+  `count + estimate` points gate and its per-session turn cap are unchanged.
 - **How to check usage:** `tortoise team info` → `GET /v1/team` returns
   `point_count` plus user/graph limits. **Known mismatch:** `GET /v1/team`
   exposes only `point_count` — there is **no points-limit field**, and the
