@@ -5819,6 +5819,18 @@ tier1:
 # no-DB shape, and the same docs-only PR is exactly the change that can drop or
 # contradict the declared policy.
 - test_extractor_v4_failure_policy.py
+# #5333 review (P1, twice): the SAME document's *G5's destructive half* guards now
+# live in `test_definite_description_backfill_5059.py` (`core` above) — three of
+# them read ONLY `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`: the
+# load-bearing share (§4.3's evidence bar), the `archived`-has-a-writer claim,
+# and the `_ALLOWED_TRANSITIONS` production-reader scan. `docs/` is in
+# NON_PYTHON_PREFIXES and this document matches no SOURCE_PATTERNS entry, so a
+# docs-only edit of the passage filters to `changed == []` and takes
+# `select()`'s early return — tier1 ONLY. Registered in `core` alone, those
+# guards were asleep on the one change that can re-invert them (`#4309`/
+# `#3332`/`#3616` silent-drop class, the exact shape the sibling rows above
+# record). `core` stays their home for the module-level guards.
+- test_definite_description_backfill_5059.py
 # #8496: the same document's G4 reconciliation guard (`core` above) — a fast,
 # no-DB file scan plus the scrub's marker/idempotence assertions, so a docs-only
 # PR runs it here.
