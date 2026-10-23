@@ -24307,6 +24307,11 @@ class TortoiseSDK:
           - an id naming NO node at all (#9262): the store statement matches
             zero rows, so reporting success would assert a prior that does not
             exist. Create the point first, or correct the id.
+        NOT refused: an id the engine's LABELLED equality cannot bind while a
+        ``:Point`` with it exists (an empty / whitespace-padded id). That path
+        keeps its historical no-op — it returns the dict and holds the prior in
+        memory only, writing nothing — because "no node with id" would be a
+        false diagnosis there (#9063). That residual is #9751.
         """
         if source not in BASELINE_SOURCE_TOKENS:
             raise ValueError(
@@ -24402,8 +24407,12 @@ class TortoiseSDK:
         # so the phantom died on restart and a run's belief state depended on
         # WHICH PROCESS set it (#1163's request-scoped SDK is that case). The
         # method's own contract is "Persists to graph immediately", so a write
-        # that bound no row is refused loudly and leaves no in-memory seat —
-        # exactly the rule the two branches below already follow.
+        # that bound no row is refused loudly and leaves no in-memory seat.
+        # ⛔ NOT universal, and stated as measured: the ONE zero-row write that is
+        # still a no-op is the id-RESOLUTION case below (``_unbindable``), where
+        # the probe DID find a ``:Point`` but the labelled equality cannot bind
+        # its id — that call returns the dict and KEEPS the in-memory seat, which
+        # is #9751's residual, deliberately outside this issue.
         if not written:
             labels: list[str] = []
             # #7853: id-anchored per-label probe — the indexes are
@@ -24431,7 +24440,8 @@ class TortoiseSDK:
             # ``_unbindable`` is the ONE thing that separates it from #9262's
             # case below (both leave ``labels`` empty): a node WAS found, so
             # "no node with id" would be a false diagnosis in the other
-            # direction. It must be captured before the reset.
+            # direction. It must be captured before the reset. Its phantom seat
+            # (the call returns the dict, the graph stores nothing) is #9751.
             _unbindable = bool(labels) and labels[0] in _CALIBRATION_GATED_LABELS
             if _unbindable:
                 labels = []
@@ -24963,8 +24973,23 @@ class TortoiseSDK:
                 "coalesce(n.baseline_system_default, false)",
                 params={"id": pid},
             ).result_set
-            bl_src, inherited_at, cur_a, cur_b, bl_set, decide_default = (
-                row[0] if row else (None, None, 1.0, 1.0, False, False))
+            # #9262: an id this loop CANNOT resolve is not a point to derive a
+            # baseline for, so skip it rather than call the writer with it.
+            # ``MATCH (n:Point {id:$id})`` is the same labelled equality
+            # ``set_point_baseline`` writes through, so an empty row means the
+            # write below cannot land EITHER: it would plant an in-memory prior
+            # the graph never stores (measured before this guard — an id-less
+            # hand-written Point, ``id IS NULL``, arrives here as ``pid=None``
+            # and left ``_evidence == {None: (5.0, 1.0)}``), and since #9262 it
+            # would also REFUSE and abort ``compute_confidence`` on a graph
+            # #9275 already handles. Nothing to store ⇒ nothing to believe.
+            # (The public writer keeps its own no-op for the same class —
+            # #9751 — because a CALLER naming such an id must be told the truth;
+            # an internal derivation over a graph it just read has nothing to
+            # tell.)
+            if not row:
+                continue
+            bl_src, inherited_at, cur_a, cur_b, bl_set, decide_default = row[0]
 
             # #2199/#844: an EXPLICIT ``set_point_baseline`` / system-default
             # baseline is FROZEN against source recomputation, and a legacy

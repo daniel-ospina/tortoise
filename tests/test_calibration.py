@@ -1264,6 +1264,35 @@ def test_set_point_baseline_refuses_an_id_that_names_no_node(sdk):
         params={"id": p["id"]}).result_set == [[True, 5.0]]
 
 
+def test_compute_confidence_survives_an_unaddressable_id(sdk):
+    """#9262: the refusal must not reach the INTERNAL derivation path.
+
+    ``_apply_source_inheritance`` derives a baseline for every point that has an
+    eligible source, and its key comes from a graph read — so a hand-written /
+    imported ``:Point`` with ``id IS NULL`` arrives as ``pid=None``. Before this
+    guard the derivation called ``set_point_baseline(None, …)``, which matched
+    no row: on ``origin/main`` that planted ``_evidence == {None: (5.0, 1.0)}``
+    and the run completed; with #9262's refusal alone it ABORTED
+    ``compute_confidence`` on a graph the repo otherwise handles (#9275).
+    Measured both directions — the guard makes it complete again, with no
+    phantom.
+    """
+    g = sdk._get_proj().g
+    g.query("CREATE (s:Source {url:'https://example.org/9262-idless', "
+            "credibilityTier:'T1', sourceKind:'web'})")
+    g.query("MATCH (s:Source {url:'https://example.org/9262-idless'}) "
+            "CREATE (n:Point {pointKind:'statement', status:'live', "
+            "content:'id-less claim'})-[:extractedFrom]->(s)")
+
+    result = sdk.compute_confidence(require_calibration=False)
+    assert result["converged"] is True
+    assert None not in sdk._evidence
+    # …and the derivation did not invent a baseline for it either.
+    assert g.query(
+        "MATCH (n:Point) WHERE n.id IS NULL "
+        "RETURN n.baseline_set").result_set == [[None]]
+
+
 def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
     """#9063: following the audit's advice must not loop back to the refusal.
 
