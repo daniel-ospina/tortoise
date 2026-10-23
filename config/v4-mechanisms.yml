@@ -253,8 +253,14 @@ mechanisms:
       38/77 = 49.4% on the flags-on arm against a 49/90 = 54.4% committed
       baseline (#5064 comment 2026-10-13, #7949 E2);
       (b) `_render_master_compact` — selected by the documented
-      `TORTOISE_EXTRACTOR_PROMPT=compact` opt-in — deliberately EXCLUDES the
-      carve-out with the other hint blocks, so one render path silently drops
-      the guarantee (#9775 owns that decision). A row marked `implemented`
+      `TORTOISE_EXTRACTOR_PROMPT=compact` opt-in — appends no
+      `STATE_VALUE_CARVE_OUT` at all: its own comment groups the carve-out with
+      the hint blocks the compact render excludes (it still emits a FILTERED
+      `MEMORY GRANULARITY` block — that is the one hint block it keeps), so one
+      render path silently drops the guarantee. ⚠️ The row records the OMISSION,
+      not a justification for it: whether the compact render is deliberately out
+      of the carve-out's scope is #9775's decision, and the code-side comment
+      that decision would need does not exist yet — do not read "deliberately"
+      into this row. A row marked `implemented`
       would make the prompt text read as the guarantee — the exact
       declared-implies-present defect this registry exists to catch.

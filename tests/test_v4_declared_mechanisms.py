@@ -139,14 +139,6 @@ ARCH_DOCS = ROOT / "docs" / "architecture"
 MARKER_TOKEN = "v4-mechanism:"
 MARKER_COMMENT = re.compile(r"^\s*v4-mechanism:\s*([a-z][a-z0-9_]*)\s*$")
 HTML_COMMENT = re.compile(r"<!--(.*?)-->", re.DOTALL)
-#: Code is not a declaration site. A design document legitimately SHOWS the
-#: marker syntax inside a fenced block or an inline code span when explaining the
-#: convention, and that must not read as a marker (review cycle 1, P2) — nor may
-#: it silently satisfy one. Both shapes are removed before the scan; a marker
-#: that only exists inside code then surfaces as an UNMARKED row, which is the
-#: fail-closed direction.
-FENCED_CODE = re.compile(r"^```.*?^```", re.DOTALL | re.MULTILINE)
-INLINE_CODE = re.compile(r"`[^`\n]*`")
 IMPLEMENTED = "implemented"
 NOT_IMPLEMENTED = "not-implemented"
 
@@ -222,15 +214,23 @@ def load_registry(path: Path = REGISTRY) -> dict:
 
 
 def _prose_only(text: str) -> str:
-    """The document with fenced blocks and inline code spans removed.
+    """The document as scanned for markers — deliberately NOT code-stripped.
 
-    Code is where a document SHOWS the marker syntax; it is not where a
-    declaration lives (:data:`FENCED_CODE`, :data:`INLINE_CODE`). Removal is
-    one-way on purpose — a marker that survives only inside code is invisible to
-    the scan, which surfaces it as an unmarked row (fail closed) rather than as a
-    declaration nobody meant.
+    An earlier revision removed fenced blocks and inline code spans first, and
+    that was a half-implemented markdown parser: `~~~` fences, indented code
+    blocks and double-backtick spans survived it, so a code-quoted marker was a
+    declaration in some shapes and not others (review cycle 2, P2). The rule is
+    now the TEXT, not the shape: a marker is an HTML comment naming an id, and it
+    counts wherever it appears, code block included — a declaration sitting in a
+    fenced example is still a declaration a reader of that document meets.
+
+    The cost is named rather than hidden: an EXAMPLE that is comment-shaped but
+    names no id (`<!-- v4-mechanism: <id> -->`) cannot be told from a neutered
+    marker, so it is reported. Write the convention down in
+    `config/v4-mechanisms.yml`, which is not scanned, and keep scanned design
+    documents to real declarations.
     """
-    return INLINE_CODE.sub("", FENCED_CODE.sub("", text))
+    return text
 
 
 def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]], list[str]]:
@@ -248,9 +248,10 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     than skipped — a malformed declaration is not an absent one, and treating it
     as absent is how a marker gets neutered by a typo. An UNTERMINATED comment
     opener is reported too, for the same reason. The token in ordinary PROSE is
-    deliberately not a declaration (see :data:`MARKER_COMMENT`). A missing
-    documents directory is reported: an unreadable surface is a verdict, not an
-    empty set (the same polarity as `_defined_names` returning ``None``).
+    not a declaration (see :func:`_prose_only` for where the line is drawn and
+    why it is drawn there rather than by parsing markdown). A missing documents
+    directory is reported: an unreadable surface is a verdict, not an empty set
+    (the same polarity as `_defined_names` returning ``None``).
 
     The second return value is the violation list, so one caller can report the
     malformed shapes and the membership verdicts together.
@@ -1002,14 +1003,45 @@ def test_membership_fails_closed_on_a_placeholder_id(tmp_path) -> None:
 
 
 def test_membership_ignores_the_token_in_prose(tmp_path) -> None:
-    """Documenting the convention must not be reported as a declaration."""
+    """Documenting the token must not be reported as a declaration."""
     docs = _docs(
         tmp_path,
-        a__md="Write a marker as `<!-- v4-mechanism: <id> -->` beside the claim;\n"
-        "the `v4-mechanism:` token alone is not a declaration.\n"
+        a__md="Markers use the `v4-mechanism:` token, documented in the registry;\n"
+        "the token alone is not a declaration.\n"
         "<!-- v4-mechanism: x -->\n",
     )
     assert membership_errors([_row("x")], docs) == []
+
+
+def test_a_marker_inside_a_code_block_still_counts(tmp_path) -> None:
+    """Shape is not parsed: a comment-shaped marker is a declaration anywhere.
+
+    The alternative — stripping fenced/inline code — was a half-implemented
+    markdown parser (review cycle 2, P2): `~~~` fences, indented blocks and
+    double-backtick spans survived it, so the same marker counted in some code
+    shapes and not others. Counting the text uniformly is the rule; the
+    consequence (a comment-shaped EXAMPLE must not be written into a scanned
+    doc — put it in the registry) is stated in `_prose_only`.
+    """
+    docs = _docs(tmp_path, a__md="```\n<!-- v4-mechanism: x -->\n```\n")
+    assert membership_errors([_row("x")], docs) == []
+
+
+def test_membership_reds_on_a_row_citing_a_document_that_does_not_exist(tmp_path) -> None:
+    """`membership_errors` is the membership half; `gate_errors` owns paths.
+
+    Pinned as the PAIR, because reading `membership_errors` alone on a row that
+    cites a renamed document returns clean — it is still declared in ONE
+    document. The gate as a whole must red, or a renamed declaring document
+    becomes registry rot (review cycle 2, P2; `_path_violations` is the half
+    that catches it).
+    """
+    _docs(tmp_path, a__md="a <!-- v4-mechanism: x -->\n")
+    row = _row("x")
+    row["declared_in"] = ["docs/architecture/renamed-away.md"]
+    errors = gate_errors([row], tmp_path)
+    assert any("declared path does not exist" in e for e in errors), errors
+
 
 
 def test_membership_fails_closed_on_an_unterminated_comment(tmp_path) -> None:

@@ -2871,13 +2871,17 @@ surfaces:
   # SHARED_MODULE, so an sdk.py-only change already runs the full matrix.
   - test_capture_validfrom_3945.py
   # #5064: the declared-mechanism gate. `core` is its classification home and
-  # the lane for a code diff; `tier1` is REQUIRED because the gate's subject is
-  # now half DOCUMENT — `membership_errors()` reads the
-  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/*.md`, and
-  # `docs/` is in NON_PYTHON_PREFIXES, so a docs-only diff takes `select()`'s
-  # early return and would delete or rename a marker with this gate absent (the
-  # #5092 class, and every sibling v4 doc-subject guard is dual-registered for
-  # exactly this reason).
+  # the lane for a code diff; `tier1` is REQUIRED because half the gate's subject
+  # is now DOCUMENT — `membership_errors()` reads the
+  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/*.md` — and this
+  # file is in NEITHER named surface a docs-only diff can select. `docs/` is in
+  # NON_PYTHON_PREFIXES, so the mechanism differs by document: an
+  # EXTRACTOR-V4-ARCHITECTURE.md-only diff takes `select()`'s early return
+  # (`surfaces=[]`, 60 files) while a STORAGE-ARCHITECTURE.md-only diff is
+  # claimed by the `onboarding` SOURCE_PATTERNS entry (`surfaces=['onboarding']`,
+  # 131 files) — neither selects `core`. Measured for both: the gate is selected
+  # only once this `tier1` row exists, which is the same placement every sibling
+  # v4 doc-subject guard uses (#5092).
   - test_v4_declared_mechanisms.py
   # #4495: `pricing.allowance_reachability` — cap vs allowance quantised at the
   # node boundary — lives in tortoise/pricing.py, which matches no SOURCE_PATTERNS
@@ -3458,7 +3462,8 @@ surfaces:
   # `docs/architecture/STORAGE-ARCHITECTURE.md`-only diff does NOT take
   # `select()`'s early return — that path is claimed by the `onboarding`
   # `SOURCE_PATTERNS` entry, so `select()` returns `surfaces=['onboarding'],
-  # full=False, 121 files` — re-derive it after any `tier1` addition (this change added one); a `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`-only
+  # full=False, 131 files` — re-derive it after any `tier1` addition (#5064 added
+  # one, which is why this figure moved from 121); a `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md`-only
   # diff DOES take the early return (`surfaces=[]`). The guard is selected in
   # both cases (measured: `guard_selected=True` for either doc), which is the
   # property that matters — `tier1` is unconditional in the tier-2 selection and
