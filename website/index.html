@@ -64,18 +64,18 @@
     .beat.pe-on { pointer-events: auto; }
 
     /* Interactive beats: the fixed full-screen overlays must never swallow
-       clicks when invisible — only their interactive children get pointer
-       events (#744). Beats without interactive children inherit
-       pointer-events: none from .beat. */
+       clicks when invisible — and must not leave a HIT TARGET behind either.
+       `opacity: 0` does NOT affect hit-testing, so an always-on child rule
+       (`#beat-tortoise a`, an injectable form) lets a click on the hero screen
+       follow the closing pitch's "Learn More" link to the product site, or
+       focus an invisible email field (#744; #881 is the same fix on
+       website/product.html). Hit-testing therefore follows VISIBILITY for the
+       beat and for everything inside it — `pointer-events` inherits, so no
+       per-child rule is needed. `#beat-cta { pointer-events: none }` stays as
+       the explicit default and `#beat-cta.pe-on` re-enables it, because an id
+       selector out-ranks `.beat.pe-on`. */
     #beat-cta { pointer-events: none; }
-    /* The label is interactive: `for="waitlist-email"` makes a click on it
-       focus the field, so it needs pointer events like the form itself. */
-    #beat-cta form, #beat-cta a, #beat-cta button, #beat-cta .cta-label { pointer-events: auto; }
-    /* …and the beat ITSELF while visible (an id selector out-ranks
-       `.beat.pe-on`, so without this the short-viewport scroll box below can
-       only be entered over one of those controls). */
     #beat-cta.pe-on { pointer-events: auto; }
-    #beat-tortoise a { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
 
