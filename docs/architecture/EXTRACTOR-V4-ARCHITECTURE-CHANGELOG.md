@@ -765,9 +765,8 @@ SIXTEEN, the rule was stated (*a door is one independently callable entry point 
 method, or a served REST route — counted once per site that reaches it* — ⚠️ a rule since RETRACTED: it yields
 cell occurrences, not distinct doors), and `test_the_stated_door_count_matches_the_table` derived the total and
 the per-kind breakdown (then nine MCP tools, five SDK methods, two REST routes) from the reach cells and
-asserted it in BOTH documents. ⚠️ These figures are SUPERSEDED — the census now carries THIRTY-SEVEN rows /
-NINETEEN customer-callable sites / TWENTY-TWO doors, and the present counts live in §13.8 and §13 of the two
-design documents. Measured before the
+asserted it in BOTH documents. ⚠️ These figures are SUPERSEDED — the census carries whatever §13's table states, so the present counts live in §13.8 and §13 of the two
+design documents and are never restated here. Measured before the
 fix: rewriting the figure to `four` here, or `TEN` in the sibling, left all ten tests green.
 
 ## §13.8 question 2 — the count moves to SEVENTEEN sites / TWENTY doors, because the ALL-EDGE class was still a hand pass (2026-10-21, `#7948`)
@@ -821,7 +820,8 @@ the remaining untyped walks, and deleting a constraint reds
 `test_no_untyped_walk_lacks_a_row_or_a_stated_exclusion`. **Nothing in this class is out by silence any more.**
 
 **Counts.** §13, §13's blast-radius sentence, §13.6 and §13.8 stated, AT THAT PASS, THIRTY-THREE read sites, SEVENTEEN
-customer-callable, TWENTY doors — ten MCP tools, six SDK methods and four REST routes. ⚠️ **SUPERSEDED** — the table carries THIRTY-SEVEN / NINETEEN / TWENTY-TWO today; §13 is the authority, so do not re-read these as current. (`POST /v1/backups` and
+customer-callable, TWENTY doors — ten MCP tools, six SDK methods and four REST routes. ⚠️ **SUPERSEDED** — §13 is the authority and states the table's current rows and counts — deliberately not restated here, so
+do not re-read these as current. (`POST /v1/backups` and
 `POST /v1/backups/restore` are new; `backfill_v25` / `tortoise_backfill_v25` are new) — every figure derived
 from the reach cells by the guard, never hand-counted. §13.8's enumeration names all seventeen, and
 `test_the_extractor_document_agrees_on_the_count` holds it there in both directions. The ruling is unchanged:

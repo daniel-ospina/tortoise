@@ -1,0 +1,57 @@
+name: postgres-provision
+description: >-
+  Start a throwaway Postgres on an EPHEMERAL host port (#9551) and export
+  `TEST_RECORD_DB_URI` for it. Use INSTEAD of a `services:` block, and pair it
+  with the matching `.github/actions/postgres-teardown` step at the END of the
+  job (`if: always()`). WHY (#6673): every self-hosted runner on this host
+  shares ONE Docker daemon, so a fixed `5432:5432` host port is a single global
+  namespace — two overlapping services jobs make the second container's
+  `docker start` die ("Bind for 0.0.0.0:5432 failed: port is already
+  allocated"), which aborts the RUNNER in its `initialize_containers` pre-step
+  and turns the job into a FALSE RED with zero tests run. An ephemeral port
+  cannot collide, so N runners can provision at once. `python-ci.yml` may not
+  carry a `services:` block at all — `tests/test_runner_ports_6673.py` pins it.
+inputs:
+  image:
+    description: >-
+      Postgres image (each caller keeps its own pin). Resolved through the
+      pull-through mirror first, falling back to the upstream reference — the
+      service is pulled once per runner host and then cached on the shared
+      daemon, and a Docker Hub reference alone is rate-limited per egress IP
+      across the whole fleet (#7867).
+    required: false
+    default: postgres:16
+  health_timeout:
+    description: >-
+      Seconds to wait for the server to accept an AUTHENTICATED TCP connection
+      as the exported role/database. This does NOT bound the image pull (that is
+      resolved before any container starts, in provision.sh) — a cold pull is
+      bounded only by the step/job `timeout-minutes`.
+    required: false
+    default: "60"
+  database:
+    description: Database name (plain identifier; it is written into the URI).
+    required: false
+    default: record
+  username:
+    description: Role name (plain identifier; it is written into the URI).
+    required: false
+    default: record
+  password:
+    description: >-
+      Throwaway role password. Loopback-only, torn down with the container —
+      never a credential, and never a value a real deployment reads.
+    required: false
+    default: record
+runs:
+  using: composite
+  steps:
+    - name: Start Postgres on an ephemeral host port (#9551)
+      shell: bash
+      env:
+        POSTGRES_IMAGE: ${{ inputs.image }}
+        POSTGRES_HEALTH_TIMEOUT: ${{ inputs.health_timeout }}
+        POSTGRES_DB_NAME: ${{ inputs.database }}
+        POSTGRES_DB_USER: ${{ inputs.username }}
+        POSTGRES_DB_PASSWORD: ${{ inputs.password }}
+      run: bash ${{ github.action_path }}/provision.sh

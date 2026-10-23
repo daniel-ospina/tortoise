@@ -787,6 +787,184 @@ def _cmd_record_reconcile(args):
     return exit_code_for(result)
 
 
+def _cmd_record_restore(args):
+    """#9556 / R8 — the record-sourced RESTORE: rebuild a lost cache from the record.
+
+    ``rebuild_from_record`` is the seam (record → cache) and it had **no CLI
+    verb and no production caller** (measured for #9556: 0 non-test call
+    sites), so *"the graph is gone, restore it"* had no operator answer. This
+    verb is that answer; the composition and its four refusals live in
+    :mod:`tortoise.record_restore`, and the runbook section is
+    ``docs/infra-runbook.md`` §9.
+
+    Exit codes, because an operator's next step keys on them:
+      ``0`` restored · ``3`` REFUSED before any write, nothing written (empty
+      source, the cache's L2 destructive-op guard) · ``2`` no verdict — a
+      DSN/usage problem, an unreadable record or cache, **or a failure once the
+      rebuild has started** (a wipe that put nothing back lands here: the cache
+      is LOST, not untouched). ``2``'s caveat is ``record-reconcile``'s,
+      inherited verbatim: argparse's own ``error()`` also exits ``2``, so ``2``
+      means only *no verdict was produced*.
+
+    ⛔ ``--cache-graph`` is REQUIRED, with no derived default, for the reason
+    ``record-reconcile`` requires it — and the consequence here is worse than a
+    wrong verdict: a wrong guess opens an EMPTY graph, so the run would report
+    a restore into a graph nobody reads while the operator's real graph stayed
+    destroyed. That is why the pre-wipe node count is reported too, and why the
+    counts the verb prints are read back off the cache after the rebuild
+    (``record_restore``): a number the code did not measure is a claim, not a
+    restore.
+
+    ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
+    on the record, ``CACHE_READ_TIMEOUT_MS`` on the pre-wipe count — the same
+    constant ``record-reconcile`` bounds the same full-graph read with): an
+    operator's restore must not hang with no output.
+
+    ⛔ No storage allowance is consulted (G5 on #9556): #9559's byte gate must
+    exempt this lane, because the billing path must never be able to defeat the
+    durability path mid-rebuild.
+    """
+    import json as _json
+
+    from tortoise.cache_projection import read_record_view
+    from tortoise.record_reconcile import (
+        RECORD_CONNECT_TIMEOUT_S,
+        RECORD_STATEMENT_TIMEOUT_MS,
+    )
+    from tortoise.record_restore import (
+        EXIT_REFUSED,
+        EXIT_RESTORED,
+        EXIT_UNAVAILABLE,
+        RestoreRefused,
+        RestoreUnavailable,
+        log_result,
+        refuse_unrestorable_source,
+        restore_from_record_view,
+    )
+
+    # The DSN is resolved by the module that DECLARES the arming surface, so a
+    # rename cannot silently disarm this verb while `RecordWriter` stays armed,
+    # and a non-Postgres value is the MISCONFIGURATION it is rather than an
+    # unreadable record (an outage).
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    try:
+        dsn = record_dsn(args.record_dsn)
+    except RecordWriteError as e:
+        print(f"Error: {e} — nothing was restored, and the cache's state is "
+              f"UNCHANGED.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn or set "
+              "TORTOISE_RECORD_DSN. Nothing was restored: this verb cannot "
+              "tell an empty record from an unarmed one, so it reports "
+              "neither. The cache's state is UNCHANGED.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    # Usage-shaped refusals come BEFORE the optional-dependency check: an
+    # operator who forgot `--cache-graph` must not be told to install an extra
+    # first (measured — that ordering answered a missing flag with "psycopg2 is
+    # not installed" on a lane without the `postgres` extra).
+    if not args.cache_graph:
+        print(
+            "Error: --cache-graph is required — the cache graph's name is not "
+            "the record's --graph scope. This tree names it org_<org_id> (the "
+            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
+            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
+            "this run would report a restore into a graph nobody reads while "
+            "the real graph stayed destroyed. Nothing was restored.",
+            file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if args.limit is not None and args.limit < 1:
+        print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
+              f"cache and writes nothing, so it is refused before any write. "
+              f"Nothing was restored.",
+              file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    try:
+        import psycopg2
+    except ImportError:
+        print("Error: psycopg2 is not installed — the record cannot be read, "
+              "so nothing was restored and the cache's state is UNCHANGED. "
+              "Install the `postgres` extra.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    from tortoise.projection import FalkorProjection
+
+    conn = None
+    proj = None
+    try:
+        try:
+            conn = psycopg2.connect(
+                dsn,
+                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
+                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
+            )
+            view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except Exception as e:
+            raise RestoreUnavailable(
+                f"the record is unreadable ({type(e).__name__}) — nothing was "
+                f"restored and the cache's state is UNCHANGED") from e
+
+        # The SOURCE-side refusals run BEFORE the target graph is opened: a
+        # projection's construction MERGEs its own `:Meta {key:'point_fts_v2'}`
+        # bookkeeping marker, which CREATES a mistyped graph — and a mistyped
+        # scope is the commonest empty source, i.e. exactly the case where
+        # touching the named graph is worst (`refuse_unrestorable_source`).
+        refuse_unrestorable_source(
+            view, org_id=args.org, graph_id=args.graph,
+            cache_graph=args.cache_graph, allow_empty=bool(args.allow_empty),
+            limit=args.limit)
+
+        try:
+            proj = FalkorProjection.from_uri(args.db,
+                                             graph_name=args.cache_graph)
+        except Exception as e:
+            raise RestoreUnavailable(
+                f"cache {args.cache_graph!r} could not be opened "
+                f"({type(e).__name__}) — nothing was restored") from e
+
+        outcome = restore_from_record_view(
+            view,
+            org_id=args.org,
+            graph_id=args.graph,
+            cache_graph=args.cache_graph,
+            project=proj,
+            allow_empty=bool(args.allow_empty),
+            limit=args.limit,
+        )
+    except RestoreRefused as e:
+        print(f"Restore REFUSED: {e}", file=sys.stderr)
+        # ⚠️ "REFUSED" is about the RESTORE, not about the database. The
+        # source-side refusals are now raised before the target graph is
+        # opened, but the L2 refusal is asked OF a projection (the one owner of
+        # the name rule), and opening one MERGEs its `:Meta` marker. Saying
+        # "nothing was written" unqualified would be false in exactly the case
+        # an operator is reading this line (recorded on #9556's review).
+        print("  No row of the record's state was written to the cache. The "
+              "target graph may have been CREATED by opening it, with its own "
+              "`:Meta` bookkeeping marker — that is the projection, not a "
+              "restore.", file=sys.stderr)
+        return EXIT_REFUSED
+    except RestoreUnavailable as e:
+        print(f"Restore UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    finally:
+        # The verb OWNS both handles (the `record-reconcile` rule): an operator
+        # command that leaks a connection per run is a slow outage.
+        if proj is not None:
+            proj.close()
+        if conn is not None:
+            conn.close()
+
+    line = log_result(outcome)
+    if args.json:
+        print(_json.dumps(outcome.as_dict(), indent=2, sort_keys=True))
+    else:
+        print(f"\u2713 {line}")
+    return EXIT_RESTORED
+
+
 def _cmd_init(args):
     """Auto-detect FalkorDB and create default graph — onboarding."""
     import json as _json  # noqa: I001
@@ -8578,8 +8756,21 @@ def _cmd_pack_validate(args) -> int:
     """tortoise pack validate <dir> — schema + cross-pack validation.
 
     Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
-    the validator is the single source of truth). Exit 0 clean, 1 errors.
+    the validator is the single source of truth). Exit 0 clean, 1 otherwise.
     Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+
+    The verdict reads BOTH registry buckets, because they answer the same
+    question from two sides and only one of them used to reach the exit code:
+    `reg.errors` (a typo → the pack is ISOLATED) and `reg.unresolved_refs` (a
+    missing PEER → the pack stays loaded and its references into the absent
+    pack do not resolve, #2781). Reading only `errors` printed `✓ Clean` and
+    exited 0 for a catalog whose declared `depends_on` was not installed
+    (#9663) — the same false green, one bucket over. A pack whose declared
+    dependency is absent is not clean: it is *loaded but unresolved*, and the
+    references it declares into that pack do not resolve. This also matches the
+    hosted install gate (`pack_manifest_store.validate_manifest` refuses exactly
+    these refs), so the local and hosted gates cannot disagree in the fail-open
+    direction.
 
     #2766: also prints the per-relation write-path verdict
     (writable | declaration-only | predicate-not-in-allowlist) from the one
@@ -8599,10 +8790,52 @@ def _cmd_pack_validate(args) -> int:
         return 1
     reg = PackRegistry(packs_dir)
     reg.load_all()
-    errors: dict[str, list[str]] = {}
-    for ns, errs in reg.errors.items():
-        if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
-            errors[ns] = errs
+    # The registry keys `errors` by the MANIFEST's namespace, which is NOT the
+    # pack's directory name: `packs/project-management` declares `pm`,
+    # `packs/investment-portfolio-manager` declares `portfolio`. Keying this
+    # filter on the directory name silently dropped every error for such a pack
+    # — it printed "✓ Clean" and exited 0 while the registry had ISOLATED the
+    # pack (#9663: measured on `packs/investment-portfolio-manager` with a
+    # `nearMisses` typo — one isolation, zero printed errors, exit 0). Match
+    # BOTH the declared namespace and the directory name, so a manifest too
+    # broken to yield a namespace (keyed by directory name) is still reported.
+    target_manifest = target / "manifest.yaml"
+
+    def _scope(found: dict[str, list[str]],
+               keys: set[str]) -> dict[str, list[str]]:
+        """The registry's per-namespace bucket, scoped to the requested pack.
+
+        Both spellings are checked because the registry keys a diagnostic by
+        whatever it KNOWS: a pack it loaded by its MANIFEST namespace, a
+        manifest too broken to yield one by its DIRECTORY name. Nothing else
+        is the caller's business — a SIBLING's gap must not become this pack's
+        verdict (`errors` always had that false red; `unresolved_refs` only
+        inherited it once it reached the exit code, #9663).
+        """
+        return {ns: msgs for ns, msgs in found.items() if ns in keys}
+
+    if not target_manifest.exists():
+        # No manifest at the target means a `packs/` DIRECTORY was passed: the
+        # "validate every pack" mode, where there is no single pack to scope
+        # to. The old filter ran here too and hid every namespace whose
+        # directory name differs (`pm`, `portfolio`) — the same false green one
+        # level up (#9663 review), so this leg reports the registry verbatim.
+        errors: dict[str, list[str]] = dict(reg.errors)
+        unresolved: dict[str, list[str]] = dict(reg.unresolved_refs)
+    else:
+        target_keys = {target.name}
+        import yaml
+        try:
+            declared = yaml.safe_load(target_manifest.read_text()) or {}
+        except Exception:  # noqa: BLE001, RUF100 — unparseable ⇒ keyed by dir
+            declared = {}
+        declared_ns = declared.get("namespace") if isinstance(declared, dict) else None
+        if isinstance(declared_ns, str) and declared_ns.strip():
+            target_keys.add(declared_ns.strip())
+        errors = _scope(reg.errors, target_keys)
+        # Same scoping for the missing-peer bucket: it is keyed by the LOADED
+        # pack's namespace, and `target_keys` already carries the declared one.
+        unresolved = _scope(reg.unresolved_refs, target_keys)
     # #2766: the per-relation write-path verdict, from the ONE resolver pack
     # load warns with — so `validate` cannot report a relation as bound to a
     # path its own declaration does not bind. Enumerated from the registry
@@ -8625,13 +8858,19 @@ def _cmd_pack_validate(args) -> int:
     for rel in relations:
         verdict_counts[rel["write_verdict"]] = (
             verdict_counts.get(rel["write_verdict"], 0) + 1)
-    ok = not errors
+    n_errors = sum(len(v) for v in errors.values())
+    n_unresolved = sum(len(v) for v in unresolved.values())
+    # An unresolved reference is NOT clean: the pack loaded, but what it
+    # declares does not resolve, so `✓ Clean` over it is a claim the registry's
+    # own data contradicts (#9663).
+    ok = not errors and not n_unresolved
     if getattr(args, "json", False):
         print(_json.dumps({
             "ok": ok,
             "packs_dir": str(packs_dir),
             "loaded": sorted(reg.packs),
             "errors": errors,
+            "unresolved_refs": unresolved,
             "relation_verdicts": {
                 "counts": verdict_counts,
                 "relations": relations,
@@ -8645,6 +8884,16 @@ def _cmd_pack_validate(args) -> int:
             print(f"  ✗ {ns}:")
             for e in errs:
                 print(f"      {e}")
+        if unresolved:
+            # Distinct from the isolated-pack section above: these packs are
+            # LOADED, and the diagnostic names the pack that is missing. Kept
+            # separate so "installed but incomplete" is never read as "typo".
+            print("  ⚠ unresolved references — the pack is loaded, the peer it "
+                  "names is not:")
+            for ns, msgs in sorted(unresolved.items()):
+                print(f"    {ns}:")
+                for m in msgs:
+                    print(f"      {m}")
         if relations:
             print("  relation write verdicts:")
             for rel in sorted(relations, key=lambda r: (r["pack"], r["predicate"])):
@@ -8655,7 +8904,11 @@ def _cmd_pack_validate(args) -> int:
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
-            print(f"✗ {sum(len(v) for v in errors.values())} error(s)")
+            if n_errors:
+                print(f"✗ {n_errors} error(s)")
+            if n_unresolved:
+                print(f"✗ {n_unresolved} unresolved reference(s) — a declared "
+                      f"or referenced pack is not installed")
     return 0 if ok else 1
 
 
@@ -11233,6 +11486,48 @@ def main(argv: list[str] | None = None) -> int:
                          "— it never returns a partial answer")
     rr.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
+    # #9556 / R8: the record → cache RESTORE. A sibling of `record-reconcile`
+    # and deliberately NOT a `--from-record` flag on `rebuild`: `rebuild`'s
+    # `--dir` is the journal the replay reads, so a flag that silently makes it
+    # meaningless would make the two SOURCES indistinguishable on the one
+    # command that destroys a graph. The exit codes are the operator's next
+    # step (0 restored / 3 refused, nothing written / 2 no verdict) and the
+    # composition is `tortoise/record_restore.py`.
+    rr2 = sp.add_parser(
+        "record-restore",
+        help="Restore a lost cache graph from the Postgres record (R8) — the "
+             "record-sourced sibling of `rebuild`. Exit 0 restored / 3 "
+             "refused (nothing written) / 2 no verdict")
+    rr2.add_argument("--db", required=True,
+                     help="Cache target: FalkorDB docker:// URI")
+    rr2.add_argument("--record-dsn", default=None,
+                     help="Postgres record DSN (default: $TORTOISE_RECORD_DSN)")
+    rr2.add_argument("--org", required=True, help="Record org_id (the scope)")
+    rr2.add_argument("--graph", required=True,
+                     help="Record graph_id (the scope)")
+    rr2.add_argument("--cache-graph", default=None,
+                     help="Cache graph to RESTORE — REQUIRED in practice (the "
+                          "verb refuses without it, exit 2). NOT the record's "
+                          "--graph scope: this tree names it org_<org_id> or "
+                          "org_<org_id>_<graph_id>. No default is derived — a "
+                          "wrong guess opens an EMPTY graph and the run would "
+                          "report a restore into a graph nobody reads")
+    rr2.add_argument("--limit", type=int, default=None,
+                     help="Write at most N nodes (N >= 1). A bounded run is "
+                          "`bounded`, NOT necessarily partial: a bound at or "
+                          "above the record's node count covers every key the "
+                          "plan could write and declares coverage=complete "
+                          "(a record row the cache cannot address makes it "
+                          "partial at any bound). Read `unwritten_keys` / "
+                          "`relations_not_written` (reported as "
+                          "`declared_partial`), not the flag or the bound")
+    rr2.add_argument("--allow-empty", action="store_true",
+                     help="DANGER: proceed when the record holds NO rows for "
+                          "this scope. Without it an empty source is REFUSED "
+                          "(exit 3) because such a run wipes the cache and "
+                          "puts nothing back")
+    rr2.add_argument("--json", action="store_true",
+                     help="Machine-readable JSON output")
     bk = sp.add_parser("backup", help="Backup events.jsonl + FalkorDB to timestamped dir")
     bk.add_argument("--db", required=True, help="Path to database file")
     bk.add_argument("--events", default="events.jsonl", help="Path to event log")
@@ -11822,6 +12117,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reconcile(args)
     elif args.cmd == "record-reconcile":
         return _cmd_record_reconcile(args)
+    elif args.cmd == "record-restore":
+        return _cmd_record_restore(args)
     elif args.cmd == "backfill":
         _cmd_backfill(args)
         return 0
