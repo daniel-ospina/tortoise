@@ -105,6 +105,7 @@ TIMESTAMPTZ_COLUMNS: set[tuple[str, str]] = {
     ("blog_admins", "created_at"),
     ("blog_agent_keys", "created_at"),
     ("blog_posts", "created_at"),
+    ("blog_posts", "indexnow_submitted_at"),
     ("blog_posts", "published_at"),
     ("blog_posts", "reviewed_at"),
     ("blog_posts", "updated_at"),

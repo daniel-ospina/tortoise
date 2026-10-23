@@ -1,0 +1,94 @@
+# 01 — the DEPLOYED surface (api.premiselabs.co), measured 2026-10-22T21:00:38Z
+# #2208 lesson (comment on capstone #2008): verify PRODUCTION, not main.
+
+### GET /v1/version
+{"version":"0.2.0","commit_sha":"81f5594dce7ca6f68c9e0cf484a4caec8ab1032e"}
+HTTP 200
+
+### GET /health
+{"status":"ok","db":{"ok":true,"observed":true,"latency_ms":2.5,"error":null},"probe":{"in_flight":false,"in_flight_s":null,"result_age_s":5.05,"supersedes":0},"loop_stale_ms":60.9,"backup_watcher":{"state":"running","ok":true,"error":null,"expected":true},"change_feed":{"degraded":false,"feeds":0,"stages":[],"error":null}}
+HTTP 200
+
+### GET /.well-known/oauth-protected-resource/mcp   (step 4: what the connector is told the resource is)
+{"resource":"https://api.premiselabs.co/mcp","authorization_servers":["https://api.premiselabs.co"],"scopes_supported":["mcp"],"bearer_methods_supported":["header"]}
+HTTP 200
+
+### GET /.well-known/oauth-authorization-server/mcp   (step 4: DCR + authorize + token + PKCE S256)
+{"issuer":"https://api.premiselabs.co","authorization_endpoint":"https://api.premiselabs.co/oauth/authorize","token_endpoint":"https://api.premiselabs.co/oauth/token","registration_endpoint":"https://api.premiselabs.co/register","revocation_endpoint":"https://api.premiselabs.co/oauth/revoke","response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["none","client_secret_post"],"client_id_metadata_document_supported":true,"code_challenge_methods_supported":["S256"],"scopes_supported":["mcp","offline_access"]}
+HTTP 200
+
+### POST /mcp with no credential   (step 6/7 precondition: an unauthenticated call is CHALLENGED, not served)
+HTTP/2 401 
+date: Thu, 22 Oct 2026 21:00:39 GMT
+server: Fly/bde84f08e (2026-10-22)
+www-authenticate: Bearer resource_metadata="https://api.premiselabs.co/.well-known/oauth-protected-resource/mcp"
+content-length: 217
+content-type: application/json
+strict-transport-security: max-age=31536000; includeSubDomains
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+via: 2 fly.io
+fly-request-id: 01M5JPMZ7C5J44VJG3W5ZRTCX2-iad
+
+
+
+### step 3's LIVE door — GET https://tortoise.premiselabs.co/docs  (the only ChatGPT surface; #4836)
+
+HTTP 200
+--- the ChatGPT section as SERVED (extracted) ---
+id="chatgpt">ChatGPT (Developer mode) Connect it once — ChatGPT is key-less, so there is no config file to edit and no key to store: Enable Developer mode : chatgpt.com → Settings → Security and login → Developer mode (Plus / Pro / Business / Enterprise / Education). Open chatgpt.com/plugins → the + button → create a Developer-mode app. MCP server URL: https://api.premiselabs.co/mcp — no API key. Use the URL exactly as written, with no trailing slash. Choose OAuth ; ChatGPT discovers Tortoise's authorization server automatically. Click Scan Tools , sign in to Tortoise when prompted, and click Authorize . When Tortoise asks which organization to connect, choose the one you want this graph in. Start a new chat at chatgpt.com (if the Tortoise tools don't appear, re-open chatgpt.com/plugins and re-check the Scan Tools result). Open app.premiselabs.co/skills/tortoise-onboarding/SKILL.md in a browser, copy the whole document, and paste it into that chat — ChatGPT has no local skills, so this document is what onboards it (if the agent can open the link itself, that works too). Ask it to set up Tortoise: it follows those instructions to verify the connection and file your first memory — th
+
+### step 6's LIVE pointer document — GET https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md  (the doc the human pastes; ChatGPT has no skills)
+
+HTTP 200
+--- first 30 lines as served ---
+---
+name: tortoise-onboarding
+description: "Install and connect Tortoise for your agent — self-adjudicate your harness (Claude Code / Cursor / Codex / Pi = self-install; Claude Desktop / Claude Web = teach-human), write the MCP config, verify with tortoise_health, checkpoint harness-connected, and reach the decide protocol without any local skill file. Self-hosted: Docker-first install (Compose daemon + FalkorDB sidecar); embedded is the eval-only fallback. Successor to AGENT_ONBOARDING.md (archived)."
+domain: capability
+type: Workflow
+status: live
+tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
+summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
+created: 2026-09-02
+updated: 2026-10-14
+allowed-tools: read write bash
+---
+
+> ⛔ **This is the single live onboarding script.** `AGENT_ONBOARDING.md` and its deployed copies are ARCHIVED under `tortoise/onboarding/archive/` (M8, epic #1976) — never create a second live onboarding script. Edit THIS file; the deployed mirror (`website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md`) is byte-identical by test.
+>
+> **#4365 — delivered as INSTRUCTIONS, never installed as a skill.** Onboarding is a
+> one-time setup FLOW, not a reusable capability, so this document is READ — at the
+> served URL (`https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md`),
+> printed by `tortoise init` as `onboarding_prompt_url`, or named by the dashboard's
+> connect command — and is never copied into a harness's skills namespace. The skill
+> installer ships the three reusable capabilities only (`how-to-use-tortoise`,
+> `tortoise-decide`, `tortoise-file-finding`); reach across all six harnesses comes
+> from reading this document, not from a local install.
+
+# Tortoise Onboarding — install and connect your agent
+
+Successor to the archived `AGENT_ONBOARDING.md` question flow. Instead of a
+paste-the-prompt Q&A, onboarding is now: **read state → pick your harness →
+install/connect (self-hosted: Docker Compose first — §3a) → verify →
+checkpoint → (later) seed + decide**. The dashboard wizard
+--- tool calls the document names ---
+  11 tortoise_health
+   9 tortoise_manage_sources
+   6 tortoise_onboarding_state
+   3 tortoise_create_point
+   3 tortoise_
+   2 tortoise_onboarding_github_connect
+   2 tortoise_compute_confidence
+   1 tortoise_overview
+   1 tortoise_onboarding_github_status
+   1 tortoise_mitigate_operator
+   1 tortoise_file_decision
+   1 tortoise_create_operator
+   1 tortoise_check_structure
+   1 tortoise_calibrate_summary
+   1 tortoise_annotate_operator
+--- does it name load_skill? ---
+0
+0 occurrences

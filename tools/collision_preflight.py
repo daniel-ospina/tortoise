@@ -374,9 +374,16 @@ Exit codes
                         the REST rescue, which reads one page at GitHub's
                         maximum and has no setting to widen — the report says
                         which kind it measured), or the
-                        FLEET BOARD could not answer the claim gate —
-                        unreadable, unrebuildable,
-                        or an ambiguous attribution (remedy: rebuild the board,
+                        FLEET BOARD could not answer the claim gate — its LANE
+                        ROSTER is ABSENT (remedy: PROVISION it with one row per
+                        live lane, a CELL step; `fleet_state.py build` builds
+                        the board FROM that file, so a rebuild fails on the SAME
+                        read), or the roster is PRESENT but unreadable (remedy:
+                        FIX THE FILE — a rebuild cannot help, it fails on the
+                        same read), or its read recorded NO CAUSE (remedy: start
+                        from the FILE itself; `fleet_state.py build` cannot
+                        create or repair it), or the board is unreadable / the
+                        attribution is ambiguous (remedy: rebuild the board,
                         `uv run python tools/fleet_state.py build`). A surface
                         that can never
                         produce a blocking hit is EXEMPT and its failure is only
@@ -715,6 +722,38 @@ class NotAWorkItem(Exception):
     """
 
 
+class BoardRefusal(str):
+    """The board's refusal SENTENCE, carrying the RECORDED CAUSE as data (#9392
+    review P2).
+
+    ⛔ A REFUSAL THAT NAMES A CAUSE MUST CARRY IT, NOT SPELL IT. `_board_can_answer`
+    composes a sentence that embeds `reconciliation.registry_error` and ends with
+    the sentence `fleet_state.registry_remedy(raw)` derived FROM it; the exit-2
+    remedy then handed that whole sentence BACK to `registry_remedy`, so the note
+    (never empty) always looked like a cause: the helper's "no cause recorded" arm
+    was unreachable and the line asserted "the roster EXISTS but could not be read"
+    for a board that recorded nothing — the "states more than the read
+    established" defect this issue files, one cause over.
+
+    A `str` subclass, so every existing consumer (f-strings, comparisons,
+    `assertIn`, `who_is_on.py`) keeps working unchanged and the sentence stays the
+    one wording; only a reader that wants the machine value (`read_holders` →
+    `HolderRead.registry_error`) reaches for `.cause`. The pattern the
+    `truncation_widenable` / `budget_exhausted` comments on `Surface` record, with
+    the payload riding on the message rather than a new return shape — because
+    `_read_board`'s `None`-when-unanswerable contract is pinned by tests and must
+    NOT be loosened just to carry a cause.
+    """
+
+    #: The board's RECORDED cause, or ``None`` when it recorded none. Never prose.
+    cause: str | None
+
+    def __new__(cls, message: str = "", cause: str | None = None) -> BoardRefusal:
+        obj = super().__new__(cls, message)
+        obj.cause = cause
+        return obj
+
+
 class SurfaceError(Exception):
     """A surface could not be queried (INCOMPLETE — never CLEAN).
 
@@ -1004,6 +1043,13 @@ class Surface:
     note: str = ""
     truncated: bool = False
     truncation_note: str = ""
+    # The LANE-ROSTER read's recorded cause, as DATA beside the note (#9392
+    # review P2) — `None` means the board recorded none. `_incomplete_remedy`
+    # used to re-derive this by handing the composed note back to
+    # `registry_remedy`, which made the helper's "no cause recorded" arm
+    # unreachable and asserted "the roster EXISTS" from a board that had recorded
+    # nothing. Same lesson as `truncation_widenable` / `budget_exhausted` below.
+    registry_error: str | None = None
     # Whether this cap is a SETTING the operator can raise (`--pr-limit`), or a
     # ceiling no setting can lift (#9423 review, P3). The REST rescue reads ONE
     # page at GitHub's per_page maximum, so on that path `--pr-limit` cannot
@@ -1243,6 +1289,84 @@ def _is_generated_branch(name: str) -> bool:
         return (len(tail) >= _CI_TIMING_TAIL_MIN
                 and all(c in _CI_TIMING_TAIL_DIGITS for c in tail))
     return any(stripped.startswith(p) for p in _GENERATED_BRANCH_PREFIXES)
+
+
+#: The branch namespace whose `<n>` is an ISSUE reference: `fix/<n>-<slug>`.
+#:
+#: ⛔ ONE PREFIX, AND THE WIDTH IS A FAIL-CLOSED DECISION MADE THREE TIMES.
+#: Cycle 1 listed `perf|ci|build|chore|docs|refactor|test|…`, and review produced
+#: `perf/1200-rps-cache`, `ci/1800-timeout`, `chore/5000-graph-cleanup`; cycle 4
+#: produced `feat/2048-batch` — in every one of those namespaces the number can be
+#: a METRIC, a SIZE or a DATE, so cancelling a real PATH hit on one would be a
+#: false CLEAN. `fix/` is the one namespace measured where `<n>-<slug>` is an
+#: issue claim (828 remote refs, and the #9540 evidence itself, `fix/9397-…`).
+#: The cost of the narrow set is a residual OVER-block for a `feat/<n>-…` or
+#: `chore/<n>-…` worktree whose path is stale — the safe direction. Widening
+#: needs a measured argument that the number CANNOT be a size (or a lookup that
+#: the issue exists), plus a test, because every entry is a licence to demote.
+_LANE_BRANCH_CLAIM = re.compile(r"fix/#?(\d{3,7})(?![0-9])(?:-|$)")
+
+
+def _branch_names_other_issue(branch: str, issue: int) -> int | None:
+    """The OTHER issue this branch's own name claims, or None.
+
+    #9540: a worktree was matched to issue 3718 by its PATH alone — `/tmp/wt-3718`
+    — while its branch was `fix/9397-about-edge-properties`. The directory name
+    was a leftover; the lane's claim was #9397. A path is a SPELLING, and a
+    substring of it is not evidence, so the stronger field (the branch a lane
+    deliberately named) must be able to contradict it — otherwise the top of the
+    product queue is frozen by a directory name and the gate has no dismissal
+    switch by design (#8175).
+
+    ⛔ NARROW ON PURPOSE, because this DEMOTES a blocking hit and a false CLEAN
+    is the dangerous direction. It answers only one question — "does this branch
+    claim a DIFFERENT issue, in the claim shape a lane actually writes?" — and
+    returns None for everything else, so the caller keeps blocking:
+
+      * a generated branch (`mergify/merge-queue/…`) claims nothing. The caller
+        never asks this question about one (`branch_matchable` gates the
+        demotion as well as the hit test), so the PATH still blocks —
+        `test_worktree_on_a_generated_branch_is_still_found_by_its_path` and
+        `test_generated_branch_with_a_claim_shaped_tail_still_blocks`;
+      * a name with no claim shape (`chore/bump-2024-10`, `release-1.2.3`), or
+        a number in a namespace that is not an issue reference
+        (`perf/1200-rps-cache`, `ci/1800-timeout`, `feat/2048-batch`), returns
+        None: a version, a date, a metric and a size are not claims, and
+        cancelling a real PATH hit on one would be a false CLEAN;
+      * a branch that names THIS issue returns None (the branch is the claim);
+      * a detached worktree (`(detached)`) returns None — with no branch name
+        there is no contradiction, so the path keeps blocking.
+
+    ⛔ THE RESIDUAL IS STRUCTURAL AND IS STATED RATHER THAN HIDDEN: nothing in
+    the listing distinguishes "(stale PATH, live branch)" from "(live PATH,
+    branch recycled from another issue)". This rule chooses the BRANCH in both
+    cases, because the branch is the field the lane deliberately named and it is
+    the same attribution the fleet board makes (a lane is identified by its
+    branch slug) — so the two surfaces agree instead of the path silently
+    out-voting the branch. The alternative leaves the original defect in place
+    (a leftover directory name freezes an issue forever, with no dismissal
+    switch by design, #8175), which is the failure this rule exists to end.
+
+    A branch whose only mention of this issue is INTERIOR TO A HEX DIGEST
+    (`fix/9397-abc3718def`) is not read as naming it — that is #3611/#4935's
+    existing rule, not an exception made here — so such a branch demotes the
+    PATH hit exactly like any other foreign claim.
+    """
+    claimed_other: int | None = None
+    for match in _LANE_BRANCH_CLAIM.finditer(branch or ""):
+        if _inside_hex_digest(branch, match.start(1), match.end(1)):
+            continue
+        claimed = int(match.group(1))
+        # ⛔ EVERY MATCH IS READ BEFORE ANY ANSWER, because the ORDER of the two
+        # findings decides the verdict and returning on the first one is
+        # fail-OPEN: a name carrying BOTH (`feat/9397-x/fix/3061-y` — a
+        # dependency in the slug) claims THIS issue as well, so it must keep
+        # blocking no matter which segment comes first.
+        if claimed == issue:
+            return None
+        if claimed_other is None:
+            claimed_other = claimed
+    return claimed_other
 
 
 def _pr_terminal_state(pr: dict) -> str | None:
@@ -2611,6 +2735,12 @@ def scan_worktree_surface(
     angle: #3504 class 4's reproduction had the caller's OWN worktree among its
     blocking hits. The path is matched in full — a worktree is named after its
     issue by convention, and the full path is the honest field to read.
+
+    ⛔ THE PATH IS THE WEAKER OF THE TWO FIELDS, AND #9540 IS WHY. A path is also
+    a leftover: `/tmp/wt-3718` held a lane whose branch claimed #9397, and the
+    substring alone was enough to block #3718 permanently. The path still blocks
+    whenever nothing contradicts it (a generated or detached branch included) —
+    see `_branch_names_other_issue` for the one contradiction that demotes it.
     """
     for block in blocks:
         path = block.get("path", "")
@@ -2619,8 +2749,9 @@ def scan_worktree_surface(
         # says nothing about ownership); the PATH is still matched in full, so
         # a real worktree cannot be hidden by this (#3611).
         branch_matchable = not _is_generated_branch(branch)
-        if not (number_present(path, issue)
-                or (branch_matchable and number_present(branch, issue))):
+        path_hit = number_present(path, issue)
+        branch_hit = branch_matchable and number_present(branch, issue)
+        if not (path_hit or branch_hit):
             continue
         label = f"{path} [{branch or 'detached'}]"
         if identity.owns_worktree(path) or identity.owns_branch(branch):
@@ -2631,6 +2762,35 @@ def scan_worktree_surface(
                 "weak",
             )
             continue
+        # #9540: a PATH SUBSTRING IS A SPELLING, NOT A CLAIM. `/tmp/wt-3718`
+        # matched #3718 while its branch (`fix/9397-about-edge-properties`)
+        # claimed #9397 — a leftover directory name froze a product defect that
+        # every other surface reported free. The branch is the field a lane
+        # deliberately named, so when the two disagree the branch wins and the
+        # path hit is reported (never silent) at a strength that cannot block.
+        # Scoped to the case where the branch is the ONLY contradiction: a
+        # branch that names THIS issue blocks, and a detached/generated branch
+        # leaves nothing to contradict the path, so both keep blocking.
+        if path_hit and not branch_hit and branch_matchable:
+            # ⛔ `branch_matchable` IS REQUIRED HERE, AND ITS ABSENCE WAS A
+            # DOCUMENTED-BUT-BYPASSED GUARD (review cycle 4). Without it a
+            # GENERATED branch whose name contains a claim-shaped tail
+            # (`mergify/merge-queue/fix/9397-x`) was demoted: `branch_hit` is
+            # False for it BY CONSTRUCTION, and the helper then read the raw name
+            # and answered 9397. A bot-minted name is not evidence about a lane,
+            # so it must not be evidence about the PATH either — the worktree
+            # record still blocks, which is what this module's docstring and
+            # `_is_generated_branch` already promised.
+            other = _branch_names_other_issue(branch, issue)
+            if other is not None:
+                surface.add(
+                    label,
+                    f"its PATH contains {issue} but its BRANCH claims #{other} "
+                    "— a path substring is a spelling, not a claim; the branch "
+                    "is the claim (non-blocking)",
+                    "weak",
+                )
+                continue
         terminal = _branch_terminal_state(
             branch, block.get("head"), merged_head_shas, ancestor_merged,
             main_tip, first_parent,
@@ -3845,6 +4005,27 @@ class HolderRead:
     source: str
     unanswerable: str = ""
     holders: tuple[Holder, ...] = ()
+    # The roster's SIZE, from the board's own counts (#9392). `None` means the
+    # board did not publish it (an older writer) — NOT zero: an unread roster
+    # must never be reported as an empty one.
+    roster_rows: int | None = None
+    workspaces_count: int | None = None
+    # Whether the LIVE WORKSPACE read actually happened (#9392 review P1). The
+    # count beside it is only a measurement when this is True: an unreachable
+    # cmux (`workspaces_measured: false`, the documented fail-open of #7738)
+    # publishes NO workspaces, so a bare `0` there is an artefact of the failed
+    # read and printing it asserts an empty live fleet.
+    workspaces_measured: bool = False
+    # THE ROSTER READ'S RECORDED CAUSE, as DATA beside the note (#9392 review
+    # P2). `_incomplete_remedy` used to hand the whole composed NOTE back to
+    # `fleet_state.registry_remedy`, so the note — which always ends with a
+    # remedy sentence — always read as a non-empty "cause" and the helper's
+    # "no cause recorded" arm was unreachable there: the exit-2 line asserted
+    # "the roster EXISTS but could not be read" for a board that had recorded no
+    # cause at all. `None` therefore means NOT RECORDED (distinct from "" only
+    # in provenance; both take that arm), exactly like `budget_exhausted` /
+    # `truncation_widenable` on `Surface`, which exist for this same reason.
+    registry_error: str | None = None
 
 
 def _board_can_answer(state: dict) -> str:
@@ -3869,10 +4050,29 @@ def _board_can_answer(state: dict) -> str:
             "lane-registry and GitHub reads succeeded is unknown"
         )
     if rec.get("registry_measured") is not True:
-        return (
+        # ⛔ THE REMEDY IS DERIVED FROM THIS CAUSE (#9392), not left to the
+        # verdict line's generic sentence. An absent roster is not a read that
+        # went wrong on a bad day: it was never provisioned, `fleet_state.py
+        # build` cannot create it (the board is built FROM it), and the two
+        # other readers of this note (`who_is_on.py`, and the exit-2 remedy)
+        # must give a lane the SAME answer. `registry_remedy` is the one place
+        # that sentence lives, so the three cannot disagree.
+        # ⛔ ONE BINDING, THREE USES (#9392 review P2). The prose, the remedy and
+        # `cause` are all derived from this ONE validated value: composing the
+        # prose from the raw field while publishing `cause` from the validator
+        # let them disagree — a truthy non-string cause printed "the roster
+        # EXISTS but could not be read" in the note while the exit-2 line said
+        # "the cause … was not recorded".
+        cause = _board_registry_error(rec)
+        return BoardRefusal(
             "the board's lane registry could not be read "
-            f"({rec.get('registry_error') or 'cause not recorded'}) — the lane "
-            "roster is UNKNOWN, not empty"
+            f"({cause or 'cause not recorded'}) — the lane "
+            "roster is UNKNOWN, not empty — "
+            f"{fleet_state.registry_remedy(cause or '')}",
+            # …and the MACHINE value beside the sentence, so a downstream reader
+            # classifies the cause it was given instead of re-parsing this prose
+            # back out of it.
+            cause=cause,
         )
     if rec.get("github_measured") is not True:
         return (
@@ -4411,6 +4611,49 @@ def _issue_entry_problem(state: dict, issue: int) -> str:
     return ""
 
 
+def _board_count(rec: dict, key: str) -> int | None:
+    """One of the board's published COUNTS, or ``None`` when it did not publish
+    a usable one (#9392).
+
+    ⛔ ABSENT IS NOT ZERO, the same rule the provenance fields obey: a board from
+    an older writer carries no `registry_rows`, and reporting `0` would say "the
+    roster is empty" about a row count nobody measured. A bool is rejected too —
+    `isinstance(True, int)` is True, and a `True` here would print "1 row".
+    """
+    value = rec.get(key) if isinstance(rec, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value >= 0 else None
+
+
+def _board_registry_error(state: object) -> str | None:
+    """The LANE-ROSTER cause the board RECORDED, or ``None`` when it recorded
+    none (#9392 review P2).
+
+    ⛔ THE CAUSE IS READ FROM THE BOARD, NEVER FROM A NOTE. `_board_can_answer`
+    composes a sentence that embeds this value AND appends `registry_remedy(...)`;
+    handing that sentence back to `registry_remedy` made its "no cause recorded"
+    arm unreachable and asserted "the roster EXISTS" for a board that recorded
+    nothing. The field is the one place the cause exists, so it is what travels.
+
+    Accepts either the whole state or its `reconciliation` mapping, so a caller
+    holding `rec` does not have to re-wrap it just to ask this question.
+    """
+    rec = state.get("reconciliation") if isinstance(state, dict) else None
+    if rec is None and isinstance(state, dict):
+        rec = state          # already the `reconciliation` mapping
+    if not isinstance(rec, dict):
+        return None
+    error = rec.get("registry_error")
+    if not isinstance(error, str) or not error.strip():
+        # A BLANK CAUSE IS NOT A CAUSE. The board writes `""` when the read
+        # recorded none (`load_registry` always writes a cause on its only failure
+        # path), so collapsing blank and absent here keeps `None` meaning exactly
+        # "no cause recorded" at every reader.
+        return None
+    return error
+
+
 def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
     """The claim gate's answer for `issue`: who holds it, are they still there?
 
@@ -4420,7 +4663,14 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
     """
     state, source, why = _read_board(slug, repo_root)
     if state is None:
-        return HolderRead(measured=False, source=source, unanswerable=why)
+        # ⛔ THE CAUSE TRAVELS INSIDE THE REFUSAL, NOT BESIDE IT (#9392 review
+        # P2). `why` is a `BoardRefusal`, so the roster cause the board RECORDED
+        # reaches the exit-2 remedy as data. `_read_board`'s contract is
+        # deliberately unchanged: an unanswerable board is still returned as
+        # `None`, so it can never be read as an answer (the two tests that pin
+        # that stay green — the cause rides on the sentence, not on the state).
+        return HolderRead(measured=False, source=source, unanswerable=why,
+                          registry_error=getattr(why, "cause", None))
     entry_problem = _issue_entry_problem(state, issue)
     if entry_problem:
         return HolderRead(
@@ -4428,12 +4678,50 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
         )
     return HolderRead(
         measured=True, source=source, holders=_holders_from_board(state, issue),
+        roster_rows=_board_count(
+            state.get("reconciliation") or {}, "registry_rows"),
+        workspaces_count=_board_count(
+            state.get("reconciliation") or {}, "workspaces_count"),
+        # ⛔ THE COUNT'S PROVENANCE, read with the same strict-true polarity the
+        # board-level checks use: only a literal `True` says the workspace read
+        # happened, and an OLDER board that carries the count but not the flag is
+        # treated as unmeasured (fail-closed — it prints one fewer number, never
+        # a fact it cannot support).
+        workspaces_measured=(
+            (state.get("reconciliation") or {}).get("workspaces_measured")
+            is True),
     )
 
 
 def _holder_gate_note(read: HolderRead) -> str:
     """One line stating what the gate read, so the row never claims a reader it
-    does not have — the row is named `issue assignee/holder` for that reason."""
+    does not have — the row is named `issue assignee/holder` for that reason.
+
+    ⛔ THE MEASURED ARMS PUBLISH THE ROSTER'S SIZE BESIDE ITS SOURCE (#9392).
+    `board source` is the READ's provenance, not the roster's coverage: a
+    hand-written ONE-ROW roster (the reader's own lane) prints `board source:
+    rebuilt` exactly like a full one, and the measured incident is that this
+    turned 11 live lanes invisible and flipped an INCOMPLETE into a CLEAN with no
+    code change. Printing the row count (and the live workspace count beside it)
+    makes a roster of one VISIBLY a roster of one. It changes no verdict — the
+    gate still keys on `registry_measured` — so it is disclosure, not a
+    dismissal switch.
+    """
+    counts = ""
+    if read.roster_rows is not None:
+        counts = f"; lane roster: {read.roster_rows} row(s)"
+        # ⛔ THE LIVE COUNT ONLY WHEN IT WAS MEASURED (#9392 review P1). Every
+        # failure path of `cmux_workspaces` returns an EMPTY map, so an
+        # unmeasured read would print "vs 0 live workspace(s)" — telling a
+        # reader that every roster row is a ghost lane, from a read that never
+        # happened. `registered: N` alone is a smaller answer than a false one.
+        if read.workspaces_count is not None and read.workspaces_measured:
+            # ⛔ TWO COUNTS, NOT A COMPARISON (#9392 review P2). Roster rows
+            # legitimately OUTLIVE the workspaces they name (the board retires
+            # such rows to `RECOVERABLE`/`RETIRED`), and a cell's ORCHESTRATOR
+            # workspace has no roster row at all, so `N vs M` printed a
+            # discrepancy in the HEALTHY case — the opposite of the intent.
+            counts += f"; live cmux workspaces: {read.workspaces_count}"
     if not read.measured:
         return (
             "claim gate: the FLEET BOARD could not answer — "
@@ -4442,19 +4730,23 @@ def _holder_gate_note(read: HolderRead) -> str:
     if not read.holders:
         return (
             "claim gate: holder read from the FLEET BOARD "
-            f"(board source: {read.source}) — NO lane is mechanically attributed "
-            "to this issue; comment prose is not read (#8175)"
+            f"(board source: {read.source}{counts}) — NO lane is mechanically "
+            "attributed to this issue; comment prose is not read (#8175)"
         )
-    counts = {verdict: 0 for verdict in
+    counts_by_verdict = {verdict: 0 for verdict in
               (HOLDER_LIVE, HOLDER_STOPPED, HOLDER_UNMEASURED, HOLDER_AMBIGUOUS)}
     for holder in read.holders:
-        counts[holder.verdict] = counts.get(holder.verdict, 0) + 1
+        counts_by_verdict[holder.verdict] = (
+            counts_by_verdict.get(holder.verdict, 0) + 1
+        )
     return (
         "claim gate: holder read from the FLEET BOARD (board source: "
-        f"{read.source}) — {len(read.holders)} lane(s) attributed: "
-        f"{counts[HOLDER_LIVE]} still holding, {counts[HOLDER_STOPPED]} stopped, "
-        f"{counts[HOLDER_UNMEASURED]} liveness unmeasured, "
-        f"{counts[HOLDER_AMBIGUOUS]} ambiguous (comment prose is not read, #8175)"
+        f"{read.source}{counts}) — {len(read.holders)} lane(s) attributed: "
+        f"{counts_by_verdict[HOLDER_LIVE]} still holding, "
+        f"{counts_by_verdict[HOLDER_STOPPED]} stopped, "
+        f"{counts_by_verdict[HOLDER_UNMEASURED]} liveness unmeasured, "
+        f"{counts_by_verdict[HOLDER_AMBIGUOUS]} ambiguous (comment prose is not "
+        "read, #8175)"
     )
 
 
@@ -4515,6 +4807,11 @@ def scan_issue_surface(
 
     # ── the holder arm ──────────────────────────────────────────────────────
     holder_note = _holder_gate_note(holders)
+    # The roster cause travels as DATA beside the note so the exit-2 remedy
+    # classifies the board's RECORDED cause instead of re-parsing this prose
+    # (#9392 review P2). Set unconditionally: `None` is itself the answer
+    # "the board recorded no cause", which is the arm that was unreachable.
+    surface.registry_error = holders.registry_error
     for holder in holders.holders:
         if holder.verdict == HOLDER_LIVE:
             surface.add(
@@ -5880,6 +6177,15 @@ def _assert_all_surfaces(ordered: list[Surface]) -> None:
         )
 
 
+#: The claim gate's OWN note text for an unreadable lane roster
+#: (`_board_can_answer`). `_incomplete_remedy` partitions on THIS, so the roster's
+#: remedy is selected from the cause the same run measured, rather than taking
+#: the generic arm — which prescribes a rebuild that fails on the same read
+#: (#9392). It is this module's own marker, never a foreign string: the two sites
+#: are asserted to agree by `test_the_roster_marker_is_the_note_the_gate_emits`.
+_LANE_ROSTER_NOTE = "the lane roster is UNKNOWN, not empty"
+
+
 def _incomplete_remedy(incomplete: list[Surface]) -> str:
     """The remedy for an INCOMPLETE run, keyed on its CAUSE (#9402).
 
@@ -5983,6 +6289,39 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
             f"the number and repository; re-authenticating cannot change it), "
             f"and PART is: {tail_cause}"
         )
+    # ⛔ THE LANE ROSTER IS ITS OWN CAUSE, AND ITS OWN REMEDY (#9392).
+    # Every arm below answers a cause a RE-READ can fix: a budget that resets, a
+    # cap a setting widens, a network that comes back. An unreadable roster is
+    # none of those — `fleet_state.py build` builds the board FROM that file, so
+    # "rebuild the fleet board" is the dead end this issue files, and `gh auth`
+    # is fine in the same run (every other surface answered). The marker is this
+    # module's OWN note text (`_board_can_answer`), not a foreign signature, and
+    # the cause is carried on the surface (`Surface.registry_error`) and classified
+    # by `fleet_state.registry_remedy` — the same helper `fleet_state.py build` and the surface
+    # note take their sentence from, so a lane gets ONE answer from all three.
+    roster = [s for s in incomplete if _LANE_ROSTER_NOTE in (s.note or "")]
+    if roster:
+        roster_ids = {id(s) for s in roster}
+        # ⛔ THE CAUSE IS CARRIED, NOT RE-PARSED (#9392 review P2). Passing the
+        # composed note back to `registry_remedy` made the note itself look like
+        # the cause: it is never empty, so the helper's "no cause recorded" arm
+        # could not be reached and the exit-2 line asserted the roster EXISTS for
+        # a board that recorded nothing. The recorded cause is the only input.
+        recorded = [s.registry_error for s in roster
+                    if s.registry_error is not None]
+        roster_cause = fleet_state.registry_remedy(
+            recorded[0] if recorded else "")
+        text = (
+            "the LANE ROSTER is UNKNOWN (not empty) — no lane can be attributed "
+            "to this issue until it is readable, and this is NOT a read that "
+            f"retrying or rebuilding can fix: {roster_cause}"
+        )
+        if len(roster) == len(incomplete):
+            return text
+        tail_cause = _incomplete_remedy(
+            [s for s in incomplete if id(s) not in roster_ids]
+        )
+        return f"PART of this is {text}; PART is: {tail_cause}"
     if not both and not exhausted and not truncated:
         return generic
     budget = (
