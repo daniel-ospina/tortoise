@@ -191,8 +191,10 @@ class TestCreateOperator:
         """#4937: the ingest operator menu is IMPL/NAND (+ part/whole); a
         MITIGATES connection is refused with the correct path named."""
         violations: list[dict] = []
+        # `effective_route` is required (#9173): this probe has no endpoints,
+        # so the REQUEST route is all there is (`None`).
         sdk._check_connection(0, {"operator": "MITIGATES", "from": "a",
-                                  "to": "b"}, violations)
+                                  "to": "b"}, violations, None)
         msg = " ".join(v["message"] for v in violations)
         assert "MITIGATES is not an operator kind" in msg, msg
         assert "mitigate_operator" in msg, msg

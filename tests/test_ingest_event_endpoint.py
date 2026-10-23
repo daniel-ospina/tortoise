@@ -1775,22 +1775,28 @@ def test_merge_onto_array_status_holder_is_refused_in_phase1(sdk):
     Cypher comparison that simply does not match an array, and the operator axis
     is unrelated. Measured pre-fix: Phase 1 `[]`, then a step-4 raise with the
     earlier point committed.
+
+    ⛔ #9173: the connection is spelled Object↔Object ON PURPOSE. The array is
+    only ever evaluated inside `create_direct_edge`, so the leg is scoped to the
+    pairs that reach it; a bundle-local `points` ref is Point-bearing, the
+    endpoint-kind gate (#8499) reifies that pair into an operator, and
+    `create_operator` never reads a status. The original spelling put a point on
+    the other side, which quietly turned this into a promotion test.
     """
     sdk.create_object("Holder")
     sdk._get_proj().g.query(
         "MATCH (n:Object {name:'Holder'}) SET n.status = ['retracted']")
     bundle = {
-        "points": [{"kind": "statement", "content": "must-not-commit",
-                    "ref": "p0"}],
-        "entities": [{"ref": "h", "type": "object", "name": "Holder"}],
-        "connections": [{"from": "p0", "to": "h", "operator": "IMPL"}],
+        "entities": [{"ref": "o0", "type": "object", "name": "Live one"},
+                     {"ref": "h", "type": "object", "name": "Holder"}],
+        "connections": [{"from": "o0", "to": "h", "operator": "IMPL"}],
     }
     msgs = [v["message"] for v in sdk._validate_bundle(bundle)]
     assert any("resolves onto the Object" in m and "cannot be evaluated" in m
                for m in msgs), msgs
     with pytest.raises(BundleValidationError):
         sdk.ingest(bundle)
-    assert _count(sdk, "MATCH (n:Point {content:'must-not-commit'}) "
+    assert _count(sdk, "MATCH (n:Object {name:'Live one'}) "
                        "RETURN count(n)") == 0
 
 

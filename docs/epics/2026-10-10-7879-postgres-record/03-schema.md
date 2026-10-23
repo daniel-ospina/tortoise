@@ -190,7 +190,9 @@ The dotted BP edge props (`IMPL.msg_*` / `IMPL.back_msg_*`) are DERIVED too, so 
 
 ### 6.2 `supabase/tests/20261012000001_record_schema.sql` — the SQL half
 
-Runs on PGlite. Asserts the nine tables exist and the procedural layer is **not** one of them; the RLS boundary (a cross-tenant read returns **nothing**, and `authenticated` cannot write); the composite FKs (a relation to a non-existent node is refused); the `node_key` contract CHECKs; that each carve-out CHECK **fires**; and that the journal refuses UPDATE and DELETE.
+Runs on PGlite. Asserts the nine layer tables exist (§1 — and, since #9555, that the tenth,
+`session_narrative`, is there with its RLS boundary, in §6b) and the procedural layer is **not** one of
+them; the RLS boundary (a cross-tenant read returns **nothing**, and `authenticated` cannot write); the composite FKs (a relation to a non-existent node is refused); the `node_key` contract CHECKs; that each carve-out CHECK **fires**; and that the journal refuses UPDATE and DELETE.
 
 **Postgres availability: the SQL half IS verified.** `npm --prefix supabase/tests/pglite run validate` applies every migration on a fresh database and runs every suite — including this one — and passes. PGlite is WASM Postgres and is the repo's established no-Docker harness (`supabase/tests/pglite/validate.mjs`). What it does **not** verify: row-level behaviour against a live FalkorDB, and the projection (there is none yet — `#7969`).
 
