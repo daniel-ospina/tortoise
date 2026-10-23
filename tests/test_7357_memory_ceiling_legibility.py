@@ -691,6 +691,26 @@ def test_the_reached_decision_has_one_authority():
     assert retry_src.count("def ceiling_reading_drift") == 1, (
         "one definition, whose values the behavioural assertions above pin")
 
+    # ⚠️ IDENTITY ALONE DOES NOT CATCH A *SECOND* DECISION SITE (#7357 cycle 3
+    # P2): a new branch in the projection doing the arithmetic inline leaves the
+    # import in place, the name resolving, and the `def` count at 1 — every
+    # assertion above green while two tolerances drive one decision, the exact
+    # drift this PR closes. So the FORMULA is scanned, normalised, across the
+    # package: quotes, backslashes, brackets and whitespace are squashed on both
+    # sides first, because this repo splits prose and expressions across lines
+    # and a reflow must not evade the guard (its own self-test is the sibling
+    # `_ownership_constraint_holders`, which had this same line-local bug).
+    import re
+    squash = lambda text: re.sub(r"[\s\"'()\\`]+", "", text)  # noqa: E731
+    formula = squash("max(64 << 10, min(cap // 100, 1 << 20))")
+    holders = [
+        str(p.relative_to(root)) for p in sorted(root.rglob("*.py"))
+        if formula in squash(p.read_text(encoding="utf-8"))
+    ]
+    assert holders == ["retry.py"], (
+        "the tolerance must have ONE implementation, inside "
+        f"ceiling_reading_drift — not a second decision site: {holders}")
+
 
 def test_the_evidence_walk_cannot_replace_the_exception_it_explains():
     """A raising `__str__` in the chain must not lose the note (#7357 cycle 2).
@@ -717,6 +737,34 @@ def test_the_evidence_walk_cannot_replace_the_exception_it_explains():
     assert text.startswith("OOM failed to allocate 1GB")
     assert "it has reached its configured dataset limit" not in text, (
         "an unreadable chain establishes nothing — the hedge is the safe arm")
+
+
+def test_an_unreadable_message_degrades_to_no_note_rather_than_a_raise():
+    """The MESSAGE-level belt, not just the chain one (#7357 cycle 3 P3).
+
+    `is_memory_ceiling_refusal` stringifies `ResponseError` links and
+    `str(exc)` reads the exception's own `__str__`, so a caller-defined
+    subclass can raise from either — before the chain belt is ever reached.
+    A legibility helper that replaced the error it explains is what the
+    module's `is_instance_unavailable` P1 forbids, so the public entry point is
+    belted: an unreadable MESSAGE returns ``None`` (the raw sentence, no note),
+    because there is nothing to append a note to.
+
+    NON-VACUOUS: remove the belt around `_explain_memory_ceiling` and this
+    raises `RuntimeError`.
+    """
+
+    class _ExplodingText(redis_exc.OutOfMemoryError):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    assert explain_memory_ceiling(_ExplodingText("anything")) is None
+
+    class _ExplodingResponse(redis_exc.ResponseError):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    assert explain_memory_ceiling(_ExplodingResponse("anything")) is None
 
 
 # ── the wiring, through a real guarded client ───────────────────────────────

@@ -1150,7 +1150,28 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
     instance, and does NOT claim the refused command was rejected before it ran,
     because that was measured for the ``denyoom``/``maxmemory`` refusal and not
     for the allocation-failure shape.
+
+    ⚠️ **IT CANNOT RAISE OVER THE CALLER'S ERROR.** Both the family predicate and
+    ``str(exc)`` read caller-supplied data: ``is_memory_ceiling_refusal``
+    stringifies ``ResponseError`` links, and a caller-defined ``OutOfMemoryError``
+    subclass can carry a ``__str__`` that raises. A legibility helper that
+    replaced the exception it explains would hand the caller a traceback instead
+    of the failure (the module's P1 rule on :func:`is_instance_unavailable`), so
+    the whole body is belted: an unreadable MESSAGE degrades to ``None`` (the raw
+    engine sentence, unannotated) because there is nothing to append to. An
+    unreadable CHAIN degrades further along — to the hedge, which still tells the
+    caller something — because :func:`_chain_names_the_ceiling` establishes no
+    ceiling and therefore has a safe answer.
     """
+    try:
+        return _explain_memory_ceiling(exc)
+    except Exception:  # noqa: BLE001, RUF100 — never replace the error being explained
+        logger.debug("memory-ceiling note failed", exc_info=True)
+        return None
+
+
+def _explain_memory_ceiling(exc: BaseException) -> str | None:
+    """The body of :func:`explain_memory_ceiling`, belted by its caller."""
     if not is_memory_ceiling_refusal(exc):
         return None
     text = str(exc)
@@ -1169,9 +1190,10 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
             "preceded execution. The driver mints `OutOfMemoryError` for "
             "EVERY reply beginning with `OOM` — a policy refusal and an "
             "allocation failure alike — and an instance reporting "
-            "`maxmemory 0` has no dataset ceiling at all: there the pressure "
-            "is host/kernel memory, a concurrent client, or the refused "
-            "command's own allocation. So read the instance's `INFO memory` "
+            "`maxmemory 0` has no dataset ceiling at all: the pressure MAY "
+            "come from host/kernel memory, an in-instance per-query cap, this "
+            "command's own allocation, or elsewhere — that list is not closed. "
+            "So read the instance's `INFO memory` "
             "before acting, and re-read while the refusal is repeating. If it "
             "reports `maxmemory 0`, there is no ceiling to raise — and "
             "re-issuing the same command unchanged will likely be refused the "
