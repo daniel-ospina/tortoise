@@ -397,10 +397,15 @@ kindDefs:
   would rotate `kind_index.cache_key_for` on every install and silently re-embed the whole kind
   index. A test pins the index spec byte-identical with and without a declaration.
 - **A props-less pack renders byte-identically.** The brief key is absent when a kind declares
-  nothing, so the brief, the master's `pack_kinds` section and every rendered prompt are
-  byte-for-byte what they were before #2818 for the entire shipped catalog (the master gains one
-  empty `pack_values` section — the same always-present shape as `pack_hints`; a test pins the
-  renders and all six starter packs still validate unchanged).
+  nothing, so for a pack that declares none the brief, the master's `pack_kinds` section and every
+  rendered prompt are byte-for-byte what they were before #2818 (the master gains one empty
+  `pack_values` section — the same always-present shape as `pack_hints`; tests pin the renders and
+  all seven starter packs still validate unchanged). ⚠️ This is a property of a **props-less** pack,
+  not of the shipped catalog: `packs/investment-portfolio-manager` declares
+  `values: [{targetPct, percent}]` on `allocationTarget`, so with it installed every rendered
+  prompt gains a `[values: targetPct(percent)]` segment plus the KIND VALUE FIELDS policy block
+  (#9663). The catalog-wide byte-identity claim that stood here before that pack landed is
+  therefore conditional now.
 - **The hosted overlay carries it too.** Unlike `statuses`/`folds` (catalog-only — a tenant
   manifest never enters a `PackRegistry`), `values` is compiled by the same loop in
   `compile_value_brief(tenant_manifests=…)`, so a hosted tenant pack's declaration reaches its own

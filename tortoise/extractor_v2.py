@@ -866,7 +866,7 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
         # A namespace with NO trigger entry cannot be story-selected —
         # always include it (per-tenant custom packs AND, since #5165, any
         # catalog pack shipped without a trigger entry; dropping them would
-        # silently strip their kinds from the compact prompt). All six
+        # silently strip their kinds from the compact prompt). All seven
         # shipped catalog namespaces HAVE entries, so the default
         # render's selection is unchanged for them — but the byte-identity
         # argument is about those entries, not about a starter-set

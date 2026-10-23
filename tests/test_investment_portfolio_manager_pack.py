@@ -669,9 +669,51 @@ class TestRelationNearMissesGoThroughTheMissingPeerGate:
         assert any("nearMisses target 'noSuchPredicate'" in e
                    for e in r.errors.get("dev", [])), r.errors
 
-    def test_the_message_names_the_predicate_universe(self, tmp_path):
-        """A predicate near-miss must not report itself as a missing KIND —
-        the diagnostic says what it looked for."""
+    def test_the_survivable_gap_names_the_predicate_universe(self, tmp_path):
+        """The `kind=` rewording must reach the SURVIVABLE branch (#9663).
+
+        This is the branch the `kind=` parameter exists for, and the only one
+        it can change: the FATAL branch's text is identical either way. A pack
+        that declares an absent `depends_on` peer routes its unresolvable
+        near-miss through `unresolved_refs`, and the gap must still name
+        predicates + semantics, never "any known kind".
+
+        Fails on the pre-#9663 code in two independent ways: the reference was
+        appended straight to `errors` (so the pack was ISOLATED, `load_all()
+        == 0`), and the wording there was a hardcoded predicate sentence that
+        `kind=` cannot reach.
+        """
+        root = tmp_path / "packs"
+        _write_pack(root, _manifest(
+            depends_on=["venture"],
+            ontology={
+                "extends": "core",
+                "objectKinds": ["issue"],
+                "relations": [{
+                    "predicate": "addresses",
+                    "fromKind": "dev:issue",
+                    "toKind": "dev:issue",
+                    "mechanism": "IMPL",
+                    "nearMisses": ["gatedBy"],  # a predicate `venture` declares
+                }],
+            },
+        ))
+        r = PackRegistry(root)
+        assert r.load_all() == 1, r.errors
+        gaps = r.unresolved_refs.get("dev") or []
+        msg = " ".join(gaps)
+        assert "any declared predicate or semantics value" in msg, msg
+        assert "any known kind" not in msg, msg
+
+    def test_the_fatal_message_names_the_predicate_universe(self, tmp_path):
+        """Regression guard for the FATAL branch's wording.
+
+        This branch reads identically before and after #9663 (the pre-fix code
+        hardcoded the same predicate sentence), so it proves nothing about the
+        `kind=` parameter — `test_the_survivable_gap_names_the_predicate_universe`
+        above is that pin. Kept because the fatal string is what an operator
+        sees when a typo isolates a pack, and it must not drift to "kind".
+        """
         root = tmp_path / "packs"
         _write_pack(root, _manifest(
             ontology={
@@ -687,10 +729,50 @@ class TestRelationNearMissesGoThroughTheMissingPeerGate:
             },
         ))
         r = PackRegistry(root)
-        r.load_all()
+        assert r.load_all() == 0
         msg = " ".join(r.errors.get("dev", []))
         assert "any declared predicate or semantics value" in msg, msg
         assert "any known kind" not in msg, msg
+
+    def test_a_namespaced_near_miss_is_fatal_even_without_the_sibling(
+            self, tmp_path):
+        """A namespaced `nearMisses` target is a typo in EVERY catalog.
+
+        Predicates are declared and matched BARE by contract (#2030), so
+        `venture:holds` is not a predicate reference at all — the pack's own
+        manifest says so. It must therefore never be explained away as a
+        missing peer: with the #2781 gate applied uniformly (this PR's head
+        before the `bare_only` guard) the absent `venture` made
+        `_missing_pack_explanation` return "install pack 'venture'", the ref
+        became a SURVIVABLE gap, `load_all()` returned 1, and `pack validate`
+        (which never reads `unresolved_refs`) printed `✓ Clean` — advice no
+        installation can satisfy. Verified to fail on that intermediate state
+        and to pass on `origin/main`, which was fatal for the trivial reason
+        that it gated nothing.
+        """
+        root = tmp_path / "packs"
+        _write_pack(root, _manifest(
+            depends_on=["venture"],
+            ontology={
+                "extends": "core",
+                "objectKinds": ["issue"],
+                "relations": [{
+                    "predicate": "addresses",
+                    "fromKind": "dev:issue",
+                    "toKind": "dev:issue",
+                    "mechanism": "IMPL",
+                    "nearMisses": ["venture:holds"],
+                }],
+            },
+        ))
+        r = PackRegistry(root)
+        assert r.load_all() == 0, (
+            "a namespaced predicate target must isolate the pack, not become "
+            f"a survivable gap: {r.unresolved_refs}")
+        msg = " ".join(r.errors.get("dev", []))
+        assert "nearMisses target 'venture:holds'" in msg, msg
+        assert "is not loaded" not in msg, msg  # never the missing-peer advice
+        assert not r.unresolved_refs.get("dev"), r.unresolved_refs
 
 
 class TestPackValidateCLI:
@@ -837,7 +919,21 @@ class TestInstallAndMint:
             "MATCH (o:Object {id:$id}) RETURN o.status",
             params={"id": mandate["id"]}).result_set[0][0]
         assert status == "adopted"
-        assert target and mark
+        # The value DECLARATION is also a STORED property — read both back, or
+        # the acceptance claim ("both Objects mint with their declared status,
+        # incl. targetPct") has no evidence behind it: `assert target and mark`
+        # passes for any successful mint whatever was written. `percent` is
+        # basis points (`pack_values.VALUE_KINDS`), so 1500 == 15%.
+        target_row = sdk._get_proj().g.query(
+            "MATCH (o:Object {id:$id}) RETURN o.status, o.targetPct",
+            params={"id": target["id"]}).result_set[0]
+        assert target_row[0] == "adopted", target_row
+        assert target_row[1] == 1500, target_row
+        # …and the mark is about the POSITION, not merely an Event that exists.
+        mark_about = sdk._get_proj().g.query(
+            "MATCH (e:Event {id:$id})-[:aboutObject]->(o:Object) RETURN o.id",
+            params={"id": mark["id"]}).result_set
+        assert [row[0] for row in mark_about] == [pos["id"]], mark_about
 
         report = sdk.validate_domain(NS)
         assert report["domain"] == NS

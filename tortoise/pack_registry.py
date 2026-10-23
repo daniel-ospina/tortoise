@@ -2108,13 +2108,18 @@ class PackRegistry:
                 # one, so installing an overlay without its base pack dropped
                 # the overlay (measured: `packs/investment-portfolio-manager`
                 # without `venture` → 2 errors, pack isolated).
+                # #9663: the universe is BARE by contract (#2030), so a
+                # namespaced target here (`venture:holds`) is a typo in EVERY
+                # catalog, not only one that happens to have `venture`
+                # installed — `bare_only=True` keeps it fatal.
                 for target in rel.get("nearMisses", []) or []:
                     if target not in all_predicates:
                         self._report_unresolved(
                             ns,
                             f"relation '{pred}': nearMisses target '{target}'",
                             target, loaded, missing_deps[ns],
-                            kind="any declared predicate or semantics value")
+                            kind="any declared predicate or semantics value",
+                            bare_only=True)
 
             # Check every equivalentTo target resolves
             for kind, targets in pack.kind_equivalences.items():
@@ -2198,6 +2203,7 @@ class PackRegistry:
         self, ns: str, site: str, ref: str,
         loaded: set[str], missing_deps: list[str],
         kind: str = "any known kind",
+        bare_only: bool = False,
     ) -> None:
         """Record an unresolvable ``ref`` as FATAL or as an unresolved peer.
 
@@ -2211,8 +2217,24 @@ class PackRegistry:
         ``nearMisses`` resolves against predicates + semantics, #9663) reports
         what it actually looked for instead of claiming a kind was missing. The
         default is the pre-#9663 wording, so every existing site is unchanged.
+
+        ``bare_only`` says the universe holds BARE names ONLY — no namespaced
+        spelling of ``ref`` exists at all, so a namespaced ref is a typo
+        whatever is installed and the #2781 gate must not explain it away
+        (#9663). Predicates are exactly such a universe (#2030: declared and
+        matched bare), so `venture:holds` in a relation `nearMisses` cannot be
+        rescued by installing `venture`; downgrading it to a survivable gap
+        would print advice that cannot make the reference resolve, and `pack
+        validate` never reads `unresolved_refs` — a false green in the
+        direction this fix exists to close. A BARE ref in the same universe is
+        left to the gate, because naming a sibling pack's predicate is the
+        documented, legitimate use of `depends_on`.
         """
-        explanation = self._missing_pack_explanation(ref, loaded, missing_deps)
+        if bare_only and isinstance(ref, str) and ":" in ref:
+            explanation = None  # namespaced in a bare universe ⇒ always a typo
+        else:
+            explanation = self._missing_pack_explanation(
+                ref, loaded, missing_deps)
         if explanation is None:
             self.errors.setdefault(ns, []).append(
                 f"{site} does not resolve to {kind} (core or loaded pack)"
