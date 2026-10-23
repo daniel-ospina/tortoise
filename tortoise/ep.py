@@ -1251,9 +1251,25 @@ class TortoiseEP:
         DECISION-LEDGER §22). #9269 adds a new TRIGGER for that pre-existing
         behaviour, named rather than left implicit: an operator whose only
         other input was OPERATOR-SHAPED now has one participating input, so its
-        factor is SKIPPED (`degenerate`, reported through
-        `_last_skipped_factors` — #6105) and the surviving claim is recomputed
-        with no message. The accounting is new; the recompute is not.
+        factor is SKIPPED — recorded as `degenerate`, or as `source_stripped`
+        when the shaped input held the NON-bidirectional source slot — and
+        reported through `_last_skipped_factors` (#6105). A bidirectional
+        operator that merely DEGRADES (3+ inputs → 2) leaves no record at all,
+        only a log line: it still runs, on the surviving inputs.
+        ⚠️ What the surviving claim then reads is NOT necessarily Beta(1,1): a
+        skipped factor does not zero the messages a PREVIOUS run persisted on
+        its input edges, and `_load_cache` loads every `(o)-[r:IMPL|NAND]->(c)`
+        message whose `c` is affected whether or not that pair is still a
+        factor — so on a graph that already ran the pre-fix code, a stale
+        message keeps moving the surviving claim (measured: with a persisted
+        `msg_alpha 5.0` on the now-skipped edge, the claim reads posterior
+        7.01/2.11 = 0.769 instead of 2.22/2.22 = 0.500). That is PRE-EXISTING for
+        every stripped-input trigger (drafts #780, terminal #2422) and is filed
+        as its own residual rather than fixed here: zeroing an edge's messages
+        is a journaled write with its own invalidation semantics, not a
+        docstring. Likewise, posteriors a PRE-FIX run already stamped on an
+        operator-shaped node are not cleared by this filter — nothing consumes
+        those nodes any more, so nothing will ever recompute them.
         """
         live_c = _live_only("c.status", include_draft)
         live_o = _live_only("o.status", include_draft)

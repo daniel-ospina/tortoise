@@ -162,10 +162,14 @@ def test_the_shaped_input_is_not_in_the_affected_set(sdk):
 
     # The neighbourhood arm, seeded from a PLAIN point (hop 0): the shaped node
     # is the other input of an operator whose input IS the seed.
-    assert shaped not in ep._affected_claims([a], 2)
+    hop0 = ep._affected_claims([a], 2)
+    assert b in hop0  # positive control: the hop ran and admitted a neighbour
+    assert shaped not in hop0
     # …and the BFS bridge arm (hop 1+), seeded from the operator's other input
     # with the depth that reaches it.
-    assert shaped not in ep._affected_claims([b], None)
+    bridge = ep._affected_claims([b], None)
+    assert a in bridge  # positive control: the bridge hop ran
+    assert shaped not in bridge
 
 
 def test_legacy_absent_is_operator_input_is_still_consumed(sdk):
