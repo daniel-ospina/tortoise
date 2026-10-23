@@ -1690,7 +1690,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 | **S5 CONNECT — two sets, within-batch *and* to-graph** (D6) | LLM does **within-batch only**, max 2, backwards; **to-graph is mechanical** (ANN + entity join) | ⚠️ **A direct challenge to D6** — D6 is the decision that stands; the challenge is evidence for the owner, **not** a change we may make. |
 | **S3 MATCH → AND ATTACH** | entity resolution is a **join key**, and the link rows were deleted as pure storage cost | ✅ **consistent** — and it says our attach step should cost little. |
 | **minting an `Object` per entity** | entities are extracted to **link facts** (*"Extract anything that could help link related facts together"*) and kept in a mapping table | ⚠️ **The strongest available support for the `^the <X>` finding.** Their entity extraction *purpose* is linking; ours has become node creation. |
-| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **The cap is the design** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`. The cap sits above the current worst hub (123), so it binds nothing today and cannot lose data now. |
+| **connection fan-out** | bounded everywhere, with a timeout that drops an arm | ✅ **The cap is the design** — `PER_ENTITY_FANOUT_CAP = 200` (`tortoise/fanout.py`), consumed by `assembly.py` / `subgraph.py`. The cap sits above the current worst hub (123), so it binds nothing today and cannot lose data now. <!-- v4-mechanism: fanout_cap --> |
 
 **⇒ The three questions below: question 1 is OPEN; question 2 resolves to a STORED edge; question 3 resolves to a hard fan-out cap of `PER_ENTITY_FANOUT_CAP = 200`:**
 

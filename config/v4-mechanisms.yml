@@ -48,13 +48,24 @@
 # the finding. #4894 (the issue this one names as its dependency, "the v4
 # write-path design of record") does **NOT** enumerate these mechanisms; it
 # names the raw/narrative-out change and a salience gate, and no list. They are
-# declared across a cross-referenced PAIR of documents, not one authority: four
-# in `EXTRACTOR-V4-ARCHITECTURE.md` (vet, source_dedup, near_dup_merge,
-# span_link), four in `STORAGE-ARCHITECTURE.md` (span_link, embed_gate,
-# sufficiency_router, fanout_cap — span_link is declared in both), one in
-# `packs/dev/manifest.yaml` (embed_gate, its policy source), and
-# `state_value_carve_out` in §7 of BOTH documents. Each row carries its
-# declaring document; making the set a single registry is the fix.
+# declared across a cross-referenced PAIR of documents, not one authority, and
+# every one of the eight names at least one of them. Four name BOTH
+# (`near_dup_merge`, `span_link`, `fanout_cap`, `state_value_carve_out`); `vet`
+# and `source_dedup` name `EXTRACTOR-V4-ARCHITECTURE.md` only; `embed_gate` names
+# `STORAGE-ARCHITECTURE.md` only, plus its policy source in
+# `packs/dev/manifest.yaml`; `sufficiency_router` names
+# `STORAGE-ARCHITECTURE.md` at two declaration sites (§12.4, §12.5) — counted
+# once, because the marker convention is per-document. Each row carries every
+# declaring document it knows, and `membership_errors` requires a marker in EACH
+# scanned one while refusing a marker in a document the row does not name.
+# ⚠️ What it compares is MARKED declarations, and the residual follows from that
+# rather than from a list of cases: an UNMARKED prose declaration is invisible in
+# every shape — a mechanism declared with no row at all (this issue's own
+# starting defect: the design documents it and the gate never sees it), and a
+# restatement of a mechanism whose row exists, whether the document is named by
+# the row or not. Marking is the convention that makes the comparison possible,
+# so the enumeration is only as complete as the reader who writes it — the
+# residual the gate's own docstring states.
 #
 # ⭐ MEMBERSHIP IS A GATE, NOT A HAND-PINNED TUPLE. Seven of these rows came from
 # #5064's own O/I/T indicator (1); `state_value_carve_out` came from the
@@ -138,6 +149,7 @@ mechanisms:
     name: "near-duplicate MERGE (Jev-arbitrated, D12/O4)"
     declared_in:
       - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §16.4; decision D12
+      - docs/architecture/STORAGE-ARCHITECTURE.md       # §14.1 O4, the owner ruling
     state: not-implemented
     tracking_issue: 5006
     # #5010 as #5064 summarises it: the adopted fan-out cap has no
@@ -201,8 +213,7 @@ mechanisms:
   - id: sufficiency_router
     name: "sufficiency router + escalation write-back"
     declared_in:
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.5 the escalation write-back
+      - docs/architecture/STORAGE-ARCHITECTURE.md  # §12.4 the router, §12.5 the escalation write-back
     state: not-implemented
     tracking_issue: 5009
     note: >-
@@ -223,7 +234,8 @@ mechanisms:
   - id: fanout_cap
     name: "connection fan-out cap (200)"
     declared_in:
-      - docs/architecture/STORAGE-ARCHITECTURE.md  # §11.5
+      - docs/architecture/STORAGE-ARCHITECTURE.md       # §11.5, the hub measurement
+      - docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md  # §13.8 "the cap is the design", §15
     state: implemented
     code:
       - tortoise/fanout.py
@@ -267,10 +279,15 @@ mechanisms:
       baseline (#5064 comment 2026-10-13, #7949 E2);
       (b) `_render_master_compact` — selected by the documented
       `TORTOISE_EXTRACTOR_PROMPT=compact` opt-in — appends no
-      `STATE_VALUE_CARVE_OUT` at all: its own comment groups the carve-out with
-      the hint blocks the compact render excludes (it still emits a FILTERED
-      `MEMORY GRANULARITY` block — that is the one hint block it keeps), so one
-      render path silently drops the guarantee. ⚠️ The row records the OMISSION,
+      `STATE_VALUE_CARVE_OUT` at all, so one render path silently drops the
+      guarantee. ⚠️ The omission is MEASURED, not read off a comment: the
+      comment above the compact render's hint blocks
+      (`tortoise/extractor_v2.py:1162`) only excludes them from the SHUFFLE
+      ("only the kind vocabulary randomizes") and then emits a FILTERED
+      `MEMORY GRANULARITY` block, so it neither says nor implies that the
+      carve-out is dropped —
+      `test_the_compact_render_omits_the_carve_out_the_row_records` is the
+      evidence, and the code comment that would say why does not exist yet. ⚠️ The row records the OMISSION,
       not a justification for it: whether the compact render is deliberately out
       of the carve-out's scope is #9775's decision, and the code-side comment
       that decision would need does not exist yet — do not read "deliberately"

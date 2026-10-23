@@ -183,6 +183,31 @@ def test_docs_scanning_gates_stay_in_tier1():
     )
 
 
+def test_v4_membership_gate_runs_on_both_architecture_docs():
+    """#9778 review (P2): pin the SELECTION, not just the manifest string.
+
+    The `tier1` assertion above catches a deleted row, but the load-bearing half
+    of the reasoning had no test: `STORAGE-ARCHITECTURE.md` matches the
+    `onboarding` SOURCE_PATTERNS entry, so its plan is `surfaces=['onboarding']`
+    — a surface that does NOT contain the gate and whose `tier1` union is the
+    only thing that runs it. That is why `core` alone is insufficient, and this
+    file's idiom for such a registration is a behavioural assertion (as at
+    :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
+
+    Measured: 131 files for the STORAGE diff (`onboarding`), 60 for the
+    EXTRACTOR diff (empty surfaces, the early return); the gate is in the
+    selected set in both, and dropping the `tier1` row removes it from both.
+    """
+    storage = _sel(["docs/architecture/STORAGE-ARCHITECTURE.md"])
+    assert storage["surfaces"] == ["onboarding"], storage["surfaces"]
+    assert storage["full"] is False
+    assert "test_v4_declared_mechanisms.py" in storage["test_files"]
+
+    extractor = _sel(["docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md"])
+    assert extractor["surfaces"] == [], extractor["surfaces"]
+    assert "test_v4_declared_mechanisms.py" in extractor["test_files"]
+
+
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
