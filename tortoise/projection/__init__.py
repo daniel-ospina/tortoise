@@ -17183,6 +17183,12 @@ class FalkorProjection(
             # SELECTED from the record, and it is NOT a write count.
             "nodes_selected": len(nodes),
             "relations_selected": len(relations),
+            # #9604 review P2: the rows this projection DECLINED to project, so
+            # the `nodes_selected` denominator is auditable instead of merely
+            # asserted. This is the set behind the "a refused row is not a
+            # restore shortfall" decision — without it an operator comparing
+            # `nodes_written` with `nodes_selected` cannot see WHY they differ.
+            "refused_keys": sorted(refused),
             "statements": statements,
             "record_nodes": len(view.nodes),
             "record_relations": len(view.relations),

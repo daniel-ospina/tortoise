@@ -210,6 +210,11 @@ class RestoreOutcome:
     #: endpoint the projection does not resolve is a no-op (its statement
     #: MATCHes both endpoints), so selected != written is not by itself a fault.
     relations_selected: int | None = None
+    #: The ``(label, key)`` rows the projection DECLINED to project (a row the
+    #: cache cannot address — #9599's blank ``:Session`` key). These are why
+    #: :attr:`nodes_selected` can be below ``record_nodes`` without anything
+    #: being lost, and they are reported so the difference is auditable.
+    refused_keys: tuple[tuple[str, str], ...] = ()
     #: ``complete`` / ``partial`` from the projection's own declaration.
     coverage: str | None = None
     #: Keys the declaration enumerated as known-hot. ⚠️ A ``complete``
@@ -292,6 +297,7 @@ class RestoreOutcome:
             "relations_written": self.relations_written,
             "nodes_selected": self.nodes_selected,
             "relations_selected": self.relations_selected,
+            "refused_keys": [list(key) for key in self.refused_keys],
             "target_nodes_before": self.target_nodes_before,
             "coverage": self.coverage,
             "declared_keys": self.declared_keys,
@@ -627,4 +633,8 @@ def restore_from_record_view(view: Any, *, org_id: str, graph_id: str,
         bounded=limit is not None,
         nodes_selected=nodes_selected,
         relations_selected=_as_optional_int(result.get("relations_selected")),
+        refused_keys=tuple(
+            (str(key[0]), str(key[1]))
+            for key in (result.get("refused_keys") or ())
+            if isinstance(key, (list, tuple)) and len(key) == 2),
     )
