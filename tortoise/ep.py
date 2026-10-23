@@ -2093,11 +2093,20 @@ class TortoiseEP:
             # and let the derived->asserted leg flow (#2351 review, P0).
             _source_classes = {_input_classes[0]} if _input_classes else None
             _target_classes = set(_input_classes[1:])
-            effective = claim_class.factor_direction(
-                direction,
-                _source_classes,
-                _target_classes,
-            )
+            if _target_classes:
+                effective = claim_class.factor_direction(
+                    direction,
+                    _source_classes,
+                    _target_classes,
+                )
+            else:
+                # A degenerate single-input factor has NO targets, and an empty
+                # target COLLECTION must not be read as "an asserted target":
+                # ``any_asserted(∅)`` is True for ONE id carrying no marker, not
+                # for an empty set of them (#2351 review — the write surface
+                # guards the same conflation with an explicit ``target_ids``
+                # check). Nothing can be overridden, so the token stands.
+                effective = direction
             if effective is None:
                 logger.warning(
                     "Operator %s: DERIVED source over ASSERTED target — "

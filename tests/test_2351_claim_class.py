@@ -433,6 +433,26 @@ def test_update_point_refuses_the_class_outright(lane):
         "a refused update must not change the stored class")
 
 
+def test_single_input_factor_is_not_reported_as_an_override(lane):
+    """No targets is not "an asserted target" (#2351 review).
+
+    ``any_asserted(∅)`` is True for ONE id carrying no marker; it must not be
+    reused for an empty COLLECTION of targets, or a derived claim's degenerate
+    single-input factor is dropped and misreported as an override that cannot
+    exist (the write surface guards the same conflation).
+    """
+    pid = lane.create_point("statement", "computed",
+                            claim_class="derived")["id"]
+    op = lane.create_operator("IMPL", pid, [], direction="->")
+    ep = TortoiseEP(lane._get_proj())
+    factors = ep._affected_factors({pid}, skipped=ep._last_skipped_factors)
+    reasons = [sk.get("reason") for sk in ep._last_skipped_factors]
+    assert "derived_over_asserted" not in reasons, (
+        f"a factor with no targets can override nothing, got {reasons!r}")
+    assert any(f[0] == op["id"] for f in factors), (
+        "the degenerate factor must still be built — it is a no-op, not a drop")
+
+
 def test_class_marker_survives_a_rebuild(tmp_path):
     """The marker is REPLAY-OWNED: a rebuild must not drop it (#2351 P0).
 
@@ -446,6 +466,11 @@ def test_class_marker_survives_a_rebuild(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "rebuild.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
+        from tortoise.projection.entities import _EntityHandlers
+        assert "claimClass" in _EntityHandlers._POINT_DECLARED_PROPS, (
+            "the marker must be DECLARED, not merely restored by the open-set "
+            "passthrough — an undeclared prop logs drift on every rebuild "
+            "(#2795), and nothing else pins the declaration")
         pid = sdk.create_point("statement", "computed",
                                claim_class="derived")["id"]
         assert _props(sdk, pid).get(cc.PROP) == "derived"
