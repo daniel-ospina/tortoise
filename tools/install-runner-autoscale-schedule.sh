@@ -154,7 +154,11 @@ PROVISIONER=""
 for _p in "$REPO/tools/install-ci-runner-x64.sh" "$HOME/.pi/agent/scripts/install-ci-runner-x64.sh"; do
   [ -f "$_p" ] && { PROVISIONER="$_p"; break; }
 done
-CRON_ENV="PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
+# ⛔ CRON GETS `HOME` EXPLICITLY, for the same measured reason the systemd unit pins it: cron
+# sets HOME to the account's PASSWD home, and gh reads its credential from
+# $HOME/.config/gh/hosts.yml — which on these boxes is not that home. A cron-only host with PATH
+# but no HOME fired, found no credential, and exited 2 every interval (round 10, F2's cron half).
+CRON_ENV="HOME=$HOME PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin"
 [ -n "$PROVISIONER" ] && CRON_ENV="$CRON_ENV RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER"
 
 # ── platform detection, fail-closed ───────────────────────────────────────────────────────────
@@ -297,6 +301,25 @@ status() {
   else
     echo "run-copy: MISSING ($INSTALLED) — the schedule would run nothing"
   fi
+  # ⛔ "LOADED" IS NOT "RUNNABLE". One READ-ONLY pass of the RUNNING copy, with the interpreter and
+  # environment the schedule itself uses. This is the only check that can tell an armed schedule
+  # from an inert one: `systemctl is-active` and `launchctl list` both prove the job is registered,
+  # and neither says the guard can MEASURE anything on this box (round 10, I2). Exit 2 is the
+  # tool's own UNMEASURABLE verdict (no `gh`, no memory reading, unreadable pool) — reported here
+  # as a FAILED probe, and returned as exit 2 so a script can act on it. AUTOSCALE_SKIP_PROBE=1
+  # skips it (the install's probe seam, same default).
+  local probe_rc=0
+  if [ -f "$INSTALLED" ] && [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
+    local probe
+    probe="$(RUNNER_AUTOSCALE_STATE_DIR="$STATE_DIR" "$PYTHON" "$INSTALLED" --json --status 2>&1)"
+    probe_rc=$?
+    if [ "$probe_rc" = "0" ]; then
+      echo "probe: OK (exit 0) — $(printf '%s' "$probe" | tail -1 | cut -c1-200)"
+    else
+      echo "probe: FAILED (exit $probe_rc) — this schedule would fire and do NOTHING:" >&2
+      echo "       $(printf '%s' "$probe" | tail -1 | cut -c1-300)" >&2
+    fi
+  fi
   case "$(platform)" in
     systemd)
       local svc="$UNIT_DIR/$LABEL.service" tmr="$UNIT_DIR/$LABEL.timer"
@@ -322,6 +345,10 @@ status() {
     none) echo "NOT installed AND CANNOT BE: no systemd and no cron on this box" >&2; return 2 ;;
     *) echo "unsupported platform: $(uname -s)" >&2; return 2 ;;
   esac
+  # A schedule that is installed but cannot measure is a FAILURE of --status, not a note: the
+  # caller (a human, or a bring-up script) must be able to gate on it.
+  [ "$probe_rc" = "2" ] && return 2
+  return 0
 }
 
 # ── arg parsing ──────────────────────────────────────────────────────────────────────────────

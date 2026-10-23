@@ -2976,7 +2976,7 @@ surfaces:
   # agent-infra#2344 (owner ruling): the runner-capacity guard. It owns
   # `tools/runner_autoscale.py` — the measured ceiling (cores 8→3, 4→2 plus the
   # additive memory arm), the five-way classification (OTHER-REPO / BUSY /
-  # ORPHANED / SERVING / DEAD), refusal above the ceiling, and 21 MUTATION gates.
+  # ORPHANED / SERVING / DEAD), refusal above the ceiling, and 24 MUTATION gates.
   # `tools/` is a flat NON_PYTHON_PREFIXES entry, so this needs the `CORE_ALSO`
   # entry in `tools/ci_selection.py` alongside it or the pins never run on the
   # file they guard (the #1349/#3332/#3616 silent-drop class). Hermetic — fake
