@@ -995,6 +995,48 @@ def test_a_number_word_anchor_is_never_typed(anchor_sentence):
     assert normalize_money_props(anchor_sentence) is None
 
 
+# ── the S5 call pattern's warning channel (route 2, #2817) ─────────────────
+#: The narrowing the capture write seam passes: what a per-point writer must
+#: not report (it fires on ordinary business prose) vs what it must keep
+#: reporting (a number was present and was NOT safely typed — the design's
+#: named abstention, §6/T3).
+_CAPTURE_WARN_ON = DROP_REASONS - {"no_candidate", "not_an_iso4217_code"}
+
+
+def test_warn_on_narrows_the_channel_without_changing_the_derivation():
+    """``warn_on`` is a CHANNEL filter, not a parse switch: the same drops
+    occur on both paths, and only the reporting differs."""
+    noisy = []
+    quiet = []
+    assert normalize_money_props("no numbers here", warnings=noisy) is None
+    assert normalize_money_props(
+        "no numbers here", warnings=quiet, warn_on=_CAPTURE_WARN_ON) is None
+    assert len(noisy) == 1 and quiet == [], (noisy, quiet)
+    assert "no_candidate" in noisy[0], noisy
+
+
+def test_warn_on_keeps_the_designs_named_abstention_reportable():
+    """§6/T3: ``1.234,56 last quarter`` types nothing and IS worth reporting —
+    it is the case a reader must see (a number that could not be read), not
+    the noise the narrowing exists to suppress."""
+    warnings: list[str] = []
+    assert normalize_money_props(
+        "1.234,56 last quarter", warnings=warnings,
+        warn_on=_CAPTURE_WARN_ON) is None
+    assert len(warnings) == 1, warnings
+    assert "no_currency_anchor" in warnings[0], warnings
+
+
+def test_warn_on_refuses_a_reason_outside_the_closed_set():
+    """A typo in a closed vocabulary must fail loudly — silently muting the
+    warning it was meant to configure is the failure mode."""
+    with pytest.raises(ValueError, match="unknown drop reason"):
+        normalize_money_props("EUR 800", warn_on={"no_currency_anchro"})
+    # ...and it raises even when the text would have TYPED, so the typo cannot
+    # hide behind a value the caller was happy with.
+    assert normalize_money_props("EUR 800") is not None
+
+
 def test_a_long_input_is_not_quadratic():
     """Cycle-2 P2: ``_as_of`` was recomputed per candidate (24 KB took ~10 s).
     A generous bound: a structural regression shows up in orders of magnitude."""
@@ -1027,6 +1069,9 @@ def test_the_module_imports_no_clock_network_or_locale():
             imported.update(a.name.split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             imported.add(node.module.split(".")[0])
+    # `collections` is `collections.abc` for the ``warn_on`` annotation — pure
+    # stdlib with no clock, no network and no locale, so it does not weaken the
+    # property this test asserts.
     assert imported <= {"__future__", "re", "dataclasses", "typing",
-                        "tortoise"}, imported
+                        "collections", "tortoise"}, imported
     assert "locale" not in imported

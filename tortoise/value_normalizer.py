@@ -128,10 +128,21 @@ write path is a behaviour change on the live extraction lane and needs its own
 review, not a rider on this one. (The older blocking reason — writing
 undeclared props would set off the projection's "not declared" drift warning
 on every rebuild, design §7.1 — no longer applies.)
+
+Route (2) of the two `#2817` records as legal is now WIRED, at the capture
+write seam rather than in ``execute_embed``: ``sdk._extract_session_v2`` calls
+:func:`normalize_money_props` on each point's stored ``content`` and hands the
+result to ``create_point``. Deriving in ``pt_entry`` stays illegal because
+``Payload.points`` is ``list[commit_schema.Point]`` and that model is
+``extra="forbid"`` — one typed amount would refuse the whole session's commit.
+The seam derives from ``content``, never the 200-char ``quote``: a value
+straddling that cut would type the truncated prefix with a ``verbatim`` that
+still passes the §6/T1 substring check.
 """
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -718,17 +729,41 @@ def normalize_money(text: str) -> Normalization:
 
 
 def normalize_money_props(text: str, *,
-                          warnings: list[str] | None = None) -> dict | None:
+                          warnings: list[str] | None = None,
+                          warn_on: Iterable[str] | None = None) -> dict | None:
     """The S5 call pattern: props, or ``None`` + a warning (never a guess).
 
     Mirrors ``_valid_iso_date``'s posture in ``extractor_v2.py``: a caller
     that cannot type the value drops it and says so, so an abstention is
     visible in the payload instead of being silent.
+
+    ``warn_on`` narrows WHICH drop reasons the caller reports (``None`` =
+    every reason, the default). It never changes the derivation — only the
+    channel noise — and it exists because the reason vocabulary is not
+    uniform in consequence: ``no_currency_anchor`` is the design's named
+    abstention (§6/T3: ``"1.234,56 last quarter"`` types nothing and IS worth
+    reporting), while ``no_candidate`` and ``not_an_iso4217_code`` fire on
+    ordinary business prose (``"ISO 9001"``, ``"SOC 2"``, ``"Q3 target 30
+    KPI"``) and on every numberless sentence. A caller that writes one value
+    per point therefore passes a narrowed set rather than drowning the
+    warnings channel — a drop it does not report is still a drop, never a
+    guess: nothing is typed on either path.
+
+    ``warn_on`` must be a subset of :data:`DROP_REASONS`; an unknown name is
+    refused up front, because a typo in a closed vocabulary would otherwise
+    silently disable the warning it was meant to configure (and validate
+    BEFORE deriving, so a typo cannot hide behind a typed value).
     """
+    wanted = DROP_REASONS if warn_on is None else frozenset(warn_on)
+    unknown = wanted - DROP_REASONS
+    if unknown:
+        raise ValueError(
+            f"warn_on: unknown drop reason(s) {sorted(unknown)!r} — the closed "
+            f"set is {sorted(DROP_REASONS)!r}")
     result = normalize_money(text)
     if result.typed:
         return result.props
-    if warnings is not None:
+    if warnings is not None and result.drop_reason in wanted:
         warnings.append(
             f"value-normalizer: no typed money value ({result.drop_reason}) "
             f"for {result.detail!r} — prose only")

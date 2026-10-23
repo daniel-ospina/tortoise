@@ -62,6 +62,12 @@ from .commit_ops import SUBJECT_STATUS_VALUES as _SUBJECT_STATUS_VALUES
 from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
 from .ids import entity_name_id as _entity_name_id
 from .ids import ulid
+# #2817: the S5 money derivation (prose → typed value). Module scope because the
+# capture seam's `warn_on` narrowing below is derived from the CLOSED
+# `DROP_REASONS` vocabulary at import time, so a renamed reason fails here
+# instead of silently muting a warning. `value_normalizer` imports only
+# `tortoise.money` (no cycle; `money` is already loaded via the projection).
+from .value_normalizer import DROP_REASONS, normalize_money_props
 from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     EMBEDDING_PROPERTY,
     clear_embedding,
@@ -1226,6 +1232,16 @@ _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
                               # E4 (#5007): the verbatim span pointer
                               "span_start", "span_end")
 _CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
+
+#: #2817 route (2) — the drop reasons the CAPTURE WRITE SEAM reports when it
+#: derives a money value for a point. `no_candidate` (no number in the claim at
+#: all) and `not_an_iso4217_code` (`"ISO 9001"`, `"SOC 2"`, `"Q3 target 30
+#: KPI"` — ordinary business prose) fire on most sentences, so reporting them
+#: per point would drown the capture receipt. Every reason that means "a number
+#: was here and it was NOT safely typed" stays reported — including
+#: `no_currency_anchor`, which is the design's named abstention (design §6/T3).
+_CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - {
+    "no_candidate", "not_an_iso4217_code"}
 
 
 def _capture_passthrough_read_fields() -> str:
@@ -11787,6 +11803,35 @@ class TortoiseSDK:
                     create_props = props
                     if props.get("when"):
                         create_props = {**props, "validFrom": props["when"]}
+                    # #2817 (route 2 of the two the issue records as legal):
+                    # derive the money value HERE, at the capture write seam,
+                    # from the point's own `content` — the FULL stored claim
+                    # (bounded by the extractor's `_MAX_CONTENT`), never the
+                    # 200-char `quote`. The quote is the wrong source twice
+                    # over: a value straddling its cut types the truncated
+                    # prefix (a 100x understatement whose `verbatim` is still a
+                    # byte-exact substring, so traceability would PASS on a
+                    # wrong reading), and a quote is an excerpt OF the claim —
+                    # the value must agree with the sentence the graph stores.
+                    #
+                    # The derived fields are NOT added to
+                    # `_CAPTURE_PASSTHROUGH_PROPS`: that set is the public
+                    # capture RESPONSE surface (and `validFrom`'s note above is
+                    # the standing reason not to widen it). A money value is a
+                    # graph structural field read back with
+                    # `money.read_money_value` (design §7.1: server-written, not
+                    # a client field), so the response shape is untouched —
+                    # symmetric between a create (stores, does not advertise)
+                    # and a dedup hit (writes nothing).
+                    #
+                    # Derivation is deterministic and content-addressed, so a
+                    # re-ingest of the same content derives the same value and
+                    # the dedup hit above never rewrites the canonical.
+                    money = normalize_money_props(
+                        content, warnings=warnings,
+                        warn_on=_CAPTURE_MONEY_WARN_ON)
+                    if money:
+                        create_props = {**create_props, **money}
                     _created = self.create_point(
                         kind, content,
                         id=pid, dedup=True, session_id=session_id,

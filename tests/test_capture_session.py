@@ -367,6 +367,125 @@ def test_capture_v2_persists_passthrough_props_on_node(sdk, monkeypatch):
     assert row[3] == "turn-2813", row
 
 
+def _money_payload(content: str, *, quote: str = "",
+                   pid: str = "pt_2817_money") -> dict:
+    """One v2 payload point carrying ``content``; ``quote`` is the E3 excerpt."""
+    return {
+        "entities": [],
+        "events": [],
+        "points": [{
+            "id": pid,
+            "content": content,
+            "pointKind": "statement",
+            "reason": "NEW",
+            "confidence": 0.5,
+            "c_cal": 0.5,
+            "about_entities": [],
+            "source_ref": "session.md",
+            "quote": quote,
+            "status": "draft",
+        }],
+        "operators": [],
+    }
+
+
+def _read_money_row(sdk, pid: str) -> list:
+    return list(sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) "
+        "RETURN n.amountMinor, n.currency, n.minorUnitExponent, "
+        "n.verbatim, n.asOf",
+        params={"id": pid},
+    ).result_set[0])
+
+
+def test_capture_derives_the_money_value_onto_the_node(sdk, monkeypatch):
+    """#2817 (route 2): the S5 derivation must reach the GRAPH, not just exist.
+
+    The derive half landed in ``tortoise/value_normalizer.py`` (#9004) and the
+    Point lane DECLARES the five money keys (#8976), but the capture seam
+    filtered the point dict down to ``_CAPTURE_PASSTHROUGH_PROPS`` — which the
+    money keys are not in and must not be in — so a typed amount reached no
+    node at all. RED before the fix: ``n.amountMinor`` is ``None`` (the
+    KeyError-free form of "the value was dropped").
+
+    The response shape is deliberately unchanged: a money value is a graph
+    structural field read back with ``money.read_money_value`` (design §7.1 —
+    server-written, never a client field), so it is not advertised on the
+    capture receipt.
+    """
+    _install_fake_extract(monkeypatch, _money_payload(
+        "The tranche released EUR 800 last week.",
+        quote="the tranche released EUR 800"))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    pid = res["points"][0]["id"]
+    amount, currency, exponent, verbatim, as_of = _read_money_row(sdk, pid)
+    assert amount == 80_000, (amount, currency, exponent, verbatim, as_of)
+    assert currency == "EUR"
+    assert exponent == 2
+    assert verbatim == "800"
+    assert as_of is None                      # no asserted date in the claim
+    assert verbatim in "The tranche released EUR 800 last week."
+    # No response widening: the receipt still describes only the passthrough
+    # subset, so a create (stores, does not advertise) and a dedup hit (writes
+    # nothing) stay symmetric.
+    assert "amountMinor" not in res["points"][0]["props"], res["points"][0]
+
+
+def test_capture_derives_money_from_content_not_the_200_char_quote(
+        sdk, monkeypatch):
+    """The derivation source is the stored CLAIM, never the ``quote`` excerpt.
+
+    ``quote`` is cut at 200 chars in the extractor. A value straddling that cut
+    types the truncated PREFIX — and the resulting ``verbatim`` is still a
+    byte-exact substring, so the §6/T1 traceability check would PASS on a wrong
+    reading (the 1000x-class defect this issue exists to prevent, reintroduced
+    by truncation).
+
+    Two arms, both RED if a lane ever switches the source to ``quote``:
+      * a money value past char 200 of a long claim still types correctly;
+      * a money value present ONLY in ``quote`` types nothing.
+    """
+    filler = "the pilot ran and the notes stayed inconclusive " * 6
+    long_content = f"{filler}and then the tranche released EUR 800"
+    assert len(long_content) > 200
+    assert long_content.index("EUR 800") > 200
+
+    _install_fake_extract(monkeypatch, _money_payload(
+        long_content, quote=long_content[:200]))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    amount = _read_money_row(sdk, res["points"][0]["id"])[0]
+    assert amount == 80_000, amount
+
+    # ...and the quote is NOT a source: money in the excerpt alone types nothing.
+    _install_fake_extract(monkeypatch, _money_payload(
+        "the pilot phase stayed inconclusive", quote="EUR 800 released",
+        pid="pt_2817_quote_only"))
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert _read_money_row(sdk, res["points"][0]["id"])[0] is None, res["points"]
+
+
+def test_capture_never_types_an_ambiguous_amount(sdk, monkeypatch):
+    """The seam inherits the design's abstention (Option A, #2817):
+    ``R$ 1.234,56`` is NOT typed at all — never as ``1.234`` — and the raw
+    prose stays exactly as the extractor wrote it (prose is load-bearing)."""
+    _install_fake_extract(monkeypatch, _money_payload(
+        "R$ 1.234,56 was committed to the tranche."))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    pid = res["points"][0]["id"]
+    assert _read_money_row(sdk, pid)[0] is None, _read_money_row(sdk, pid)
+    stored_content = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content", params={"id": pid},
+    ).result_set[0][0]
+    assert stored_content == "R$ 1.234,56 was committed to the tranche."
+
+
+
 def _passthrough_payload(content: str) -> dict:
     """The v2 payload shape the #2813/#2949 tests drive — one point carrying
     all four E3 passthrough fields."""
