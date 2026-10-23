@@ -751,7 +751,8 @@ class TestTerminalStatusGuard:
         res = sdk.ingest(bundle)
         assert res["created"]["connections"] == 1
 
-    def test_bundle_local_point_hitting_terminal_dedup_rejected(self, sdk):
+    def test_bundle_local_point_hitting_terminal_dedup_routed_via_operator(
+            self, sdk):
         # cycle-17/18: a bundle-local point item whose (content_hash, kind)
         # dedup-hits an EXISTING terminal point.
         #
@@ -791,14 +792,13 @@ class TestTerminalStatusGuard:
         # `_upsert_point_props` RE-DERIVE the hash from the replayed content,
         # so a rebuilt graph keeps its hashes.) With the hash absent, the
         # content-hash MATCH the guard used missed that point and the
-        # cycle-17/18 guard silently stopped matching it. The bundle is then
-        # rejected only at Phase-2 `_check_endpoint_race` — a mid-write raise
-        # AFTER earlier bundle items committed (verified: point count 1 -> 2,
-        # an orphan left behind), the exact partial-mutation class the Phase-1
-        # guard exists to prevent. Simulate the hash-less state directly
-        # (clear the terminal point's `content_hash`) and assert the guard
-        # rejects the direct edge in Phase 1 via the hash-less content+kind
-        # fallback.
+        # cycle-17/18 guard silently stopped matching it — the PREDICATE gap
+        # this test pins, via the hash-less content+kind fallback. Simulate
+        # that state directly (clear the terminal point's `content_hash`) and
+        # assert the guard still MATCHES it.
+        #
+        # ⛔ #9173: the MATCH no longer implies an ingest-level REFUSAL, and
+        # this test no longer asserts one — see the assertion block below.
         #
         # Scope note: this simulates the TERMINAL-STATUS state (`status=
         # 'superseded'`, `outdated` unset) — the shape a direct status write
