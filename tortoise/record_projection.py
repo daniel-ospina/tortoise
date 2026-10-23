@@ -2385,8 +2385,10 @@ def _epistemic_endpoint(
 
     ⛔ WHICH COLUMN carries `s.id` is per label, and it is NOT always the
     table's `id` column — :data:`_ENTITY_MATCH_COLUMNS` is the one answer, and
-    every label here agrees with it (`Point` → `node_key`, `Subject`/`Object` →
-    `id`, `Event` → `node_key`). `Event` is the label where the two DISAGREE and
+    this resolver DERIVES from it rather than restating it (a second spelling is
+    how this family drifted onto `event.id` in the first place). Every label here
+    agrees with it (`Point` → `node_key`, `Subject`/`Object` → `id`, `Event` →
+    `node_key`). `Event` is the label where the two DISAGREE and
     where assuming `id` cost the record the edge: the schema pins
     `event.node_key = event_id` ``NOT NULL`` (`chk_event_node_key_is_contract_key`)
     while `event.id` is a plain nullable column, and the dominant
@@ -2424,12 +2426,24 @@ def _epistemic_endpoint(
         # `20261012000001`): `Point`/`Event` → `node_key` (the id / the
         # `eventId`), `Subject`/`Object` → `name`.
         key_column = "node_key" if label in ("Point", "Event") else "name"
-        # The FOLD's match column is `s.id`; for `Point` AND `Event` that IS
-        # `node_key` (Point's `node_key` is the id; Event's is the `eventId`,
-        # which `_upsert_event` also writes as the node's `id`). Matching the key
-        # keeps the per-(label, id) index instead of a column no producer must
-        # fill — and for `Event` the `id` COLUMN is exactly such a column.
-        match_column = "node_key" if label in ("Point", "Event") else "id"
+        # The FOLD's match column is `s.id`, and WHICH record column carries it
+        # is `_ENTITY_MATCH_COLUMNS`' own answer — DERIVED here, never restated.
+        # A second spelling of that fact is exactly how the Event arm came to
+        # match `event.id`, the one column its dominant producers leave NULL, and
+        # silently filed no row (#9553 review). Matching the key also keeps the
+        # per-(label, id) index instead of a column no producer must fill.
+        # This family resolves ONE column per label: the row carries one journal
+        # id per endpoint, and the pair-per-input fan-out assumes the fixed
+        # parameter block. A multi-column entry is REFUSED rather than silently
+        # read as "first".
+        match_columns = _ENTITY_MATCH_COLUMNS[table]
+        if len(match_columns) != 1:
+            raise RecordProjectionError(
+                f"the {label} endpoint resolves on {len(match_columns)} columns "
+                f"{match_columns} — an operator input is ONE journal id, so "
+                "this family can match exactly one"
+            )
+        match_column = match_columns[0]
         selects.append(
             f"SELECT '{label}' AS node_label, {key_column} AS node_key, "
             f"{pref} AS pref FROM public.{table} "
