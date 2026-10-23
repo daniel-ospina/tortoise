@@ -2591,30 +2591,45 @@ def test_the_superseded_census_note_only_claims_what_its_path_set_returns():
         "the baseline census command grew the manifest path, so the note's scope "
         "claim has changed — re-derive it instead of trusting this assertion"
     )
-    # Claim 1: what the baseline set RETURNS cannot include the manifest, because
-    # the manifest is not in its path set. Pre-#9548-P2 the note said it did.
-    returned = re.search(r"it now returns(.*?)comment\.", note, re.S)
-    assert returned, "the note no longer states what the baseline command returns"
-    claim = returned.group(1)
-    assert "manifest" not in claim, (
-        "the note credits the baseline census command with the manifest "
-        "declaration, but `.github/scripts/fly-managed-secrets.txt` is not in "
-        "that command's path set — a later lane re-running the census then "
-        "finds the note false (#9548 review P2)"
+    # ⛔ NEITHER THE WORD NOR THE SENTENCE WINDOW IS THE CLAIM. Two reword
+    # bypasses were measured here: naming the FILE instead of the word, and
+    # ending the "it now returns …" sentence early so the false provenance sits
+    # in the NEXT sentence. A window-scoped assertion passed both, and it
+    # REJECTED a truthful "…and NOT the manifest declaration". So stop scoping on
+    # a window: bind every MENTION of the manifest in the note to a clause that
+    # DENIES it is one of the census command's returns. The note may name the
+    # file as often as it likes; what it may not do is credit the baseline
+    # command with it (#9548 review r2).
+    sentences = [s for s in re.split(r"(?<=\.)\s+", note) if s.strip()]
+    naming = [
+        s for s in sentences
+        if "manifest" in s or manifest in s or Path(manifest).name in s
+    ]
+    assert naming, (
+        "the note no longer names the manifest declaration at all — the fourth "
+        "arming surface is then undocumented in the provenance record"
     )
-    # ⛔ THE WORD IS NOT THE CLAIM. The assertion above pins the token
-    # "manifest"; a note that makes the SAME false provenance claim by naming
-    # the file instead — "…the `.github/scripts/fly-managed-secrets.txt`
-    # declaration…" — walked straight past it (measured: that mutation left this
-    # test green). The referent is the FILE, so bind the claim to the file: its
-    # path and its basename must both be absent from "what the baseline census
-    # returns". A reworded claim is exactly how the false provenance comes back.
-    assert manifest not in claim and Path(manifest).name not in claim, (
-        "the note's 'what the baseline census returns' claim names the manifest "
-        "declaration by PATH — `.github/scripts/fly-managed-secrets.txt` is not "
-        "in that command's path set, so a later lane re-running the census finds "
-        "the note false (#9548 review P2). Rewording the claim does not make it "
-        "true; asserting the word alone lets a reworded one through"
+    unnegated = [
+        s for s in naming
+        # ⛔ Case-insensitive: emphasis variants are legitimate prose — a
+        # "…and NOT the manifest declaration" is exactly the truthful shape this
+        # assertion must ACCEPT, and a case-sensitive `\bnot\b` rejected it
+        # (measured while checking that this pin does not over-block).
+        if not re.search(r"\b(?:not|never|isn't|is not|are not)\b", s, re.I)
+    ]
+    assert not unnegated, (
+        "the note names the manifest declaration in a sentence that does not "
+        "deny it is in the baseline census command's path set:\n  "
+        + "\n  ".join(unnegated)
+        + "\n`.github/scripts/fly-managed-secrets.txt` is NOT in that command's "
+        "path set, so crediting the command with it is the pre-#9548-P2 false "
+        "claim however it is reworded (#9548 review r2)"
+    )
+    # The denial has to be about THAT command's path set — a negation elsewhere
+    # in the sentence is not the correction.
+    assert re.search(r"\bnot\b[^.]{0,12}in that path set", note, re.I), (
+        "the note no longer states that the manifest is NOT in the baseline "
+        "census command's path set — that denial is the whole correction"
     )
     # Claim 2: the surface it DOES live on is named, so the reader has a command
     # that reaches it ...

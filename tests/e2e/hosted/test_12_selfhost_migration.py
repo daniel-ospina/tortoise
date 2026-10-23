@@ -66,7 +66,11 @@ def _boot_selfhost(tmpdir: str):
     # shared harness boot (`conftest.py` scrubs it there): this child runs the
     # real app, arming is presence-based, so an inherited DSN makes a hermetic
     # run write rows into the REAL record. This boot path builds its own env and
-    # would otherwise be the one blind spot left in the directory.
+    # would otherwise be A blind spot left in the directory — not "the" one:
+    # the claim-server boot in `test_13_claim.py` was a second unscrubbed path
+    # and is blanked in the same change. This sentence scopes the guarantee to
+    # what was actually verified (all four child-env builders in this directory),
+    # not to the shape of one commit's diff (#9548 review r2).
     for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI", "TORTOISE_RECORD_DSN"):
         env[var] = ""
     env.update({

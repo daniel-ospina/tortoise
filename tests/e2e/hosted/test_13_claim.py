@@ -268,8 +268,19 @@ def claim_server(tmp_path_factory):
         # so a popped key would come straight back.
         "TORTOISE_RECORD_DSN": "",
     }
-    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI", "STRIPE_SECRET_KEY",
-                "STRIPE_WEBHOOK_SECRET", "STRIPE_PRICE_IDS", "GITHUB_CLIENT_ID"):
+    # ⛔ BLANK, NOT setdefault, for the two DB SELECTORS. `hosted_api._make_sdk`
+    # does `if os.environ.get("TORTOISE_DB_URI"): return TortoiseSDK(namespace=…)`
+    # and never consults `TORTOISE_DB_PATH` — so an operator shell or a sourced
+    # `.env` carrying a URI silently points this "hermetic" claim server at that
+    # DB (the shared docker FalkorDB) instead of the fixture's `db_path`. That is
+    # the same blank-not-pop mechanic the record-DSN entry above documents, one
+    # variable over, and `setdefault` leaves an inherited value intact (#9548
+    # review r2). The optional vendor keys keep `setdefault`: presence of a
+    # Stripe key does not redirect where the run reads and writes.
+    for var in ("TORTOISE_DB_URI", "FALKORDB_CLOUD_URI"):
+        env[var] = ""
+    for var in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+                "STRIPE_PRICE_IDS", "GITHUB_CLIENT_ID"):
         env.setdefault(var, "")
 
     log_path = Path(db_path).parent / "claim-uvicorn.log"
