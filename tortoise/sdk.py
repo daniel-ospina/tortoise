@@ -17724,6 +17724,18 @@ class TortoiseSDK:
             if route == "operator":
                 # cycle-13 route scoping: create_operator accepts no
                 # confidence/weight (they are plain direct-edge attributes).
+                # ⛔ #9173 review — DELIBERATELY left on the REQUEST route, not
+                # `write_route`: a promoted Point-bearing plain IMPL already
+                # passes these attributes through and `create_operator` DROPS
+                # them (measured at this head: a SINGULAR plain IMPL between
+                # Points with `confidence: 0.5` validates clean and writes an
+                # edge without it). Scoping this arm by the effective route
+                # would turn that silently-accepted bundle into a refusal — a
+                # new refusal for every existing caller, outside #9173's scope.
+                # The silent drop is a PRE-EXISTING defect on both route
+                # spellings, tracked as its own issue; when it is fixed this arm
+                # must move WITH the multi-item arm above, or the two rules stay
+                # inconsistent inside one function.
                 for key in ("confidence", "weight"):
                     if key in conn:
                         violations.append({
@@ -18910,7 +18922,8 @@ class TortoiseSDK:
                     })
 
     def _check_endpoint_race(self, index: int, conn: dict,
-                             refs: dict[str, str], violations: list[dict]) -> None:
+                             refs: dict[str, str], violations: list[dict],
+                             effective_route: str | None = None) -> None:
         """Phase-2 defense-in-depth (check 3): re-verify endpoints right
         before the connection write — a node deleted/superseded between
         Phase-1 validation and this write is the race class this exists for.
@@ -18934,8 +18947,11 @@ class TortoiseSDK:
         # (#9173) The EFFECTIVE route: refs are resolved HERE, so the
         # endpoint-kind gate can be asked before the write — which is what
         # makes this a check on the primitive that will run rather than on the
-        # connection item the caller wrote.
-        route = self._effective_route(conn, vals)
+        # connection item the caller wrote. `effective_route` is that answer
+        # already resolved by the caller (one graph read per connection, shared
+        # with `_check_connection` and the write branch); `None` resolves it.
+        route = (effective_route if effective_route is not None
+                 else self._effective_route(conn, vals))
         external = {v for v in vals if isinstance(v, str)}
         info = self._fetch_endpoint_info(external)
         for v in vals:
@@ -19834,8 +19850,12 @@ class TortoiseSDK:
             # same answer Phase 1 read from `_effective_connection_routes`.
             # Passing the REQUEST here would make Phase 2 refuse a bundle
             # Phase 1 accepted (the parity break this parameter closes).
+            # Resolved ONCE per connection and handed to both Phase-2 checks
+            # and to the write branch below: `_effective_route` is a graph
+            # read (`_point_bearing_ids`), and the three call sites ask the
+            # same question about the same ids.
             _eff = None
-            if isinstance(conn, dict):
+            if isinstance(conn, dict) and "operator" in conn:
                 _to_v = conn.get("to")
                 _ids = [refs.get(x, x) if isinstance(x, str) else x
                         for x in [conn.get("from"),
@@ -19843,7 +19863,7 @@ class TortoiseSDK:
                                     else [_to_v])]]
                 _eff = self._effective_route(conn, _ids)
             self._check_connection(i, conn, viols, _eff)
-            self._check_endpoint_race(i, conn, refs, viols)
+            self._check_endpoint_race(i, conn, refs, viols, _eff)
             if viols:
                 raise Phase2Error(viols[0]["message"], batch_id=batch_id)
             src = refs.get(conn["from"], conn["from"])
@@ -19880,7 +19900,8 @@ class TortoiseSDK:
                 # operator-mediated structure is chosen where the ruling
                 # requires it.
                 _request_route = self._connection_route(conn)
-                _route = self._effective_route(conn, [src, *dsts])
+                _route = (_eff if _eff is not None
+                          else self._effective_route(conn, [src, *dsts]))
                 if _request_route == "direct" and _route == "operator":
                     self._append_warning(
                         f"point_mediated_route:{src}->{dsts[0]}:{op_type} — a "
