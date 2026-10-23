@@ -396,6 +396,32 @@ def test_the_ambient_libpq_environment_never_reaches_the_dump(monkeypatch):
     assert env["PATH"] == "/usr/bin"
 
 
+def test_percent_encoded_credentials_are_decoded_at_every_userinfo_site():
+    """#3039: ONE userinfo reader — and the one it names must DECODE.
+
+    Every site in this module that reads the DSN's userinfo (the libpq
+    environment, the error sentence, the manifest's non-secret coordinates) goes
+    through `tortoise.config.parse_uri_userinfo`; a raw
+    `urlsplit(...).username` read here is refused by
+    `tests/test_from_uri_userinfo.py::test_no_raw_urlparse_userinfo_read_in_guarded_dirs`.
+    This test pins the CONTRACT that makes that substitution safe, because the
+    guard cannot: `urlsplit` does NOT percent-decode, while libpq/psycopg DO, so
+    handing the raw form to the client authenticates with a literal `%40` and
+    fails with a misleading "invalid username-password pair". `env` is exactly
+    what libpq reads, so a revert to the raw fields (or to `raw_uri_userinfo`)
+    reds this.
+    """
+    dsn = "postgresql://rec%40ord:p%40ss%3Aword@db.projectref.supabase.co:5432/postgres"
+    env = rb.libpq_env(dsn)
+    assert env["PGUSER"] == "rec@ord"
+    assert env["PGPASSWORD"] == "p@ss:word"
+    # The manifest is plaintext and world-readable — decoded, never re-encoded.
+    assert rb._source_of(dsn)["user"] == "rec@ord"
+    # An error sentence names the user; the encoded form must not leak into it.
+    assert "rec@ord@" in rb._coordinates_for_message(dsn)
+    assert "rec%40ord" not in rb._coordinates_for_message(dsn)
+
+
 def test_the_manifest_records_the_table_set_the_ciphertext_hash_and_no_credentials():
     manifest, storage, _runner, _db = _dump_manifest()
     assert manifest["format"] == rb.RECORD_DUMP_FORMAT
