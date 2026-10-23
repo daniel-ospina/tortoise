@@ -361,9 +361,10 @@ export async function purgePostCache(slug: string): Promise<void> {
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ slug }),
-        // Bounded like the server's own reads (3s row + 5s window): without this
-        // one request that never settles keeps its slot in `notifyInFlight`, and
-        // every later notification for that slug queues behind it and never runs.
+        // Bounded for the same reason as the notification below, against this
+        // function's own queue (`purgeInFlight`): a request that never settles
+        // would keep its slot, and every later purge for that slug would queue
+        // behind it and never run.
         signal: AbortSignal.timeout(15_000),
       });
     } catch {
