@@ -1480,17 +1480,23 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
     def test_damped_factor_ids_returns_every_copy_deduped(self):
         from tortoise.decide_wiring import damped_factor_ids
 
-        assert damped_factor_ids({"targets": ["a", "b", "a"]}) == ["a", "b"]
-        assert damped_factor_ids({"targets": []}) == []
+        assert damped_factor_ids(["a", "b", "a"]) == ["a", "b"]
+        assert damped_factor_ids([]) == []
 
     def test_mint_gate_licenses_the_empty_and_shared_triple_only(self):
         from tortoise.decide_wiring import may_mint_damped_bridge
 
-        empty = {"targets": [], "singles": [], "other_singles": []}
-        shared_only = {"targets": [], "singles": [], "other_singles": []}
+        # The two licensed states are DISTINCT (the shared-only one really does
+        # have a bridge on the triple), so the case the test is named for can
+        # fail on its own.
+        empty = {"targets": [], "singles": [], "other_singles": [],
+                 "bridges": 0}
+        shared_only = {"targets": [], "singles": [], "other_singles": [],
+                       "bridges": 1}
         has_single = {"targets": ["op"], "singles": ["op"],
-                      "other_singles": []}
-        other_label = {"targets": [], "singles": [], "other_singles": ["op2"]}
+                      "other_singles": [], "bridges": 1}
+        other_label = {"targets": [], "singles": [],
+                       "other_singles": ["op2"], "bridges": 1}
 
         assert may_mint_damped_bridge(empty) is True
         assert may_mint_damped_bridge(shared_only) is True

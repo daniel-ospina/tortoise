@@ -10607,6 +10607,11 @@ def _cmd_decide(args) -> int:
                     if note:
                         print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: "
                               f"{note}")
+                    # Name the consequence: the notes above describe the
+                    # bridges that were ALREADY there, and this command's answer
+                    # to "nothing to damp" is to wire the bridge it damps.
+                    print(f"  ✓ relevance: {src} --{op_type}--> {tgt} "
+                          f"(wired single-pair bridge {op_id} to damp)")
                     targets = [op_id]
                 elif pick["notes"]:
                     for note in pick["notes"]:
@@ -10617,8 +10622,7 @@ def _cmd_decide(args) -> int:
                 # "ranking depends on the run count" defect in its other
                 # direction (#9631 review). The rule lives in
                 # `damped_factor_ids` so both entry points agree.
-                for target_id in damped_factor_ids(
-                        {"targets": targets, **pick}):
+                for target_id in damped_factor_ids(targets):
                     if target_id not in all_operator_ids:
                         all_operator_ids.append(target_id)
                 for target_id in targets:

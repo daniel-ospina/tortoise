@@ -248,7 +248,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         # points share — the CLI appends all of them too (#9631 review: the two
         # callers had forked this leg, so a polluted triple produced different
         # factor lists per entry point).
-        for damped_id in damped_factor_ids(pick):
+        for damped_id in damped_factor_ids(targets):
             if damped_id not in all_operator_ids:
                 all_operator_ids.append(damped_id)
         operator_rows.append({

@@ -243,6 +243,12 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
          "other_singles": [ids...],    # single-pair bridges under ANOTHER label
          "bridges": int}               # how many bridges sit on the triple
 
+    The NOTES describe the bridges that are ALREADY there; they never state what
+    the caller will do next, because the two callers differ exactly there (the
+    script refuses to mint, the CLI wires a bridge to damp). A shared note that
+    said "nothing damped" would be printed by a caller that then damped a fresh
+    bridge — the drift this module exists to end, in user-facing prose.
+
     ``label`` scopes the dampening when the caller names one (two labels over
     one triple are two claims — damping a `refutes` bridge on behalf of a
     `supports` mitigation would silently weaken a claim the caller did not
@@ -253,8 +259,7 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
                            any_label=label is None)
     if not found:
         named = f"{label} " if label else ""
-        notes = [f"no {named}bridge on this triple — nothing damped "
-                 "(a relevance edge never mints a claim)"]
+        notes = [f"no {named}bridge on this triple"]
         # A labelled edge on a triple that carries other labels is NOT an empty
         # triple, and the caller must not treat it as licence to mint.
         others = [row for row in find_operators(
@@ -285,8 +290,8 @@ def select_damp_targets(proj, op_type: str, source_id: str, target_id: str,
                      "weaken claims this edge did not name)")
     found = [row for row in found if row["targets"] == 1]
     if not found:
-        notes.append("every bridge on this triple is shared with other pairs — "
-                     "nothing damped")
+        notes.append("every bridge on this triple is shared with other pairs "
+                     "(no single-pair bridge to damp)")
         return {"targets": [], "bridges": len(shared), "singles": [],
                 "other_singles": [], "notes": notes}
     if label is not None:
@@ -331,7 +336,7 @@ def may_mint_damped_bridge(pick: dict) -> bool:
     return not pick["singles"] and not pick["other_singles"]
 
 
-def damped_factor_ids(pick: dict) -> list[str]:
+def damped_factor_ids(targets: list[str]) -> list[str]:
     """The operators a relevance edge damped, for an explicit factor list.
 
     EVERY damped copy belongs in the list, not just the first: a polluted triple
@@ -340,9 +345,13 @@ def damped_factor_ids(pick: dict) -> list[str]:
     point, which is the drift this module exists to prevent. Deduped, because a
     factor list must not carry the same operator twice: EP would count one
     bridge as two.
+
+    Takes the ids the caller actually damped (``pick["targets"]``, or the freshly
+    minted bridge), never a dict: an earlier version spread the dict beside an
+    explicit ``targets`` key, and the spread silently won.
     """
     seen: list[str] = []
-    for op_id in pick["targets"]:
+    for op_id in targets:
         if op_id not in seen:
             seen.append(op_id)
     return seen
