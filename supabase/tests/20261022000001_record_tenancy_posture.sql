@@ -259,7 +259,15 @@ END $$;
 -- report tenant A's rows and nothing else. `count(*) = 1` per table is the
 -- paired assertion: "the other tenant's row is invisible" AND "my own row is
 -- visible" — a test that only asserted 0 rows would pass on an empty table.
-BEGIN;
+-- ⛔ NO `BEGIN`/`ROLLBACK` HERE. The harness executes this file as ONE
+-- `db.exec` batch, i.e. inside one implicit transaction — so an explicit
+-- `ROLLBACK` at the end of §7 aborted the whole file's state from line 1,
+-- discarding §0's two-tenant seed AND line 49's `GRANT USAGE ON SCHEMA tests`.
+-- §8 and §10 then asserted against EMPTY tables and passed vacuously (measured:
+-- `public.point` held 0 rows at §10, and `has_schema_privilege(
+-- 'tortoise_record_app','tests','USAGE')` was false — #9600 review cycle 7).
+-- `SET LOCAL ROLE` is already transaction-local in this batch, so the sections
+-- below run as the app role and §7c RESETs both settings explicitly.
 SET LOCAL ROLE tortoise_record_app;
 SELECT set_config('app.current_org_id', 'org_r6_a', true);
 
@@ -349,7 +357,14 @@ END $$;
 SELECT tests.assert(
   (SELECT count(*) FROM public.relation) = 2,
   'R6: the app role sees only its own relation rows (the seeded one + the one it wrote)');
-ROLLBACK;
+
+-- ── 7c. Leave the app-role scope (§6-§7) and KEEP the data ──────────────────
+-- The counterpart of the removed `ROLLBACK`: clear the role and the GUC so §8's
+-- "no GUC set" case is the real one, WITHOUT discarding the seeded tenants the
+-- later sections assert against.
+RESET ROLE;
+SELECT set_config('app.current_org_id', '', true);
+RESET app.current_org_id;
 
 -- ── 8. The DOCUMENTED failure signature: a missing GUC reads as zero rows ──
 -- A fresh transaction, so nothing set the GUC. This is the trap the decision
@@ -358,7 +373,13 @@ ROLLBACK;
 -- the read side into an error becomes a red test rather than a surprise at
 -- cutover — and so that a reader cannot mistake an empty result for a working
 -- tenant boundary.
-BEGIN;
+-- ⛔ No `BEGIN`/`ROLLBACK` (same reason as §6-§7: this batch is one
+-- transaction, so a ROLLBACK here would discard §0's seed and make the very
+-- assertion below vacuous). ANTI-VACUITY first: the unscoped tables must HAVE
+-- rows through a role that can see them, or "zero rows" proves nothing.
+SELECT tests.assert(
+  (SELECT count(*) FROM public.point WHERE org_id IN ('org_r6_a','org_r6_b')) = 3,
+  'R6: the seeded tenants are still present before the missing-GUC case (two seeded + the one row 7 wrote) — otherwise "zero rows" is an empty table, not a boundary');
 SET LOCAL ROLE tortoise_record_app;
 
 DO $$
@@ -375,12 +396,11 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
-ROLLBACK;
+RESET ROLE;
 
 -- ── 9. …and a missing GUC makes a WRITE loud, not silent ───────────────────
 -- The asymmetry is the safety property: an unscoped reader sees nothing, and an
 -- unscoped writer is refused. Both halves are pinned here.
-BEGIN;
 SET LOCAL ROLE tortoise_record_app;
 
 DO $$
@@ -392,12 +412,22 @@ BEGIN
   EXCEPTION WHEN insufficient_privilege THEN NULL;
   END;
 END $$;
-ROLLBACK;
+RESET ROLE;
+-- The refused statement left no row behind: the guard must be a refusal, not a
+-- filter that quietly drops the write.
+SELECT tests.assert(
+  (SELECT count(*) FROM public.point WHERE id = 'p_r6_unscoped') = 0,
+  'R6: the refused unscoped write landed NOTHING');
 
 -- ── 10. Clean up (the harness spot-checks for leftovers afterwards) ────────
 -- Through the ONE production erasure path, as `20261012000001_record_schema.sql`
 -- does: `purge_org_record` sets app.record_journal_purge transaction-locally and
 -- hard-deletes the org, cascading to every record table.
+-- The seed is still there (it survived §6-§9 now), so the two assertions below
+-- measure a deletion rather than an empty table.
+SELECT tests.assert(
+  (SELECT count(*) FROM public.point WHERE org_id IN ('org_r6_a','org_r6_b')) = 3,
+  'R6: both tenants are present immediately before the purge (three rows, as at 7) — a purge assertion over an empty table proves nothing');
 SET ROLE service_role;
 SELECT public.purge_org_record('org_r6_a');
 SELECT public.purge_org_record('org_r6_b');
@@ -425,16 +455,12 @@ SELECT tests.assert(
 -- both places, so drift reddens a Python test instead of being visible only to
 -- whoever reads this file.
 --
--- ⚠️ The result is captured in a TEMP TABLE while the role is switched, because
--- in-place assertion is NOT available in this harness. MEASURED here: BOTH
--- forms — `SET ROLE tortoise_record_app; SELECT tests.assert(true, …)` and
--- `BEGIN; SET LOCAL ROLE tortoise_record_app; SELECT tests.assert(true, …);
--- ROLLBACK;` — fail with `permission denied for schema tests`, even though line
--- 49 grants that role USAGE on the schema (the grant is not what the engine
--- consults for a `SET ROLE`-effected user here). The temp-table capture
--- sidesteps it: EVALUATE as the role, ASSERT after `RESET ROLE`.
+-- The assertion runs IN PLACE as the app role: line 49 grants that role USAGE on
+-- schema `tests`, and since §6-§9 no longer `ROLLBACK` (which used to discard
+-- that grant mid-file — #9600 review cycle 7), the grant is in effect here.
 SET ROLE tortoise_record_app;
-CREATE TEMP TABLE r6_gate_app AS SELECT (SELECT (r.rolsuper OR r.rolbypassrls
+SELECT tests.assert(
+  (SELECT (r.rolsuper OR r.rolbypassrls
            OR EXISTS (SELECT 1 FROM pg_roles g
                        WHERE g.oid <> r.oid
                          AND (g.rolsuper OR g.rolbypassrls)
@@ -449,18 +475,16 @@ CREATE TEMP TABLE r6_gate_app AS SELECT (SELECT (r.rolsuper OR r.rolbypassrls
                          AND (c.relowner = r.oid
                               OR pg_has_role(r.oid, c.relowner, 'USAGE'))))
      FROM pg_roles r
-    WHERE r.rolname = current_user) AS bypassing;
-RESET ROLE;
-
-SELECT tests.assert(
-  (SELECT bypassing FROM r6_gate_app) = false,
+    WHERE r.rolname = current_user) = false,
   'R6 runtime gate: the app role reads as NON-bypassing — the gate lets the write path proceed, and the policies are what scope it');
+RESET ROLE;
 
--- The ANTI-VACUITY half: `service_role` is BYPASSRLS, so the same expression
--- must come back TRUE. Without this, an expression that had lost its legs (or
--- returned NULL) would still satisfy the assertion above.
+-- The ANTI-VACUITY half: `service_role` is BYPASSRLS, so the same expression must
+-- come back TRUE. Without this, an expression that had lost its legs (or returned
+-- NULL) would still satisfy the assertion above.
 SET ROLE service_role;
-CREATE TEMP TABLE r6_gate_service AS SELECT (SELECT (r.rolsuper OR r.rolbypassrls
+SELECT tests.assert(
+  (SELECT (r.rolsuper OR r.rolbypassrls
            OR EXISTS (SELECT 1 FROM pg_roles g
                        WHERE g.oid <> r.oid
                          AND (g.rolsuper OR g.rolbypassrls)
@@ -475,15 +499,9 @@ CREATE TEMP TABLE r6_gate_service AS SELECT (SELECT (r.rolsuper OR r.rolbypassrl
                          AND (c.relowner = r.oid
                               OR pg_has_role(r.oid, c.relowner, 'USAGE'))))
      FROM pg_roles r
-    WHERE r.rolname = current_user) AS bypassing;
-RESET ROLE;
-
-SELECT tests.assert(
-  (SELECT bypassing FROM r6_gate_service) = true,
+    WHERE r.rolname = current_user) = true,
   'R6 runtime gate: service_role reads as BYPASSING — the gate refuses it, which is what makes the app-role assertion non-vacuous');
-
-DROP TABLE r6_gate_app;
-DROP TABLE r6_gate_service;
+RESET ROLE;
 
 -- The unset-GUC half of the same gate is already pinned above (§8/§9: a read
 -- returns ZERO ROWS and a write raises 42501), so it is not restated here — this

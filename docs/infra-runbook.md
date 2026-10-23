@@ -2858,22 +2858,27 @@ on, because `INHERIT` is the default on both sides. The boundary is therefore th
 flipped or granted membership must be corrected as an operator, and the migration fails closed when
 the applying role cannot re-assert the attributes.
 
-**The code checks all four bypasses on every connection, and refuses.**
+**The code checks all four bypasses on both record doors' connections, and refuses.**
 `record_projection.scope_connection()` is what both record doors (the write path and
-`tortoise record-reconcile`) call. On each connection it sets the tenant GUC transaction-locally,
+`tortoise record-reconcile`) call. ⚠️ One reader is outside them and is NOT gated:
+`tortoise/record_read.py` takes a caller-supplied connection and installs no scope (#9555's
+outstanding read arm), so it is neither refused nor tenant-scoped under this migration. On each connection it sets the tenant GUC transaction-locally,
 reads it back, and — on the same statement — refuses the connection when `current_user` is a
 superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table. So a DSN naming
 `postgres` or `service_role` (or `tortoise_record_app` after a mistaken `GRANT`) does not silently
 write and read across tenants with the policies unevaluated: the first write or read raises, and
 the operator fixes the DSN.
 The same refusal covers BOTH read verbs — `tortoise record-reconcile` and `tortoise
-record-restore` (R8) — whose record read would otherwise return zero rows. Fail-closed, and the
-two verbs fail DIFFERENTLY: the reconciler would report a coherent pair as **divergent** (exit
-3), and the restore would find an empty source and **refuse** before touching the target graph
-(`refuse_unrestorable_source`, exit 3, "nothing was written") — unless `--allow-empty` was passed. It is fail-closed but not self-explaining: the
-verb's CLI reports the error's TYPE only, so a wrong-role DSN surfaces as
-`record is unreadable (RecordProjectionError)` with no role named — if you see that, check the DSN's
-role against this section first, because the same message covers a transient record outage.
+record-restore` (R8) — because both read through `read_record_view`. Both fail the SAME way on a
+wrong-role DSN, and it is the FIRST thing they do: `scope_connection` raises inside the read, the
+verb wraps it as `RestoreUnavailable`/its reconcile equivalent, and both exit **2** (UNAVAILABLE
+— no verdict, nothing written) with `the record is unreadable (RecordProjectionError)`. ⚠️ They
+never reach the *empty source* refusal (`refuse_unrestorable_source`, exit 3) or the divergence
+verdict (exit 3): those are what a correctly-roled but EMPTY record would produce. Read the
+exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
+DSN); a driver `OperationalError` in the same message is a transient outage.
+⚠️ Note `-m tortoise record-restore`, a read-only restore, behaves as described here; the
+R8 drill's `--limit` and `--allow-empty` flags apply to a run that HAS read a record.
 
 ### Runtime Config (non-secret)
 
