@@ -137,10 +137,29 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   confer `nextval`, and `has_table_privilege(..., 'INSERT')` reads TRUE while the insert fails
   (#9600 review cycle 2, measured by executing the insert). Granted by the migration; proven by
   §7b of the posture suite, which lands a real `relation` row through the app role.
-- **No production code set that GUC** before this change (`grep` over `tortoise/`, `apps/`, `tools/`,
-  `services/`: zero `current_setting`/`set_config`; the only setters were `supabase/tests/*.sql`).
+- **No production code set that GUC** before this change. The one SETTER is `TENANT_GUC_SQL`
+  (`tortoise/record_projection.py:239`, `SELECT set_config('app.current_org_id', %s, true)`), executed in
+  exactly one place — `_apply_tenant_scope`, `tortoise/record_projection.py:3152` — which both record doors
+  reach through `scope_connection()` (`:3200`; `replay()` at `:3327`, `cache_projection.read_record_view()`
+  at `:789`). ⚠️ Those line numbers are as of THIS PR's head: at the `ec9132efe` this section is measured
+  at, the statement did not exist at all (introduced by this change: `git log -S TENANT_GUC_SQL
+  -- tortoise/` returns exactly one commit). The pathspec is required, and it is the same trap as the
+  greps below: unscoped, the search also matches DOCUMENTATION that merely quotes the constant — this
+  file among it — so it reports a commit that changed a doc, not a setter. The only setters before R6
+  were `supabase/tests/*.sql`. `grep -rn TENANT_GUC_SQL tortoise/` finds the setter and its use.
+  ⚠️ Three greps that look like the test and are NOT. The setter interpolates
+  `TENANT_GUC`, so `grep -rn "set_config('app.current_org_id" tortoise/` returns **one** line and it is
+  PROSE — `replay()`'s docstring at `:3269` quotes the statement — which reads as "the code never sets the
+  GUC". A bare `grep -rn --include='*.py' set_config tortoise/` reaches two things that are not this GUC:
+  `tortoise/projection/__init__.py:1634`'s `set_config_reset_marker` (a GRAPH marker) and
+  `tortoise/record_backup.py`'s `statement_timeout`/`lock_timeout` statements. And
+  `grep -rn --include='*.py' current_setting tortoise/` returns only the tenant GUC's own read-back
+  (`:277`) and prose about it — it does NOT reach `set_config_reset_marker`, whose name does not contain
+  `current_setting`, so a reader using that grep to count "the GUC's uses" is counting something else.
+  Scope: the greps are over `tortoise/` only — `supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql:43`
+  quotes the same statement, so "one place in the tree" is false as a tree-wide claim and is not made here.
 - The `authenticated` **read** surface already had a cross-tenant test
-  (`20261012000001_record_schema.sql:389-417`, #7968) — that half was **not** missing. What was
+  (`20261012000001_record_schema.sql:410-418`, #7968) — that half was **not** missing. What was
   missing was the posture the *write path* runs under, which is what this lane added.
 
 **Sources (all read 2026-10-22):**
