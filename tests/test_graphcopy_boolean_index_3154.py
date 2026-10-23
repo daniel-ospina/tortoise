@@ -463,9 +463,8 @@ def test_audit_helper_repairs_a_corrupted_copy(db):
         ).result_set[0][0]) == _N_FALSE, (
             "the absence-or-false predicate must survive the corrupt index — "
             "it is the form the calibration gate and dream's anchor selection "
-            "use (#3139/#3154/#9063). The readers still on the bare form "
-            "(sdk/ingest/ranking/audit/taxonomy) are safe only because the "
-            "index never survives an open, which "
+            "use (#3139/#3154/#9063). Readers still on the bare form are "
+            "safe only because the index never survives an open, which "
             "test_open_heals_a_legacy_boolean_index pins — do not read this "
             "as licence to drop that purge"
         )
