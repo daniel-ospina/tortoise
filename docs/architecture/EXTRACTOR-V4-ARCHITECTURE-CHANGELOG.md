@@ -827,3 +827,45 @@ from the reach cells by the guard, never hand-counted. §13.8's enumeration name
 `test_the_extractor_document_agrees_on_the_count` holds it there in both directions. The ruling is unchanged:
 **KEEP the stored edges, deferred to post-launch** — the corrected count moves in the direction the ruling
 already bet on, since more read sites make keeping the edge more strongly indicated.
+
+---
+
+## G5's destructive half — the mechanism was re-measured and §4.3 now states it (2026-10-22, `#5333`)
+
+**What changed in the design document.** §4.3 gained a subsection, *G5's destructive half — the target and the
+journaling arm EXIST; the bar, the arbiter and the RULING do not*, and the G5 row plus the *"Two need an owner
+ruling"* sentence now point at it. **The ruling itself is unchanged and still the owner's**: `#5333`'s task 1 is
+open, `DESTRUCTIVE_DISPOSITIONS` stays empty, and the subsection states a proposal rather than a decision.
+
+**Why it was written: a premise in the decision record was false.** `#5059`'s record told the ruling that *"the
+`(Object)` layer has no writer that folds an archive-style relocation — every existing `status` write is a Point
+supersession (`ObjectSuperseded`, `#1350`)"*, and made the missing mechanism the reason the destructive half
+needed its own issue. Measured against the tree, that is not the state:
+
+| the claim | measured 2026-10-22 |
+|---|---|
+| no fold carries an Object relocation | `update_entity(<object>, status=…)` journals `EntityMutated`, the classifier labels it `restatus`, and replay runs the **same** `SET n += $s` on the canonical label (`sdk.py:33029`; `projection/__init__.py:18664` over `_ENTITY_MUTATION_STATE_OPS`, `:7383`) |
+| every `Object.status` write is a Point supersession | `ObjectSuperseded` folds Objects (`projection/entities.py:4059`, rebuild sweep `projection/__init__.py:14280`) — but it requires a **visible distinct successor** (`commit_ops.py:1408`), so it is the one arm that cannot express relocation-without-successor |
+| the target needs new vocabulary | `archived` is already in `commit_ops.OBJECT_TERMINAL_STATUSES` (`:51`) and the read-exclusion alias (`:59`), routed by `search_engine._status_vocab_for`; **no first-class producer or lifecycle transition writes it** — `_ALLOWED_TRANSITIONS` (`sdk.py:2942`) declares it terminal with *"reserved — no v1 write path"* (`:2955`) **and nothing consults that map**, so it proves nothing about the Object family — while the generic unvalidated `update_entity` path **can** already place `archived` on an `:Object`, so the existing `archived` population is **UNMEASURED** and must be enumerated before any relocation pass |
+| `#3304`'s raw-`SET` tombstone gap is adjacent and open | `#3304` closed 2026-10-06; the remaining gap is narrower and is stated in the subsection — **no Object-status vocabulary guard on the write side**, and it cannot be a closed set because pack-declared lifecycles own their words |
+
+**The correction moves the cost of the authorisation, so it belongs in front of the ruling.** What the ruling
+would buy is now: an applier plus the **Jev arbitration seam that does not exist** (§4.2 — an adapter, a prompt
+and a parser), not a new event type and not a new fold. #5059's *"one thing B needs that does not exist today"*
+is therefore replaced by an accurate list, and nothing in the ledger's invariants (I1/I2, the empty
+`DESTRUCTIVE_DISPOSITIONS`) changed.
+
+**Not changed, deliberately.** No producer for `archived`, no applier, no disposition rung, no Object-status
+vocabulary guard (a closed set would break pack lifecycles — stated in the subsection rather than implemented),
+and no `OVERRIDES:` marker: this is a proposal awaiting a ruling, not a departure from a recorded one.
+
+**Two record defects fixed in the same pass, neither a design change.** ⚠️ **The subsection now names its revision
+pin (`653980445`).** Its citations are HEAD numbers: read against the document's default pin (`c79ba1cf2`) five of
+the cited files are shorter than the cited line (`sdk.py`, `assembly.py`, `projection/entities.py`,
+`projection/__init__.py`, `commit_ops.py`) and `tortoise/definite_description_backfill.py` does not exist, so
+the header's default sent a reader to no citation on every line of the passage — the pin is stated in the passage
+and named in the header's exception list, and a guard reds if the pin is dropped. ⚠️ **The closing sentence
+counted the steps wrong** — it read *"§4.4 declares the policy for the six pipeline steps … not a seventh
+declaration"*, while §4.0/§4.1 declare **EIGHT** (and §4.4 covers all eight), so the carried-over rule is
+*"not a ninth declaration"*. Both are corrected in the design document; a guard now reds if that subsection states a
+spelled or numeric step count other than §4.0's canonical one, or a `… declaration` ordinal other than the next one.

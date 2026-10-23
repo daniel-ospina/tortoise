@@ -177,7 +177,7 @@ mkdir -p "$RUNNER_TEMP"
 DRIFT_REPORT="$FIX/drift-report.txt"
 cat > "$DRIFT_REPORT" <<'REPORT_EOF'
 check-migration-drift: repo migrations vs prod (project ybetwichurajbfswfeqa)
-  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):
+  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):
     - 20260926000002
     - 20260930000001
   note: BLOCKING list above is the COMPLETE repo-ahead set — 2 of 2 repo-ahead pending
@@ -255,9 +255,10 @@ BIG_REPORT="$FIX/drift-report-big.txt"
     echo "  warn-class line $i — index-only drift, non-blocking, listed for context only"
     i=$((i + 1))
   done
-  echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
+  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):"
   echo "    - 20260926000002"
-  echo "  Remediation: apply migrations first —"
+  echo "  Remediation — decide PER VERSION, from prod:"
+  echo "    (a) the objects are ABSENT — apply migrations first:"
   echo "    gh workflow run supabase-deploy.yml --ref main"
 } > "$BIG_REPORT"
 if [ "$(wc -c < "$BIG_REPORT")" -gt 6000 ]; then
@@ -405,10 +406,15 @@ assert_contains "$PACK_BODY" "SKIPPED" "(control) the pack-smoke body DOES state
 FENCE_REPORT="$FIX/drift-report-fence.txt"
 {
   echo "check-migration-drift: repo migrations vs prod"
-  echo '  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):'
+  # Exact shipped heading (double-quoted: the heading carries an apostrophe and no
+  # fence, so nothing forces the single-quoted form). Round-9 review: the earlier
+  # single-quoted variant silently diverged from what the gate emits, and nothing
+  # in this case asserts on the heading, so the drift was undetectable.
+  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):"
   echo "    - 20260926000002   # see ###\`\`\` the runbook"
   echo '  ```'
-  echo '  Remediation: apply migrations first —'
+  echo '  Remediation — decide PER VERSION, from prod:'
+  echo '    (a) the objects are ABSENT — apply migrations first:'
   echo '    gh workflow run supabase-deploy.yml --ref main'
 } > "$FENCE_REPORT"
 reset_case

@@ -138,7 +138,14 @@ to have none.
     upsert is the one read, and it resolves a RECORD coordinate).
   * **rebuild == record**: re-projecting the plan writes exactly the record's
     key set and field set — **no extra field, no extra node** — asserted over
-    the plan's `Statement.params['props']`, not over the input model.
+    the plan's `Statement.params['props']`, not over the input model. ⚠️ **One
+    declared exception (#9634):** `cache_projection.FOLD_ON_CREATE_DEFAULTS`
+    applies the FOLD's `ON CREATE` constants (`subjectKind`/`objectKind` →
+    `'other'`, `Object.title` → `''`) where the record row is silent, so a
+    record-sourced node equals the node the live fold would build. Because the
+    assertion reads the VIEW, it cannot see this class — the drift pin in
+    `tests/test_cache_projection.py` is the bound, and the members the record
+    cannot decide are #9710.
   * **idempotent**: projecting the same view twice yields the same statement
     multiset.
   * **not-hot, never empty**: an unmaterialized record key is `not-hot` and an
