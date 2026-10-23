@@ -8588,10 +8588,11 @@ def _cmd_pack_validate(args) -> int:
     pack do not resolve, #2781). Reading only `errors` printed `✓ Clean` and
     exited 0 for a catalog whose declared `depends_on` was not installed
     (#9663) — the same false green, one bucket over. A pack whose declared
-    dependency is absent is not clean: it is *loaded but unresolved*, and
-    nothing it declares could be used. This also matches the hosted install
-    gate (`pack_manifest_store.validate_manifest` refuses exactly these refs),
-    so the local and hosted gates cannot disagree in the fail-open direction.
+    dependency is absent is not clean: it is *loaded but unresolved*, and the
+    references it declares into that pack do not resolve. This also matches the
+    hosted install gate (`pack_manifest_store.validate_manifest` refuses exactly
+    these refs), so the local and hosted gates cannot disagree in the fail-open
+    direction.
 
     #2766: also prints the per-relation write-path verdict
     (writable | declaration-only | predicate-not-in-allowlist) from the one

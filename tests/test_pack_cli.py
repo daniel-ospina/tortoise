@@ -356,32 +356,30 @@ class TestPackValidate:
         `beta` is not, in the SAME tree — so `0` vs `1` is the scoping, not the
         catalog.
         """
-        alpha = _scaffold("alpha", tmp_path)
-        alpha_manifest = alpha
-        beta = tmp_path / "packs" / "beta"
-        beta.mkdir()
-        beta_manifest = beta / "manifest.yaml"
-        beta_manifest.write_text(
+        alpha_manifest = _scaffold("alpha", tmp_path)
+        beta_dir = tmp_path / "packs" / "beta"
+        beta_dir.mkdir()
+        (beta_dir / "manifest.yaml").write_text(
             alpha_manifest.read_text()
             .replace("namespace: alpha", "namespace: beta")
             .replace("name: Alpha Pack", "name: Beta Pack")
             .replace("depends_on: []", "depends_on: [ghost]"))
         # A third sibling whose DIRECTORY is not its namespace: the filter must
         # match on the namespace too, never admit it by path.
-        gamma = tmp_path / "packs" / "gamma-dir"
-        gamma.mkdir()
-        (gamma / "manifest.yaml").write_text(
+        gamma_dir = tmp_path / "packs" / "gamma-dir"
+        gamma_dir.mkdir()
+        (gamma_dir / "manifest.yaml").write_text(
             alpha_manifest.read_text()
             .replace("namespace: alpha", "namespace: gam")
             .replace("name: Alpha Pack", "name: Gam Pack")
             .replace("depends_on: []", "depends_on: [ghost]"))
 
-        clean = _run_cli("pack", "validate", str(alpha.parent))
+        clean = _run_cli("pack", "validate", str(alpha_manifest.parent))
         assert clean.returncode == 0, clean.stdout + clean.stderr
         assert "Clean" in clean.stdout
 
-        for broken, ns in ((beta, "beta"), (gamma, "gam")):
-            r = _run_cli("pack", "validate", str(broken))
+        for broken_dir, ns in ((beta_dir, "beta"), (gamma_dir, "gam")):
+            r = _run_cli("pack", "validate", str(broken_dir))
             out = r.stdout + r.stderr
             assert r.returncode == 1, out
             assert "Clean" not in out
