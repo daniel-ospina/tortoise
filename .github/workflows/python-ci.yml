@@ -3388,7 +3388,10 @@ jobs:
     runs-on: ubuntu-latest
     # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
     # against a warm database, and ~100s when the container first applies the
-    # record migrations. 20m is a runaway bound, not a measurement-thin one.
+    # record migrations. The arm-gate tests this PR adds (they run the gate over
+    # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
+    # container: 70 passed / 0 skipped in ~194s, migrations included. 20m is a
+    # runaway bound, not a measurement-thin one.
     timeout-minutes: 20
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
