@@ -94,6 +94,43 @@ _EP_GUARD_MIN_GRAPH_CLAIMS = 500
 _EP_ANCHOR_BARRIER = "WITH * "
 
 
+def _non_operator(var: str) -> str:
+    """The absence-or-false non-operator predicate for a Cypher variable.
+
+    #9269: an operator-shaped node is not a CLAIM. EP's factor-INPUT arms (the
+    ``(o)-[:IMPL|NAND]->(c)`` selection and the two operator-mediated
+    affected-set hops) used to carry NO non-operator filter, so a node with
+    ``is_operator = true`` — or any out-of-contract spelling the calibration
+    gate's identical predicate does not match, e.g. the STRING ``'false'`` —
+    was consumed as a factor input and STAMPED with a posterior while the
+    #9063 gate saw nothing to demand a prior of (the #7478 class: an
+    uncalibrated EP run stamping a belief).
+
+    The form is ABSENCE-OR-FALSE, deliberately, and it is the SAME predicate
+    the gate's universe uses (``sdk._uncalibrated_ep_participants``), so the
+    two cannot disagree about who participates:
+
+    * ``is_operator`` ABSENT — a legacy plain Point (#3139/#3154) and the
+      hybrid ``create_point(op_type=...)`` shape (``is_operator = false``
+      WITH ``op_type``) are CLAIMS and stay admitted. Adding an ``op_type IS
+      NULL`` conjunct here (as the direct-edge arms carry) would exclude the
+      hybrid and REMOVE coverage the audit already had — a fail-open, the one
+      direction this filter must never move.
+    * ``is_operator = true`` — an operator. Excluded.
+    * any other value (the string ``'false'``, a numeric ``1``) — outside
+      ``is_operator = true`` AND unequal to the boolean ``false``, so it was
+      consumed but never demanded. Excluded here for the same reason: the
+      gate's predicate does not match it, so admitting it is a stamp with no
+      prior.
+
+    Predicated in the WHERE clause, never post-filtered in Python: every site
+    uses the predicate as an index-independent Cypher condition, and a Python
+    post-pass would still pay for the rows the graph should never return
+    (#3139/#3154's lesson on the direct-edge arms).
+    """
+    return f"({var}.is_operator IS NULL OR {var}.is_operator = false)"
+
+
 try:  # redis-py is a hard dependency of the graph lane; guard anyway (#6211)
     from redis.exceptions import RedisError as _RedisError
     from redis.exceptions import ResponseError as _ResponseError
@@ -1182,6 +1219,15 @@ class TortoiseEP:
         otherwise `_update_claim_posterior` would recompute that node from
         empty natural parameters as `Beta(1,1)` and discard its persisted
         prior. This is the neutral-link rule (#5025, ONTOLOGY §3.9/§8).
+        #9269: an OPERATOR-SHAPED node is not a claim, so every
+        operator-mediated arm applies `_non_operator` to the far endpoint — the
+        same absence-or-false predicate the #9063 calibration gate's universe
+        uses. Without it, `is_operator = true` (and any out-of-contract
+        spelling such as the string `'false'`) was admitted, consumed as a
+        factor input and STAMPED with a posterior while the gate saw nothing to
+        demand a prior of (the #7478 class). The filter is absence-or-false,
+        NOT `op_type IS NULL`: the hybrid `op_type` shape and the legacy
+        property-absent Point are claims and stay admitted.
         KNOWN EXCEPTION, not fixed here: a factor with fewer than 2
         PARTICIPATING inputs (draft/terminal inputs are stripped before
         `_update_factor`, and a unidirectional operator whose source was
@@ -1245,7 +1291,7 @@ class TortoiseEP:
             # operator's inputs (the operator's factor). Draft operators and
             # draft target claims are excluded (#780). #7853: the input may
             # be any epistemic label.
-            conds = [epistemic_disjunction("c")]
+            conds = [epistemic_disjunction("c"), _non_operator("c")]
             if live_c:
                 conds.append(live_c)
             if live_o:
@@ -1370,6 +1416,7 @@ class TortoiseEP:
                         "-[r2:IMPL|NAND]->(m) "
                         "WHERE m.id <> n.id "
                         f"AND {epistemic_disjunction('m')} "
+                        f"AND {_non_operator('m')} "
                         "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                         f"AND {_live_only('op.status', include_draft)} "
                         f"AND {_live_only('m.status', include_draft)} "
@@ -1715,6 +1762,9 @@ class TortoiseEP:
             "-[r2:IMPL|NAND]->(m) "
             "WHERE m.id <> n.id "
             f"AND {epistemic_disjunction('m')} "
+            # #9269: an operator-shaped far endpoint is not a claim — the SAME
+            # filter the direct-edge hops below already carry.
+            f"AND {_non_operator('m')} "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             f"AND {_live_only('op.status', include_draft)} "
             f"AND {_live_only('m.status', include_draft)} "
@@ -1894,6 +1944,10 @@ class TortoiseEP:
             return factors
 
         # Batch 2: all inputs for all discovered operators, ordered by idx.
+        # #9269: the factor-INPUT arm applies the SAME absence-or-false
+        # non-operator predicate the affected-set arms and the calibration gate
+        # use (see `_non_operator`), so an operator-shaped node is neither
+        # consumed here nor demanded there.
         # ORDER BY r.idx ensures source (idx=0) comes first — required
         # for directional IMPL: id_a = source, id_b = target so that
         # back-messages are correctly skipped. Draft inputs are stripped
@@ -1921,6 +1975,12 @@ class TortoiseEP:
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
+            # #9269: the factor-INPUT half of EP's participant predicate. An
+            # operator is not a claim, so it is neither a factor input nor a
+            # posterior's home; the calibration gate's identical
+            # absence-or-false predicate already saw nothing to demand, and EP
+            # stamped it anyway (#7478).
+            f"AND {_non_operator('c')} "
             "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,

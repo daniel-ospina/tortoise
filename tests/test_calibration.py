@@ -782,8 +782,9 @@ def test_guidance_the_error_offers_lists_the_point_it_named(sdk):
 def test_guidance_lists_every_consumed_shape_the_gate_demands(sdk):
     """#9063: the audit's universe must COVER the gate's, or the remedy is empty.
 
-    Both shapes here are in EP's factor-input set (the ``(o)->(c)`` arm has no
-    non-operator filter), so the gate demands a prior for each; the guidance
+    Both shapes here are in EP's factor-input set (the ``(o)->(c)`` arm's
+    non-operator filter is absence-or-false, which BOTH pass — #9269), so the
+    gate demands a prior for each; the guidance
     must therefore list each — including the hybrid ``create_point(op_type=...)``
     node, whose ``is_operator = false`` the audit has always matched.
     """
@@ -907,8 +908,9 @@ def test_legacy_op_type_only_operator_is_gated(sdk):
     A legacy operator carries ``op_type`` WITHOUT ``is_operator`` (#3139/#3154).
     It is tempting to exclude it with the claim-predicate's ``op_type IS NULL``
     conjunct — but EP's factor-INPUT arm (``ep.py`` Batch 2, the ``(o)->(c)``
-    selection) has NO non-operator filter, so such a node IS in
-    ``_ep_run_scope`` and DOES get a posterior (measured). An earlier draft
+    selection) filters on ``is_operator`` ABSENCE-OR-FALSE only (#9269), which
+    an ABSENT ``is_operator`` passes, so such a node IS in ``_ep_run_scope`` and
+    DOES get a posterior (measured). An earlier draft
     excluded ``op_type``-bearing nodes and thereby REMOVED coverage the audit
     had before #9063 for the hybrid shape (``is_operator = false`` WITH
     ``op_type``) — a fail-open. The demand is fail-closed and satisfiable: the

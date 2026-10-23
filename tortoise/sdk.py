@@ -25289,8 +25289,11 @@ class TortoiseSDK:
         the two cannot drift: ``_affected_claims`` admits a claim only when it
         forms a factor (#5566), and ``_affected_factors`` names every factor
         INPUT — its operator inputs and BOTH endpoints of an operator-less
-        direct edge (#888 W5). The gate's own evidence-kind / live filters
-        decide what to demand calibration of.
+        direct edge (#888 W5). #9269: both of those EP selections now apply the
+        SAME absence-or-false non-operator predicate this gate's universe does
+        (``ep._non_operator``), so an operator-shaped node is in neither — the
+        scope and the run cannot disagree about it. The gate's own evidence-kind
+        / live filters decide what to demand calibration of.
 
         Deriving this from the SELECTED operators' immediate endpoints alone
         is NOT enough: ``ep.run`` re-expands ``max_hops`` from those seeds, so
@@ -25394,19 +25397,27 @@ class TortoiseSDK:
             bare ``n.is_operator = false`` matched ZERO rows on a legacy point
             whose property is ABSENT — that point was consumed AND stamped
             while the gate saw nothing — which is this issue.
-            NO ``op_type IS NULL`` conjunct here, deliberately: EP's
-            factor-INPUT selection (``ep.py`` Batch 2, the ``(o)->(c)`` arm)
-            carries NO non-operator filter, so a HYBRID node
+            NO ``op_type IS NULL`` conjunct here, deliberately: a HYBRID node
             (``create_point(op_type=...)`` → ``is_operator = false`` WITH
-            ``op_type``) is a participant and lands in ``_ep_run_scope``
+            ``op_type``) is an EP participant and lands in ``_ep_run_scope``
             (measured). Excluding it would REMOVE coverage the audit had before
             #9063 (its bare ``is_operator = false`` matched hybrids) — a
             fail-open, the one direction this gate must never move. A legacy
             ``op_type``-only operator is in that same consumed set and is now
             demanded too, which is fail-closed and satisfiable (it is a
-            ``:Point``). ⚠️ RESIDUAL, pre-existing on both trees (#9269): an
-            ``is_operator = true`` node used as a factor input is also consumed
-            and stamped, and is NOT demanded here.
+            ``:Point``).
+            #9269 (CLOSED): an ``is_operator = true`` node used as a factor
+            input USED to be consumed and stamped while this predicate —
+            correctly — demanded nothing of it (the #7478 class), and so did
+            an out-of-contract spelling (the STRING ``is_operator = 'false'``)
+            that matches neither ``IS NULL`` nor ``= false``. Both were closed
+            on the OTHER side: EP's factor-INPUT selection now carries THIS
+            SAME absence-or-false predicate (``ep._non_operator``), so the two
+            agree by construction — neither demands nor consumes an operator-
+            shaped node. Widening this predicate to reach them was the rejected
+            route (it would demand a prior of every operator Point that happens
+            to be a factor input, and could not cover the string spelling
+            without also demanding every non-boolean spelling).
             NOTE: ``_dedup_match_clauses`` keeps a DIFFERENT form on purpose
             (#2892/#2949); do not restore parity between the two.
           * ``n.pointKind`` NULL-or-an-evidence-kind — absent kind is
