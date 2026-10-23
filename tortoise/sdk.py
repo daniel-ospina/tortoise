@@ -25289,11 +25289,16 @@ class TortoiseSDK:
         the two cannot drift: ``_affected_claims`` admits a claim only when it
         forms a factor (#5566), and ``_affected_factors`` names every factor
         INPUT — its operator inputs and BOTH endpoints of an operator-less
-        direct edge (#888 W5). #9269: both of those EP selections now apply the
-        SAME absence-or-false non-operator predicate this gate's universe does
-        (``ep._non_operator``), so an operator-shaped node is in neither — the
-        scope and the run cannot disagree about it. The gate's own evidence-kind
-        / live filters decide what to demand calibration of.
+        direct edge (#888 W5). #9269: the OPERATOR-MEDIATED selections in both
+        of those apply the SAME absence-or-false non-operator predicate this
+        gate's universe does (``ep._non_operator``), so an operator-shaped node
+        is in neither — the scope and the run cannot disagree about it. (The
+        operator-less DIRECT-EDGE arms stay a STRICTER spelling, this predicate
+        AND ``op_type IS NULL``; the one population where the gate deliberately
+        demands a prior the run's direct-edge arms exclude is the HYBRID
+        ``is_operator = false`` + ``op_type`` node — recorded, not a drift.) The
+        gate's own evidence-kind / live filters decide what to demand
+        calibration of.
 
         Deriving this from the SELECTED operators' immediate endpoints alone
         is NOT enough: ``ep.run`` re-expands ``max_hops`` from those seeds, so

@@ -115,9 +115,11 @@ def test_operator_shaped_factor_input_is_not_stamped(sdk):
     assert _stamp(sdk, shaped) == [None, None, None, None]
     # Not over-corrected: the operator still ran, and its plain inputs voted.
     for pid in (a, b):
-        confidence, ep_alpha, _ep_beta, _posterior = _stamp(sdk, pid)
+        confidence, _ep_alpha, _ep_beta, posterior_alpha = _stamp(sdk, pid)
         assert confidence is not None and confidence != 0.5
-        assert ep_alpha is not None
+        # The posterior MOVED off the declared prior (3, 1) — the factor voted on
+        # this claim, which is what proves the strip did not empty the factor.
+        assert posterior_alpha is not None and posterior_alpha != 3.0
 
 
 def test_string_is_operator_factor_input_is_not_stamped(sdk):
@@ -194,8 +196,9 @@ def test_legacy_absent_is_operator_input_is_still_consumed(sdk):
     # The documented opt-out runs and consumes the legacy node, which is the
     # consumption half this guard pins (the gate refuses it above, by design).
     sdk.compute_confidence(factors=[op], require_calibration=False)
-    confidence, ep_alpha, _ep_beta, _posterior = _stamp(sdk, legacy["id"])
-    assert confidence is not None and ep_alpha is not None
+    confidence, _ep_alpha, _ep_beta, posterior_alpha = _stamp(sdk, legacy["id"])
+    assert confidence is not None
+    assert posterior_alpha is not None and posterior_alpha != 1.0
 
 
 def test_hybrid_op_type_point_is_still_consumed(sdk):
@@ -216,3 +219,68 @@ def test_hybrid_op_type_point_is_still_consumed(sdk):
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
         sdk.compute_confidence(factors=[op], require_calibration=True)
     assert hybrid["id"] in str(exc.value)
+
+
+def test_directional_operator_with_an_operator_shaped_source_is_skipped(sdk):
+    """The shaped input must not be silently REPLACED in the source slot.
+
+    ``IMPL`` is a star: ``input_ids[0]`` is the SOURCE, and the factor's
+    messages are directed. Stripping an operator-shaped idx-0 source must be
+    VISIBLE to the ``source_stripped`` guard, which is why the strip happens in
+    Python and not in the WHERE clause. A Cypher-side filter would have dropped
+    the row before this loop, leaving ``stripped == 0`` and the first surviving
+    TARGET renumbered into the source slot — measured on that shape: the factor
+    became ``[B, C]`` and the message flowed B→C instead of shaped→{B, C}, and
+    C's posterior moved from (0.5, 2.175) to (0.6068, 3.139).
+    """
+    shaped = _shaped_point(sdk, "shaped-9269-src", "true")
+    b = sdk.create_point("statement", "Target B", status="live")
+    c = sdk.create_point("statement", "Target C", status="live")
+    op = sdk.create_operator("IMPL", shaped, [b["id"], c["id"]],
+                             direction="unidirectional")
+    op_id = op["id"] if isinstance(op, dict) else op
+    ep = sdk._get_ep()
+
+    skipped: list[dict] = []
+    factors = ep._affected_factors({b["id"], c["id"]}, skipped=skipped)
+    mine = [f for f in factors if f[0] == op_id]
+    assert mine == [], (
+        "the factor was built anyway — a stripped source can only mean a "
+        f"renumbered source slot: {mine}")
+    assert [s["reason"] for s in skipped if s["operator_id"] == op_id] == [
+        "source_stripped"]
+    # The record names the SHAPE, not a misleading `live` status.
+    assert [i["status"] for i in skipped[0]["inputs"]] == [
+        "operator-shaped", "live", "live"]
+
+    # …and a run reports it rather than reading as healthy (#6105).
+    result = sdk.compute_confidence(factors=[op_id], require_calibration=False)
+    assert result["diagnostic"] == "factors_skipped"
+    assert [s["reason"] for s in result["skipped_factors"]] == [
+        "source_stripped"]
+    assert _stamp(sdk, shaped) == [None, None, None, None]
+
+
+def test_a_two_input_operator_losing_its_shaped_input_is_reported(sdk):
+    """The 2-input collapse is a REPORTED skip, not a silent unary factor.
+
+    With ``[plain, shaped]`` the surviving factor has ONE input, so
+    ``_update_factor`` no-ops. Nothing in the graph would say so — the operator
+    would read as consumed — unless the strip is accounted for like a draft/
+    terminal one (#6105's ``skipped_factors``). This pins the accounting rather
+    than the (owner-reserved, #5566) ``Beta(1,1)`` recompute that follows it.
+    """
+    shaped = _shaped_point(sdk, "shaped-9269-two", "'false'")
+    a = sdk.create_point("statement", "Only live input", status="live")
+    op = sdk.create_operator("IMPL", a["id"], [shaped])
+    op_id = op["id"] if isinstance(op, dict) else op
+
+    result = sdk.compute_confidence(factors=[op_id], require_calibration=False)
+    assert result["diagnostic"] == "factors_skipped"
+    record = result["skipped_factors"][0]
+    assert record["operator_id"] == op_id
+    assert record["reason"] == "degenerate"
+    assert record["participating_inputs"] == 1
+    assert [i["status"] for i in record["inputs"]] == [
+        "live", "operator-shaped"]
+    assert _stamp(sdk, shaped) == [None, None, None, None]
