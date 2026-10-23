@@ -38,10 +38,10 @@ function applyPostRenameVocabulary(sql) {
 // ── Split a migration file into its TOP-LEVEL statements ────────────────────
 // A per-statement apply (`psql -f`, autocommit per statement) executes them one
 // at a time and can STOP between any two. The 20261023000001 drill reproduces
-// that by executing the FIRST one alone, so the splitter must be faithful:
-// comments are carried with their statement, and a dollar-quoted `DO $$ … $$`
-// body (which itself contains `;`) must count as ONE statement — that is the
-// property the drill exists to assert.
+// that by replaying them one at a time and checking the trigger after EVERY
+// prefix, so the splitter must be faithful: comments are carried with their
+// statement, and a dollar-quoted `DO $$ … $$` body (which itself contains `;`)
+// must count as ONE statement — that is the property the drill asserts.
 function splitTopLevelStatements(sql) {
   const out = [];
   let buf = '';
