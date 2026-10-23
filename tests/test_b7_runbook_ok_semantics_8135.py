@@ -58,6 +58,18 @@ STALE_PLAIN_DICT_CLAIM = 'a tool-level refusal returned as a **plain dict**'
 CLOSED_REFUSAL_CLAIM = ('since #9084 a tool-level refusal is answered as an '
                        '`_SafeError` and recorded')
 
+# ⚠️ "CLOSED" alone is an over-read, and the first version of this pin froze it
+# as REQUIRED text while three producer shapes were still open. The two shapes
+# that survive BY DESIGN are named, and pinned PRESENT, so the closure claim
+# cannot be restated without them: an `error` key is not by itself a refusal
+# (a domain answer carries one on purpose), and the seam only reads two levels
+# deep (a payload nested under a section is not classified).
+RESIDUAL_DOMAIN_ANSWER = 'a domain answer that carries an `error` key on purpose'
+RESIDUAL_NESTED_REFUSAL = 'a refusal buried deeper than the seam reads'
+#: What the gate actually scans — pinned so the doc cannot claim a narrower
+#: denominator than the one that holds the class shut.
+GATE_SCOPE_CLAIM = 'a gate on the producers (not a `status` filter) keeps it closed'
+
 
 def _flat_runbook() -> str:
     """The runbook with prose whitespace collapsed.
@@ -98,6 +110,23 @@ def test_the_runbook_states_the_meaning_of_ok_the_emitter_has() -> None:
         "failure since #9084 — otherwise an operator reads `status == ok` as "
         "excluding only the `_safe` class"
     )
+    assert GATE_SCOPE_CLAIM in flat, (
+        "the runbook must say WHAT holds the class shut — a gate on the "
+        "producers, not a `status` filter (#9084)"
+    )
+    for residual, why in (
+        (RESIDUAL_DOMAIN_ANSWER,
+         "a payload may carry `error` because it is the ANSWER "
+         "(`tortoise_get_operator` reports `is_operator: false`), and "
+         "recording that as a failure would invent one (#4576)"),
+        (RESIDUAL_NESTED_REFUSAL,
+         "the seam reads the payload and its `result` wrap key only, so a "
+         "payload nested under a section is not classified"),
+    ):
+        assert residual in flat, (
+            "the runbook's CLOSED claim must NAME this residual, or an "
+            f"operator reads `status == ok` as excluding it: {why}"
+        )
 
 
 def test_the_pin_reads_the_runbook_the_scorecard_names() -> None:

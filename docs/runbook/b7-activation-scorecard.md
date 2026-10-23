@@ -116,11 +116,19 @@ instant. If you change one leg's bounds, the other must move with it.
 swallowed — since #8135 such a call is recorded `status: 'exec_error'` /
 `error_kind: 'safe_error'` — and a search that returned zero points is still
 `ok`. The one class that still read `ok` while #9084 was open — a tool-level
-refusal the tool body answered with a plain dict — is CLOSED: since #9084 a
+refusal the tool body answered with a plain dict, whatever built it (a helper
+the body returns from, a name it assigned the payload to, or a retired-but-
+still-served name whose original body the shim runs) — is CLOSED: since #9084 a
 tool-level refusal is answered as an `_SafeError` and recorded `exec_error` /
 `safe_error` like every other refusal, and a gate on the producers (not a
-`status` filter) keeps it closed. Do not read a `status` filter as "the
-retrieval answered".
+`status` filter) keeps it closed. Two named residuals still read `ok` and are
+NOT refusals a `status` filter should find: a domain answer that carries an
+`error` key on purpose (`tortoise_get_operator` on a point that is not an
+operator — a successful fetch reporting that fact, #4576), and a refusal
+buried deeper than the seam reads (`tortoise_overview()` with no `section`
+nests each section's payload one level down, so a failing section is not
+classified). Otherwise: do not read a `status` filter as "the retrieval
+answered".
 
 **`recall_returned` is a RETURN, not an answer.** Since #3675 the
 `mcp_tool_call` props carry `result_count` — the number of items the call

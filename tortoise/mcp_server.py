@@ -290,11 +290,23 @@ def _emit_mcp_tool_call_telemetry(org_id: str, tool_name: str, status: str,
       by the HTTP tenant-context refusal and by `_safe`'s unset-transport
       refusal, which record ``auth_error`` with ``error_kind = None`` rather
       than claim a gate they never touched. ``exec_error`` has ONE more
-      producer family, with ``error_kind = "safe_error"``: a dispatch whose
-      failure `_safe` ANSWERED with a dict instead of raising — the general
-      `_SafeError` payload (#8135) and the wrap envelope the tool's own schema
-      forbids (#8482), which is the same producer class and deliberately shares
-      the kind.
+      producer family, with ``error_kind = "safe_error"``: a dispatch that
+      answered with an `_SafeError` dict instead of raising. TWO producers
+      write that kind, both deliberately, and it is the same class in both
+      cases — "the tool answered with a failure payload, nothing raised":
+
+      * a failure `_safe` CAUGHT — the general `_SafeError` payload (#8135) and
+        the wrap envelope the tool's own schema forbids (#8482);
+      * a TOOL-BODY refusal the SDK was never called for — an argument
+        validation branch (`page must be >= 1`, an unrecognised recall mode, a
+        tag/option cap), a caller-side gate (`GitHub not connected`), or a
+        transport exclusion (`_http_excluded_error`). Before #9084 those were
+        plain dicts and read ``ok``.
+
+      Do NOT read ``error_kind == "safe_error"`` as "the SDK/backend failed":
+      it covers both, so a query that wants backend failures only must also
+      look at the payload's own ``code``. ``status == "exec_error"`` is the
+      failure column; ``safe_error`` names HOW it was reported.
     - ``timeout`` — the transport wait bound fired at this seam
       (``error_kind = "wait_bound"``).
     - ``cancelled`` — the caller cancelled the dispatch
@@ -1371,8 +1383,10 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         # (`tortoise_recall`'s `{"mode": mode, **results}`) — so a tool that
         # recovered from a secondary `_safe` failure stays `ok`.
         #
-        # `exec_error` and NOT a new status member: the SDK DID raise and `_safe`
-        # only caught it, so this is the same class the ladder's own
+        # `exec_error` and NOT a new status member: the dispatch ANSWERED with a
+        # failure payload instead of raising — either `_safe` caught the SDK's
+        # exception (#8135) or the tool body refused before the SDK was ever
+        # called (#9084) — so this is the same class the ladder's own
         # `exec_error` names. The kind is `safe_error` — the member #8482
         # already established for a `_safe`-answered failure (the envelope
         # repair below is the same producer class, so folding in a second name
@@ -2117,8 +2131,16 @@ def _reject_server_managed_props(props: dict | None) -> str | None:
 
 
 def _http_excluded_error() -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
-    return {
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
+
+    #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
+    tool bodies (six live, two retired-but-served), each of which returns it
+    verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
+    payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
+    it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
+    it — the exact-dict arm is what classifies it.
+    """
+    return _SafeError({
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
@@ -2127,7 +2149,7 @@ def _http_excluded_error() -> dict:
                 "Use the hosted REST API or stdio MCP."),
         },
         "id": None,
-    }
+    })
 
 
 def _parse(v: Any) -> Any:
@@ -3731,7 +3753,7 @@ def tortoise_index_sessions(directory: str, extract_metadata: bool = True, llm_m
     if _transport_mode.get() == "http":
         return _http_excluded_error()
     if not os.path.isdir(directory):
-        return {"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."}
+        return _SafeError({"error": f"Directory not found: {directory!r}. Provide a valid path to a directory containing .md session files."})
     return _safe(_get_org_sdk().index_sessions, directory, extract_metadata=extract_metadata, llm_model=llm_model)
 
 def tortoise_index_files(directory: str, corpus_name: str | None = None,
@@ -4122,7 +4144,8 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_list_graphs()
     if section == "topics":
         if not entity_id:
-            return {"error": "overview(section='topics') requires entity_id"}
+            return _SafeError(
+                {"error": "overview(section='topics') requires entity_id"})
         return tortoise_list_topics(entity_id)
     if section == "health":
         return tortoise_health()
@@ -4130,8 +4153,9 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_status()
     if section == "stale":
         return tortoise_stale(days=days, limit=limit)
-    return {"error": f"overview: unknown section {section!r}. "
-                      f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"}
+    return _SafeError(
+        {"error": f"overview: unknown section {section!r}. "
+                  f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"})
 
 
 def tortoise_overview(section: str | None = None,
@@ -4236,14 +4260,15 @@ def tortoise_get(id: str, type: str | None = None,
     """
     if not isinstance(type, str) or not type.strip():
         if not isinstance(id, str) or not id.strip():
-            return {"error": "get: 'id' is required when type is omitted"}
+            return _SafeError(
+                {"error": "get: 'id' is required when type is omitted"})
         return _get_auto_detect(id.strip())
     t = type.strip().lower()
     if t == "events":
         # get_events is a list surface — id is an optional eventKind filter
         return tortoise_get_events(eventKind=id or None, limit=limit)
     if not isinstance(id, str) or not id.strip():
-        return {"error": f"get: 'id' is required for type={t!r}"}
+        return _SafeError({"error": f"get: 'id' is required for type={t!r}"})
     id = id.strip()
     if t == "point":
         return tortoise_get_point(id)
@@ -4257,8 +4282,8 @@ def tortoise_get(id: str, type: str | None = None,
         return _safe(_get_org_sdk().get_session, id)
     if t == "governance":
         return tortoise_get_governance(id)
-    return {"error": f"get: unknown type {type!r}. "
-                      f"Valid types: {', '.join(_GET_TYPES)}"}
+    return _SafeError({"error": f"get: unknown type {type!r}. "
+                                f"Valid types: {', '.join(_GET_TYPES)}"})
 
 
 def tortoise_backfill_v25(dry_run: bool = True) -> dict:
@@ -4535,7 +4560,10 @@ def _onboarding_state() -> dict:
     from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        # #9084: `_SafeError`, so `tortoise_onboarding_state`,
+        # `tortoise_manage_sources` and `_sources_view` — which all return this
+        # payload verbatim — record the dispatch as a refusal instead of `ok`.
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     if org_id == SELFHOST_ORG_ID:
         from tortoise.mcp_auth import _get_org_sdk
         from tortoise.onboarding import selfhost as _sh
@@ -4633,7 +4661,7 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     _reject_graph_bound_mcp_org_surface("session recording toggle")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     from tortoise.hosted_api import _update_onboarding_state
     state = _update_onboarding_state(org_id, session_recording=enabled,
                                      capture_revised=True)
@@ -4927,7 +4955,7 @@ def _set_source_state(source: str, enable: bool) -> dict:
     """
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
     from tortoise.hosted_api import (
         _INDEX_JOB_OWNERS,
         _INDEX_JOBS,
@@ -4957,9 +4985,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
             _log_source_change(org_id, source,
                                "enable" if enable else "disable",
                                "refused_state_unavailable")
-            return {"error": (
+            return _SafeError({"error": (
                 "The team's onboarding state could not be read (graph "
-                "unavailable), so nothing was changed.")}
+                "unavailable), so nothing was changed.")})
         if not enable:
             if not current_on:
                 _log_source_change(org_id, source, "disable", "already_off")
@@ -4979,9 +5007,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
                              exc_info=True)
                 _log_source_change(org_id, source, "disable",
                                    "error_flag_write")
-                return {"error": (
+                return _SafeError({"error": (
                     "The source's enable flag could not be written; nothing "
-                    "changed. Retry.")}
+                    "changed. Retry.")})
             _log_source_change(org_id, source, "disable", "ok")
             return {
                 "source": source,
@@ -5010,23 +5038,23 @@ def _set_source_state(source: str, enable: bool) -> dict:
                          exc_info=True)
             _log_source_change(org_id, source, "enable",
                                "error_credentials")
-            return {
+            return _SafeError({
                 "error": (
                     "Could not read the stored GitHub credential (control "
                     "plane unavailable). NOTHING was changed — retry, or "
                     "re-authorise with tortoise_onboarding_github_connect."
                 )
-            }
+            })
         if not encrypted:
             _log_source_change(org_id, source, "enable",
                                "refused_not_connected")
-            return {
+            return _SafeError({
                 "error": (
                     "GitHub not connected. Authorise it first with "
                     "tortoise_onboarding_github_connect — this tool never "
                     "accepts credentials."
                 )
-            }
+            })
         # #1845: HEAL before walking, exactly as both REST twins do. The two
         # shapes this repairs — `github_org` missing, and the pre-#1845 connect
         # flow having stored the internal org_id UUID in it — index fine after
@@ -5052,14 +5080,14 @@ def _set_source_state(source: str, enable: bool) -> dict:
             # over a value that is not a login.
             _log_source_change(org_id, source, "enable",
                                "refused_no_github_org")
-            return {
+            return _SafeError({
                 "error": (
                     "GitHub org unknown for this team's stored credential and "
                     "it could not be derived from the stored token. Nothing "
                     "was started. Re-connect with "
                     "tortoise_onboarding_github_connect."
                 )
-            }
+            })
         kind = "docs" if source == "github_documents" else "github"
         runner = _run_docs_indexing if kind == "docs" else _run_indexing
         job_id, is_new = _start_index_job(org_id, kind=kind)
@@ -5070,8 +5098,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
             _INDEX_JOBS.pop(job_id, None)
             _INDEX_JOB_OWNERS.pop(job_id, None)
             _log_source_change(org_id, source, "enable", "error_spawn")
-            return {"error": ("The index job could not be started; nothing "
-                              "was left claimed. Retry.")}
+            return _SafeError({"error": ("The index job could not be started; nothing "
+                                         "was left claimed. Retry.")})
         if not current_on:
             try:
                 _update_onboarding_state(org_id, _echo=False, **{flag: True})
@@ -5082,7 +5110,7 @@ def _set_source_state(source: str, enable: bool) -> dict:
                              exc_info=True)
                 _log_source_change(org_id, source, "enable",
                                    "error_flag_write")
-                return {
+                return _SafeError({
                     "error": (
                         "The index job started but the source's enable flag "
                         "could not be written, so it will still read as "
@@ -5090,7 +5118,7 @@ def _set_source_state(source: str, enable: bool) -> dict:
                     ),
                     "job_id": job_id,
                     "state": "started" if is_new else "reused",
-                }
+                })
         _log_source_change(org_id, source, "enable", "ok")
         return {
             "source": source,
@@ -5109,9 +5137,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
         _log_source_change(org_id, source,
                            "enable" if enable else "disable",
                            "refused_state_unavailable")
-        return {"error": (
+        return _SafeError({"error": (
             "The team's onboarding state could not be read (graph "
-            "unavailable), so nothing was changed.")}
+            "unavailable), so nothing was changed.")})
     # `session_recording` defaults ON (#1927), so `current_on` alone does not say
     # whether a session-recording WRITE has ever landed — `capture_revised` is
     # that marker (both directions write it; there is no separate consent record
@@ -5148,9 +5176,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
         _log_source_change(org_id, source,
                            "enable" if enable else "disable",
                            "error_flag_write")
-        return {"error": (
+        return _SafeError({"error": (
             "The source's recording flag could not be written; nothing "
-            "changed. Retry.")}
+            "changed. Retry.")})
     _log_source_change(org_id, source,
                        "enable" if enable else "disable", "ok")
     return {"source": source, "scope": "source",
@@ -5607,7 +5635,7 @@ def tortoise_session_capture(conversation: list[dict],
         # ERR_QUOTA code rather than making the caller interpret a bare status.
         # One mapping site covers every 402 this impl can raise, so REST and
         # MCP cannot drift on the class of a refusal.
-        out = {"error": str(detail), "status": status}
+        out = _SafeError({"error": str(detail), "status": status})
         if status == 402:
             out["code"] = ERR_QUOTA
         return out
@@ -5698,7 +5726,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     _reject_graph_bound_mcp_org_surface("github index")
     org_id = _current_org_id.get()
     if org_id is None:
-        return {"error": "No team context (HTTP mode required)"}
+        return _SafeError({"error": "No team context (HTTP mode required)"})
 
     from tortoise.hosted_api import (
         _github_token_enc,
@@ -5713,9 +5741,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         # aren't misled (code-review P2, PR #861).
         from tortoise.supabase_control import is_supabase_enabled
         plane = "Supabase control plane" if is_supabase_enabled() else "registry"
-        return {"error": f"{plane} unavailable"}
+        return _SafeError({"error": f"{plane} unavailable"})
     if not encrypted:
-        return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
+        return _SafeError({"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."})
     # #1725 + P1-1 (PR #1792): single-flight — an in-flight started job for
     # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
@@ -5732,8 +5760,8 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         from tortoise.hosted_api import _INDEX_JOB_OWNERS, _INDEX_JOBS
         _INDEX_JOBS.pop(job_id, None)
         _INDEX_JOB_OWNERS.pop(job_id, None)
-        return {"error": ("The index job could not be started; nothing was "
-                          "left claimed. Retry.")}
+        return _SafeError({"error": ("The index job could not be started; nothing was "
+                                     "left claimed. Retry.")})
     return {"job_id": job_id, "status": "started",
             "state": "started" if is_new else "reused"}
 
