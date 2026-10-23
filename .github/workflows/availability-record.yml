@@ -24,10 +24,12 @@
 # ignores them there), so — like the repo's other infra cron workflows
 # (registry-backup-cron, registry-drill-cron) — this carries a schedule plus a
 # manual dispatch; the PR-time path gate for the harness lives in ci.yml
-# (`watchdog_scripts` surface), mirroring the availability-watchdog job.
+# (`watchdog_scripts` surface), mirroring the availability-watchdog harness in the
+# same job.
 #
-# Harness: .github/scripts/availability-record.test.sh (CI job
-# availability-record; stubs `gh`, no network).
+# Harness: .github/scripts/availability-record.test.sh (CI: the `Availability
+# record-only baseline (#3810)` step of ci.yml's `ops-harnesses` job; stubs `gh`,
+# no network).
 name: availability-record
 
 on:
