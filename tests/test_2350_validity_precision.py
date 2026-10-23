@@ -673,10 +673,16 @@ def test_a_padded_start_is_gated_on_the_raw_bound_not_the_display_copy(lane):
     assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-06-01]"
 
 
-def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_type():
-    """#9730 P3: ``_bounds_an_instant`` documents "can never disagree" with
-    ``validity.effective_precision``, so it must carry that helper's NUMERIC
-    short-circuit too — not just its ``_created_sort_key`` gate.
+def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_it_sees():
+    """#9730 P3: ``_bounds_an_instant`` resolves orderability exactly as
+    ``validity.effective_precision`` does — including that helper's NUMERIC
+    short-circuit, not just its ``_created_sort_key`` gate.
+
+    Scope, precisely: this pins the PREDICATE parity (the two helpers agree on
+    every value either is handed). It does not claim the RENDERER consults the
+    predicate for every bound — a falsey numeric is dropped upstream by
+    ``(raw_vf or "")``; that residual is pinned separately in
+    ``test_an_epoch_zero_start_renders_no_window_is_recorded``.
 
     ``effective_precision`` short-circuits ``int``/``float`` BEFORE ordering,
     deliberately: an integer too large for ``float()`` raises ``OverflowError``
@@ -685,9 +691,6 @@ def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_type():
     numeric bound makes the two surfaces disagree — ``effective_precision(0,
     None) == "day"`` while ``_bounds_an_instant(0)`` was ``False`` (the falsey
     shortcut) and a huge int RAISED.
-
-    Unreachable from ``_validity_marker`` today (it ``.strip()``s the bound
-    first, which is #9741); pinned here so #9741 cannot reintroduce it.
 
     (1) FAILS pre-fix: ``_bounds_an_instant(0)`` was False and
         ``_bounds_an_instant(10**400)`` raised OverflowError.
@@ -715,6 +718,37 @@ def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_type():
         assert effective_precision(padded, None) is None, padded
     assert _bounds_an_instant("2024-01-01") is True
     assert effective_precision("2024-01-01", None) == "day"
+
+
+def test_an_epoch_zero_start_renders_no_window_is_recorded():
+    """#9730 P3: the ONE recorded residual of the parity claim — pinned so a
+    future change cannot silently keep the docstring that says otherwise.
+
+    ``(raw_vf or "")`` drops a FALSEY numeric (``0``/``False``) before the gate
+    ever sees it, while ``validity.effective_precision(0, None)`` reads
+    ``"day"`` (epoch 0 IS an instant). So for a stored epoch-0 start the marker
+    renders no window at all and the precision beside it names one.
+
+    That truthiness trap is the same one ``sdk._supersede_window_start``
+    records fixing, and it is a WRITE/RENDER contract question owned by #9741 —
+    not by the orderability gate, which is why this test asserts today's
+    answer rather than the eventual one. It is green on both sides of #9730
+    (the pre-fix renderer also rendered nothing here), so it is a lock, not a
+    catch: if #9741 makes an epoch-0 start render a start clause, this test
+    goes red and the fixer must also widen ``_bounds_an_instant``'s scoping
+    paragraph.
+    """
+    from tortoise.retrieval import _validity_marker
+    from tortoise.validity import effective_precision
+
+    for epoch_zero in (0, 0.0, False):
+        assert effective_precision(epoch_zero, None) == "day", epoch_zero
+        assert _validity_marker({"valid_from": epoch_zero,
+                                 "end_state": "open"}) == "", epoch_zero
+        # a TRUTHY numeric does not even get this far — it raises at
+        # ``.strip()`` (#9741), so neither surface renders a start today.
+        with pytest.raises(AttributeError):
+            _validity_marker({"valid_from": 1735689600, "end_state": "open"})
 
 
 def test_search_annotation_distinguishes_open_from_unknown(lane):

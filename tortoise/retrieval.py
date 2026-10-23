@@ -956,9 +956,11 @@ def _validity_marker(h: dict) -> str:
         # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
         # ``search_engine._created_sort_key(raw_vf)[0] == 0``, the one
         # ``validity.effective_precision`` resolves precision behind), not a
-        # second notion of "parseable" — so the marker cannot disagree with
-        # the precision it sits beside. ``""`` already escapes as falsey;
-        # only truthy-but-unorderable values leaked here.
+        # second notion of "parseable" — so a start clause this renders cannot
+        # disagree with the precision beside it. A FALSEY bound never reaches
+        # here (``""``, and a numeric ``0``/``False`` — see
+        # ``_bounds_an_instant``'s residual note); only truthy-but-unorderable
+        # values ever leaked.
         vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(raw_vf) \
             else ""
         since = f" since {vfd}" if vfd else ""
@@ -994,25 +996,37 @@ def _bounds_an_instant(value: object) -> bool:
 
     THE predicate is ``search_engine._created_sort_key(value)[0] == 0``, the
     one the #6140/#9201/#9244 read gate resolves precision behind and
-    ``commit_schema.validate_validity_window`` orders with — so the
-    reader-facing marker and the precision beside it can never disagree about
-    whether a bound names an instant — which is why ``_validity_marker`` hands
-    this function the RAW stored bound, never its own trimmed display copy (a
-    padded date orders as nothing on every other surface). Imported lazily
-    inside the call for the same reason ``validity.effective_precision`` does:
-    ``retrieval`` sits in the import graph ``search_engine`` is assembled from,
-    and the eager edge is the cycle.
+    ``commit_schema.validate_validity_window`` orders with — so for every bound
+    the marker CONSULTS, the reader-facing marker and the precision beside it
+    cannot disagree about whether that bound names an instant. (The one bound it
+    does not consult is a FALSEY numeric — see the last paragraph.) That is why
+    ``_validity_marker`` hands this function the RAW stored bound, never its own
+    trimmed display copy (a padded date orders as nothing on every other
+    surface). Imported lazily inside the call for the same reason
+    ``validity.effective_precision`` does: ``retrieval`` sits in the import
+    graph ``search_engine`` is assembled from, and the eager edge is the cycle.
 
     A NUMERIC bound (``int``/``float``, and so ``bool``) short-circuits to True
     — mirroring ``validity.effective_precision``'s own short-circuit, which is
     there so that an integer too large for ``float()`` cannot raise
     ``OverflowError`` out of the ordering primitive (a read path must not
     acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
-    instant here too (1970-01-01T00:00:00Z). Today ``_validity_marker`` still
-    raises at ``(h.get("valid_from") or "").strip()`` for a numeric bound
-    (#9741), so this branch is unreachable from the renderer — it exists so the
-    parity claim above survives #9741 handing the raw bound through, instead of
-    turning into an ``OverflowError`` on the read path.
+    instant here too (1970-01-01T00:00:00Z).
+
+    ⚠️ This branch is unreachable from ``_validity_marker`` TWICE over, and the
+    second way is a KNOWN residual, not a guarantee: a TRUTHY numeric raises at
+    ``(raw_vf or "").strip()`` (#9741), while a FALSEY one (``0``/``False``) is
+    dropped before the gate by ``(raw_vf or "")`` — so an epoch-``0`` start
+    renders NO window marker at all while ``valid_from_precision`` reads
+    ``"day"``. That truthiness trap is the same one
+    ``sdk._supersede_window_start`` records fixing; how a numeric bound is
+    WRITTEN and RENDERED is #9741's contract question, not this gate's. The
+    branch exists so that #9741 handing the raw bound through cannot turn the
+    parity above into an ``OverflowError`` on the read path — when it lands, the
+    marker will start consulting numerics and this docstring's scope widens
+    back. ``tests/test_2350_validity_precision.py``
+    ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the residual
+    so that change cannot pass silently.
     """
     if isinstance(value, (int, float)):
         return True
