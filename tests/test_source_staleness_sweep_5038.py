@@ -1203,3 +1203,120 @@ def test_a_normaliser_failure_is_reported_not_swallowed(monkeypatch):
         assert sweep["status"] == "unknown", sweep
     finally:
         sdk.close()
+
+
+# ── review round 2: what the round-1 fixes could have broken ─────────────────
+
+def test_a_blank_but_present_anchor_stays_judged_and_reads_unknown():
+    """Review round 2 (P1, introduced by the round-1 B-F3/B-F4 fix). Input: a
+    derivation `references` edge whose anchor is PRESENT but blank (`"   "` —
+    `create_source(..., contentHash="   ")` stamps it, because
+    `_anchor_on_create` nulls only `''`), alongside one current link.
+
+    "Anchored" is the WRITE-side predicate (`sourceVersion IS NOT NULL AND <> ''`),
+    so this link is an anchored derivation with an UNREADABLE operand: it must stay
+    in `links` and read `unknown`. FAILS IF the anchored test uses the normalised
+    operand — the link is then withheld from `links`, the aggregate reports
+    `current` over a link it never judged (a false-fresh), and this reader
+    disagrees with `get_provenance_chain`, which reports the same link `unknown`.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = _fixture(sdk, content_hash="h2")
+        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        proj.g.query("CREATE (d:Source {url:'doc-ws', sourceKind:'document'})")
+        proj.g.query(
+            "MATCH (s:Source {url:'src.txt'}), (d:Source {url:'doc-ws'}) "
+            "CREATE (s)-[r:references]->(d) SET r.sourceVersion = '   '")
+        sweep = source_staleness(proj.g, "src.txt")
+        rows = {lk["node"]: lk for lk in sweep["links"]}
+        assert "doc-ws" in rows, (
+            "a blank-but-present anchor is an anchored derivation with an "
+            f"unreadable operand — it must stay judged; got {sorted(rows)}")
+        assert rows["doc-ws"]["recorded"] == "", rows["doc-ws"]
+        assert rows["doc-ws"]["currency"] == "unknown", rows["doc-ws"]
+        assert sweep["counts"]["withheld"] == 0, sweep["counts"]
+        assert sweep["status"] == "unknown", (
+            "the unreadable anchor must keep the aggregate off `current`; "
+            f"got {sweep['status']!r}")
+    finally:
+        sdk.close()
+
+
+def test_a_source_with_no_url_is_refused_not_certified_empty():
+    """Review round 2 (P2). Input: the node is matched through `canonicalUrl` but
+    carries NO `url`, and the link reads are keyed by `url`.
+
+    Falling back to the caller's spelling reads a spelling no node carries, so
+    the sweep returns an EMPTY, CERTIFIED answer over real derivations — the same
+    false-fresh class the canonical-spelling arm closes. FAILS IF `complete`
+    stays true: an answer that could not be addressed is not a clean bill.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query(
+            "CREATE (s:Source {canonicalUrl:'https://ex.com/a', "
+            "sourceKind:'document', contentHash:'h2', ingestedAt:'2024-01-01'})")
+        proj.g.query("CREATE (p:Point {id:'pt-nourl', statement:'x', "
+                     "kind:'statement', createdAt:'2024-01-01'})")
+        proj.g.query(
+            "MATCH (p:Point {id:'pt-nourl'}), (s:Source {contentHash:'h2'}) "
+            "CREATE (p)-[:extractedFrom {sourceVersion:'h1'}]->(s)")
+        sweep = source_staleness(proj.g, "https://ex.com/a")
+        assert sweep["complete"] is False, sweep
+        assert any("no url" in e for e in sweep["errors"]), sweep["errors"]
+        assert sweep["status"] == "unknown", sweep
+    finally:
+        sdk.close()
+
+
+def test_the_withheld_count_covers_both_classes_and_is_unread_on_failure(
+        monkeypatch):
+    """Review round 2 (P2 ×2). Two things at once, because they are one contract:
+
+    (a) the withheld class has TWO members with different reasons — an unanchored
+        `Source`-targeted link (ambiguous containment/document-derivation) and an
+        unanchored `Object` link (identity/mention by design, `#5199` option A).
+        Both are counted, so the number a reader sees is the number of links the
+        sweep did not judge.
+
+    (b) when the `references` read FAILS, `withheld` is `None`, not `0` — an
+        UNREAD class must not read as an EMPTY one (0 keeps its meaning:
+        "nothing was refused").
+
+    FAILS IF either class is missed, or if a failed read reports 0.
+    """
+    sdk = TortoiseSDK(_tmp("test.db"))
+    try:
+        proj = _fixture(sdk, content_hash="h1")
+        sdk.link_source_to_entity("src.txt", "ev-1", "Event")   # judged
+        sdk.link_source_to_entity("src.txt", "obj-1", "Object")  # withheld: identity
+        proj.g.query("CREATE (d:Source {url:'doc-1', sourceKind:'document'})")
+        sdk.link_source_to_entity("src.txt", "doc-1", "Source")  # withheld: ambiguous
+
+        sweep = source_staleness(proj.g, "src.txt")
+        assert sweep["counts"]["withheld"] == 2, sweep["counts"]
+        assert [lk["node"] for lk in sweep["links"]] == ["ev-1"], sweep["links"]
+
+        # (b) a FAILED references read: withheld is unread, not empty. A PROXY
+        # graph, not a monkeypatch: `proj.g` is the guarded write handle and its
+        # `query` attribute is read-only, which is itself worth relying on — a
+        # test must not be able to weaken the handle it is testing.
+        class _FailOnReferences:
+            def __init__(self, graph):
+                self._graph = graph
+
+            def query(self, statement, *args, **kwargs):
+                if "references" in statement:
+                    raise RuntimeError("references read died")
+                return self._graph.query(statement, *args, **kwargs)
+
+        failed = source_staleness(_FailOnReferences(proj.g), "src.txt")
+        assert failed["counts"]["withheld"] is None, (
+            f"a failed read must not report an empty withheld class: "
+            f"{failed['counts']!r}")
+        assert failed["complete"] is False, failed
+        assert failed["status"] == "unknown", failed
+    finally:
+        sdk.close()

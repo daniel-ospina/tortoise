@@ -367,10 +367,20 @@ def _resolve_source_read_only(graph, ref: str, errors: list[str]) -> tuple[str, 
                 f"the url {rows[0][0] or ref!r}; a sweep of one of them cannot "
                 "speak for the others (repair with tools/source_dedup_report.py)")
     url, current = rows[0][0], rows[0][1]
+    if not url:
+        # Matched through `canonicalUrl` on a node that carries no `url`. The link
+        # reads below are keyed by `url`, so falling back to the caller's spelling
+        # reads a spelling NO node carries: an EMPTY, CERTIFIED sweep (exit 0) over
+        # real derivations — the same false-fresh class the canonical-spelling arm
+        # above exists to close. Report it instead.
+        errors.append(
+            "the matched :Source carries no url, and the link reads are keyed by "
+            "url — the sweep cannot address it (repair the node's url)")
+        return ref, version_operand(current)
     # `version_operand` — the SAME blank-is-absent rule the Point read applies
     # (`search_engine.read_currency_links`), so the two directions cannot disagree
     # about `"   "`; see that helper for the false-fresh it refuses.
-    return (url or ref), version_operand(current)
+    return url, version_operand(current)
 
 
 def source_staleness(graph, source_ref: str) -> dict:
@@ -408,16 +418,23 @@ def source_staleness(graph, source_ref: str) -> dict:
         can downgrade a verdict but can never fabricate a ``current`` or a
         target.
       - an **anchored** target of any other label (a document ``:Source``) is a
-        derivation too — only a derivation writer sets the anchor.
+        derivation too — only a derivation writer sets the anchor. ⛔ "Anchored"
+        is the write-side predicate (``r.sourceVersion IS NOT NULL AND
+        r.sourceVersion <> ''``), **not** the normalised operand: a
+        blank-but-present anchor (``"   "``) is an anchored derivation with an
+        UNREADABLE operand, so it stays in ``links`` and reads ``unknown``. Testing
+        the stripped value here instead would withhold it and let the aggregate
+        certify ``current`` over a link it never judged.
       - an **unanchored ``Source``-targeted** link is genuinely AMBIGUOUS and is
         excluded: referential containment and a document derivation are stored
         as ``(Source)-[:references]->(Source)`` either way (*"the stored edge is
         ... either way"*), so the anchor is the only read-time discriminator. A
-        property-free ``Object`` link is excluded for the same class of reason —
-        it is identity/mention by design (option A, `#5199`), and there is no
-        version of an identity to be stale. ⚠️ Excluded, but **COUNTED**
-        (``counts["withheld"]``): a sweep that silently ignored them could
-        certify ``current`` over a link set it knows it did not read.
+        property-free ``Object`` link is excluded for a different reason in the
+        same class of situation — it is identity/mention by design (option A,
+        `#5199`), and there is no version of an identity to be stale.
+        ⚠️ Excluded, but **COUNTED** (``counts["withheld"]``): a sweep that
+        silently ignored them could certify ``current`` over a link set it knows
+        it did not read.
 
     NOTHING IS WRITTEN. The verdicts are computed by
     :func:`tortoise.search_engine.currency_status` and aggregated by
@@ -443,9 +460,14 @@ def source_staleness(graph, source_ref: str) -> dict:
     "links", "re_inference_targets"}`` where
 
     * ``counts`` is ``{"stale", "current", "unknown", "links", "withheld"}``.
-      ``withheld`` counts the links deliberately NOT judged (the ambiguous
-      property-free ``references`` class above) — it is reported so a reader can
-      tell *"nothing to report"* from *"something I refused to classify"*.
+      ``withheld`` counts the links deliberately NOT judged, and it covers TWO
+      classes that are indistinguishable at read time and unjudgeable for
+      different reasons: an **unanchored ``Source``-targeted** link (containment
+      or a document derivation — stored identically), and an **unanchored
+      ``Object``** link (identity/mention by design, option A of `#5199`). It is
+      reported so a reader can tell *"nothing to report"* from *"something I
+      refused to classify"*. It is ``None`` when the ``references`` read itself
+      failed — an UNREAD class is not an empty one.
     * ``status`` is the §4.6 aggregate over every link found — ``stale`` if ANY
       is behind, ``current`` only when every one is and there is at least one,
       ``unknown`` otherwise (including a source that derived nothing: an empty
@@ -484,6 +506,7 @@ def source_staleness(graph, source_ref: str) -> dict:
             "node": node_id or "",
             "recorded": version_operand(remembered),
         })
+    references_failed = False
     try:
         # EVERY ``references`` link is read and CLASSIFIED HERE, not filtered in
         # Cypher. Two reasons, both load-bearing:
@@ -498,6 +521,16 @@ def source_staleness(graph, source_ref: str) -> dict:
         #   did not read. Every other incompleteness is reported (`errors`,
         #   `complete`); this one is reported as ``counts["withheld"]``, which
         #   keeps the aggregate honest without pretending a guess is a verdict.
+        #
+        # ⚠ COST, stated because it is paid: this returns EVERY `references` row of
+        # the source, including the withheld class, where the old server-side
+        # filter returned only derivations. It is still an index seek from ONE
+        # Source (never a global edge scan), but it is O(degree) in that source's
+        # fan-out — a corpus source's containment links are typically the majority
+        # class — and there is no `LIMIT` (an enumeration cannot be truncated
+        # without lying about what it found). Counting `withheld` in a second
+        # `RETURN count(*)` query would keep the old selectivity at the cost of a
+        # second round trip; this read pays the rows instead.
         reference_rows = graph.query(
             "MATCH (s:Source {url:$url})-[r:references]->(t) "
             "RETURN labels(t), coalesce(t.url, t.eventId, t.id), "
@@ -507,10 +540,25 @@ def source_staleness(graph, source_ref: str) -> dict:
     except Exception as exc:  # REPORTED, never silent — see `complete`
         errors.append(f"references read failed: {type(exc).__name__}: {exc}")
         reference_rows = []
-    withheld = 0
+        references_failed = True
+    # `None` on a failed read: 0 must keep meaning "nothing was refused", and an
+    # unread class is not an empty one (the same distinction `complete` draws for
+    # the judged rows).
+    withheld: int | None = 0 if not references_failed else None
     for labels, node_id, remembered in reference_rows:
         labels = list(labels or [])
         recorded = version_operand(remembered)
+        # ⛔ ANCHORED IS **PRESENCE**, NOT THE NORMALISED OPERAND. The write-side
+        # rule is `r.sourceVersion IS NOT NULL AND r.sourceVersion <> ''`, and a
+        # blank-BUT-PRESENT anchor (`"   "` from `create_source(..., contentHash="   ")`,
+        # which `_anchor_on_create` stamps because it nulls only `''`; or a
+        # non-string restored by a graph restore) is an ANCHORED DERIVATION WITH
+        # AN UNREADABLE OPERAND — its honest verdict is `unknown`. Testing the
+        # stripped operand here instead classed it unanchored, withheld it from
+        # `links`, and the aggregate could then certify `current` over a link it
+        # never judged: a false-fresh, and a disagreement with
+        # `get_provenance_chain`, which reports that same link `unknown`.
+        anchored = remembered is not None and remembered != ""
         # The write-time discriminator is "did a DERIVATION writer mint it", and
         # at read time the two observable signals are the target's label and the
         # anchor's presence: every provenance writer of an `Event` reference is a
@@ -521,7 +569,7 @@ def source_staleness(graph, source_ref: str) -> dict:
         # add an `unknown` row — the hatch cannot set an anchor — so it can
         # downgrade a verdict to `unknown` and can never fabricate a `current` or
         # a re-inference target. Conservative in the direction §4.6 prefers.
-        if "Event" in labels or recorded:
+        if "Event" in labels or anchored:
             links.append({
                 "via": REFERENCES,
                 "kind": ("event" if "Event" in labels
@@ -726,12 +774,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                           f"{link['node']} "
                           f"(recorded {link['recorded'] or '∅'} → "
                           f"current {link['current'] or '∅'})")
-                if counts["withheld"]:
-                    # The ambiguous class is NOT judged, and saying so is what
+                if counts["withheld"] is None:
+                    print("  withheld unread — the `references` read failed, so "
+                          "the withheld class is unknown, not empty")
+                elif counts["withheld"]:
+                    # The withheld class is NOT judged, and saying so is what
                     # keeps `current` from being read as "every link checked".
-                    print(f"  withheld {counts['withheld']} link(s) — an "
-                          f"unanchored Source-targeted `references` link cannot "
-                          f"be told from containment, so it is not judged")
+                    # TWO classes land here, for two different reasons: an
+                    # unanchored `Source`-targeted link cannot be told from
+                    # containment, and an unanchored `Object` link is
+                    # identity/mention by design (option A, #5199).
+                    print(f"  withheld {counts['withheld']} link(s) — unanchored "
+                          f"non-Event `references` links (ambiguous containment/"
+                          f"document-derivation, or identity/mention by design) "
+                          f"are not judged")
                 if sweep["re_inference_targets"]:
                     print("  re-inference: " + ", ".join(sweep["re_inference_targets"]))
                 if not sweep["complete"]:
