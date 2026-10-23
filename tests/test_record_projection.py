@@ -661,16 +661,21 @@ def test_a_point_lands_its_extractedFrom_relation_after_the_point_identity():
     # fallback `_ENTITY_MATCH_COLUMNS` gives `EntityLinked`: the fold calls
     # `resolve_source_key` (canonicalise, then any Source registered under that
     # canonical form) before it MERGEs `(s:Source {url:$url})`. So the record
-    # matches the raw ref OR the canonical form, ordered like the fold's
-    # `ORDER BY s.url LIMIT 1`. An id match could attach the row to a node the
-    # fold never chose. The SQL proves which predicate was emitted.
+    # matches the raw ref OR the canonical form, PREFERRING the canonical match
+    # and ordered by `node_key` within each tier — `resolve_source_key`'s own
+    # order (canonicalUrl first, return there; raw spelling afterwards) and its
+    # own tiebreak (`ORDER BY s.url LIMIT 1`). An id match could attach the row
+    # to a node the fold never chose. The SQL proves which predicate was emitted.
     assert "public.source WHERE org_id = %s AND graph_id = %s AND " \
-        "(node_key = %s OR canonical_url = %s) ORDER BY node_key LIMIT 1" \
+        "(node_key = %s OR canonical_url = %s) ORDER BY CASE WHEN " \
+        "canonical_url = %s THEN 0 ELSE 1 END, node_key LIMIT 1" \
         in relation.sql, relation.sql
-    # params: the row's own values, then the two endpoint subquery triples/quadruples
-    # the caller joins on — src, then tgt (raw ref, canonical form).
-    assert relation.params[-7:-4] == ("org-a", "g1", "p1"), relation.params
-    assert relation.params[-4:] == ("org-a", "g1", "src1", "src1"), relation.params
+    # params: the row's own values, then the two endpoint subquery triples/
+    # quadruples the caller joins on — src, then tgt (raw ref, canonical form,
+    # canonical form again for the precedence clause).
+    assert relation.params[-8:-5] == ("org-a", "g1", "p1"), relation.params
+    assert relation.params[-5:] == ("org-a", "g1", "src1", "src1", "src1"), \
+        relation.params
     # Idempotent: a replayed capture converges on the one row.
     assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " \
         in relation.sql
@@ -692,12 +697,14 @@ def test_a_url_variant_ref_resolves_to_the_recorded_canonical_source():
     relations = _relation_statements(record)
     assert len(relations) == 1, [s.sql for s in relations]
     # The raw ref is retained as the row's `tgt` intent, but the RESOLUTION
-    # binds both spellings, so the subselect can find the canonical row.
-    assert relations[0].params[-2:] == (variant, "https://example.com/a"), \
+    # binds both spellings (the canonical one twice: predicate + precedence),
+    # so the subselect can find the canonical row and prefers it.
+    assert relations[0].params[-3:] == (variant, "https://example.com/a",
+                                       "https://example.com/a"), \
         relations[0].params
     # A non-network ref normalises to itself — no phantom second spelling.
     plain = _relation_statements(_EXTRACTED_RECORD)[0]
-    assert plain.params[-2:] == ("src1", "src1"), plain.params
+    assert plain.params[-3:] == ("src1", "src1", "src1"), plain.params
 
 
 def test_the_source_canonicaliser_is_the_folds_own():
@@ -791,17 +798,52 @@ def test_a_ref_the_fold_skips_lands_no_relation():
     assert relations[0].params[-1] == "src1"
 
 
-def test_only_the_point_creation_records_carry_point_property_relations():
-    """The fold wires these edges for exactly `PointAdded`/`OperatorAdded`.
+def test_only_the_point_MATERIALISATION_records_carry_point_property_relations():
+    """The fold's point-materialisation types — FOUR, and `apply()` is richer.
 
-    `apply()` and `rebuild_all`'s pass 2 both gate on those two types, so a
-    `PointRevised` carrying `extractedFrom` lands no edge on the JOURNAL route —
-    and the record emitting one there would be the record richer than the graph.
+    `apply()` re-derives this family from four arms — `PointAdded` /
+    `OperatorAdded` (`self._upsert(p)`) and `PointPromoted` / `OperatorPromoted`
+    (`self._upsert(gated_promote_payload(…))` /
+    `self._upsert(_promotion_point_with_operator(…))`, neither wrapper dropping
+    `extractedFrom`). `rebuild_all`'s pass 2 re-derives it for the two CREATION
+    types only, so the two fold routes already disagree; the record follows
+    `apply()`, the chronological engine `rebuild`/`recover_from_log` run, because
+    otherwise a promote-only operator (#2256) has the edge in the graph and none
+    in the record — the record POORER than the graph.
+
+    Everything else lands nothing: a `PointRevised` never reaches
+    `_upsert_point_edges` on any route, so a row there would be the record richer
+    than the graph.
     """
-    for record_type in ("PointPromoted", "OperatorPromoted", "DedupeRecorded",
+    # Non-vacuity for the four: each one carries the SAME edge, once.
+    for record_type in ("PointAdded", "OperatorAdded",
+                        "PointPromoted", "OperatorPromoted"):
+        record = {**_EXTRACTED_RECORD, "type": record_type}
+        relations = _relation_statements(record)
+        assert len(relations) == 1, (record_type, [s.sql for s in relations])
+        assert relations[0].params[2:5] == ("extractedFrom", "Point", "Source")
+    for record_type in ("PointRevised", "DedupeRecorded",
                         "DedupeRejected", "PointInvalidated", "BatchIdStamped"):
         record = {**_EXTRACTED_RECORD, "type": record_type}
         assert _relation_statements(record) == [], record_type
+
+
+def test_the_declared_types_are_the_folds_point_materialisations():
+    """Drift guard: the declaration tracks the fold's own type list.
+
+    `_JOURNAL_POINT_MATERIALIZATION_TYPES` is the fold's ONE declaration of what
+    materialises a `:Point` — the four types `apply()` folds through `_upsert`,
+    and therefore the four whose payload reaches `_upsert_point_edges`. A fifth
+    materialisation type added there without a row here would silently re-open
+    the record-poorer-than-the-graph gap on that arm.
+    """
+    from tortoise.projection import _JOURNAL_POINT_MATERIALIZATION_TYPES
+
+    declared = {type_of for type_of, _p, _r, _l in rp._POINT_PROPERTY_RELATIONS}
+    assert declared == set(_JOURNAL_POINT_MATERIALIZATION_TYPES), (
+        sorted(declared), sorted(_JOURNAL_POINT_MATERIALIZATION_TYPES))
+    # Non-vacuity: the sets are non-empty and the reference is the fold's own.
+    assert len(_JOURNAL_POINT_MATERIALIZATION_TYPES) == 4
 
 
 def test_the_read_version_anchor_rides_the_primary_column():
@@ -857,6 +899,11 @@ def test_the_source_version_selector_is_the_folds_own():
         # Duplicate raw ref: the comprehension keeps the LAST pair.
         {"extractedFrom": "src1",
          "sourceVersionTransit": [["src1", "h1"], ["src1", "h2"]]},
+        # A carrier naming ONLY a ref this Point does not carry ⇒ no anchor at
+        # all (the fold's `kept or None` filter). Outcome-neutral for today's
+        # consumer, which only looks up its own refs — pinned so the "equal"
+        # claim below is literal rather than approximate.
+        {"extractedFrom": "src1", "sourceVersionTransit": [["src2", "h2"]]},
         # Malformed pair: all-or-nothing ⇒ NO anchor.
         {"extractedFrom": "src1",
          "sourceVersionTransit": [["src1", "h1"], ["src2", None]]},
@@ -886,13 +933,14 @@ def test_a_record_sourced_rebuild_materialises_the_provenance_edge():
         _SNAPSHOT, extractedFrom="src1", sourceVersionTransit=[["src1", "h1"]])})[0]
     rel_type, src_label, tgt_label = statement.params[2:5]
     # The tail is [src org, src graph, src key][tgt org, tgt graph, raw ref,
-    # canonical ref] — the tgt endpoint binds TWO values (raw + canonical, see
-    # `_endpoint_resolution`), so the src key is fifth-from-last and the target
-    # the row addresses is the canonical spelling second-from-last.
+    # canonical ref, canonical ref again — the endpoint binds THREE values (the
+    # predicate's two spellings plus the precedence clause, see
+    # `_endpoint_resolution`), so the src key is sixth-from-last and the target
+    # the row addresses is the canonical spelling third-from-last.
     rel = cp.relation_from_row({
         "rel_type": rel_type,
-        "src_label": src_label, "src_key": statement.params[-5],
-        "tgt_label": tgt_label, "tgt_key": statement.params[-2],
+        "src_label": src_label, "src_key": statement.params[-6],
+        "tgt_label": tgt_label, "tgt_key": statement.params[-3],
         "idx": 0, "source_version": statement.params[6], "props": {},
     })
     built = cp.relation_statement(rel)
@@ -905,6 +953,41 @@ def test_a_record_sourced_rebuild_materialises_the_provenance_edge():
     # #5256's anchor survives the record → graph trip, as the same edge scalar
     # `_link_source` stamps (`ON CREATE SET r.sourceVersion`).
     assert rel.props["sourceVersion"] == "h1", rel.props
+
+
+def test_the_read_version_anchor_is_written_ON_CREATE_never_advanced():
+    """#5256 / #5199: a RE-LINK must not ADVANCE a recorded read version.
+
+    The fold writes the anchor through `_anchor_on_create` (`ON CREATE SET
+    r.sourceVersion`) — `_link_source`'s own rule. The record writes through ON
+    CONFLICT, whose generic `DO UPDATE SET c = EXCLUDED.c` would let a LATER
+    record for the same edge overwrite it: a re-emitted `PointAdded`
+    (`create_point` appends its record before a DETACH DELETE and may append a
+    second), a promote snapshot, or a second ref of one Point resolving onto the
+    same Source. The two rebuild routes would then disagree about the same
+    journal — exactly the split `test_the_source_version_selector_is_the_folds_own`
+    exists to prevent, one layer down.
+
+    So the anchor is written ON CREATE ONLY: the INSERT carries it, and the
+    conflict path does not touch the column at all — literally the fold's `ON
+    CREATE SET`, not an approximation of it. Asserted on the emitted SQL because
+    that is where the rule lives; the DB-level half (a real replay with a changed
+    carrier) runs in `supabase/tests/pglite/validate.mjs`.
+    """
+    anchored = _relation_statements({**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom="src1",
+        sourceVersionTransit=[["src1", "h1"]])})[0]
+    # The INSERT half still writes the anchor...
+    assert "source_version" in anchored.sql.split("FROM", 1)[0], anchored.sql
+    assert "h1" in anchored.params, anchored.params
+    # ...and the CONFLICT half never rewrites it. A `DO UPDATE` on this column
+    # (the pre-fix emission) let a later record ADVANCE the anchor.
+    assert "ON CONFLICT" in anchored.sql, anchored.sql
+    update_clause = anchored.sql.split("DO UPDATE SET", 1)[1]
+    assert "source_version" not in update_clause, anchored.sql
+    # Everything ELSE keeps latest-record-wins: `props` is edge state, not a
+    # recorded read version.
+    assert "props = EXCLUDED.props" in update_clause, anchored.sql
 
 
 def test_dollar_placeholder_rewrite_is_faithful():

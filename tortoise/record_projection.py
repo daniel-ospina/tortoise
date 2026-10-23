@@ -1394,6 +1394,7 @@ def _endpoint_resolution(
     match: tuple[str, ...] | None = None,
     values: Sequence[Any] | None = None,
     order_by: str | None = None,
+    prefer: tuple[str, Any] | None = None,
 ) -> tuple[str, list[Any]]:
     """The node row an edge endpoint addresses, keyed by the label's key column.
 
@@ -1438,6 +1439,16 @@ def _endpoint_resolution(
     `resolve_source_key` picks the LOWEST `url` on ties — without the clause the
     record would pick arbitrarily and could wire the edge to a different Source
     than the graph did, on the same journal line.
+
+    *prefer* orders one matched COLUMN ahead of the rest: `ORDER BY CASE WHEN
+    <column> = %s THEN 0 ELSE 1 END[, <order_by>] LIMIT 1`. A `match` predicate
+    is a UNION, and a union has no precedence — but `resolve_source_key` does:
+    it queries `canonicalUrl` FIRST and returns there, considering the raw
+    spelling only afterwards (adopt-on-touch, then a second canonical query). A
+    plain `ORDER BY <key>` over the union therefore expresses a different rule,
+    and on a record holding two Sources for one identity it can wire the edge to
+    the node the fold would not have chosen — the same class of divergence the
+    `id`-fallback exclusion above exists to stop.
     """
     table = _LABEL_TABLES.get(label)
     if table is None:
@@ -1450,7 +1461,15 @@ def _endpoint_resolution(
     predicate = " OR ".join(f"{column} = %s" for column in match)
     if len(match) > 1:
         predicate = f"({predicate})"
-    tail = f" ORDER BY {order_by} LIMIT 1" if order_by else ""
+    ordering: list[str] = []
+    preferred: list[Any] = []
+    if prefer is not None:
+        preferred_column, preferred_value = prefer
+        ordering.append(f"CASE WHEN {preferred_column} = %s THEN 0 ELSE 1 END")
+        preferred.append(preferred_value)
+    if order_by:
+        ordering.append(order_by)
+    tail = f" ORDER BY {', '.join(ordering)} LIMIT 1" if ordering else ""
     bound = list(values) if values is not None else [journal_id] * len(match)
     if len(bound) != len(match):
         raise RecordProjectionError(
@@ -1460,7 +1479,7 @@ def _endpoint_resolution(
     return (
         f"(SELECT node_key FROM public.{table} "
         f"WHERE org_id = %s AND graph_id = %s AND {predicate}{tail}) {alias}",
-        [org_id, graph_id, *bound],
+        [org_id, graph_id, *bound, *preferred],
     )
 
 
@@ -1476,7 +1495,33 @@ def _relation_upsert_statement(
     tgt_match: tuple[str, ...] | None = None,
     tgt_values: Sequence[Any] | None = None,
     tgt_order_by: str | None = None,
+    tgt_prefer: tuple[str, Any] | None = None,
 ) -> list[Statement]:
+    """One `relation` row, with both endpoints RESOLVED from record rows.
+
+    *src_match* / *tgt_match* / *tgt_values* / *tgt_order_by* / *tgt_prefer* are
+    pass-throughs to :func:`_endpoint_resolution` for a family whose fold
+    addresses an endpoint by something other than the label's default predicate
+    (`extractedFrom` → the Source's canonical identity, #9553 class 1). All are
+    keyword-only with `None` defaults, so every pre-existing call site emits
+    byte-identical SQL.
+
+    ON CONFLICT is a REPLAY, not a re-link — with ONE exception.
+    `source_version` (the #5256 read-version anchor) is written by the fold
+    through `_anchor_on_create` (`ON CREATE SET r.sourceVersion = …`), whose rule
+    `_link_source` states: *"a re-link must not ADVANCE a recorded version"*.
+    Emitting `source_version = EXCLUDED.source_version` on the conflict path
+    would let a LATER record for the same edge (a re-emitted `PointAdded` —
+    `create_point` appends one before a DETACH DELETE and may append a second; a
+    promote snapshot; a second ref of one Point resolving onto the same Source)
+    overwrite an anchor the journal route keeps, and the two rebuild routes would
+    then disagree about the same journal. So the anchor is written ON CREATE
+    ONLY: `source_version` is dropped from the update list entirely, which is
+    the fold's own rule rather than an approximation of it. Every OTHER
+    attribute stays latest-record-wins (`direction`/`confidence`/`weight`/
+    `label`/`batch_id` are edge STATE the later record legitimately corrects,
+    not a recorded read version).
+    """
     rel_type, src_label, src, tgt_label, tgt, idx = _relation_coordinates(rel, payload)
     col_values, tail = _split_properties(
         "relation", {k: payload[k] for k in rel.attrs if k in payload},
@@ -1492,7 +1537,7 @@ def _relation_upsert_statement(
         org_id, graph_id, src_label, src, "src", match=src_match)
     tgt_select, tgt_params = _endpoint_resolution(
         org_id, graph_id, tgt_label, tgt, "tgt", match=tgt_match,
-        values=tgt_values, order_by=tgt_order_by)
+        values=tgt_values, order_by=tgt_order_by, prefer=tgt_prefer)
     columns_ = ["org_id", "graph_id", "rel_type", "src_label", "src_key",
                 "tgt_label", "tgt_key", "idx", *col_values, "props"]
     select_list = ", ".join([
@@ -1504,7 +1549,16 @@ def _relation_upsert_statement(
         *(_jsonb_or_scalar(c, v) for c, v in col_values.items()), json.dumps(tail),
         *src_params, *tgt_params,
     ]
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in [*col_values, "props"])
+    updates = ", ".join(
+        f"{column} = EXCLUDED.{column}"
+        for column in [*col_values, "props"]
+        # ON CREATE ONLY (#5256 / #5199): the anchor is written by the INSERT
+        # and never by the conflict path — see the docstring. Dropping it here
+        # (rather than filling a NULL) is literally `_anchor_on_create`: the
+        # fold does not touch `r.sourceVersion` on a re-link, so a row whose
+        # edge already existed keeps whatever it was created with.
+        if column != "source_version"
+    )
     return [Statement(
         f"INSERT INTO public.relation ({', '.join(columns_)}) "
         f"SELECT {select_list} FROM {src_select}, {tgt_select} "
@@ -1778,9 +1832,8 @@ def _envelope_relation_statements(
 #: PROPERTIES, keyed `(record type, prop, rel_type, target label)`.
 #:
 #: ⛔ WHY A DECLARATION AND NOT A SPECIAL CASE. `_upsert_point_edges`
-#: (`projection/entities.py`) is the fold's ONE edge writer, shared by `apply()`
-#: and `rebuild_all`'s pass 2, and it runs for exactly `PointAdded` /
-#: `OperatorAdded`. What it derives from the payload:
+#: (`projection/entities.py`) is the fold's ONE edge writer. What it derives from
+#: the payload:
 #:
 #:   * `extractedFrom` → `(Point)-[:extractedFrom]->(Source)`, one edge per ref,
 #:     fanned out many-to-many (#3263) by `_link_source` — **carried HERE**;
@@ -1807,13 +1860,46 @@ def _envelope_relation_statements(
 #:     needs a record-side `:Tag` node first, which is a schema decision, not a
 #:     projection one.
 #:
-#: The ONE family carried above (`extractedFrom`, for BOTH point-creation record
-#: types) is the class-1 SLICE this change covers; the rest are named above and
-#: in `04-projection.md` §3 / `08-hosted-prerequisites.md` §R5 so the next reader
-#: meets the boundary instead of inferring it from a green suite.
+#: The ONE family carried above (`extractedFrom`) covers the materialisation
+#: types below; the rest are named above and in `04-projection.md` §3 /
+#: `08-hosted-prerequisites.md` §R5 so the next reader meets the boundary
+#: instead of inferring it from a green suite.
+#:
+#: ⛔ FOUR TYPES, NOT TWO — AND THE FOLD'S TWO ROUTES DO NOT AGREE ABOUT THEM.
+#: `apply()` materialises a Point from FOUR arms, and three of them reach
+#: `_upsert_point_edges` (which reads `extractedFrom` off the payload with no
+#: type gate of its own):
+#:
+#:   * `PointAdded` / `OperatorAdded` → `self._upsert(p)`;
+#:   * `PointPromoted` → `self._upsert(gated_promote_payload(p, …))`;
+#:   * `OperatorPromoted` → `self._upsert(_promotion_point_with_operator(p))`.
+#:
+#: Neither wrapper drops `extractedFrom` (`gated_promote_payload` withholds
+#: `status` only; `_promotion_point_with_operator` only SYNTHESISES the nested
+#: `operator` key), and promote emitters journal the full `get_point(id)`
+#: property set (`sdk.promote_point`) — so a promote-only record (the #2256
+#: capture case, where the promote IS the operator's only durable record)
+#: re-derives the provenance edge on the `apply()` route. `_JOURNAL_POINT_
+#: MATERIALIZATION_TYPES` names exactly these four, and the record follows it:
+#: declining the two promote rows would leave the record POORER than the graph
+#: on the engine `rebuild` / `recover_from_log` actually run.
+#:
+#: The two rebuild routes genuinely diverge here — `rebuild_all`'s pass 2 gates
+#: on `PointAdded`/`OperatorAdded` only (`projection/__init__.py`, "Pass 2 edge
+#: wiring") — so on THAT route the promote-derived edge is not re-derived at all.
+#: The record follows `apply()` deliberately: it is the chronological, journal-
+#: order engine, and carrying the edge cannot be wrong when the record holds the
+#: payload that derives it (the row is FK-bound to a Point and a Source the
+#: record itself materialised — nothing is minted). The pass-2 gate is named in
+#: `04-projection.md` §3 so the narrower route is visible rather than inferred.
+#: A normal `PointAdded` → `PointPromoted` journal converges on ONE row: the
+#: relation's UNIQUE identity keys the upsert, and a promote snapshot carrying a
+#: NEW ref adds a second row exactly as the fold's `MERGE` adds a second edge.
 _POINT_PROPERTY_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
     ("PointAdded", "extractedFrom", "extractedFrom", "Source"),
     ("OperatorAdded", "extractedFrom", "extractedFrom", "Source"),
+    ("PointPromoted", "extractedFrom", "extractedFrom", "Source"),
+    ("OperatorPromoted", "extractedFrom", "extractedFrom", "Source"),
 )
 
 
@@ -1936,15 +2022,19 @@ def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
 
     `_link_source` writes `r.sourceVersion` from the Point's OWN
     `sourceVersionTransit` carrier, through the shared `_point_source_transit`
-    selector, whose decision is THREE rules and all three are restated here:
+    selector, whose decision is FOUR rules and all four are restated here:
 
     1. the carrier is accepted ALL-OR-NOTHING — one malformed pair (not a
        2-element `[str, str]` with both members non-blank) and the payload
        contributes NO anchor, rather than the well-formed half of one;
     2. no `extractedFrom` ref at all ⇒ no anchor (the carrier is a transit for
        an edge that will be written, so a stray carrier writes nothing);
-    3. a pair is keyed by the RAW ref spelling — the journal-stable key — and a
-       DUPLICATE keeps the LAST pair (the fold builds its map by comprehension).
+    3. a pair naming a ref this Point does NOT carry is dropped
+       (`kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]`), so a
+       carrier whose every pair is foreign yields NO anchor;
+    4. a pair is keyed by the RAW ref spelling — the journal-stable key — and a
+       DUPLICATE keeps the LAST pair (both sides build their map by
+       comprehension over the same pair order).
 
     Restated rather than imported for the same standalone reason as
     :func:`_point_raw_refs`; the two are pinned equal over a value table by
@@ -1958,9 +2048,10 @@ def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
                 and isinstance(pair[0], str) and pair[0].strip()
                 and isinstance(pair[1], str) and pair[1].strip()):
             return {}
-    if not _point_raw_refs(snapshot.get("extractedFrom")):
+    refs = _point_raw_refs(snapshot.get("extractedFrom"))
+    if not refs:
         return {}
-    return {pair[0]: pair[1] for pair in pairs}
+    return {pair[0]: pair[1] for pair in pairs if pair[0] in refs}
 
 
 def _point_property_relation_statements(
@@ -1984,15 +2075,23 @@ def _point_property_relation_statements(
     `resolve_source_key` first (canonicalise, then take the `url` of any Source
     already registered under that canonical form) and only then MERGEs
     `(s:Source {url:$url})`. So the record matches `node_key = <raw ref>` OR
-    `canonical_url = <normalised ref>`, ordered by `node_key` to mirror
-    `resolve_source_key`'s `ORDER BY s.url LIMIT 1`. Matching the raw ref ALONE
+    `canonical_url = <normalised ref>`, PREFERRING the canonical match and
+    ordered by `node_key` within it — which is `resolve_source_key`'s own order
+    (it queries `canonicalUrl` first and returns there; the raw spelling is
+    consulted afterwards, adopt-on-touch) and its own tiebreak
+    (`ORDER BY s.url LIMIT 1`, and `chk_source_node_key_is_contract_key` forces
+    `node_key = url`). The ORDER BY is expressed rather than inherited: with two
+    Sources for one canonical identity the preference decides WHICH node the
+    edge lands on, and a plain `ORDER BY node_key` over the union would be free
+    to pick the node the fold would not have. Matching the raw ref ALONE
     resolved a variant onto no row and landed NOTHING while the journal rebuild
     restored the edge — a silent provenance loss on this very family (#9553
     review P1). The `id` fallback is still excluded: it would attach the row to
     a document row the fold never chose (see `_endpoint_resolution`'s `match`).
 
     ⛔ TWO HONEST GAPS, stated rather than papered over — neither is the
-    variant case above, which is now RESOLVED to the fold's own answer.
+    variant case above, which is now RESOLVED to the fold's own answer. A THIRD
+    one, about which RECORDS carry this family at all, is named at the end.
 
     (a) ORDERING. The row lands only when the Source's own record precedes the
     Point's — the capture path materialises the session Source BEFORE extraction
@@ -2011,6 +2110,27 @@ def _point_property_relation_statements(
     a node from an edge directive would materialise a Source no record created,
     the record richer than the graph. Same absent verdict, same reason, as the
     CONTAINS envelope family (#9594).
+
+    (c) THE FOLD'S TWO ROUTES DISAGREE ABOUT THE RECORD SET, and the record
+    follows `apply()`. `apply()` re-derives this family from FOUR point-
+    materialisation arms (`PointAdded`, `OperatorAdded`, `PointPromoted`,
+    `OperatorPromoted` — none of the payload wrappers drops `extractedFrom`),
+    while `rebuild_all`'s pass 2 re-derives it for the two CREATION types only
+    (`projection/__init__.py`, "Pass 2 edge wiring"). `_POINT_PROPERTY_RELATIONS`
+    declares all four: the record is a durable capture of the journal, so
+    declining the promote rows would make it POORER than the graph on the
+    chronological engine `rebuild` / `recover_from_log` run — the direction
+    Interface A forbids — for exactly the #2256 population whose promote IS the
+    operator's only record. The divergence that follows is on the pass-2 side
+    (a full rebuild re-derives no promote edge), named here and in
+    `04-projection.md` §3 rather than left to be discovered.
+
+    ⛔ AND ONE RULE THE RECORD NOW SHARES WITH `_anchor_on_create`: the anchor
+    is written ON CREATE ONLY — a replay of the same edge neither advances nor
+    fills `source_version` (`_relation_upsert_statement` omits it from the
+    update list, which is literally `ON CREATE SET`). For two refs of one Point
+    resolving onto the SAME Source with different hashes, the first ref's anchor
+    therefore wins on both routes, instead of the last INSERT winning.
     """
     if not isinstance(snapshot, Mapping):
         return []
@@ -2023,10 +2143,11 @@ def _point_property_relation_statements(
     for prop, rel_type, tgt_label in declared:
         versions = _point_source_versions(snapshot)
         for ref in _point_property_refs(snapshot.get(prop)):
-            # Mirror `resolve_source_key`: the raw ref, AND its canonical form.
-            # Both columns are tried because the canonical form is what the fold
-            # resolves to; `node_key` covers a Source recorded under the raw
-            # spelling. ORDER BY node_key mirrors its `ORDER BY s.url LIMIT 1`.
+            # Mirror `resolve_source_key`: the raw ref, AND its canonical form,
+            # with the CANONICAL match preferred (that is the order it queries
+            # in: canonicalUrl first, return there; the raw spelling is the
+            # adopt-on-touch fallback). `node_key` is the tiebreak inside each
+            # tier, exactly as its `ORDER BY s.url LIMIT 1`.
             canonical = _normalize_source_url(ref)
             payload: dict[str, Any] = {
                 "edge_type": rel_type,
@@ -2035,10 +2156,13 @@ def _point_property_relation_statements(
                 "source_label": "Point",
                 "target_label": tgt_label,
             }
-            # #5256: the read-version anchor the fold stamps ON CREATE. It is a
-            # PRIMARY column (`relation.source_version` → the cache projection's
-            # `sourceVersion` property, `cache_projection.placement_columns`), not
-            # a props key, and absent/empty means NO anchor on both routes.
+            # #5256: the read-version anchor the fold stamps ON CREATE — and the
+            # record writes through ON CONFLICT, so the anchor is the ONE
+            # attribute the upsert never rewrites (`_relation_upsert_statement`
+            # drops it from the update list). It is a PRIMARY column
+            # (`relation.source_version` → the cache projection's
+            # `sourceVersion` property, `cache_projection.placement_columns`),
+            # not a props key, and absent/empty means NO anchor on both routes.
             anchor = versions.get(ref)
             if anchor:
                 payload["source_version"] = anchor
@@ -2048,6 +2172,7 @@ def _point_property_relation_statements(
                 tgt_match=("node_key", "canonical_url"),
                 tgt_values=(ref, canonical),
                 tgt_order_by="node_key",
+                tgt_prefer=("canonical_url", canonical),
             ))
     return statements
 

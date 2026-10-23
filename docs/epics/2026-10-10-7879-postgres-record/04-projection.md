@@ -203,17 +203,24 @@ closed at both layers:
   the fold's `_link_source` performs (many-to-many, `#3263`). Three details make
   it parity rather than a plausible copy: the target resolves to the SAME Source
   the fold picks — `resolve_source_key`'s canonical identity, matched on `url`
-  **or** `canonical_url`, ordered like its `ORDER BY s.url LIMIT 1`, and never
-  via the `id` fallback `_ENTITY_MATCH_COLUMNS` supplies for `EntityLinked` —
-  which also required the projection to DERIVE `source.canonical_url`, since no
-  payload may carry it (`projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists `canonicalUrl` as
-  writer-derived); the ref container and the per-member gate mirror
-  `_link_source`'s (a dict fans out to nothing, `#8171`); and the `#5256`
+  **or** `canonical_url`, PREFERRING the canonical match and ordered by
+  `node_key` within it, which is that resolver's own order (it queries
+  `canonicalUrl` first and returns there; the raw spelling is the adopt-on-touch
+  fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`), and never via the
+  `id` fallback `_ENTITY_MATCH_COLUMNS` supplies for `EntityLinked` — which also
+  required the projection to DERIVE `source.canonical_url`, since no payload may
+  carry it (`projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists
+  `canonicalUrl` as writer-derived); the ref container and the per-member gate
+  mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and the `#5256`
   read-version anchor rides `relation.source_version` — a PRIMARY column the
   cache projection maps back to `r.sourceVersion` — from the Point's own
   `sourceVersionTransit` carrier, all-or-nothing and raw-ref keyed, exactly as
-  `_point_source_transit` decides.
-  **Two residuals, neither an unmatched-URL case.** (a) The Source's record must
+  `_point_source_transit` decides. That anchor is written ON CREATE, as
+  `_anchor_on_create` does: the INSERT carries it and the conflict path does not
+  touch the column at all, so a replayed edge neither advances nor fills a
+  recorded `source_version` on either route (every other relation attribute
+  stays latest-record-wins — edge state, not a recorded read version).
+  **Three residuals, none an unmatched-URL case.** (a) The Source's record must
   precede the Point's (the live order: the capture materialises the session
   Source first, `sdk.py::_materialize_session_source`), else the insert finds no
   `source` row and lands nothing — the `absent` verdict every relation gives.
@@ -223,6 +230,17 @@ closed at both layers:
   record lands nothing by design: minting a node from an edge directive would
   materialise a Source no record created. Same absent verdict, same reason, as
   the CONTAINS envelope family (**#9594**).
+  (c) **Which RECORDS carry the family, where the fold's own routes disagree.**
+  `apply()` materialises a Point from four arms and three reach
+  `_upsert_point_edges` — `PointAdded`/`OperatorAdded`, `PointPromoted`,
+  `OperatorPromoted` (neither promote payload wrapper drops `extractedFrom`) —
+  while `rebuild_all`'s pass 2 re-derives the family for the two creation types
+  only. `_POINT_PROPERTY_RELATIONS` declares all four and the record follows
+  `apply()`, the chronological engine `rebuild`/`recover_from_log` run: declining
+  the promote rows would make the record POORER than the graph for exactly the
+  #2256 population whose promote IS the operator's only record. A full rebuild
+  that re-derives no promote edge is the divergence that follows, and it sits on
+  the pass-2 side.
   The other class-1 families are still **not**
   materialized, each for its own reason: `about*` needs `_create_about_edges`'
   live name→label cascade (and `EntityLinked` already carries it whenever the

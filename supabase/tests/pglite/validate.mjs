@@ -1273,6 +1273,113 @@ try {
   unlinkSync(variantSegment);
   console.log('✓ #9553: a URL-variant ref resolves to the registered Source '
     + '(Point/p2 -> Source/https://example.com/a), matching the fold');
+
+  // ── #9553 '#5256': the anchor is written ON CREATE, never ADVANCED ──
+  //
+  // The fold stamps `r.sourceVersion` through `_anchor_on_create` (`ON CREATE
+  // SET`), and `_link_source` states the rule: "a re-link must not ADVANCE a
+  // recorded version". The record writes the anchor through ON CONFLICT, whose
+  // generic `DO UPDATE SET c = EXCLUDED.c` WOULD advance it — a re-emitted
+  // `PointAdded` (`create_point` appends one before a DETACH DELETE and may
+  // append a second) carrying a newer hash then rewrites an anchor the journal
+  // route keeps, and the two rebuild routes disagree about the same journal.
+  // This leg replays that second record and asserts the FIRST hash survives.
+  const rerunSegment = join(tmpdir(), `9553c1a-${process.pid}.jsonl`);
+  writeFileSync(rerunSegment, `${JSON.stringify({
+    ...pointRecord, ts: '2026-10-22T00:00:09Z',
+    point: { ...pointRecord.point, sourceVersionTransit: [['src1', 'h2']] },
+  })}\n`);
+  const rerunPlan = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     rerunSegment, ...tenant],
+    { encoding: 'utf8' },
+  )).plan;
+  await db.exec('BEGIN');
+  for (const statement of rerunPlan) {
+    await db.query(statement.sql, statement.params);
+  }
+  await db.exec('COMMIT');
+  const reAnchored = await db.query(
+    `SELECT src_key, source_version FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'
+        AND src_key = 'p1'`,
+    tenant);
+  if (reAnchored.rows.length !== 1) {
+    throw new Error(
+      `replaying the same edge produced ${reAnchored.rows.length} p1 rows (expected 1) `
+      + '— the relation upsert is not keyed on its UNIQUE identity');
+  }
+  if (reAnchored.rows[0].source_version !== 'h1') {
+    throw new Error(
+      `the replayed edge ADVANCED its read-version anchor to `
+      + `${JSON.stringify(reAnchored.rows[0].source_version)} (expected 'h1') — the `
+      + 'fold stamps it ON CREATE, so a re-link must not overwrite a recorded '
+      + 'version; the record is diverging from the journal route (#5256/#5199)');
+  }
+  unlinkSync(rerunSegment);
+  console.log('✓ #9553: the read-version anchor is written ON CREATE — a replayed '
+    + 'record with a NEWER hash keeps the recorded h1 (the fold\'s ON CREATE rule)');
+
+  // ── #9553 class 1: a PROMOTE record carries the family too ──
+  //
+  // `apply()` materialises a Point from four arms and three of them reach
+  // `_upsert_point_edges`, which reads `extractedFrom` with no type gate of its
+  // own: `PointAdded`/`OperatorAdded` (`self._upsert(p)`) and
+  // `PointPromoted`/`OperatorPromoted` (`self._upsert(gated_promote_payload(...))`
+  // / `self._upsert(_promotion_point_with_operator(...))`, neither wrapper
+  // dropping the ref). A promote-only record is the #2256 capture case, where
+  // the promote IS the operator's only durable record — so declining the promote
+  // rows would leave the record POORER than the graph on the engine `rebuild` /
+  // `recover_from_log` run.
+  const promoteRecords = [
+    {
+      type: 'SourceCreated', ts: '2026-10-22T00:00:10Z', id: 'src3',
+      url: 'src3', sourceKind: 'document', contentHash: 'h3',
+    },
+    {
+      type: 'PointPromoted', ts: '2026-10-22T00:00:11Z', id: 'p3',
+      point: {
+        id: 'p3', content: 'promoted claim', pointKind: 'observation',
+        extractedFrom: 'src3',
+      },
+    },
+  ];
+  const promoteSegment = join(tmpdir(), `9553c1p-${process.pid}.jsonl`);
+  writeFileSync(promoteSegment,
+    promoteRecords.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const promotePlan = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     promoteSegment, ...tenant],
+    { encoding: 'utf8' },
+  )).plan;
+  if (!promotePlan.some((x) => x.sql.startsWith('INSERT INTO public.relation'))) {
+    throw new Error('the PointPromoted record emitted NO relation statement — a '
+      + 'promote-only operator has the extractedFrom edge in the graph (`apply()`) '
+      + 'and none in the record, the record POORER than the graph (#9553 class 1)');
+  }
+  await db.exec('BEGIN');
+  for (const statement of promotePlan) {
+    await db.query(statement.sql, statement.params);
+  }
+  await db.exec('COMMIT');
+  const promotedRows = await db.query(
+    `SELECT src_label, src_key, tgt_label, tgt_key FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'
+        AND src_key = 'p3'`,
+    tenant);
+  const promotedGot = promotedRows.rows.map((r) =>
+    `${r.src_label}/${r.src_key} -> ${r.tgt_label}/${r.tgt_key}`);
+  if (promotedRows.rows.length !== 1
+      || promotedGot[0] !== 'Point/p3 -> Source/src3') {
+    throw new Error(
+      `the promote record landed ${JSON.stringify(promotedGot)}, expected exactly `
+      + '["Point/p3 -> Source/src3"]');
+  }
+  unlinkSync(promoteSegment);
+  console.log('✓ #9553: a PointPromoted record carries the extractedFrom row too '
+    + '(Point/p3 -> Source/src3), matching apply()\'s promote arm');
 } catch (e) {
   console.error(`✗ #9553 R5/EXTRACTED-FROM FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
   process.exit(1);
