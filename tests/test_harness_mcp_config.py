@@ -1372,7 +1372,11 @@ class TestDocsPageAndSkillConfig:
         #   now hang the catalog sentence on `packs.js::usesCatalogUnion` —
         #   `configured: false` AND zero records — so a starter-seeded default
         #   graph gets the "packs it already holds" line instead. The remaining
-        #   residual is the record-count derivation, not this copy.)
+        #   residual is the record-count DERIVATION: it cannot see a tombstone
+        #   the catalog arm offers as `available`. That shape is unreachable
+        #   today — the only writer that sets `removed` without moving the
+        #   marker (`pack_manifest_store.delete_tenant_manifest`) has no caller
+        #   or route — so it is a latent shape, not a live mis-render.)
         assert "only stops new classifications" not in disable, (
             "PACK_CONSEQUENCE.disable must not state the consequence "
             "unconditionally — the resolution contract re-admits a namespace "

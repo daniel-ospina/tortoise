@@ -79,11 +79,14 @@ export const PACK_CONSEQUENCE = Object.freeze({
   // that resolves to the catalog union, so it is the only state allowed to say
   // so; a starter-seeded graph is unconfigured too and reads the other line.
   unconfigured: 'This graph has never been configured and holds no packs, so it uses the full pack catalog. Adding or removing a pack here pins this graph to the set you save.',
-  // `catalog_ok: false` is the server saying it could not READ the catalog, so
-  // neither sentence above may be stated: the add-list beside it is degraded
-  // for the same reason (ADD_LIST_DEGRADED_LINE).
-  unconfiguredDegraded: 'This graph has never been configured and holds no packs. The pack catalog could not be read, so what applies right now is not known. Adding or removing a pack here pins this graph to the set you save.',
-  unconfiguredHolding: 'This graph has never been configured, so it uses the packs it already holds rather than the full catalog. Adding or removing a pack here pins this graph to the set you save.',
+  // No comparative against the catalog here. `resolved_pack_set` for this arm is
+  // `recorded(any status) ∪ data`, and NOTHING stops that union equalling the
+  // catalog — a graph holding records for every catalog namespace (an
+  // out-of-band activer such as `upsert_tenant_manifest` writes a `:PackInstall`
+  // without moving the marker) really does apply the whole catalog while being
+  // `configured: false`. So state the narrowing POSITIVELY and never claim what
+  // the set is not.
+  unconfiguredHolding: 'This graph has never been configured, so only the packs it already holds apply. Adding or removing a pack here pins this graph to the set you save.',
 })
 
 function asRows(body) {
@@ -117,13 +120,13 @@ export function usesCatalogUnion(body) {
 
 // The unconfigured note the surface renders: two different graphs, two
 // different sentences. Callers pass the payload, never the flag.
+// NOT keyed on `catalog_ok`: that flag reports whether the shared catalog could
+// be READ (the add-list's enumeration), never which set resolves — so it must
+// not change what this note says about the resolution.
 export function unconfiguredConsequence(body) {
-  if (!usesCatalogUnion(body)) return PACK_CONSEQUENCE.unconfiguredHolding
-  // A catalog that could not be READ is not a catalog that applies: the same
-  // distinction `addListEmptyLine` draws two functions above.
-  return body && body.catalog_ok === false
-    ? PACK_CONSEQUENCE.unconfiguredDegraded
-    : PACK_CONSEQUENCE.unconfigured
+  return usesCatalogUnion(body)
+    ? PACK_CONSEQUENCE.unconfigured
+    : PACK_CONSEQUENCE.unconfiguredHolding
 }
 
 // `kind_count` is best-effort server-side (a registry failure omits it). Never
@@ -285,12 +288,10 @@ export function packCountLine(body) {
   // "the full catalog applies" — the same self-contradiction in a new shape,
   // so this arm reports no count at all.
   if (usesCatalogUnion(body)) {
-    // `catalog_ok: false` means the catalog could not be READ, so "the full
-    // catalog applies" is a confident claim about something the server just
-    // said it could not read.
-    if (body.catalog_ok === false) {
-      return 'Not configured yet \u2014 this graph holds no packs. Saving pins the set.'
-    }
+    // `catalog_ok: false` deliberately does NOT change this line: it means the
+    // catalog could not be READ (the add-list cannot enumerate it), not that a
+    // different set resolves. The degraded caveat belongs to
+    // `ADD_LIST_DEGRADED_LINE`, which renders beside it.
     return 'Not configured yet \u2014 this graph holds no packs, so the full catalog applies. Saving pins the set.'
   }
   return `Not configured yet \u2014 this graph uses the packs it already holds (${line}). Saving pins the set.`

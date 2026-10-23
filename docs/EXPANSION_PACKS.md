@@ -534,17 +534,25 @@ customer-facing territory that owns per-graph permissions.
 > reader could mistake for the enforced set, and it is omitted in the
 > record-less arm rather than printed as a structurally-0 "0 active packs"
 > beside the catalog claim.
-> A catalog that could not be READ gets neither claim (`catalog_ok: false`): the
-> record-less arm drops the catalog sentence, and the modal note says the
-> catalog could not be read rather than that it applies — the same distinction
-> the degraded add-list line draws.
+> A catalog that could not be READ (`catalog_ok: false`) does NOT change which
+> set applies — the flag reports the add-list's enumeration, not the resolution —
+> so the copy is unchanged and the caveat rides on `ADD_LIST_DEGRADED_LINE`
+> beside it. The seeded arm states its narrowing POSITIVELY ("only the packs it
+> already holds apply") and never names the catalog at all: a comparative is
+> still an absolute the contract cannot keep, because `recorded ∪ data` may equal
+> the whole catalog.
 > `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
 > zero records (a tombstone counts; the catalog arm of `available` does not).
 > ⚠️ The predicate derives the record set from the two lists the payload carries
-> rather than from the resolved set itself, so a CATALOG-shipped tombstone with
-> no marker (offered by the catalog arm as `available`, never as `removed`) is a
-> residual it cannot see; the exact fix is to surface the record count / the
-> union flag on the payload, which is tracked on the issue.
+> rather than from the resolved set itself, so it cannot see a tombstone the
+> catalog arm offers as `available` instead of `removed`. That shape is
+> unreachable TODAY and only by one writer: `get_tenant_packs` self-heals with
+> `active` records, `_apply_import_pack_config` and `upsert_tenant_manifest`
+> activate, `set_graph_packs` writes the marker — and the only writer that sets
+> `removed` without moving the marker, `pack_manifest_store.delete_tenant_manifest`,
+> has no caller and no route. If that function is ever bound to a delete surface,
+> the predicate silently mis-renders as the union; the exact fix then is to
+> surface the record count (or `namespaces is None` itself) on the payload.
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 

@@ -829,43 +829,49 @@ _PACK_TRIGGERS = {
     # `mandate`, `allocation` and `impairment` reproduce that on "the team's
     # mandate…", "resource allocation…", "a visual impairment…".
     #
-    # A synonym is NOT automatically safe because it has a space in it — the
-    # compound forms collide too, measured on this row's earlier drafts:
-    #   * `valuation mark` is a SUBSTRING of "evaluation mark" and
-    #     "revaluation mark" — the same trap as bare `valuation`, one word
-    #     longer (`"valuation mark" in "the evaluation mark scheme"` is True);
-    #   * `write-up` / `write-down` are ordinary English ("the write-up of the
-    #     release", "a write-down of the inventory");
-    #   * `reference weight` / `policy weight` / `benchmark weight` are generic
-    #     in engineering prose ("the reference weight of the assembly is
-    #     4.2 kg");
-    #   * `allocation target` / `target allocation` are generic in budgeting
-    #     ("the council approved its target allocation of the road budget");
-    #   * `policy statement` is generic in compliance ("our privacy policy
-    #     statement");
-    #   * `mandate limits` is ordinary English ("the mandate limits how much we
-    #     can spend");
-    #   * `fair value mark` rides on an accounting term that applies to any
-    #     asset, not only a portfolio position.
-    # EVERY one of those selected `portfolio:*` ALONE on an unrelated story and
-    # so stripped every other pack's kinds. All of them are recorded, with the
-    # measurement, in
+    # A space or a hyphen is NOT enough. Measured on this row's earlier drafts,
+    # each of these selected `portfolio:*` ALONE on an ordinary non-portfolio
+    # sentence and so stripped every other pack's kinds:
+    #   * `valuation mark` — a SUBSTRING of "evaluation mark" and "revaluation
+    #     mark", the same trap as bare `valuation` one word longer;
+    #   * `write-up` / `write-down` — "the write-up of the release", "a
+    #     write-down of the inventory";
+    #   * `reference weight` / `policy weight` / `benchmark weight` — engineering
+    #     prose, "the reference weight of the assembly is 4.2 kg";
+    #   * `allocation target` / `target allocation` — budgeting prose, "the
+    #     council approved its target allocation of the road budget";
+    #   * `policy statement` — compliance prose, "our privacy policy statement";
+    #   * `mandate limits` — "the mandate limits how much we can spend";
+    #   * `fair value mark` / `target weight` — accounting and engineering terms
+    #     that apply to any asset, not to a portfolio position.
+    # All of them are recorded, with the measurement, in
     # `tests/test_investment_portfolio_manager_pack.py::NON_TRIGGER_SYNONYMS`,
     # so this is a recorded choice, not an omission.
     #
-    # THE INVARIANT, made mechanical by that test: every entry is either this
-    # namespace's own name or a phrase containing `investment`. Nothing else
-    # reaches this row — the collision surface of a substring match is too
-    # large for a judgement call, and a synonym that is MISSING here costs
-    # almost nothing (with no other trigger the selector falls back to ALL
-    # packs, so the overlay is still injected), while a spurious entry STRIPS
-    # every other pack.
+    # THE INVARIANT, made mechanical by that test: an entry is this namespace's
+    # own name, or an `investment `-prefixed phrase. Nothing else reaches this
+    # row — a per-phrase judgement call is exactly how a substring collision
+    # survives review (the first draft of this fix removed five and kept five of
+    # the same class).
+    #
+    # THE COST, stated accurately rather than waved away. `_select_pack_kinds`
+    # falls back to ALL packs only when NOTHING matched in ANY namespace — and
+    # the sibling rows carry ordinary English (`dev:` "deploy"/"sprint"/"test",
+    # `venture:` "fund"/"asset"), so that fallback is not much of a net. A
+    # genuinely portfolio-shaped story whose only portfolio vocabulary is a
+    # synonym excluded above DOES lose the overlay once a sibling matches
+    # ("the allocation target for the fund was missed; deploy the fix" selects
+    # dev+venture, no portfolio). That loss is ACCEPTED — the alternative costs
+    # another pack's entire vocabulary — and it is pinned as a recorded decision
+    # in `tests/test_investment_portfolio_manager_pack.py::
+    # test_the_accepted_loss_is_a_recorded_decision`, so a later lane can tell it
+    # from a bug.
     #
     # A row missing a synonym the pack DOES declare is a real loss when a
     # sibling matches: a bare "policy statement" used to lose the overlay to
-    # `agent-ops:`'s "policy". That is the cost of the invariant, and it is the
-    # cheap direction (`investment policy` — which a portfolio policy statement
-    # is actually called — still matches).
+    # `agent-ops:`'s "policy". That is the cost of the invariant (`investment
+    # policy` — which a portfolio policy statement is actually called — still
+    # matches).
     "portfolio:": ("portfolio", "investment mandate", "investment policy",
                    "investment guidelines"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",

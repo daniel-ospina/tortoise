@@ -424,14 +424,26 @@ class TestClashRules:
         assert "constrainedBy" in by_pred["boundedBy"]["nearMisses"]
 
     #: Declared synonyms deliberately NOT in the trigger row, each with the
-    #: reason. A missing trigger is CHEAP here: with nothing else matching, the
-    #: selector falls back to ALL packs, so the overlay is still injected — while
-    #: a spurious trigger is EXPENSIVE, because one match suppresses that
-    #: fallback and strips every other pack's kinds from the prompt.
+    #: reason. The asymmetry that decides every exclusion: a SPURIOUS trigger is
+    #: EXPENSIVE — one match suppresses the all-packs fallback and strips every
+    #: other pack's kinds from the prompt — while a MISSING trigger costs the
+    #: overlay, and sometimes does not even cost that.
+    #:
+    #: ⚠️ State the cost ACCURATELY: the all-packs fallback fires only when
+    #: NOTHING matched in ANY namespace, and the sibling rows are full of ordinary
+    #: English (`dev:` matches "deploy"/"sprint"/"test", `venture:` matches
+    #: "fund"/"asset"). So a genuinely portfolio-shaped story whose ONLY
+    #: portfolio vocabulary is an excluded synonym does lose the overlay when a
+    #: sibling also matches — "the allocation target for the fund was missed;
+    #: deploy the fix" selects dev+venture and no `portfolio:*`. That loss is
+    #: ACCEPTED and pinned below (`test_the_accepted_loss_is_a_recorded_decision`),
+    #: not denied: the alternative costs another pack's whole vocabulary.
     #:
     #: The row's own invariant (asserted in `test_compact_mode_can_gate_the_
-    #: namespace_by_story`) is: an entry is the namespace name, or it contains
-    #: `investment`. Every ENGLISH exclusion below fails that invariant for a
+    #: namespace_by_story`) is: an entry is the namespace name, or it STARTS
+    #: WITH `investment ` (the prefix, not a bare containment — a bare
+    #: `investment` collides in "the investment of effort"). Every ENGLISH
+    #: exclusion below fails that invariant for a
     #: measured reason — each was run through the REAL `_select_pack_kinds`
     #: against the real catalog and selected `portfolio:*` on ordinary prose,
     #: dropping the other packs. `peso alvo` is excluded for a different reason
@@ -523,15 +535,14 @@ class TestClashRules:
             set(_PACK_TRIGGERS[f"{NS}:"]) ^ expected)
 
         # THE INVARIANT, mechanically: a substring match over a phrase this
-        # generic cannot be trusted to a judgement call, so an entry is either
-        # the namespace's own name or it contains `investment`. Five entries of
-        # the same class ('allocation target', 'benchmark weight', 'policy
-        # statement', 'mandate limits', 'fair value mark') survived one round of
-        # this review because the exclusion list was assembled case by case;
-        # this assertion is what makes a SIXTH impossible.
+        # generic cannot be trusted to a judgement call, so an entry is the
+        # namespace's own name or an `investment `-prefixed phrase. The prefix
+        # matters: a bare "investment" would satisfy a naked `"investment" in t`
+        # test while colliding in "the investment of effort" and
+        # "disinvestment of the plant".
         row = _PACK_TRIGGERS[f"{NS}:"]
-        assert all(t == NS or "investment" in t for t in row), [
-            t for t in row if not (t == NS or "investment" in t)]
+        assert all(t == NS or t.startswith("investment ") for t in row), [
+            t for t in row if not (t == NS or t.startswith("investment "))]
 
         # The REAL catalogue, so a sibling namespace collision (agent-ops's
         # "policy") is visible: a four-entry fixture hides exactly the failure
@@ -613,6 +624,36 @@ class TestClashRules:
             got = _select_pack_kinds(story, pack_kinds)
             assert [k for k in got if k.startswith(f"{NS}:")], (mention, got)
             assert set(got) != set(pack_kinds), (mention, "all-packs fallback")
+
+    def test_the_accepted_loss_is_a_recorded_decision(self, pack):
+        """The COST of the row's invariant, pinned so it is a decision and not an
+        accident.
+
+        `_select_pack_kinds` falls back to ALL packs only when NOTHING matched in
+        ANY namespace, and the sibling rows carry ordinary English (dev:'s
+        "deploy"/"sprint"/"test", venture:'s "fund"/"asset"). A genuinely
+        portfolio-shaped story whose only portfolio vocabulary is an excluded
+        synonym therefore LOSES the overlay as soon as a sibling matches. That is
+        the accepted side of the trade — a spurious trigger would instead strip
+        another pack's whole vocabulary — and it is pinned here so a future row
+        change that alters it is visible rather than silent.
+
+        If one of these starts selecting `portfolio:*`, the trade-off moved:
+        update the recorded decision above rather than deleting this test.
+        """
+        from tortoise.extractor_v2 import _select_pack_kinds
+
+        pack_kinds = v2._build_master_from_brief(
+            compile_value_brief())["pack_kinds"]
+        for story in (
+            "the allocation target for the fund was missed; deploy the fix",
+            "the board reviewed the valuation mark before the sprint",
+            "the benchmark weight for the mandate was off; deploy the fix",
+        ):
+            got = _select_pack_kinds(story, pack_kinds)
+            assert not [k for k in got if k.startswith(f"{NS}:")], (
+                "the accepted cost changed — update the recorded decision",
+                story, got)
 
 
 # ── 4. Core extraction unchanged with the pack OFF ────────────────────────
