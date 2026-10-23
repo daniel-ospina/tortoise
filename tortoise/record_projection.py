@@ -1380,6 +1380,8 @@ def _endpoint_resolution(
     label: str,
     journal_id: str,
     alias: str,
+    *,
+    match: tuple[str, ...] | None = None,
 ) -> tuple[str, list[Any]]:
     """The node row an edge endpoint addresses, keyed by the label's key column.
 
@@ -1401,6 +1403,17 @@ def _endpoint_resolution(
     cascade uses (:data:`_ENTITY_MATCH_COLUMNS`), and the caller joins on the
     result: an endpoint with no row produces **no relation at all**, which is
     the fold's own `"absent"` verdict rather than a minted phantom.
+
+    *match* overrides the label's default predicate (:data:`_ENTITY_MATCH_COLUMNS`)
+    for a family whose fold matches ONE property. `extractedFrom` is that family
+    (#9553 class 1): `_link_source` writes
+    `MATCH (n:Point {id:…}), (s:Source {url:$url}) MERGE (n)-[:extractedFrom]->(s)`
+    — url ONLY — while the `Source` default is `id = %s OR url = %s`. Without the
+    override a point whose `extractedFrom` ref happens to be a Source's `id`
+    (a document reference: `create_document` keys the `url` but also stores the
+    `id`) would resolve onto that document row, where the fold would have minted
+    a stub `(s:Source {url:<ref>})` and attached the edge to the STUB: the record
+    would wire the edge to a different node than the graph did.
     """
     table = _LABEL_TABLES.get(label)
     if table is None:
@@ -1408,7 +1421,8 @@ def _endpoint_resolution(
             f"edge endpoint names label {label!r}, which is not a record node "
             f"label ({sorted(_LABEL_TABLES)})"
         )
-    match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
+    if match is None:
+        match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
     predicate = " OR ".join(f"{column} = %s" for column in match)
     if len(match) > 1:
         predicate = f"({predicate})"
@@ -1426,6 +1440,9 @@ def _relation_upsert_statement(
     payload: Mapping[str, Any],
     columns: Mapping[str, frozenset[str]],
     refused: Mapping[str, frozenset[str]],
+    *,
+    src_match: tuple[str, ...] | None = None,
+    tgt_match: tuple[str, ...] | None = None,
 ) -> list[Statement]:
     rel_type, src_label, src, tgt_label, tgt, idx = _relation_coordinates(rel, payload)
     col_values, tail = _split_properties(
@@ -1439,9 +1456,9 @@ def _relation_upsert_statement(
     # insert is a no-op — the fold's `"absent"` verdict, not a dropped edge
     # that still materializes a key.
     src_select, src_params = _endpoint_resolution(
-        org_id, graph_id, src_label, src, "src")
+        org_id, graph_id, src_label, src, "src", match=src_match)
     tgt_select, tgt_params = _endpoint_resolution(
-        org_id, graph_id, tgt_label, tgt, "tgt")
+        org_id, graph_id, tgt_label, tgt, "tgt", match=tgt_match)
     columns_ = ["org_id", "graph_id", "rel_type", "src_label", "src_key",
                 "tgt_label", "tgt_key", "idx", *col_values, "props"]
     select_list = ", ".join([
@@ -1723,6 +1740,181 @@ def _envelope_relation_statements(
     return statements
 
 
+#: R5 / #9553 **class 1** — the edges the graph fold derives from a Point's own
+#: PROPERTIES, keyed `(record type, prop, rel_type, target label)`.
+#:
+#: ⛔ WHY A DECLARATION AND NOT A SPECIAL CASE. `_upsert_point_edges`
+#: (`projection/entities.py`) is the fold's ONE edge writer, shared by `apply()`
+#: and `rebuild_all`'s pass 2, and it runs for exactly `PointAdded` /
+#: `OperatorAdded`. What it derives from the payload:
+#:
+#:   * `extractedFrom` → `(Point)-[:extractedFrom]->(Source)`, one edge per ref,
+#:     fanned out many-to-many (#3263) by `_link_source` — **carried HERE**;
+#:   * `contains_session` → CONTAINS — carried by the ENVELOPE directive above
+#:     (`_ENVELOPE_RELATIONS`, class 2, #9594);
+#:   * `p.operator` → `IMPL`/`NAND`/`hasPart` + the reverse `INPUT` + the
+#:     canonical `mitigated_by` reverse (`edges.py::_create_edges`) — class 3,
+#:     NOT carried here: the edges are emitted as a PAIR (`IMPL` and its
+#:     `mitigated_by` mirror), so carrying one without the other would leave the
+#:     record's edge census disagreeing with the journal's for the same payload.
+#:     Its endpoints also resolve across FOUR labels (:Point/:Subject/:Object/
+#:     :Event, #7902), which `relation`'s `(label, key)` columns support but the
+#:     fold's short-id stub rule does not express as a record row;
+#:   * `aboutEntities` → `about*` — NOT carried here: `_create_about_edges`
+#:     resolves a NAME through a Subject→Object→Event→Source→Point cascade
+#:     against the LIVE graph, so the record would have to re-run that cascade
+#:     over its own tables to pick a label, and the `EntityLinked` record (#3664)
+#:     already carries the edge whenever the capture resolved it. The stored-vs-
+#:     derived ruling for `about*` is KEEP (owner, 2026-09-23), which is about
+#:     the STORE, not about inventing a second resolver here;
+#:   * `tags` → `TAGGED` — NOT carried here: the target is a `:Tag` node, and
+#:     `NODE_TABLES` has no `tag` table, so the record holds no `(Tag, key)`
+#:     identity for `relation.tgt_key`'s composite FK to point at. That family
+#:     needs a record-side `:Tag` node first, which is a schema decision, not a
+#:     projection one.
+#:
+#: The two listed families are the class-1 SLICE this change carries; the rest
+#: are named above and in `04-projection.md` §3 / `08-hosted-prerequisites.md`
+#: §R5 so the next reader meets the boundary instead of inferring it from a
+#: green suite.
+_POINT_PROPERTY_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
+    ("PointAdded", "extractedFrom", "extractedFrom", "Source"),
+    ("OperatorAdded", "extractedFrom", "extractedFrom", "Source"),
+)
+
+
+def _point_raw_refs(value: Any) -> list[Any]:
+    """`_point_source_refs`'s normalisation: the refs the fold would FAN OUT.
+
+    A bare `str` is ONE ref (never iterated character-wise), any other value is a
+    sequence, and falsy members are skipped. The CONTAINER gate is
+    `_link_source`'s: a `str` or a `list`/`tuple` is a ref collection, and
+    anything ELSE fans out to NOTHING (`#8171` review P1: a dict was
+    `list()`-ed into its KEYS and each key minted as its own `:Source` —
+    invented provenance). Restated rather than imported because this module is
+    loaded STANDALONE (`spec_from_file_location`, where a package-relative
+    import raises).
+    """
+    if isinstance(value, str):
+        refs = [value]
+    elif isinstance(value, (list, tuple)):
+        refs = list(value)
+    else:
+        return []
+    return [ref for ref in refs if ref]
+
+
+def _point_property_refs(value: Any) -> list[str]:
+    """The refs of a point PROPERTY that can land a `relation` row, per ref.
+
+    On top of :func:`_point_raw_refs`, `_link_source` skips a non-`str` member
+    and `_mint_source_stub` refuses an id `_writable_id` rejects (empty, NUL,
+    lone surrogate) and then MATCHes `(s:Source {url:$url})` with `None`, landing
+    no edge. Those refs land nothing on either route; `_writable_endpoint_id` is
+    that same predicate PLUS the blank refusal, and blank is the measured #9599
+    case: `:Source(url)` carries a range index (`_RANGE_INDEX_LABEL_PROPS`), so
+    an indexed equality filter does not match a whitespace-only key and the fold
+    writes no edge for one either.
+    """
+    return [ref for ref in _point_raw_refs(value)
+            if _writable_endpoint_id(ref)]
+
+
+def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
+    """The `{raw ref: hash}` anchors the fold stamps on those edges (#5256).
+
+    `_link_source` writes `r.sourceVersion` from the Point's OWN
+    `sourceVersionTransit` carrier, through the shared `_point_source_transit`
+    selector, whose decision is THREE rules and all three are restated here:
+
+    1. the carrier is accepted ALL-OR-NOTHING — one malformed pair (not a
+       2-element `[str, str]` with both members non-blank) and the payload
+       contributes NO anchor, rather than the well-formed half of one;
+    2. no `extractedFrom` ref at all ⇒ no anchor (the carrier is a transit for
+       an edge that will be written, so a stray carrier writes nothing);
+    3. a pair is keyed by the RAW ref spelling — the journal-stable key — and a
+       DUPLICATE keeps the LAST pair (the fold builds its map by comprehension).
+
+    Restated rather than imported for the same standalone reason as
+    :func:`_point_raw_refs`; the two are pinned equal over a value table by
+    `tests/test_record_projection.py::test_the_source_version_selector_is_the_folds_own`.
+    """
+    pairs = snapshot.get("sourceVersionTransit")
+    if not isinstance(pairs, (list, tuple)) or not pairs:
+        return {}
+    for pair in pairs:
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and isinstance(pair[0], str) and pair[0].strip()
+                and isinstance(pair[1], str) and pair[1].strip()):
+            return {}
+    if not _point_raw_refs(snapshot.get("extractedFrom")):
+        return {}
+    return {pair[0]: pair[1] for pair in pairs}
+
+
+def _point_property_relation_statements(
+    org_id: str,
+    graph_id: str,
+    record_type: Any,
+    snapshot: Mapping[str, Any] | None,
+    target_key: str,
+    columns: Mapping[str, frozenset[str]],
+    refused: Mapping[str, frozenset[str]],
+) -> list[Statement]:
+    """The `relation` rows a record's own POINT PROPERTIES derive (class 1).
+
+    Returned AFTER the node upsert by the caller — `relation`'s endpoints are
+    composite FKs into `node_identity` — and both endpoints are RESOLVED from the
+    record's own node rows, never minted.
+
+    The target is matched on `node_key` ONLY (`Source.url`), never the entity
+    `id` fallback: `_link_source` MERGEs `(s:Source {url:$url})`, so an `id`
+    match would attach the row to a node the fold never chose (see
+    `_endpoint_resolution`'s `match` argument).
+
+    ⛔ ONE HONEST GAP, stated rather than papered over. The row lands only when
+    the Source's own record precedes the Point's — the capture path materialises
+    the session Source BEFORE extraction (`sdk.py::_materialize_session_source`),
+    and a document/link ref names a Source that was journaled when it was
+    created, so the live order holds. For a journal that orders them the other
+    way the record's insert finds no `source` row and lands nothing, while
+    `rebuild_all`'s pass 2 re-derives edges AFTER every node is folded and would
+    restore it. That is the `absent` verdict this projection gives every relation
+    rather than a fabricated endpoint, and a record-sourced rebuild is expected to
+    be fed in journal order (#9190).
+    """
+    if not isinstance(snapshot, Mapping):
+        return []
+    declared = [(prop, rel_type, tgt_label)
+                for type_of, prop, rel_type, tgt_label in _POINT_PROPERTY_RELATIONS
+                if type_of == record_type]
+    if not declared:
+        return []
+    statements: list[Statement] = []
+    for prop, rel_type, tgt_label in declared:
+        versions = _point_source_versions(snapshot)
+        for ref in _point_property_refs(snapshot.get(prop)):
+            payload: dict[str, Any] = {
+                "edge_type": rel_type,
+                "src": target_key,
+                "tgt": ref,
+                "source_label": "Point",
+                "target_label": tgt_label,
+            }
+            # #5256: the read-version anchor the fold stamps ON CREATE. It is a
+            # PRIMARY column (`relation.source_version` → the cache projection's
+            # `sourceVersion` property, `cache_projection.placement_columns`), not
+            # a props key, and absent/empty means NO anchor on both routes.
+            anchor = versions.get(ref)
+            if anchor:
+                payload["source_version"] = anchor
+            statements.extend(_relation_upsert_statement(
+                org_id, graph_id, RelationUpsert(), payload,
+                columns=columns, refused=refused, tgt_match=("node_key",),
+            ))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -1812,6 +2004,13 @@ def mutations_for(
             # be in `node_identity` or the composite FK refuses the insert.
             *_envelope_relation_statements(
                 org_id, graph_id, record, record_type, key, columns, refused),
+            # AND the edges this record's own PROPERTIES derive (R5 class 1).
+            # Same ordering rule for the same reason; the target Source row is
+            # resolved from the record, never minted.
+            *_point_property_relation_statements(
+                org_id, graph_id, record_type,
+                snapshot if isinstance(snapshot, Mapping) else None,
+                key, columns, refused),
         ]
     if isinstance(effect, NodePatch):
         node = effect.node

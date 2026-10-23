@@ -197,8 +197,27 @@ closed at both layers:
   graph cannot match a whitespace-only key (FalkorDB equality filter, **#9599**),
   so the fold would mint a duplicate `:Session` and land no edge while Postgres
   would have held the row.
-  The three remaining R5 classes are still **not** materialized and are named
-  where the producer lives: point-property edges (`extractedFrom`, `about*`,
+  **Updated by #9553 (R5 class 1, `extractedFrom`):** the first family of the
+  point-PROPERTY set now lands too — one `relation` row per ref
+  (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the fan-out
+  the fold's `_link_source` performs (many-to-many, `#3263`). Three details make
+  it parity rather than a plausible copy: the target is resolved on the Source's
+  `url` (`node_key`) ALONE, never the `id` fallback `_ENTITY_MATCH_COLUMNS`
+  supplies for `EntityLinked`, because `_link_source` MERGEs
+  `(s:Source {url:$url})`; the ref container and the per-member gate mirror
+  `_link_source`'s (a dict fans out to nothing, `#8171`); and the `#5256`
+  read-version anchor rides `relation.source_version` — a PRIMARY column the
+  cache projection maps back to `r.sourceVersion` — from the Point's own
+  `sourceVersionTransit` carrier, all-or-nothing and raw-ref keyed, exactly as
+  `_point_source_transit` decides. The other class-1 families are still **not**
+  materialized, each for its own reason: `about*` needs `_create_about_edges`'
+  live name→label cascade (and `EntityLinked` already carries it whenever the
+  capture resolved it); `mitigated_by` is emitted as a PAIR with the operator's
+  `IMPL`/`INPUT` (`edges.py::_create_edges`), so half of it would leave the edge
+  census disagreeing with the journal's; `TAGGED` has no record `tag` node for
+  `relation.tgt_key` to key on.
+  The remaining R5 classes are still **not** materialized and are named
+  where the producer lives: the rest of the point-property set (`about*`,
   `mitigated_by`, `TAGGED`), operator `IMPL`/`NAND`/`INPUT`, and the structural
   predicates whose `DirectEdgeCreated` fold works but has **no producer**.
 * **It does not approve `#7879`'s scope.** Scope and Plan carry human gates.

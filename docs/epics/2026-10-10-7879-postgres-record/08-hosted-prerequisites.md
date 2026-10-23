@@ -7,7 +7,7 @@ created: 2026-10-21
 updated: 2026-10-21
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "epic #7879, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
+aboutObjects: "epic #7879, issue #9553, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
 ---
 
 # Hosted prerequisites — what standing Postgres up as the system of record still needs
@@ -91,7 +91,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's envelope directive**: `CONTAINS` (`record_projection._ENVELOPE_RELATIONS` emits the `relation` row after the Point's `node_identity`). Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`) and `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS`, with the #5256 anchor in `relation.source_version`) — both emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. Everything else is R5's work: the rest of the point-property-derived families (`mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
 **Supersede chains are in.** `point.status` is a PRIMARY column with the lifecycle journaled;
@@ -277,6 +277,22 @@ edge while Postgres held the row. That harness now runs in CI on a projection-on
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
 operator topology non-negotiable (a fused claim cannot be `NAND`ed).
+
+✅ **Partially closed by #9553 (R5 class 1) — `extractedFrom`.** The provenance family now lands
+one `relation` row per ref (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the
+fan-out `_link_source` performs (many-to-many, `#3263`), and the `#5256` read-version anchor rides
+`relation.source_version` — the PRIMARY column the cache projection maps back to `r.sourceVersion`
+— from the Point's own `sourceVersionTransit` carrier. Three parity details are load-bearing: the
+target resolves on the Source's `url`/`node_key` ALONE (the fold MERGEs `(s:Source {url:$url})`, so
+the `EntityLinked` `id` fallback would attach the row to a node the fold never chose); the ref
+container and per-member gates mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and
+the blank/NUL rule is the same `_writable_endpoint_id` the CONTAINS gate uses, justified by the
+same `#9599` indexed-key measurement (`:Source(url)` is indexed too). The other three class-1
+families stay open for reasons that are NOT this fix's to invent: `about*` needs
+`_create_about_edges`' live name→label cascade (`EntityLinked` already carries it when the capture
+resolved it); `mitigated_by` is written as a PAIR with the operator's `IMPL`/`INPUT`, so half of it
+would leave the record's edge census disagreeing with the journal's; `TAGGED` targets a `:Tag` node
+and the record has no `tag` table for `relation.tgt_key`'s composite FK to point at.
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item
 *implements* that ruling for the record, it does not revisit it.

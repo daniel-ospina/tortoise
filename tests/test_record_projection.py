@@ -591,6 +591,222 @@ def test_a_record_sourced_rebuild_materialises_the_session_container():
     assert built.params["tgt_key"] == _SNAPSHOT["id"]
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# 2c. The POINT-PROPERTY edge — `extractedFrom` → a `relation` row
+#     (#9553 R5 class 1)
+# ════════════════════════════════════════════════════════════════════════════
+#
+# `_upsert_point_edges` derives this family from the Point's OWN payload
+# (`_link_source`), so a journal rebuild restores
+# `(:Point)-[:extractedFrom]->(:Source)` while a record-sourced rebuild restored
+# nothing: the point row carried `extracted_from`, and `relation` stayed empty of
+# the provenance edge. These legs pin the four things a row count cannot see —
+# WHICH records may carry it, the ORDER, the FAN-OUT the fold applies, and the
+# endpoint/family parity that keeps the two rebuilds from disagreeing.
+
+_EXTRACTED_RECORD = {
+    "type": "PointAdded",
+    "ts": "2026-10-12T00:00:00Z",
+    "id": "p1",
+    "point": dict(_SNAPSHOT, extractedFrom="src1"),
+}
+
+
+def test_a_point_lands_its_extractedFrom_relation_after_the_point_identity():
+    """The provenance edge lands, and it lands LAST — endpoints are FK children."""
+    plan = rp.replay_plan([_EXTRACTED_RECORD], org_id="org-a", graph_id="g1")
+    kinds = []
+    for statement in plan:
+        sql = statement.sql
+        kinds.append("identity" if "public.node_identity" in sql else
+                     "relation" if "public.relation" in sql else
+                     "point" if "public.point" in sql else "journal")
+    assert kinds == ["identity", "point", "relation", "journal"], kinds
+
+    relation = plan[2]
+    assert relation.params[:6] == ("org-a", "g1", "extractedFrom", "Point",
+                                   "Source", 0), relation.params
+    # The TARGET is matched on the Source's `url` (its MERGE key) and NOT on the
+    # `id` fallback `_ENTITY_MATCH_COLUMNS` gives `EntityLinked`: `_link_source`
+    # MERGEs `(s:Source {url:$url})`, so an id match could attach the row to a
+    # node the fold never chose. The SQL proves which predicate was emitted.
+    assert "public.source WHERE org_id = %s AND graph_id = %s AND node_key = %s" \
+        in relation.sql, relation.sql
+    # params: the row's own values, then the two `(org, graph, key)` triples the
+    # endpoint subqueries bind — src LAST-5, tgt LAST-1 (the row carries no
+    # optional column here, so the tail is exactly those two triples).
+    assert relation.params[-6:-3] == ("org-a", "g1", "p1"), relation.params
+    assert relation.params[-3:] == ("org-a", "g1", "src1"), relation.params
+    # Idempotent: a replayed capture converges on the one row.
+    assert "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, " \
+        in relation.sql
+
+
+def test_an_operator_capture_carries_the_same_provenance_edge():
+    """`OperatorAdded` is the fold's OTHER `_upsert_point_edges` caller."""
+    operator = {**_EXTRACTED_RECORD, "type": "OperatorAdded",
+                "point": dict(_SNAPSHOT, extractedFrom="src1",
+                              is_operator=True, op_type="IMPL")}
+    relations = _relation_statements(operator)
+    assert len(relations) == 1, [s.sql for s in relations]
+    assert relations[0].params[2:5] == ("extractedFrom", "Point", "Source")
+
+
+def test_extractedFrom_fans_out_one_relation_per_ref():
+    """Many-to-many (#3263): one edge per ref, not one edge per point."""
+    record = {**_EXTRACTED_RECORD,
+              "point": dict(_SNAPSHOT, extractedFrom=["src1", "src2", "src3"])}
+    relations = _relation_statements(record)
+    assert len(relations) == 3, [s.sql for s in relations]
+    assert [r.params[-1] for r in relations] == ["src1", "src2", "src3"]
+    # A bare STRING is one ref — never iterated character-wise.
+    assert len(_relation_statements({**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom="src1")})) == 1
+
+
+def test_a_ref_container_the_fold_refuses_lands_no_relation():
+    """`_link_source` returns on a non-str/non-list container (#8171).
+
+    A dict was `list()`-ed into its KEYS and each key minted as its own
+    `:Source` — invented provenance. The record must not iterate it either: a
+    row the graph refused to write is the record richer than the graph.
+    """
+    for value in ({"url": "u", "kind": "k"}, 7, 0, None, ""):
+        record = {**_EXTRACTED_RECORD,
+                  "point": dict(_SNAPSHOT, extractedFrom=value)}
+        assert _relation_statements(record) == [], value
+
+
+def test_a_ref_the_fold_skips_lands_no_relation():
+    """The MEMBER gate: non-str / falsy / unwritable refs land nothing.
+
+    `_link_source` skips a falsy or non-`str` member; `_mint_source_stub`
+    refuses an id `_writable_id` rejects and then MATCHes `url=None`, landing no
+    edge. The BLANK case is the measured one: `:Source(url)` carries a range
+    index, so an indexed equality filter does not match a whitespace-only key
+    (#9599) and the fold writes no edge for it either.
+    """
+    skipped = [7, None, "", "   ", "\t\n", ["a"], {"a": 1}, "a\x00b",
+               "\ud800"]
+    record = {**_EXTRACTED_RECORD,
+              "point": dict(_SNAPSHOT, extractedFrom=["src1", *skipped])}
+    relations = _relation_statements(record)
+    assert len(relations) == 1, [(r.params[-1]) for r in relations]
+    assert relations[0].params[-1] == "src1"
+
+
+def test_only_the_point_creation_records_carry_point_property_relations():
+    """The fold wires these edges for exactly `PointAdded`/`OperatorAdded`.
+
+    `apply()` and `rebuild_all`'s pass 2 both gate on those two types, so a
+    `PointRevised` carrying `extractedFrom` lands no edge on the JOURNAL route —
+    and the record emitting one there would be the record richer than the graph.
+    """
+    for record_type in ("PointPromoted", "OperatorPromoted", "DedupeRecorded",
+                        "DedupeRejected", "PointInvalidated", "BatchIdStamped"):
+        record = {**_EXTRACTED_RECORD, "type": record_type}
+        assert _relation_statements(record) == [], record_type
+
+
+def test_the_read_version_anchor_rides_the_primary_column():
+    """#5256: `r.sourceVersion` is a PRIMARY relation column, not a props key.
+
+    The fold stamps it from the Point's `sourceVersionTransit` carrier, keyed by
+    the RAW ref. `chk_relation_props_no_derived` is untouched by it (the column
+    is where the placement table puts it, `source_version` → `sourceVersion`), so
+    the cache projection re-stamps the same edge scalar the journal lane wrote.
+    """
+    anchor = {**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom=["src1", "src2"],
+        sourceVersionTransit=[["src1", "h1"]])}
+    relations = _relation_statements(anchor)
+    assert len(relations) == 2, [s.sql for s in relations]
+    flagged = next(r for r in relations if r.params[-1] == "src1")
+    unflagged = next(r for r in relations if r.params[-1] == "src2")
+    assert "source_version" in flagged.sql, flagged.sql
+    assert flagged.params[6] == "h1", flagged.params
+    # A pair for a ref this Point does not carry never reaches the row.
+    assert "source_version" not in unflagged.sql, unflagged.sql
+
+    # ALL-OR-NOTHING: one malformed pair and NO ref gets an anchor — the edge
+    # still lands (the carrier is not the edge), which is the fold's own split.
+    broken = {**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom=["src1"],
+        sourceVersionTransit=[["src1", "h1"], ["src2", None]])}
+    relations = _relation_statements(broken)
+    assert len(relations) == 1, [s.sql for s in relations]
+    assert "source_version" not in relations[0].sql, relations[0].sql
+
+    # No refs at all ⇒ the carrier is a transit for an edge that will never be
+    # written, so it contributes nothing (the fold's `if not refs: return None`).
+    orphan = {**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, sourceVersionTransit=[["src1", "h1"]])}
+    assert _relation_statements(orphan) == []
+
+
+def test_the_source_version_selector_is_the_folds_own():
+    """Parity pin: the record restates `_point_source_transit`, so pin it equal.
+
+    The module is loaded STANDALONE by the PGlite harness (a package-relative
+    import raises there), which is why the selector is restated at all. A drift
+    in either spelling makes the journal and the record rebuild to two different
+    anchors with no error anywhere.
+    """
+    from tortoise.projection.entities import _point_source_transit
+
+    points = (
+        {"extractedFrom": "src1", "sourceVersionTransit": [["src1", "h1"]]},
+        {"extractedFrom": ["src1", "src2"],
+         "sourceVersionTransit": [["src1", "h1"], ["src2", "h2"]]},
+        # Duplicate raw ref: the comprehension keeps the LAST pair.
+        {"extractedFrom": "src1",
+         "sourceVersionTransit": [["src1", "h1"], ["src1", "h2"]]},
+        # Malformed pair: all-or-nothing ⇒ NO anchor.
+        {"extractedFrom": "src1",
+         "sourceVersionTransit": [["src1", "h1"], ["src2", None]]},
+        {"extractedFrom": "src1", "sourceVersionTransit": [["src1", "  "]]},
+        # A carrier with no refs contributes nothing.
+        {"sourceVersionTransit": [["src1", "h1"]]},
+        {"extractedFrom": [], "sourceVersionTransit": [["src1", "h1"]]},
+        {"extractedFrom": "src1"},
+        {"extractedFrom": "src1", "sourceVersionTransit": []},
+        {"extractedFrom": "src1", "sourceVersionTransit": "h1"},
+        {"extractedFrom": "src1", "sourceVersionTransit": [["src1"]]},
+    )
+    for point in points:
+        fold = _point_source_transit(point)
+        expected = {pair[0]: pair[1] for pair in fold} if fold else {}
+        assert rp._point_source_versions(point) == expected, point
+    # Non-vacuity: the table must exercise both answers.
+    assert any(rp._point_source_versions(p) for p in points)
+    assert not all(rp._point_source_versions(p) for p in points)
+
+
+def test_a_record_sourced_rebuild_materialises_the_provenance_edge():
+    """S3: the row lands an edge the cache projection can actually re-create."""
+    from tortoise import cache_projection as cp
+
+    statement = _relation_statements({**_EXTRACTED_RECORD, "point": dict(
+        _SNAPSHOT, extractedFrom="src1", sourceVersionTransit=[["src1", "h1"]])})[0]
+    rel_type, src_label, tgt_label = statement.params[2:5]
+    rel = cp.relation_from_row({
+        "rel_type": rel_type,
+        "src_label": src_label, "src_key": statement.params[-4],
+        "tgt_label": tgt_label, "tgt_key": statement.params[-1],
+        "idx": 0, "source_version": statement.params[6], "props": {},
+    })
+    built = cp.relation_statement(rel)
+    assert built.cypher == (
+        "MATCH (src:Point {id:$src_key}), (tgt:Source {url:$tgt_key}) "
+        "MERGE (src)-[r:extractedFrom {idx:$idx}]->(tgt) SET r += $props"
+    ), built.cypher
+    assert built.params["src_key"] == _SNAPSHOT["id"]
+    assert built.params["tgt_key"] == "src1"
+    # #5256's anchor survives the record → graph trip, as the same edge scalar
+    # `_link_source` stamps (`ON CREATE SET r.sourceVersion`).
+    assert rel.props["sourceVersion"] == "h1", rel.props
+
+
 def test_dollar_placeholder_rewrite_is_faithful():
     for statement in _plan_for_everything():
         sql, params = rp.to_dollar_placeholders(statement)

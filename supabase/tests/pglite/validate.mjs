@@ -1075,5 +1075,117 @@ try {
   process.exit(1);
 }
 
+// ── #9553 (R5 class 1): the point-PROPERTY edge lands a `relation` row ──
+//
+// `_upsert_point_edges` derives `extractedFrom` from the Point's own payload
+// (`_link_source`), so a JOURNAL rebuild restored
+// `(:Point)-[:extractedFrom]->(:Source)` while a RECORD-sourced rebuild restored
+// nothing: the point row carried `extracted_from` and not a single relation row
+// carried the edge. Unlike the CONTAINS leg above, the two records here are
+// SYNTHETIC — the shared fixture carries no `extractedFrom` — so the segment is
+// spelled out rather than lifted, and it is the LIVE order: the Source is
+// journaled before the Point whose payload names it
+// (`sdk._materialize_session_source` mints the capture Source first).
+//
+// ⛔ ONE RESIDUAL, asserted by the DIAGNOSTIC below rather than by a green row:
+// the insert RESOLVES the Source from the record's own `source` row. Replay the
+// Point first and it lands nothing — the `absent` verdict every relation gives,
+// not a minted endpoint. A record-sourced rebuild is fed in journal order
+// (#9190); the reverse order is the documented gap, not a contract.
+try {
+  const tenant = ['9553c1-org', '9553c1-graph'];
+  await db.exec(`
+    INSERT INTO public.organizations (id, name, graph_name)
+      VALUES ('9553c1-org', '9553c1-org', 'org_9553c1-org');
+    INSERT INTO public.graphs (id, org_id, name, namespace)
+      VALUES ('9553c1-graph', '9553c1-org', '9553c1-graph', 'org_9553c1-org_9553c1-graph');
+  `);
+  const sourceRecord = {
+    type: 'SourceCreated', ts: '2026-10-22T00:00:01Z', id: 'src1',
+    url: 'src1', sourceKind: 'document', contentHash: 'h1',
+  };
+  const pointRecord = {
+    type: 'PointAdded', ts: '2026-10-22T00:00:02Z', id: 'p1',
+    point: {
+      id: 'p1', content: 'extracted claim', pointKind: 'observation',
+      extractedFrom: 'src1',
+      // #5256: the read-version anchor rides the Point's OWN carrier, keyed by
+      // the raw ref, and the record must stamp it on the EDGE
+      // (`relation.source_version`), not smuggle it into `relation.props`
+      // (`chk_relation_props_no_derived` exists to stop exactly that class).
+      sourceVersionTransit: [['src1', 'h1']],
+    },
+  };
+  const segment = join(tmpdir(), `9553c1-${process.pid}.jsonl`);
+  writeFileSync(segment, `${JSON.stringify(sourceRecord)}\n${JSON.stringify(pointRecord)}\n`);
+  const emitted = JSON.parse(execFileSync(
+    'python3',
+    ['-c', PROJECTION_PY, join(REPO_ROOT, 'tortoise', 'record_projection.py'),
+     segment, ...tenant],
+    { encoding: 'utf8' },
+  ));
+  if (!emitted.plan.some((x) => x.sql.startsWith('INSERT INTO public.relation'))) {
+    throw new Error('the pair emitted NO relation statement at all — the '
+      + 'extractedFrom producer is gone and the record loses the provenance '
+      + 'edge again (#9553 R5 class 1)');
+  }
+  const applySegment = async () => {
+    await db.exec('BEGIN');
+    for (const statement of emitted.plan) {
+      await db.query(statement.sql, statement.params);
+    }
+    await db.exec('COMMIT');
+  };
+  const readProvenance = async () => db.query(
+    `SELECT rel_type, src_label, src_key, tgt_label, tgt_key, idx, source_version
+       FROM public.relation
+      WHERE org_id = $1 AND graph_id = $2 AND rel_type = 'extractedFrom'`,
+    tenant);
+  await applySegment();
+  const first = await readProvenance();
+  if (first.rows.length !== 1) {
+    const diag = await db.query(
+      `SELECT
+         (SELECT count(*) FROM public.source
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'src1')  AS source_row,
+         (SELECT count(*) FROM public.point
+            WHERE org_id = $1 AND graph_id = $2 AND node_key = 'p1')    AS point_row,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Source' AND node_key = 'src1')        AS source_identity,
+         (SELECT count(*) FROM public.node_identity
+            WHERE org_id = $1 AND graph_id = $2
+              AND node_label = 'Point' AND node_key = 'p1')           AS point_identity`,
+      tenant);
+    throw new Error(
+      `expected exactly 1 extractedFrom relation row, got ${first.rows.length} — `
+      + 'the target Source was absent when the insert ran (ORDERING), or the '
+      + `point-property directive was dropped. endpoints: ${JSON.stringify(diag.rows[0])}`);
+  }
+  const row = first.rows[0];
+  const got = `${row.src_label}/${row.src_key} -> ${row.tgt_label}/${row.tgt_key} `
+    + `idx=${row.idx} version=${row.source_version}`;
+  const want = 'Point/p1 -> Source/src1 idx=0 version=h1';
+  if (got !== want) {
+    throw new Error(
+      `the extractedFrom row is ${got}, expected ${want} — the endpoint `
+      + 'resolution (node_key, never the `id` fallback) or the #5256 anchor is wrong');
+  }
+  // Idempotent: the upsert is keyed on the relation's UNIQUE identity.
+  await applySegment();
+  const second = await readProvenance();
+  if (second.rows.length !== 1) {
+    throw new Error(
+      `a second replay produced ${second.rows.length} extractedFrom rows `
+      + '(expected 1) — the relation upsert is not idempotent');
+  }
+  unlinkSync(segment);
+  console.log('✓ #9553: the point-property extractedFrom edge lands one `relation` row '
+    + '(Point/p1 -> Source/src1, source_version=h1), and re-replays idempotently');
+} catch (e) {
+  console.error(`✗ #9553 R5/EXTRACTED-FROM FAILED:\n  ${e.message.split('\n').slice(0, 6).join('\n  ')}`);
+  process.exit(1);
+}
+
 console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 await db.close();
