@@ -75,7 +75,8 @@
 # ⚠️ That is the whole point of the exercise: a hand-written list cannot prove it
 # is complete, which is how a declared mechanism (this one) stayed unregistered
 # while the seven-entry gate stayed green. So every declaration in
-# `docs/architecture/*.md` carries a `<!-- v4-mechanism: <id> -->` marker at the
+# `docs/architecture/**/*.md` (recursive) carries a `<!-- v4-mechanism: <id> -->`
+# marker at the
 # declaration site, and `membership_errors()` in the gate fails closed in BOTH
 # directions — a marker with no row, and a row with no marker — AND holds each
 # row to its OWN declared documents: every scanned document a row names must
@@ -86,7 +87,7 @@
 # ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
 # here rather than assumed covered: `packs/dev/manifest.yaml` (`embed_gate`'s
 # policy source) is YAML, and the marker convention is a markdown-comment
-# convention over `docs/architecture/*.md`. A row that declares such a source
+# convention over `docs/architecture/**/*.md`. A row that declares such a source
 # must ALSO declare a scanned document carrying its marker — `membership_errors`
 # refuses a row whose every declaring document is outside the surface, because
 # an unfindable declaration must not read as a marked one. So the "every

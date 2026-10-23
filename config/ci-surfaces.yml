@@ -2880,7 +2880,7 @@ surfaces:
   # #5064: the declared-mechanism gate. `core` is its classification home and
   # the lane for a code diff; `tier1` is REQUIRED because half the gate's subject
   # is now DOCUMENT — `membership_errors()` reads the
-  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/*.md` — and this
+  # `<!-- v4-mechanism: <id> -->` markers in `docs/architecture/**/*.md` — and this
   # file is in NEITHER named surface a docs-only diff can select. `docs/` is in
   # NON_PYTHON_PREFIXES, so the mechanism differs by document: an
   # EXTRACTOR-V4-ARCHITECTURE.md-only diff takes `select()`'s early return
@@ -5885,7 +5885,7 @@ tier1:
 # falsify a claim it pins (or tidy the marker away).
 - test_extractor_v4_s4_stage_claims.py
 # #5064: the declared-mechanism gate (`core` above) — its membership half scans
-# `docs/architecture/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
+# `docs/architecture/**/*.md` for the `v4-mechanism:` markers, so a docs-only PR is
 # exactly the change that can delete, rename or forge one with the gate absent
 # from the tier-1 arm. Same no-DB, doc/`ast` shape as the guards above.
 # ⚠️ #9778 review (P1): the docs-only diff really does reach this entry, and the
