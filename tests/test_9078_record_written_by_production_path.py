@@ -39,12 +39,17 @@ WHAT IS NOT HERE, NAMED SO THE ABSENCE IS VISIBLE.
 * The reconciler's production trigger (#9189), and (before it landed) the
   `journal_event.seq` ordinal
   (#9190) and the reconciler's own dirty-run behaviour are other lanes.
-* ⚠️ **No CI job arms `TEST_RECORD_DB_URI`** (checked: `.github/` and `config/`
-  never set it), so the two Postgres legs skip in CI and the DB-FREE wiring gate
-  (`tools/record_wiring_check.py`) is what guards this seam on the PR path. The
-  Postgres legs are the operator-run acceptance command from #9078
-  ("a throwaway Postgres with only the RECORD migrations"), not a CI check.
-  Wiring them into a CI service container is its own change.
+* ⚠️ **Until #9551 the two Postgres legs never ran in CI** (`_record_db()` skips
+  twice over: no `TEST_RECORD_DB_URI`, and no `[postgres]` extra), so the DB-FREE
+  wiring gate (`tools/record_wiring_check.py`) was the only guard on this seam on
+  the PR path. #9551 arms them in the dedicated `test-record-postgres` job
+  (`.github/actions/postgres-provision`, a throwaway Postgres carrying the record
+  migrations, asserted to run with ZERO skips) — `test_ci_arms_the_record_against_a_real_postgres`
+  below pins that wiring so it cannot silently go unarmed again.
+  What a green there still does NOT prove: the migrations are applied **as files**
+  against a bare `postgres:16`, not as applied to the hosted Supabase project, and
+  the DSN is a DIRECT connection — so the transaction-mode-pooler failure mode is
+  unexercised (epic #7879 doc 08 §G1/§G6).
 * The fold defect that keeps captured Points out of the record today is pinned
   CONDITIONALLY (see `_fold_refuses_captured_points`), so this file neither
   hides it nor reddens the day it is fixed.
@@ -1370,7 +1375,8 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
     Both Postgres legs SKIP without `TEST_RECORD_DB_URI`, and every DB-free leg
     asserts a REFUSAL (`no_tenant`, `no_durable_journal`, `malformed_dsn`) — so
     `write_live_record → write_records(position=False) → commit() → close()` was
-    only ever exercised by an operator with a database. Deleting the `commit()`
+    only ever exercised by an operator with a database (until #9551 armed the
+    leg in CI). Deleting the `commit()`
     left CI green and every layer row uncommitted on an armed deployment. This
     drives the real door against a fake seam and counts the promises it makes:
     the record reaches the seam unchanged, the position is deferred, and the
@@ -1417,9 +1423,9 @@ def test_an_armed_live_write_commits_and_closes_exactly_once(monkeypatch):
 def test_the_live_door_threads_the_ordinal_into_the_seam(monkeypatch):
     """The ORDINAL half of the seam, DB-free — the half CI could not see.
 
-    Both Postgres legs SKIP without `TEST_RECORD_DB_URI` and no CI job arms it,
-    so a door could satisfy every AST rule in this file and still hand the seam
-    `position=False` / `first_seq=1` — the empty-layer-1 defect, on the one path
+    Both Postgres legs SKIP without `TEST_RECORD_DB_URI` (and no CI job armed it
+    before #9551), so a door could satisfy every AST rule in this file and still
+    hand the seam `position=False` / `first_seq=1` — the empty-layer-1 defect, on the one path
     the static rules cannot execute (#9307 review advisory). This drives the
     real door against the same fake seam as the leg above: the ordinal the
     journal reported arrives AS the row's number, one call, one number.
@@ -2353,3 +2359,92 @@ def test_ensure_record_schema_applies_everything_on_a_fresh_container():
     assert "CREATE ROLE anon" in executed
     for path in RECORD_MIGRATION_FILES:
         assert path.read_text(encoding="utf-8") in executed, path.name
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 8. The ARMED CI LEG (#9551) — the leg a skip cannot hide a disagreement behind
+# ════════════════════════════════════════════════════════════════════════════
+
+PYTHON_CI = REPO_ROOT / ".github" / "workflows" / "python-ci.yml"
+POSTGRES_PROVISION = (REPO_ROOT / ".github" / "actions"
+                      / "postgres-provision" / "provision.sh")
+
+
+def _record_ci_job():
+    """(job name, job) for the python-ci leg that ARMS the record database.
+
+    `yaml` is imported HERE, not at module scope: this file runs in every lane
+    matcher (including the embedded carve-out), and pyyaml is a CI/test-tooling
+    dependency this module has no other reason to require.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(PYTHON_CI.read_text())["jobs"]
+    arming = [
+        (name, job) for name, job in jobs.items()
+        if any(str(step.get("uses", "")).endswith("actions/postgres-provision")
+               for step in (job.get("steps") or []))
+    ]
+    assert arming, (
+        "no python-ci job provisions the record's Postgres (#9551): both "
+        "Postgres legs then SKIP on every PR, so a new schema↔producer "
+        "disagreement of the #9264 class has NO CI failure path at all — the "
+        "operator-run command from #9078 is the only thing that ever sees it")
+    assert len(arming) == 1, (
+        "more than one job arms the record database — the armed leg is one "
+        f"named check, not a family: {[name for name, _ in arming]}")
+    return arming[0]
+
+
+def test_ci_arms_the_record_against_a_real_postgres():
+    """Indicator (a)/(b) of #9551: a job sets `TEST_RECORD_DB_URI` + the extra.
+
+    The env var is exported by the provisioning action (`$GITHUB_ENV`), not by a
+    workflow literal — that is what a `services:` block cannot do on this host
+    (#6673) — so both halves are pinned: the job that calls the action, and the
+    action that exports the variable.
+    """
+    name, job = _record_ci_job()
+    steps = job.get("steps") or []
+    runs = "\n".join(str(step.get("run", "")) for step in steps)
+
+    assert "TEST_RECORD_DB_URI=" in POSTGRES_PROVISION.read_text(), (
+        f"{name} provisions a database but the action never exports "
+        f"{RECORD_DB_ENV}: the legs still skip (#9551)")
+    assert re.search(r"\.\[[^\]]*\bpostgres\b[^\]]*\]", runs), (
+        f"{name} does not install the `postgres` extra, so `_record_db()`'s "
+        "`importorskip('psycopg2')` skips the legs for the OTHER half of the "
+        f"reason and the job passes by skipping (#9551)")
+    assert Path(__file__).name in runs, (
+        f"{name} arms a database but runs none of this file's legs")
+    assert "skipped" in runs and "exit 1" in runs, (
+        f"{name} runs the legs but never asserts they RAN: without a zero-skip "
+        "assertion the armed job is green when the leg skips, which is exactly "
+        "the shape #9551 exists to remove")
+
+
+def test_the_armed_record_leg_can_block_a_merge():
+    """Decision 2 of #9551: REQUIRED on day one, not advisory.
+
+    An advisory leg is a check nobody's merge depends on — and this leg already
+    had to be armed twice over (the DSN *and* the driver). The aggregate
+    `python-ci-gate` is the required context, so the leg must be one of its
+    `needs:` AND carry a LEGS row: a `needs:` entry with no row cannot fail
+    closed on `skipped` (#5219), and a row with no `needs:` entry is dead.
+    """
+    name, _job = _record_ci_job()
+    gate = yaml_jobs()["python-ci-gate"]
+
+    assert name in (gate.get("needs") or []), (
+        f"{name} is not in python-ci-gate.needs — the armed leg cannot block a "
+        f"merge, so a red record leg is advisory (#9551 decision 2: REQUIRED)")
+    legs = "\n".join(str(step.get("run", "")) for step in gate["steps"])
+    assert f"{name}|" in legs, (
+        f"{name} has no row in python-ci-gate's LEGS table — a `skipped` "
+        "result for it would not fail closed (#5219)")
+
+
+def yaml_jobs():
+    import yaml
+
+    return yaml.safe_load(PYTHON_CI.read_text())["jobs"]
