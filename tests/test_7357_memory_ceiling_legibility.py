@@ -542,6 +542,10 @@ def test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read():
         "the note must say how to establish whether a ceiling exists")
     assert "`maxmemory 0`" in text
     assert "if it reports a non-zero" in lowered
+    assert "within a small drift below" in lowered, (
+        "a real ceiling reads 3.5-56 KiB under the cap; an exact 'has "
+        "reached' withdraws the remedy there")
+    assert "re-read while the refusal is repeating" in lowered
     # The one-authority pin below holds for BOTH arms, not just the measured one.
     assert MEMORY_CEILING_OWNERSHIP_CONSTRAINT in text
     assert "#2981" in text
@@ -641,6 +645,42 @@ def test_both_arms_share_one_remedy_sentence():
     assert _CEILING_REMEDY_HOMES in (explain_memory_ceiling(_ceiling_error()) or "")
     assert _CEILING_REMEDY_HOMES in (
         explain_memory_ceiling(redis_exc.OutOfMemoryError("OOM failed")) or "")
+
+
+def test_the_reached_decision_has_one_authority():
+    """Both messages decide "the ceiling was reached" with ONE tolerance.
+
+    #7357 review P2, and it was a live defect rather than a tidy-up: the SDK's
+    hedge told an operator to raise `maxmemory` only if `used_memory` "has
+    reached" it, while `_write_refusal_message` already knew — measured on
+    falkordb 4.20.6 — that a reading taken after the refusal sits **3.5-56 KiB
+    below** the cap and still counts. So the note withdrew the remedy at a
+    genuine ceiling, the same "advice that cannot be acted on" class the issue
+    is about, pointing the other way.
+
+    NON-VACUOUS: re-inlining the tolerance in either place reddens the
+    structural assertions, and dropping the drift from the note reddens the
+    previous test.
+    """
+    from pathlib import Path
+
+    import tortoise
+    from tortoise.retry import ceiling_reading_drift
+
+    # The measured absolute floor, the 1 % heuristic, and its 1 MiB cap.
+    assert ceiling_reading_drift(16 << 20) == (16 << 20) // 100
+    assert ceiling_reading_drift(0) == 64 << 10
+    assert ceiling_reading_drift(1 << 40) == 1 << 20
+
+    root = Path(tortoise.__file__).resolve().parent
+    projection_src = (root / "projection" / "__init__.py").read_text(encoding="utf-8")
+    retry_src = (root / "retry.py").read_text(encoding="utf-8")
+    assert "ceiling_reading_drift(cap)" in projection_src, (
+        "the projection must call the shared rule, not hold its own copy")
+    assert "max(64 << 10, min(cap // 100, 1 << 20))" not in projection_src, (
+        "a second copy of the tolerance is free to drift from the note's")
+    assert retry_src.count("max(64 << 10, min(cap // 100, 1 << 20))") == 1, (
+        "the tolerance must exist exactly once, in ceiling_reading_drift")
 
 
 # ── the wiring, through a real guarded client ───────────────────────────────

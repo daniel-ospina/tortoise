@@ -51,7 +51,10 @@ from tortoise.cypher_guard import (  # #3595 `=~` guard — the ONE seam
     tolerates_altered_numbers,  # #7174/#5011: the replay/apply exemption
 )
 from tortoise.env_truthy import FALSY, env_flag  # #4097: the declared truthy contract
-from tortoise.retry import MEMORY_CEILING_OWNERSHIP_CONSTRAINT  # #9532: ONE ownership authority
+from tortoise.retry import (  # #9532: ONE ownership authority; #7357: ONE "reached" rule
+    MEMORY_CEILING_OWNERSHIP_CONSTRAINT,
+    ceiling_reading_drift,
+)
 from tortoise.index_catalogue import (  # #3154/#522/#3441: the ONE presence check
     index_catalogue_has_field,
     index_row_has_field,
@@ -10926,15 +10929,15 @@ class FalkorProjection(
             # tolerance — a 1-byte or 4 KiB shortfall is the reading, not a
             # different cause — and only a shortfall WIDER than it is treated as
             # evidence that the ceiling is not the explanation.
-            # #7392 cycle 6 — the tolerance's measured half is the ABSOLUTE
-            # floor; the 1% arm is a heuristic that must not scale unbounded,
-            # because at 1 TiB it would swallow 10 GiB of genuine headroom and
-            # print the ceiling sentence for a reading that is far from it —
-            # the over-claim direction, which is the unsafe one (its remedy is
-            # `--maxmemory`). Capped at 1 MiB: the false-negative direction is
-            # safe, because the below branch withholds nothing and asks for a
-            # re-read.
-            drift = max(64 << 10, min(cap // 100, 1 << 20))
+            #
+            # ⚠️ THE TOLERANCE IS NOT THIS MODULE'S (#7357 review P2). The SDK's
+            # hedge note TELLS an operator how to decide the same question from
+            # an `INFO memory` read of their own, so the rule has two readers and
+            # lived in two places — and they had already drifted: the note said
+            # "used_memory has reached", with no tolerance, which withdraws the
+            # remedy at a genuine ceiling reading 40 KiB under the cap. Both now
+            # call `retry.ceiling_reading_drift`, so a correction lands once.
+            drift = ceiling_reading_drift(cap)
             if cap <= 2 * drift:
                 # #7392 cycle 7 — a tolerance larger than the ceiling's own
                 # scale makes the below branch UNREACHABLE and prints "has
@@ -11012,8 +11015,21 @@ class FalkorProjection(
         # issuecomment-6341756094). The note now branches on
         # `_chain_names_the_ceiling`: the ceiling sentence needs the engine's own
         # sentence in the exception, and a class-only refusal is told what the
-        # message does establish plus how to READ whether a ceiling exists. So
-        # neither side asserts a `maxmemory` it did not read.
+        # message does establish plus how to READ whether a ceiling exists.
+        #
+        # ⚠️ WHAT IS BOUND BETWEEN THE PAIR, precisely, so this cannot be read
+        # as more than it is: (1) the #2981 PROHIBITION, via the shared constant;
+        # (2) the knob's two HOMES, via `_CEILING_REMEDY_HOMES`; and (3) the
+        # "reached" DECISION, via the shared `ceiling_reading_drift` — added on
+        # review of #7357, because the note's operator advice had said "has
+        # reached" with no tolerance while this branch knew a real ceiling reads
+        # up to 56 KiB under the cap, which withdrew the remedy at a genuine
+        # ceiling. What is deliberately NOT bound is the probe SENTENCE itself:
+        # this message has already READ `INFO memory` (its three branches above
+        # are the readings), while the SDK note has only an exception and must
+        # tell the caller to go and read — so they say different things about
+        # the same rule on purpose, and neither asserts a `maxmemory` it did not
+        # read.
         #
         # ⚠️ What is STILL not agreed is the classification, not the claim:
         # `_WRITE_REFUSAL_MARKERS` does not match a class-only `OOM …` reply,

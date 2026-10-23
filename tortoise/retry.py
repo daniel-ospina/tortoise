@@ -855,6 +855,15 @@ def explain_instance_unavailable(
 #: engine's variant spelling without the `OOM` prefix. Only the distinctive
 #: clause is matched (never a bare `maxmemory`, which a `CONFIG GET` reply or a
 #: caller's own message can carry).
+#:
+#: ⚠️ THIS REGEX HAS TWO JOBS, and the second one is load-bearing (#7357): it
+#: decides family MEMBERSHIP (the text arm of
+#: :func:`is_memory_ceiling_refusal`), and it is the CEILING EVIDENCE for
+#: :func:`_chain_names_the_ceiling` — the only thing that licenses a note to
+#: assert `maxmemory` at all. Loosening it (e.g. matching a bare `maxmemory`)
+#: silently re-arms the exact over-claim this issue closed; narrowing it
+#: demotes a genuinely-named ceiling to the hedge arm. Change it for both
+#: readers or not at all.
 _MEMORY_CEILING_RE = re.compile(
     r"command not allowed when used memory\s*>\s*['\"]?maxmemory", re.IGNORECASE)
 
@@ -970,6 +979,39 @@ def _chain_names_the_ceiling(exc: BaseException) -> bool:
         else:
             link = link.__context__
     return False
+
+
+#: How far BELOW a non-zero `maxmemory` a reading may sit and still be the
+#: ceiling — the ONE authority for "the ceiling was reached" (#7357 / #7392).
+#:
+#: The reading is taken AFTER the refusal, and `used_memory` includes transient
+#: client buffers that are released when the refused reply is written. MEASURED
+#: on falkordb 4.20.6 at a 16 MiB `noeviction` ceiling: immediately after the
+#: server's own `used memory > 'maxmemory'` answer the reading sits **3.5-56 KiB
+#: BELOW** the cap while the instance is still refusing at it. So a 1-byte or
+#: 4 KiB shortfall is the reading, not a different cause, and only a shortfall
+#: WIDER than this tolerance is evidence that the ceiling is not the explanation.
+#:
+#: ⚠️ TWO READERS, ONE RULE (#7357 review P2): `_write_refusal_message` decides
+#: "reached" from an `INFO memory` reading it took itself, and the SDK's hedge
+#: note TELLS an operator how to decide it. They disagreed — the operator advice
+#: said "has reached" with no tolerance, so at a real ceiling reading 40 KiB
+#: under the cap it withdrew the remedy — which is the drift #2981 rules out.
+#: Both now call this.
+#:
+#: The 1 % arm is a HEURISTIC and is capped at 1 MiB so it cannot scale
+#: unbounded: at 1 TiB it would swallow 10 GiB of genuine headroom and print the
+#: ceiling sentence for a reading far from it — the over-claim direction, which is
+#: the unsafe one (its remedy is `--maxmemory`). The false-negative direction is
+#: safe, because the below-ceiling branch withholds nothing and asks for a
+#: re-read.
+#:
+#: A tolerance larger than the ceiling's own scale is meaningless (`0 B of 4 KiB`
+#: would print "reached" for every reading); callers that compare against a tiny
+#: cap must use their own scale guard, as `_write_refusal_message` does.
+def ceiling_reading_drift(cap: int) -> int:
+    """Bytes of measured shortfall below *cap* that still count as REACHED."""
+    return max(64 << 10, min(cap // 100, 1 << 20))
 
 
 #: #2981's ownership constraint for a memory-ceiling refusal, as ONE authority.
@@ -1103,29 +1145,30 @@ def explain_memory_ceiling(exc: BaseException) -> str | None:
     if not _chain_names_the_ceiling(exc):
         explains = (
             "the INSTANCE ANSWERED, and what it answered was a MEMORY "
-            "refusal — an allocation failed — but the message does NOT name a "
-            "dataset ceiling, so a `maxmemory` ceiling must not be read into "
-            "it. What IS established: this is an ANSWERED capacity refusal, "
-            "not the engine's 'graph was deleted or replaced' abort, not a "
-            "dead or restarting instance, and not evidence that the graph or "
-            "its data was lost. What is NOT established: that this instance "
-            "has a configured `maxmemory`, that it has reached one, or that "
-            "the refusal preceded execution. The driver mints "
-            "`OutOfMemoryError` for EVERY reply beginning with `OOM`, an "
-            "allocation failure included, and an instance reporting "
-            "`maxmemory 0` has no dataset ceiling at all — there the pressure "
+            "refusal whose reply names no dataset ceiling — so a `maxmemory` "
+            "ceiling must not be read into it. What IS established: this is "
+            "an ANSWERED capacity refusal, not the engine's 'graph was "
+            "deleted or replaced' abort, not a dead or restarting instance, "
+            "and not evidence that the graph or its data was lost. What is "
+            "NOT established: that this instance has a configured "
+            "`maxmemory`, that it has reached one, or that the refusal "
+            "preceded execution. The driver mints `OutOfMemoryError` for "
+            "EVERY reply beginning with `OOM` — a policy refusal and an "
+            "allocation failure alike — and an instance reporting "
+            "`maxmemory 0` has no dataset ceiling at all: there the pressure "
             "is host/kernel memory, a concurrent client, or the refused "
             "command's own allocation. So read the instance's `INFO memory` "
-            "before acting. If it reports a non-zero `maxmemory` that "
-            "`used_memory` has reached, THAT is the ceiling and the next "
-            "action is to raise it. "
+            "before acting, and re-read while the refusal is repeating. If it "
+            "reports `maxmemory 0`, there is no ceiling to raise — and "
+            "re-issuing the same command unchanged will likely be refused the "
+            "same way. If it reports a non-zero `maxmemory` and `used_memory` "
+            "is at it or within a small drift BELOW it, THAT is the ceiling "
+            "and the next action is to raise it — a reading taken after the "
+            "refusal sits slightly under the cap (measured: 3.5-56 KiB), so a "
+            "near-miss is the reading and not a different cause. "
             + _CEILING_REMEDY_HOMES
-            + " If it "
-            "reports `maxmemory 0`, do not raise a ceiling that does not "
-            "exist: re-issuing the same command unchanged will likely be "
-            "refused the same way. Read back before re-issuing anything that "
-            "mutates — this message does not establish that the refusal "
-            "preceded execution. "
+            + " Read back before re-issuing anything that mutates — this "
+            "message does not establish that the refusal preceded execution. "
             + MEMORY_CEILING_OWNERSHIP_CONSTRAINT
             + " See #2981."
         )
