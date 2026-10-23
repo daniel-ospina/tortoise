@@ -262,7 +262,11 @@ Enforced in code, not prose: a top-level `{"verdict": "clean"}` makes **every** 
 invalid; a verdict echoed from another PR's head is refused; a `clean*` contradicted
 by a P0/P1 is coerced to `issues`; one malformed result fails only its own PR; and no
 record is minted for a PR that fell out, for `issues`, or without its own evidence
-comment. `diff_sha256` is computed with agent-infra's one shared normalizer, and two
+comment. Neither step reports a partial batch as a success: `verify` exits 3 on any
+fallout, and `record` exits 3 when a recordable PR was left with no record (`post`
+also persists each comment id as it is minted, so an abort mid-loop keeps the ids
+of the comments that already exist on GitHub). `diff_sha256` is computed with
+agent-infra's one shared normalizer, and two
 of the four prepared digests match digests `record-review.sh` itself minted today
 (#2428 `5021b171…`, #2355 `1ec46580…`) — verified against the real recorder, not
 assumed.
@@ -279,9 +283,10 @@ uv run python tools/batch_review.py record  --manifest .batch-review/manifest.js
 ```
 
 Tests: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_batch_review.py -q`
-(46 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
-result never invalidates a sibling, and a record is never minted for a PR that fell
-out or whose digest is not the manifest's). The record path's EXECUTOR is covered too:
+(48 cases; the load-bearing ones: a top-level verdict invalidates every PR, one bad
+result never invalidates a sibling, a record is never minted for a PR that fell
+out or whose digest is not the manifest's, and neither `post` nor `record` reports
+a partial batch as a success). The record path's EXECUTOR is covered too:
 `record` is run against a stub `record-review.sh`, so the planned argv (and the
 fail-closed rc when the recorder refuses a PR) is asserted rather than assumed. A
 finding's file anchor is MEASURED against the cached diff it claims to come from — a

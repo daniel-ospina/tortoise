@@ -578,6 +578,66 @@ def test_the_anchoring_claim_is_withheld_when_no_cached_diff_exists():
     assert "anchored to files in this PR's diff" not in comment
 
 
+# ── post: each comment id is persisted as it is minted, not once at the end ──
+
+
+@pytest.fixture()
+def stub_gh_post(tmp_path, monkeypatch):
+    """gh stub: #1's evidence comment posts and #2's aborts the run (rate limit)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    gh = bindir / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -u\n"
+        'case "$*" in\n'
+        '  *"/issues/1/comments"*) printf "111\\n"; exit 0 ;;\n'
+        '  *"/issues/2/comments"*) printf "API rate limit exceeded\\n" >&2; exit 1 ;;\n'
+        "esac\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return gh
+
+
+def test_post_persists_each_comment_id_so_an_abort_mid_loop_keeps_the_earlier_ones(
+    tmp_path, stub_gh_post
+):
+    # The comment exists on GitHub the moment the API returns, so an abort at PR k
+    # must not lose the ids of PRs 1..k-1: a re-run would re-post duplicates, and
+    # `record` would read a map that never held them.
+    m = manifest((1, HEAD_A, DIFF_A), (2, HEAD_B, DIFF_B))
+    outcomes = [
+        br.validate_answer(
+            manifest((1, HEAD_A, DIFF_A)), {"results": [result(1, HEAD_A, DIFF_A)]}
+        )[0],
+        br.validate_answer(
+            manifest((2, HEAD_B, DIFF_B)), {"results": [result(2, HEAD_B, DIFF_B)]}
+        )[0],
+    ]
+    mpath = tmp_path / "manifest.json"
+    mpath.write_text(json.dumps(m))
+    apath = tmp_path / "verified.json"
+    apath.write_text(json.dumps({"results": outcomes}))
+    ev_path = tmp_path / "evidence.json"
+    rc = br.main(
+        [
+            "post",
+            "--manifest",
+            str(mpath),
+            "--answer",
+            str(apath),
+            "--evidence-out",
+            str(ev_path),
+        ]
+    )
+    assert rc == 2  # the rate limit aborts the run (fail closed, never retried)
+    assert ev_path.is_file()
+    assert json.loads(ev_path.read_text()) == {"1": "comment:111"}
+
+
 # ── record: the ONLY executor of a minted record, over a stub recorder ─────
 
 
@@ -630,19 +690,62 @@ def test_record_names_the_pr_and_fails_when_the_recorder_rejects(tmp_path, stub_
         br.validate_answer(manifest((1, HEAD_A, DIFF_A)), {"results": [result(1, HEAD_A, DIFF_A)]})[0],
         br.validate_answer(manifest((2, HEAD_B, DIFF_B)), {"results": [result(2, HEAD_B, DIFF_B)]})[0],
     ]
-    argv = _record_files(
-        tmp_path, m, outcomes, {1: "comment:42", 2: "comment:43"}
-    ) + ["--record-review", str(script)]
+    argv = [
+        *_record_files(tmp_path, m, outcomes, {1: "comment:42", 2: "comment:43"}),
+        "--record-review",
+        str(script),
+    ]
     assert br.main(argv) == 1
     err = capsys.readouterr().err
     assert "#2" in err and "rc=4" in err and "NO record" in err
+
+
+def test_record_returns_3_when_the_batch_is_partial(tmp_path, stub_recorder, capsys):
+    # A recordable PR left with NO record is fallout, not success: rc 0 would tell a
+    # lane that every reviewed PR was recorded, and it would land one that has no
+    # attestation (`verify` sets the same precedent by returning 3 on any fallout).
+    script, log = stub_recorder
+    m = manifest((1, HEAD_A, DIFF_A), (2, HEAD_B, DIFF_B))
+    outcomes = [
+        br.validate_answer(
+            manifest((1, HEAD_A, DIFF_A)), {"results": [result(1, HEAD_A, DIFF_A)]}
+        )[0],
+        br.validate_answer(
+            manifest((2, HEAD_B, DIFF_B)), {"results": [result(2, HEAD_B, DIFF_B)]}
+        )[0],
+    ]
+    argv = [
+        *_record_files(tmp_path, m, outcomes, {1: "comment:42"}),
+        "--record-review",
+        str(script),
+    ]
+    assert br.main(argv) == 3
+    err = capsys.readouterr().err
+    assert "PARTIAL" in err and "#[2]" in err
+    # The covered PR still minted exactly one record: a partial exit relaxes the
+    # per-PR rule in NEITHER direction — no invented record, no withheld one.
+    lines = [ln for ln in log.read_text().splitlines() if ln != "---"]
+    assert lines == [
+        "1",
+        HEAD_A,
+        "clean",
+        "o/r",
+        "--evidence",
+        "comment:42",
+        "--expect-head",
+        HEAD_A,
+    ]
 
 
 def test_record_refuses_when_no_clean_verdict_has_evidence(tmp_path, stub_recorder, capsys):
     script, _log = stub_recorder
     m = manifest((1, HEAD_A, DIFF_A))
     outcomes = [br.validate_answer(m, {"results": [result(1, HEAD_A, DIFF_A, verdict="issues")]})[0]]
-    argv = _record_files(tmp_path, m, outcomes, {}) + ["--record-review", str(script)]
+    argv = [
+        *_record_files(tmp_path, m, outcomes, {}),
+        "--record-review",
+        str(script),
+    ]
     assert br.main(argv) == 1
     err = capsys.readouterr().err
     assert "nothing to record" in err

@@ -831,9 +831,15 @@ def cmd_post(args) -> int:
         if not cid.isdigit():
             raise BatchError(f"could not capture the comment id for #{o['pr']} (got {cid[:80]!r})")
         evidence[str(o["pr"])] = f"comment:{cid}"
+        # Persist after EACH post, not once at the end: the comment exists on GitHub
+        # the moment the API returns, so an abort at PR k (a rate limit, a
+        # non-numeric id) must not lose the ids of PRs 1..k-1 — re-running `post`
+        # would then re-post duplicates while `record` read a stale map. _write_json
+        # is atomic (tmp + replace), so a partial write cannot be observed.
+        _write_json(ev_path, evidence)
         print(f"posted #{o['pr']} evidence=comment:{cid}")
     if not args.dry_run:
-        _write_json(ev_path, evidence)
+        _write_json(ev_path, evidence)  # idempotent; also covers a zero-post run
         print(f"evidence map -> {ev_path}")
     return 0
 
@@ -866,6 +872,17 @@ def cmd_record(args) -> int:
             f"⛔ no evidence artifact for #{missing} — post the per-PR comment first",
             file=sys.stderr,
         )
+    # A PARTIAL batch is not a success. `verify` already returns 3 on any fallout;
+    # `record` must not report "all clear" (rc 0) for a run that left a recordable
+    # PR with no record, because a lane keying on the exit status would then believe
+    # every reviewed PR was recorded and be refused by the rail mid-flight.
+    recordable = [
+        o["pr"]
+        for o in outcomes
+        if o.get("status") == "ok" and o.get("verdict") in ("clean", "clean-micro", "clean-low")
+    ]
+    planned = {int(argv[1]) for argv in plan}
+    unrecorded = [pr for pr in recordable if pr not in planned]
     recorder = (
         args.record_review
         or shutil.which("record-review.sh")
@@ -890,6 +907,16 @@ def cmd_record(args) -> int:
     if not plan:
         print("nothing to record (no OK clean verdict with evidence)", file=sys.stderr)
         return 1
+    if unrecorded:
+        print(
+            f"⛔ {len(unrecorded)} recordable PR(s) NOT recorded — #{unrecorded}. This "
+            "batch is PARTIAL: the PR(s) listed above have no record at this head, so "
+            "do not treat them as reviewed-and-landable.",
+            file=sys.stderr,
+        )
+        # rc 1 (the recorder refused a PR it was asked to record) outranks 3: the
+        # louder failure is reported, and both are non-zero fallout either way.
+        return rc or 3
     return rc
 
 
@@ -919,7 +946,12 @@ def main(argv: list[str] | None = None) -> int:
     o.add_argument("--dry-run", action="store_true")
     o.set_defaults(func=cmd_post)
 
-    r = sub.add_parser("record", help="call record-review.sh per PR at its own head")
+    r = sub.add_parser(
+        "record",
+        help="call record-review.sh per PR at its own head "
+        "(rc 0 = every recordable PR recorded, 3 = PARTIAL of the batch, "
+        "1 = the recorder refused a PR or there was nothing to record)",
+    )
     r.add_argument("--manifest", required=True)
     r.add_argument("--answer", required=True)
     r.add_argument("--evidence", default=".batch-review/evidence.json")
