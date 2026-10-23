@@ -54,6 +54,15 @@
       padding: 2rem;
     }
 
+    /* Hit-testing follows VISIBILITY. The full-screen overlay must never
+       swallow clicks when invisible (#744), but a VISIBLE beat has to receive
+       wheel/touch itself: it is the beat's own box that carries
+       `overflow-y: auto` on a short viewport, and a gesture over text that
+       passes through to the document is consumed by the ScrollTrigger scrub
+       instead — the clipped content never moves. The script toggles `.pe-on`
+       from the scrubbed opacity; same pattern as website/product.html. */
+    .beat.pe-on { pointer-events: auto; }
+
     /* Interactive beats: the fixed full-screen overlays must never swallow
        clicks when invisible — only their interactive children get pointer
        events (#744). Beats without interactive children inherit
@@ -62,6 +71,10 @@
     /* The label is interactive: `for="waitlist-email"` makes a click on it
        focus the field, so it needs pointer events like the form itself. */
     #beat-cta form, #beat-cta a, #beat-cta button, #beat-cta .cta-label { pointer-events: auto; }
+    /* …and the beat ITSELF while visible (an id selector out-ranks
+       `.beat.pe-on`, so without this the short-viewport scroll box below can
+       only be entered over one of those controls). */
+    #beat-cta.pe-on { pointer-events: auto; }
     #beat-tortoise a { pointer-events: auto; }
 
     #beat-hero { opacity: 1; }
@@ -105,8 +118,9 @@
     /* Tortoise reveal — the closing pitch is this section's heading (<h2>), so
        the outline runs h1 -> h2 -> h3 instead of skipping a level. It reads as
        prose, not a headline: same size/colour/face as the beat above.
-       (`font-family` is stated here, not inherited from a heading rule: an h2
-       would otherwise pick up `var(--serif)` and change the look.) */
+       (`font-family` is stated here rather than inherited: an `h2` has no rule
+       of its own in this file, so it would inherit `body`'s mono anyway — the
+       declaration keeps the face explicit if a heading rule is ever added.) */
     #beat-tortoise .tortoise-pitch {
       font-family: var(--mono);
       font-size: clamp(1.15rem, 2.2vw, 1.5rem);
@@ -276,7 +290,9 @@
        their own — allow the stack to scroll instead of clipping it. #beat-cta
        carries the email form and links; #beat-tortoise carries the closing
        pitch plus the page's only route to the product front page, and
-       `justify-content: center` would cut it at BOTH viewport edges. */
+       `justify-content: center` would cut it at BOTH viewport edges. The
+       overflow box only helps if the beat can RECEIVE the gesture, which is
+       what `.beat.pe-on` above provides while it is visible. */
     @media (max-height: 520px) {
       #beat-cta, #beat-tortoise { justify-content: flex-start; overflow-y: auto; }
     }
@@ -481,6 +497,16 @@
     /* ── Content beats (opacity scrubbed to scroll) ── */
     const beats = ['beat-hero', 'beat-origin', 'beat-tortoise', 'beat-lab', 'beat-cta'];
 
+    /* Hit-testing follows visibility (`website/product.html` does the same):
+       an invisible full-screen beat stays click-through (#744), and a visible
+       one takes pointer events so its `overflow-y: auto` short-viewport escape
+       hatch can actually be scrolled — the document's own scroll is consumed
+       by ScrollTrigger, so a gesture that passes through moves the sequence,
+       not the clipped beat. */
+    const syncPE = (el) => {
+      el.classList.toggle('pe-on', parseFloat(gsap.getProperty(el, 'opacity')) > 0.05);
+    };
+
     const beatSpan = 0.11;
     const gapSpan = 0.015;
     const step = beatSpan + gapSpan;
@@ -491,6 +517,8 @@
       const peak = start + beatSpan;
 
       if (i === 0) {
+        // Starts visible (CSS opacity: 1) — hit-testable from load.
+        el.classList.add('pe-on');
         // Pulse independently, kill on scroll
         const pulse = gsap.to('#scroll-hint', {
           opacity: 0.4, y: 6, duration: 1.5, yoyo: true, repeat: -1, ease: 'power1.inOut'
@@ -507,6 +535,7 @@
         });
         gsap.to(el, {
           opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: '1% top',
@@ -524,6 +553,7 @@
         { opacity: 0, y: 20 },
         {
           opacity: 1, y: 0,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: `${fadeInStart * 100}% top`,
@@ -537,6 +567,7 @@
         const fadeOutStart = i === 1 ? 0.20 : peak;
         gsap.to(el, {
           opacity: 0, y: -20,
+          onUpdate: () => syncPE(el),
           scrollTrigger: {
             trigger: '#scroll-wrapper',
             start: `${fadeOutStart * 100}% top`,

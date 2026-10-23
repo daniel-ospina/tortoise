@@ -1641,6 +1641,73 @@ def _asserted_expressions(src: str, function: str) -> list[str]:
     return []
 
 
+def _called_names(src: str, function: str) -> list[str]:
+    """Every function CALLED inside `function`, by simple name.
+
+    `ast`, not a text scan: the whole point is to tell what a test actually
+    invokes from what its comments, docstring or messages mention.
+    """
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
+            names: list[str] = []
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Call):
+                    continue
+                func = child.func
+                if isinstance(func, ast.Name):
+                    names.append(func.id)
+                elif isinstance(func, ast.Attribute):
+                    names.append(func.attr)
+            return names
+    return []
+
+
+def _asserted_string_literals(src: str) -> list[tuple[int, str]]:
+    """Every string LITERAL that appears inside an `assert` expression.
+
+    `(line, value)` pairs, deliberately excluding two things a source-text scan
+    cannot:
+
+    * COMMENTS — invisible to `ast`, and a comment that quotes a sentence is
+      documentation, not an assertion;
+    * DOCSTRINGS and assert MESSAGES — they are `ast.Constant` too, but they
+      sit in `ast.Expr` / `Assert.msg`, so walking only `Assert.test` leaves
+      them out.
+
+    That is why a note that QUOTES a sentence (however it is wrapped) can never
+    red the caller, while an assertion that literally pins it is caught.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Assert):
+            continue
+        for child in ast.walk(node.test):
+            if isinstance(child, ast.Constant) and isinstance(child.value, str):
+                found.append((child.lineno, child.value))
+    return found
+
+
+def _shares_a_run_of(a: str, b: str, length: int) -> str | None:
+    """A shared contiguous `length`-character run between `a` and `b`, if any.
+
+    Contiguity is what a source-text scan gets WRONG when the text wraps: two
+    lines joined are never adjacent in the file. Comparing normalised LITERALS
+    makes the check independent of how the source happens to be wrapped, in
+    either direction (the literal can be longer or shorter than the subject).
+
+    A run must span a space to count: a `length`-character match inside a
+    single word ("ction") is not a phrase anyone pins copy by.
+    """
+    for short, long in ((a, b), (b, a)):
+        if len(short) < length:
+            continue
+        for start in range(len(short) - length + 1):
+            window = short[start:start + length]
+            if " " in window and window in long:
+                return window
+    return None
+
+
 class TestProductRootMarkerContract:
     """The served-root marker is ONE structural string, agreed by both pins.
 
@@ -1810,6 +1877,34 @@ def _max_height_media_blocks(html: str) -> list[tuple[int, str]]:
     return [(int(m.group(1)), m.group(2)) for m in MEDIA_BLOCK_RE.finditer(html)]
 
 
+#: The e2e test that proves the company host's served root.
+COMPANY_ROOT_CALL_SITE = "test_middleware_root_rewrites"
+
+#: How many contiguous characters a string literal must share with the company
+#: hero sentence before it counts as a PROSE PIN, plus a word break (a run
+#: inside one word is not copy). 15 is what it takes to span the shortest
+#: phrase this hero can be pinned by — "reasoning & learning" is 20 — and the
+#: longest run ANY existing assertion in the e2e module shares with the hero is
+#: 5 characters ("ction", " not "), so the margin is 3x.
+HERO_PROSE_RUN = 15
+
+
+def _company_hero_sentence() -> str:
+    """`website/index.html`'s `<h1>` as one normalised (lowercase) sentence.
+
+    Entities are unescaped so the comparison is against the sentence as it
+    READS (`&`), not as it is spelled in markup (`&amp;`) — an assertion
+    written either way is a prose pin.
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    h1 = re.search(r"<h1\b[^>]*>(.*?)</h1>", html, re.S | re.I)
+    assert h1, "website/index.html has no <h1> — the hero moved"
+    sentence = " ".join(
+        unescape(re.sub(r"<[^>]+>", " ", h1.group(1))).split()).lower()
+    assert sentence, "the company hero <h1> is empty"
+    return sentence
+
+
 class TestCompanyRootMarkerContract:
     """The served company-root marker is ONE structural string (PR #9813).
 
@@ -1855,27 +1950,125 @@ class TestCompanyRootMarkerContract:
             "hero rewrite is exactly what deleted the prose pin this replaced. "
             "Keep the pin on page identity; keep the hero owner-editable.")
 
-    def test_the_hero_copy_is_not_the_pin(self):
-        """The defect itself: the page's hero sentence must not be the marker.
+    def test_the_served_root_is_proven_structurally_not_by_prose(self):
+        """The served-root test proves the root with the marker, never by text.
 
-        The old pin was a literal substring of the `<h1>`; a copy edit then
-        turned a correct page red post-deploy. Asserting the hero sentence is
-        ABSENT from the e2e module keeps that shape from coming back (a prose
-        pin has to be spelled out there to be asserted).
+        This pins the SHAPE of the call site — the one thing that stops the
+        historical defect returning: `test_middleware_root_rewrites` must call
+        `_assert_serves_company` (which reads the RAW body and asserts
+        `COMPANY_ROOT_MARKER`) and must make NO `_clean()` call at all. A prose
+        pin cannot be added without text to compare, so "no `_clean()` here"
+        is the mechanical statement of "the root is not proven by reading the
+        page's words".
         """
-        html = INDEX_HTML.read_text(encoding="utf-8")
-        h1 = re.search(r"<h1\b[^>]*>(.*?)</h1>", html, re.S | re.I)
-        assert h1, "website/index.html has no <h1> — the hero moved"
-        sentence = " ".join(re.sub(r"<[^>]+>", " ", h1.group(1)).split()).lower()
-        needle = sentence[:40]
-        assert needle, "the company hero <h1> is empty"
-        e2e_src = LEGAL_PAGES_E2E.read_text(encoding="utf-8").lower()
-        assert needle not in e2e_src, (
-            f"tests/e2e/test_legal_pages.py pins the company root by hero copy "
-            f"({needle!r} appears in the module). A copy edit then reds the "
-            "served-root suite on a CORRECT page — that is the PR #9813 "
-            "defect. Pin `COMPANY_ROOT_MARKER` on the `<html>` element "
-            "instead, and read it through `_assert_serves_company()`.")
+        src = LEGAL_PAGES_E2E.read_text(encoding="utf-8")
+        calls = _called_names(src, COMPANY_ROOT_CALL_SITE)
+        assert calls, (
+            f"tests/e2e/test_legal_pages.py no longer defines "
+            f"`{COMPANY_ROOT_CALL_SITE}` — this gate's subject moved, so the "
+            "company root has no served-document proof at all")
+        assert RAW_BODY_HELPER_COMPANY in calls, (
+            f"`{COMPANY_ROOT_CALL_SITE}` does not call "
+            f"`{RAW_BODY_HELPER_COMPANY}()` (calls: {sorted(set(calls))!r}). "
+            "The company root must be proven by `COMPANY_ROOT_MARKER` on the "
+            "raw document — a prose assertion is what PR #9813 had to rewrite.")
+        assert "_clean" not in calls, (
+            f"`{COMPANY_ROOT_CALL_SITE}` calls `_clean()` (calls: "
+            f"{sorted(set(calls))!r}). `_clean()` strips tags and therefore "
+            "the `data-page` attribute off `<html>`, so any assertion built on "
+            "it either can never match or is a prose pin on the page's words "
+            "— the PR #8597/#9652/#9813 defect. Read the raw body through "
+            f"`{RAW_BODY_HELPER_COMPANY}(body, where)`.")
+
+    def test_no_assertion_pins_the_company_root_by_hero_copy(self):
+        """No assertion in the e2e module may quote the company hero sentence.
+
+        Read from the `ast` string LITERALS inside `assert` tests, not from the
+        source text, so the check is independent of how the file is wrapped and
+        of what its comments/docstrings quote — the previous 40-character
+        prefix scan reddened a CORRECT page when a comment two files away was
+        reflowed, and stayed green for a pin of the hero's tail.
+        """
+        sentence = _company_hero_sentence()
+        offenders = []
+        for line, literal in _asserted_string_literals(
+                LEGAL_PAGES_E2E.read_text(encoding="utf-8")):
+            shared = _shares_a_run_of(
+                " ".join(literal.split()).lower(), sentence, HERO_PROSE_RUN)
+            if shared:
+                offenders.append((line, literal, shared))
+        assert not offenders, (
+            "tests/e2e/test_legal_pages.py asserts on the company HERO COPY at "
+            + ", ".join(f"line {line} ({literal[:60]!r})"
+                        for line, literal, _ in offenders)
+            + f". It shares {HERO_PROSE_RUN}+ characters with the hero "
+            f"({offenders[0][2]!r}), so the next hero rewrite reds the "
+            "served-root suite on a CORRECT page — the PR #9813 defect. Pin "
+            "`COMPANY_ROOT_MARKER` on the `<html>` element instead, and read "
+            "it through `_assert_serves_company()`.")
+
+    def test_the_prose_pin_checks_reject_the_old_shapes(self):
+        """Both checks above must FIRE on the shapes they exist to stop.
+
+        Without this, the two tests could pass vacuously (a predicate that
+        matches nothing is green on every tree). Each fixture is the defect in
+        miniature, checked through the SAME helpers the tests use.
+        """
+        prose_pins = (
+            # the shape PR #8597/#9652/#9813 shipped: the root pinned by a
+            # sentence of the hero, asserted on cleaned text
+            'def test_middleware_root_rewrites():\n'
+            '    assert "the primary function of memory is not recall, but '
+            'learning" in _clean(r2.text())\n',
+            # the same pin WRAPPED across source lines — this is what reddened
+            # a correct tree under the old source-text scan
+            'def test_middleware_root_rewrites():\n'
+            '    assert (\n'
+            '        "the primary function of memory"\n'
+            '        " is not recall, but learning"\n'
+            '    ) in r2.text()\n',
+            # a fragment of the CURRENT hero's tail, the half the old
+            # 40-character prefix could never see
+            'def test_middleware_root_rewrites():\n'
+            '    assert "not recall, but reasoning & learning" in r2.text()\n',
+        )
+        for fixture in prose_pins:
+            assert any(
+                _shares_a_run_of(" ".join(literal.split()).lower(),
+                                 _company_hero_sentence(), HERO_PROSE_RUN)
+                for _, literal in _asserted_string_literals(fixture)
+            ), f"the prose-pin check does NOT fire on: {fixture!r}"
+
+        clean_read = (
+            'def test_middleware_root_rewrites():\n'
+            '    body = _clean(r2.text())\n'
+            '    assert COMPANY_ROOT_MARKER in body\n')
+        calls = _called_names(clean_read, COMPANY_ROOT_CALL_SITE)
+        assert "_clean" in calls, (
+            "the call-site check does NOT fire when the served-root test reads "
+            f"`_clean()` (calls: {calls!r})")
+        assert RAW_BODY_HELPER_COMPANY not in calls, (
+            "the call-site check does not notice a missing "
+            f"`{RAW_BODY_HELPER_COMPANY}()` call (calls: {calls!r})")
+
+        # …and neither check may fire on a CORRECT site, however it is wrapped
+        # or documented: comments and docstrings quoting the hero are not
+        # assertions.
+        documented = (
+            '"""Quotes the hero: "the primary function of memory is not '
+            'recall, but reasoning & learning"."""\n'
+            '# a comment quoting the hero, wrapped mid-sentence:\n'
+            '#   the primary function of memory\n'
+            '#   is not recall, but reasoning & learning\n'
+            'def test_middleware_root_rewrites():\n'
+            '    _assert_serves_company(r2.text(), "company root")\n')
+        assert not _asserted_string_literals(documented), (
+            "the literal scan reads comments or docstrings — a note quoting "
+            "the hero would red a correct tree: "
+            f"{_asserted_string_literals(documented)!r}")
+        documented_calls = _called_names(documented, COMPANY_ROOT_CALL_SITE)
+        assert RAW_BODY_HELPER_COMPANY in documented_calls
+        assert "_clean" not in documented_calls
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1927,15 +2120,37 @@ class TestPageHeadingOutline:
 # carry a beat whose text is now taller than a landscape phone's viewport:
 # `#beat-tortoise` on index.html (the closing pitch, PR #9813) and
 # `#beat-hero` on product.html (the subtitle PR #9813 enlarged). Each needs the
-# existing `@media (max-height: ...)` escape hatch.
+# existing `@media (max-height: ...)` escape hatch — AND a way to RECEIVE the
+# gesture: `.beat` is `pointer-events: none`, so without the visibility-gated
+# `.beat.pe-on` rule a gesture over the pitch text passes through to the
+# document and drives the ScrollTrigger scrub instead of the beat's overflow
+# box. Declaring `overflow-y: auto` alone is decoration (PR #9813 review, P2).
 SHORT_VIEWPORT_BEATS = (
     (INDEX_HTML, "#beat-tortoise", "the company closing pitch + its CTA"),
     (PRODUCT_HTML, "#beat-hero", "the product hero + its CTA"),
 )
 
+#: A rule that lets a VISIBLE beat take pointer events (the animation script
+#: toggles the class from the scrubbed opacity, so invisible beats stay
+#: click-through — #744).
+PE_ON_RULE_RE = re.compile(
+    r"\.beat\.pe-on\b[^{}]*\{[^{}]*pointer-events\s*:\s*auto", re.S)
+PE_ON_TOGGLE_RE = re.compile(r"classList\.toggle\(\s*['\"]pe-on['\"]")
+BEAT_LIST_RE = re.compile(r"const\s+beats\s*=\s*\[(.*?)\]", re.S)
+
 
 class TestShortViewportBeatsScrollInsteadOfClipping:
-    def test_the_tall_beats_are_covered_by_a_max_height_rule(self):
+    """The escape hatch is DECLARED (here) and REACHABLE (next test).
+
+    Scope, stated plainly: this reads the committed markup and script. It does
+    not open a browser, so it cannot observe clipping pixel-for-pixel — what it
+    can do is pin the two conditions without which the hatch provably cannot
+    work: the `@media (max-height: ...)` rule with both declarations, and the
+    visibility-gated pointer-events rule that lets the beat receive the
+    gesture. A change that drops either stops being a silent regression.
+    """
+
+    def test_each_tall_beat_declares_the_css_escape_hatch(self):
         for path, selector, what in SHORT_VIEWPORT_BEATS:
             blocks = _max_height_media_blocks(path.read_text(encoding="utf-8"))
             assert blocks, (
@@ -1962,3 +2177,46 @@ class TestShortViewportBeatsScrollInsteadOfClipping:
                 f"(found: {[b for _, b in covering]!r}). Centred overflow is "
                 "cut at BOTH edges, so the first line goes above the viewport "
                 "and the CTA below it.")
+
+    def test_the_beat_can_receive_the_scroll_gesture_while_visible(self):
+        """`overflow-y: auto` on a `pointer-events: none` box does nothing.
+
+        A gesture over the pitch text would pass THROUGH the beat to the
+        document, where ScrollTrigger consumes it — so the clipped content
+        never moves and the beat's own overflow box is decoration. The
+        mechanism the pages use is visibility-gated hit-testing
+        (`.beat.pe-on`, toggled from the scrubbed opacity): the beat must be in
+        the script's beat list, the script must toggle the class by opacity,
+        and a `.beat.pe-on { pointer-events: auto }` rule must exist.
+        """
+        for path, selector, what in SHORT_VIEWPORT_BEATS:
+            html = path.read_text(encoding="utf-8")
+            beat_id = selector.lstrip("#")
+            assert PE_ON_RULE_RE.search(html), (
+                f"{path.name} declares no `.beat.pe-on {{ pointer-events: auto "
+                "}` rule. `.beat` is `pointer-events: none`, so the overflow "
+                f"hatch on {selector} can never receive a wheel/touch gesture "
+                f"— {what} stays clipped where it is cut, and the gesture "
+                "scrolls the page instead. Gate hit-testing on visibility "
+                "(the `.beat.pe-on` pattern) rather than dropping the overlay "
+                "rule, which would let invisible beats swallow clicks (#744).")
+            assert PE_ON_TOGGLE_RE.search(html), (
+                f"{path.name} never toggles `.pe-on`: the class must follow the "
+                "scrubbed opacity (`classList.toggle('pe-on', opacity > "
+                "0.05)`), or the beat takes pointer events at the wrong time "
+                "— always (swallowing clicks, #744) or never (the overflow "
+                "hatch stay inert).")
+            beat_list = BEAT_LIST_RE.search(html)
+            assert beat_list and beat_id in beat_list.group(1), (
+                f"{path.name}: `{beat_id}` is not in the script's beat list "
+                f"({beat_list.group(0) if beat_list else 'not found'!r}), so no "
+                "fade tween ever updates its `.pe-on` state and the overflow "
+                "hatch is never reachable.")
+            assert not re.search(
+                r"#" + re.escape(beat_id) + r"\s*\{[^{}]*pointer-events\s*:\s*none",
+                html), (
+                f"{path.name} sets `pointer-events: none` on `{selector}` "
+                "unconditionally. An id selector out-ranks `.beat.pe-on`, so "
+                "the visibility-gated rule above is defeated and the beat can "
+                "never receive the scroll gesture (this is how `#beat-cta` "
+                "had to be given a `#beat-cta.pe-on` companion).")
