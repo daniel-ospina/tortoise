@@ -53,8 +53,15 @@ import sys
 # lane is 3.12-only, so a bare ImportError would be the first thing a
 # 3.11 user sees.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    # #5128's contract: the refusal names the file, the interpreter it GOT, and
+    # the invocation that WORKS. Without the `(got X.Y)` half a reader on 3.9 is
+    # told the requirement and left to guess whether they met it, and without
+    # the invocation they are left to guess how to run it —
+    # `tests/test_entry_point_python_guard.py` pins all three repo-wide.
     raise SystemExit(
-        "tools/longmem_eval.temporal_admission_arms requires Python >= 3.12"
+        "tools/longmem_eval/temporal_admission_arms.py requires Python >= 3.12 "
+        f"(got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python -m tools.longmem_eval.temporal_admission_arms`"
     )
 
 import argparse

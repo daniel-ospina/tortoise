@@ -467,7 +467,11 @@ the `{error}`-only shape whose retry action is different.
   refusal is about the instance and not about anything you wrote). This is a
   **throttle, not a cap**: it never refuses your data, the window self-heals
   within 60 s, and the correct action is **backoff-and-retry** — the opposite
-  of the cumulative `ERR_QUOTA` advice above. (The repo's bundled SDK does not
+  of the cumulative `ERR_QUOTA` advice above. A refused request is **not** an
+  attempt you have to reason about later: it writes nothing and leaves no
+  commit record of its own, so retrying the same `client_commit_id` after the
+  backoff is a **first** attempt — the same `held[]` adjudication a clean
+  request would have received, not a second one. (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the
   flat session cap (#4010 — sessions are unlimited for every tier, by owner
