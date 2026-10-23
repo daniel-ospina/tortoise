@@ -43,6 +43,7 @@ import asyncio
 import contextlib
 import inspect
 import threading
+import time as _time
 
 import pytest
 from fastmcp.exceptions import ToolError
@@ -699,17 +700,23 @@ def test_the_wiring_scopes_the_dispatch_and_never_forwards_the_key(monkeypatch):
     Driving the two halves directly would stay green if the dispatch stopped
     calling them — every schema still advertising an argument nothing honours,
     which is the defect #9340 exists to close.
+
+    Only the INNERMOST dispatch is faked: the real wrapper, the real seam and
+    the real resolution all run, so the assertion below is about the scope the
+    tool body actually executes under (#9762 moved the resolution into the
+    dispatch task — see the `#9762` section at the end of this file).
     """
     monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
     seen: dict = {}
 
-    async def _fake_dispatch(name, arguments, *, version=None, task_meta=None):
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
         seen["name"] = name
         seen["arguments"] = dict(arguments or {})
         seen["graph"] = mcp_auth._current_graph_id.get()
         return "DISPATCHED"
 
-    monkeypatch.setattr(mcp_server, "_await_under_mcp_wait_bound", _fake_dispatch)
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
     monkeypatch.setattr(mcp_server, "_check_mcp_op_budget",
                         _async_noop)
     org = mcp_auth._current_org_id.set(ORG_A)
@@ -1145,3 +1152,267 @@ def test_no_advertised_handler_names_the_workspace_default_itself():
                       "tortoise_analyze"}, (
         "a graph-naming handler stopped reading the dispatch's selection: "
         f"{sorted(routed)}")
+
+
+# ── #9762: the resolution rides the DISPATCH TASK, not the wrapper ─────────
+#
+# `_wrapped_call_tool` used to resolve the `graph` argument BEFORE it handed the
+# dispatch to `_await_under_mcp_wait_bound`. That seam spends the transport's
+# REMAINING deadline (#3834 F1), so when the transport had already refused the
+# request (`_wait_bound_refused()`, remaining == 0 by construction) the
+# resolution ran FIRST: its `asyncio.timeout(0)` expired and a request the
+# transport had already answered raised `ToolError("… graph lookup exceeded the
+# wait budget …")`. Three things were wrong with that — the caller's transport
+# refusal was replaced by a graph error, the `mcp_tool_call` row was
+# `exec_error`/`ToolError` where the truthful row is `refused`/
+# `transport_wait_bound` (the very series #3834 F-1/F-2 keep honest), and a
+# control-plane `graph_list` read was issued for an answered request.
+#
+# The obvious guard (`if not _wait_bound_refused(): resolve`) is WRONG and is
+# pinned as wrong below: `_await_under_mcp_wait_bound` returns `task.result()`
+# when the dispatch finished as the deadline expired, so a SKIPPED resolution
+# hands an UNSCOPED result (the workspace default graph) to a caller who named
+# another graph — the silent-wrong-graph class #9340 exists to close. The fix
+# moves the resolution INSIDE the dispatch task, so the scope moves with the
+# task and cannot outlive it.
+
+
+def _spent_budget_state(*, refused: bool) -> dict:
+    """The middleware's own ``scope["state"]``: arrival 60 s ago, budget spent.
+
+    ``_wait_bound_refused`` is set by ``hosted_api.WaitBoundMiddleware`` only on
+    the pre-SSE-refusal path, where the pre-SSE cost alone has already spent the
+    bound — so "refused" and "``remaining == 0``" are the same state, and both
+    are produced here through the REAL readers (``_wait_bound_arrival`` /
+    ``_wait_bound_refused``), not by patching them out.
+    """
+    state = {"_wait_bound_t0": _time.monotonic() - 60.0}
+    if refused:
+        state["_wait_bound_refused"] = True
+    return state
+
+
+def _record_telemetry(monkeypatch) -> list:
+    rows: list = []
+    monkeypatch.setattr(
+        mcp_server, "_emit_mcp_tool_call_telemetry",
+        lambda org, name, status, latency, error_kind=None, count=None:
+        rows.append((status, error_kind)))
+    return rows
+
+
+def _wrapped_call(monkeypatch, name, arguments):
+    monkeypatch.setattr(mcp_server, "_check_mcp_op_budget", _async_noop)
+    org = mcp_auth._current_org_id.set(ORG_A)
+    try:
+        return asyncio.run(mcp_server._wrapped_call_tool(name, arguments))
+    finally:
+        mcp_auth._current_org_id.reset(org)
+
+
+def test_a_transport_refused_graph_call_is_not_a_graph_error(monkeypatch):
+    """#9762 acceptance 1: an already-refused request keeps its own refusal.
+
+    The transport answered the caller and emitted the breach event; this seam's
+    job is only to NOT contradict it. Before the fix this raised a graph
+    `ToolError` (recorded `exec_error`/`ToolError`), emitted nothing itself but
+    issued the control-plane read for a request nobody was waiting on.
+    """
+    monkeypatch.setattr(mcp_server, "_wait_bound_state",
+                        lambda: _spent_budget_state(refused=True))
+    reads: list = []
+
+    def _reachable(org_id):
+        reads.append(org_id)
+        return OWN_ROWS
+
+    monkeypatch.setattr(mcp_auth, "reachable_graph_rows", _reachable)
+    breaches: list = []
+    monkeypatch.setattr(mcp_server, "_emit_mcp_wait_bound_breach_off_loop",
+                        lambda *a, **k: breaches.append(a))
+    rows = _record_telemetry(monkeypatch)
+
+    result = _wrapped_call(monkeypatch, "tortoise_query",
+                           {"query": "x", "graph": "g_fund_a"})
+
+    assert getattr(result, "meta", None) and \
+        result.meta.get(mcp_server._WAIT_BOUND_META_KEY) is True, (
+            "the transport's own refusal was not the result the caller got")
+    assert result.is_error is True
+    assert rows == [("refused", "transport_wait_bound")], (
+        "a graph-bearing call whose transport already refused was recorded as "
+        f"{rows} — a false row in the mcp_tool_call series #3834 F-2 keeps "
+        "truthful")
+    assert breaches == [], (
+        f"a second breach event was emitted for one request: {breaches}")
+    assert reads == [], (
+        "a control-plane `graph_list` read was issued for a request the "
+        "transport had already answered")
+
+
+def test_a_dispatch_that_completes_as_the_deadline_expires_stays_scoped(
+        monkeypatch):
+    """#9762 acceptance 2: a COMPLETING dispatch returns only the named graph.
+
+    ``_await_under_mcp_wait_bound`` surfaces ``task.result()`` when the dispatch
+    finished as the deadline expired, so the resolution must already have been
+    applied to the task that produced that result. A resolution DROPPED for a
+    spent budget (or skipped because the transport refused) would hand back a
+    result produced by the workspace DEFAULT graph to a caller who named another
+    one — trading a telemetry fix for the silent-wrong-graph class #9340 closes.
+    Moving the resolution into the task is what makes that unrepresentable; this
+    pin holds the property from the outside (it is the shape a naive guard
+    breaks).
+
+    ``await_under_wait_bound`` is faked because the branch under test is *the
+    dispatch FINISHING at the deadline*; a real clock cannot be made to land
+    there deterministically.
+    """
+    monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
+    # A POSITIVE residual: the deadline is about to expire, it has not already
+    # been spent (a spent one refuses the lookup by design — the same bound).
+    spent = mcp_auth._TRANSPORT_WAIT_BOUND_S - 0.2
+    monkeypatch.setattr(
+        mcp_server, "_wait_bound_state",
+        lambda: {"_wait_bound_t0": _time.monotonic() - spent})
+
+    async def _finish_then_expire(task, timeout, *, reference, owner=None):
+        await task           # the dispatch completes as the deadline expires
+        raise TimeoutError   # ... and the wait reports the breach
+
+    monkeypatch.setattr(mcp_auth, "await_under_wait_bound", _finish_then_expire)
+    seen: dict = {}
+
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
+        seen["graph"] = mcp_auth._current_graph_id.get()
+        return "RESULT-FROM-THE-NAMED-GRAPH"
+
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
+
+    org = mcp_auth._current_org_id.set(ORG_A)
+    try:
+        result = asyncio.run(mcp_server._await_under_mcp_wait_bound(
+            "tortoise_query", {}, version=None, task_meta=None,
+            graph_ref="g_fund_a"))
+    finally:
+        mcp_auth._current_org_id.reset(org)
+
+    assert result == "RESULT-FROM-THE-NAMED-GRAPH"
+    assert seen.get("graph") == "g_fund_a", (
+        "the dispatch ran under the workspace DEFAULT graph and its result was "
+        "returned to a caller who named another graph — the resolution was "
+        "dropped rather than moved into the task")
+
+
+@pytest.mark.asyncio
+async def test_the_resolution_runs_in_the_dispatch_task(monkeypatch):
+    """#9762: the resolution rides the TASK — that ordering IS the fix.
+
+    Both halves of the bug come from the same place: a resolution executed in
+    the CALLER's task runs before the seam spends the transport's remaining
+    deadline (so it raises on an already-refused request), and it applies a
+    scope that then outlives the dispatch. This asserts the structural property
+    directly — the resolution executes in a DIFFERENT task from the caller's, and
+    it is the same task the tool body runs in — so any wrapper-side resolution
+    (guarded or not) fails here.
+    """
+    monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
+    monkeypatch.setattr(mcp_server, "_check_mcp_op_budget", _async_noop)
+    seen: dict = {}
+    real_resolve = mcp_server._resolve_graph_argument
+
+    async def _spy_resolve(ref, stack):
+        seen["resolve_task"] = asyncio.current_task()
+        return await real_resolve(ref, stack)
+
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
+        seen["dispatch_task"] = asyncio.current_task()
+        seen["graph"] = mcp_auth._current_graph_id.get()
+        return "DISPATCHED"
+
+    monkeypatch.setattr(mcp_server, "_resolve_graph_argument", _spy_resolve)
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
+    org = mcp_auth._current_org_id.set(ORG_A)
+    try:
+        caller_task = asyncio.current_task()
+        await mcp_server._wrapped_call_tool(
+            "tortoise_query", {"query": "x", "graph": "g_fund_a"})
+    finally:
+        mcp_auth._current_org_id.reset(org)
+
+    assert "resolve_task" in seen, "the graph argument was never resolved"
+    assert seen["resolve_task"] is seen["dispatch_task"], (
+        "the resolution ran in a different task from the dispatch it scopes")
+    assert seen["resolve_task"] is not caller_task, (
+        "the graph was resolved in the CALLER's task — before the seam spends "
+        "the transport's remaining deadline, which is the #9762 ordering bug")
+    assert seen["graph"] == "g_fund_a"
+
+
+def test_the_wrapper_hands_the_ref_to_the_seam_instead_of_resolving_it(
+        monkeypatch):
+    """#9762: the ORDERING is the contract — nothing resolves before the task.
+
+    A resolution in the wrapper is what produced the bug: it runs before the
+    seam spends the transport's remaining deadline, so on an already-refused
+    request it expires and raises. A scope applied in the caller's context also
+    outlives the dispatch, so a later call in the same context that names no
+    graph would inherit it.
+    """
+    monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
+    seen: dict = {}
+
+    async def _fake_seam(name, arguments, *, version=None, task_meta=None,
+                         graph_ref=None):
+        seen["graph_ref"] = graph_ref
+        seen["arguments"] = dict(arguments or {})
+        seen["graph_at_seam_entry"] = mcp_auth._current_graph_id.get()
+        return "DISPATCHED"
+
+    monkeypatch.setattr(mcp_server, "_await_under_mcp_wait_bound", _fake_seam)
+
+    assert _wrapped_call(monkeypatch, "tortoise_query",
+                         {"query": "x", "graph": "g_fund_a"}) == "DISPATCHED"
+    assert seen["graph_ref"] == "g_fund_a", (
+        "the wrapper did not hand the `graph` argument to the dispatch seam as "
+        "`graph_ref` — the seam cannot resolve it inside the task")
+    assert "graph" not in seen["arguments"], (
+        "the handler would receive a keyword its signature does not declare")
+    assert seen["graph_at_seam_entry"] is None, (
+        "the graph was already resolved when the seam was entered — the "
+        "#9762 ordering bug: on an already-refused request that resolution "
+        "runs under a spent deadline and raises a graph error")
+
+
+@pytest.mark.asyncio
+async def test_the_graph_scope_cannot_outlive_the_dispatch(monkeypatch):
+    """#9762: the scope is the DISPATCH's, not the caller's context's.
+
+    ``use_graph_target`` sets ``_current_graph_id`` / ``_current_graph_namespace``
+    with no reset token, so a resolution held in the caller's context persists
+    after the call: the next call in that context which names no graph — the
+    documented "untouched default path" — would read the PREVIOUS call's graph.
+    Executing the resolution inside the dispatch task confines it by
+    construction.
+    """
+    monkeypatch.setattr(mcp_auth, "reachable_graph_rows", lambda org_id: OWN_ROWS)
+    monkeypatch.setattr(mcp_server, "_check_mcp_op_budget", _async_noop)
+
+    async def _body(name, arguments, *, version=None, run_middleware=True,
+                    task_meta=None):
+        return "DISPATCHED"
+
+    monkeypatch.setattr(mcp_server, "_original_call_tool", _body)
+    org = mcp_auth._current_org_id.set(ORG_A)
+    try:
+        await mcp_server._wrapped_call_tool(
+            "tortoise_query", {"query": "x", "graph": "g_fund_a"})
+        assert mcp_auth._current_graph_id.get() is None, (
+            "the selected graph survived the dispatch in the CALLER's context — "
+            "the next call in this context that names no graph reads it")
+        assert mcp_auth._current_graph_namespace.get() is None, (
+            "the selected namespace survived the dispatch")
+    finally:
+        mcp_auth._current_org_id.reset(org)
