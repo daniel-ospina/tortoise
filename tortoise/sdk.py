@@ -27895,6 +27895,37 @@ class TortoiseSDK:
                 _read_ledger.record_rows(label, rows)
             return rows
 
+        def _with_claim_class(rows: list[dict],
+                              classes: dict[str, frozenset[str]]) -> list[dict]:
+            """Annotate each returned Point with its asserted|derived class.
+
+            #2351 (epic #2349 E-derived), read side indicator 3. Only reachable
+            when the caller ASKED for the class (``claim_class is not None``):
+            an unfiltered read emits no key at all, so every pre-#2351 caller
+            stays byte-identical — the annotation is OPT-IN, never a widened
+            result shape.
+
+            The classes are the ones the FILTER already read (``classes``), so
+            annotating costs no second round trip. An id carrying no node with
+            a marker reads as ``asserted``: absence IS the default class, which
+            is what lets an authored-only graph be queried without migrating it.
+            """
+            wanted = claim_class
+            for row in rows:
+                pid = row.get("id")
+                if not isinstance(pid, str):
+                    continue
+                carried = classes.get(pid) or frozenset({_claim_class.DEFAULT})
+                # A Point id may fan out to several nodes with different marks
+                # (#7822) — report the class the caller asked for when the id
+                # carries it, else the strongest fact we have.
+                row["claim_class"] = (
+                    wanted if wanted in carried
+                    else _claim_class.DERIVED
+                    if _claim_class.DERIVED in carried
+                    else _claim_class.ASSERTED)
+            return rows
+
         try:
             proj = self._get_proj()
         except Exception:
@@ -29240,6 +29271,8 @@ class TortoiseSDK:
             if entity_type == "point" and w4_enrich \
                     and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
+            if claim_class is not None:
+                ranked = _with_claim_class(ranked, claim_classes)
             return _with_read_status(ranked)
         if order_by == "confidence":
             # #25/#2206/#2286: sort by the PERSISTED EP belief mean α/(α+β)
@@ -29265,6 +29298,8 @@ class TortoiseSDK:
         if entity_type == "point" and w4_enrich \
                 and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
+        if claim_class is not None:
+            out = _with_claim_class(out, claim_classes)
         return _with_read_status(out)
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
