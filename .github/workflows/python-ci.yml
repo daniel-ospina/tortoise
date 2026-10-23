@@ -3367,9 +3367,124 @@ jobs:
             rhysd/actionlint:1.7.12 \
             -shellcheck= "${files[@]}"
 
+  test-record-postgres:
+    # #9551 (epic #7879, doc 08 §B R3): the record's two Postgres legs
+    # (`test_the_public_capture_path_writes_the_record` /
+    # `..._the_epistemic_layer` in tests/test_9078_record_written_by_production_path.py)
+    # SKIPPED on EVERY PR, twice over: `_record_db()` skips when
+    # `TEST_RECORD_DB_URI` is unset AND `importorskip("psycopg2")` skips when the
+    # optional `[postgres]` extra is absent — and no job set either. That is the
+    # mechanism a NEW schema↔producer disagreement (#9264 class) hides behind:
+    # the leg that would catch it never ran, so the loss was silent and the only
+    # thing that ever saw it was an operator running the #9078 acceptance command
+    # by hand. This job arms both halves and asserts the legs RAN.
+    #
+    # Runs on every PR and push (no diff gate, the `-` selector row in the
+    # aggregate): the issue's required set — diffs touching `tortoise/`,
+    # `supabase/` or `tests/` — is a SUBSET of that, and a diff-scoped selector
+    # here would be new machinery for a ~2.5m job that already runs in parallel.
+    needs: changes
+    if: always() && needs.changes.result == 'success'
+    runs-on: ubuntu-latest
+    # Measured on the lane where this was built: 63 passed / 0 skipped in 70–73s
+    # against a warm database, and ~100s when the container first applies the
+    # record migrations. The arm-gate tests this PR adds (they run the gate over
+    # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
+    # container: 70 passed / 0 skipped in ~194s, migrations included. 20m is a
+    # runaway bound, not a measurement-thin one.
+    timeout-minutes: 20
+    env:
+      # The record's database is POSTGRES, not a tortoise graph: this job exports
+      # no `TORTOISE_DB_URI`, so `tests/conftest.py`'s epic #1647 P4 gate needs
+      # the explicit URI-less opt-in. The zero-skip step below is what stops that
+      # opt-in from being how the leg "passes".
+      TORTOISE_TEST_CARVE_OUT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Cache pip dependency caches (#7612)
+        # Same key shape as the other pip-only sites, so it SHARES their cache
+        # and a warm restore is a no-op. Coverage-neutral: pip's cache is
+        # content-addressed, so it cannot substitute a different version.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+      - name: Install package + the postgres extra
+        # `[postgres]` is one of the TWO skip causes (the other is the DSN).
+        # `[embeddings]`/torch are deliberately absent: this file needs neither
+        # (measured — same run, 71s against 204s with the embedder installed).
+        run: pip install -e '.[test,postgres]'
+      - name: Provision a throwaway Postgres on an ephemeral host port (#9551)
+        # NOT a `services:` block: `tests/test_runner_ports_6673.py` forbids one
+        # in this workflow, because a fixed host port is ONE global namespace on
+        # the shared Docker daemon (a second overlapping job's `docker start`
+        # fails and the runner aborts pre-step — a false red with zero tests
+        # run). The action binds loopback (#7637) and exports
+        # `TEST_RECORD_DB_URI`; paired with the teardown step below.
+        uses: ./.github/actions/postgres-provision
+      - name: Run the record's Postgres legs (armed — #9551)
+        run: |
+          set +e
+          # Per-job scratch, NOT /tmp: the Python CI jobs on this repo write
+          # hard-coded host-global paths (/tmp/junit.xml, /tmp/pytest.log) on a
+          # shared self-hosted runner, and concurrent jobs clobber each other
+          # (#7815 family). $RUNNER_TEMP is per-job.
+          SCRATCH="${RUNNER_TEMP:-/tmp}/record-postgres"
+          mkdir -p "$SCRATCH"
+          # #3470: the log is captured through `tee`, so this leg gets the same
+          # attribution every captured leg gets (`pytest-attribution.sh`).
+          timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
+            tests/test_9078_record_written_by_production_path.py \
+            -v --timeout=300 -p no:cacheprovider -r fEs \
+            --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \
+            2>&1 | tee "$SCRATCH/pytest.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > "$SCRATCH/pytest-rc"
+          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest.log" --rc "$rc"
+          exit $rc
+      - name: The DB legs RAN, not skipped (#9551)
+        # The target of the issue is "0 of the two DB legs skipped in the armed
+        # job" — so this is asserted, not assumed. Without it the job is green
+        # when the leg skips, which is the whole defect: an unarmed job and an
+        # armed-but-skipping job are indistinguishable from the outside.
+        # Read from the junit XML, not from the log text: a count in a summary
+        # line is a rendering, an attribute is the result.
+        #
+        # The DECISION lives in `.github/scripts/record-postgres-leg-gate.py`,
+        # not in this string (#9772 review P2). An inline heredoc is only
+        # pinnable by substrings of its own text, and the substring pin this
+        # step used to carry (`"skipped" in runs and "exit 1" in runs`) stayed
+        # GREEN after the clause that fails the job on a real skip was deleted
+        # — so the pin could not tell "asserts zero skips" from "prints a skip
+        # count". As a script it is exercised against fixture XMLs
+        # (`tests/test_9078_record_written_by_production_path.py` §8): a real
+        # skip reds, a strict xfail does not, a green run passes.
+        if: always()
+        run: |
+          SCRATCH="${RUNNER_TEMP:-/tmp}/record-postgres"
+          python3 .github/scripts/record-postgres-leg-gate.py "$SCRATCH/junit.xml"
+      - name: Upload record-postgres log (measurement artifact)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-record-postgres
+          path: |
+            ${{ runner.temp }}/record-postgres/pytest.log
+            ${{ runner.temp }}/record-postgres/junit.xml
+          if-no-files-found: ignore
+      - name: Stop Postgres (#9551)
+        if: always()
+        uses: ./.github/actions/postgres-teardown
+
   python-ci-gate:
     if: always()
-    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, surface-guard]
+    needs: [changes, manifest-integrity, workflow-lint, test, test-slow, test-carve-out, test-concurrency-falkor, packs-compile, test-track-b, test-d14-hosted-api, test-record-postgres, surface-guard]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result
@@ -3420,6 +3535,7 @@ jobs:
           packs-compile|${{ needs.packs-compile.result }}|${{ needs.changes.outputs.python }}
           test-track-b|${{ needs.test-track-b.result }}|${{ needs.changes.outputs.python }}
           test-d14-hosted-api|${{ needs.test-d14-hosted-api.result }}|-
+          test-record-postgres|${{ needs.test-record-postgres.result }}|-
           surface-guard|${{ needs.surface-guard.result }}|-
           LEGS
 

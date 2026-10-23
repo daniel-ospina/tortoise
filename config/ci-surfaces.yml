@@ -1589,6 +1589,11 @@ surfaces:
   #
   # DB-free except its last leg, which SKIPS unless `TEST_RECORD_DB_URI` names a
   # Postgres carrying the record migrations — the `TEST_AUDIT_DB_URI` pattern.
+  # #9551 arms that leg in the DEDICATED `test-record-postgres` job
+  # (`.github/actions/postgres-provision` + the `[postgres]` extra, asserted to
+  # run with zero skips); THIS registration is what keeps the file in the fast
+  # matrix, where the same two legs still skip. Do not read the armed job as a
+  # replacement for it — the DB-free legs run here.
   - test_9078_record_written_by_production_path.py
   # #9192: the production caller of the record's tenant scope + the arming
   # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
