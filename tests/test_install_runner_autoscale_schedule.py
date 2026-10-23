@@ -521,6 +521,58 @@ def test_status_proves_the_schedule_would_actually_run(tmp_path):
     assert "gh is not on PATH" in res.stderr, res.stderr
 
 
+def test_status_fails_when_nothing_is_armed(tmp_path):
+    """⛔ "NOT installed" was exit 0 — the strictly worse state read as healthy.
+
+    The round's own contract is that a bring-up script can gate on `--status`. A non-zero answer
+    for "installed but inert" and a ZERO answer for "nothing is armed" would be backwards.
+    Mutation: drop `armed=0` from the NOT-installed branches -> rc 0 -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    res = _run(sb, "--status")
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "NOT installed" in res.stdout or "MISSING" in res.stdout, res.stdout
+
+    # …and after an install, the same box is armed: the difference is the schedule, not the box.
+    assert _run(sb).returncode == 0
+    assert _run(sb, "--status").returncode == 0
+
+
+def test_the_probe_runs_the_schedule_s_repo_and_pinned_environment(tmp_path):
+    """The probe must reproduce what the TIMER runs, or it green-lights a different schedule.
+
+    ⛔ Round 10 review, P3: the probes ignored `$ARGV_TAIL`, so with `RUNNER_AUTOSCALE_REPO` set
+    the installer validated this shell's repo while the timer served another — and they reproduced
+    only `RUNNER_AUTOSCALE_STATE_DIR`, not the HOME/PATH/RUNNER_AUTOSCALE_GH pins the unit and
+    plist exist to carry. A box inert BECAUSE of those pins still probed OK.
+    Mutation: drop `$ARGV_TAIL`/the pinned env from `probe()` -> no `--repo`, no pinned HOME -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    # a `gh` the installer can resolve at install time: the pin it then carries is what the probe
+    # must reproduce (without one, the plist renders the bare `gh` default and nothing is pinned).
+    _write_stub(sb["bin"], "gh", "#!/usr/bin/env bash\nexit 0\n")
+    _write_stub(
+        sb["bin"],
+        "py312_echo",
+        "#!/usr/bin/env bash\n"
+        'printf "ARGV:%s\\n" "$*" >> "$STUB_LOG/probe.log"\n'
+        'printf "HOME=%s\\n" "${HOME:-}" >> "$STUB_LOG/probe.log"\n'
+        'printf "GH=%s\\n" "${RUNNER_AUTOSCALE_GH:-}" >> "$STUB_LOG/probe.log"\n'
+        "exit 0\n",
+    )
+    env = dict(
+        sb["env"],
+        AUTOSCALE_PYTHON=str(sb["bin"] / "py312_echo"),
+        RUNNER_AUTOSCALE_REPO="someone/other-repo",
+    )
+    assert _run(sb, env=env).returncode == 0
+    log = (sb["log"] / "probe.log").read_text()
+    assert "--repo someone/other-repo" in log, log
+    assert f"HOME={sb['home']}" in log, log
+    # (the first ARGV line is the interpreter FLOOR CHECK, `-c …`, not the probe)
+    assert f"GH={sb['bin']}/gh" in log, f"the resolved gh must be pinned for the probe: {log}"
+
+
 def test_status_reports_a_healthy_probe(tmp_path):
     """The other direction: a measurable box is reported OK, and exit stays 0."""
     sb = _sandbox(tmp_path)

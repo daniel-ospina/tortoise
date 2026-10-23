@@ -283,8 +283,32 @@ cron_line() {
     "$sched" "$CRON_ENV" "$REPO" "$PYTHON" "$INSTALLED" "$ARGV_TAIL" "$LOG" "$LABEL-cron"
 }
 
+# ── the probe: run the guard the way the SCHEDULE will run it ─────────────────────────────────
+# ⛔ THE SCHEDULE'S ENVIRONMENT, NOT THE OPERATOR'S SHELL'S. The unit/plist pin HOME, PATH,
+# RUNNER_AUTOSCALE_GH and RUNNER_AUTOSCALE_PROVISIONER (each for a measured reason — see the
+# systemd render), and the timer serves `$RUNNER_AUTOSCALE_REPO` via `$ARGV_TAIL`. A probe that
+# does not reproduce those is a green light for a schedule that will behave differently: it would
+# measure this shell's repo and pool against a timer that serves another, and it would pass on a
+# box that is inert BECAUSE of a pin (round 10 review, P3).
+probe() {
+  local target="$1"
+  local -a penv=(
+    "HOME=$HOME"
+    "PATH=$GH_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    "RUNNER_AUTOSCALE_STATE_DIR=$STATE_DIR"
+  )
+  [ -n "${GH_BIN:-}" ] && penv+=("RUNNER_AUTOSCALE_GH=$GH_BIN")
+  [ -n "$PROVISIONER" ] && penv+=("RUNNER_AUTOSCALE_PROVISIONER=$PROVISIONER")
+  # shellcheck disable=SC2086  # $ARGV_TAIL is a deliberate word-split argv tail (" --repo o/n")
+  env "${penv[@]}" "$PYTHON" "$target" $ARGV_TAIL --json --status 2>&1
+}
+
 # ── status: "installed" is not "will fire" ────────────────────────────────────────────────────
 status() {
+  # `armed` = some scheduler entry exists for this schedule. A non-zero answer for "installed but
+  # inert" and a ZERO answer for "nothing is armed" would be backwards: the caller gates on this
+  # exit code, and "nothing armed" is the strictly worse state.
+  local armed=1
   if [ -f "$INSTALLED" ]; then
     local run_sum repo_sum
     run_sum="$(_sha256 "$INSTALLED" || true)"
@@ -310,14 +334,14 @@ status() {
   # skips it (the install's probe seam, same default).
   local probe_rc=0
   if [ -f "$INSTALLED" ] && [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
-    local probe
-    probe="$(RUNNER_AUTOSCALE_STATE_DIR="$STATE_DIR" "$PYTHON" "$INSTALLED" --json --status 2>&1)"
+    local probe_out
+    probe_out="$(probe "$INSTALLED")"
     probe_rc=$?
     if [ "$probe_rc" = "0" ]; then
-      echo "probe: OK (exit 0) — $(printf '%s' "$probe" | tail -1 | cut -c1-200)"
+      echo "probe: OK (exit 0) — $(printf '%s' "$probe_out" | tail -1 | cut -c1-200)"
     else
       echo "probe: FAILED (exit $probe_rc) — this schedule would fire and do NOTHING:" >&2
-      echo "       $(printf '%s' "$probe" | tail -1 | cut -c1-300)" >&2
+      echo "       $(printf '%s' "$probe_out" | tail -1 | cut -c1-300)" >&2
     fi
   fi
   case "$(platform)" in
@@ -330,24 +354,25 @@ status() {
         systemctl list-timers "$LABEL.timer" --all --no-pager 2>/dev/null | sed -n '1,2p'
         [ -f "$svc" ] || echo "WARNING: $svc is missing — the timer activates nothing"
       else
-        echo "NOT installed (no $tmr)"
+        echo "NOT installed (no $tmr)"; armed=0
       fi ;;
     cron)
       if crontab -l 2>/dev/null | grep -qF "$LABEL-cron"; then
         echo "installed: cron entry present"; crontab -l 2>/dev/null | grep -F "$LABEL-cron"
-      else echo "NOT installed (no $LABEL-cron in crontab)"; fi ;;
+      else echo "NOT installed (no $LABEL-cron in crontab)"; armed=0; fi ;;
     launchd)
       local plist="$AGENTS_DIR/$PLIST_LABEL.plist"
       if [ -f "$plist" ]; then
         echo "installed: $plist"
-        launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" || echo "loaded: NO (run without --status to load)"
-      else echo "NOT installed ($plist missing)"; fi ;;
+        launchctl list 2>/dev/null | grep -F "$PLIST_LABEL" || { echo "loaded: NO (run without --status to load)"; armed=0; }
+      else echo "NOT installed ($plist missing)"; armed=0; fi ;;
     none) echo "NOT installed AND CANNOT BE: no systemd and no cron on this box" >&2; return 2 ;;
     *) echo "unsupported platform: $(uname -s)" >&2; return 2 ;;
   esac
   # A schedule that is installed but cannot measure is a FAILURE of --status, not a note: the
-  # caller (a human, or a bring-up script) must be able to gate on it.
+  # caller (a human, or a bring-up script) must be able to gate on it. So is "nothing is armed".
   [ "$probe_rc" = "2" ] && return 2
+  [ "$armed" = "0" ] && return 2
   return 0
 }
 
@@ -422,11 +447,11 @@ esac
 # the tool's own run log (which it tolerates being unwritable); no schedule state exists yet, so a
 # refusal here leaves the box as it was. AUTOSCALE_SKIP_PROBE=1 arms it anyway.
 if [ "${AUTOSCALE_SKIP_PROBE:-0}" != "1" ]; then
-  probe="$(RUNNER_AUTOSCALE_STATE_DIR="$STATE_DIR" "$PYTHON" "$TOOL" --json --status 2>&1)"
+  probe_out="$(probe "$TOOL")"
   probe_rc=$?
   if [ "$probe_rc" = "2" ]; then
     echo "REFUSED: the guard cannot MEASURE on this box, so a schedule here would fire and do nothing." >&2
-    echo "         probe said: $(printf '%s' "$probe" | tail -1)" >&2
+    echo "         probe said: $(printf '%s' "$probe_out" | tail -1)" >&2
     echo "         fix that reading (gh on PATH, memory readable), or AUTOSCALE_SKIP_PROBE=1 to arm it anyway." >&2
     exit 2
   fi
