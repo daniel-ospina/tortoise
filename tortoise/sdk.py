@@ -38520,9 +38520,14 @@ class TortoiseSDK:
         entity read at, and is that still the source's current version?* Each row
         carries ``linkRelation`` (the link set it describes — always
         ``references`` here), ``linkRecordedVersion`` (the version recorded on
-        THAT link, i.e. the edge's own ``sourceVersion`` property),
-        ``sourceCurrentVersion`` (the source's version now) and ``linkCurrency``
-        (the verdict). Every one of those names is scoped to the link on purpose:
+        THAT link), ``sourceCurrentVersion`` (the source's version now) and
+        ``linkCurrency`` (the verdict). ⚠ The two versions are the NORMALISED
+        operands — ``search_engine.version_operand``, i.e. blank-is-absent and
+        strip-tested — NOT the raw properties: an edge holding ``"   "`` reports
+        ``""``, which is what keeps this reader's verdict identical to
+        ``read_currency_links``' for the same link (a truthiness comparison would
+        read ``"   " == "   "`` as ``current``). A caller that needs the stored
+        bytes must read the property itself. Every one of those names is scoped to the link on purpose:
         §4.6's aggregate reads the Point's ``extractedFrom`` link, which records a
         version of its OWN under the same ``sourceVersion`` property name, so a
         bare ``sourceVersion``/``currency`` on a Point-addressed call is the
