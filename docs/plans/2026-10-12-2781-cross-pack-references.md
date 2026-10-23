@@ -53,9 +53,10 @@ cascade (bare `nearMisses` in `dev`/`marketing`) into two reported gaps, which c
 not do.
 
 **OVERRIDES:** the blanket "a namespaced ref into an unloaded namespace is always a missing peer"
-reading of Clause 1 — at the relation `nearMisses` site such a ref names no predicate or semantics
-value at all (they are bare by contract, #2030), so "install pack X" cannot resolve it and it stays
-fatal (#9663). Recorded on #2781; the residual (a pack may still DECLARE a namespaced predicate) is
+reading of Clause 1 — at the relation `nearMisses` site such a ref names no entry an **install**
+could supply (predicates and semantics values are bare by contract, #2030), so "install pack X"
+cannot resolve it and it stays fatal (#9663). Recorded on #2781; the residual (a pack may still
+DECLARE a namespaced predicate, which `_validate` accepts, and such a ref then does resolve) is
 #9760.
 
 **Cost, stated.** A pack with a declared-but-absent dependency and a typo'd **bare** reference
