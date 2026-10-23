@@ -322,9 +322,12 @@ def test_out_of_order_block_does_not_instruct_apply():
     # The repair is printed on this branch too, so the #2240 owner bound rides
     # the shared note here as well (round-3 review finding).
     assert "#2240" in r.stdout, r.stdout
-    # The refused action is withheld, not merely labelled.
+    # The refused action is withheld, not merely labelled — INCLUDING the
+    # "dispatch is the sanctioned lane path" line, which is a forward reference
+    # that must not print when no dispatch line follows it (round-7 finding).
     assert "apply migrations first" not in r.stdout, r.stdout
     assert "gh workflow run supabase-deploy.yml" not in r.stdout, r.stdout
+    assert "supabase-deploy" not in r.stdout, r.stdout
 
 
 def test_in_order_block_still_instructs_apply():
@@ -498,12 +501,16 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     # destination is the one the command uses.
     assert (
         "git mv supabase/migrations/20260813000005_second.sql"
-        " supabase/migrations/<next-free-prefix>_second.sql"
+        " supabase/migrations/<next-free-prefix-2>_second.sql"
     ) in r.stdout, r.stdout
     # Nothing shape-specific to a `_a`/`_b` fixture pair, and never the old
     # rename-onto-the-other-duplicate form ("fatal: destination exists").
     assert "_b.sql" not in r.stdout, r.stdout
     assert "git mv 20260813000005_a.sql" not in r.stdout, r.stdout
+    # The ordering bound applies here too: `--include-all` applies the whole
+    # pending set in filename order, so a rename to a prefix BELOW prod's newest
+    # applied version is the #4278 hazard this gate refuses elsewhere.
+    assert "sorts AFTER 0001" in r.stdout, r.stdout
 
     # Every colliding prefix gets its own operand: naming one of two leaves the
     # next run red.
@@ -519,6 +526,23 @@ def test_diagnosis_reaches_the_duplicate_branch_without_a_blocking_member():
     assert r2.returncode == 1, r2.stdout
     assert "git mv supabase/migrations/20260813000005_second.sql" in r2.stdout, r2.stdout
     assert "git mv supabase/migrations/20260813000006_second.sql" in r2.stdout, r2.stdout
+
+    # N files at one prefix need N-1 renames, so N-1 operands; and a filename with
+    # a space must survive whole (no `basename`/`xargs` word-splitting) — both
+    # round-7 findings, both of which made the printed command unrunnable.
+    r3 = _run_fixture(
+        {
+            "20260813000005_alpha.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_beta gamma.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+            "20260813000005_delta.sql": "CREATE INDEX IF NOT EXISTS i3 ON public.t (c);\n",
+        },
+        ["0001"],
+    )
+    assert r3.returncode == 1, r3.stdout
+    assert "git mv supabase/migrations/20260813000005_beta gamma.sql" in r3.stdout, r3.stdout
+    assert "git mv supabase/migrations/20260813000005_delta.sql" in r3.stdout, r3.stdout
+    assert "git mv supabase/migrations/20260813000005_alpha.sql" not in r3.stdout, r3.stdout
+    assert "Repeat until ONE file remains" in r3.stdout, r3.stdout
 
 
 def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():

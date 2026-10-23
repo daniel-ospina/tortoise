@@ -214,34 +214,60 @@ fi
 if [ -n "$BLOCKING" ] || [ -n "$DUP_LOCAL_VERSIONS" ]; then
   echo "  ⛔ OWNER-ONLY for any remedy below that runs DDL DIRECTLY, or 'migration repair':"
   echo "     a lane must not run prod DDL or repair, and no auto-dispatch exists (#2240)."
-  echo "     Dispatching supabase-deploy (below) IS the lane-sanctioned path (runbook §8.6)."
+  # ... and the sanctioned-lane line only where a dispatch line is actually printed.
+  # The all-out-of-order state (BLOCK_SAFE empty) deliberately prints NO apply
+  # command — its whole point is "do NOT apply these as-is" (#4278) — so naming
+  # supabase-deploy there both referenced nothing "(below)" and re-offered the
+  # action the gate refuses (#9613 review round 7).
+  if [ -n "$DUP_LOCAL_VERSIONS" ] || [ -n "$BLOCK_SAFE" ]; then
+    echo "     Dispatching supabase-deploy IS the lane-sanctioned path (runbook §8.6)."
+  fi
 fi
 
 if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   echo "  BLOCKING duplicate migration version prefixes (abort \`supabase db push\` AND mask drift state — see #1235):"
   for v in $DUP_LOCAL_VERSIONS; do
-    files="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | xargs -n1 basename | tr '\n' ' ')"
-    echo "    - $v  [$files]"
+    dup_paths="$(ls -1 "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null || true)"
+    files=""
+    # ⛔ ONE PATH PER LINE, read with IFS= — no `basename`/`xargs`, which
+    # word-split a filename containing a space into a broken command (a name the
+    # CLI pattern ^[0-9]+_(.*)\.sql$ accepts; measured round-7 finding).
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      files="$files ${p##*/}"
+    done <<DUP_LIST
+$dup_paths
+DUP_LIST
+    echo "    - $v  [$files ]"
   done
-  # ⛔ THE OPERAND IS THE ACTUAL SECOND FILE, NOT `${v}_b.sql` (review rounds 5-6).
+  # ⛔ THE OPERANDS ARE THE ACTUAL FILES, NEVER `${v}_b.sql` (review rounds 5-7).
   # The printed remedy was `git mv ${v}_a.sql ${v}_b.sql`, which renames one
   # duplicate ONTO the other — "fatal: destination exists" (rc 128) — and its
   # replacement `${v}_b.sql → <next-free>_b.sql` was runnable only for filenames
-  # literally shaped `_a`/`_b` (the test fixture's shape). Every duplicate prefix
-  # in this repo's history has DESCRIPTIVE names (0011x3, 0012x3, 0015x3,
-  # 20261022000001 x4, …), so a hardcoded `_b` aborts with "fatal: bad source".
-  # Print the real second filename, with the migrations path, one per prefix:
-  # a report listing two colliding prefixes needs both renamed, and naming only
-  # one leaves the next run red.
-  echo "  Rename operand per prefix (the SECOND file listed, left in place: the first) —"
-  echo "  run from the repo root, once per prefix above:"
+  # literally shaped `_a`/`_b` (the test fixture's shape). Every duplicate in this
+  # repo's history is DESCRIPTIVELY named (0011, 0012, 0015, 20261022000001 today
+  # — measured across all 149 commits touching supabase/migrations: the max ever
+  # seen at one prefix is TWO files), so a hardcoded `_b` aborts with
+  # "fatal: bad source". Print the real name of every file but the first, per
+  # prefix, with the migrations path so the command runs from the repo root.
+  echo "  Rename operand(s) — the FIRST file listed at each prefix stays put, every other"
+  echo "  file at that prefix moves to a free prefix (run from the repo root):"
   for v in $DUP_LOCAL_VERSIONS; do
-    second="$(ls "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null | sed -n 2p | xargs -n1 basename 2>/dev/null || true)"
-    if [ -n "$second" ]; then
-      slug="${second#${v}_}"
-      echo "    git mv supabase/migrations/$second supabase/migrations/<next-free-prefix>_$slug"
-    fi
+    dup_paths="$(ls -1 "$MIGRATIONS_DIR"/${v}_*.sql 2>/dev/null || true)"
+    n=0
+    while IFS= read -r p; do
+      [ -n "$p" ] || continue
+      n=$((n + 1))
+      [ "$n" -ge 2 ] || continue
+      name="${p##*/}"
+      slug="${name#${v}_}"
+      echo "    git mv supabase/migrations/$name supabase/migrations/<next-free-prefix-$n>_$slug"
+    done <<DUP_PATHS
+$dup_paths
+DUP_PATHS
   done
+  echo "    Repeat until ONE file remains at each prefix above — a prefix that still"
+  echo "    collides is re-listed by the next run."
   if [ -n "$BLOCK_OOO" ]; then
     # The same refusal applies here: once the rename is done the deploy still
     # runs `--include-all` over the WHOLE repo-pending set, so a repo-ahead
@@ -259,7 +285,13 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "    3. then apply via supabase-deploy dispatch."
   else
     echo "  Remediation: pure-prefix rename — move the operand(s) printed above to a free"
-    echo "    prefix (content unchanged), then apply via supabase-deploy dispatch."
+    if [ -n "$REMOTE_MAX" ]; then
+      echo "    prefix that sorts AFTER $REMOTE_MAX (content unchanged: an earlier prefix"
+      echo "    would be applied out of order by --include-all, #4278), then apply via"
+      echo "    supabase-deploy dispatch."
+    else
+      echo "    prefix (content unchanged), then apply via supabase-deploy dispatch."
+    fi
   fi
   exit 1
 fi
