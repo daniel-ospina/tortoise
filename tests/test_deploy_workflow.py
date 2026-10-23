@@ -2504,6 +2504,34 @@ def test_the_record_arming_verify_recipe_reads_a_surface_that_exists():
         "the bounded arm names no counting site, so a reader cannot check the "
         "claim that `no_tenant` is designed on those lanes"
     )
+    # The bounded arm must be EXECUTABLE. The first draft sent the operator to
+    # "attribute any `no_tenant` growth … through recipe 1's log line", but that
+    # line (`record_writer.write_live_record`, the `no_tenant` branch) logs only
+    # the env-pair note — no request identity, no org/graph id, not even the
+    # record type — so per-request attribution is impossible from the log and the
+    # arm's only remaining branch reds a healthy deployment (#9585 review P2).
+    assert re.search(r"\*\*no\*\*\s+request\s+identity", section), (
+        "the section claims the `no_tenant` log line can attribute growth to a "
+        "request — it carries no request identity, and of the four "
+        "`record_writer` reasons only `circuit_open` carries the record type, so "
+        "that step cannot be performed"
+    )
+    assert re.search(r"capture ran \*\*unbound\*\*", section), (
+        "the section gives no executable discriminator for `no_tenant` growth — "
+        "an unbound capture is the one state that makes the growth the capture's"
+    )
+    # ... and recipe 1's own scope claim: the SDK's `no_journal` /
+    # `seam_unimportable` reasons go through `TortoiseSDK._record_write_failure`,
+    # which logs at WARNING with the SAME prefix, so the grep DOES return them.
+    # Only `no_durable_journal` (DEBUG) is missed (#9585 review P2).
+    assert not re.search(r"Two readings are NOT", section), (
+        "the section claims two readings are missing from the failure grep — the "
+        "SDK's `no_journal` / `seam_unimportable` lines carry the same WARNING "
+        "prefix and ARE returned; only the DEBUG `no_durable_journal` is not"
+    )
+    assert re.search(r"does \*\*not\*\* return is the `no_durable_journal`", section), (
+        "the section no longer names the ONE reading the failure grep misses"
+    )
 
 
 def _guarded_append(name: str) -> str:

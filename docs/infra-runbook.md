@@ -2827,10 +2827,13 @@ the counter either.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
-   `write_failed`), and this needs no auth. ⚠️ **Two readings are NOT in this
-   grep**: the `no_durable_journal` decline is logged at **DEBUG** (it is the
-   healthy M2 path, not a failure), and the `no_journal` / `seam_unimportable`
-   reasons are emitted by the SDK (`tortoise/sdk.py`), not by `record_writer.py`:
+   `write_failed`), and this needs no auth. The SDK's own `no_journal` /
+   `seam_unimportable` reasons are ALSO returned by the grep below: they go through
+   `TortoiseSDK._record_write_failure` (`tortoise/sdk.py`), which logs at WARNING
+   with the same prefix — that they are emitted by the SDK rather than by
+   `record_writer.py` is an attribution, not a grep fact. ⚠️ The ONE reading this
+   grep does **not** return is the `no_durable_journal` decline, logged at **DEBUG**
+   because it is the healthy M2 path, not a failure:
 
    ```bash
    fly logs -a tortoise-y4mjjq | grep "the record write did not happen"
@@ -2942,11 +2945,21 @@ why the two recipes above are the verification and the deploy status is not.
    These counters are **process-global**, so a before/after delta also covers
    whatever else the process served: ordinary traffic on a healthy armed
    deployment can grow `no_tenant` with nothing wrong. So make the capture
-   **graph-bound** — its own writes cannot land in `no_tenant` — and attribute any
-   `no_tenant` growth inside the window to a specific request through recipe 1's
-   log line rather than to the capture. Growth with no log line to attribute it
-   to is a fail-and-fix; the route is never `TORTOISE_RECORD_SINGLE_TENANT`, which
-   the #9192 cross-tenant note below forbids.
+   **graph-bound** — a graph-bound credential cannot land in `no_tenant` — and
+   treat `no_tenant` growth as the residual it then is: it is a fail-and-fix only
+   when the capture ran **unbound**, or when item 1's row did not appear. ⛔ **Do
+   not try to attribute that growth per request from the log.** The line an
+   unbound capture produces carries the env-pair diagnosis and **no** request
+   identity and no record type — and `no_tenant` has a second emission, for a
+   malformed CARRIED tenant, that echoes only that pair — so the log cannot tell
+   two requests apart. (Of the four `record_writer` reasons, `circuit_open` is the
+   only one that carries the record type; `malformed_dsn` and `write_failed` carry
+   the exception text instead, and the SDK's `no_journal` line names the record
+   type inside its exception text.)
+   A bar that required per-request attribution would be unexecutable and would
+   red a healthy deployment on its default branch. The route is never
+   `TORTOISE_RECORD_SINGLE_TENANT`, which the #9192 cross-tenant note below
+   forbids.
 
 ⛔ **Do NOT put it in `fly.toml`'s `[env]`.** A DSN carries a password, so a
 versioned `[env]` entry is a committed credential; and a Fly **secret** shadows
