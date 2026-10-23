@@ -2499,13 +2499,15 @@ def _raising(message: str, pgcode: str | None = None, seen: list[str] | None = N
 def test_a_driver_failure_of_the_COUNT_leg_is_a_documented_class_not_a_traceback():
     """P2: `connector(dsn)` stood outside every `try`, so `OperationalError` escaped.
 
-    The first *connection* either mode opens is the role-posture read (#9801);
-    the first *count* is still the drill's vacuity read. `_default_connector`'s
-    last statement is a bare `psycopg2.connect(...)`, so a refused connection /
-    bad password / absent database used to leave `main()` as an interpreter
-    traceback: exit 1 ("try again") on faults only a config edit clears, and no
-    sentence from the class table the verb documents. Pre-fix this raises
-    `_DriverError`.
+    The first *connection* either mode opens is the role-posture read (#9801) —
+    from `create_record_backup` in backup-only mode, from `run_restore_drill` in
+    drill mode. The first *count* is the drill's emptiness check (`before`), or,
+    in backup-only mode, `create_record_backup`'s own manifest count; there is no
+    drill at all in backup-only mode. `_default_connector`'s last statement is a
+    bare `psycopg2.connect(...)`, so a refused connection / bad password / absent
+    database used to leave `main()` as an interpreter traceback: exit 1 ("try
+    again") on faults only a config edit clears, and no sentence from the class
+    table the verb documents. Pre-fix this raises `_DriverError`.
     """
     with pytest.raises(rb.RecordBackupError) as excinfo:
         rb.record_row_counts(DSN, connect=_raising("connection ... failed: refused"))
@@ -2557,18 +2559,34 @@ def test_the_verb_exits_the_CLASS_code_when_the_ROLE_leg_cannot_connect(
 
     Since #9801 the gate is the FIRST connection either path opens, so the
     `_default_connector` failure this arm injects happens on the ROLE-POSTURE
-    read, not on the count leg it used to reach — the mapping is the same
-    (`require_bypassing_role` routes through the same `_connect` →
-    `_connection_failure` pair), but the leg being proven is the gate's. The
-    count leg's own end-to-end proof is
-    `test_the_verb_exits_the_CLASS_code_when_the_COUNT_leg_cannot_connect` below,
-    which lets the posture read succeed and fails the second connect.
+    read — the mapping is the same (`require_bypassing_role` routes through the
+    same `_connect` → `_connection_failure` pair as the count leg). Naming the
+    leg is not enough to prove it, because an arm that only asserts the exit code
+    is satisfied by a run that never opened the gate and failed on the count
+    instead, so the arm also spies both legs: the gate must be REACHED and the
+    count must NOT be. The count leg's own end-to-end proof is
+    `test_the_verb_exits_the_CLASS_code_when_the_COUNT_leg_cannot_connect` below.
 
     Pre-fix this is not an exit code at all — the exception leaves `main()`.
     """
+    reached: list[str] = []
+    real_gate, real_count = rb.require_bypassing_role, rb.record_row_counts
+
+    def gate(*a, **kw):
+        reached.append("gate")
+        return real_gate(*a, **kw)
+
+    def count(*a, **kw):
+        reached.append("count")
+        return real_count(*a, **kw)
+
+    monkeypatch.setattr(rb, "require_bypassing_role", gate)
+    monkeypatch.setattr(rb, "record_row_counts", count)
     monkeypatch.setattr(rb, "_default_connector", _raising("could not connect", pgcode))
     rc = _cli(monkeypatch, ["record-backup", "--record-dsn", DSN], patch_connector=False)
     captured = capsys.readouterr()
+    assert reached == ["gate"], (
+        f"the failure must land on the role gate BEFORE any count — reached {reached}")
     assert rc == expected, f"stdout={captured.out!r} stderr={captured.err!r}"
     assert "Traceback" not in captured.err
     assert "could not be reached" in captured.err
