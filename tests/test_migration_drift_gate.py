@@ -553,9 +553,14 @@ def test_the_printed_rename_command_actually_runs(tmp_path):
         ["bash", str(SCRIPT)], capture_output=True, text=True, env=env, cwd=REPO_ROOT
     )
     assert r.returncode == 1, r.stdout
-    lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("git mv ")]
+    # Two files at the prefix, so the report prints BOTH choices as (a)/(b); this
+    # test runs (a) — keep the first listed file, move the other.
+    lines = [
+        ln.strip() for ln in r.stdout.splitlines() if ln.strip().startswith("(a) git mv ")
+    ]
     assert len(lines) == 1, r.stdout
-    cmd = lines[0].replace("NEXTFREE1", "20261024000001")
+    assert any(ln.strip().startswith("(b) git mv ") for ln in r.stdout.splitlines()), r.stdout
+    cmd = lines[0][len("(a) ") :].replace("NEXTFREE1", "20261024000001")
 
     work = tmp_path / "repo"
     (work / "supabase" / "migrations").mkdir(parents=True)
@@ -568,9 +573,13 @@ def test_the_printed_rename_command_actually_runs(tmp_path):
     )
     assert run.returncode == 0, f"{cmd!r} -> {run.stderr}"
     names = sorted(p.name for p in (work / "supabase" / "migrations").iterdir())
-    # Exactly one file left at the old prefix; the other moved, name intact.
+    # Exactly one file left at the old prefix; the other moved with its name
+    # INTACT — pinned to the exact expected name, because a quoting bug that ate
+    # the slug still satisfies a bare `startswith` (round-9 finding).
     assert names.count("20260813000005_alpha.sql") == 1, names
-    assert any(n.startswith("20261024000001_") for n in names), names
+    expected = "20261024000001_" + nasty[len("20260813000005_") :]
+    assert expected in names, (expected, names)
+    assert nasty not in names, names
     # ... and pasting it did NOT run the command substitution in the filename.
     assert not (work / "PWNED").exists(), "the printed command executed a filename"
 

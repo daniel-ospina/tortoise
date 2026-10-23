@@ -228,13 +228,29 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   echo "  BLOCKING duplicate migration version prefixes (abort \`supabase db push\` AND mask drift state — see #1235):"
   for v in $DUP_LOCAL_VERSIONS; do
     files=""
+    n_files=0
     # ⛔ NUL-SAFE ENUMERATION: a filename may contain a space (accepted by the
-    # CLI pattern ^[0-9]+_(.*)\.sql$) and, pathologically, a newline. `xargs`,
-    # `basename` and unquoted globbing all split those into a broken command —
-    # measured round-7 and round-8 findings.
+    # CLI pattern ^[0-9]+_(.*)\.sql$) and, pathologically, a newline/quote.
+    # `xargs`, `basename` and unquoted globbing split those into a broken command
+    # (rounds 7-8); a raw echo also rendered a newline name across two lines
+    # (round 9), so every printed name goes through %q.
+    # `find -L`: `DRIFT_MIGRATIONS_DIR` (a test seam) may be a symlink; without
+    # dereferencing, the listing came out EMPTY while detection still saw the
+    # duplicate — a report with no operand and a remedy pointing at nothing
+    # (round-9 finding).
     while IFS= read -r -d '' p; do
-      files="${files:+$files }${p##*/}"
-    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+      n_files=$((n_files + 1))
+      printf -v q '%q' "${p##*/}"
+      files="${files:+$files }$q"
+    done < <(find -L "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+    # ⛔ FAIL CLOSED: `sort -z` is not POSIX, and a process substitution's failure
+    # does not propagate under `pipefail`. If enumeration yields nothing for a
+    # prefix that WAS detected, the report cannot be trusted (it would print a
+    # remedy with no operand) — refuse rather than print it (round-9 finding).
+    if [ "$n_files" -eq 0 ]; then
+      echo "check-migration-drift: could not enumerate files at duplicate prefix $v — refusing to print a remedy (exit 2)" >&2
+      exit 2
+    fi
     echo "    - $v  [$files]"
   done
   # ⛔ THE OPERANDS ARE THE ACTUAL FILES, NEVER `${v}_b.sql` (review rounds 5-7).
@@ -247,21 +263,40 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   # seen at one prefix is TWO files), so a hardcoded `_b` aborts with
   # "fatal: bad source". Print the real name of every file but the first, per
   # prefix, with the migrations path so the command runs from the repo root.
-  echo "  Rename operand(s) — at each prefix above keep ONE file and move each file listed"
-  echo "  here to its own prefix. Operands are shell-quoted; replace NEXTFREE<n> with a"
-  echo "  free NUMERIC prefix (^[0-9]+_) — ONE per operand — and run from the repo root:"
+  echo "  Rename operand(s) — at each prefix above keep ONE file. BOTH choices are"
+  echo "  printed where the prefix holds two files: run exactly ONE line per prefix, after"
+  echo "  checking which file's DDL prod already has ('supabase db diff --linked')."
+  echo "  Operands are shell-quoted; replace NEXTFREE<n> with a free NUMERIC prefix"
+  echo "  (^[0-9]+_) — ONE per operand — and run from the repo root:"
   dup_n=0
   for v in $DUP_LOCAL_VERSIONS; do
-    seen=0
+    names=()
     while IFS= read -r -d '' p; do
-      seen=$((seen + 1))
-      [ "$seen" -ge 2 ] || continue
+      names+=("${p##*/}")
+    done < <(find -L "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+    n_pref=${#names[@]}
+    [ "$n_pref" -ge 2 ] || continue
+    # (a) the default: keep the FIRST listed file, move the rest.
+    i=1
+    while [ "$i" -lt "$n_pref" ]; do
       dup_n=$((dup_n + 1))
-      name="${p##*/}"
+      name="${names[$i]}"
       slug="${name#${v}_}"
-      printf '    git mv %q %q\n' "supabase/migrations/$name" \
+      printf '    (a) git mv %q %q\n' "supabase/migrations/$name" \
         "supabase/migrations/NEXTFREE${dup_n}_$slug"
-    done < <(find "$MIGRATIONS_DIR" -maxdepth 1 -name "${v}_*.sql" -print0 2>/dev/null | sort -z)
+      i=$((i + 1))
+    done
+    # (b) the inverted choice, only when the prefix holds exactly two files: if
+    # prod already has the SECOND file's DDL, the first is the one to move.
+    # Printing only (a) handed the reader a command that performs the outcome the
+    # note above forbids, with no line for the other choice (round-9 finding).
+    if [ "$n_pref" -eq 2 ]; then
+      dup_n=$((dup_n + 1))
+      name="${names[0]}"
+      slug="${name#${v}_}"
+      printf '    (b) git mv %q %q\n' "supabase/migrations/$name" \
+        "supabase/migrations/NEXTFREE${dup_n}_$slug"
+    fi
   done
   # ⛔ THE GATE CANNOT SEE WHICH FILE'S DDL PROD ALREADY HAS. When the colliding
   # version IS recorded, "keep the first listed one" can keep the file that never
@@ -270,10 +305,15 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   # NEVER applied, and the next run is green because the version is recorded —
   # the silent #1001 loss this gate exists to prevent. Same limit the OUT OF
   # ORDER block states; it belongs here too (round-8 review finding).
-  if [ -n "$REMOTE_MAX" ] && [ -z "$BLOCK_OOO" ]; then
-    echo "  ⚠️ Which file to KEEP is a prod question this gate cannot answer: check each file's"
-    echo "     objects in prod ('supabase migration list --linked', 'supabase db diff --linked')"
-    echo "     and keep the one whose DDL prod already has — not simply the first listed."
+  # Gated on prod having ANY applied history, NOT on `-z "$BLOCK_OOO"`: an
+  # unrelated out-of-order version suppressed this warning in exactly the state it
+  # describes (a duplicate whose version IS recorded — round-9 finding), and
+  # `supabase migration list --linked` cannot answer "which file" (it lists
+  # VERSIONS; only a schema diff can tell the two files' DDL apart).
+  if [ -n "$REMOTE_MAX" ]; then
+    echo "  ⚠️ Which file to KEEP is a prod question this gate cannot answer: run"
+    echo "     'supabase db diff --linked' and keep the one whose objects prod already has,"
+    echo "     then run exactly ONE of the operand lines above for that prefix."
   fi
   echo "    Repeat until ONE file remains at each prefix above — a prefix that still"
   echo "    collides is re-listed by the next run."
@@ -286,7 +326,7 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
     echo "  OUT OF ORDER after the rename (older than prod's newest applied version $REMOTE_MAX) — resolve these FIRST:$BLOCK_OOO"
     echo '    The deploy runs `supabase db push --include-all`, which applies the whole repo-pending set.'
     echo "  Remediation (in this order):"
-    echo "    1. rename the operand(s) printed above to a free prefix that sorts AFTER $REMOTE_MAX;"
+    echo "    1. rename ONE operand per prefix (line (a) or (b) above) to a free prefix that sorts AFTER $REMOTE_MAX;"
     echo "    2. resolve each OUT OF ORDER version above (never applied -> forward migration;"
     echo "       already applied but unrecorded -> supabase migration repair --linked"
     echo "       --status applied <version> — OWNER ACTION, a lane must not run prod DDL"

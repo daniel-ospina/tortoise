@@ -406,11 +406,11 @@ assert_contains "$PACK_BODY" "SKIPPED" "(control) the pack-smoke body DOES state
 FENCE_REPORT="$FIX/drift-report-fence.txt"
 {
   echo "check-migration-drift: repo migrations vs prod"
-  # Single-quoted fixture: it carries a literal fence and backslashes, so the
-  # heading drops the apostrophe in "prod's" (the same report verbatim is in the
-  # double-quoted fixtures above). Round-8 review flagged the divergence; this is
-  # the reason, and the assertion below matches the PREFIX either way.
-  echo '  BLOCKING repo-ahead migrations (repo has them; supabase_migrations.schema_migrations has NO row):'
+  # Exact shipped heading (double-quoted: the heading carries an apostrophe and no
+  # fence, so nothing forces the single-quoted form). Round-9 review: the earlier
+  # single-quoted variant silently diverged from what the gate emits, and nothing
+  # in this case asserts on the heading, so the drift was undetectable.
+  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):"
   echo "    - 20260926000002   # see ###\`\`\` the runbook"
   echo '  ```'
   echo '  Remediation — decide PER VERSION, from prod:'
