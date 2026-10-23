@@ -280,6 +280,96 @@ def grade_label(answer: str, hypothesis: str) -> bool:
     return classify_answer(answer, hypothesis) is AnswerGrade.CORRECT
 
 
+#: The benchmark's own multi-variant gold convention (#2976). A gold answer may
+#: ship several acceptable readings in one string:
+#:
+#:     7 days. 8 days (including the last day) is also acceptable.
+#:
+#: No reasonable answer contains that string verbatim, so strict single-string
+#: containment scores a substantively correct answer WRONG. This marker is what
+#: the benchmark's own formatting uses to separate the variants; splitting on
+#: ANY sentence instead would let an incidental clause match and inflate the
+#: number, so the split is marker-only on purpose.
+GOLD_VARIANT_MARKER = "is also acceptable"
+
+#: The ``--judge-model`` sentinel that selects the deterministic,
+#: variant-aware containment instrument (:class:`VariantContainmentJudge`)
+#: instead of a transport-backed LLM judge.
+VARIANT_CONTAINMENT_SPEC = "variant-containment"
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split on sentence boundaries without adding a dependency."""
+    out: list[str] = []
+    buf: list[str] = []
+    for i, ch in enumerate(text):
+        buf.append(ch)
+        if ch in ".!?" and (i + 1 == len(text) or text[i + 1].isspace()):
+            out.append("".join(buf))
+            buf = []
+    if buf:
+        out.append("".join(buf))
+    return out
+
+
+def _strip_acceptable_wrapper(text: str) -> str:
+    """Drop the benchmark's own acceptability wrapper from a variant.
+
+    The variants ship with trailing prose that is not part of the answer
+    ("(including the last day) is also acceptable"), so the wrapper is
+    removed before the containment check.
+    """
+    t = text.strip()
+    low = t.lower()
+    idx = low.find(GOLD_VARIANT_MARKER)
+    if idx >= 0:
+        t = t[:idx]
+    t = t.strip()
+    if t.endswith(")"):
+        depth = 0
+        for j in range(len(t) - 1, -1, -1):
+            if t[j] == ")":
+                depth += 1
+            elif t[j] == "(":
+                depth -= 1
+                if depth == 0:
+                    t = t[:j].strip()
+                    break
+    return t.strip(_TRAILING_PUNCTUATION).strip()
+
+
+def gold_variants(answer: str | int | float | None) -> list[str]:
+    """The acceptable readings of a (possibly multi-variant) gold answer.
+
+    Splits ONLY on the benchmark's ``"is also acceptable"`` convention: a gold
+    with no such marker is a SINGLE variant even when it spans several
+    sentences, so incidental clauses in a multi-sentence gold cannot inflate a
+    grade. Non-string golds are coerced (the benchmark ships integer golds, e.g.
+    the temporal-reasoning ``4``).
+    """
+    text = str(answer) if answer is not None else ""
+    text = text.strip()
+    if not text:
+        return []
+    if GOLD_VARIANT_MARKER not in text.lower():
+        return [_strip_acceptable_wrapper(text)]
+    variants = [v for v in (_strip_acceptable_wrapper(s)
+                            for s in _split_sentences(text)) if v]
+    return variants or [text.strip(_TRAILING_PUNCTUATION).strip()]
+
+
+def grade_variant_aware(answer: str | int | float | None,
+                        hypothesis: str) -> bool:
+    """Correct iff ANY gold variant is contained in the hypothesis (#2976).
+
+    The strict containment rule (:func:`grade_label`) applied per variant. An
+    empty hypothesis is never correct and an empty gold is never a free pass.
+    """
+    if not _normalize_answer_text(hypothesis):
+        return False
+    return any(v and grade_label(v, hypothesis) for v in gold_variants(answer))
+
+
 class Judge(Protocol):
     model_id: str
     def judge(self, *, question_type: str, question: str, answer: str,
@@ -436,6 +526,54 @@ class MockJudge:
         return grade_label(answer, hypothesis)
 
 
+class VariantContainmentJudge:
+    """Deterministic, variant-aware containment judge (#2976).
+
+    WHY THIS EXISTS. The official judge (``gpt-4o-2024-08-06``) was blocked
+    when #2976's ceiling was measured (the OpenRouter key hit its monthly
+    limit), so the run graded with a deterministic **variant-aware
+    containment** check instead of the LLM judge. That rule is not a weaker
+    proxy invented for convenience — it is exactly the official rubric's
+    containment test applied to the benchmark's OWN multi-variant gold format:
+
+        gold:  "7 days. 8 days (including the last day) is also acceptable."
+
+    Plain single-string containment (:class:`MockJudge`) scores that answer
+    WRONG even when the hypothesis says "7 days", so it is a FLOOR (25/52 on
+    the #2976 rows, against 42/52 variant-aware). This judge makes the
+    variant-aware figure reproducible **without a key**, which is what allows
+    a before/after comparison to be apples-to-apples under one grader.
+
+    It is a MEASUREMENT INSTRUMENT, never a product surface: a Tortoise answer
+    is never graded by it. Selecting it is a DECLARED substitution — the run
+    records ``judge_model="variant-containment"`` in its methodology, so no
+    published number can inherit it silently.
+
+    Abstention questions (`*_abs`) keep the MockJudge contract: correct iff the
+    hypothesis carries an unanswerability marker.
+    """
+
+    model_id = "variant-containment"
+    model_spec = VARIANT_CONTAINMENT_SPEC
+    #: The pre-flight judge-key check short-circuits on this: a deterministic
+    #: instrument has no transport, so there is no key to verify (and requiring
+    #: one would make the keyless reproduction impossible).
+    no_transport = True
+
+    def ping(self, probe: str) -> str:
+        del probe
+        return "variant-containment judge (no transport)"
+
+    def judge(self, *, question_type: str, question: str, answer: str,
+              hypothesis: str, abstention: bool) -> bool:
+        if not hypothesis:
+            return False
+        if abstention:
+            low = hypothesis.lower()
+            return any(m in low for m in MockJudge._ABSTRACTION_MARKERS)
+        return grade_variant_aware(answer, hypothesis)
+
+
 class ScriptedSemanticJudge:
     """Deterministic scripted stand-in for the semantic LLM judge on offline
     lanes (issue #2071 CI fixtures / key-free harness runs).
@@ -485,6 +623,11 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     """
     if mock:
         return MockJudge()
+    # #2976: the deterministic, variant-aware containment instrument — selected
+    # by NAME (no transport, no key), and recorded in methodology as
+    # ``judge_model="variant-containment"`` so the substitution is never silent.
+    if spec == VARIANT_CONTAINMENT_SPEC:
+        return VariantContainmentJudge()
     raw_spec = spec or os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip() or DEFAULT_JUDGE_MODEL
     provider, model_id = _parse_model_spec(raw_spec)
     resolved = _resolve_provider()
