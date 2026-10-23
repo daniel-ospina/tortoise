@@ -79,7 +79,7 @@ import logging
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from .live import canonical_direction, direction_flows
+from .live import direction_flows
 
 logger = logging.getLogger(__name__)
 
@@ -273,11 +273,10 @@ def factor_direction(direction: str | None, source_classes: Iterable[str] | None
         # function's DROP signal, and ``direction_flows(None)`` is (True, True)
         # — an absent token means the mutual default, which is a FLOWING
         # direction, so it must not be confused with "no leg may flow".
+        # (This is also the ONLY both-legs-survive exit: the two blocks below
+        # can only ever clear a leg, never restore one, so "both still flow but
+        # the token changed" cannot occur.)
         return direction if direction is not None else "<->"
-    if new_fwd and new_bwd:
-        # Both legs survive but the token was rewritten from the legacy
-        # spelling — canonicalize so the stored/served value is a model value.
-        return canonical_direction(direction) or "<->"
     if new_fwd:
         return "->"
     if new_bwd:

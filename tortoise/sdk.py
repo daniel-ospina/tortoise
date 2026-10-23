@@ -27937,13 +27937,24 @@ class TortoiseSDK:
             the caller asked to EXCLUDE — the one failure mode a filter must
             never have. Classes are read from the graph by id, so an
             unmarked hit stays ``asserted`` (absence IS the class).
+
+            A store that cannot answer must not raise out of ``search()`` —
+            this tier exists to serve a SICK store — so a failed read passes
+            the rows through UNANNOTATED, the same degradation the primary
+            path uses for a failed class read.
             """
             ids = [r.get("id") for r in rows if isinstance(r.get("id"), str)]
-            classes = _claim_class.classes_for_ids(graph, ids)
+            try:
+                classes = _claim_class.classes_for_ids(graph, ids)
+            except Exception:
+                _logger.warning(
+                    "claim-class filter failed on the degraded fallback — "
+                    "pass-through, without the class annotation", exc_info=True)
+                return rows
             kept: list[dict] = []
             for row in rows:
-                pid = row.get("id")
-                carried = classes.get(pid) or frozenset({_claim_class.DEFAULT})
+                carried = classes.get(row.get("id")) or frozenset(
+                    {_claim_class.DEFAULT})
                 if claim_class not in carried:
                     continue
                 row["claim_class"] = claim_class
@@ -28283,7 +28294,16 @@ class TortoiseSDK:
                 )
                 _key = snapshot_key(proj, getattr(self, "_namespace", None))
                 _snap = _fb_store.get(_key)
-                if _snap is None:
+                # #2351: the snapshot is a deliberately LEAN projection (it
+                # carries no class column), so it cannot honour a claim-class
+                # filter pre-truncation. When one is requested, DROP the (cached
+                # or fresh) snapshot and take the legacy path below — which
+                # filters the CORPUS before truncating. Correctness over the
+                # ~350ms the snapshot saves, on a rare degraded AND
+                # class-filtered read.
+                if claim_class is not None:
+                    _snap = None
+                elif _snap is None:
                     _snap = build_snapshot(proj)
                     if _snap is not None:
                         _fb_store.put(_key, _snap)
@@ -28301,8 +28321,6 @@ class TortoiseSDK:
                         status_trace.append(_trace_entry(
                             "fallback", ran=True, degraded=True,
                             reason="tfidf_snapshot", count=len(snap_hits)))
-                    if claim_class is not None and entity_type == "point":
-                        snap_hits = _filter_and_annotate_claim_class(snap_hits)
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
@@ -28328,13 +28346,19 @@ class TortoiseSDK:
                         {"id": p.get("id"),
                          "point_kind": p.get("pointKind"),
                          "content": p.get("content")})]
+                if points and claim_class is not None:
+                    # #2351: filter the CORPUS before truncation, the same
+                    # reason ``exclude_status`` is threaded into the tiers
+                    # above: a filter applied AFTER the limit cut silently
+                    # under-fills the caller's ``limit``.
+                    _allowed = _filter_and_annotate_claim_class(points)
+                    allowed_ids = {p.get("id") for p in _allowed}
+                    points = [p for p in points if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
                 if status_trace is not None:
                     status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
-                if claim_class is not None and entity_type == "point":
-                    legacy_hits = _filter_and_annotate_claim_class(legacy_hits)
                 return _with_read_status(
                     _decorate_fallback_hits(legacy_hits, graph))
             if status_trace is not None:
