@@ -220,8 +220,10 @@ MAX_PROVENANCE_REFS = 500
 # 6,000 req/min a 20-key team could reach through the per-key buckets alone
 # (6000 × ~4 KB ≈ 23 MB/min). Override with
 # ``TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`` when a real workload argues for a
-# different number; the helper floors the allowance at the largest possible
-# single charge so a knob set too low cannot refuse one request forever.
+# different number. A knob set BELOW the largest possible single request does
+# not refuse that request for ever: `commit_ingest_admit` admits one over-sized
+# request per empty window (see its docstring), so the worst case is throttling,
+# never an unbreakable retry loop.
 #
 # RESIDUAL (stated so this is not over-read): it bounds the RATE. A tenant
 # writing at the allowed rate forever still grows without limit, and that is BY
@@ -1219,10 +1221,17 @@ def ask_budget_retry_after(org_id: str | None) -> float:
 # at a full store is charged to ONE shared overflow bucket instead of growing
 # the store, refused only when that overflow is spent too.
 #
-# The bucket stores ``(timestamp, charge_bytes)`` because the WINDOW TOTAL is
-# the quantity compared against the allowance — both the sum and the oldest
-# entry's age are needed on a refusal (``used`` and ``Retry-After``), and both
-# come from the ONE locked read that refused (#4614).
+# The bucket stores ``(timestamp, org_id, charge_bytes)`` because the WINDOW
+# TOTAL is the quantity compared against the allowance — both the sum and the
+# oldest entry's age are needed on a refusal (``used`` and ``Retry-After``),
+# and both come from the ONE locked read that refused (#4614). The org field is
+# the PER-KEY OVERFLOW ATTRIBUTION ``rate_buckets.py`` records as closing a
+# known fail-open regression (#3124 review): the shared overflow holds charges
+# for several orgs, so without attribution (a) a refusal would report OTHER
+# orgs' bytes as the caller's own ``used``, and (b) an org that spent the
+# overflow could graduate to a fresh owned bucket the moment ANY slot freed and
+# obtain a SECOND full allowance inside one window — the exact defect
+# ``test_sticky_overflow_blocks_a_second_budget`` pins there, re-pinned here.
 _COMMIT_INGEST_WINDOW_S = 60.0
 #: Owned-key cap, matching ``RateLimitMiddleware.MAX_BUCKETS`` — the repo's own
 #: bound on a per-process bucket store.
@@ -1232,7 +1241,7 @@ _COMMIT_INGEST_MAX_ORGS = 10_000
 #: (those come from the auth layer; none contains a NUL).
 _COMMIT_INGEST_OVERFLOW_KEY = "\x00commit-ingest-overflow"
 _commit_ingest_budget: collections.OrderedDict[
-    str, list[tuple[float, int]]] = collections.OrderedDict()
+    str, list[tuple[float, str, int]]] = collections.OrderedDict()
 _commit_ingest_lock = threading.Lock()
 
 
@@ -1247,6 +1256,12 @@ class IngestAdmission(collections.namedtuple(
     """
 
     __slots__ = ()
+
+
+def _commit_ingest_owned_count(store) -> int:
+    """Org-keyed buckets in ``store`` — the ONE shared overflow bucket does not
+    consume a slot (``rate_buckets._bucket_owned_count``, same policy)."""
+    return len(store) - (1 if _COMMIT_INGEST_OVERFLOW_KEY in store else 0)
 
 
 def _commit_ingest_reclaim(store, now_ts: float) -> None:
@@ -1290,6 +1305,22 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
 
     A REFUSED charge is not appended, so a client parked at the boundary is not
     pushed further away from recovery by each futile retry.
+
+    The SHARED-overflow regime keeps ``rate_buckets.py``'s per-key attribution
+    (#3124 review), which is what makes the two numbers below honest rather
+    than merely conservative:
+
+    * the ADMISSION predicate compares the whole target bucket against the
+      allowance, so the overflow cannot be over-subscribed by many orgs adding
+      one charge each (the shared capacity ``rate_buckets`` documents);
+    * ``used`` is what THIS ORG spent — an owned bucket is entirely its own,
+      and in the shared overflow only entries attributed to this org count. A
+      refusal therefore never names another tenant's bytes, and a fresh org
+      refused because the shared bucket is spent reports ``used`` 0 (the truth:
+      it spent nothing; the store is full, which is the fail-closed overflow
+      class both stores accept);
+    * an org is STICKY in the overflow while its own charges are in-window, so
+      freeing one slot cannot hand it a second full allowance.
     """
     limit = MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG
     charge = max(0, int(charge_bytes))
@@ -1299,11 +1330,23 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
     with _commit_ingest_lock:
         store = _commit_ingest_budget
         key = org_id
-        if key not in store:
+        if key != _COMMIT_INGEST_OVERFLOW_KEY and key not in store:
             _commit_ingest_reclaim(store, now_ts)
-            owned = len(store) - (1 if _COMMIT_INGEST_OVERFLOW_KEY in store
-                                  else 0)
-            if owned >= _COMMIT_INGEST_MAX_ORGS:
+            overflow = store.get(_COMMIT_INGEST_OVERFLOW_KEY)
+            if overflow is not None:
+                overflow[:] = [e for e in overflow
+                               if now_ts - e[0] < _COMMIT_INGEST_WINDOW_S]
+            # STICKY PER ORG, never store-wide: an org with its OWN in-window
+            # overflow charges stays in the overflow until they expire (no
+            # second allowance), while an org with none takes a free slot at
+            # once (a store-wide rule would deny every fresh org for the rest
+            # of the window once the overflow held any charge). Both halves are
+            # ``rate_buckets._bucket_route``'s #3124 rule, restated for a
+            # weighted bucket.
+            sticky = overflow is not None and any(e[1] == org_id
+                                                  for e in overflow)
+            if sticky or (_commit_ingest_owned_count(store)
+                          >= _COMMIT_INGEST_MAX_ORGS):
                 key = _COMMIT_INGEST_OVERFLOW_KEY
         bucket = store.get(key)
         if bucket is None:
@@ -1311,12 +1354,19 @@ def commit_ingest_admit(org_id: str | None, charge_bytes: int) -> IngestAdmissio
         # prune THIS bucket's expired charges, then sum what is in-window
         bucket[:] = [e for e in bucket
                      if now_ts - e[0] < _COMMIT_INGEST_WINDOW_S]
-        used = sum(e[1] for e in bucket)
+        # ``bucket_used`` is the capacity predicate (for the shared overflow it
+        # is EVERY org's charges: one shared bucket, one allowance). ``used`` is
+        # what THIS org spent — the number a refusal reports, so it never names
+        # another tenant's bytes.
+        bucket_used = sum(e[2] for e in bucket)
+        used = (bucket_used if key != _COMMIT_INGEST_OVERFLOW_KEY
+                else sum(e[2] for e in bucket if e[1] == org_id))
         # ADMIT when the window has room, and ALSO when this single request is
         # bigger than the whole allowance AND the window is empty (the
         # over-sized case: see the docstring — once per window, never forever).
-        if used + charge <= limit or (used == 0 and charge > limit):
-            bucket.append((now_ts, charge))
+        if bucket_used + charge <= limit or (bucket_used == 0
+                                            and charge > limit):
+            bucket.append((now_ts, org_id, charge))
             store[key] = bucket
             store.move_to_end(key)
             return IngestAdmission(True, used + charge, limit, 0.0)

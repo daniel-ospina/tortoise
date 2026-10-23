@@ -2779,10 +2779,23 @@ class TestCommitOrgIngestBound:
         (`RateLimitMiddleware.PATH_LIMITS`), and a team plan allows 20 keys —
         so a per-key bound multiplies with the number of keys the tenant can
         mint. One org spending its minute must not spend another's.
+
+        The middle leg is the DISCRIMINATING one: `key_id` varies while
+        `org_id` is held fixed, so the mutation `key = org_id` → `key = key_id`
+        in `commit_ingest_admit` fails here (verified by applying it). The
+        second-org leg alone cannot discriminate — a new key AND a new org
+        gets a fresh window under either keying.
         """
         self._allow(monkeypatch, self._charge())
         assert self._empty_commit(client, "sIngestOrgA1").status_code == 200
         assert self._empty_commit(client, "sIngestOrgA2").status_code == 429
+
+        # A SECOND KEY of the SAME ORG must not buy the org more room.
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, "key_id": "test-key-002"}
+        assert self._empty_commit(client, "sIngestOrgA2b").status_code == 429, (
+            "a second API key of the SAME org was handed a fresh window — "
+            "the budget is keyed on the key, not on the org")
 
         # A SECOND org has its own window — its first commit still lands.
         app.dependency_overrides[get_current_org] = lambda: {
@@ -2794,6 +2807,77 @@ class TestCommitOrgIngestBound:
         # keys, so B's commit did not buy A any more room.
         app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         assert self._empty_commit(client, "sIngestOrgA3").status_code == 429
+
+    def test_sticky_overflow_blocks_a_second_budget(self, client, monkeypatch):
+        """An org that spent the SHARED overflow must not graduate to a fresh
+        owned bucket when a slot frees — `rate_buckets.py`'s #3124 rule.
+
+        The store-overflow regime IS a flood signature, so a fail-open there
+        bites exactly where the bound is needed: without per-key attribution an
+        org's overflow charges are invisible to routing, and the first freed
+        slot hands it a SECOND full allowance inside the same window (up to 2x
+        the limit).
+        """
+        import tortoise.quota as quota_mod
+        unit = self._charge()
+        self._allow(monkeypatch, unit)
+        # One slot for the whole store, so TEST_ORG_ID cannot own one and is
+        # charged to the shared overflow instead.
+        monkeypatch.setattr(quota_mod, "_COMMIT_INGEST_MAX_ORGS", 1)
+        assert quota_mod.commit_ingest_admit("org-owner", 1).allowed is True
+        assert self._empty_commit(client, "sIngestOvA").status_code == 200, (
+            "the overflow-routed commit was refused — the store is not full")
+        assert self._empty_commit(client, "sIngestOvB").status_code == 429
+        # A slot frees (what `_commit_ingest_reclaim` does to an aged-out
+        # bucket) while this org's OWN overflow charges are still in-window.
+        quota_mod._commit_ingest_budget.pop("org-owner")
+        r = self._empty_commit(client, "sIngestOvC")
+        assert r.status_code == 429, (
+            "a slot freed and the overflow-routed org got a SECOND full "
+            "allowance inside the same window — the overflow is not sticky "
+            "per org")
+        # ...and the refusal names THIS org's spend, not the shared bucket's.
+        assert r.json()["detail"]["used"] == unit
+
+    def test_overflow_refusal_reports_this_orgs_own_spend(self, monkeypatch):
+        """A refusal from the SHARED overflow must name what THIS org spent.
+
+        The overflow bucket holds several orgs' charges; reporting its total as
+        the caller's `used` tells a tenant it spent bytes it never sent (the
+        second half of `rate_buckets.py`'s #3124 attribution rule).
+        """
+        import tortoise.quota as quota_mod
+        self._allow(monkeypatch, 1000)
+        monkeypatch.setattr(quota_mod, "_COMMIT_INGEST_MAX_ORGS", 1)
+        assert quota_mod.commit_ingest_admit("org-owner", 1).allowed is True
+        assert quota_mod.commit_ingest_admit("org-y", 600).allowed is True
+        assert quota_mod.commit_ingest_admit("org-z", 300).allowed is True
+        adm = quota_mod.commit_ingest_admit("org-z", 300)
+        assert adm.allowed is False
+        assert adm.used == 300, (
+            f"the refusal reports {adm.used} bytes but this org spent 300 — "
+            "the rest belongs to another tenant sharing the overflow bucket")
+
+    def test_a_fresh_org_takes_a_free_slot_while_the_overflow_is_warm(
+            self, monkeypatch):
+        """The stickiness is PER ORG, never store-wide.
+
+        A store-wide rule would deny EVERY fresh tenant for the rest of the
+        window once the overflow held any charge — a new-customer denial
+        reachable with an empty owned store. Guards the other direction of
+        `test_sticky_overflow_blocks_a_second_budget`.
+        """
+        import tortoise.quota as quota_mod
+        self._allow(monkeypatch, 1000)
+        monkeypatch.setattr(quota_mod, "_COMMIT_INGEST_MAX_ORGS", 1)
+        assert quota_mod.commit_ingest_admit("org-owner", 1).allowed is True
+        assert quota_mod.commit_ingest_admit("org-y", 100).allowed is True
+        quota_mod._commit_ingest_budget.pop("org-owner")  # a slot frees
+        adm = quota_mod.commit_ingest_admit("org-fresh", 500)
+        assert adm.allowed is True, (
+            "a fresh org with no overflow charges of its own was refused the "
+            "free slot — the overflow rule is store-wide, not per org")
+        assert adm.used == 500
 
     def test_replay_does_not_consume_the_budget(self, client, monkeypatch):
         """A fully_written re-POST writes nothing, so it must not be charged

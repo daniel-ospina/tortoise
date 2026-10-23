@@ -81,7 +81,7 @@ single-writer-plus-many-readers pattern that is verified.
 |---|---|---|
 | Hosted REST and MCP, per API key | **100 req/min** | `tortoise/hosted_api.py` |
 | Hosted `POST /v1/sessions/commit`, per key | **300 req/min**, on its own bucket | `tortoise/hosted_api.py` |
-| Hosted `POST /v1/sessions/commit`, **per team (org)** | **10 MiB of writes per rolling 60 s** (`TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`) — a request is charged `max(payload bytes, nodes it will write × 1024)`; over the allowance is `429` + `Retry-After` (`detail.code = ingest_rate_limited`) | `tortoise/quota.py` (`commit_ingest_admit`) |
+| Hosted `POST /v1/sessions/commit`, **per team (org)**, per process | **10 MiB of writes per rolling 60 s** (`TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`) — a request is charged `max(payload bytes, nodes it will write × 1024)`; over the allowance is `429` + `Retry-After` (`detail.code = ingest_rate_limited`) | `tortoise/quota.py` (`commit_ingest_admit`) |
 | Hosted, unauthenticated or malformed key | **100 req/min per client IP** | `tortoise/hosted_api.py` |
 | Self-hosted daemon | **100 req/min** (`TORTOISE_RATE_LIMIT`) — per API key when one is presented, otherwise per client IP | `tortoise/selfhost.py`, `README.md` |
 | Rate-limit bucket store (hosted) | **10,000 buckets** per process (`MAX_BUCKETS`) | `tortoise/hosted_api.py` |
@@ -100,6 +100,10 @@ it is measured in BYTES (the ruled storage unit, #4495/#5331), it is a rolling
 60-second window rather than a fixed minute, and it is a **throttle**, not a
 cap: the refusal is a transient `429` whose `Retry-After` self-heals, so it
 delays a capture and never refuses the customer's data (#4051 §3.1, #5425).
+The window is module-global **process** state (`tortoise/quota._commit_ingest_budget`),
+like the bucket stores above: `Dockerfile.hosted` runs a single `uvicorn` worker,
+so per-process equals per-instance today, and running N workers or replicas
+would make the effective figure N × 10 MiB.
 
 Every per-IP bucket (the unauthenticated fallback above, plus register / signup /
 recovery / claim / sensitive-op / session-login / invite buckets) identifies a
