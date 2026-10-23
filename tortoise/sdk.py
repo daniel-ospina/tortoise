@@ -16438,6 +16438,21 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
+            # #9262 (review cycle 2): an id-less mitigation Point (a
+            # hand-written / imported shape) makes ``mid`` None, and EVERY write
+            # in this branch is id-keyed — ``update_point``, the baseline writer
+            # and the word stamp all match zero rows. Until #9262 the baseline
+            # writer accepted what it could not bind, so this silently updated
+            # nothing and returned ``{}``; since #9262 it REFUSES that id, so
+            # without this guard the whole call aborts with a remedy the caller
+            # cannot execute (it named the OPERATOR, not the mitigation), and
+            # ``commit_ops`` would abort a write loop mid-graph. MEASURED on
+            # origin/main: the call returns ``{}`` and leaves
+            # ``_evidence[None] = (3.0, 1.0)``; that false PASS is a defect of
+            # its own (#9754) — this guard keeps the historical outcome rather
+            # than turning it into an abort.
+            if mid is None:
+                return self.get_point(mid)
             self.update_point(mid, content=f"[MITIGATION] {reason}",
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines

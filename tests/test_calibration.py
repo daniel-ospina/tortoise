@@ -1276,21 +1276,62 @@ def test_compute_confidence_survives_an_unaddressable_id(sdk):
     ``compute_confidence`` on a graph the repo otherwise handles (#9275).
     Measured both directions — the guard makes it complete again, with no
     phantom.
+
+    The ADDRESSABLE companion is the other half: a guard that skipped every
+    point (not just the unresolvable id) would keep the assertions above green
+    while silently disabling source inheritance, so its derived baseline is
+    pinned too.
     """
     g = sdk._get_proj().g
-    g.query("CREATE (s:Source {url:'https://example.org/9262-idless', "
-            "credibilityTier:'T1', sourceKind:'web'})")
+    for url, tier in (("https://example.org/9262-idless", "T1"),
+                      ("https://example.org/9262-addressable", "T1")):
+        g.query("CREATE (s:Source {url:$u, credibilityTier:$t, "
+                "sourceKind:'web'})", params={"u": url, "t": tier})
     g.query("MATCH (s:Source {url:'https://example.org/9262-idless'}) "
             "CREATE (n:Point {pointKind:'statement', status:'live', "
             "content:'id-less claim'})-[:extractedFrom]->(s)")
+    real = sdk.create_point("statement", "addressable claim", status="live")
+    g.query("MATCH (n:Point {id:$id}), (s:Source {url:'https://example.org/"
+            "9262-addressable'}) CREATE (n)-[:extractedFrom]->(s)",
+            params={"id": real["id"]})
 
     result = sdk.compute_confidence(require_calibration=False)
     assert result["converged"] is True
     assert None not in sdk._evidence
-    # …and the derivation did not invent a baseline for it either.
+    # …and the derivation did not invent a baseline for the id-less point…
     assert g.query(
         "MATCH (n:Point) WHERE n.id IS NULL "
         "RETURN n.baseline_set").result_set == [[None]]
+    # …while the ADDRESSABLE point still inherited from its T1 source.
+    assert g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.baseline_source, n.ep_alpha",
+        params={"id": real["id"]}).result_set[0][0] == "inherited-from-source"
+
+
+def test_mitigate_operator_survives_an_idless_mitigation(sdk):
+    """#9262: the refusal must not reach ``mitigate_operator`` either.
+
+    The re-mitigation branch reads the existing mitigation's id from the graph
+    (``… RETURN m.id``), so a hand-written id-less mitigation Point yields
+    ``mid=None`` and every write in the branch is id-keyed. Measured on
+    ``origin/main``: the call returns ``{}`` (a pre-existing false PASS, filed
+    as #9754) and the run continues; with #9262's refusal alone it
+    RAISED ``no node with id None`` — aborting a call whose caller named the
+    OPERATOR, and mid-loop for ``commit_ops``. The guard keeps the historical
+    outcome instead of turning a broken path into an abort.
+    """
+    g = sdk._get_proj().g
+    op = sdk.create_point("statement", "operator claim", status="live",
+                          is_operator=True, op_type="IMPL")
+    g.query("MATCH (op:Point {id:$id}) CREATE (m:Point {pointKind:'statement', "
+            "content:'[MITIGATION] legacy', status:'live', is_operator:false})"
+            "-[:IMPL]->(op), (op)-[:mitigated_by]->(m)", params={"id": op["id"]})
+    assert g.query(
+        "MATCH (op:Point {id:$id})-[:mitigated_by]->(m:Point) RETURN m.id",
+        params={"id": op["id"]}).result_set == [[None]]
+
+    assert not sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+    assert None not in sdk._evidence
 
 
 def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
