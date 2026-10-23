@@ -61,8 +61,8 @@ is left OFF.
 So the residual defect is not admission-vs-rank. It is **volume**: the TR window
 is capped at 12 items, which spends **27% of the 8 000-token budget** the lane
 configures, and the reader needs more evidence than that — the 7 questions still
-refused at baseline (all in the interval class) and the 21 wrong answers are
-evidence *starvation*, not evidence *absence*.
+refused at baseline (3 interval, 4 ordering/compare) and the 21 wrong answers
+are evidence *starvation*, not evidence *absence*.
 
 That is why the oracle comparison is misleading in both directions: the oracle
 (42/52) is not an upper bound for retrieval — this change reaches **44/52** —

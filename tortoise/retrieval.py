@@ -1722,12 +1722,15 @@ def assemble_session_context(
         elif len(selected) == before and _has_claim_text(h):
             breadth_dropped += 1
     # ── phase 2: DEPTH (complete the sessions breadth touched, whole-or-skip) ──
-    # The session order and the per-session membership come from
-    # :func:`session_blocks` — ONE grouping implementation, so the assembler and
-    # the tested primitive cannot drift. Blocks are in best-pool-rank order, and
-    # the breadth pass admits a rank prefix, so "first appearance in breadth"
-    # and "best rank in the pool" are the same order for the sessions breadth
-    # touched.
+    # The session MEMBERSHIP comes from :func:`session_blocks` (ONE grouping
+    # implementation, so the assembler and the tested primitive cannot drift),
+    # but the VISIT ORDER is first-admitted-breadth-rank — NOT session_blocks'
+    # best-pool-rank order. The two differ because ``_try_admit`` is
+    # skip-and-continue: a session's best-ranked hit can be refused by the
+    # breadth budget while a later hit of the same session is admitted after
+    # another session's. Visiting by best-pool-rank would then complete a
+    # DIFFERENT session than this docstring promises whenever the depth budget
+    # binds — which is the measured case.
     breadth_hits = list(selected)
     # FIRST ADMITTED breadth rank per session — the order the depth pass
     # visits them in. `session_blocks` alone orders by BEST POOL rank, and the
@@ -1805,11 +1808,14 @@ def assemble_session_context(
         # ONLY a bound that actually dropped something can be `stopped_by`: a
         # cap that was merely REACHED (the depth pass landing exactly on it, or
         # the pool ending there) dropped nothing, and reporting it would make
-        # the field the #2976 argument rests on produce a false positive.
+        # the field the #2976 argument rests on produce a false positive. The
+        # BREADTH token budget is a drop counter too — omitting it reported
+        # `None` ("no bound dropped anything") on windows where it refused
+        # candidates, which is why it is consulted alongside the depth caps.
         stopped_by = (
             "byte_cap" if depth_dropped_by_byte_cap else
-            "token_cap" if depth_dropped_by_token_cap else
-            "item_cap" if (depth_dropped_by_item_cap or breadth_item_cap_cut)
+            "token_cap" if (depth_dropped_by_token_cap or breadth_dropped)
+            else "item_cap" if (depth_dropped_by_item_cap or breadth_item_cap_cut)
             else None)
         stats.update({
             "items_selected": len(selected),

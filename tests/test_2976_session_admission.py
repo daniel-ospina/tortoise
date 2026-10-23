@@ -476,3 +476,16 @@ def test_tr_complete_sessions_splices_adjacent_and_never_mutates_the_pool(monkey
                                         _hit(0, "sid-a", "a1", idx=1)]
     # (a): adjacent to sid-a's LAST base hit (index 2), so the block is whole
     assert [h["content"] for h in out] == ["a0", "b0", "a1", "a2-injected"]
+
+
+def test_a_breadth_token_drop_is_reported_as_the_token_cap():
+    """The breadth budget is a real drop counter: reporting `None` there said
+    "no bound dropped anything" on a window the token budget had just narrowed,
+    which is the opposite of what the census is for."""
+    pool = [_hit(i, f"sid-{i}", "word " * 60, idx=0) for i in range(30)]
+    stats: dict = {}
+    out = assemble_session_context(pool, max_context_tokens=600,
+                                   breadth_share=0.5, stats=stats)
+    assert len(out) < 30
+    assert stats["dropped_by_breadth_bound"] > 0
+    assert stats["stopped_by"] == "token_cap", stats
