@@ -553,8 +553,17 @@ is one job, alongside the graph sweep's `registry-backup-cron.yml`:
 17 3 * * *   python -m tortoise record-backup --reset-scratch
 ```
 
-Both DSNs are read from the environment (`TORTOISE_RECORD_DSN`,
-`TORTOISE_RECORD_SCRATCH_DSN`), so the job's command line carries no password.
+All three DSNs are read from the environment, so the job's command line carries no password — and the
+BACKUP one is **`TORTOISE_RECORD_BACKUP_DSN`**, not the app-role `TORTOISE_RECORD_DSN` (#9801): a
+backup must see every tenant, and the record's own app role (`NOBYPASSRLS`) is refused with exit `2`
+by design. A job armed with only `TORTOISE_RECORD_DSN` therefore exits `2` on every run and publishes
+nothing — loud, but never a working archive. The three are:
+
+| variable | what it is |
+|---|---|
+| `TORTOISE_RECORD_BACKUP_DSN` | the **backup** connection: the DIRECT string, as a role that **bypasses RLS** (the table owner / `postgres`, or `service_role`). **This is the one the job needs.** |
+| `TORTOISE_RECORD_SCRATCH_DSN` | the drill's empty scratch target (direct, not the pooler) |
+| `TORTOISE_RECORD_DSN` | the record's own app-role DSN. Used only as a FALLBACK when the backup DSN is unset — and the run then fails closed with a refusal naming the role, rather than backing up as the app role |
 
 Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
 restate the record's loss window as anything smaller. The drill's own cadence can be slower than the

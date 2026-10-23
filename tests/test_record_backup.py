@@ -1136,7 +1136,10 @@ def test_a_lost_table_is_STILL_red_on_a_record_that_moved():
     def connect(dsn):
         if dsn == DSN:
             reads["n"] += 1
-            if reads["n"] >= 3:
+            # 1 = the role-posture read (#9801), 2 = the vacuity count, 3 = the
+            # `cut` count, 4 = the post-dump re-count. The row lands INSIDE the
+            # dump (between 3 and 4), so the artifact may legitimately carry it.
+            if reads["n"] >= 4:
                 db.source = {**db.source, "journal_event": 515}
         return real_connect(dsn)
 

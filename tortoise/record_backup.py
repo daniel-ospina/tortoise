@@ -555,7 +555,8 @@ def require_bypassing_role(
             f"{RECORD_BACKUP_DSN_ENV} with a role that bypasses RLS (the table "
             "owner / `postgres`, or `service_role`), separate from "
             "TORTOISE_RECORD_DSN, using the DIRECT connection "
-            "(docs/infra-runbook.md §3.5, precondition 1)."
+            "(docs/infra-runbook.md §3.5 — precondition 2 is this role rule; "
+            "precondition 1 is the pooler rule)."
         )
     return str(role)
 
