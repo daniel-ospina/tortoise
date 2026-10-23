@@ -37,7 +37,7 @@ connect as a role that bypasses it.
 | **Is RLS the boundary, or defence-in-depth?** | **The boundary**, for both record doors the application path uses — the write path and `tortoise record-reconcile`. ⚠️ One reader is outside them: `tortoise/record_read.py` takes a caller-supplied connection and installs no scope, which is #9555's outstanding read arm. | one `*_app_tenant` policy per record table in `THE_RECORD_TABLES` (ten), `USING` **and** `WITH CHECK`; **and, by code**, `record_projection.scope_connection()` — which refuses a connection whose role can bypass them (superuser, `BYPASSRLS`, membership of either, or owner of a record table) |
 | **What sets the tenant?** | `set_config('app.current_org_id', $1, true)` — **transaction-local**, issued by `record_projection.replay()` as the first statement, from the same `org_id` it projects. | `record_projection.TENANT_GUC_SQL` |
 | **Who sets it on the READ path?** | The SAME helper: `cache_projection.read_record_view()` (the `tortoise record-reconcile` verb) opens its own connection from the same `TORTOISE_RECORD_DSN`, so it installs the same scope before its first `SELECT`. Without it the policies read NULL — zero rows and no error — and a coherent pair is reported divergent (#9600 review cycle 2). | `record_projection.scope_connection()`, called by both doors |
-| **Who may bypass?** | `postgres`/table owner and `service_role`, for three named purposes only: schema, backup/restore (R8/R9), and the org-erasure RPC. They are not the application path. | `purge_org_record` (`20261012000005`) is `SECURITY DEFINER` + `service_role`-only EXECUTE |
+| **Who may bypass?** | `postgres`/table owner and `service_role`, for three named purposes only: schema, the **database-level** backup/restore (R9: `pg_dump`/`pg_restore`), and the org-erasure RPC. They are not the application path — and ⚠️ **not** `record-restore` (R8), which reads through the read door and so connects as the app role. | `purge_org_record` (`20261012000005`) is `SECURITY DEFINER` + `service_role`-only EXECUTE |
 | **Which pooler mode?** | R1's DSN is `:5432` = the shared Supavisor pooler, **session** mode. `:6543` = transaction mode. **The posture does not depend on the answer** — see §3. | `docs/infra-runbook.md` → "The record's connecting role" |
 
 ### Why not the two bypassing candidates
@@ -116,8 +116,11 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
   `service_role`, app-tenant) or it is a table whose RLS state this decision does not explain.
   `tests/test_record_tenancy_guc.py::test_the_migration_covers_every_record_table` reddens until it
   does — it matches against `record_projection.THE_RECORD_TABLES`.
-- **R8/R9 keep the bypassing roles on purpose** (`pg_dump`/restore must use the direct connection,
-  never the pooler). Nothing in this decision narrows them.
+- **R9 keeps the bypassing roles on purpose** (`pg_dump`/`pg_restore` of the database must use the
+  direct connection, never the pooler). ⚠️ **R8 does not**: `tortoise record-restore` reads through
+  the read door, so it is tenant-scoped and connects as the app role — the verb restores the same
+  rows it did before, but its DSN shape changed with this decision (`docs/infra-runbook.md` §9).
+  Nothing in this decision narrows R9.
 
 ## 6. Evidence, and what this decision does NOT cover
 
@@ -135,7 +138,7 @@ Operator steps: `docs/infra-runbook.md` → "The record's connecting role".
 - **No production code set that GUC** before this change (`grep` over `tortoise/`, `apps/`, `tools/`,
   `services/`: zero `current_setting`/`set_config`; the only setters were `supabase/tests/*.sql`).
 - The `authenticated` **read** surface already had a cross-tenant test
-  (`20261012000001_record_schema.sql:373-414`, #7968) — that half was **not** missing. What was
+  (`20261012000001_record_schema.sql:389-417`, #7968) — that half was **not** missing. What was
   missing was the posture the *write path* runs under, which is what this lane added.
 
 **Sources (all read 2026-10-22):**

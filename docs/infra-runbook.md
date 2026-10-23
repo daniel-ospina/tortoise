@@ -2583,6 +2583,11 @@ whole reason this path exists.
 # 1. Arm and read the record scope FIRST — a restore writes what the record
 #    holds for exactly this (org_id, graph_id), so read it before you wipe:
 #      export TORTOISE_RECORD_DSN='postgresql://…'          # or --record-dsn
+#    ⛔ That DSN is the APP ROLE (`tortoise_record_app`), not `postgres`: this verb
+#    READS the record through the read door, which refuses a bypassing role. A
+#    `postgres`/`service_role` DSN here exits 3 with "the record is unreadable
+#    (RecordProjectionError)" — that message names no role, and it is the SAME
+#    text as a real outage (see "The record's connecting role").
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \
@@ -2811,8 +2816,12 @@ TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<reg
 `FORCE ROW LEVEL SECURITY` is set) and a superuser bypasses it regardless, so that DSN would make
 §4's *"rows scoped by tenant via row-level security"* false for the only path that writes customer
 data — while every RLS artifact stayed in place looking true. `service_role` is `BYPASSRLS` for the
-same reason. Both remain correct for what needs them: schema, **backup and restore** (R8/R9 — and
-`pg_dump`/restore must use the **direct** connection, never the pooler), and the org-erasure RPC.
+same reason. Both remain correct for what needs them: schema, the **database-level** backup/restore
+(R9 — `pg_dump`/`pg_restore` of the Postgres record, which must use the **direct** connection, never
+the pooler), and the org-erasure RPC. ⚠️ **Not `tortoise record-restore` (R8)**: that verb is not a
+`pg_dump` — it *reads* the record through the read door (`cache_projection.read_record_view()`), so
+the role gate refuses a bypassing DSN exactly as it does for the write path. Its DSN is the app
+role; see §9.
 
 **3. Pooler mode does not change the answer.** Port `5432` is the shared pooler in **session** mode,
 `6543` is **transaction** mode. `record_projection.replay()` sets the tenant GUC
@@ -2852,8 +2861,10 @@ superuser, is `BYPASSRLS`, is a **member** of either, or **owns** a record table
 `postgres` or `service_role` (or `tortoise_record_app` after a mistaken `GRANT`) does not silently
 write and read across tenants with the policies unevaluated: the first write or read raises, and
 the operator fixes the DSN.
-The same refusal covers `tortoise record-reconcile`, whose record read would otherwise return zero
-rows and report a coherent pair as **divergent**. It is fail-closed but not self-explaining: the
+The same refusal covers BOTH read verbs — `tortoise record-reconcile` and `tortoise
+record-restore` (R8) — whose record read would otherwise return zero rows; the reconciler would
+report a coherent pair as **divergent**, and the restore would rebuild an EMPTY cache and call it
+done. It is fail-closed but not self-explaining: the
 verb's CLI reports the error's TYPE only, so a wrong-role DSN surfaces as
 `record is unreadable (RecordProjectionError)` with no role named — if you see that, check the DSN's
 role against this section first, because the same message covers a transient record outage.

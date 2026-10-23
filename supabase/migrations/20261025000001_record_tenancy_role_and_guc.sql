@@ -30,18 +30,24 @@
 --        · `service_role`, which the record migrations' own earlier comment
 --          expected even while calling RLS "the tenancy boundary" — it is
 --          `BYPASSRLS`, so that comment was false exactly where it mattered.
---      Both remain legitimate for what actually needs them: schema, backup and
---      restore (R8/R9), and the org-erasure RPC (`purge_org_record`, migration
---      20261012000005, SECURITY DEFINER + service_role-only EXECUTE). They are
---      NOT the application path.
+--      Both remain legitimate for what actually needs them: schema, DATABASE-LEVEL
+--      backup and restore (R9: `pg_dump`/`pg_restore`), and the org-erasure RPC
+--      (`purge_org_record`, migration 20261012000005, SECURITY DEFINER +
+--      service_role-only EXECUTE). They are NOT the application path — and ⚠️ NOT
+--      `python -m tortoise record-restore` (R8): that verb reads through the read
+--      door (`cache_projection.read_record_view()`), so the role gate refuses a
+--      bypassing DSN for it exactly as it does for the write path, and its DSN is
+--      the app role (`docs/infra-runbook.md` §9).
 --   3. THE GUC IS TRANSACTION-LOCAL, and production code sets it — not a
 --      session `SET`, not a connection-init hook. `record_projection.replay()`
 --      issues `set_config('app.current_org_id', $1, true)` as the FIRST
 --      statement on the caller's transaction, from the SAME `org_id` it is
 --      about to project. THE SAME prologue is installed by the READ door
 --      (`cache_projection.read_record_view()`), because both doors share the
---      one `TORTOISE_RECORD_DSN`; before that, the production reconciler read
---      zero rows and reported a coherent pair as divergent (#9600 review
+--      one `TORTOISE_RECORD_DSN`; before that, an ARMED reconciler would have
+--      read zero rows and reported a coherent pair as divergent (the
+--      counterfactual, not an observation: the DSN is unset on the deployment,
+--      and no schedule drives the verb) (#9600 review
 --      cycle 2, P1). Two consequences, both deliberate:
 --        · the writer's `org_id` and the connection's GUC cannot disagree —
 --          there is one value, and it feeds both places;
@@ -320,7 +326,14 @@ CREATE POLICY relation_app_tenant ON public.relation
 --     deliberately NOT edited: migrations are append-only (#1095,
 --     `.github/scripts/check-migration-append-only diff`), so a merged file's
 --     comments are as immutable as its SQL. Read the paragraphs above as the
---     correction of that header, not as a duplicate of it. The header also cites
+--     correction of that header, not as a duplicate of it. Its GUARDED BLOCK's
+--     own comment carries the same stale claim in a second place ("R6's
+--     migration **sorts first**, so where R6 is applied this branch runs") —
+--     equally false, and equally not editable: on a fresh database the role does
+--     not exist when `20261023000001` applies, so that block cannot fire and
+--     §4b below is what grants and policies that table. Read both stale
+--     sentences as corrected here.
+--     The header also cites
 --     this file by its VACATED name (`20261022000001_record_tenancy_role_and_guc
 --     .sql`, which no longer exists): the prefix moved to `20261025000001` in
 --     this same change, to stop sharing it with two other migrations, so a reader

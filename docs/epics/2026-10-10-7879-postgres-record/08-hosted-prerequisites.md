@@ -202,8 +202,9 @@ Sizes are single-lane estimates: **S** ≤ 1 day · **M** ≤ 1 week · **L** > 
 
 **What:** set `TORTOISE_RECORD_DSN` on `tortoise-y4mjjq` to the project's **pooler** DSN
 (`postgresql://tortoise_record_app.<ref>:…@aws-0-<region>.pooler.supabase.com:5432/postgres`, `?sslmode=require`
-— the shape `.env.example:305` already documents for `TORTOISE_AUDIT_DSN`), add it to the runbook
-Secrets Matrix and to the deploy workflow's secret-provisioning step, and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
+— the shape `.env.example:305` already documents for `TORTOISE_AUDIT_DSN`), add it to the deploy
+workflow's secret-provisioning step (the runbook's Secrets Matrix row already landed with #9600 — see
+A8), and **leave `TORTOISE_RECORD_SINGLE_TENANT` unset** — unset is already multi-tenant, which is
 what makes the env tenant pair be refused rather than silently used
 (`tortoise/record_writer.py:577`; setting `=0` only restates the default).
 > ⚠️ **The user is `tortoise_record_app`, NOT `postgres`** — corrected by R6's decision
@@ -395,8 +396,9 @@ exactly this question and the tree cannot answer it today.
 > GUC is `set_config('app.current_org_id', $1, true)`, issued **transaction-locally** by
 > `record_projection.replay()` from the same `org_id` it projects, so the writer cannot disagree
 > with its own connection and the posture is pooler-mode independent. `postgres`/table owner and
-> `service_role` remain bypassing **on purpose** for schema, backup/restore (R8/R9) and the erasure
-> RPC. Full record, with the rejected candidates and the vendor evidence:
+> `service_role` remain bypassing **on purpose** for schema, database-level backup/restore (R9) and
+> the erasure RPC — but not for R8's `record-restore` verb, which reads through the read door and so
+> connects as the app role. Full record, with the rejected candidates and the vendor evidence:
 > [`09-record-tenancy-decision.md`](09-record-tenancy-decision.md). Proven by
 > `supabase/tests/20261022000001_record_tenancy_posture.sql` (PGlite) and
 > `tests/test_record_tenancy_guc.py`.

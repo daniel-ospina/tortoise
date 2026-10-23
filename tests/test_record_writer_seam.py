@@ -158,7 +158,11 @@ class FakeConnection:
         # (`SELECT current_setting(...)`, #9600 review cycle 1) is filtered here
         # rather than pinned into every expected list. Its presence and order
         # are asserted separately.
-        return [r for r in self.executed if "current_setting" not in r[0]]
+        # Filtered by IDENTITY, not by substring: a substring filter would
+        # also hide any hand-written statement that happened to mention
+        # `current_setting`, which is the drift this equality exists to catch
+        # (#9600 review cycle 5, P3).
+        return [r for r in self.executed if r[0] != rp.TENANT_SCOPE_SQL]
 
 
 def _plan(records: list[dict[str, Any]] | None = None, *,

@@ -409,3 +409,78 @@ SELECT tests.assert(
 SELECT tests.assert(
   (SELECT count(*) FROM public.journal_event WHERE org_id IN ('org_r6_a','org_r6_b')) = 0,
   'R6: purge_org_record cascaded both tenants out of the append-only journal');
+
+-- ── 11. The RUNTIME gate's statement, EXECUTED (not merely described) ──────
+-- `record_projection.TENANT_SCOPE_SQL` is the statement `replay()` and
+-- `read_record_view()` refuse a connection on — the code half of "RLS is the
+-- boundary". Every Python test fakes its row (`RecordingCursor.fetchone` answers
+-- from the connection being modelled), so a syntax break, a dropped leg or a
+-- flipped `'USAGE'` → `'MEMBER'` in that statement would redden NOTHING. This
+-- section runs it, against two postures that must DISAGREE: a gate that answers
+-- `false` for every role is exactly as broken as one that answers `true`.
+--
+-- ⚠️ The expression below is a COPY of the module's SELECT list (this harness is
+-- SQL and cannot import Python). `tests/test_record_tenancy_guc.py::
+-- test_the_runtime_gate_statement_is_executed_here` pins the four predicates in
+-- both places, so drift reddens a Python test instead of being visible only to
+-- whoever reads this file.
+--
+-- ⚠️ The result is captured in a TEMP TABLE while the role is switched, because
+-- `tests.assert` lives in schema `tests` and the app role deliberately has no
+-- USAGE on it — asserting in place fails with `permission denied for schema
+-- tests`, which is the grant posture working, not a bug.
+SET ROLE tortoise_record_app;
+CREATE TEMP TABLE r6_gate_app AS SELECT (SELECT (r.rolsuper OR r.rolbypassrls
+           OR EXISTS (SELECT 1 FROM pg_roles g
+                       WHERE g.oid <> r.oid
+                         AND (g.rolsuper OR g.rolbypassrls)
+                         AND pg_has_role(r.oid, g.oid, 'USAGE'))
+           OR EXISTS (SELECT 1 FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE n.nspname = 'public'
+                         AND c.relname = ANY(ARRAY['node_identity','journal_event',
+                                                   'source','event','session','object',
+                                                   'subject','point','relation',
+                                                   'session_narrative'])
+                         AND (c.relowner = r.oid
+                              OR pg_has_role(r.oid, c.relowner, 'USAGE'))))
+     FROM pg_roles r
+    WHERE r.rolname = current_user) AS bypassing;
+RESET ROLE;
+
+SELECT tests.assert(
+  (SELECT bypassing FROM r6_gate_app) = false,
+  'R6 runtime gate: the app role reads as NON-bypassing — the gate lets the write path proceed, and the policies are what scope it');
+
+-- The ANTI-VACUITY half: `service_role` is BYPASSRLS, so the same expression
+-- must come back TRUE. Without this, an expression that had lost its legs (or
+-- returned NULL) would still satisfy the assertion above.
+SET ROLE service_role;
+CREATE TEMP TABLE r6_gate_service AS SELECT (SELECT (r.rolsuper OR r.rolbypassrls
+           OR EXISTS (SELECT 1 FROM pg_roles g
+                       WHERE g.oid <> r.oid
+                         AND (g.rolsuper OR g.rolbypassrls)
+                         AND pg_has_role(r.oid, g.oid, 'USAGE'))
+           OR EXISTS (SELECT 1 FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                       WHERE n.nspname = 'public'
+                         AND c.relname = ANY(ARRAY['node_identity','journal_event',
+                                                   'source','event','session','object',
+                                                   'subject','point','relation',
+                                                   'session_narrative'])
+                         AND (c.relowner = r.oid
+                              OR pg_has_role(r.oid, c.relowner, 'USAGE'))))
+     FROM pg_roles r
+    WHERE r.rolname = current_user) AS bypassing;
+RESET ROLE;
+
+SELECT tests.assert(
+  (SELECT bypassing FROM r6_gate_service) = true,
+  'R6 runtime gate: service_role reads as BYPASSING — the gate refuses it, which is what makes the app-role assertion non-vacuous');
+
+DROP TABLE r6_gate_app;
+DROP TABLE r6_gate_service;
+
+-- The unset-GUC half of the same gate is already pinned above (§8/§9: a read
+-- returns ZERO ROWS and a write raises 42501), so it is not restated here — this
+-- section exists to execute the STATEMENT, not to duplicate the semantics.

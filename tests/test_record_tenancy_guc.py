@@ -186,8 +186,11 @@ class RecordingConnection:
         back (`current_setting(...)`) on the same round trip as the connecting
         role's posture, so each is named rather than filtered by position.
         """
+        # Identity, not substring (#9600 review cycle 5, P3): a statement that
+        # merely mentioned `current_setting` used to disappear from this list,
+        # which is exactly the "statement the seam invented" this pins.
         return [(sql, params) for sql, params in self.executed
-                if sql != rp.TENANT_GUC_SQL and "current_setting" not in sql]
+                if sql != rp.TENANT_GUC_SQL and sql != rp.TENANT_SCOPE_SQL]
 
 
 def _migration_text(name: str) -> str:
@@ -332,6 +335,60 @@ def test_an_unreadable_role_posture_is_refused_not_assumed() -> None:
         rp.replay(RECORDS, conn, org_id=ORG, graph_id=GRAPH)
 
     assert conn.plan_statements() == []
+
+
+def test_the_scope_statement_names_both_columns_and_uses_usage_not_member() -> None:
+    """The two properties the mapping read and the gate both depend on.
+
+    `_apply_tenant_scope` reads this row by KEY when the cursor is a `RealDict`
+    one, so both columns must carry the aliases the reader uses: without
+    `AS bypassing` the second column is named `?column?` and the mapping read
+    raises `KeyError` (#9600 review cycle 5, P3 — the fake in this file cannot
+    catch that, because it invents the keys).
+
+    `'USAGE'` rather than `'MEMBER'` is deliberate: `NOINHERIT` / `WITH INHERIT
+    FALSE` makes the permissive policy inapplicable and `pg_has_role(...,'USAGE')`
+    false, so the two agree — pinned here because a silent `USAGE -> MEMBER` edit
+    would make the gate permissive toward exactly that grant.
+    """
+    sql = rp.TENANT_SCOPE_SQL
+
+    assert "AS tenant" in sql, "the tenant column has no alias — a mapping row cannot be read"
+    assert "AS bypassing" in sql, (
+        "the role-posture column has no alias — `row['bypassing']` on a RealDict "
+        "cursor raises KeyError on the first statement either door runs")
+    assert "pg_has_role(r.oid, g.oid, 'USAGE')" in sql, (
+        "the membership leg must read 'USAGE': a non-inheriting grant makes the "
+        "policy inapplicable, and 'MEMBER' would call that harmless")
+    assert "pg_has_role(r.oid, c.relowner, 'USAGE')" in sql
+
+
+def test_the_runtime_gate_statement_is_executed_here() -> None:
+    """The posture suite RUNS this statement; keep the two copies in step.
+
+    Every Python test fakes the scope row, so a syntax break or a dropped leg in
+    `TENANT_SCOPE_SQL` was invisible to the whole tree (#9600 review cycle 5, P3).
+    `supabase/tests/20261022000001_record_tenancy_posture.sql` §11 now executes a
+    COPY of it for the app role and for `service_role` and requires the two
+    answers to DISAGREE — a gate that says `false` for everyone is as broken as
+    one that says `true`. This test is the pin between the copy and the module:
+    the four predicates must be in both, so drift reddens here instead of waiting
+    for a reader to notice.
+    """
+    posture = (MIGRATIONS.parent / "tests" /
+               "20261022000001_record_tenancy_posture.sql").read_text(encoding="utf-8")
+
+    for predicate in (
+        "r.rolsuper OR r.rolbypassrls",
+        "pg_has_role(r.oid, g.oid, 'USAGE')",
+        "c.relowner = r.oid",
+        "pg_has_role(r.oid, c.relowner, 'USAGE')",
+    ):
+        assert predicate in rp.TENANT_SCOPE_SQL, (
+            f"the runtime gate no longer carries {predicate!r}")
+        assert predicate in posture, (
+            f"the posture suite's executed copy of the gate no longer carries "
+            f"{predicate!r} — the SQL lane is testing something else now")
 
 
 def test_the_role_gate_reads_a_mapping_shaped_row_by_key() -> None:
