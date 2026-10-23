@@ -2568,6 +2568,390 @@ class TestCommitPointsGate:
         assert self._chain_counts("sGateReplay") == (1, 1, 1)
 
 
+class TestCommitOrgIngestBound:
+    """#4051 §3.1 — the per-ORG ingest bound on the commit lane.
+
+    What the classes above close, and what they do not: the payload's
+    per-request SHAPE is bounded (MAX_EVENTS/MAX_SOURCES/MAX_PROVENANCE_REFS,
+    #9425) and the lane carries the same pre-write `max_points` gate every
+    other write endpoint has (#5637). Neither bounds the TOTAL: a
+    `points: []` commit mints :Session + transcript :Source + AgentSession
+    :Event, `_count_resource("points")` matches none of them, so the count
+    never moves and that gate can never trip. MEASURED on the pre-fix code:
+    a free-tier key looping /v1/sessions/commit with a fresh `session_id`
+    mints unbudgeted nodes forever.
+
+    This class pins the part of #4051 that is NOT decision-blocked — its own
+    §3.1 (the triage comment on the issue names it "adoptable, not done"): a
+    per-ORG, per-minute ingest allowance denominated in the STORED BYTES a
+    request will add — the unit the owner ruled for storage (#4495/#5331,
+    MB/GB not nodes) — refused with 429 + Retry-After. It is a THROTTLE
+    (bounds the rate), not a cap (bounds the total) — the total bound is §4
+    and turns on `max_graph_nodes` vs the recorded "storage is free" position
+    (#4495/#5331), an owner ruling this lane does not take.
+
+    Why the charge is not `nodes_written`: the PL4 metering figure
+    (`plan.reconcile.net_new`) is points+entities+operators only, so a
+    payload whose `events[]`/`sources[]` are large while its points all
+    reconcile as merges meters 0 while still minting :Event/:Source nodes —
+    the budget would be bypassable by the very hole it bounds.
+    """
+
+    @staticmethod
+    def _allow(monkeypatch, charge_bytes: int) -> None:
+        """Set the per-minute BYTE allowance and start from an empty window.
+
+        The window is PROCESS state keyed by org_id (every test in this file
+        authenticates as `team-001`), so it is reset rather than assumed — see
+        `tests/conftest.py::_fresh_commit_ingest_budget`.
+        """
+        import tortoise.quota as quota_mod
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", charge_bytes)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+    @staticmethod
+    def _charge(**overrides) -> int:
+        """The bytes one payload is charged — the unit the budget compares.
+
+        Read from the SAME function the endpoint calls, so a test cannot pin a
+        charge the product does not compute.
+        """
+        raw = _raw_payload(0, points=[], entities=[], provenance_refs=[])
+        raw.update(overrides)
+        return TestCommitOrgIngestBound._charge_of(raw)
+
+    @staticmethod
+    def _charge_of(raw: dict) -> int:
+        """The charge of an arbitrary raw payload dict (as the endpoint sees it)."""
+        from tortoise.commit_schema import (
+            CommitPayload,
+            commit_ingest_charge_bytes,
+        )
+        payload = dict(raw)
+        payload["client_commit_id"] = "0" * 64
+        return commit_ingest_charge_bytes(CommitPayload(**payload))
+
+    @staticmethod
+    def _empty_commit(client, session_id: str):
+        """The cheapest loop iteration: `points: []` — the `:CommitRecord`
+        anchor, the `:Session`, the transcript `:Source` and the AgentSession
+        `:Event`, and no Points."""
+        return _commit(client, _raw_payload(
+            0, session_id=session_id, points=[], entities=[],
+            provenance_refs=[]))
+
+    def test_points_empty_loop_is_refused_once_the_minute_is_spent(
+            self, client, monkeypatch):
+        """THE HOLE, pinned: the cheapest loop iteration is charged 4 × 1024 B
+        (the :CommitRecord anchor plus the :Session/:Source/:Event chain, none
+        of which the points count sees), so an allowance of two such commits
+        admits exactly two — the third must 429 and mint no chain.
+
+        Pre-fix this loop has NO org-level bound at all: every iteration 200s
+        while the org's points count stays 0 (asserted below), which is the
+        `points: []` bypass #4051 names. MEASURED pre-fix, this exact test
+        failed with `the third empty commit was admitted (200)`.
+        """
+        unit = self._charge()
+        self._allow(monkeypatch, 2 * unit)
+        for i in (0, 1):
+            r = self._empty_commit(client, f"sIngest{i}")
+            assert r.status_code == 200, r.text
+        # The chain nodes a commit mints that no quota counts: proof the thing
+        # we are now metering is the thing that was invisible before.
+        assert TestCommitPointsGate._chain_counts("sIngest0") == (1, 1, 1)
+        assert TestCommitPointsGate._point_count() == 0
+
+        r = self._empty_commit(client, "sIngest2")
+        assert r.status_code == 429, (
+            f"the third empty commit was admitted ({r.status_code}) — the "
+            "per-org ingest budget did not bind")
+        assert int(r.headers["Retry-After"]) >= 1
+        detail = r.json()["detail"]
+        assert detail["code"] == "ingest_rate_limited"
+        # The refusal names its SCOPE and the numbers it compared (#4614's
+        # contract: a refusal is a structured, distinguishable state).
+        assert detail["scope"] == "org"
+        assert detail["limit"] == 2 * unit
+        assert detail["used"] == 2 * unit
+        assert detail["unit"] == "bytes/60s"
+        # ... and no chain node was minted for the refused request.
+        assert TestCommitPointsGate._chain_counts("sIngest2") == (0, 0, 0)
+
+    def test_the_refusal_is_not_write_free_and_says_so(self, client, monkeypatch):
+        """The 429's REAL residual, pinned so the gate is not overclaimed.
+
+        `store.acquire(...)` merges the `:CommitRecord` idempotency anchor
+        before any gate in this handler (as it does for the pre-existing
+        sessions/points gates), so a refused request leaves one
+        `status='partial'` record. It is counted by no quota and deliberately
+        uncharged (a refused charge is not appended), and it is bounded by the
+        per-key rate limit — but it IS a node, so "the gate is pre-write" must
+        never be read as "a refusal mints nothing".
+        """
+        self._allow(monkeypatch, self._charge())
+        assert self._empty_commit(client, "sIngestRecA").status_code == 200
+        raw = _raw_payload(0, session_id="sIngestRecB", points=[],
+                           entities=[], provenance_refs=[])
+        r = _commit(client, raw)
+        assert r.status_code == 429, r.text
+        cid = _finalize(dict(raw))["client_commit_id"]
+        assert _commit_record(cid) is not None, (
+            "the :CommitRecord anchor is merged before every gate — if this "
+            "fails, the handler's ordering changed and the residual claim in "
+            "hosted_api's [4c] comment is stale")
+        # ... and nothing else was minted for that session.
+        assert TestCommitPointsGate._chain_counts("sIngestRecB") == (0, 0, 0)
+
+    def test_held_commit_is_charged(self, client, monkeypatch):
+        """A HELD commit must be charged too — it WRITES.
+
+        The `held` outcome (>25 net-new on a first adjudication) MERGEs the
+        `:Session` node with its `value_nodes_held` counter, and for a fresh
+        `session_id` that MERGE CREATES the node while the points count stays
+        at 0. A gate placed below that return would leave the cheapest
+        remaining loop (a 26-point payload, fresh session each iteration, no
+        Points written, no count moved) completely uncharged — the exact class
+        #4051 is about. Review cycle 1 caught the gate sitting below it.
+        """
+        # The allowance is exactly ONE held-band commit's charge: the two empty
+        # commits spend 2 × unit, so the held commit must be refused — and its
+        # charge stays at/below the allowance, so the over-sized-single-request
+        # rule cannot be what admits it (an allowance BELOW the request's own
+        # charge would exercise that other rule instead).
+        held = _raw_payload(
+            26, session_id="sIngestHeld",
+            points=[_point(i, about_entities=[]) for i in range(26)])
+        self._allow(monkeypatch, self._charge_of(held))
+        assert self._empty_commit(client, "sIngestHeldA").status_code == 200
+        assert self._empty_commit(client, "sIngestHeldB").status_code == 200
+        r = _commit(client, held)
+        assert r.status_code == 429, (
+            f"a held-band commit was admitted uncharged ({r.status_code}) — "
+            "the gate sits below the held return")
+        sess, ev, src = TestCommitPointsGate._chain_counts("sIngestHeld")
+        assert (sess, ev, src) == (0, 0, 0), (
+            "the held :Session MERGE landed despite the refusal")
+
+    def test_refused_charge_does_not_poison_the_window(self, client, monkeypatch):
+        """A refused charge is NOT appended to the window.
+
+        A client parked at the boundary retries; if each refusal were
+        appended, the window would never empty and the org would be throttled
+        for as long as it keeps retrying. Pinned directly (review cycle 1: the
+        mutation `append the refused charge` left the whole class green).
+        """
+        unit = self._charge()
+        self._allow(monkeypatch, 2 * unit)
+        assert self._empty_commit(client, "sIngestPzA").status_code == 200
+        assert self._empty_commit(client, "sIngestPzB").status_code == 200
+        for i in range(3):
+            assert self._empty_commit(
+                client, f"sIngestPzRefused{i}").status_code == 429
+        from tortoise.quota import commit_ingest_admit
+        # used is still exactly what the two ADMITTED commits spent: the three
+        # refusals added nothing (a zero charge is always admissible).
+        assert commit_ingest_admit(TEST_ORG_ID, 0).used == 2 * unit
+
+    def test_oversized_single_request_is_admitted_once(self, client, monkeypatch):
+        """A request larger than the whole allowance is admitted once.
+
+        Refusing it with a Retry-After would tell a client to retry a payload
+        that can never fit — an unbreakable loop that appears only when an
+        operator sets `TORTOISE_COMMIT_INGEST_BYTES_PER_MIN` below the route's
+        8 MiB body cap. Admitting it spends the window, so the burst is bounded
+        by ONE request rather than by "never".
+        """
+        self._allow(monkeypatch, 100)  # smaller than any commit's charge
+        r = self._empty_commit(client, "sIngestOversize1")
+        assert r.status_code == 200, r.text
+        r2 = self._empty_commit(client, "sIngestOversize2")
+        assert r2.status_code == 429, (
+            "an oversize request did not spend the window — the burst is not "
+            "bounded")
+
+
+    def test_bound_is_per_org_not_per_key(self, client, monkeypatch):
+        """The bound must key on the ORG.
+
+        Today's only ingest rate on this lane is 300 req/min per KEY
+        (`RateLimitMiddleware.PATH_LIMITS`), and a team plan allows 20 keys —
+        so a per-key bound multiplies with the number of keys the tenant can
+        mint. One org spending its minute must not spend another's.
+        """
+        self._allow(monkeypatch, self._charge())
+        assert self._empty_commit(client, "sIngestOrgA1").status_code == 200
+        assert self._empty_commit(client, "sIngestOrgA2").status_code == 429
+
+        # A SECOND org has its own window — its first commit still lands.
+        app.dependency_overrides[get_current_org] = lambda: {
+            **TEST_TEAM, "org_id": "team-002", "key_id": "test-key-002"}
+        r = self._empty_commit(client, "sIngestOrgB1")
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is False
+        # ...and org A's window is still spent: the two windows are separate
+        # keys, so B's commit did not buy A any more room.
+        app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
+        assert self._empty_commit(client, "sIngestOrgA3").status_code == 429
+
+    def test_replay_does_not_consume_the_budget(self, client, monkeypatch):
+        """A fully_written re-POST writes nothing, so it must not be charged
+        — #1727's lesson applied to the new bound: quota never gates a
+        duplicate."""
+        self._allow(monkeypatch, self._charge())
+        raw = _raw_payload(0, session_id="sIngestReplay", points=[],
+                           entities=[], provenance_refs=[])
+        r1 = _commit(client, raw)
+        assert r1.status_code == 200, r1.text
+        # The minute is now fully spent: a NEW commit is refused...
+        assert self._empty_commit(client, "sIngestReplay2").status_code == 429
+        # ...while the replay of the committed payload still answers 200.
+        r2 = _commit(client, dict(raw))
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["duplicate"] is True
+        assert TestCommitPointsGate._chain_counts("sIngestReplay") == (1, 1, 1)
+
+    def test_default_allowance_admits_a_normal_commit(self, client):
+        """The gate must be invisible to ordinary traffic: with the shipped
+        allowance (NOT monkeypatched), the empty commit — the zero-budget
+        payload `test_empty_commit_ok_zero_budget` pins — still 200s."""
+        import tortoise.quota as quota_mod
+        assert quota_mod.MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG >= 1_000_000
+        r = self._empty_commit(client, "sIngestDefault")
+        assert r.status_code == 200, r.text
+        assert r.json()["nodes_created"] == 0
+        assert TestCommitPointsGate._chain_counts("sIngestDefault") == (1, 1, 1)
+
+    def test_used_is_the_declared_node_writes_not_the_metered_net_new(
+            self, client, monkeypatch):
+        """The charge is the nodes the write phase MINTS, not PL4's
+        `net_new` (points+entities+operators): an `events[]`-only commit
+        meters 0 net-new nodes while minting one :Event per entry, so a
+        net-new-keyed budget would let the bypass through.
+
+        The allowance admits ONE empty commit and nothing more, and the
+        events-only commit is charged more than an empty one — so it is
+        refused while a net-new-keyed budget would see 0 and admit it.
+        """
+        events = [{"id": f"ev_{i:064d}", "eventKind": "decision",
+                   "content": f"event {i}", "confidence": 0.8,
+                   "source_ref": "session.md", "about_entities": []}
+                  for i in range(2)]
+        unit = self._charge()
+        events_charge = self._charge(events=events)
+        assert events_charge > unit, (
+            "an events-only payload is not charged for the :Event nodes it "
+            "mints — the budget would be bypassable by the hole it bounds")
+        # The allowance is exactly the events payload's own charge: if the
+        # charge were keyed on PL4's `net_new` (0 for a merge-only payload, and
+        # 0 here because no Points are declared) the events commit would spend
+        # nothing and the FOLLOWING empty commit would be admitted.
+        self._allow(monkeypatch, events_charge)
+        r = _commit(client, _raw_payload(
+            0, session_id="sIngestEvents", points=[], entities=[],
+            provenance_refs=[], events=events))
+        assert r.status_code == 200, r.text
+        assert self._empty_commit(client, "sIngestEventsAfter").status_code == 429, (
+            "the events-only commit did not spend the window — the budget is "
+            "not charging the :Event nodes the write phase mints")
+        assert TestCommitPointsGate._chain_counts("sIngestEvents") == (1, 1, 1)
+
+    def test_uncapped_text_fields_are_charged_as_payload_bytes(self):
+        """The payload term: `summary`/`story_arc` carry no Layer-1 field cap,
+        so a few-node commit could otherwise add megabytes for a few KB of node
+        charge. The charge must follow the bytes the client sent.
+
+        (Unit test, no HTTP: the charge function is what the endpoint calls.)
+        """
+        big = "x" * 40_000
+        assert self._charge(summary=big) >= len(big)
+        assert self._charge(summary=big) > self._charge()
+
+    def test_no_org_context_is_unbounded(self):
+        """stdio/operator (no org) mirrors `_check_org_limit`'s
+        `if not org_id: return` — there is no tenant to throttle."""
+        from tortoise.quota import commit_ingest_admit
+        assert commit_ingest_admit(None, 10 ** 9).allowed is True
+        assert commit_ingest_admit("", 10 ** 9).allowed is True
+
+
+class TestDeclaredCommitWriteCount:
+    """The budget's unit — every node `_execute_commit_writes` mints."""
+
+    @staticmethod
+    def _payload(**overrides):
+        from tortoise.commit_schema import CommitPayload
+        raw = _raw_payload(0, points=[], entities=[], provenance_refs=[])
+        raw.update(overrides)
+        raw["client_commit_id"] = "0" * 64
+        return CommitPayload(**raw)
+
+    def test_empty_payload_declares_the_anchor_and_chain(self):
+        """4 = `:CommitRecord` (merged before every gate) + `:Session` +
+        transcript `:Source` + AgentSession `:Event`."""
+        from tortoise.commit_schema import declared_commit_write_count
+        assert declared_commit_write_count(self._payload()) == 4
+
+    def test_provenance_refs_add_the_session_source(self):
+        """`_execute_commit_writes` step 4 materializes the canonical
+        `session:<id>` `:Source` only when `provenance_refs` is non-empty — an
+        ordinary commit has them, so omitting it would under-charge the common
+        case (review cycle 1)."""
+        from tortoise.commit_schema import declared_commit_write_count
+        p = self._payload(provenance_refs=[
+            {"path": "session.md", "spans": ["0-10"]}],)
+        assert declared_commit_write_count(p) == 5
+
+    def test_each_collection_entry_is_charged_once(self):
+        from tortoise.commit_schema import declared_commit_write_count
+        p = self._payload(
+            points=[_point(0), _point(1)],
+            entities=[{"name": "Alpha", "kind": "Project",
+                       "passes_frequency_gate": True}],
+            events=[{"id": f"ev_{i:064d}", "eventKind": "decision",
+                     "content": f"e{i}", "confidence": 0.8,
+                     "source_ref": "session.md", "about_entities": []}
+                    for i in range(3)],
+            sources=[{"url": "https://example.test/a",
+                      "sourceKind": "web"}],
+        )
+        assert declared_commit_write_count(p) == 4 + 2 + 1 + 3 + 1
+
+    def test_the_node_floor_is_the_pricing_cost_basis(self):
+        """The floor is the repo's own per-node figure, not a new number.
+
+        `product/pricing.json` `billing.cost_basis.bytes_per_node` is the ONE
+        source of that figure; if an operator retunes the cost basis, this rate
+        must not keep charging the old value silently.
+        """
+        import json
+        from pathlib import Path
+
+        from tortoise.commit_schema import COMMIT_INGEST_BYTES_PER_NODE
+        pricing_json = Path(__file__).resolve().parent.parent / "product" / "pricing.json"
+        basis = json.loads(pricing_json.read_text())["billing"]["cost_basis"]
+        assert basis["bytes_per_node"] == COMMIT_INGEST_BYTES_PER_NODE
+
+    def test_the_charge_is_the_node_floor_for_a_small_payload(self):
+        """A small payload is charged `nodes × 1024` — the floor, by exact
+        value, so deleting the floor from `commit_ingest_charge_bytes` fails
+        here directly (review cycle 1: it previously failed only by accident,
+        through a few bytes of `session_id` length drift)."""
+        from tortoise.commit_schema import (
+            COMMIT_INGEST_BYTES_PER_NODE,
+            commit_ingest_charge_bytes,
+        )
+        assert commit_ingest_charge_bytes(self._payload()) == 4 * COMMIT_INGEST_BYTES_PER_NODE
+
+    def test_a_fat_payload_is_charged_by_its_bytes(self):
+        """The other arm: an uncapped `summary` is charged what it actually
+        sends, not the node floor."""
+        from tortoise.commit_schema import commit_ingest_charge_bytes
+        big = "x" * 40_000
+        assert commit_ingest_charge_bytes(self._payload(summary=big)) >= len(big)
+
+
 class TestLayer1:
     def test_missing_required_field_400(self, client):
         raw = _raw_payload(1)

@@ -92,6 +92,9 @@ __all__ = [  # noqa: RUF022
     "validate_domain_rules", "domain_block_warnings", "_infer_payload_domain",
     # canonicalization
     "canonical_payload", "compute_client_commit_id", "point_content_id",
+    # ingest budget (#4051 §3.1)
+    "declared_commit_write_count", "commit_ingest_charge_bytes",
+    "COMMIT_INGEST_BYTES_PER_NODE",
     # reconciliation
     "GraphState", "PointReconcile", "EntityReconcile", "OperatorReconcile",
     "ReconcileResult", "reconcile_payload",
@@ -876,6 +879,93 @@ class CommitPayload(BaseModel):
         except ValueError:
             raise ValueError("captured_at must be an ISO 8601 timestamp")  # noqa: B904
         return v
+
+
+# ── #4051 §3.1: the per-org ingest charge ────────────────────────────────
+# The input to ``quota.commit_ingest_admit``. Computed from the PAYLOAD, never
+# from metering: the PL4 figure (``plan.reconcile.net_new``) is
+# points+entities+operators only, so an ``events[]``-only commit meters 0 while
+# minting a :Event per entry — a budget keyed on it would be bypassable by the
+# very hole it exists to bound.
+
+#: Nodes the write phase mints for EVERY commit, before any payload entry:
+#: the ``:CommitRecord`` idempotency anchor (``commit_idempotency._MERGE_CYPHER``
+#: — merged before ANY gate on this handler, so a refused request mints it
+#: too), the ``:Session`` MERGE, its transcript ``:Source`` (D10 — a document IS
+#: a ``:Source``) and the AgentSession ``:Event``
+#: (``hosted_api._execute_commit_writes`` steps 1-3). The last three are exactly
+#: the labels `_count_resource("points")` does NOT match, which is why a
+#: ``points: []`` commit was invisible to every quota (#4051).
+_COMMIT_FIXED_NODES = 4
+
+#: The planning figure the repo's own cost basis uses for ONE node
+#: (``product/pricing.json`` → ``billing.cost_basis.bytes_per_node`` = 1024).
+#: Deliberately NOT a price and NOT a cap input — ``tortoise/graph_storage.py``
+#: records that the ``bytes_per_node`` constant and ``max_graph_nodes`` are
+#: owner territory and stay untouched. This is a RATE unit: it converts "how
+#: many nodes will this request leave behind" into stored bytes, so a
+#: node-counting loop cannot be cheap merely because each node is small.
+#: A test ties the value to pricing.json, so an owner retune of the cost basis
+#: cannot silently leave this rate charging the old figure.
+COMMIT_INGEST_BYTES_PER_NODE = 1024
+
+
+def declared_commit_write_count(payload) -> int:
+    """Every graph NODE one commit payload will mint (upper bound).
+
+    One per ``points[]``/``entities[]``/``operators[]``/``events[]``/
+    ``sources[]``/``supersessions[]`` entry, the ``_COMMIT_FIXED_NODES`` chain,
+    and one more for the canonical ``session:<id>`` ``:Source`` that step 4 of
+    ``_execute_commit_writes`` materializes **only when ``provenance_refs`` is
+    non-empty** (an ordinary commit has provenance refs, so omitting it would
+    under-charge the common case by 20%).
+
+    ``provenance_refs[]`` entries are otherwise NOT charged one-for-one: beyond
+    that single Source they grow the session ``:Source``'s stored
+    ``provenance_spans`` property rather than minting nodes, and their count is
+    already bounded by ``quota.MAX_PROVENANCE_REFS`` — the payload term of
+    :func:`commit_ingest_charge_bytes` charges the bytes they actually add.
+
+    This is an UPPER bound for a Layer-1-validated payload, deliberately: a
+    MERGE that finds an existing node mints nothing, so a replay-heavy or
+    dedup-heavy client is charged for more than it writes. That is the
+    fail-closed direction for a throttle (over-charging delays a request;
+    under-charging removes the bound).
+    """
+    total = _COMMIT_FIXED_NODES
+    if getattr(payload, "provenance_refs", None):
+        total += 1  # the canonical ``session:<id>`` :Source (step 4)
+    for field_name in ("points", "entities", "operators", "events",
+                       "sources", "supersessions"):
+        total += len(getattr(payload, field_name, None) or ())
+    return total
+
+
+def commit_ingest_charge_bytes(payload) -> int:
+    """The stored BYTES one commit is charged against its org's ingest budget.
+
+    ``max(payload bytes, nodes it will mint × 1024)``:
+
+    * the **payload term** stops the fat-property bypass — ``summary`` and
+      ``story_arc`` carry no field cap (Layer-1 caps point content/quote and the
+      event/source/entity counts, not these two), so a commit of three nodes
+      carrying an 8 MiB summary would add megabytes for a few hundred bytes of
+      node charge;
+    * the **node floor** stops the reverse — a ``points: []`` commit's ~1 KB
+      body mints ~3 KB of nodes, which is the cheapest iteration of the very
+      loop #4051 is about (measured pre-fix: unbounded).
+
+    Serializing the payload costs one pass; the commit path already
+    canonicalizes a JSON subset per request for ``client_commit_id``, and this
+    runs on the endpoint's worker thread (``asyncio.to_thread(_commit_sync)``),
+    never on the event loop.
+    """
+    try:
+        payload_bytes = len(payload.model_dump_json().encode("utf-8"))
+    except Exception:  # a charge must never fail a commit
+        payload_bytes = 0
+    return max(payload_bytes,
+               declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE)
 
 
 # ── Layer-1 validation (deterministic) ────────────────────────────────────
