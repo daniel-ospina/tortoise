@@ -79,8 +79,10 @@ def _points_pair(refs=("pA", "pB"), contents=("A implies B", "B")):
 
 
 def _object_pair(refs=("oA", "oB"), names=("Object A", "Object B")):
-    """Object↔Object — the ONLY pair that keeps the operator-less direct
-    shape (#8499), so it is the pair the direct-edge rules still govern."""
+    """Object↔Object — the common non-Point-bearing pair, so the shape the
+    direct-edge rules still govern (#8499 probes `:Point` only; `:Subject`/
+    `:Event` pairs keep the direct edge too, but Object↔Object is the pair a
+    bundle can mint with no pre-seeded graph)."""
     return {"entities": [
         {"ref": refs[0], "type": "object", "name": names[0]},
         {"ref": refs[1], "type": "object", "name": names[1]},
