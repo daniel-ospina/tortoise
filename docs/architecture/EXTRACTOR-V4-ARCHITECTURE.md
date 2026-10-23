@@ -1711,7 +1711,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 15. Open questions
 
-**Cross-batch connection — by LLM or mechanically — is open** (§13.8). The other two questions this document raises are answered by the design: **hard fan-out caps apply** (200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3) <!-- v4-mechanism: fanout_cap -->, and **`aboutObject` is a STORED edge**, not a derived join (§13.8 question 2, §16) — the one remaining unknown, *are those tools ever called?*, cannot be answered pre-launch and is therefore deferred.
+**Cross-batch connection — by LLM or mechanically — is open** (§13.8). The other two questions this document raises are answered by the design: **hard fan-out caps apply** (200, `PER_ENTITY_FANOUT_CAP`, §13.8 question 3), and **`aboutObject` is a STORED edge**, not a derived join (§13.8 question 2, §16) — the one remaining unknown, *are those tools ever called?*, cannot be answered pre-launch and is therefore deferred. <!-- v4-mechanism: fanout_cap -->
 
 ---
 

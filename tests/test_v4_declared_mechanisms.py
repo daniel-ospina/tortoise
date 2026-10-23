@@ -90,10 +90,11 @@ limits) — and `membership_errors` fails closed on ALL THREE shapes:
     header rather than silently assumed to be checked. The same holds for a
     non-markdown file INSIDE the architecture dir: the surface is `**/*.md`, so a
     `.yaml` there is an uncovered source, not a document that owes a marker;
-  * a SYMLINK anywhere in the surface is refused rather than followed — the walk
-    and the attribution would disagree about its name (a linked directory is not
-    descended, so a marker behind it would get no verdict), which is a verdict of
-    its own and not a silent hole. No link exists there today.
+  * a SYMLINK to a document or to a directory in the surface is refused rather
+    than followed — the walk and the attribution would disagree about its name (a
+    linked directory is not descended, so a marker behind it would get no
+    verdict), which is a verdict of its own and not a silent hole. No link exists
+    there today; a NON-markdown link is an uncovered source, as above.
 * It does not touch the extraction/write-path stages.
 * It does not check that a cited test file is REGISTERED in the CI manifest —
   that surface is owned by `tools/ci_selection.py --integrity`. The gate checks
@@ -316,16 +317,18 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
     every verdict below names the document that way too, because a basename is
     not a document identity (`a.md` can exist at two depths).
 
-    ⛔ A SYMLINK in the surface is a REFUSAL, not a document. The surface is read
-    two ways — this scan WALKS it (`rglob`) while attribution RESOLVES each
-    `declared_in:` entry — and those two readings cannot be kept identical across
-    a link: `rglob` does not descend a linked DIRECTORY (a `v4-mechanism:` marker
-    inside one would get NO verdict at all, the fail-open direction), and a linked
-    FILE whose target lies outside the surface is walked under its link name while
-    resolving outside it, so a row naming the link could never be attributed
-    (an unsatisfiable red). Rather than teach both halves to agree about aliases,
-    the alias is refused: no link exists in the surface today, and a declaration
-    belongs in a document, not behind one.
+    ⛔ A SYMLINK to a DOCUMENT or to a DIRECTORY in the surface is a REFUSAL, not a
+    document. The surface is read two ways — this scan WALKS it (`rglob`) while
+    attribution RESOLVES each `declared_in:` entry — and those two readings cannot
+    be kept identical across a link: `rglob` does not descend a linked DIRECTORY (a
+    `v4-mechanism:` marker inside one would get NO verdict at all, the fail-open
+    direction), and a linked DOCUMENT whose target lies outside the surface is
+    walked under its link name while resolving outside it, so a row naming the
+    link could never be attributed (an unsatisfiable red). Rather than teach both
+    halves to agree about aliases, the alias is refused: no link exists in the
+    surface today, and a declaration belongs in a document, not behind one. A
+    non-markdown link is untouched by this — it is an uncovered SOURCE, exactly
+    like a real `.yaml` beside it (see the stated limits).
 
     The second return value is the violation list, so one caller can report the
     malformed shapes and the membership verdicts together.
@@ -340,10 +343,10 @@ def declaration_markers(docs_dir: Path = ARCH_DOCS) -> tuple[dict[str, list[str]
         ]
     for doc in sorted(docs_dir.rglob("*")):
         rel = doc.relative_to(docs_dir).as_posix()
-        if doc.is_symlink():
+        if doc.is_symlink() and (doc.suffix == ".md" or doc.is_dir()):
             errors.append(
                 f"{rel}: a symlink inside the declaration surface — this scan "
-                f"does not follow a linked directory, and a linked file is "
+                f"does not follow a linked directory, and a linked document is "
                 f"walked under one name while it resolves under another, so a "
                 f"marker behind it could be read here and attributed nowhere "
                 f"(fail closed): declare the mechanism in a real document under "
@@ -423,14 +426,16 @@ def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
 
     Resolved against the docs dir's own root (`<root>/docs/architecture` ->
     `<root>`), not string-compared: a declaration written as
-    `./docs/architecture/X.md`, with a doubled separator, or through a symlink
-    names the same document, and a string comparison would silently attribute it
-    to nothing (a false red on a legitimate registry). Containment — not mere
+    `./docs/architecture/X.md` or with a doubled separator names the same
+    document, and a string comparison would silently attribute it to nothing (a
+    false red on a legitimate registry). Containment — not mere
     existence — is the test, so `packs/dev/manifest.yaml` is NOT a scanned
     declaring document: the markdown marker convention does not reach it. A
     `.yaml`/`.yml` INSIDE the architecture dir is not one either, for the same
     reason: `gate_errors` accepts such a source, it can carry no markdown
     comment, and demanding a marker there emits a remedy no edit can satisfy.
+    (A symlink is refused by the scan, never resolved here — see
+    :func:`declaration_markers`.)
     """
     scanned_dir = docs_dir.resolve()
     root = docs_dir.parent.parent
@@ -1475,6 +1480,22 @@ def test_membership_refuses_a_linked_file_whose_target_is_outside(tmp_path) -> N
     errors = membership_errors([row], docs)
     assert any("link.md" in e and "symlink" in e for e in errors), errors
     assert not any("does not name it" in e for e in errors), errors
+
+
+def test_a_non_markdown_link_in_the_surface_is_an_uncovered_source(tmp_path) -> None:
+    """The symlink refusal reaches DOCUMENTS and DIRECTORIES, not every entry.
+
+    A linked `.yaml`/`.yml` is exactly what a real `.yaml` there is: a source the
+    marker convention cannot reach, i.e. a stated limit. Refusing it would
+    contradict that limit and tell its author to move a declaration that is not
+    there (#9778 review P3) — so the refusal is narrowed to a linked doc or dir.
+    """
+    docs = _docs(tmp_path, a__md="the real one <!-- v4-mechanism: x -->\n")
+    outside = tmp_path / "policies"
+    outside.mkdir()
+    (outside / "p.yaml").write_text("policy: {}\n", encoding="utf-8")
+    (docs / "policy.yaml").symlink_to(outside / "p.yaml")
+    assert membership_errors([_row("x")], docs) == []
 
 
 def test_a_nested_unreadable_document_is_named_by_its_relative_path(tmp_path) -> None:

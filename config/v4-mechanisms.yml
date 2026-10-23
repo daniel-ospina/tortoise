@@ -91,7 +91,11 @@
 # with no row, and a row with no marker — AND holds each row to its OWN declared
 # documents: every scanned document a row names must carry its marker (a marker
 # elsewhere does not stand in for it), a marker in a document the row omits is
-# refused, and a row that names none is refused outright. Placement INSIDE the
+# refused, and a row that names NO SCANNED document is refused as unverifiable.
+# ⚠️ A row that names no document AT ALL (`declared_in: []`) is a different
+# verdict, and it is `gate_errors`' — the shape rule says "declares no declaring
+# document" and this membership rule stays SILENT about it, so one defect draws
+# one message. Placement INSIDE the
 # document is the convention described above, which the gate cannot read. See the
 # gate's docstring for the rule and its stated limits.
 #
