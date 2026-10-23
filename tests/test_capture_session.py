@@ -468,6 +468,35 @@ def test_capture_derives_money_from_content_not_the_200_char_quote(
     assert _read_money_row(sdk, res["points"][0]["id"])[0] is None, res["points"]
 
 
+def test_capture_keeps_the_claim_when_the_derived_amount_is_unstorable(
+        sdk, monkeypatch):
+    """#2817 (review P1): a DERIVED value must never sink the record it came
+    from. An ``amountMinor`` above the store's INT64 domain is refused by
+    ``_sanitize_props`` (#4647), and before this fix that refusal cost the
+    whole POINT — the claim was never written and the capture reported
+    `ok=False` (a partially-written session reported as failed).
+
+    The value is now refused at the Layer-1 boundary (``money.py``), so the
+    normalizer abstains, the point is written with its prose intact, and the
+    abstention is VISIBLE on the receipt — never a silent guess, never a lost
+    claim.
+    """
+    content = "The facility size was EUR 123456789012345678 for the year."
+    _install_fake_extract(monkeypatch, _money_payload(content))
+
+    res = sdk.capture_session(CONV)
+    assert res["ok"] is True, res
+    assert res["extracted"] == 1, res
+    pid = res["points"][0]["id"]
+    assert _read_money_row(sdk, pid)[0] is None, _read_money_row(sdk, pid)
+    stored_content = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content", params={"id": pid},
+    ).result_set[0][0]
+    assert stored_content == content
+    assert any("refused_by_layer1" in w for w in res["warnings"]), res[
+        "warnings"]
+
+
 def test_capture_never_types_an_ambiguous_amount(sdk, monkeypatch):
     """The seam inherits the design's abstention (Option A, #2817):
     ``R$ 1.234,56`` is NOT typed at all — never as ``1.234`` — and the raw

@@ -143,6 +143,24 @@ class TestMoneyProps:
         with pytest.raises(MoneyValueError):
             money_props(True, "USD", minor_unit_exponent=2)
 
+    def test_an_amount_the_store_cannot_hold_is_refused(self):
+        """#2817 review P1: the store's INTEGER domain is part of the value.
+
+        FalkorDB silently CLAMPS an int above INT64 (#4647) and the write path
+        refuses it — so admitting it at this boundary let a DERIVED amount sink
+        the record it came from: at the capture seam the refusal costs the whole
+        point and reports the whole capture `ok=False`. Measured pre-fix:
+        ``EUR 123456789012345678`` → ``amountMinor`` 12345678901234567800 →
+        ``ValueError: integer with 64 bits is outside the range`` → point not
+        written. Refusing HERE makes the normalizer abstain instead.
+        """
+        for over in (2 ** 63, -(2 ** 63) - 1, 12345678901234567800):
+            with pytest.raises(MoneyValueError, match=r"64 bits is outside the range"):
+                money_props(over, "EUR", minor_unit_exponent=2)
+        # ...and the boundary itself is inclusive: INT64 max is storable.
+        assert money_props(
+            2 ** 63 - 1, "EUR", minor_unit_exponent=2)[AMOUNT_MINOR] == 2 ** 63 - 1
+
     @pytest.mark.parametrize("bad", ["usd", "US", "US1", "", None, 840,
                                     "USD\n", " USD", "USD ", "U\nD"])
     def test_currency_must_be_iso_4217_alpha3(self, bad):
@@ -242,6 +260,13 @@ class TestReadMoneyValue:
     def test_a_record_with_an_unknown_currency_is_refused(self):
         with pytest.raises(MoneyValueError, match="pinned table"):
             read_money_value({AMOUNT_MINOR: 100, CURRENCY: "ZZZ",
+                              MINOR_UNIT_EXPONENT: 2})
+
+    def test_an_unstorable_amount_is_refused_on_read_too(self):
+        # The read boundary refuses what the store could not have held — a
+        # clamped amount is a data error, never something to sum.
+        with pytest.raises(MoneyValueError, match=r"64 bits is outside the range"):
+            read_money_value({AMOUNT_MINOR: 2 ** 63, CURRENCY: "EUR",
                               MINOR_UNIT_EXPONENT: 2})
 
 

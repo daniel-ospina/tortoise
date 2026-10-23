@@ -1027,6 +1027,19 @@ def test_warn_on_keeps_the_designs_named_abstention_reportable():
     assert "no_currency_anchor" in warnings[0], warnings
 
 
+def test_an_amount_the_store_cannot_hold_is_an_abstention():
+    """#2817 (review P1): a value the store cannot represent is a DROP, never a
+    write — and never the record's loss. Pre-fix this typed ``amountMinor``
+    above INT64, which the write path refuses, so at the capture seam the whole
+    POINT was lost and the capture reported `ok=False`."""
+    result = dropped(
+        "The facility size was EUR 123456789012345678 for the year.",
+        "refused_by_layer1")
+    assert result.typed is False
+    # The boundary is inclusive: INT64 max / 100 still types at exponent 2.
+    assert typed("EUR 92233720368547758")[AMOUNT_MINOR] == 9_223_372_036_854_775_800
+
+
 def test_warn_on_refuses_a_reason_outside_the_closed_set():
     """A typo in a closed vocabulary must fail loudly — silently muting the
     warning it was meant to configure is the failure mode."""

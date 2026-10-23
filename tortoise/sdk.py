@@ -1233,15 +1233,28 @@ _CAPTURE_PASSTHROUGH_ORDER = ("quote", "when", "search_keys",
                               "span_start", "span_end")
 _CAPTURE_PASSTHROUGH_PROPS = frozenset(_CAPTURE_PASSTHROUGH_ORDER)
 
-#: #2817 route (2) — the drop reasons the CAPTURE WRITE SEAM reports when it
-#: derives a money value for a point. `no_candidate` (no number in the claim at
-#: all) and `not_an_iso4217_code` (`"ISO 9001"`, `"SOC 2"`, `"Q3 target 30
-#: KPI"` — ordinary business prose) fire on most sentences, so reporting them
-#: per point would drown the capture receipt. Every reason that means "a number
-#: was here and it was NOT safely typed" stays reported — including
-#: `no_currency_anchor`, which is the design's named abstention (design §6/T3).
-_CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - {
-    "no_candidate", "not_an_iso4217_code"}
+#: #2817 route (2) — the drop reasons the CAPTURE WRITE SEAM does NOT report.
+#: This partition is the one recorded on #2817 (comment `6359826543`):
+#: `not_an_iso4217_code` is the noisy one in business prose (`"ISO 9001"`,
+#: `"SOC 2"`, `"Q3 target 30 KPI"`) and `no_candidate` fires on every sentence
+#: with no number at all. Every other reason means "a number was here and it
+#: was NOT safely typed" and stays reported — including `no_currency_anchor`.
+#: `refused_by_layer1` is reported too: a value the store cannot hold is exactly
+#: the abstention a reader must see (the #2817 review's over-range amount).
+#:
+#: ⚠️ Measured residual (2026-10-23): the vocabulary conflates a NON-money bare
+#: number (`"Sprint 14 closed on time"` → `no_currency_anchor`) with a
+#: money-shaped amount in an unsupported currency (`"800 BTC"` →
+#: `not_an_iso4217_code`, so silent here). That partition is a decision's, not
+#: this lane's — a reason-level split is the fix, filed against #2817.
+_CAPTURE_MONEY_WARN_SILENT: frozenset[str] = frozenset({
+    "no_candidate", "not_an_iso4217_code"})
+# Import-time truth of the comment above: a RENAMED reason in the silent set
+# must fail here, never silently re-partition the warning policy.
+assert _CAPTURE_MONEY_WARN_SILENT <= DROP_REASONS, (
+    "capture money warn policy names a reason outside DROP_REASONS: "
+    f"{sorted(_CAPTURE_MONEY_WARN_SILENT - DROP_REASONS)!r}")
+_CAPTURE_MONEY_WARN_ON: frozenset[str] = DROP_REASONS - _CAPTURE_MONEY_WARN_SILENT
 
 
 def _capture_passthrough_read_fields() -> str:
