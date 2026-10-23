@@ -9316,8 +9316,25 @@ class TortoiseSDK:
         deployment's provider account; that divergence is warned about
         (``UserWarning``) rather than silently assumed (#6869)."""
         import os
-        import uuid
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
+
+        # #9599: the caller's RAW argument is diagnosed BEFORE the mint, in the
+        # same order as `capture_session` (one rule, two doors). Diagnosing the
+        # minted value instead would make the doors disagree with each other and
+        # with the hosted boundary: `session_id or mint()` replaces a FALSY
+        # non-str (`0`, `False`), so the predicate would never see it here while
+        # `SessionRequest`'s typed model 422s it — a review finding.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {"session_id": session_id, "ok": False,
+                    "errors": [_blank_session], "error": _blank_session,
+                    "payload": None}
+        # The mint keeps its ORIGINAL position — before the consent gate — so a
+        # consent-declined receipt still reports the minted id exactly as it did
+        # before this change (`session_id` is public receipt surface; moving the
+        # mint below the gate would have silently turned that field into `None`).
+        session_id = session_id or mint_session_id()
         # #3662: consent FIRST — this is the SDK sibling of the gated CLI
         # primitives (`session capture` / `sessions import`), which also refuse
         # before doing any work, so no extraction (and therefore no BYOK provider
@@ -9338,6 +9355,7 @@ class TortoiseSDK:
             return {"session_id": session_id, "ok": False,
                     "errors": [declined], "error": declined,
                     "payload": None}
+
         # #6869: base_url/api_key are the Tortoise API POST credentials ONLY —
         # they never reach the extraction model. With extractor_model=None the
         # model is built from the AMBIENT environment (_default_byok_model →
@@ -9701,10 +9719,17 @@ class TortoiseSDK:
         "ok" is the success signal (never "extracted" — extracted > 0 can
         co-occur with ok=False on partial-emission failure), "extraction_mode"
         is truthful ("llm:<route>" / "llm" on success, "empty" when the
-        conversation has no extractable content — always with ok=False and an
-        errors entry — and "error" when extraction failed), errors/warnings
-        are additive and never clobbered, and an empty/blank conversation is
-        rejected BEFORE any write (no Session stub, turns=0). W5 Phase F
+        conversation has no extractable content, and "error" when extraction
+        failed), errors/warnings are additive and never clobbered, and an
+        empty/blank conversation is rejected BEFORE any write (no Session stub,
+        turns=0). A request REFUSED at the door (a blank `session_id`, #9599)
+        reports ``extraction_mode: "empty"`` too — nothing was accepted, so
+        nothing was extractable — with ok=False and an ``errors``/
+        ``diagnostics`` entry naming the cause. Reusing "empty" is deliberate:
+        every consumer of this receipt (``tortoise/__main__.py``) already reads
+        "empty" as "degraded / not filed", which is the correct read of a
+        refusal, and a new token would change the receipt shape for no added
+        truth. W5 Phase F
         (#2104): a re-capture of an EXISTING session_id reports
         "extraction_mode": "replayed" (ok=True, 0 points, additive warning —
         the hosted #1727 replay skip; a replay is a no-op on the first
@@ -9727,8 +9752,34 @@ class TortoiseSDK:
         re-attempts extraction through the existing #2335 TRUE-retry path
         instead of silently replaying.
         """
-        import uuid
         from datetime import datetime, timezone
+
+        # #9599: the same door rule as ``commit_session``'s, in the SAME ORDER —
+        # the caller's RAW argument is diagnosed first, then the mint — so the
+        # two doors cannot disagree about any input shape (a review finding: an
+        # earlier draft checked the MINTED value, so `0`/`False` were minted over
+        # here while `123`/`b"  "` were refused, and both doors disagreed with
+        # the hosted boundary, whose typed model 422s all four). Checked BEFORE
+        # the extractor, the projection handle or any graph write: a refused id
+        # writes nothing and journals nothing.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": [_blank_session],
+                "diagnostics": [_blank_session],
+                "stats": {},
+                "warnings": [],
+                "capture_redactions": 0,
+            }
+        session_id = session_id or mint_session_id()
 
         # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
         # capture for a missing key — the key gates EXTRACTION, not storage.
@@ -9737,7 +9788,6 @@ class TortoiseSDK:
 
         proj = self._get_proj()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
-        session_id = session_id or f"session_{uuid.uuid4().hex[:12]}"
         # #5632: snapshot the LIFETIME journal-failure counter at the START of
         # THIS capture. The receipt below must disclose only appends that
         # failed DURING it — a failure from an earlier, unrelated write on this
