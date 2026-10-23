@@ -570,20 +570,24 @@ ${me}" > "$block" || _emit_fail "could not build the new block text — nothing 
     # NO INTERVAL QUANTIFIERS ({m} / {m,n}) ANYWHERE IN THIS AWK PROGRAM (the
     # fence classifier below needs none). The obvious spelling of its two
     # functions is /^ {0,3}(`{3,}|~{3,})/, and that spelling is what #9274 is
-    # about — both ways it breaks, and both are a lie to the user:
-    #   * mawk 1.3.4 20240123 (the DEFAULT awk on Ubuntu 24.04) DIES at REcompile
-    #     time: "values still on machine stack", exit 100. Measured in
-    #     ubuntu:24.04: the trigger is a leading zero-minimum interval followed by
-    #     an open-ended one (the fence regex above, and /^ {0,3}(a{3,})/); /x{3,}/
-    #     and /^ {0,3}a+/ compile fine on their own.
-    #   * mawk 1.3.4 20200120 (Debian 12) predates interval support entirely —
-    #     `-W re-interval` there is a "vacuous option" — so the braces are
-    #     LITERAL and no fence ever matches (measured: /^a{3,}/ misses "aaa").
-    # Either way the state pass fails, and the READABLE AGENTS.md is refused as
-    # "could not read AGENTS.md (unreadable, or not a regular file)" at exit 3 — a
-    # diagnostic that names no real cause, which is the defect #8947 exists to end.
-    # substr() implements the same rule on every awk, so the classifier has no
-    # dependency on interval support at all.
+    # about — both ways it breaks, and each one lies to the user DIFFERENTLY:
+    #   * Ubuntu 24.04, mawk 1.3.4 20240123 (the distro DEFAULT awk): the state
+    #     pass DIES at REcompile time — "values still on machine stack", exit 100
+    #     — and the READABLE file is refused as "could not read AGENTS.md
+    #     (unreadable, or not a regular file)". Measured in ubuntu:24.04: the
+    #     trigger is a leading zero-minimum interval followed by an open-ended one
+    #     (the fence regex above, and /^ {0,3}(a{3,})/); /x{3,}/ and /^ {0,3}a+/
+    #     compile fine on their own.
+    #   * Debian 12, mawk 1.3.4 20200120: intervals are not ENABLED at all
+    #     (`-W re-interval` there is a "vacuous option"), so the braces are LITERAL
+    #     and no fence ever matches (measured: /^a{3,}/ misses "aaa"). The state
+    #     pass then SUCCEEDS and counts a documented fenced EXAMPLE of the markers
+    #     as the block, so the refusal comes from the MALFORMED branch below —
+    #     "the Tortoise block markers are MALFORMED … delete from the FIRST start
+    #     marker", i.e. advice that deletes the user's documentation.
+    # Both end at exit 3 over a file the installer could read, and neither names
+    # the real cause — the defect #8947 exists to end. substr() implements the same
+    # CommonMark rule on every awk, so the classifier needs no interval support.
     state="$(LC_ALL=C awk -v ms="$ms" -v me="$me" -v msws="$ms_ws" -v mews="$me_ws" \
                  -v msre="$ms_re" -v mere="$me_re" '
       # NEAR: the marker ALONE on the line once whitespace/BOM is stripped, but

@@ -70,10 +70,12 @@ Mutations that turn these RED (each verified RED before merge, restored byte-exa
   * drop the unclosed-fence fallback                      -> the unclosed-fence test
     fails: ``state=none`` means APPEND, so one more copy is added per run, forever;
   * use an interval quantifier in the fence classifier        -> the mawk test
-    fails: on a host whose awk is mawk the state pass dies (Ubuntu 24.04's mawk
-    PANICS at REcompile time, Debian 12's compiles ``{3,}`` as literal braces) and
-    the READABLE AGENTS.md is refused as "could not read AGENTS.md" at exit 3 —
-    #9274, invisible on this host's BSD awk and on CI's gawk;
+    fails: on a host whose awk is mawk the readable AGENTS.md is refused at exit 3
+    — Ubuntu 24.04's mawk PANICS at REcompile time (so the state pass dies and the
+    file is called unreadable), Debian 12's has no interval support at all (so
+    ``{3,}`` is LITERAL, no fence matches, and a documented fenced example is
+    counted as the block → a false MALFORMED). #9274, invisible on this host's BSD
+    awk and on CI's gawk;
   * neutralise BOTH the ``tr`` guard and the non-empty check -> the failing-``tr``
     test fails: ``tr`` dying empties both stripped markers, which silently disables
     the mangled detector, and a file whose two markers are BOTH spacing-mangled
@@ -692,17 +694,23 @@ def test_a_cr_inside_a_line_is_a_real_difference(tmp_path):
 #:     compile fine);
 #:   * 1.3.4 20200120 (Debian 12) predates interval support entirely
 #:     (``-W re-interval`` is a "vacuous option"), so ``{3,}`` is a LITERAL and no
-#:     fence ever matches (measured: ``/^a{3,}/`` misses "aaa").
+#:     fence ever matches (measured: ``/^a{3,}/`` misses "aaa") — the state pass
+#:     then SUCCEEDS and reports a false MALFORMED, a DIFFERENT lie from the
+#:     unreadable-file one above.
 #: The shim models the PANIC for the whole interval-quantifier class rather than
 #: re-implementing mawk's state-stack bug: on the Debian build every interval is
 #: already wrong, so "a classifier that needs none" is the only spelling that is
 #: right on both — and over-refusing here fails in the safe direction (a red test,
 #: not a user's refused ``AGENTS.md``). Anything without an interval goes to the
-#: HOST awk, so the rest of the installer still runs for real.
+#: HOST awk, so the rest of the installer still runs for real. ``@SHIM_CALLED@`` is
+#: touched on every pass through the shim so a test can prove the INSTALLER really
+#: consulted it — an installer that later resolves ``gawk`` by absolute path would
+#: otherwise leave this test green while modelling nothing.
 MAWK_SHIM = """#!/bin/sh
 prog=
 for a in "$@"; do prog="$prog
 $a"; done
+: > '@SHIM_CALLED@'
 if printf '%s' "$prog" | grep -qE '\\{[0-9]+(,[0-9]*)?\\}'; then
   echo "REcompile() - panic:  values still on machine stack for <interval expression>" >&2
   exit 100
@@ -852,20 +860,31 @@ def test_an_unparsed_state_fails_instead_of_claiming_an_upgrade(tmp_path):
 def test_the_fence_classifier_installs_on_a_host_whose_awk_is_mawk(tmp_path):
     """#9274 — the block must install where ``awk`` is mawk, not refuse a readable
     file. On Debian/Ubuntu (mawk is the distro default) the fence classifier's
-    interval quantifiers either panic (Ubuntu 24.04) or silently never match
-    (Debian 12), and the installer turned that into
-    ``✗ AGENTS.md — could not read AGENTS.md (unreadable, or not a regular file)``
-    and exit 3 over a file it could read. Unobservable on BSD awk (this host) and
-    on CI's gawk, which is why it shipped."""
+    interval quantifiers break the install in two DIFFERENT ways, and the user is
+    lied to differently each time: Ubuntu 24.04's mawk panics at REcompile time,
+    so the state pass dies and the run says
+    ``✗ AGENTS.md — could not read AGENTS.md (unreadable, or not a regular file)``;
+    Debian 12's mawk has no interval support at all, so ``{3,}`` is literal, no
+    fence matches, a documented fenced EXAMPLE is counted as the block, and the run
+    instead says ``the Tortoise block markers are MALFORMED … delete from the FIRST
+    start marker`` (advice that deletes the user's documentation). Both at exit 3
+    over a file that was perfectly readable. Unobservable on BSD awk (this host)
+    and on CI's gawk, which is why it shipped.
+
+    The shim models the FIRST class (the panic); it refusing the whole interval
+    class is the safe direction, because the SECOND class has no correct intervals
+    to model."""
     real_awk = shutil.which("awk")
     assert real_awk, "no awk on PATH — cannot model a mawk host"
-    shim = MAWK_SHIM.replace("@REAL_AWK@", real_awk)
+    probe_called = tmp_path / "probe-awk-called"
+    probe_shim = (MAWK_SHIM.replace("@REAL_AWK@", real_awk)
+                  .replace("@SHIM_CALLED@", str(probe_called)))
 
     # The shim itself is pinned: a shim that stopped modelling the panic would
     # make the assertion below vacuous (the installer would just pass).
     probe_dir = tmp_path / "probe-bin"
     probe_dir.mkdir()
-    (probe_dir / "awk").write_text(shim, encoding="utf-8")
+    (probe_dir / "awk").write_text(probe_shim, encoding="utf-8")
     (probe_dir / "awk").chmod(0o755)
     refused = subprocess.run(
         [str(probe_dir / "awk"), '/^ {0,3}(`{3,}|~{3,})/'],
@@ -874,13 +893,24 @@ def test_the_fence_classifier_installs_on_a_host_whose_awk_is_mawk(tmp_path):
         f"the shim must refuse what mawk 1.3.4 refuses: rc={refused.returncode}\n"
         f"{refused.stdout}{refused.stderr}")
     assert "REcompile() - panic" in refused.stderr, refused.stderr
+    assert probe_called.exists(), "the shim did not even run in the probe"
 
     # A fenced EXAMPLE of the markers plus the real (legacy) block: the fence
     # scanner is exercised on the way to the upgrade, exactly as on a mawk host.
     agents_in = ("# House rules\n\n"
                  f"```\n{START}\n...\n{END}\n```\n\n" + LEGACY_BLOCK)
-    done, agents = _install_with_stub(tmp_path, "awk", shim, agents_in)
+    installer_called = tmp_path / "installer-awk-called"
+    done, agents = _install_with_stub(
+        tmp_path, "awk",
+        MAWK_SHIM.replace("@REAL_AWK@", real_awk)
+        .replace("@SHIM_CALLED@", str(installer_called)),
+        agents_in)
 
+    # Liveness, so this cannot pass while proving nothing: an installer that later
+    # resolves ``gawk``/``/usr/bin/awk`` by absolute path (issue #9274's option 2)
+    # would bypass the shim entirely, and the mawk regression would be unmodelled.
+    assert installer_called.exists(), (
+        "the installer never consulted the shim — this test proved nothing")
     assert done.returncode == 0, (
         "a mawk host must install the block, not refuse a readable file:\n"
         f"{done.stdout}{done.stderr}")
