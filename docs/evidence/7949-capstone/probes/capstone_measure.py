@@ -223,13 +223,18 @@ POINT_COMPOSITION_CYPHER = (
     "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
     "AND NOT coalesce(n.is_operator, false) AND deriv = 0 "
     "THEN 1 ELSE 0 END) AS other_points, "
-    # The anchored count PER CLASS. The derivation-only figure is taken over
-    # `extraction_claims` ALONE, because it is the only class whose writer can
-    # stamp a derivation link: turn rows carry none BY CONSTRUCTION, and
-    # `create_operator` writes IMPL/NAND/INPUT and never `extractedFrom`. The
-    # per-class anchored counts are RETURNED so the printed line can STATE that
-    # instead of asserting it — a denominator that folds in a class which can
-    # never carry the link reports a coverage shortfall nothing can close.
+    # The anchored count PER CLASS. The per-class counts are RETURNED so the
+    # printed line can STATE the composition instead of asserting it.
+    #
+    # ⛔ The derivation figure's denominator is the WRITER class (turn rows
+    # excluded, operator Points excluded) — i.e. `extraction_claims +
+    # other_points` — NOT `extraction_claims` alone. The narrower reading was
+    # CIRCULAR: `extraction_claims` is DEFINED by `deriv > 0`, so a node that
+    # LOST its `extractedFrom` link left the denominator and landed in `other`,
+    # and the figure could not move (132/132 no matter what `other` held). The
+    # writer class is the population that is SUPPOSED to derive, so the residual
+    # is inside the denominator and a dropped link shows up as an unanchored
+    # node. `other_points_anchored` is what makes the numerator complete.
     "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
     "AND NOT coalesce(n.is_operator, false) AND deriv > 0 "
     "AND (deriv_anchored > 0 OR in_anchored > 0) "
@@ -240,7 +245,11 @@ POINT_COMPOSITION_CYPHER = (
     "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
     "AND coalesce(n.is_operator, false) "
     "AND (deriv_anchored > 0 OR in_anchored > 0) "
-    "THEN 1 ELSE 0 END) AS operator_points_anchored"
+    "THEN 1 ELSE 0 END) AS operator_points_anchored, "
+    "sum(CASE WHEN NOT coalesce(n.is_episodic, false) "
+    "AND NOT coalesce(n.is_operator, false) AND deriv = 0 "
+    "AND (deriv_anchored > 0 OR in_anchored > 0) "
+    "THEN 1 ELSE 0 END) AS other_points_anchored"
 )
 
 
@@ -746,9 +755,8 @@ def run_corpus(graph: str, sessions: list[str]) -> list[dict]:
     return results
 
 
-#: The two stat keys a #9116 surface carries when its pass RAN. Consulted ONLY
-#: for a block that has no ``enabled`` field at all — the two shapes the extractor
-#: emits both carry one, and for those the flag is the deciding word.
+#: The two stat keys a #9116 surface carries when its pass did WORK. Required for
+#: ANY witness: the flag alone is not evidence (see :func:`_pass_ran`).
 _WITNESS_STATS = ("s2", "union")
 
 
@@ -763,24 +771,46 @@ def _pass_ran(block: dict) -> bool | None:
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
+    ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
+    this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:7912`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:7915``, whose
+    ``if not edus:`` early return (``:7916``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:7932``) — with the flag ON. The
+    passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
+    embed_list:`` (``:8000``) and ``if vet_enabled and complete_list:``
+    (``:8122``). So a session whose conversation produced no list emits
+    ``enabled: True`` with empty counters and no pass ever ran; so does a pass
+    that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
+    exception path (``extractor_v2.py:7781-7801``). ``enabled: true`` therefore
+    proves the flag was read, never that the pass did anything.
+
     The rule applied here, in this order:
 
-    1. ``enabled is True`` → the pass ran. This is the extractor's OWN statement
-       that the gate was open for this pass (``vet_enabled`` reads the flag at
-       call time), and it is the only field that separates the ON population from
-       the OFF one.
-    2. ``enabled is False`` → the pass did NOT run, and non-empty stats cannot
-       outvote the flag. A block that says OFF while carrying S2 counters would be
-       a surface contradicting itself, so it fails CLOSED (never a witness).
-    3. No ``enabled`` field at all → non-empty ``s2``/``union`` is the only
-       positive evidence available; empty means silent, which is not a witness.
+    1. ``enabled is False`` → no witness, and non-empty stats cannot outvote the
+       flag. A block that says OFF while carrying S2 counters would be a surface
+       contradicting itself, so it fails CLOSED (never a witness).
+    2. A non-empty ``s2`` or ``union`` → the pass DID work, and that is the
+       positive evidence whatever carries it. This is the ONLY rule that can
+       return ``True``: activity is required, not merely permitted.
+    3. ``enabled is True`` with BOTH ``s2`` and ``union`` empty → the flag was on
+       and nothing ran (an empty list, or a failed pass). Returned as ``False``:
+       the block states its flag and evinces no pass. The caller keeps this
+       DISTINCT from the flag-OFF refusal via ``block["enabled"]`` — it is "flag
+       on, no pass activity", not the ``#9116`` absent-surface cause and not the
+       OFF cause.
+    4. No ``enabled`` field and no activity → silent (``None``), which is not a
+       witness.
     """
     enabled = block.get("enabled")
-    if enabled is True:
-        return True
     if enabled is False:
         return False
-    return True if any(block.get(key) for key in _WITNESS_STATS) else None
+    if any(block.get(key) for key in _WITNESS_STATS):
+        return True
+    if enabled is True:
+        # flag ON, zero activity — a distinct negative, never a witness
+        return False
+    return None
 
 
 def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
@@ -793,10 +823,19 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
     Returns ``(block, where, refusal)``. ``block`` is non-``None`` only when a
     surface in that place states the pass ran (:func:`_pass_ran`); otherwise
     ``where`` still names the place a surface WAS found and ``refusal`` says why
-    it is not a witness (``""`` when no surface was found at all). A positive
-    witness anywhere outranks a refusal elsewhere; a refusal outranks silence.
+    it is not a witness (``""`` when no surface was found at all).
+
+    Precedence among the negatives: a positive witness anywhere outranks every
+    refusal; an ``enabled: false`` refusal outranks a flag-on/no-activity one
+    (it CONTRADICTS the arm the probe forced, which is the sharper finding); both
+    outrank silence. The two refusal KINDS are kept apart on purpose — "the pass
+    did not run because its flag was off", "the flag was on and the pass did no
+    work" and "the surface was never delivered (``#9116``)" send a reader to
+    three different places, and one message for all three is how #9116 was
+    mis-blamed the first time.
     """
     refused: tuple[str, str] | None = None
+    idle: tuple[str, str] | None = None
     silent: tuple[str, str] | None = None
     for run in runs:
         surfaces = run.get("surfaces") or {}
@@ -811,13 +850,35 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
             ran = _pass_ran(block)
             if ran is True:
                 return block, where, ""
-            reason = (
-                f"the {key!r} surface IS present at {where} but its own "
-                f"`enabled` reads {block.get('enabled')!r} "
-                f"({_summary(block)}) — a block that says the pass did NOT run "
-                f"is not evidence that it did")
-            if ran is False:
-                refused = refused or (where, reason)
+            if ran is False and block.get("enabled") is True:
+                # flag ON, no activity: the pass was gated out (or failed) with
+                # its flag set — NOT a contradiction of the arm, and NOT #9116.
+                idle = idle or (
+                    where,
+                    f"the {key!r} surface IS present at {where} and its own "
+                    f"`enabled` reads True, but it carries NO pass activity — "
+                    f"neither {'/'.join(_WITNESS_STATS)} is non-empty "
+                    f"({_summary(block)}). The extractor emits exactly this "
+                    f"shape when the flag is ON and the list a pass would have "
+                    f"worked on is empty: `vet_enabled` is computed BEFORE the "
+                    f"`if not edus:` early return that emits "
+                    f"{{'enabled': vet_enabled, 's2': {{}}, 'union': {{}}}} "
+                    f"(tortoise/extractor_v2.py:7912 and :7932), and each pass "
+                    f"is gated on the LIST — `if vet_enabled and embed_list:` "
+                    f"(:8000), `if vet_enabled and complete_list:` (:8122) — so a "
+                    f"block that says enabled=true proves the FLAG, never that "
+                    f"the pass ran. A failed pass leaves the same empty stats "
+                    f"(`_run_vet_pass` returns {{}} on its fail-open path, "
+                    f":7781-7801). This is NOT the #9116 absent-surface cause: "
+                    f"the surface is HERE and says the flag was set, and the "
+                    f"step stays unobserved until it carries a non-empty "
+                    f"{'/'.join(_WITNESS_STATS)} AS WELL")
+            elif ran is False:
+                refused = refused or (
+                    where,
+                    f"the {key!r} surface IS present at {where} but its own "
+                    f"`enabled` reads False ({_summary(block)}) — a block that "
+                    f"says the pass did NOT run is not evidence that it did")
             else:
                 silent = silent or (
                     where,
@@ -827,6 +888,8 @@ def _witness_block(runs: list[dict], key: str) -> tuple[dict | None, str, str]:
                     f"not say the pass ran")
     if refused:
         return None, refused[0], refused[1]
+    if idle:
+        return None, idle[0], idle[1]
     if silent:
         return None, silent[0], silent[1]
     return None, "", ""
@@ -881,32 +944,51 @@ def anchor_census_cypher(label: str) -> str:
 
 
 def derivation_only(composition: dict | None) -> tuple[int, int, float | None]:
-    """E3's figure over the ONLY Point class that can carry a derivation link.
+    """E3's derivation figure: ``anchored / expected-to-derive``.
 
-    Returns ``(anchored, total, share)`` over ``extraction_claims``.
+    Returns ``(anchored, total, share)`` where ``total`` is the WRITER class —
+    every Point that is neither a turn row nor an operator Point — i.e.
+    ``extraction_claims + other_points``, and ``anchored`` is those same nodes
+    carrying a version anchor (``extraction_claims_anchored +
+    other_points_anchored``).
 
-    ⛔ THE DENOMINATOR THIS REPLACED WAS WRONG, and the error was in the direction
-    that misleads. It summed extraction claims **+ operator Points** and printed
+    ⛔ THE DENOMINATOR WAS WRONG TWICE, in opposite directions, and the second
+    error was the more insidious because it LOOKED rigorous.
+
+    *First it summed extraction claims + operator Points* and printed
     ``claim_anchored/claim_denominator`` — ``140/169 = 0.828402`` on the run that
-    shipped that line, ``132/161 = 0.819876`` on the run that replaced it, both
-    printed beside the frozen denominator — a figure reading as "derivation
-    coverage is still ~17-18% short". Nothing could ever close that remainder:
-    the operator writer is ``create_operator`` (``tortoise/sdk.py`` — the
-    IMPL/NAND/INPUT operator writer), it never writes an ``extractedFrom`` link,
-    and the graph said so on both runs (``extractedFrom`` 140/140 with
-    ``extraction_claims`` 140, and 0 of 29 operator Points anchored).
-    So the number invited #9736 to read a derivations-only metric as short when
-    every Point that CAN derive was anchored.
+    shipped that line, ``132/161 = 0.819876`` on the run that replaced it — a
+    figure reading as "derivation coverage is still ~17-18% short". Nothing could
+    ever close that remainder: ``create_operator`` (``tortoise/sdk.py``, the
+    IMPL/NAND/INPUT writer) never writes an ``extractedFrom`` link. So operator
+    Points are excluded, and turn rows with them (``_TURN_WRITE_CYPHER`` writes
+    ``is_episodic=true`` and wires only ``CONTAINS``).
 
-    The classes that are STRUCTURALLY INCAPABLE of an ``extractedFrom`` link are
-    therefore excluded and named, not folded in: turn rows (``_TURN_WRITE_CYPHER``
-    writes ``is_episodic=true`` and wires only ``CONTAINS``) and operator Points
-    (``create_operator`` writes IMPL/NAND/INPUT). What remains is exactly the
-    class the metric is about.
+    *Then it took the denominator over ``extraction_claims`` ALONE, which was
+    CIRCULAR.* ``extraction_claims`` is DEFINED by the very link the figure
+    reports (``NOT is_episodic AND NOT is_operator AND deriv > 0``, see
+    :data:`POINT_COMPOSITION_CYPHER`), so it could not do anything but restate
+    ``extractedFrom=132/132`` and it was INVARIANT to a lost link: a node that
+    dropped ``extractedFrom`` left the denominator and landed in ``other``, and
+    the figure stayed ``1.000000``. Measured on the shipped run —
+    ``derivation_only`` returned ``1.0`` for ``other_points`` of 0, 1, 9 and 40,
+    and a hand-dropped link moved it from ``132/132`` to ``131/131``.
+
+    So the denominator is the class the WRITERS stamp as "supposed to derive" —
+    non-episodic, non-operator Points — and the residual is INSIDE it. ``other``
+    is therefore not a footnote: it is the class where a LOST derivation link
+    would land, and every unanchored node in it is now visible in the figure.
+    What ``other`` cannot say on its own is whether a given node lost a link or
+    was minted by a writer that never derives — that attribution is #9736's open
+    question, and the line prints the composition so it can be argued from
+    numbers rather than from the figure alone.
     """
     block = composition or {}
-    total = int(block.get("extraction_claims") or 0)
-    anchored = int(block.get("extraction_claims_anchored") or 0)
+    claims = int(block.get("extraction_claims") or 0)
+    other = int(block.get("other_points") or 0)
+    total = claims + other
+    anchored = (int(block.get("extraction_claims_anchored") or 0)
+                + int(block.get("other_points_anchored") or 0))
     return anchored, total, ((anchored / total) if total else None)
 
 
@@ -920,29 +1002,42 @@ def point_composition_line(composition: dict | None) -> str:
     operators_anchored = int(block.get("operator_points_anchored") or 0)
     turns = int(block.get("turn_rows") or 0)
     turns_anchored = int(block.get("turn_rows_anchored") or 0)
+    others = int(block.get("other_points") or 0)
+    others_anchored = int(block.get("other_points_anchored") or 0)
     classes = (
         f"turn_rows={turns} (anchored {turns_anchored}) "
         f"extraction_claims={claims} (anchored {claims_anchored}) "
         f"operator_points={operators} (anchored {operators_anchored}) "
-        f"other={int(block.get('other_points') or 0)} "
+        f"other={others} (anchored {others_anchored}) "
         f"(total={int(block.get('points') or 0)} Point nodes)")
     figure = (f"{anchored}/{total}" +
               (f" = {share:.6f}" if share is not None else ""))
     return (
         f"e3 point composition: {classes} — each class read off the property its "
         f"WRITER stamps (is_episodic for turn rows, is_operator for operator "
-        f"Points, an extractedFrom edge for extraction claims). TWO classes are "
+        f"Points, an extractedFrom edge for extraction claims). 'other' = Points "
+        f"with NO extractedFrom edge that are neither turn rows nor operator "
+        f"Points ({others} of them, {others_anchored} anchored) — the class where "
+        f"a LOST derivation link lands, so it is INSIDE the derivation figure's "
+        f"denominator and an unanchored node in it is visible there. The "
+        f"denominator is the class the writers stamp as supposed-to-derive "
+        f"(non-episodic, non-operator Points = {claims} extraction claims + "
+        f"{others} other = {total}); it is NOT defined by the extractedFrom link "
+        f"itself, because a denominator filtered on the link cannot move when the "
+        f"link is lost (measured: the earlier reading of this figure was "
+        f"132/132 = 1.000000 while 9 Points sat in 'other'). TWO classes are "
         f"STRUCTURALLY INCAPABLE of an extractedFrom link and are therefore NOT "
-        f"in the derivation figure: turn rows carry none BY CONSTRUCTION "
-        f"(_TURN_WRITE_CYPHER in _write_capture_turns, "
+        f"in the denominator, with their anchored counts stated: turn rows carry "
+        f"none BY CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
         f"tortoise/sdk.py:2367, t.is_episodic=true, wired only by CONTAINS), and "
         f"operator Points are written by create_operator (tortoise/sdk.py — the "
         f"IMPL/NAND/INPUT operator writer), which never writes extractedFrom "
-        f"(measured: {operators_anchored} of {operators} anchored). 'other' is "
-        f"the residual class with no extractedFrom edge at all, disclosed here "
-        f"rather than folded in. derivation-only figure (over extraction claims, "
-        f"the ONLY class that can derive): {figure}. The frozen 'all derived "
-        f"nodes' reading above is unchanged")
+        f"(measured: {operators_anchored} of {operators} anchored). Whether an "
+        f"unanchored node in 'other' LOST a link or was minted by a writer that "
+        f"never derives is the attribution #9736 still owns; the figure counts "
+        f"it, the line does not excuse it. derivation figure (anchored / "
+        f"expected-to-derive): {figure}. The frozen 'all derived nodes' reading "
+        f"above is unchanged")
 
 
 def _stage_calls(stats: dict, stage: str) -> int:
@@ -1027,18 +1122,15 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
             f"the VET pass surfaced its own evidence: {vet_where} "
             f"— {_summary(vet_block)}")
     elif vet_refusal:
-        # PRESENT but it does not say the pass ran. This is the shape a
-        # present-and-OFF surface lands in once #9116 copies the key, and it must
-        # never be accepted as a witness for "the S2.2 VET pass ran" — the block
-        # the extractor emits on a FLAG-OFF arm would otherwise make every step
-        # observed on a run whose flags were off.
+        # PRESENT but it does not say the pass ran. Two distinct negatives land
+        # here and the refusal names which: `enabled: false` (contradicts the arm)
+        # and `enabled: true` with no activity (the pass was gated out). Neither
+        # is the #9116 absent-surface cause below.
         unobserved["S2.2"] = (
             f"UNOBSERVED — {vet_refusal}. The arm forced TORTOISE_VET=1 "
             f"in-process (read back from os.environ; the `arm:` line above is "
-            f"that read-back), so a surface reading enabled=false either did "
-            f"not run for this pass or contradicts the arm — the probe will not "
-            f"score an OFF block as a witness for a pass that RAN. The step "
-            f"stays unobserved until a surface says enabled=true")
+            f"that read-back), and the probe will not score a block as a witness "
+            f"for a pass that RAN unless the block shows the pass DID something")
     else:
         unobserved["S2.2"] = (
             f"UNOBSERVED — the arm forced TORTOISE_VET=1 in-process (read back "
@@ -1067,8 +1159,8 @@ def observe_steps(runs: list[dict], census_data: dict) -> tuple[dict, dict]:
         unobserved["S2.3"] = (
             f"UNOBSERVED — {classify_refusal}. The arm forced "
             f"TORTOISE_CLASSIFY_LATER=1 in-process (read back from os.environ), "
-            f"so an OFF block is not a witness for a pass that RAN — the step "
-            f"stays unobserved until a surface says enabled=true")
+            f"and a block that does not show the pass DID something is never "
+            f"scored as its witness")
     else:
         unobserved["S2.3"] = (
             f"UNOBSERVED — the arm forced TORTOISE_CLASSIFY_LATER=1 in-process "
@@ -1186,12 +1278,13 @@ def census(uri: str) -> dict:
         for index, key in enumerate(
             ("points", "turn_rows", "operator_points", "extraction_claims",
              "other_points", "extraction_claims_anchored",
-             "turn_rows_anchored", "operator_points_anchored"))
+             "turn_rows_anchored", "operator_points_anchored",
+             "other_points_anchored"))
     } if composition_rows else {
         "points": 0, "turn_rows": 0, "operator_points": 0,
         "extraction_claims": 0, "other_points": 0,
         "extraction_claims_anchored": 0, "turn_rows_anchored": 0,
-        "operator_points_anchored": 0}
+        "operator_points_anchored": 0, "other_points_anchored": 0}
 
     relationship_counts: dict[str, int] = {}
     relationship_anchored: dict[str, int] = {}
@@ -1776,8 +1869,10 @@ def main(argv: list[str] | None = None) -> int:
     e3_result = e3_outcome(anchored=census_data["anchored_total"],
                            derived=census_data["derived_total"], bars=bars)
     composition = census_data.get("point_composition") or {}
-    claims_anchored, claim_den, derivation_share = derivation_only(composition)
-    derivation = (f"{claims_anchored}/{claim_den}" +
+    # NOTE the names: this is the WRITER class (claims + other), NOT the claims
+    # alone — a `claim_den` here would be the circular denominator again.
+    deriv_anchored, deriv_expected, derivation_share = derivation_only(composition)
+    derivation = (f"{deriv_anchored}/{deriv_expected}" +
                   (f" = {derivation_share:.6f}"
                    if derivation_share is not None else ""))
     e3 = {
@@ -1801,10 +1896,11 @@ def main(argv: list[str] | None = None) -> int:
                  f"({composition.get('extraction_claims_anchored', 0)} anchored) "
                  f"+ {composition.get('operator_points', 0)} operator Points "
                  f"({composition.get('operator_points_anchored', 0)} anchored) "
-                 f"+ {composition.get('other_points', 0)} other, each class read "
-                 f"off the property its writer stamps. TWO of those classes "
-                 f"cannot carry a derivation link AT ALL and are named rather "
-                 f"than folded into the figure: the turn rows carry none BY "
+                 f"+ {composition.get('other_points', 0)} other "
+                 f"({composition.get('other_points_anchored', 0)} anchored), each "
+                 f"class read off the property its writer stamps. TWO of those "
+                 f"classes cannot carry a derivation link AT ALL and are named "
+                 f"rather than folded into the figure: the turn rows carry none BY "
                  f"CONSTRUCTION (_TURN_WRITE_CYPHER in _write_capture_turns, "
                  f"tortoise/sdk.py:2367, t.is_episodic=true, wired only by "
                  f"CONTAINS), and the operator Points are written by "
@@ -1813,9 +1909,21 @@ def main(argv: list[str] | None = None) -> int:
                  f"counting them under 'all derived nodes' is defensible but "
                  f"they can never anchor and are not a provenance shortfall, and "
                  f"a denominator summing them would report a shortfall nothing "
-                 f"could close. The DERIVATION-ONLY figure — over extraction "
-                 f"claims, the ONLY class that can derive — is {derivation}. "
-                 f"#9736 must choose between "
+                 f"could close. The DERIVATION figure is anchored / "
+                 f"expected-to-derive over the WRITER class (non-episodic, "
+                 f"non-operator Points = the extraction claims PLUS the 'other' "
+                 f"Points, which are the class where a LOST derivation link lands "
+                 f"— Points with no extractedFrom that are neither turn rows nor "
+                 f"operator Points): {derivation}. It is computed over that "
+                 f"class and NOT over the claims alone, because a denominator "
+                 f"defined by the extractedFrom link itself cannot move when that "
+                 f"link is lost — the earlier reading of this figure was "
+                 f"{composition.get('extraction_claims_anchored', 0)}/"
+                 f"{composition.get('extraction_claims', 0)} = 1.000000 while "
+                 f"{composition.get('other_points', 0)} Points sat in 'other' "
+                 f"outside it. Whether an unanchored 'other' Point lost a link or "
+                 f"was minted by a writer that never derives is the attribution "
+                 f"#9736 still owns. #9736 must choose between "
                  f"re-registering the metric and reopening the model, and this "
                  f"row reports BOTH readings so neither choice is made on a "
                  f"denominator whose composition was hidden"),

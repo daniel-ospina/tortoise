@@ -482,6 +482,31 @@ def test_an_exemption_naming_an_absent_log_fails(tmp_path, monkeypatch):
         prereg, sorted(prereg.parent.glob("*.log")), pins)
     assert any("not in this directory" in f for f in failures), failures
 
+
+def test_two_scored_measurement_logs_are_refused(tmp_path):
+    """One artifact claims to be THE measurement — a superseded log is REMOVED, not kept.
+
+    `check_ordering` iterates every `*.log` it finds and never counts the SCORED ones, so a
+    superseded run left beside the current one was accepted and the directory held two artifacts
+    claiming to be the measurement. The refusal must be legible (this runs as a required CI step):
+    it names both files and the repair.
+    """
+    (tmp_path / "capstone.log").write_text("the separate REFUSAL record\n")
+    (tmp_path / "e1-e2.log").write_text("the arm log\n")
+    assert check.check_single_measured_log(tmp_path) == []
+    (tmp_path / "capstone-measured-aaaaaaa.log").write_text("scored\n")
+    assert check.check_single_measured_log(tmp_path) == []
+    (tmp_path / "capstone-measured-bbbbbbb.log").write_text("scored\n")
+    failures = check.check_single_measured_log(tmp_path)
+    assert len(failures) == 1, failures
+    message = failures[0]
+    for fragment in ("capstone-measured-aaaaaaa.log", "capstone-measured-bbbbbbb.log",
+                     "exactly ONE", "RE-RUNNING", "DELETING"):
+        assert fragment in message, (fragment, message)
+    # the non-scored logs are never counted against the rule
+    assert "capstone.log," not in message and "e1-e2.log" not in message, message
+
+
 # ── the machine record must agree with the argument ──────────────────────────
 
 

@@ -351,19 +351,83 @@ def test_the_e1_and_e2_siblings_carry_the_same_denominator():
         (rows["E2"]["numerator"], rows["E2"]["denominator"])
 
 
+#: The scored-measurement logs, by the name the probe writes (`--out` default).
+_SCORED_LOG_GLOB = "capstone-measured-*.log"
+
+
+def _scored_logs() -> list[Path]:
+    return sorted((_REPO / "docs/evidence/7949-capstone").glob(_SCORED_LOG_GLOB))
+
+
+def _generated_stamp(log: Path) -> str:
+    """The log's OWN ``# generated:`` stamp — never its filename.
+
+    The filename carries the HEAD the run was stamped at, which is not an ordering: `main` moves and
+    a re-run's head can sort either side of the stamp it replaces (``capstone-measured-6020cbd5``
+    sorts BEFORE ``capstone-measured-8a8bbcba``). A log without a stamp cannot be ordered at all,
+    so it refuses rather than sorting last.
+    """
+    match = re.search(r"^# generated: (\S+)$", log.read_text(), re.MULTILINE)
+    assert match, (f"{log.name}: no `# generated:` stamp — a log without one cannot "
+                   f"be ordered against another")
+    return match.group(1)
+
+
+def _newest_log(logs: list[Path]) -> Path:
+    """The newest run by STAMP. With one log this is that log; with two it is the newer."""
+    assert logs, ("no measured capstone log is committed — run "
+                  "probes/capstone_measure.py")
+    return max(logs, key=_generated_stamp)
+
+
+def test_the_scored_log_is_chosen_by_stamp_not_by_filename_order(tmp_path):
+    """A second log must never be silently validated because its name sorts first.
+
+    The glob validated ``logs[0]`` — the lexicographically FIRST filename — and asserted only
+    non-emptiness, so a superseded log committed green and the artifact validated was whichever
+    name sorted first, not the newest run. Measured with this fixture: ``aaa`` sorts first and is
+    the OLDER run, so the old selection validated the superseded log while the new one sat beside
+    it.
+    """
+    older = tmp_path / "capstone-measured-aaa.log"   # sorts FIRST, measured EARLIER
+    older.write_text("# generated: 2026-10-23T22:24:52Z\n")
+    newer = tmp_path / "capstone-measured-zzz.log"   # sorts LAST, measured LATER
+    newer.write_text("# generated: 2026-11-01T09:00:00Z\n")
+    assert sorted([older, newer])[0] == older
+    assert _newest_log([older, newer]) == newer
+    assert _newest_log([newer, older]) == newer
+    # a log that carries no stamp cannot be ordered, so it is refused rather than
+    # silently ranked last
+    bare = tmp_path / "capstone-measured-bare.log"
+    bare.write_text("# nothing\n")
+    try:
+        _generated_stamp(bare)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("a log with no `# generated:` stamp was ordered anyway")
+
+
 def test_the_shipped_measurement_log_is_structurally_clean():
     """The artifact this probe wrote must pass the gate — or say why not.
 
-    Globbed rather than named: the file carries the head it was measured at, and a
-    merged branch's head is not this checkout's. Exactly one is expected, so a
-    second scored run must be added deliberately (two logs claiming to be THE
-    measurement is the ambiguity ``extract_block`` refuses inside a single file).
+    Globbed rather than named: the file carries the head it was measured at, and a merged branch's
+    head is not this checkout's. ⛔ EXACTLY ONE must match: this test used to assert only
+    non-emptiness and then validate ``logs[0]``, so a second (superseded) log committed green and
+    the validated artifact was the lexicographically-first filename rather than the newest run.
+    The bundle's own reproduce instruction (re-run under a ``<new-head8>`` filename) produces that
+    state on every re-run, so the ambiguity the supersede chain exists to prevent is exactly what
+    the assertion has to refuse. Supersede = re-run + DELETE the old file + disclose the chain.
     """
-    logs = sorted((_REPO / "docs/evidence/7949-capstone").glob(
-        "capstone-measured-*.log"))
-    assert logs, ("no measured capstone log is committed — run "
-                  "probes/capstone_measure.py")
-    record = cvc.extract_block(logs[0].read_text())
+    logs = _scored_logs()
+    assert len(logs) == 1, (
+        f"expected EXACTLY ONE scored log under "
+        f"docs/evidence/7949-capstone/{_SCORED_LOG_GLOB}, found {len(logs)}: "
+        f"{[p.name for p in logs]} — a superseded run must be REMOVED, not kept "
+        f"beside the current one (supersede by re-running and deleting, with the "
+        f"chain disclosed in README.md and docs/00_index.md)")
+    log = _newest_log(logs)
+    record = cvc.extract_block(log.read_text())
     findings = cvc.check(record, repo=_REPO, require_green=False)
     assert not findings, findings.render()
     verdicts = {row["criterion"]: row["verdict"] for row in record["rows"]}
@@ -519,7 +583,8 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
     """
     runs = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
                  surfaces={"vet": {"enabled": True, "s2": {"kept": 3}},
-                           "classify_later": {"enabled": True, "s2": {}}})]
+                           "classify_later": {"enabled": True,
+                                              "s2": {"kept": 2}}})]
     observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
     assert "S2.2" in observed and "S2.2" not in unobserved, observed
     assert "S2.3" in observed and "S2.3" not in unobserved, observed
@@ -529,9 +594,10 @@ def test_a_witnessed_vet_surface_makes_s2_2_observed():
 
 def test_a_stats_home_for_the_classify_surface_also_counts():
     """The witness may land on the receipt OR in stats; both are the run's own."""
-    stats = {**_FULL_STATS, "classify_later": {"enabled": True, "s2": {}}}
+    stats = {**_FULL_STATS, "classify_later": {"enabled": True,
+                                              "s2": {"kept": 2}}}
     runs = [_run(stats=stats, stats_keys=sorted(stats),
-                 surfaces={"vet": {"enabled": True, "s2": {}},
+                 surfaces={"vet": {"enabled": True, "s2": {"kept": 1}},
                            "classify_later": {}})]
     observed, _unobserved = measure.observe_steps(runs, _FULL_CENSUS)
     assert "S2.3" in observed, observed
@@ -575,19 +641,73 @@ def test_a_surface_that_says_the_pass_did_not_run_is_not_a_witness():
     assert "tortoise/sdk.py:12401" not in unobserved["S2.2"], unobserved["S2.2"]
 
 
-def test_the_witness_rule_prefers_the_flag_and_fails_closed_on_contradiction():
-    """The rule, stated: `enabled: true` wins; `enabled: false` can never be outvoted.
+def test_the_witness_rule_requires_the_flag_and_a_pass_that_did_work():
+    """The rule, stated: activity is REQUIRED, and `enabled: false` can never be outvoted.
 
     A block that carries no `enabled` field at all is the one shape where non-empty
-    `s2`/`union` is the only positive evidence available — so it counts. A block
-    that says OFF while carrying S2 counters contradicts itself, and a
-    self-contradicting surface is not evidence of anything (fail closed).
+    `s2`/`union` is the only available evidence — so it counts. A block that says
+    OFF while carrying S2 counters contradicts itself, and a self-contradicting
+    surface is not evidence of anything (fail closed). And `enabled: true` with
+    EMPTY counters is `False`: the flag was read, nothing ran.
     """
-    assert measure._pass_ran({"enabled": True, "s2": {}}) is True
+    assert measure._pass_ran({"enabled": True, "s2": {"kept": 2}}) is True
+    assert measure._pass_ran({"enabled": True, "s2": {},
+                              "union": {"kept": 1}}) is True
+    assert measure._pass_ran({"enabled": True, "s2": {},
+                              "union": {}}) is False
     assert measure._pass_ran({"enabled": False, "s2": {}, "union": {}}) is False
     assert measure._pass_ran({"enabled": False, "s2": {"kept": 2}}) is False
     assert measure._pass_ran({"s2": {"kept": 2}}) is True
     assert measure._pass_ran({"s2": {}, "union": {}}) is None
+
+
+def test_the_flag_alone_is_not_a_witness_and_has_its_own_cause():
+    """`enabled: true` with zero activity is a NON-witness, and not #9116.
+
+    `extractor_v2.py:7912` computes `vet_enabled` (the FLAG) BEFORE the
+    `if not edus:` early return at `:7916`, whose surface is literally
+    `"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:7932`); the
+    passes themselves are gated on the LIST (`if vet_enabled and embed_list:`
+    `:8000`, `if vet_enabled and complete_list:` `:8122`). So the flag-ON +
+    empty-list session emits `enabled: True` with empty counters and no pass ran —
+    and a FAILED pass leaves the same shape (`_run_vet_pass` returns `{}` on its
+    fail-open path, `:7781-7801`).
+
+    Accepting that block as a witness made S2.2/S2.3 WITNESSED (6/8 -> 8/8) from
+    ONE such session, because `_witness_block` returns the first positive anywhere
+    on the run. `V5` (all eight steps observed) is the epic's only closing gate
+    for the step count, so that would pass on a step nobody observed.
+
+    Measured from the reviewer's reproduction before the fix: with
+    `surfaces={"vet": {"enabled": True, "s2": {}, "union": {}}, …}` both steps
+    returned WITNESSED. It must return 6/8, with a cause distinct from #9116's.
+    """
+    idle = {"enabled": True, "s2": {}, "union": {}}
+    assert measure._pass_ran(idle) is False
+    runs = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
+                 surfaces={"vet": dict(idle), "classify_later": dict(idle)})]
+    observed, unobserved = measure.observe_steps(runs, _FULL_CENSUS)
+    assert "S2.2" not in observed and "S2.3" not in observed, observed
+    assert len(observed) == len(measure.STEPS) - 2, sorted(observed)
+    for step in ("S2.2", "S2.3"):
+        cause = unobserved[step]
+        assert "NO pass activity" in cause, cause
+        # the three causes are distinct: flag-on/no-activity names the flag and
+        # the LIST gate, and must NOT be attributed to the #9116 meta fold
+        assert "`enabled` reads True" in cause, cause
+        assert "tortoise/extractor_v2.py:7912" in cause, cause
+        assert ":7932" in cause, cause
+        assert "if vet_enabled and embed_list" in cause, cause
+        assert "tortoise/sdk.py:12401" not in cause, cause
+        assert "did NOT run" not in cause, cause
+    # and the OFF refusal still reads as the OFF refusal (the two are not merged)
+    off = [_run(stats=dict(_FULL_STATS), stats_keys=sorted(_FULL_STATS),
+                surfaces={"vet": {"enabled": False, "s2": {}, "union": {}},
+                          "classify_later": {"enabled": False, "s2": {},
+                                             "union": {}}})]
+    _obs, off_unobserved = measure.observe_steps(off, _FULL_CENSUS)
+    assert "did NOT run" in off_unobserved["S2.2"], off_unobserved["S2.2"]
+    assert "NO pass activity" not in off_unobserved["S2.2"], off_unobserved["S2.2"]
 
 
 def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
@@ -628,40 +748,101 @@ def test_every_step_is_witnessed_or_given_a_cause():
 
 # ── E3's Point denominator is disclosed, not silently mixed (F4) ──────────
 
-def test_the_derivation_only_figure_divides_by_the_class_that_can_derive():
-    """The figure was 126/152 = 0.828 — a shortfall no Point in the run could close.
+def test_the_derivation_figure_divides_by_the_writer_class_not_the_link():
+    """Two wrong denominators, in opposite directions — this pins the right one.
 
-    `claim_denominator` summed extraction claims **+ operator Points**, and no
-    operator Point can carry an `extractedFrom` link: `create_operator` writes
-    IMPL/NAND/INPUT only. Measured on the run that shipped that line
-    (`extractedFrom=140/140` beside `operator_points=29`, 0 anchored) and again on
-    the run that replaced it (`extractedFrom=132/132`, 0 of 29 anchored). The 17%
-    short reading was therefore an artefact of the DENOMINATOR, printed beside a
-    frozen denominator — exactly where #9736 reads it for the
-    re-register-vs-reopen choice. The derivation figure is taken over
-    `extraction_claims` now, and the incapable classes are named with their own
-    anchored counts instead of being folded in.
+    **(1) Too wide.** `claim_denominator` summed extraction claims **+ operator
+    Points**, and no operator Point can carry an `extractedFrom` link:
+    `create_operator` writes IMPL/NAND/INPUT only. Measured on the run that
+    shipped that line (`extractedFrom=140/140` beside `operator_points=29`, 0
+    anchored) and again on the run that replaced it (`extractedFrom=132/132`, 0
+    of 29 anchored). The 17% short reading was an artefact of the DENOMINATOR,
+    printed beside a frozen denominator — exactly where #9736 reads it for the
+    re-register-vs-reopen choice.
 
-    Non-vacuity: on the pre-fix line the denominator is 152 and the figure reads
-    `126/152 = 0.828947`, so both the figure assertion and the `126/152` absence
-    assertion red there.
+    **(2) Circular.** The fix took the denominator over `extraction_claims`
+    ALONE — a class DEFINED by `deriv > 0`, i.e. by the very link the figure
+    reports. It could not say anything but 1.0, and it was invariant to a lost
+    link (see the movement test below). The denominator is now the WRITER class:
+    non-episodic, non-operator Points = `extraction_claims + other_points`, with
+    `other` INSIDE it, because `other` is exactly where a lost link lands.
+
+    Non-vacuity: on the first pre-fix line the denominator is 152 and the figure
+    reads `126/152 = 0.828947`; on the second it reads `126/126`. With `other=15`
+    here the figure must read `126/141` — neither of the pre-fix readings.
     """
-    composition = {"points": 311, "turn_rows": 159, "turn_rows_anchored": 0,
+    composition = {"points": 326, "turn_rows": 159, "turn_rows_anchored": 0,
                    "extraction_claims": 126, "extraction_claims_anchored": 126,
                    "operator_points": 26, "operator_points_anchored": 0,
-                   "other_points": 0}
-    assert measure.derivation_only(composition) == (126, 126, 1.0)
+                   "other_points": 15, "other_points_anchored": 0}
+    anchored, total, share = measure.derivation_only(composition)
+    assert (anchored, total) == (126, 141), (anchored, total)
+    assert round(share, 6) == round(126 / 141, 6), share
     line = measure.point_composition_line(composition)
-    assert "126/126 = 1.000000" in line, line
+    assert "126/141 = 0.893617" in line, line
+    assert "126/126 = 1.000000" not in line, line
     assert "126/152" not in line, line
     assert "0.828947" not in line, line
     for fragment in ("turn_rows=159 (anchored 0)",
                      "extraction_claims=126 (anchored 126)",
                      "operator_points=26 (anchored 0)",
-                     "total=311", "STRUCTURALLY INCAPABLE",
+                     "other=15 (anchored 0)",
+                     "total=326", "STRUCTURALLY INCAPABLE",
                      "create_operator", "never writes extractedFrom",
-                     "BY CONSTRUCTION", "tortoise/sdk.py:2367"):
+                     "BY CONSTRUCTION", "tortoise/sdk.py:2367",
+                     # the denominator is stated as the WRITER class, and the
+                     # residual is inside it
+                     "supposed-to-derive", "the class where a LOST derivation "
+                     "link lands",
+                     # and it says WHY the link-defined denominator was wrong
+                     "NOT defined by the extractedFrom link"):
         assert fragment in line, (fragment, line)
     assert "2306-2331" not in line, line
     assert measure.derivation_only({}) == (0, 0, None)
     assert measure.derivation_only(None) == (0, 0, None)
+
+
+def test_the_derivation_figure_moves_when_a_derivation_link_is_lost():
+    """The circularity, reproduced: the old figure was 1.0 for ANY `other` count.
+
+    Reviewer's check, run against the pre-fix probe: `derivation_only` returned
+    ``(132, 132, 1.0)`` for `other_points` of 0, 1, 9 and 40, because
+    `other_points` was not an input at all. And dropping ONE link moved a node
+    out of `extraction_claims` (defined by `deriv > 0`) into `other`, so the
+    figure went ``132/132 -> 131/131`` — still ``1.000000``. A coverage figure
+    that cannot move when the thing it measures is lost measures nothing but its
+    own definition, and it restated the relationship line `extractedFrom=132/132`
+    in node terms.
+
+    The denominator is now fixed by the WRITER, so the two cases differ on the
+    SHIPPED run's own composition (121 claims, all anchored, plus 8 `other`):
+    ``121/129`` intact versus ``120/129`` when one of the 121 links is dropped
+    and that node joins the residual.
+    """
+    census = {"points": 323, "turn_rows": 159, "turn_rows_anchored": 0,
+              "operator_points": 35, "operator_points_anchored": 0}
+    # the shipped run's census: 121 claims (all anchored) + 8 other, unanchored
+    intact = dict(census, extraction_claims=121, extraction_claims_anchored=121,
+                  other_points=8, other_points_anchored=0)
+    anchored, total, share = measure.derivation_only(intact)
+    assert (anchored, total) == (121, 129), (anchored, total)
+    assert round(share, 6) == round(121 / 129, 6), share
+
+    # ONE derivation link lost: the node leaves the link-defined class and joins
+    # the residual, exactly as a dropped extractedFrom edge would move it.
+    lost = dict(census, extraction_claims=120, extraction_claims_anchored=120,
+                other_points=9, other_points_anchored=0)
+    anchored_lost, total_lost, share_lost = measure.derivation_only(lost)
+    assert (anchored_lost, total_lost) == (120, 129), (anchored_lost, total_lost)
+    assert share_lost < share, (share_lost, share)
+    assert round(share_lost, 6) == round(120 / 129, 6), share_lost
+
+    # non-vacuity against BOTH pre-fix readings: the old one ignored `other`
+    # entirely (1.0 for every count) and the first one folded operator Points in.
+    for other in (0, 1, 9, 40):
+        _a, t, _s = measure.derivation_only(
+            dict(intact, other_points=other))
+        assert t == 121 + other, (other, t)
+    assert measure.derivation_only(
+        dict(intact, extraction_claims_anchored=120,
+             extraction_claims=120, other_points=9))[2] < 1.0

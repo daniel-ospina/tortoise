@@ -130,6 +130,12 @@ PINS_FENCE = "```yaml prereregistration-pins"
 #: deliberate act, not a side effect of adding a subdirectory.
 EVIDENCE_LOG_GLOB = "*.log"
 
+#: The SCORED-measurement logs, by the name the measurement probe writes (``--out`` default is
+#: ``capstone-measured-<head8>.log``). Exactly one may exist: the bundle's rule is that superseding
+#: a run means RE-RUNNING the probe under the new head's filename and REMOVING the file it replaces
+#: (``capstone.log`` is the separate REFUSAL record and is not matched here).
+SCORED_LOG_GLOB = "capstone-measured-*.log"
+
 #: The machine-readable record beside the document. The evidence probe already names this path on
 #: its ``prereg=`` line, so the name is not this check's invention.
 MACHINE_RECORD = "preregistration.json"
@@ -1111,6 +1117,33 @@ def check_machine_record(directory: Path, pins: dict) -> list[str]:
 # ── the checks ──────────────────────────────────────────────────────────────
 
 
+def check_single_measured_log(directory: Path) -> list[str]:
+    """``[]`` unless MORE THAN ONE scored log claims to be THE measurement.
+
+    The failure this closes is not "two green rows" — it is that ``check_ordering`` iterates every
+    ``*.log`` it finds and never asks how many of them are SCORED, so a superseded run left beside
+    the current one is accepted (ordering-wise) and the directory then holds two artifacts claiming
+    to be the measurement. Which one a reader quotes becomes a filename-order accident, and the
+    bundle's own reproduce instruction (write ``capstone-measured-<new-head8>.log``) produces that
+    state on every re-run unless the old file is removed.
+
+    The message names the files and the repair, because this runs as a required CI step: a red that
+    does not say what to change is a red someone disables.
+    """
+    scored = sorted(directory.glob(SCORED_LOG_GLOB))
+    if len(scored) <= 1:
+        return []
+    return [
+        f"{len(scored)} scored measurement logs claim to be THE measurement "
+        f"({', '.join(p.name for p in scored)}), but exactly ONE may exist: a superseded "
+        f"run is replaced by RE-RUNNING `probes/capstone_measure.py` (which writes a new "
+        f"`capstone-measured-<head8>.log`) and DELETING the file it supersedes, with the "
+        f"supersede chain disclosed in README.md and docs/00_index.md. Keeping both leaves "
+        f"two artifacts claiming to be the measurement, and which one a reader quotes becomes "
+        f"an accident of filename order"
+    ]
+
+
 def check_completeness(rows: list[dict[str, str]]) -> list[str]:
     failures: list[str] = []
     if not rows:
@@ -1287,6 +1320,8 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True) -> dict:
 
     logs = sorted(directory.glob(EVIDENCE_LOG_GLOB))
     report["evidence_logs"] = [p.name for p in logs]
+    report["scored_logs"] = [p.name for p in sorted(directory.glob(SCORED_LOG_GLOB))]
+    failures += check_single_measured_log(directory)
     if use_git:
         try:
             content_exempt: list[str] = []
