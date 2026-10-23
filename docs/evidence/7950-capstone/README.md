@@ -245,7 +245,7 @@ production population: ['tortoise', 'tools', 'scripts']/**/*.py
 `FalkorProjection.rebuild_from_record` moves **0 → 1** and `read_record_view`
 **1 → 2**: `python -m tortoise record-restore` is now a production caller of
 both, so a lost cache graph has an operator path that reads the RECORD. The
-#9189 verdict below is unchanged — `reconciliation.reconcile` still has **0**
+`#9189` verdict below is unchanged — `reconciliation.reconcile` still has **0**
 call sites and nothing SCHEDULES the sweep.
 
 **Re-cut at `#9189`, and the numbers moved for two different reasons.** The two halves this change

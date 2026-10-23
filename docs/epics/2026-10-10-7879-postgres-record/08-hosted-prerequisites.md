@@ -477,7 +477,7 @@ with this change, and #9555 stays open on (1) and (2).
 (its four refusals, its measured counts, its exit codes) is `tortoise/record_restore.py`, the runbook
 section is `docs/infra-runbook.md` §9, and a drill table states which steps are measured. **Not
 landed, and the reason this item stays open:** the production graph name (`org_*`) is refused by
-#2944's L2 name guard until the disposable-graph registry exists, and the drill's armed-record row is
+`#2944`'s L2 name guard until the disposable-graph registry exists, and the drill's armed-record row is
 unmeasured (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). The repo's own
 precedent is that restores fail at the *artifact* boundary, not at the API: **`#3895`** (CLOSED
 COMPLETED, 2026-09-25) is the drill that restored **9,687 / 10,000** edges, and it failed because

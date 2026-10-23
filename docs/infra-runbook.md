@@ -2710,7 +2710,7 @@ states have their own reason string, and neither is an absence (§17.3):
 ### Quota: a restore is not a billable write (#9556 G5)
 
 The restore door must never be refused by the org's own storage allowance.
-#9559 lands a fail-closed byte gate on the write path; because `rebuild_from_record`
+`#9559` lands a fail-closed byte gate on the write path; because `rebuild_from_record`
 WRITES the graph, a gate inherited here would let the **billing** path defeat the
 **durability** path mid-rebuild. Nothing in the verb consults an allowance today;
 when the gate lands it must **exempt this lane** (or account it explicitly), and
@@ -2731,7 +2731,7 @@ part of this section, and its status is stated rather than implied:
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
-#9567), flush the `test_`-named drill graph, run this verb, then compare
+`#9567`), flush the `test_`-named drill graph, run this verb, then compare
 `nodes_written`/`relations_written` (both **measured off the cache**) **and** a
 per-label count against the **RECORD's** counts — not against the flushed
 baseline: a record-sourced rebuild legitimately holds fewer nodes than the
