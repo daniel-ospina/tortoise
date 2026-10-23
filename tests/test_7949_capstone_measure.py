@@ -451,7 +451,7 @@ def test_the_durations_row_quotes_the_case_count_it_weights():
     """The shard weight's provenance must describe the file that SHIPS.
 
     #9823 review: the ``durations`` row quoted a 2.5 s / **24 cases** reading
-    for a file that had already grown past it (39 at the pre-merge head, 40
+    for a file that had already grown past it (39 at the pre-merge head, 41
     now) — a measurement of a smaller file used as the input to shard packing,
     and a body sentence ``pytest`` can no longer reproduce. The sibling row for
     ``test_7949_capstone_verdict_check.py`` is pinned the same way
