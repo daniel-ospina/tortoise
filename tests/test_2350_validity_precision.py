@@ -617,6 +617,42 @@ def test_reader_marker_on_the_search_wire_never_leaks_an_unorderable_start(lane)
     assert _validity_marker(hits[dated["id"]]) == "[valid since 2024-01-01]"
 
 
+def test_bounds_an_instant_agrees_with_the_read_gate_on_every_bound_type():
+    """#9730 P3: ``_bounds_an_instant`` documents "can never disagree" with
+    ``validity.effective_precision``, so it must carry that helper's NUMERIC
+    short-circuit too — not just its ``_created_sort_key`` gate.
+
+    ``effective_precision`` short-circuits ``int``/``float`` BEFORE ordering,
+    deliberately: an integer too large for ``float()`` raises ``OverflowError``
+    out of ``_created_sort_key``, and a read path must not acquire a failure
+    mode it never had (#9201 review P3). Without the same branch here, a
+    numeric bound makes the two surfaces disagree — ``effective_precision(0,
+    None) == "day"`` while ``_bounds_an_instant(0)`` was ``False`` (the falsey
+    shortcut) and a huge int RAISED.
+
+    Unreachable from ``_validity_marker`` today (it ``.strip()``s the bound
+    first, which is #9741); pinned here so #9741 cannot reintroduce it.
+
+    (1) FAILS pre-fix: ``_bounds_an_instant(0)`` was False and
+        ``_bounds_an_instant(10**400)`` raised OverflowError.
+    (2) REACHABLE: both args are bounds ``_created_sort_key`` documents as
+        supported (a mixed ISO/epoch graph), and the assertion is on the real
+        helpers.
+    """
+    from tortoise.retrieval import _bounds_an_instant
+    from tortoise.validity import effective_precision
+
+    for numeric in (0, 0.0, False, 1735689600, 10 ** 400):
+        assert _bounds_an_instant(numeric) is True, numeric
+        assert effective_precision(numeric, None) == "day", numeric
+    # the string half is unchanged — parity for absent and unorderable text.
+    for text in ("", None, "TBD", "not-a-date", "2026"):
+        assert _bounds_an_instant(text) is False, text
+        assert effective_precision(text, None) is None, text
+    assert _bounds_an_instant("2024-01-01") is True
+    assert effective_precision("2024-01-01", None) == "day"
+
+
 def test_search_annotation_distinguishes_open_from_unknown(lane):
     sdk, _events = lane
     still = sdk.create_point("statement", "still", validFrom="2024-01-01")

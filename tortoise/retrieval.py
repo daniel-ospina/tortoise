@@ -993,7 +993,20 @@ def _bounds_an_instant(value: object) -> bool:
     same reason ``validity.effective_precision`` does: ``retrieval`` sits in
     the import graph ``search_engine`` is assembled from, and the eager edge
     is the cycle.
+
+    A NUMERIC bound (``int``/``float``, and so ``bool``) short-circuits to True
+    — mirroring ``validity.effective_precision``'s own short-circuit, which is
+    there so that an integer too large for ``float()`` cannot raise
+    ``OverflowError`` out of the ordering primitive (a read path must not
+    acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
+    instant here too (1970-01-01T00:00:00Z). Today ``_validity_marker`` still
+    raises at ``(h.get("valid_from") or "").strip()`` for a numeric bound
+    (#9741), so this branch is unreachable from the renderer — it exists so the
+    parity claim above survives #9741 handing the raw bound through, instead of
+    turning into an ``OverflowError`` on the read path.
     """
+    if isinstance(value, (int, float)):
+        return True
     if not value:
         return False
     from .search_engine import _created_sort_key  # lazy — no import cycle
