@@ -250,9 +250,13 @@ def test_duplicate_free_but_pending_blocks_normally():
 # applies the whole repo-pending set in filename order). The BLOCKING list also
 # silently omitted warn-class (index-only) repo-ahead migrations, which are
 # still pushed. Against the pre-#4278 script (`origin/main` @ 877fa52d1, which
-# predates this change) the behaviour tests below fail. Re-run it by writing
-# that revision to the script path and running this file — do NOT use `HEAD`,
-# which already contains the fix. `test_clean_run_has_no_remediation_markers`
+# predates this change) the behaviour tests below fail. Re-run it against that
+# revision in a THROWAWAY worktree — never by overwriting the tracked script,
+# which mutates the tree under review and races a concurrent reviewer (see the
+# ⛔ repo-ahead block below for the recipe and the measured incident):
+#     git worktree add /tmp/pre4278 877fa52d1 && cd /tmp/pre4278
+# Do not use `HEAD`, which already contains the fix.
+# `test_clean_run_has_no_remediation_markers`
 # and `test_duplicate_branch_never_executes_supabase` are guards rather than
 # fail-on-current tests; `test_report_never_executes_supabase` fails there too,
 # but on its stdout assertion — see the docstrings.
@@ -310,6 +314,9 @@ def test_out_of_order_block_does_not_instruct_apply():
     assert "OUT OF ORDER" in r.stdout, r.stdout
     assert "20260918000001" in r.stdout, "the newest applied version must be named"
     assert "supabase migration repair --linked --status applied" in r.stdout
+    # The repair is printed on this branch too, so the #2240 owner bound rides
+    # the shared note here as well (round-3 review finding).
+    assert "#2240" in r.stdout, r.stdout
     # The refused action is withheld, not merely labelled.
     assert "apply migrations first" not in r.stdout, r.stdout
     assert "gh workflow run supabase-deploy.yml" not in r.stdout, r.stdout
@@ -436,6 +443,31 @@ def test_repo_ahead_note_accompanies_the_duplicate_prefix_branch():
     assert r.returncode == 1, r.stdout
     assert "duplicate" in r.stdout.lower(), r.stdout
     assert "schema_migrations ROW" in r.stdout, r.stdout
+    # The #2240 owner bound rides the same shared note, so every repair site
+    # (duplicate+rename, out-of-order, ordinary pending) carries it once.
+    assert "#2240" in r.stdout, r.stdout
+
+
+def test_note_covers_the_duplicate_branch_when_nothing_is_repo_ahead():
+    """The `$DUP_LOCAL_VERSIONS` disjunct of the note's guard is load-bearing.
+
+    Two index-only files at ONE prefix whose version IS recorded in prod: no
+    BLOCKING member (index-only is warn class), no repo-ahead — only the
+    duplicate term can fire, and that is a red rename exit. Round-3 review
+    measured a mutant with the term deleted passing all 34 tests, because every
+    other duplicate fixture uses CREATE TABLE and so sets BLOCKING too.
+    """
+    r = _run_fixture(
+        {
+            "20260813000005_a.sql": "CREATE INDEX IF NOT EXISTS i1 ON public.t (a);\n",
+            "20260813000005_b.sql": "CREATE INDEX IF NOT EXISTS i2 ON public.t (b);\n",
+        },
+        ["0001", "20260813000005"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "duplicate" in r.stdout.lower(), r.stdout
+    assert "schema_migrations ROW" in r.stdout, r.stdout
+    assert "#2240" in r.stdout, r.stdout
 
 
 def test_mixed_out_of_order_and_safe_are_partitioned():
@@ -518,11 +550,12 @@ def test_in_order_report_never_executes_supabase():
 
     What the marker proves, exactly: mutation-verified for the `db push` line —
     wrap it in backticks and the stub runs (marker written). NOT for the repair
-    line: `<version>` re-parses as a redirect once the line is unquoted, so a
-    backticked mutant fails to execute rather than running the stub. That line's
-    regression is caught by the printed-text assertion below (a mutant prints an
-    empty line where the command was), not by the marker — stated here so the
-    next reader does not read a stronger guarantee than the test gives.
+    line: bash rejects the substitution at PARSE time (the `<version>` is parsed
+    as a redirect with a missing target, so the whole `echo` is a syntax error),
+    which means a backticked mutant executes nothing and prints an empty line.
+    That line's regression is therefore caught by the printed-text assertion
+    below, not by the marker — stated so the next reader does not read a
+    stronger guarantee than the test gives.
     """
     r, marker = _run_with_supabase_stub(
         {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
@@ -637,11 +670,12 @@ def test_duplicate_branch_never_executes_supabase():
 def test_clean_run_has_no_remediation_markers():
     """Negative control: a clean run must not print any block remediation.
 
-    The repo-ahead note is in the marker list because it is a RED diagnosis: it
-    says a report "produces exactly this report", so it belongs only on a run
-    that prescribes an action. Round-2 review found the note leaking onto a
-    warn-only EXIT-0 run (its guard was `$REPO_AHEAD`, which warn-class drift
-    also sets) — without this marker the leak was invisible to the suite.
+    The repo-ahead note is in the marker list because it is a RED diagnosis, so
+    it belongs only on a run that prescribes an action. What the marker pins,
+    precisely: the NO-GUARD state (a note printed unconditionally) — a clean run
+    has no repo-ahead, so the `$REPO_AHEAD`-only mutant from round 1 is caught by
+    `test_warn_only_run_is_green_and_carries_no_red_diagnosis_note` instead
+    (round-3 review measured both mutants; neither test covers the other).
     """
     r = _run({}, ["0001_base.sql", "20260813000004_claim.sql"], ["0001", "20260813000004"])
     assert r.returncode == 0, r.stderr
