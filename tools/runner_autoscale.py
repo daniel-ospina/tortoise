@@ -69,7 +69,12 @@ WHAT IT DOES, IN ORDER (every step idempotent; safe to run every few minutes)
                          work, and holds memory
   5. REPAIR    DEAD → restart its service unit, then WAIT for the pool to report it online; only
                if it is demonstrably still offline is it re-registered (`--replace`), and an
-               UNREADABLE pool is never treated as offline. ORPHANED → re-register under its own
+               UNREADABLE pool is never treated as offline. The restart primitive follows the
+               HOST's service manager — systemd on Linux, the runner's own `svc.sh` (launchd) on
+               macOS — and a host with NEITHER is `unverified`/`no-restart-primitive`, never
+               "offline": re-registering on the strength of an attempt that could not run is
+               the one destructive action this file promises not to take blindly.
+               ORPHANED → re-register under its own
                name with `--replace` (adopts the stale registration; never a duplicate), keeping
                the labels it already carries. A BUSY, SERVING or OTHER-REPO runner is never
                restarted, relabelled or removed.
@@ -78,9 +83,12 @@ WHAT IT DOES, IN ORDER (every step idempotent; safe to run every few minutes)
                created by the FLEET's installer, `install-ci-runner-x64.sh` (the one registration
                path — it downloads and sha256-checks the runner), resolved from the candidates
                `provision()` lists. ⛔ That installer is NOT in this tree today (it lands with
-               #9639): on a box without it this step REFUSES (exit 3, `no provisioner`) rather
-               than improvising a second registration path. Measurement, repair (restart /
-               re-register), `--want`, `--status` and `--dry-run` are unaffected by its absence.
+               #9639): on a box without it this step REFUSES — `verdict=fill-blocked`, exit 0 —
+               rather than improvising a second registration path. It is a REFUSAL, not a
+               failure: the missing file is a dependency this PR does not own, and a timer that
+               goes red every interval over it would be the "installed but cries failure" class.
+               Measurement, repair (restart / re-register), `--want`, `--status` and `--dry-run`
+               are unaffected by its absence.
   7. REFUSE    beyond the ceiling nothing is added and the reading is printed. `--want N` is the
                explicit-request form of the same guard; `--status` is the read-only form.
 
@@ -114,6 +122,9 @@ USAGE
     RUNNER_AUTOSCALE_STATE_DIR     default $HOME/.pi/agent/state (holds the run log)
     RUNNER_AUTOSCALE_GH            `gh` binary (default: gh on PATH)
     RUNNER_AUTOSCALE_SYSTEMCTL     `systemctl` binary (default: systemctl on PATH)
+    RUNNER_AUTOSCALE_SERVICE       force the service manager: `systemd` | `launchd` | `none`
+                                   (default: systemd when a systemctl resolves, else launchd on
+                                   Darwin — the seam exists because the suite runs on BOTH)
     RUNNER_AUTOSCALE_CONFIG_SH      config.sh for a pre-staged install (tests)
     RUNNER_AUTOSCALE_PROVISIONER    install-ci-runner-x64.sh for a NEW install
     RUNNER_AUTOSCALE_NO_SUDO        "1" → do not prefix with sudo (tests, rootless)
@@ -124,10 +135,16 @@ USAGE
   `--ceiling` / `--max-runners` flag: a box that can be told to exceed its own measurement is a
   box with no guard, which is the defect this file exists to close.
 
-EXIT  0 converged / nothing to do (a REFUSAL is an answer, not a failure)
+EXIT  0 converged / at-ceiling / nothing to do / a REFUSAL (an answer, not a failure):
+        `provisioner-refused` (its own guard) and `fill-blocked` (no provisioner on this box —
+        the #9639 dependency is absent, so FILL cannot run; nothing else is affected)
       1 usage, or `--want N` refused (N above the measured ceiling — nothing was changed)
-      2 a measurement or pool read was UNREADABLE — fail-closed, nothing was changed
-      3 an ACTION failed (restart / registration / missing provisioner) — the record says which
+      2 a measurement or pool read was UNREADABLE — fail-closed. ⛔ NOT always "nothing was
+        changed": a pass that already restarted/registered a runner and THEN could not
+        re-measure reports exit 2 with `verdict=unmeasurable`, and its JSON record lists what it
+        already did ("the actions listed above were already performed") — read the record, not
+        this line, for whether the box was touched
+      3 an ACTION failed (restart / registration) — the record says which
 """
 
 from __future__ import annotations
@@ -187,6 +204,20 @@ class ActionFailed(Exception):
 
 class ProvisionerRefused(ActionFailed):
     """The provisioner's OWN guard refused (exit 2). A refusal is an answer, not a failure."""
+
+
+class ProvisionerAbsent(ProvisionerRefused):
+    """No provisioner resolves on this box — a DEPENDENCY is missing, not this pass.
+
+    ⛔ A SUBCLASS OF `ProvisionerRefused` ON PURPOSE. The installer that owns the registration
+    path (`install-ci-runner-x64.sh`) is not in this tree yet (it lands with #9639), so on a box
+    without it the FILL step cannot run at all. Reporting that as `ActionFailed` made every
+    scheduled pass on a BELOW-CEILING box exit 3 — a red unit every interval, forever, over a
+    file this PR does not own, which is the "installed but cries failure" class this installer
+    exists to avoid. It is a REFUSAL with a named cause (`fill-blocked`), so the timer records
+    the state without claiming the guard is broken; the next pass re-evaluates (idempotent), and
+    every other capability — measurement, repair, `--want`, `--status`, `--dry-run` — still works.
+    """
 
 
 # ── measurement ────────────────────────────────────────────────────────────────────────────────
@@ -532,10 +563,67 @@ def _systemctl(args: list[str]) -> list[str]:
     return [*_sudo_prefix(), binary, *args]
 
 
-def restart_runner(runner: LocalRunner) -> tuple[bool, str]:
-    """Restart a runner's service unit. NEVER called on a BUSY runner (the caller decides)."""
-    rc, out = _run(_systemctl(["restart", runner.unit]), timeout=180)
-    return rc == 0, f"systemctl restart {runner.unit} rc={rc} {out[:200]}"
+def service_manager() -> str:
+    """Which service manager this HOST really has: `systemd`, `launchd`, or `` (neither).
+
+    ⛔ ASKED, NEVER ASSUMED FROM THE PLATFORM. The restarter used to be `systemctl` unconditionally,
+    and on macOS that binary does not exist: `_run` returned rc=127, the DEAD branch read the
+    failure as "restart attempted, still offline" and re-registered the runner with `--replace`
+    — inverting this file's own documented order (restart first, replace only if it is
+    demonstrably still offline) on the one platform where nothing had been restarted at all.
+
+    A resolvable `systemctl` (PATH or `RUNNER_AUTOSCALE_SYSTEMCTL`) wins, so the Linux lanes and
+    the suite keep the systemd path on every host; otherwise Darwin (or a host carrying
+    `launchctl`) is `launchd`; otherwise `` — and an empty answer is reported as UNKNOWN, never
+    as "the restart failed". `RUNNER_AUTOSCALE_SERVICE` forces one branch (test seam, and the
+    escape hatch for a host that resolves a systemctl it must not use).
+    """
+    forced = (os.environ.get("RUNNER_AUTOSCALE_SERVICE") or "").strip().lower()
+    if forced:
+        return "" if forced in ("none", "no", "unsupported") else forced
+    if os.environ.get("RUNNER_AUTOSCALE_SYSTEMCTL") or shutil.which("systemctl"):
+        return "systemd"
+    if sys.platform == "darwin" or shutil.which("launchctl"):
+        return "launchd"
+    return ""
+
+
+def restart_runner(runner: LocalRunner) -> tuple[str, str]:
+    """Restart a runner's service. Returns `(ok | failed | unsupported, detail)`.
+
+    NEVER called on a BUSY runner (the caller decides). ⛔ THREE STATES, like `wait_online`: a host
+    with no service manager has not told us the runner is offline, so `unsupported` must not be
+    folded into `failed` — the caller would then re-register (`--replace`) on the strength of an
+    attempt that could not run. macOS restarts through the runner's OWN `svc.sh` (its launchd
+    primitive: `svc.sh stop` + `svc.sh start`), which is the only supported way to bounce a
+    launchd-run agent.
+    """
+    manager = service_manager()
+    if manager == "systemd":
+        rc, out = _run(_systemctl(["restart", runner.unit]), timeout=180)
+        return (
+            "ok" if rc == 0 else "failed",
+            f"systemctl restart {runner.unit} rc={rc} {out[:200]}",
+        )
+    if manager == "launchd":
+        svc = runner.directory / "svc.sh"
+        if not svc.exists():
+            return (
+                "unsupported",
+                f"no restart primitive for {runner.name}: launchd host and {svc} is absent "
+                "(a launchd agent is restarted by the runner's own svc.sh) — NOT treated as "
+                "offline, so nothing is re-registered",
+            )
+        rc, out = _run([*_sudo_prefix(), str(svc), "stop"], timeout=180)
+        if rc != 0:
+            return "failed", f"svc.sh stop {runner.name} rc={rc} {out[:200]}"
+        rc, out = _run([*_sudo_prefix(), str(svc), "start"], timeout=180)
+        return "ok" if rc == 0 else "failed", f"svc.sh restart {runner.name} rc={rc} {out[:200]}"
+    return (
+        "unsupported",
+        f"no service manager on this host (neither systemctl nor launchd), so {runner.name} "
+        "cannot be restarted — NOT treated as offline, so nothing is re-registered",
+    )
 
 
 def wait_online(repo: str, name: str, timeout_s: int, poll_s: int) -> str:
@@ -625,15 +713,36 @@ def register(directory: Path, name: str, repo: str, labels: str, replace: bool) 
 
 
 def enable_unit(directory: Path, name: str, repo: str) -> list[str]:
-    """Install/enable the systemd unit. Returns the FAILURES (empty = the unit is up).
+    """Install/enable the service unit for this runner. Returns the FAILURES (empty = up).
 
     A registered runner without an enabled unit dies with the shell that started it, which is the
     "runner disappears silently" mode; a caller that ignores this returns `converged` over a
     runner that will never start, so every step's status is checked and reported.
+
+    ⛔ THE ENABLE MECHANISM FOLLOWS THE HOST, like the restart. `systemctl enable --now` does not
+    exist on macOS, so the old unconditional call failed AFTER `config.sh` had already succeeded:
+    `register()` raised `ActionFailed` for a runner that was in fact registered and up, and the
+    pass reported exit 3 over a success (round 10, F1). A host with no service manager at all is
+    a FAILURE here, not a silent pass — the unit genuinely cannot be enabled.
     """
     unit = f"actions.runner.{repo.replace('/', '-')}.{name}.service"
     failures: list[str] = []
     svc = directory / "svc.sh"
+    manager = service_manager()
+    if manager == "launchd":
+        if not svc.exists():
+            return [f"launchd host and {svc} is absent — the runner cannot be enabled as a service"]
+        rc, out = _run(
+            [*_sudo_prefix(), str(svc), "install", os.environ.get("USER") or "root"], timeout=180
+        )
+        if rc != 0:
+            failures.append(f"svc.sh install rc={rc} {out[-200:]}")
+        rc, out = _run([*_sudo_prefix(), str(svc), "start"], timeout=180)
+        if rc != 0:
+            failures.append(f"svc.sh start rc={rc} {out[-200:]}")
+        return failures
+    if manager != "systemd":
+        return ["no service manager on this host (neither systemctl nor launchd)"]
     if svc.exists():
         rc, out = _run(
             [*_sudo_prefix(), str(svc), "install", os.environ.get("USER") or "root"], timeout=180
@@ -679,10 +788,11 @@ def provision(target_count: int) -> str:
     (`install-ci-runner-x64.sh`, the one registration path). ⛔ THE PROVISIONER IS NOT IN THIS
     TREE: it lives on #9639's branch (`fix/ci-x64-runner-pool`) and is resolved at run time from
     the candidates below — a sibling of this file, `$PWD/tools/`, or `~/.pi/agent/scripts/`.
-    Absent, this REFUSES (exit 3, `no provisioner`) rather than improvising a second, divergent
-    registration path — `--want`, `--status`, `--dry-run`, every measurement and every
-    restart/re-register repair still work without it. Set `RUNNER_AUTOSCALE_PROVISIONER` to the
-    installer's real path on a box that has one.
+    Absent, this REFUSES — `verdict=fill-blocked`, exit 0, `no provisioner` in the notes — rather
+    than improvising a second, divergent registration path. It is a REFUSAL, because the missing
+    file is a dependency of another PR, not a defect of this pass: `--want`, `--status`,
+    `--dry-run`, every measurement and every restart/re-register repair work without it. Set
+    `RUNNER_AUTOSCALE_PROVISIONER` to the installer's real path on a box that has one.
     """
     raw = os.environ.get("RUNNER_AUTOSCALE_PROVISIONER")
     # The installer is resolved, never assumed: the RUNNING copy of this tool lives in
@@ -700,12 +810,15 @@ def provision(target_count: int) -> str:
     )
     provisioner = next((c for c in candidates if c and Path(c).exists()), None)
     if not provisioner:
-        raise ActionFailed(
-            "no provisioner: install-ci-runner-x64.sh is absent (it lands with #9639, and is not "
-            "in this tree), so a NEW runner cannot be created on this box (this script never "
-            "downloads a runner binary). Measurement, --want/--status/--dry-run and the "
-            "restart/re-register repairs still work; set RUNNER_AUTOSCALE_PROVISIONER to the "
-            "installer's path to enable FILL."
+        # ⛔ NAMES THE DEPENDENCY AND ITS OWNER. Round 10 read the previous message as presenting
+        # a file of this repo; it is #9639's, and the absence is a fact a reader must be able to
+        # act on rather than a generic "action failed".
+        raise ProvisionerAbsent(
+            "no provisioner: install-ci-runner-x64.sh is absent (it lands with #9639's branch "
+            "`fix/ci-x64-runner-pool` and is NOT in this tree), so a NEW runner cannot be created "
+            "on this box (this script never downloads a runner binary). Measurement, "
+            "--want/--status/--dry-run and the restart/re-register repairs still work; set "
+            "RUNNER_AUTOSCALE_PROVISIONER to the installer's path to enable FILL."
         )
     rc, out = _run(
         ["bash", provisioner, "--count", str(target_count), "--fallback", "auto"], timeout=1800
@@ -846,14 +959,30 @@ def converge(
             record["actions"].append(f"would repair {c['name']} ({c['state']})")
             continue
         if c["state"] == "DEAD":
-            ok, detail = restart_runner(runner)
+            restart_state, detail = restart_runner(runner)
             record["actions"].append(f"restart {c['name']}: {detail}")
+            if restart_state == "unsupported":
+                # ⛔ NO PRIMITIVE IS NOT "IT IS OFFLINE". Falling through to `--replace` here
+                # re-registers on the strength of an attempt that never ran (macOS before the
+                # launchd branch existed), and a re-registration invalidates the credentials of a
+                # listener that may be reconnecting. Report the unknown and stop the PASS: no fill
+                # decision may be taken from a state this pass could not establish.
+                record["unverified"] = True
+                record["unverified_cause"] = "no-restart-primitive"
+                record["notes"].append(
+                    f"{c['name']}: {detail} — stopping this pass (no fill decision on an unknown "
+                    "box state; the next pass re-measures from scratch)"
+                )
+                stop_pass = True
+                break
             # ⛔ "we could not look" is NOT "it is still offline". An unreadable pool after a
             # restart proves nothing about the runner, and acting on it re-registers (with
             # --replace) a registration that may be reconnecting and picking up a job — the one
             # destructive action this file promises never to take blindly. Stop the PASS: the box
             # state is unknown from here, so no fill decision may be taken on a stale count.
-            state = wait_online(repo, c["name"], wait_s, poll) if ok else "offline"
+            state = (
+                wait_online(repo, c["name"], wait_s, poll) if restart_state == "ok" else "offline"
+            )
             if state == "online":
                 record["actions"].append(f"{c['name']} came back online after restart")
                 continue
@@ -965,6 +1094,17 @@ def converge(
             break
         try:
             note = provision(index)
+        except ProvisionerAbsent as exc:
+            # ⛔ A MISSING DEPENDENCY IS NOT A FAILED PASS. The installer this step delegates to
+            # is not in this tree (it lands with #9639), so `action-failed`/exit 3 made the timer
+            # red every interval on exactly the boxes the guard is meant to help. A named refusal
+            # records the state, keeps exit 0, and the next pass re-evaluates.
+            record["problem_kind"] = "no-provisioner"
+            record["notes"].append(
+                f"fill-blocked: {exc} — nothing was added. This is a REFUSAL, not a failure: "
+                "every measurement and every repair above still ran"
+            )
+            break
         except ProvisionerRefused as exc:
             record["problem_kind"] = "refusal"
             record["notes"].append(
@@ -1012,6 +1152,11 @@ def converge(
     # 7. VERDICT --------------------------------------------------------------------------------
     if record["problems"]:
         record["verdict"] = "action-failed"
+    elif record.get("problem_kind") == "no-provisioner":
+        # Named apart from the provisioner's own headroom refusal: this one is a DEPENDENCY that
+        # has not landed (#9639), so a reader can tell "the box is full" from "fill cannot run
+        # here" without reading the log prose. Exit 0 — a refusal is an answer.
+        record["verdict"] = "fill-blocked"
     elif record.get("problem_kind") == "refusal":
         record["verdict"] = "provisioner-refused"
     elif record.get("unverified"):
@@ -1027,6 +1172,13 @@ def converge(
                 "the pool could not be read after a restart — the box's runner count is UNKNOWN, "
                 "so the pass stopped there. The actions listed above were already performed BEFORE "
                 "that point; nothing was added or registered after it."
+            )
+        elif record.get("unverified_cause") == "no-restart-primitive":
+            record["error"] = (
+                "a DEAD runner could not be restarted because this host has no service manager "
+                "this tool can drive (systemctl or the runner's own svc.sh) — the box's state is "
+                "UNKNOWN, so the pass stopped there and NOTHING was re-registered. The actions "
+                "listed above were already performed BEFORE that point."
             )
         else:
             record["error"] = (

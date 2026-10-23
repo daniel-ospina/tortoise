@@ -401,16 +401,22 @@ def test_systemd_install_fails_when_the_timer_is_not_active(tmp_path):
 
 
 # ── the cron leg ────────────────────────────────────────────────────────────────────────────
-def test_cron_line_carries_the_path_the_job_needs(tmp_path):
-    """cron runs with `/usr/bin:/bin`, so an unpinned PATH is the same exit-2-forever as the plist.
+def test_cron_line_carries_the_path_and_home_the_job_needs(tmp_path):
+    """cron runs with `/usr/bin:/bin` and the PASSWD home, so both must be pinned.
 
-    Mutation: drop `$CRON_ENV` from cron_line -> no PATH= in the entry -> RED.
+    ⛔ HOME, not just PATH (round 10, F2's cron half): gh reads its credential from
+    `$HOME/.config/gh/hosts.yml`, and the passwd home is not where the fleet's login lives — the
+    systemd unit pins HOME for exactly this measured reason, and a cron-only host without it
+    fired, found no credential and exited 2 every interval.
+
+    Mutation: drop `$CRON_ENV` from cron_line -> no PATH=/HOME= in the entry -> RED.
     """
     sb = _sandbox(tmp_path, uname="Linux", cron=True)
     res = _run(sb, "--dry-run")
     assert res.returncode == 0, (res.stdout, res.stderr)
     line = [ln for ln in res.stdout.splitlines() if f"{LABEL}-cron" in ln]
     assert line and "PATH=" in line[0], res.stdout
+    assert "HOME=" in line[0], f"cron needs HOME pinned too (gh credential): {line[0]}"
 
 
 def test_cron_install_is_idempotent_and_survives_an_empty_crontab(tmp_path):
@@ -482,6 +488,46 @@ def test_status_warns_instead_of_claiming_no_drift_when_no_hasher_works(tmp_path
     assert res.returncode == 0, (res.stdout, res.stderr)
     assert "sha256=unavailable" in res.stdout, res.stdout
     assert "drift cannot be verified" in res.stderr, res.stderr
+
+
+def test_status_proves_the_schedule_would_actually_run(tmp_path):
+    """`--status` must PROVE runnability, not just that the unit/plist is loaded.
+
+    ⛔ Round 10, I2: `launchctl list` and `systemctl is-active` both report "installed/loaded" for
+    a schedule whose guard cannot measure anything on this box — installed, and inert forever. The
+    only honest proof is a read-only pass of the RUNNING copy with the interpreter the schedule
+    uses, so `--status` now runs it and reports ITS exit code.
+
+    Mutation: drop the probe block -> a guard that exits 2 reports "installed" with exit 0 -> RED.
+    """
+    sb = _sandbox(tmp_path)
+    # An interpreter whose read-only pass REFUSES to measure (the tool's own exit-2 verdict).
+    _write_stub(
+        sb["bin"],
+        "py312_refuses",
+        "#!/usr/bin/env bash\n"
+        'case " $* " in *" --json "*) echo \'{"verdict": "unmeasurable", "error": "gh is not on PATH"}\'; exit 2 ;; esac\n'
+        "exit 0\n",
+    )
+    env = dict(sb["env"], AUTOSCALE_PYTHON=str(sb["bin"] / "py312_refuses"))
+    # Install with a WORKING interpreter (the install's own probe refuses on a box that cannot
+    # measure), then ask `--status` with the failing one: the installed copy has not changed, so
+    # the difference is exactly what `--status` proves about it.
+    assert _run(sb).returncode == 0
+
+    res = _run(sb, "--status", env=env)
+    assert res.returncode == 2, (res.stdout, res.stderr)
+    assert "probe: FAILED (exit 2)" in res.stderr, res.stderr
+    assert "gh is not on PATH" in res.stderr, res.stderr
+
+
+def test_status_reports_a_healthy_probe(tmp_path):
+    """The other direction: a measurable box is reported OK, and exit stays 0."""
+    sb = _sandbox(tmp_path)
+    assert _run(sb).returncode == 0
+    res = _run(sb, "--status")
+    assert res.returncode == 0, (res.stdout, res.stderr)
+    assert "probe: OK (exit 0)" in res.stdout, res.stdout
 
 
 def test_help_prints_the_usage_block():
