@@ -42,7 +42,7 @@ disagree:
 | | Ruling |
 |---|---|
 | Bucket | `registry.errors` = the manifest is **unusable** (schema / typo) → isolated. `registry.unresolved_refs` = **a missing peer** → the pack loads, the reference is reported. |
-| Clause 1 | A namespaced ref whose **namespace is not loaded** is a missing pack, never a typo: the namespace does not resolve *at all*, so it cannot be a misspelling inside a present pack. |
+| Clause 1 | A namespaced ref whose **namespace is not loaded** is a missing pack, never a typo: the namespace does not resolve *at all*, so it cannot be a misspelling inside a present pack. **One exception at one site: a relation `nearMisses` target** (#9663). That universe is predicates + semantics values, which are declared BARE by contract (#2030), so `venture:holds` matches nothing such a catalog can supply and the ref stays **fatal** (`_record_unresolved(..., bare_only=True)`) — the one way it resolves is a pack that itself declares that exact namespaced predicate, a declaration `_validate` accepts and no shipped pack makes (#9760) — rather than reporting "install pack 'venture'" as advice that works only under such a non-conforming declaration. Clause 1's own premise — that installing the namespace would resolve the ref — does not hold in a bare-conforming catalog, which is why this is the clause applied to a universe it does not describe rather than a reversal of the ruling. |
 | Clause 2 | Any unresolvable ref (bare included) is a missing peer when the declaring pack has a `depends_on` entry that is not loaded. A bare name carries no namespace, so without that declaration there is no evidence of absence → it stays a **typo** and the pack is isolated. |
 | `depends_on` | Consumed at registry load (an absent declared dependency is reported against the declaring pack, by name) **and** enforced fail-closed at hosted install. |
 | Self-hosted vs hosted | Different questions. Registry load is **availability-preserving** (one absent pack must not take down the catalog); a hosted **install** is **fail-closed** (`validate_manifest` refuses, naming the missing pack). |
@@ -51,6 +51,13 @@ disagree:
 from a typo, and the declaration is what supplies the evidence. It converted the `product-strategy`
 cascade (bare `nearMisses` in `dev`/`marketing`) into two reported gaps, which clause 1 alone could
 not do.
+
+**OVERRIDES:** the blanket "a namespaced ref into an unloaded namespace is always a missing peer"
+reading of Clause 1 — at the relation `nearMisses` site such a ref stays fatal (#9663): predicates
+and semantics values are declared bare by contract (#2030), so installing the namespace cannot make
+it resolve, and the one way it does resolve is a loaded pack that itself declares that exact
+namespaced predicate — a declaration `_validate` accepts today and no shipped pack makes (#9760).
+Recorded on #2781.
 
 **Cost, stated.** A pack with a declared-but-absent dependency and a typo'd **bare** reference
 reports rather than isolates it. Clause 1 keeps the exact-name case fatal, and every tolerance is

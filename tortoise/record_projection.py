@@ -1703,14 +1703,15 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #: never wrote — the record richer than the graph, which is the one direction
 #: Interface A forbids.
 #:
-#: ⛔ NOT covered here, named so the next reader does not infer it: the other
-#: three R5 classes stay missing. Point-PROPERTY edges (`extractedFrom`,
-#: `about*`, `mitigated_by`, `tags`) are derived by the graph fold from the
-#: Point's snapshot and have no record carrier yet (class 1); operator
-#: `IMPL`/`NAND`/`INPUT` sit in `point.props` and are not journaled as edges
-#: (class 3); the structural predicates `ownedBy`/`hasPart`/`dependsOn`/
-#: `references` and friends have a working `DirectEdgeCreated` fold and NO
-#: producer (class 4 — a producer-side change, not a projection one).
+#: ⛔ NOT covered here, named so the next reader does not infer it. Point-PROPERTY
+#: edges are carried by their OWN declarations, not this one:
+#: `_POINT_PROPERTY_RELATIONS` (class 1, `extractedFrom`) and
+#: `_OPERATOR_RELATION_RECORDS` (class 3 — the operator's `IMPL`/`NAND`/`hasPart`,
+#: its reverse `INPUT`, and the canonical `mitigated_by` mirror). What stays
+#: missing is the rest of the point-property set (`about*`, `TAGGED`) and the
+#: structural predicates `ownedBy`/`hasPart`/`dependsOn`/`references` and
+#: friends, which have a working `DirectEdgeCreated` fold and NO producer
+#: (class 4 — a producer-side change in `sdk.py`, not a projection one).
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
@@ -1840,13 +1841,12 @@ def _envelope_relation_statements(
 #:   * `contains_session` → CONTAINS — carried by the ENVELOPE directive above
 #:     (`_ENVELOPE_RELATIONS`, class 2, #9594);
 #:   * `p.operator` → `IMPL`/`NAND`/`hasPart` + the reverse `INPUT` + the
-#:     canonical `mitigated_by` reverse (`edges.py::_create_edges`) — class 3,
-#:     NOT carried here: the edges are emitted as a PAIR (`IMPL` and its
-#:     `mitigated_by` mirror), so carrying one without the other would leave the
-#:     record's edge census disagreeing with the journal's for the same payload.
-#:     Its endpoints also resolve across FOUR labels (:Point/:Subject/:Object/
-#:     :Event, #7902), which `relation`'s `(label, key)` columns support but the
-#:     fold's short-id stub rule does not express as a record row;
+#:     canonical `mitigated_by` reverse (`edges.py::_create_edges`) — **carried
+#:     by `_OPERATOR_RELATION_RECORDS`, class 3**: the carrier is the Point's own
+#:     descriptor, and the pair is emitted together there, so the record's edge
+#:     census agrees with the journal's for both halves. Its endpoints resolve
+#:     across FOUR labels (:Point/:Subject/:Object/:Event, #7902), which is why
+#:     that family builds its own row statement (labels as subselect columns);
 #:   * `aboutEntities` → `about*` — NOT carried here: `_create_about_edges`
 #:     resolves a NAME through a Subject→Object→Event→Source→Point cascade
 #:     against the LIVE graph, so the record would have to re-run that cascade
@@ -2177,6 +2177,411 @@ def _point_property_relation_statements(
     return statements
 
 
+#: The epistemic label set, in the order the record's endpoint resolver tries it
+#: (#7902: an operator endpoint may carry ANY of these four, owner ruling
+#: #7813). Restated for the STANDALONE load and pinned to the original —
+#: `tortoise/live.py::EPISTEMIC_LABELS` — by
+#: `tests/test_record_projection.py::test_the_epistemic_label_order_is_the_folds_own`,
+#: because the ORDER decides which label a row is filed under when one id
+#: somehow exists in two tables and the fold's own probe is unordered.
+_EPISTEMIC_LABELS: tuple[str, ...] = ("Point", "Subject", "Object", "Event")
+
+#: #9553 **class 3** — the typed edge `_create_edges` derives from an operator's
+#: own `{op_type, inputs}` descriptor (`projection/edges.py`). The mapping is the
+#: fold's literal, restated: an op_type the fold does not know mints no typed
+#: edge at all, only the reverse `INPUT`.
+_OPERATOR_REL_TYPES: dict[str, str] = {
+    "NAND": "NAND",
+    "IMPL": "IMPL",
+    # The four composition spellings all land the ONE `hasPart` predicate.
+    "composedOf": "hasPart",
+    "decomposesInto": "hasPart",
+    "contains": "hasPart",
+    "wraps": "hasPart",
+}
+
+#: How the operator descriptor is read from a record's snapshot. `nested` is
+#: `snapshot["operator"]`; `synthesized` additionally mirrors
+#: `projection._promotion_point_with_operator`, which rebuilds the nested shape
+#: from FLAT props because promotion emitters journal `get_point` snapshots.
+_NESTED_OPERATOR = "nested"
+_SYNTHESIZED_OPERATOR = "synthesized"
+
+#: `(record type, how its operator descriptor is read)` — EXACTLY the records
+#: whose materialisation calls `_upsert_point_edges` → `_create_edges`.
+#:
+#: ⛔ WHY THESE FOUR. `apply()` reaches the edge writer from four
+#: point-materialisation arms (`projection/__init__.py:11563` for
+#: `PointAdded`/`OperatorAdded`, `:11643` for `PointPromoted`, `:11673` for
+#: `OperatorPromoted`), while `rebuild_all`'s pass 2 re-derives them for the two
+#: CREATION types only. The record follows `apply()` — the chronological engine
+#: `rebuild` / `recover_from_log` run — because declining a promote row would
+#: make the record POORER than the graph on the engine that folds in order, for
+#: exactly the #2256 population whose promote IS the operator's only record.
+#: The divergence that follows is on the pass-2 side (a full rebuild re-derives
+#: no promote edge) and is named in `04-projection.md` §3, not left to be found.
+#:
+#: ⚠️ `PointPromoted` is `nested`, NOT `synthesized`: `apply()` applies the
+#: promotion synthesis (`_promotion_point_with_operator`) to the
+#: `OperatorPromoted` arm ONLY, so a flat `PointPromoted` snapshot reaches
+#: `_create_edges` with no `operator` key and the fold writes no edge. Reading
+#: `op_type`/`inputs` there would mint a row the graph never wrote.
+_OPERATOR_RELATION_RECORDS: tuple[tuple[str, str], ...] = (
+    ("PointAdded", _NESTED_OPERATOR),
+    ("OperatorAdded", _NESTED_OPERATOR),
+    ("PointPromoted", _NESTED_OPERATOR),
+    ("OperatorPromoted", _SYNTHESIZED_OPERATOR),
+)
+
+
+def _operator_descriptor(
+    record_type: Any,
+    snapshot: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """The `{op_type, inputs}` descriptor `_create_edges` would read, or None.
+
+    ⛔ BOTH gates are the fold's, and the second one is a `dict` test on purpose.
+    A truthy non-`dict` degrades to no edges there (`_create_edges`:
+    `if not isinstance(op, dict): return`) and to no rows here, so a custom
+    `Mapping` — which passes `isinstance(x, Mapping)` but is not a `dict` — must
+    NOT be accepted: the record would be richer than the graph.
+
+    The synthesis gate is KEY PRESENCE, not `None`-ness. `_upsert_point_edges`
+    reaches `_create_edges` only `if p.get("operator")` (so a falsy descriptor
+    withholds the call), and `_promotion_point_with_operator` refuses to
+    synthesize when the key EXISTS at all (`"operator" in p`). A snapshot
+    carrying `{"operator": None, "is_operator": True, "op_type": "IMPL"}` is
+    therefore edge-less on BOTH fold halves — reading `descriptor is None` here
+    would synthesize one and emit `IMPL`/`INPUT` rows the graph never wrote, a
+    silent topology change from a record the fold ignores.
+    """
+    how = dict(_OPERATOR_RELATION_RECORDS).get(record_type) \
+        if isinstance(record_type, str) else None
+    if how is None or not isinstance(snapshot, Mapping):
+        return None
+    descriptor = snapshot.get("operator")
+    # `_promotion_point_with_operator(p)`: `if p.get("is_operator") and
+    # p.get("op_type")` → `{"op_type": p["op_type"], "inputs": p.get("inputs")
+    # or []}`. Restated verbatim: the polarity and the `or []` both decide
+    # whether a real edge is restored.
+    if (how == _SYNTHESIZED_OPERATOR and "operator" not in snapshot
+            and snapshot.get("is_operator") and snapshot.get("op_type")):
+        descriptor = {"op_type": snapshot["op_type"],
+                      "inputs": snapshot.get("inputs") or []}
+    return descriptor if isinstance(descriptor, dict) else None
+
+
+def _writable_epistemic_id(value: Any) -> bool:
+    """True when the FOLD would key an operator input on `value`.
+
+    `projection._writable_id`, restated: a non-`str`, the EMPTY string, a NUL and
+    a lone surrogate are refused — and a WHITESPACE-ONLY value is deliberately
+    ADMITTED (#9599), which is the difference between this predicate and
+    :func:`_writable_endpoint_id`.
+
+    ⛔ WHY THE DIFFERENCE IS LOAD-BEARING, and why the Session family's rule
+    cannot be reused here. `_writable_container_id` refuses a blank key because
+    `_link_session` addresses the container with an INLINE property MATCH
+    (`(s:Session {id:$sid})`), which FalkorDB answers from the `:Session(id)`
+    range index, and an indexed equality filter does not match a
+    whitespace-only string (#9599). This family's probe is not that shape:
+    `_create_edges` addresses an input with a LABEL DISJUNCTION plus a `WHERE`
+    (`MATCH (o:Point {id:$oid}), (s) WHERE (s:Point OR … ) AND s.id = $sid`) —
+    a SCAN, where the ordinary string comparison applies. MEASURED on the fold
+    through this code path (review round 2): a blank input id gets a `:Point`
+    stub minted and BOTH edges landed (`IMPL`, `INPUT`), and the same holds when
+    a node already carries the blank key.
+
+    So refusing a blank input here would make the record POORER than the graph
+    on exactly the edge this change exists to carry — the direction Interface A
+    forbids — and would do it on a stated-but-false reason. The refusal set is
+    therefore `_writable_id`'s, value for value; pinned by
+    `test_the_operator_input_gate_is_the_folds_own_rule`.
+
+    The NUL / lone-surrogate refusals are not cosmetic on THIS side either:
+    Postgres refuses a NUL in `text` and the driver cannot encode a lone
+    surrogate, so admitting either would turn a fold skip into a failed replay.
+    A ≥20-character id bearing one is the case where the fold's own `else`
+    branch has no gate and its probe RAISES (measured: `ResponseError: Failed to
+    parse query parameter`); the record skips it instead, which is the fail-safe
+    half of the same verdict — no edge on either route, and no aborted write.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False  # lone surrogate
+    return True
+
+
+def _is_non_operator_snapshot(snapshot: Mapping[str, Any]) -> bool:
+    """`projection/entities.py::is_non_operator_payload`, restated.
+
+    The polarity is load-bearing: `not p.get("is_operator")` is ALSO true when
+    the key is ABSENT, and the EventAPI / extractor / ingest producer emits an
+    `OperatorAdded` with no flag at all — that form would authorise a
+    `mitigated_by` row for every generic IMPL operator on the main write path.
+    Pinned value-for-value against the fold by
+    `test_the_mitigation_gates_are_the_folds_own`.
+    """
+    return snapshot.get("is_operator") is False
+
+
+def _has_usable_mitigation_strength(snapshot: Mapping[str, Any]) -> bool:
+    """`projection/entities.py::has_usable_mitigation_strength`, restated.
+
+    `mitigate_operator`'s own accepted domain: a real `int`/`float` (a `bool`
+    included on purpose — the writer accepts one) inside `[0, 1]`. A map / list /
+    None is dropped by the writer's passthrough, a non-numeric value persists but
+    is unreadable, and an out-of-band value is refused by the writer's band
+    check — none of them is a mitigation a live call could have written, so none
+    of them may authorise the reconstructed dampening.
+
+    Refusal is TOTAL and fail-safe: `isinstance` admits an `int`/`float`
+    SUBCLASS whose comparison raises, and a hand-edited record must land NO row
+    rather than abort the record write after the engine has started replaying.
+    The band comparison IS the finiteness check (`10**400` fails it by
+    comparison, never by `OverflowError`), exactly as the fold states.
+    """
+    value = snapshot.get("mitigation_strength")
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        return bool(0 <= value <= 1)
+    except Exception:
+        return False
+
+
+def _epistemic_endpoint(
+    org_id: str,
+    graph_id: str,
+    journal_id: str,
+    alias: str,
+) -> tuple[str, list[Any]]:
+    """The `(label, node_key)` row an operator input addresses, resolved.
+
+    ⛔ WHY THIS IS NOT `_endpoint_resolution`. That helper takes the LABEL as an
+    argument, because every other edge family knows it: an `EntityLinked`
+    record names both labels, a `DirectEdgeCreated` descriptor defaults to
+    `Point`, and the class-1 target is a `Source`. An operator's input does NOT
+    come with one: `_create_edges`
+    probes `MATCH (s) WHERE (s:Point OR s:Subject OR s:Object OR s:Event) AND
+    s.id = $sid`, so the label is whatever the graph happened to hold. The
+    record therefore has to answer label AND key from one lookup, and
+    `relation.src_label`/`tgt_label` are bound as VALUES by
+    `_relation_upsert_statement` — hence a resolver that returns both, and a
+    statement built for it below.
+
+    The probe is the fold's, `s.id = $sid`, over the four tables; first label in
+    :data:`_EPISTEMIC_LABELS` order wins. The KEY is each label's canonical one
+    (`point.node_key` = the id; `subject`/`object` → `name`; `event` →
+    `node_key` = the `eventId`), because `relation.src_key`/`tgt_key` are
+    composite FKs into `node_identity` — writing the raw journal id for a
+    Subject would address a phantom identity the hard-delete cascade can never
+    reach (the same defect `_endpoint_resolution` exists to prevent).
+
+    ⛔ WHICH COLUMN carries `s.id` is per label, and it is NOT always the
+    table's `id` column — :data:`_ENTITY_MATCH_COLUMNS` is the one answer, and
+    this resolver DERIVES from it rather than restating it (a second spelling is
+    how this family drifted onto `event.id` in the first place). Every label here
+    agrees with it (`Point` → `node_key`, `Subject`/`Object` → `id`, `Event` →
+    `node_key`). `Event` is the label where the two DISAGREE and
+    where assuming `id` cost the record the edge: the schema pins
+    `event.node_key = event_id` ``NOT NULL`` (`chk_event_node_key_is_contract_key`)
+    while `event.id` is a plain nullable column, and the dominant
+    `EventRecorded` producers — `mining._make_event` (nested `{eventId: …}`, no
+    `id`) and `github_map.issue_to_event`/`pr_to_event` (`eventId` only) — never
+    fill it. The graph still keys such a node `id == eventId`
+    (`_upsert_event`'s unconditional `props["id"] = eid`, `eid = inner.get("id")
+    or inner.get("eventId")`), so the fold's `s.id = $sid` probe matched and
+    wrote both edges while an `id`-matching record write filed no `relation` row
+    at all: R5 class 3, silently open on the Event arm (`#9553` review).
+
+    ⚠️ RESIDUAL, named: a payload carrying BOTH `id` and a DIFFERENT `eventId`
+    would key the record row on the `eventId` while the fold's MERGE key is the
+    `id` — the record and the graph would then disagree about the node's
+    identity, which is upstream of this resolver and not something a match
+    column can repair. No producer emits that shape (both dominant producers
+    emit `eventId` alone), so it is stated, not handled.
+
+    ⚠️ BOUND, stated rather than discovered — and it is the record that is
+    POORER, not two arbitrary-but-equal choices. The fold's probe BINDS `s` to
+    every node holding that id (`_create_edges`' `MATCH … WHERE (s:Point OR
+    s:Subject OR s:Object OR s:Event) AND s.id = $sid` then `MERGE`), so a
+    duplicated id yields one typed/`INPUT` edge pair PER node, while this
+    resolver files the row under ONE label (`ORDER BY pref LIMIT 1`). Ids are
+    ULIDs minted per node, so two nodes share one only through a hand-written
+    graph. The row is absent-but-one rather than wrong; a one-row-per-candidate
+    -label form cannot express "every label that matched", so the bound is the
+    record's, not a choice the graph also makes.
+    """
+    selects: list[str] = []
+    params: list[Any] = []
+    for pref, label in enumerate(_EPISTEMIC_LABELS):
+        table = _LABEL_TABLES[label]
+        # Each label's CANONICAL key (`node_identity.key_property`, migration
+        # `20261012000001`): `Point`/`Event` → `node_key` (the id / the
+        # `eventId`), `Subject`/`Object` → `name`.
+        key_column = "node_key" if label in ("Point", "Event") else "name"
+        # The FOLD's match column is `s.id`, and WHICH record column carries it
+        # is `_ENTITY_MATCH_COLUMNS`' own answer — DERIVED here, never restated.
+        # A second spelling of that fact is exactly how the Event arm came to
+        # match `event.id`, the one column its dominant producers leave NULL, and
+        # silently filed no row (#9553 review). Matching the key also keeps the
+        # per-(label, id) index instead of a column no producer must fill.
+        # This family resolves ONE column per label: the row carries one journal
+        # id per endpoint, and the pair-per-input fan-out assumes the fixed
+        # parameter block. A multi-column entry is REFUSED rather than silently
+        # read as "first".
+        match_columns = _ENTITY_MATCH_COLUMNS[table]
+        if len(match_columns) != 1:
+            raise RecordProjectionError(
+                f"the {label} endpoint resolves on {len(match_columns)} columns "
+                f"{match_columns} — an operator input is ONE journal id, so "
+                "this family can match exactly one"
+            )
+        match_column = match_columns[0]
+        selects.append(
+            f"SELECT '{label}' AS node_label, {key_column} AS node_key, "
+            f"{pref} AS pref FROM public.{table} "
+            f"WHERE org_id = %s AND graph_id = %s AND {match_column} = %s"
+        )
+        params.extend([org_id, graph_id, journal_id])
+    return (
+        f"(SELECT node_label, node_key, pref FROM ({' UNION ALL '.join(selects)}) "
+        f"epistemic ORDER BY pref LIMIT 1) {alias}",
+        params,
+    )
+
+
+def _operator_relation_statement(
+    org_id: str,
+    graph_id: str,
+    rel_type: str,
+    src_id: str,
+    tgt_id: str,
+    idx: int,
+) -> Statement:
+    """One `relation` row whose endpoints carry their OWN labels.
+
+    The same shape `_relation_upsert_statement` emits, with two differences the
+    family forces:
+
+    * the labels come from the endpoint subselects, so they are COLUMNS of the
+      `SELECT` rather than parameters — an operator input's label is a fact the
+      graph holds, not one the record may assume;
+    * `ON CONFLICT … DO NOTHING`. These rows carry NO attribute: the fold writes
+      `{idx}` on the typed/reverse edges and nothing at all on `mitigated_by`
+      (`projection/edges.py::_create_edges`), and `idx` is part of the conflict
+      key — so a replay has nothing to correct, and `DO NOTHING` is exactly the
+      idempotent form. (`DO UPDATE SET props = EXCLUDED.props`, which the other
+      families use, is for rows whose attributes a later record legitimately
+      supersedes; it would be a no-op here and would misstate the contract.)
+    """
+    src_select, src_params = _epistemic_endpoint(org_id, graph_id, src_id, "src")
+    tgt_select, tgt_params = _epistemic_endpoint(org_id, graph_id, tgt_id, "tgt")
+    return Statement(
+        "INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, "
+        "src_key, tgt_label, tgt_key, idx) "
+        "SELECT %s, %s, %s, src.node_label, src.node_key, tgt.node_label, "
+        "tgt.node_key, %s "
+        f"FROM {src_select}, {tgt_select} "
+        "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, "
+        "tgt_label, tgt_key, idx) DO NOTHING",
+        (org_id, graph_id, rel_type, idx, *src_params, *tgt_params),
+    )
+
+
+def _operator_relation_statements(
+    org_id: str,
+    graph_id: str,
+    record_type: Any,
+    snapshot: Mapping[str, Any] | None,
+    target_key: str,
+) -> list[Statement]:
+    """The `relation` rows an OPERATOR's own descriptor derives (class 3).
+
+    ⛔ THE GAP THIS CLOSES (R5 / #9553, class 3). An operator's `IMPL`/`NAND`/
+    `hasPart` edge, its reverse `INPUT`, and (for a mitigation) the canonical
+    `mitigated_by` mirror exist ONLY as `_create_edges` Cypher, driven from the
+    `{op_type, inputs}` descriptor in the Point's snapshot. The record
+    materialised the operator's `point` row and emitted no `relation` row, so a
+    **journal** rebuild restored the epistemic topology while a
+    **record**-sourced rebuild restored the claims and none of their structure —
+    the loss the epic's "destroyed and rebuilt without data loss" acceptance is
+    about, since `compute_operator_weight` reads exactly these edges.
+
+    For each input, mirroring `_create_edges` VALUE FOR VALUE:
+
+    * a KNOWN `op_type` → `(operator)-[:<REL> {idx}]->(input)` AND
+      `(input)-[:INPUT {idx}]->(operator)`;
+    * an UNKNOWN `op_type` → the reverse `INPUT` only (`rel_type` is None);
+    * `IMPL` from a NON-operator Point carrying a usable
+      `mitigation_strength` → additionally `(input)-[:mitigated_by]->
+      (operator)`, the canonical reverse `mitigate_operator` writes (#5048,
+      #4937). Both gates are the fold's own, restated above.
+
+    ⚠️ Iteration mirrors `enumerate(op.get("inputs") or [])` verbatim, INCLUDING
+    its tolerance of a container the fold never guards: a dict iterates its keys
+    and a string its characters there, and the same members are read here. They
+    simply land no row, because the fold mints a STUB node for an input that does
+    not resolve and a stub has no record row to resolve from — the `absent`
+    verdict this projection gives every relation, never a minted endpoint.
+    """
+    descriptor = _operator_descriptor(record_type, snapshot)
+    if descriptor is None:
+        return []
+    try:
+        rel_type = _OPERATOR_REL_TYPES.get(descriptor.get("op_type"))
+    except TypeError:
+        # An unhashable `op_type` (a corrupt record) raises out of `dict.get`,
+        # and this function is reached from a fold declared TOTAL — a record
+        # write must never abort mid-replay after the engine has started. The
+        # fold raises on the same payload; the record fails SAFE instead (no
+        # typed edge, and the reverse `INPUT` below, which is what an unknown
+        # op_type gets there too).
+        rel_type = None
+    mitigation = (
+        rel_type == "IMPL"
+        and _is_non_operator_snapshot(snapshot)
+        and _has_usable_mitigation_strength(snapshot)
+    )
+    try:
+        members = list(enumerate(descriptor.get("inputs") or []))
+    except TypeError:
+        # A non-iterable `inputs` is a malformed record: the fold would raise on
+        # it, and a record write must never abort mid-replay after the engine has
+        # started — no rows, no invented endpoints (fail-safe, like every other
+        # refusal on this path).
+        return []
+    statements: list[Statement] = []
+    for idx, source in members:
+        # The fold's own member gate: a non-string member is malformed and
+        # skipped (`if not isinstance(src, str): continue`), and an unwritable
+        # id is skipped. The id predicate is `_writable_id`'s, NOT the
+        # blank-refusing container rule — see :func:`_writable_epistemic_id`:
+        # this family's probe is a label-disjunctive SCAN, so the fold really
+        # does land the edges for a blank key, and refusing it here would make
+        # the record poorer than the graph.
+        if not isinstance(source, str) or not _writable_epistemic_id(source):
+            continue
+        if rel_type is not None:
+            statements.append(_operator_relation_statement(
+                org_id, graph_id, rel_type, target_key, source, idx))
+            statements.append(_operator_relation_statement(
+                org_id, graph_id, "INPUT", source, target_key, idx))
+            if mitigation:
+                statements.append(_operator_relation_statement(
+                    org_id, graph_id, "mitigated_by", source, target_key, 0))
+        else:
+            statements.append(_operator_relation_statement(
+                org_id, graph_id, "INPUT", source, target_key, idx))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -2326,6 +2731,14 @@ def _declared_mutations(
                 org_id, graph_id, record_type,
                 snapshot if isinstance(snapshot, Mapping) else None,
                 key, columns, refused),
+            # AND the epistemic topology this record's own OPERATOR descriptor
+            # derives (R5 class 3): the typed edge, its reverse INPUT, and the
+            # canonical mitigated_by mirror. Same ordering rule again, and the
+            # endpoints are resolved across the four epistemic labels — never
+            # minted, so an input the fold stubs lands no row.
+            *_operator_relation_statements(
+                org_id, graph_id, record_type,
+                snapshot if isinstance(snapshot, Mapping) else None, key),
         ]
     if isinstance(effect, NodePatch):
         node = effect.node
