@@ -189,20 +189,29 @@ def test_the_hint_block_is_ordered_by_namespace(tmp_path):
 
 
 def test_the_default_prompt_path_is_byte_identical():
-    """No shipped pack declares either slot, so nothing may move.
+    """No shipped pack declares the HINT slots, so nothing may move.
 
     This is the half that matters in production: a change here would alter
     extraction for every tenant that never used the slots.
+
+    #9663: one shipped pack now DOES declare a per-kind `values` shape
+    (`portfolio:allocationTarget.targetPct`), which legitimately adds the #2818
+    KIND VALUE FIELDS block. That block belongs to the value declaration, not to
+    the hint slot, so the byte-identity claim is made on a master whose
+    `pack_values` is emptied — the hint slot still moves nothing.
     """
     master = v2.build_master_list()
     assert master["pack_hints"] == {}
     assert v2._pack_hints_text(master) == ""
-    assert v2._s2s4_rules(master) == v2._s2s4_rules()
+    assert "KIND VALUE FIELDS" not in v2._s2s4_rules()
+    assert v2._s2s4_rules(master | {"pack_values": {}}) == v2._s2s4_rules()
     assert v2._granularity_text(master) == v2._granularity_text(None)
 
     brief = ve.compile_value_brief()
     assert brief["pack_hints"] == {}
-    assert v2._s2s4_rules(v2._build_master_from_brief(brief)) == v2._s2s4_rules()
+    assert v2._s2s4_rules(
+        v2._build_master_from_brief(brief) | {"pack_values": {}}
+    ) == v2._s2s4_rules()
 
 
 def test_a_reserved_section_is_never_a_pack_kind():
