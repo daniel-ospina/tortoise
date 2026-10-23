@@ -528,8 +528,8 @@ def _pack_values_text(master: dict | None) -> str:
     ``_select_pack_kinds`` dropped from this story's PACK KINDS section,
     contradicting "EVERY kind you emit MUST come from this list". Policy,
     never vocabulary. ``""`` when nothing is declared, so the S2/S4 rule slot
-    is byte-identical for every pack that declares none (every shipped pack
-    today).
+    is byte-identical for every pack that declares none (the other six shipped
+    packs — since #9663 `portfolio:allocationTarget` does declare one).
     """
     values = (master or {}).get("pack_values") or {}
     if not isinstance(values, dict) or not values:
@@ -825,10 +825,17 @@ _PACK_TRIGGERS = {
     # must be one that cannot ride inside an unrelated word. `valuation` was the
     # first draft and matched "evaluation" — which made an unrelated story
     # select `portfolio:*` AND (because one match suppresses the all-packs
-    # fallback) drop every other pack's kinds from the compact prompt. Prefer
-    # compound forms (`valuation mark`) over words with common look-alikes.
-    "portfolio:": ("portfolio", "mandate", "allocation", "target weight",
-                   "benchmark weight", "valuation mark", "impairment"),
+    # fallback) drop every other pack's kinds from the compact prompt. The same
+    # trap made bare `mandate` (the team's mandate is to ship the CLI) and bare
+    # `allocation` (resource allocation across the fleet) fire on unrelated
+    # stories and strip every OTHER pack. So: compound forms only, drawn from the
+    # pack's own `synonyms` — a trigger that cannot fire on the mentions the pack
+    # declares is as wrong as one that fires on mentions it does not.
+    "portfolio:": ("portfolio", "investment mandate", "investment policy",
+                   "mandate limits", "investment guidelines",
+                   "allocation target", "target allocation", "target weight",
+                   "policy weight", "benchmark weight", "valuation mark",
+                   "fair value mark", "impairment", "write-down"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it

@@ -7,12 +7,17 @@ MCP server (mcp_server.py → sdk.validate_domain) and the SDK path
 a missing import would make ``tortoise validate`` report a false-clean.
 
 Registered surfaces:
-  - ``graph`` (on-demand): ``product_strategy.validate_chain_integrity`` — a
+  - ``graph`` (on-demand): ``validate_chain_integrity`` for `product-strategy` — a
     mechanism-complete, batched migration of the legacy ``sdk.check_structure``
     (all 5 rule types: orphan_use_case, dangling_use_case_ref,
     dangling_jtbd_ref, dangling_workflow_ref, orphaned_draft). Runs from
     ``tortoise validate --domain`` and the MCP tool. Never runs at commit
     (the commit path has no graph state by construction).
+  - ``graph`` (on-demand): ``validate_portfolio_shape`` for `portfolio` (#9663) —
+    rules ``undeclared_object_status`` and ``orphaned_valuation_mark``, derived
+    from the overlay pack's own declarations. Without a rule, a domain's
+    ``validate`` verdict is ``([], [])`` — a green light over nothing — which is
+    why this list exists.
   - ``payload_local`` (commit path): ``validate_payload_intra_chain`` — the
     deterministic intra-payload leapfrog rule, run by
     ``commit_schema.validate_domain_rules`` (warn-first, additive
@@ -342,6 +347,14 @@ def run_domain_graph_validators(
 
 _PORTFOLIO_DOMAIN = "portfolio"
 
+#: Statuses that mean "no lifecycle state was written", not "a state outside the
+#: kind's vocabulary". ``projection/entities.py`` MERGEs an Object with
+#: ``o.status=coalesce($st, 'live')``, so a node created without an explicit
+#: status carries ``live`` — flagging it would redden every freshly-minted
+#: mandate until someone set a status, which is not a graph defect. Named here
+#: (not inlined) because the exemption is a decision, not a test.
+_OBJECT_UNSET_STATUSES = frozenset({"live"})
+
 
 def _portfolio_declared_statuses() -> dict[str, list[str]]:
     """``{bare kind: declared statuses}`` from the loaded `portfolio` pack.
@@ -383,16 +396,31 @@ def validate_portfolio_shape(graph) -> list[dict]:
          connector fold no longer applies to it), so an out-of-vocabulary status
          is a state nothing declared — and every "what is the current position?"
          read misses it.
-      2. ``orphaned_valuation_mark`` — a `portfolio:valuationMark` Event with no
-         ``aboutObject`` edge. The manifest declares the mark as an occurrence
-         ABOUT a position (`marks`); an unlinked one records that a mark
-         happened and can never be joined back to what it marked.
+      2. ``orphaned_valuation_mark`` — a `portfolio:valuationMark` Event
+         attached to no position, by EITHER declared shape (see the query
+         below). The manifest declares the mark as an occurrence ABOUT a
+         position (`marks`); an unattached one records that a mark happened and
+         can never be joined back to what it marked.
 
-    One batched anchored query per rule (no N+1) — the anchor lives in the MATCH
-    pattern, not a bare ``WHERE``, because an unanchored leg degrades to a full
-    scan and a timeout here surfaces as a FALSE CLEAN (#8173).
+    One batched query per rule (no N+1), each anchored on a LABEL — and the
+    claim stops there. ``objectKind``/``eventKind`` are properties with no index,
+    so the kind filter is a label scan within the anchored walk. That is the
+    honest residual: a query slow enough to time out is swallowed by
+    ``run_domain_graph_validators`` and reads as CLEAN (#8173), and this rule
+    does not design that away — it keeps the walk label-anchored so it cannot
+    degrade to a whole-graph scan.
     """
     violations: list[dict] = []
+
+    # The framework's terminal vocabulary (``superseded`` / ``deprecated`` /
+    # ``archived`` / ``retracted``) is written by the ENGINE, never by a caller:
+    # ``commit_ops.apply_supersessions`` folds a superseded Object to
+    # ``superseded``. Supersession is exactly how a mandate or target changes
+    # state, so treating that status as undeclared would redden
+    # `validate_domain portfolio` on every graph that ever superseded one — the
+    # pack's own acceptance would forbid its own write path. Exempt, from the
+    # one definition (never a second literal).
+    from .commit_ops import OBJECT_TERMINAL_STATUSES
 
     declared = _portfolio_declared_statuses()
     if declared:
@@ -404,9 +432,10 @@ def validate_portfolio_shape(graph) -> list[dict]:
             "RETURN o.id, o.objectKind, o.name, o.status",
             params={"kinds": kinds},
         ).result_set
+        exempt = OBJECT_TERMINAL_STATUSES | _OBJECT_UNSET_STATUSES
         for node_id, object_kind, name, status in rows:
             valid = allowed.get(object_kind)
-            if not valid or status in valid:
+            if not valid or status in valid or status in exempt:
                 continue
             violations.append({
                 "rule": "undeclared_object_status",
@@ -425,10 +454,20 @@ def validate_portfolio_shape(graph) -> list[dict]:
             })
 
     mark_kind = f"{_PORTFOLIO_DOMAIN}:valuationMark"
+    # BOTH declared shapes count as "attached". The manifest declares `marks`
+    # with ``mechanism: IMPL``, and a mechanism resolves to the OPERATOR write
+    # path (``pack_registry.relation_write_paths``) — ``create_operator(op_type=
+    # 'IMPL', label='marks', ...)`` writes ``(e)-[:INPUT]->(:Point)-[:IMPL]->
+    # (o)``, NOT ``aboutObject``. Checking only ``aboutObject`` would call a mark
+    # wired exactly as the manifest declares it an orphan, i.e. forbid the
+    # relation that admits the kind. ``aboutObject`` is accepted too because it
+    # is the structural form some callers use and it is just as attached.
     rows = graph.g.query(
         "MATCH (e:Event) WHERE e.eventKind = $kind "
-        "OPTIONAL MATCH (e)-[:aboutObject]->(o:Object) "
-        "WITH e, count(o) AS targets WHERE targets = 0 "
+        "OPTIONAL MATCH (e)-[:aboutObject]->(o1:Object) "
+        "OPTIONAL MATCH (e)-[:INPUT]->(:Point)-[:IMPL]->(o2:Object) "
+        "WITH e, count(DISTINCT o1) + count(DISTINCT o2) AS targets "
+        "WHERE targets = 0 "
         "RETURN e.id, e.name",
         params={"kind": mark_kind},
     ).result_set
@@ -443,8 +482,9 @@ def validate_portfolio_shape(graph) -> list[dict]:
                 f"marks, so the mark cannot be joined back to what it valued"
             ),
             "fix": (
-                "re-create the mark with `aboutObject=<the venture:investment "
-                "it values>` (create_entity('event', ..., aboutObject=...))"
+                "record the declared `marks` relation: create_operator("
+                "'IMPL', <mark>, [<the venture:investment it values>], "
+                "label='marks', semantics='related')"
             ),
         })
     return violations

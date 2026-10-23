@@ -188,8 +188,8 @@ def test_the_hint_block_is_ordered_by_namespace(tmp_path):
 # ── byte identity on every shipped-pack path ───────────────────────────────
 
 
-def test_the_default_prompt_path_is_byte_identical():
-    """No shipped pack declares either HINT slot, so nothing may move.
+def test_the_default_prompt_path_moves_only_the_declared_values_block():
+    """No shipped pack declares either HINT slot, so the HINTS move nothing.
 
     This is the half that matters in production: a change here would alter
     extraction for every tenant that never used the slots.
@@ -198,7 +198,9 @@ def test_the_default_prompt_path_is_byte_identical():
     allocationTarget`), and the #2818 policy block rides this same slot
     (`_s2s4_rules`'s own docstring: both ride here because both are policy).
     So the rule is not "identical" any more but "identical plus exactly the
-    one declared block" — the hints half still moves nothing.
+    one declared block" — the hints half still moves nothing. (The name says
+    what the test now asserts: a name claiming byte identity would be a false
+    claim a future reader would trust.)
     """
     master = v2.build_master_list()
     assert master["pack_hints"] == {}

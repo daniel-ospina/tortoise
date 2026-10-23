@@ -176,9 +176,13 @@ ontology:
   #   `synonyms` ("benchmark weight", "reference weight", "benchmark de
   #   referência"); a bare benchmark label stays prose. Both places state this
   #   one rule and the test pins it.
-  # `rebalance` — an owned, dated action rather than a state carrier, so it is
-  #   absorbed by `venture:actionItem`, whose existing `synonyms` ("action
-  #   item", "next step", "follow-up", "task") already cover the mention.
+  # `rebalance` — an owned, dated action rather than a state carrier, so the
+  #   mention classifies to the KIND `venture:actionItem` (an owned, dated
+  #   commitment). ⚠ NOT by synonym: none of actionItem's synonyms ("action
+  #   item", "next step", "follow-up", "task") matches "rebalance", so
+  #   absorption rests on the kind's own definition. That is what the test
+  #   below pins, and adding the word as a venture synonym would be a
+  #   venture-side edit, not this overlay's.
   #   ⛔ This pack deliberately declares NO `rebalance` kind and NO `rebalance`
   #   synonym: the ambiguity belongs to venture's own kind, and a second home
   #   here is the rename this pack exists to avoid.
@@ -251,8 +255,10 @@ connectors: []
 tools: []
 
 # #2781: the cross-pack references this manifest actually makes are DECLARED —
-# `venture:investment` is a relation endpoint in all three relations. Consumer:
-# registry load reports an absent `venture` against THIS pack and keeps the pack
-# loaded; the hosted install refuses fail-closed, naming the missing pack.
+# `venture:investment` is a relation endpoint in TWO of the three relations
+# (`constrainedBy` fromKind, `marks` toKind); the third, `boundedBy`, stays
+# inside this pack (allocationTarget → mandate). Consumer: registry load reports
+# an absent `venture` against THIS pack and keeps the pack loaded; the hosted
+# install refuses fail-closed, naming the missing pack.
 depends_on:
 - venture

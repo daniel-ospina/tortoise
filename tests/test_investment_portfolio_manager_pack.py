@@ -431,6 +431,30 @@ class TestClashRules:
         assert "dev:issue" in evaluation, list(evaluation)
         assert not [k for k in evaluation if k.startswith(f"{NS}:")], list(evaluation)
 
+        # Bare generic words are the OTHER half of the same trap: an overlay
+        # trigger must match the mentions the pack DECLARES, and only those.
+        # `mandate`/`allocation` alone are generic English ("the team's mandate
+        # is to ship the CLI", "resource allocation across the fleet"), and a
+        # match there strips every other pack's kinds from the prompt.
+        for generic in ("the team's mandate is to ship the CLI",
+                        "resource allocation across the fleet"):
+            got = _select_pack_kinds(f"{generic} during this deploy", pack_kinds)
+            assert not [k for k in got if k.startswith(f"{NS}:")], (generic, got)
+
+        # …and every multi-word mention the manifest declares as a `synonym`
+        # must SELECT the namespace, or the row cannot fire on the vocabulary
+        # the pack ships. Single words are skipped: `mark`/`valuation` are
+        # deliberately not triggers (they ride inside "marketing"/"evaluation").
+        declared = {syn.lower()
+                    for spec in RAW["ontology"]["kindDefs"].values()
+                    for syn in (spec.get("synonyms") or [])}
+        multiword = sorted(w for w in declared if " " in w and w.isascii())
+        assert multiword, "the manifest must declare multi-word synonyms"
+        for mention in multiword:
+            got = _select_pack_kinds(
+                f"the board reviewed the {mention} last week", pack_kinds)
+            assert [k for k in got if k.startswith(f"{NS}:")], (mention, got)
+
 
 # ── 4. Core extraction unchanged with the pack OFF ────────────────────────
 
@@ -610,11 +634,52 @@ class TestKindsAreMintable:
         # not about the kinds existing.
         sdk._get_proj().g.query(
             "MATCH (o:Object {name:'Mandate M-9'}) SET o.status = 'adopted'")
+        sdk._get_proj().g.query(
+            "MATCH (e:Event {name:'VM orphan'}) DETACH DELETE e")
+        # TWO attached marks, one per declared write shape: `aboutObject` (the
+        # structural form) and the `marks` relation as DECLARED — `mechanism:
+        # IMPL` resolves to the operator path, which writes INPUT→Point→IMPL
+        # and never `aboutObject`. A rule that honours only one of them forbids
+        # the relation that admits the kind.
         sdk.create_entity("event", "VM-1",
                           eventKind=f"{NS}:valuationMark",
                           aboutObject=position["id"])
-        sdk._get_proj().g.query(
-            "MATCH (e:Event {name:'VM orphan'}) DETACH DELETE e")
+        vm2 = sdk.create_entity("event", "VM-2",
+                                eventKind=f"{NS}:valuationMark")
+        sdk.create_operator("IMPL", vm2["node"]["id"], [position["id"]],
+                            label="marks", semantics="related")
+        assert sdk.validate_domain(NS)["ok"] is True
+
+    @requires_db
+    def test_a_superseded_mandate_is_not_an_undeclared_status(self, sdk):
+        """Supersession is the ENGINE's own state-change fold
+        (``commit_ops.apply_supersessions`` writes ``status='superseded'``), and
+        it is how a mandate changes: a rule that only accepted the manifest's
+        four words would redden `validate_domain portfolio` on every graph that
+        superseded one — the pack would forbid its own write path.
+        """
+        from tortoise.commit_ops import OBJECT_TERMINAL_STATUSES, apply_supersessions
+
+        sdk.create_entity("object", "Mandate M-1 — draft",
+                          objectKind=f"{NS}:mandate", is_episodic=False)
+        sdk.create_entity("object", "Mandate M-2",
+                          objectKind=f"{NS}:mandate", is_episodic=False)
+        applied = apply_supersessions(
+            sdk._get_proj(), sdk,
+            [{"superseded": "Mandate M-1 — draft",
+              "supersedes_by": "Mandate M-2", "evidence": "board vote"}],
+            session_id="s-9663")
+        assert applied == 1, "the live fold must apply, or this test is vacuous"
+
+        stored = sdk._get_proj().g.query(
+            "MATCH (o:Object {name:'Mandate M-1 — draft'}) RETURN o.status"
+        ).result_set
+        assert stored and stored[0][0] in OBJECT_TERMINAL_STATUSES, stored
+
+        declared = set(RAW["ontology"]["kindDefs"]["mandate"]["statuses"])
+        assert "superseded" not in declared, (
+            "the framework terminal vocabulary is written by the engine, not "
+            "declared by the kind — declaring it would be a second definition")
         assert sdk.validate_domain(NS)["ok"] is True
 
     @requires_db
