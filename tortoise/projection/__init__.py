@@ -11001,17 +11001,26 @@ class FalkorProjection(
         # the pair is bound by `MEMORY_CEILING_OWNERSHIP_CONSTRAINT` below and
         # must not disagree about the remedy either.
         #
-        # #7392 review P1 — what that binding does NOT yet cover: the pair is
-        # bound on the PROHIBITION and on the ceiling remedy, but NOT on whether
-        # a ceiling exists. `tortoise/retry.py::explain_memory_ceiling` still
-        # asserts "it has reached its configured dataset limit (`maxmemory`)"
-        # for any `redis.exceptions.OutOfMemoryError` (its classifier admits the
-        # CLASS, not just the wording), so on a ceiling-less instance the note
-        # and the `cap <= 0` branch above state opposite facts. Measured and
-        # recorded on #7357 (issuecomment-6341756094) — the note is that
-        # issue's deliverable, so it is fixed there, not here; this comment is
-        # the pointer so the next reader does not read the sentence above as
-        # proof that the two already agree.
+        # #7392 review P1 — the gap that binding did NOT cover, now closed on
+        # #7357: the pair was bound on the PROHIBITION and on the remedy, but
+        # NOT on whether a ceiling exists. `tortoise/retry.py::
+        # explain_memory_ceiling` used to assert "it has reached its configured
+        # dataset limit (`maxmemory`)" for any `redis.exceptions.OutOfMemoryError`
+        # (its classifier admits the CLASS, not just the wording), so on a
+        # ceiling-less instance the note and the `cap <= 0` branch above stated
+        # opposite facts (measured and recorded on #7357,
+        # issuecomment-6341756094). The note now branches on
+        # `_chain_names_the_ceiling`: the ceiling sentence needs the engine's own
+        # sentence in the exception, and a class-only refusal is told what the
+        # message does establish plus how to READ whether a ceiling exists. So
+        # neither side asserts a `maxmemory` it did not read.
+        #
+        # ⚠️ What is STILL not agreed is the classification, not the claim:
+        # `_WRITE_REFUSAL_MARKERS` does not match a class-only `OOM …` reply,
+        # so such a refusal can still fall
+        # through to the rebuild advice in `_backend_failure_message` — the
+        # #2981 direction. That is a separate seam with its own measurement,
+        # deliberately not widened here.
         return (
             "DB refused writes on open: the graph is INTACT but "
             f"{lead}. This is NOT "
