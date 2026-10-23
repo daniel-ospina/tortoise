@@ -10,6 +10,8 @@ The five starter packs shipped by default: `dev`, `marketing`, `product-strategy
 
 One further pack ships in the catalog **without** being a starter: `venture` (fund / venture-builder / accelerator vocabulary — portfolio stakes, programmes, assets, funding agreements, tranches and their gating conditions, disbursement events, action items). It is deliberately not auto-installed, and `docs/`-visible per-graph pack selection is #2728.
 
+A second non-starter is an **overlay**: `investment-portfolio-manager` (namespace `portfolio`, `depends_on: [venture]`) adds only what the portfolio manager needs on top of `venture` — the mandate, the target allocation, the dated valuation mark — and references the position as `venture:investment` rather than re-declaring it. See §"Overlay packs — add, never rename" below.
+
 > ⚠️ **Interim caveat — the ungated paths are still catalog-wide (#2714/#2728).** Shipping a pack under `packs/` puts its vocabulary into the **catalog union**, and the union is what a graph gets whenever no per-graph gate is resolved: its kinds enter that graph's value brief and kind index, its `memory_granularity` enters the S1 prompt, and its chains are rendered as chain guidance. Per-graph `:PackInstall` records now gate the classifier and the write gate as well as the pack-state introspection surfaces — but only where a gate is actually resolved. Two paths resolve none: a graph that has **no** `:PackInstall` records falls back to the catalog union by contract (#2714 indicator 3), and the `sdk=None` path is the union by contract (#5163). A third does not resolve one for the whole session: the SDK v2 extraction master (`_commit_session_v2` calls `extract_session_v2` with no `master`) falls through to `build_master_list()` for S1/S2/S4 **and the S5 write gate**, while the classify-later index in that same call IS gated (#5202). So "installed" narrows a graph's vocabulary exactly where records exist, and nowhere else — **except chains**, which are never narrowed (see the `CHAINS` note below), and **except the SDK v2 extraction master**, whose index is gated but whose prompt and write gate are not. The two pack-fit layers remain separate — **approval** (which packs a graph allows, per graph) and **classification** (which approved kind an item gets, per item) — and making approval gate classification on **every** path is #2714/#2728. Do not read "not a starter" as "not active".
 
 ## When to write a pack (vs using core kinds)
@@ -410,6 +412,61 @@ path for a declared value field is #2782, and the shape's companion props (`curr
 (WS-A `POINT_PROPS` / WS-C D12), which is not in code yet. Declaring a shape is therefore necessary
 but not sufficient to make a value durable — see #2818's residuals.
 
+## Overlay packs — add, never rename (#9663)
+
+An **overlay** declares what a narrower role needs on top of a broad domain pack. The shape is
+always the same:
+
+```yaml
+namespace: portfolio            # short, because it is prompt-visible (`portfolio:mandate`)
+depends_on: [venture]           # #2781 — the base pack is a DECLARED dependency
+ontology:
+  extends: core
+  objectKinds: [mandate, allocationTarget]
+  eventKinds: [valuationMark]
+  relations:
+    - predicate: constrainedBy
+      fromKind: venture:investment   # the base pack's kind, NAMESPACED, never re-declared
+      toKind: portfolio:mandate
+      mechanism: IMPL
+      semantics: dependsOn
+      nearMisses: [gatedBy]          # a sibling pack's PREDICATE — BARE (predicates are bare by contract)
+```
+
+Three rules make an overlay safe, and #9663 exists because getting them wrong gives one concept two
+homes:
+
+1. **Never rename what the base pack already models.** If the concept IS `venture:investment`, use
+   `venture:investment` and reference it as `venture:investment` (never bare). Declaring a twin
+   kind — even one equated with `equivalentTo` — is the failure mode, not the fix.
+2. **Resolve ambiguity in the manifest, not by minting a kind.** `synonyms`/`examples` are what the
+   classifier reads and `nearMisses` is what the rerank reads, so a confusable sibling is named
+   there. Two packs must not share one synonym: a phrase offered for two kinds is exactly the
+   ambiguity an overlay is supposed to remove (`tests/test_investment_portfolio_manager_pack.py`
+   asserts the synonym surfaces of `portfolio` and `venture` are disjoint).
+3. **A pack cannot extend another pack's lifecycle.** `statuses`/`folds` may only be declared for
+   kinds in *this* pack's `objectKinds` (the fold dispatches on the namespaced kind, and
+   `status_folds.validate_status_decl` refuses anything else), so an overlay that needs a different
+   lifecycle for the base pack's state carrier is asking for a base-pack amendment — a decision to
+   make explicitly, not something a manifest can quietly do.
+
+**The value test.** A new kind is admitted only if it does at least one of: owns a closed `statuses`
+lifecycle with declared `folds`; declares a `values` shape; is a step in a declared `chains` path;
+or is an endpoint of a declared `relations` entry carrying a `mechanism`. Otherwise the concept
+belongs in a `synonyms` entry on an existing kind — and a claim (thesis, view, hypothesis) is a
+core `statement` **Point**, never an Object. `packs/investment-portfolio-manager/manifest.yaml`
+records the verdict per kind and, in its header, every rejected candidate with the entry that
+absorbed it; the test file re-derives the same verdict from the manifest each run instead of
+restating it.
+
+**A pack-declared chain is inert.** `master["chains"]` is built from `extractor_v2.CHAINS` on every
+path, so a chain declared only in an overlay's manifest reaches no prompt. Adding one is an engine
+edit (`CHAINS`) first; the overlay therefore declares none.
+
+The overlay's `_PACK_TRIGGERS` row gives compact-mode story selection its own keywords, so an
+ordinary portfolio sentence does not drag the overlay into a prompt that did not need it (see
+"The extractor contract" above — a catalog namespace with no row is injected whole, fail-open).
+
 ## Per-graph pack selection (#2728)
 
 Which packs a graph allows is **per graph**, and stored graph-natively: one
@@ -664,7 +721,13 @@ declaration that would be inert.
 
 ## Reserved namespaces
 
-`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` ships in the catalog but is **not** a starter and is not in the reserved list.
+`dev`, `pm`, `marketing`, `product-strategy`, `agent-ops` are reserved starter namespaces — both the CLI scaffold and the hosted upload reject them (one guard, both surfaces). `venture` ships in the catalog but is **not** a starter and is not in the reserved list. The same is true of the `portfolio` overlay: not a starter, not reserved.
+
+⚠️ **A pack's directory name need not be its namespace** (`packs/project-management` → `pm`,
+`packs/investment-portfolio-manager` → `portfolio`). `tortoise pack validate` used to key its error
+filter on the directory name, so a pack whose two names differed reported `✓ Clean` and exited 0
+while the registry had already isolated it (#9663). If you are writing a tool that reports on a
+single pack, read the namespace from its manifest.
 
 ## Reference
 
@@ -673,3 +736,4 @@ declaration that would be inert.
 - Governance research (enforcement layering): `docs/research/2026-08-05-expansion-pack-governance-surfaces.md`
 - Worked example: `packs/agent-ops/manifest.yaml` (rules-with-why)
 - Domain pack example: `packs/venture/manifest.yaml` (fund/portfolio state model — Objects hold state, Events are dated, claims are Points)
+- Overlay pack example: `packs/investment-portfolio-manager/manifest.yaml` (adds to `venture`, renames nothing — see §"Overlay packs — add, never rename")

@@ -3619,9 +3619,10 @@ def _hand_built_master() -> dict:
                            "mode', 'coffee not tea'). The CHOICE is the fact; "
                            "retain it verbatim.",
         },
-        # FIXED order (agent-ops, dev, marketing, pm, product-strategy, venture)
-        # — the golden pins THIS order; it is independent of the packs' readdir
-        # order.
+        # FIXED order (agent-ops, dev, marketing, pm, portfolio,
+        # product-strategy, venture) — the golden pins THIS order; it is
+        # independent of the packs' readdir order. `portfolio` joined the
+        # catalog with #9663 (the investment-portfolio-manager overlay).
         "memory_granularity": {
             "agent-ops": "Durable: the rule text, the situation that created it, "
                           "and the reasoning that supports or undermines it. "
@@ -3645,6 +3646,15 @@ def _hand_built_master() -> dict:
                    "committed, the reasoning, and milestone outcomes. "
                    "Ephemeral: card/board status, sprint burndown, assignment "
                    "logistics, issue triage.",
+            "portfolio": "Durable: the mandate terms the portfolio is actually "
+                          "run under and whether it is currently breached, the "
+                          "adopted target allocation per class/sector and why "
+                          "it was chosen, and the dated valuation marks with "
+                          "their basis (a multiple of cost, a write-down "
+                          "reason). Ephemeral: the mechanics of a mark "
+                          "(spreadsheet, sign-off logistics), superseded "
+                          "allocations, and any restatement of a position that "
+                          "`venture:investment` already carries.",
             "product-strategy": "Durable: the productDelivery chain itself — "
                                  "which JTBDs/use-cases/features are being "
                                  "pursued, the chosen vs rejected options at "
@@ -3809,10 +3819,16 @@ class TestClassifyStage:
         newline) that self-referential compares miss."""
         monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
         assert v2.render_s2_prompt() == v2.render_s2_prompt()
+        # The base is rendered from the SAME master the prompt uses: the
+        # KIND VALUE FIELDS rule block is emitted only when a catalog kind
+        # DECLARES a value field (#2818), and since #9663 one shipped pack
+        # does (`portfolio:allocationTarget`), so `_s2s4_rules()` without the
+        # master is no longer the base this prompt is built from.
+        _m = v2.build_master_list()
         base = (v2.S2_TMPL
-                .replace("{master_list}", v2._render_master(v2.build_master_list()))
-                .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
-                .replace("{anti_routine}", v2._s2s4_rules())
+                .replace("{master_list}", v2._render_master(_m))
+                .replace("{chains_text}", v2._render_chains(_m))
+                .replace("{anti_routine}", v2._s2s4_rules(_m))
                 .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
                 .replace("{output_contract}", v2.OUTPUT_CONTRACT))
         assert v2.render_s2_prompt() == base

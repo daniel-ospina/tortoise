@@ -814,6 +814,15 @@ _PACK_TRIGGERS = {
     "venture:": ("venture", "fund", "portfolio", "grant", "tranche",
                   "disbursement", "term of award", "programme", "asset",
                   "patent", "condition"),
+    # #9663: the portfolio OVERLAY's own row, so compact-mode story selection
+    # can gate the namespace instead of injecting it whole (the #5165
+    # fail-open default for a catalog namespace with no entry). It names the
+    # portfolio-MANAGER words this pack ADDS — venture's row already carries
+    # "investment", "portfolio" and "programme" — so a story that only talks
+    # about a fund's portfolio keeps selecting `venture` alone.
+    "portfolio:": ("mandate", "allocation", "valuation",
+                   "mark-to-market", "mark to market", "portfolio manager",
+                   "target weight", "rebalanc"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
     # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it

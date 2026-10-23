@@ -4207,6 +4207,15 @@ surfaces:
   # which skips when no TORTOISE_DB_URI is set — the `sdk` fixture itself does
   # not skip, so a new URI-dependent test must carry the marker.
   - test_venture_pack.py
+  # #9663: the investment-portfolio-manager OVERLAY on `venture` — the overlay
+  # shape (no rename, namespaced references), the value test re-derived from the
+  # manifest, the synonyms/nearMisses clash rules, core extraction unchanged with
+  # the pack OFF (brief + kind-index spec + cache key vs a catalog copy without
+  # it), the #2781 missing-peer gate for relation `nearMisses`, and the
+  # `tortoise pack validate` false green for a pack whose directory name is not
+  # its namespace. Same URI-gating convention as `test_venture_pack.py`: the
+  # install/mint half carries the `requires_db` marker.
+  - test_investment_portfolio_manager_pack.py
   # #2714 (lane L7): vocab gating by graph — the compile seams
   # (compile_value_brief / compile_vocab) and the graph's :PackInstall
   # APPROVAL set. Guards tortoise/value_extractor.py,
@@ -7236,6 +7245,7 @@ durations:
   test_notify.py: 0.4
   test_pack_kinds.py: 1.2
   test_pack_value_declarations_2818.py: 2.0  # unmeasured — new in #2818; no sweep has collected it, so it carries the flat default exactly as an absent key would (#3419/#2788 rule). Do NOT substitute a local timing (a measured-on-this-box 4.9 was written here first and is deliberately gone: the map is a SHARD-LAYOUT input, so a number that does not model CI decides which files run together). The row also buys the coverage floor its margin — duration_coverage_issues() passes without it too (90.01% vs 90.12%), so the row is margin, not the floor. The refresher (tools/ci_timing.py) replaces this value from the first post-merge CI run that includes the file and clears the `unmeasured` tail.
+  test_investment_portfolio_manager_pack.py: 2.0  # unmeasured — new in #9663; no sweep has collected it, so it carries the flat default exactly as an absent key would (#3419/#2788 rule). Do NOT substitute a local timing: the durations map is a SHARD-LAYOUT input modelling CI, so a measured-on-this-box number would decide which files run together. The refresher (tools/ci_timing.py) replaces this value from the first post-merge CI run that includes the file and clears the `unmeasured` tail.
   test_session_index_lock.py: 0.5
   eval/write_path/test_write_path_corpus.py: 0.5
   eval/write_path/test_score_qualifiers.py: 2.0  # #7947: a file ADDED BY A PR can never have a CI junit measurement (the refresher samples push-to-main runs only), so it carries the #3400 flat 2.0s default — which is also why adding it changes NO packing (it already packed at that default as an absent key). Required for the durations half as well as the surface half (#4348 trap): the surface row at `ci-surfaces.yml` surfaces.eval is MANIFEST CLASSIFICATION only and does not cover this half. Local reading on this host 2026-10-19 at the PR head, embedded carve-out lane, 33 tests, `--junitxml`: sum of testcase/@time 11.67s, max single test 9.43s — which is the FIRST test absorbing the once-per-leg conftest/DB setup the #3400 method attributes to no file, so the flat default is the correct weight and the local sum is deliberately NOT substituted. Refresh from the first post-merge run that includes it; do NOT drop the row without re-deriving the floor at that head.
