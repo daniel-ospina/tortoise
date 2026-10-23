@@ -329,6 +329,65 @@ def test_in_order_block_still_instructs_apply():
     assert "FILTERED" not in r.stdout, r.stdout
 
 
+# ── #9613: the block named a cause it cannot know, and withheld the remedy ──
+# Repo-ahead is a set-diff of version STRINGS against `schema_migrations`. It
+# proves prod has no ROW; it cannot prove prod lacks the OBJECTS. The in-order
+# report said "NOT applied to prod" and prescribed only `db push` — while the
+# out-of-order branch of the SAME script already documents the other case
+# ("already in prod with no schema_migrations row: record it WITHOUT running
+# DDL — migration repair --status applied"). Measured live on #9613: prod served
+# `blog_posts.author_image_url` — a column `20261021000001` adds — from
+# /blog/state-of-agentic-memory-2026 (rendered per request by the Pages
+# Function, reading project ybetwichurajbfswfeqa, which the page itself names in
+# its JSON-LD storage URL), while this gate reported that same version as "NOT
+# applied to prod". So the red could not be cleared by the action it named and
+# was not cleared by any other: the DDL-free remedy was printed only as a
+# trailing `# rename-repair case:` comment. Both tests below fail against the
+# pre-#9613 script (write `origin/main` @ 3542e8f80 there and run this file);
+# `test_in_order_block_still_instructs_apply` above is the guard that keeps
+# the apply path from being REPLACED rather than joined.
+
+
+def test_in_order_block_does_not_claim_prod_lacks_the_objects():
+    """The heading may state only what was measured: prod has no version row."""
+    r = _run_fixture(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    assert "NOT applied to prod" not in r.stdout, r.stdout
+    assert "schema_migrations" in r.stdout, r.stdout
+
+
+def test_in_order_block_offers_the_ddl_free_remedy_for_bookkeeping_drift():
+    """Both outcomes are printed as peers, and the repair is gated on prod.
+
+    Naming only `db push` in this branch is what left #9613 red: for a version
+    whose objects are already in prod it re-runs DDL, and the remedy that fits
+    (repair) was not offered. Naming only `repair` would be the #1001 defect —
+    a blanket repair hides real drift — so the report must also carry the
+    read-only verification that tells the two cases apart.
+    """
+    r = _run_fixture(
+        {"20260813000004_claim.sql": "CREATE TABLE IF NOT EXISTS public.c (id text);\n"},
+        ["0001"],
+    )
+    assert r.returncode == 1, r.stdout
+    out = r.stdout
+    # (a) the apply path survives, verbatim.
+    assert "apply migrations first" in out, out
+    assert "gh workflow run supabase-deploy.yml --ref main" in out, out
+    # (b) the DDL-free path is now a first-class outcome, not a trailing comment.
+    assert "supabase migration repair --linked --status applied" in out, out
+    # ... and it is not a blanket instruction: the report names the read-only
+    # checks that distinguish "absent" from "unrecorded", and the #1001 limit.
+    assert "db diff --linked" in out, out
+    assert "migration list --linked" in out, out
+    assert "#1001" in out, out
+    # (a) before (b): the cheap apply path stays first for the ordinary case.
+    assert out.index("apply migrations first") < out.index("repair --linked")
+
+
 def test_mixed_out_of_order_and_safe_are_partitioned():
     """A blocking set can hold both kinds; the out-of-order marker must name
     only the older version and the apply remediation only the newer one."""

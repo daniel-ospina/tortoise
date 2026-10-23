@@ -207,7 +207,17 @@ if [ -n "$DUP_LOCAL_VERSIONS" ]; then
   exit 1
 fi
 if [ -n "$BLOCKING" ]; then
-  echo "  BLOCKING repo-ahead migrations (pending in repo, NOT applied to prod):"
+  # ⛔ THE HEADING STATES ONLY WHAT WAS MEASURED. Repo-ahead is a `set -diff` of
+  # version STRINGS: it proves prod has no `schema_migrations` row for these
+  # versions, and it proves NOTHING about whether the objects exist. It used to
+  # read "(pending in repo, NOT applied to prod)", and #9613 measured that claim
+  # FALSE in a live instance: prod served `blog_posts.author_image_url` — a column
+  # `20261021000001` adds — from the live blog (`/blog/state-of-agentic-memory-2026`,
+  # rendered per request, reading project ybetwichurajbfswfeqa) while this gate
+  # reported that same version as "NOT applied to prod". A reader who believes the
+  # old heading runs DDL that is already in place; a reader who knows better has
+  # no remedy here at all, because this branch withheld the DDL-free one.
+  echo "  BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations has NO row):"
   for v in $BLOCKING; do echo "    - $v"; done
   # Say whether this list is the whole repo-pending set or a filtered subset:
   # the heading alone reads as "the work", but `--include-all` also pushes the
@@ -232,6 +242,13 @@ if [ -n "$BLOCKING" ]; then
     echo "    A blanket repair hides real drift (#1001) — verify in prod first."
   fi
 
+  # Say what the list does NOT establish, before the remediation leans on it.
+  # Same distinction the OUT OF ORDER block spells out; it is not specific to
+  # out-of-order versions, and #9613 is the case where it fired in THIS branch.
+  echo "  note: 'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks"
+  echo "        the objects. Bookkeeping drift (DDL applied outside 'supabase db push',"
+  echo "        so the version was never recorded) produces exactly this report (#9613)."
+
   if [ -n "$BLOCK_SAFE" ]; then
     if [ -n "$REMOTE_MAX" ]; then
       echo "  PENDING AFTER $REMOTE_MAX (safe to append):$BLOCK_SAFE"
@@ -251,13 +268,22 @@ if [ -n "$BLOCKING" ]; then
       echo "    filename order, so step 2 before step 1 would apply the out-of-order"
       echo "    versions too."
     else
-      echo "  Remediation: apply migrations first —"
-      echo "    gh workflow run supabase-deploy.yml --ref main"
-      echo "    # or manually: supabase db push --linked --include-all (whole pending set, filename order)"
+      # ONE decision, per version, made FROM PROD — this gate cannot make it.
+      # Both outcomes are printed as peers: the apply path re-runs DDL, so it is
+      # wrong for the bookkeeping case, and the repair path records a version
+      # without running DDL, so it is wrong (and hides real drift, #1001) for the
+      # ordinary case. Naming only one of them is how a red stays red.
+      echo "  Remediation — decide PER VERSION, from prod (this gate sees versions, not schema):"
+      echo "    (a) the objects are ABSENT — apply migrations first:"
+      echo "        gh workflow run supabase-deploy.yml --ref main"
+      echo "        # or manually: supabase db push --linked --include-all (whole pending set, filename order)"
+      echo "    (b) the objects are PRESENT and only the version is unrecorded (bookkeeping"
+      echo "        drift, #9613): record it WITHOUT running DDL —"
+      echo "        supabase migration repair --linked --status applied <version>"
+      echo "        Verify in prod first: 'supabase migration list --linked', and"
+      echo "        'supabase db diff --linked' for a schema diff. A blanket repair hides"
+      echo "        real drift (#1001) — repair only a version whose objects you observed."
     fi
-  fi
-  if [ -z "$BLOCK_OOO" ]; then
-    echo "    # rename-repair case: supabase migration repair --linked --status applied <version>"
   fi
   exit 1
 fi
