@@ -134,6 +134,23 @@ CONFIG_SH_FAKE = (
     '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >> "${CONFIG_LOG:-/dev/null}"\nexit 0\n'
 )
 
+# A fake `svc.sh`: the runner's OWN service primitive (launchd on macOS, systemd-wrap elsewhere).
+# `stop`/`start`/`install` are the only verbs the tool may use on a launchd host, and `start`
+# writes the restart marker so the real `wait_online` poll sees the runner come back.
+SVC_SH_FAKE = textwrap.dedent("""\
+    #!/usr/bin/env bash
+    printf '%s\\n' "$*" >> "${SVC_LOG:-/dev/null}"
+    case "${1:-}" in
+      install) exit "${SVC_INSTALL_RC:-0}" ;;
+      stop)    exit "${SVC_STOP_RC:-0}" ;;
+      start)
+        [ "${SVC_START_RC:-0}" = "0" ] || exit 1
+        printf '%s' "${SVC_MARK:-}" > "${RESTART_MARKER:-/dev/null}"
+        exit 0 ;;
+      *) exit 0 ;;
+    esac
+""")
+
 _counter = itertools.count()
 
 
@@ -201,6 +218,11 @@ class Env:
         gap_slots: list[int] | None = None,
         ps_rc: int = 0,
         alive_seam: bool = True,
+        svc_sh: bool = False,
+        service: str | None = None,
+        svc_start_rc: int = 0,
+        svc_mark: str = "",
+        provisioner_absent: bool = False,
     ) -> None:
         self.tmp = tmp
         self.root = tmp / "opt"
@@ -217,6 +239,12 @@ class Env:
         self.provisioner_log = tmp / "provisioner.log"
         self.config_log = tmp / "config.log"
         self.systemctl_log = tmp / "systemctl.log"
+        self.svc_log = tmp / "svc.log"
+        self.service = service
+        self.svc_sh = svc_sh
+        self.svc_start_rc = svc_start_rc
+        self.svc_mark = svc_mark
+        self.provisioner_absent = provisioner_absent
         self.state_dir = tmp / "state"
         self.alive_file = tmp / "alive.txt"
         self.busy_file = tmp / "busy.txt"
@@ -245,6 +273,8 @@ class Env:
                     ),
                     encoding="utf-8-sig",
                 )
+            if svc_sh:
+                _exe(directory / "svc.sh", SVC_SH_FAKE)
             dirs.append(str(directory))
         # Every fixture install is ALIVE by default: `running` is a measured process count in
         # production, and this seam is that measurement for the suite.
@@ -264,7 +294,9 @@ class Env:
             {
                 "RUNNER_AUTOSCALE_GH": str(self.gh),
                 "RUNNER_AUTOSCALE_SYSTEMCTL": str(self.systemctl),
-                "RUNNER_AUTOSCALE_PROVISIONER": str(self.provisioner),
+                "RUNNER_AUTOSCALE_PROVISIONER": str(
+                    self.bin / "absent.sh" if self.provisioner_absent else self.provisioner
+                ),
                 "RUNNER_AUTOSCALE_MEMINFO": str(self.meminfo),
                 "RUNNER_AUTOSCALE_NPROC": str(self.ncpu),
                 "RUNNER_AUTOSCALE_MACHINE": self.machine,
@@ -284,6 +316,9 @@ class Env:
                 else str(self.pool_fail_after),
                 "POOL_READ_COUNT": str(self.pool_read_count),
                 "SYSTEMCTL_LOG": str(self.systemctl_log),
+                "SVC_LOG": str(self.svc_log),
+                "SVC_START_RC": str(self.svc_start_rc),
+                "SVC_MARK": self.svc_mark,
                 "PROVISIONER_LOG": str(self.provisioner_log),
                 "CONFIG_LOG": str(self.config_log),
                 "PROVISIONER_SHRINK_TO": "" if self.shrink_to is None else str(self.shrink_to),
@@ -293,6 +328,10 @@ class Env:
                 "PROVISIONER_RC": str(self.provisioner_rc),
             }
         )
+        if self.service:
+            env["RUNNER_AUTOSCALE_SERVICE"] = self.service
+        else:
+            env.pop("RUNNER_AUTOSCALE_SERVICE", None)
         if self.alive_seam:
             env["RUNNER_AUTOSCALE_ALIVE_DIRS"] = str(self.alive_file)
         else:
@@ -343,6 +382,12 @@ class Env:
         return [
             ln for ln in self.systemctl_log.read_text().splitlines() if ln.startswith("restart")
         ]
+
+    def service_calls(self) -> list[str]:
+        """Every verb the tool asked `svc.sh` for (the launchd restart primitive)."""
+        if not self.svc_log.exists():
+            return []
+        return [ln for ln in self.svc_log.read_text().splitlines() if ln.strip()]
 
     def config(self) -> str:
         return self.config_log.read_text() if self.config_log.exists() else ""
@@ -990,13 +1035,98 @@ def test_unknown_architecture_refuses_rather_than_guessing(env):
     assert "unknown architecture" in " ".join(rec["problems"]), rec
 
 
-def test_missing_provisioner_refuses_a_new_install(env):
-    """A box that cannot create a NEW install refuses to add — it never improvises one."""
+def test_missing_provisioner_is_a_named_refusal_not_a_failed_pass(env):
+    """A box that cannot create a NEW install refuses to add — and SAYS WHY, without crying failure.
+
+    ⛔ Round 10, I1: the FILL step delegates to `install-ci-runner-x64.sh`, which is not in this
+    tree (it lands with #9639). Reporting the absence as `action-failed` made a scheduled pass on
+    a below-ceiling box exit 3 every interval — a red unit forever over a dependency this PR does
+    not own. It is a REFUSAL with a named cause: `fill-blocked`, exit 0, and the note names the
+    upstream PR so the state is actionable rather than a generic failure.
+    """
     e = env()
     e.provisioner = e.bin / "absent.sh"
     rec = e.record()
-    assert rec["_rc"] == 3, rec
-    assert any("no provisioner" in p for p in rec["problems"]), rec
+    assert rec["_rc"] == 0, rec
+    assert rec["verdict"] == "fill-blocked", rec
+    assert rec["problems"] == [], rec["problems"]
+    notes = " ".join(rec["notes"])
+    assert "no provisioner" in notes, rec["notes"]
+    assert "#9639" in notes, f"the note must name the dependency it is blocked on: {rec['notes']}"
+
+
+def test_missing_provisioner_still_repairs_dead_runners(env):
+    """The refusal is scoped to FILL: measurement and repair are unaffected by the absent file."""
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")], installs=[("gh-runner-x64-1", "r1")]
+    )
+    e.provisioner = e.bin / "absent.sh"
+    rec = e.record()
+    assert any(a.startswith("restart r1") for a in rec["actions"]), rec["actions"]
+    assert rec["verdict"] == "fill-blocked", rec
+
+
+# ── 4b. the service manager is the HOST's, never assumed to be systemd ────────────────────
+def test_a_launchd_host_restarts_through_svc_sh_and_never_systemctl(env):
+    """⛔ Round 10 (F1/I2): macOS has no systemctl. The restart primitive follows the host.
+
+    On a launchd host the runner's own `svc.sh` is the ONLY way to bounce the agent. The old code
+    ran `systemctl restart` unconditionally: rc 127, read as "restart failed", which fell through
+    to `--replace` — re-registering a runner on the strength of an attempt that never ran.
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        svc_sh=True,
+        service="launchd",
+        svc_mark="r1",
+    )
+    rec = e.record()
+    assert rec["_rc"] == 0, rec
+    assert any(a.startswith("restart r1") and "svc.sh" in a for a in rec["actions"]), rec["actions"]
+    assert e.service_calls()[:2] == ["stop", "start"], e.service_calls()
+    assert e.restarted() == [], "a launchd host must not shell out to systemctl at all"
+    assert any("came back online" in a for a in rec["actions"]), rec["actions"]
+    assert e.config() == "", "a successful restart must never re-register"
+
+
+def test_a_launchd_host_without_svc_sh_is_unknown_never_offline(env):
+    """No service manager ⇒ the runner's state is UNKNOWN: stop the pass, register nothing.
+
+    ⛔ This is the destructive half of F1: `unsupported` folded into `failed` reaches
+    `register(..., replace=True)`, which invalidates the credentials of a listener that may be
+    reconnecting and picking up a job — the one action this file promises never to take blindly.
+    """
+    e = env(
+        pool=[("r1", "offline", False, "self-hosted-x64")],
+        installs=[("gh-runner-x64-1", "r1")],
+        service="launchd",
+    )
+    rec = e.record()
+    assert rec["_rc"] == 2, rec
+    assert rec["verdict"] == "unmeasurable", rec
+    assert rec.get("unverified_cause") == "no-restart-primitive", rec
+    assert "service manager" in rec["error"], rec["error"]
+    assert e.config() == "", f"nothing may be re-registered on an unknown state: {e.config()}"
+    assert e.restarted() == []
+
+
+def test_a_launchd_host_enables_the_unit_through_svc_sh(env):
+    """ORPHANED registration on launchd enables the service with `svc.sh install` + `start`.
+
+    The old code called `systemctl enable --now` after a SUCCESSFUL `config.sh`, so the pass
+    reported exit 3 for a runner that was in fact registered and up (F1, second half).
+    """
+    e = env(
+        pool=[], installs=[("gh-runner-x64-1", "pi-runner-ghost")], svc_sh=True, service="launchd"
+    )
+    rec = e.record()
+    assert rec["_rc"] == 0, rec
+    assert "--replace" in e.config() and "--name pi-runner-ghost" in e.config(), e.config()
+    calls = [c.split()[0] for c in e.service_calls()]
+    assert calls[:2] == ["install", "start"], e.service_calls()
+    assert e.restarted() == [], "launchd hosts must never call systemctl"
+    assert rec["problems"] == [], rec["problems"]
 
 
 # ── 6. mutation testing — every gate must be load-bearing ───────────────────────────────────
@@ -1248,6 +1378,35 @@ MUTATIONS = {
         ),
         args=(),
         wrong=lambda r: bool(r.get("_provisioned", [])),
+    ),
+    # ⛔ Round 10's gates. Each of these three is a fail-open this PR was reviewed for twice:
+    # a registration whose unit never came up counted as live; a restart that could not be
+    # ATTEMPTED read as "still offline" (and re-registered); and a missing provisioner reported
+    # as the installer's own headroom refusal — a different fact with a different remedy.
+    "enable-unit-failure-read-as-registered": dict(
+        old="    if failures:\n        raise ActionFailed(",
+        new="    if False:\n        raise ActionFailed(",
+        kwargs=dict(pool=[], installs=[("gh-runner-x64-1", "ghost")], service="launchd"),
+        args=(),
+        wrong=lambda r: not r.get("problems"),
+    ),
+    "no-restart-primitive-read-as-offline": dict(
+        old='            if restart_state == "unsupported":',
+        new="            if False:",
+        kwargs=dict(
+            pool=[("r1", "offline", False, "self-hosted-x64")],
+            installs=[("gh-runner-x64-1", "r1")],
+            service="launchd",
+        ),
+        args=(),
+        wrong=lambda r: "--replace" in (r.get("_config") or ""),
+    ),
+    "missing-provisioner-reported-as-the-installers-own-refusal": dict(
+        old='    elif record.get("problem_kind") == "no-provisioner":',
+        new="    elif False:",
+        kwargs=dict(provisioner_absent=True),
+        args=(),
+        wrong=lambda r: r.get("verdict") != "fill-blocked",
     ),
 }
 
