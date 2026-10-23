@@ -28346,6 +28346,7 @@ class TortoiseSDK:
                         {"id": p.get("id"),
                          "point_kind": p.get("pointKind"),
                          "content": p.get("content")})]
+                allowed_ids: set[str] | None = None
                 if points and claim_class is not None:
                     # #2351: filter the CORPUS before truncation, the same
                     # reason ``exclude_status`` is threaded into the tiers
@@ -28355,6 +28356,16 @@ class TortoiseSDK:
                     allowed_ids = {p.get("id") for p in _allowed}
                     points = [p for p in points if p.get("id") in allowed_ids]
                 legacy_hits = fallback_tfidf(query, points, limit=limit)
+                if allowed_ids is not None:
+                    # The ANNOTATION has to be re-applied: ``fallback_tfidf``
+                    # rebuilds every row through ``SearchResult.to_dict()``,
+                    # which has no class field, so the stamp put on the CORPUS
+                    # dicts above does not survive into the returned rows. The
+                    # rows kept here are exactly ``allowed_ids`` by
+                    # construction, so the class is known without re-reading.
+                    for _row in legacy_hits:
+                        if _row.get("id") in allowed_ids:
+                            _row["claim_class"] = claim_class
                 if status_trace is not None:
                     status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
