@@ -31,10 +31,11 @@ closed-unknown).
 
 Legacy compatibility is total: a window written by #1538 carries no precision
 property, ``effective_precision`` reports ``"day"`` for its present, ORDERABLE
-bounds (#9201: a present but unparseable bound names no instant, so it reports
-no precision — the #6140 ruling's read on the start side),
-``end_state`` reports ``END_OPEN`` for its open end — byte-identical reads,
-no migration.
+bounds — and no precision (declared token or not) for a present bound that
+names no instant (#9201 on the undeclared default, #9244 on the declared
+token: a declaration ANNOTATES a bound, it cannot summon one; the #6140 ruling
+reads an unparseable START as "no start was recorded") — and ``end_state``
+reports ``END_OPEN`` for its open end, byte-identical reads, no migration.
 """
 from __future__ import annotations
 
@@ -90,39 +91,46 @@ def normalize_precision(value: object, *, field: str = "precision") -> str | Non
 def effective_precision(bound: object, declared: object) -> str | None:
     """The precision a READ path should report for ``bound``.
 
-    A declared token wins. A PRESENT bound with no declared token is the
-    #1538 legacy shape and reads as ``"day"`` — but ONLY when the bound names
-    an instant. Presence is not precision (#9201): the write path stores
+    A declared token ANNOTATES the bound, it cannot summon one (#9244): the
+    declaration is reported only when the bound it annotates names an instant.
+    Presence is not precision (#9201): the write path stores
     ``validFrom``/``validTo`` verbatim, so ``""``, ``"TBD"`` and ``"not-a-date"``
     are all PRESENT values that ``_created_sort_key`` cannot order, and the
     #6140 ruling makes an unparseable START mean *no start was recorded*. A
-    ``"day"`` claim about an absent datum is the defect #9201 records, so the
-    legacy default additionally requires the bound to ORDER — the same
-    ``_created_sort_key`` the read path orders with (``key[0] == 0`` ⇒ a
-    parseable instant), never a second notion of "parseable". A numeric epoch
-    ``0`` (or ``False``) IS an instant — 1970-01-01T00:00:00Z — so it keeps
-    ``"day"``.
+    ``"day"`` claim about an absent datum is the defect #9201 records; a
+    ``"year"`` claim about it is the same defect one step further (#9244 — the
+    write boundary accepts a declaration on a PRESENT-but-unorderable bound, so
+    a read path reporting that declaration would state a granularity for a
+    start the ruling reads as never recorded, with no warning). Both the legacy
+    default AND the declared token therefore sit behind the SAME orderability
+    gate — the same ``_created_sort_key`` the read path orders with
+    (``key[0] == 0`` ⇒ a parseable instant), never a second notion of
+    "parseable". A numeric epoch ``0`` (or ``False``) IS an instant —
+    1970-01-01T00:00:00Z — so it keeps ``"day"``.
 
-    An absent bound with no declared token has no precision (``None``); an
-    absent bound with ``"unknown"`` is the closed-unknown end.
+    An ABSENT bound is not gated: there is nothing to order, and the
+    declaration is the only datum there is. An absent bound with no declared
+    token has no precision (``None``); an absent bound with ``"unknown"`` is
+    the closed-unknown end (#2350's ``END_UNKNOWN`` marker). An absent bound
+    with a concrete token is refused at the write boundary
+    (``validate_validity_precision``), so reading it back as the caller
+    declared it is not a lie about a stored instant.
 
-    A NUMERIC bound (``int``/``float``) short-circuits to ``"day"`` before
+    A NUMERIC bound (``int``/``float``) short-circuits before
     ``_created_sort_key`` runs: it always names an instant, and an integer too
     large for ``float()`` would otherwise raise ``OverflowError`` from the
     ordering primitive — a read path must not acquire a failure mode it never
-    had (#9201 review P3). ``nan``/``inf`` keep the pre-#9201 ``"day"`` too.
+    had (#9201 review P3). ``nan``/``inf`` keep the pre-#9201 reading too.
     """
     declared_token = normalize_precision(declared, field="precision")
-    if declared_token is not None:
-        return declared_token
     if bound is None:
-        return None
+        return declared_token
     if isinstance(bound, (int, float)):
-        return "day"
+        return declared_token or "day"
     from .search_engine import _created_sort_key  # lazy — no import cycle
     if _created_sort_key(bound)[0] != 0:
         return None
-    return "day"
+    return declared_token or "day"
 
 
 def end_state(valid_to: object, valid_to_precision: object) -> str:
@@ -166,6 +174,13 @@ def validate_validity_precision(
       means "no date", so a coexisting date is a fabrication;
     * a concrete precision (year/month/day) with an ABSENT opposite bound — a
       granularity cannot attach to a bound that does not exist.
+
+    A declaration on a PRESENT-but-UNORDERABLE bound is deliberately NOT
+    refused: it is stored verbatim. The read path answers it honestly instead
+    (`effective_precision` reports ``None``, #9244) — a ``"year"`` for a start
+    that names no instant is the #9201 lie one step further. Refusing the pair
+    here would narrow what ``create_point`` accepts, a wider contract change
+    than that read fix.
 
     Raises ``ValueError``; callers that want a 422/ValueError boundary get one.
     """
@@ -220,10 +235,10 @@ def window_read_fields(
     (#2350 review P2).
 
     The block ALWAYS carries the three keys: a present-but-unorderable bound
-    yields ``None`` for its precision (``effective_precision``, #9201) and the
-    key is still emitted, so no consumer has to distinguish "no precision"
-    from "this surface did not report it". This holds on BOTH ends — a
-    present-but-unorderable ``validTo`` reports ``valid_to_precision: None``
+    yields ``None`` for its precision — declared token or not (#9201, #9244) —
+    and the key is still emitted, so no consumer has to distinguish "no
+    precision" from "this surface did not report it". This holds on BOTH ends —
+    a present-but-unorderable ``validTo`` reports ``valid_to_precision: None``
     while ``end_state`` stays ``known`` (whether an un-datable END should
     report ``END_UNKNOWN`` is #9202's owner decision, not this read fix).
     """

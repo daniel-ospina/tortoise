@@ -129,7 +129,10 @@ class ToolDefinition:
 # The three tools that motivated it (#4122): `tortoise_get_confidence`,
 # `tortoise_compute_confidence`, `tortoise_packs_list`. They keep `graphs:read`
 # and stop claiming `readOnlyHint: true` — the hint is what clients auto-approve
-# on, and it was the only thing actually wrong.
+# on. The hint was NOT the only wrong channel: the `tortoise_packs_list`
+# `description` kept telling the agent it was "Read-only;" after the hint was
+# fixed, and that second string was corrected under #9575 — the two are separate
+# artifacts an agent reads before calling, and #4122 only closed the first.
 #
 # THE TIER AXIS, in one sentence each, so the next lane does not re-litigate a
 # row (the split is what `destructiveHint` means to a client):
@@ -392,8 +395,13 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.packs_list",
         description="List this team's active packs (#318): the shared pack catalog "
                     "joined with the tenant graph's PackInstall activation records. "
-                    "Read-only; empty result when nothing is installed (existence "
-                    "masking — another tenant's packs are never observable).",
+                    "NOT a pure read: when the graph carries no PackInstall record "
+                    "at all, the handler re-seeds the starter set before it answers "
+                    "(one MERGE per starter namespace), so a graphs:read caller can "
+                    "cause a write. The re-seed is skipped when the graph's pack set "
+                    "was deliberately configured (#8648). Empty result when nothing "
+                    "is installed (existence masking — another tenant's packs are "
+                    "never observable).",
         risk="maintenance",
         http_policy=True,
         sdk_method="",  # custom handler in mcp_server.py (calls pack_state.get_tenant_packs)

@@ -424,6 +424,53 @@ class TestGraphPacksRest:
         assert body["configured"] is False
         assert body["revision"] == 0
 
+    def test_a_starter_seeded_default_graph_is_unconfigured_AND_narrowed(
+            self, sel_client):
+        """#9691 — the shape the Settings copy must describe: `configured:
+        false` WITH records, already narrowed to the starter set.
+
+        This is not a corner: `ensure_tenant_packs` runs on every provisioning
+        path (#318), so a hosted organization's default graph — the graph an
+        OAuth connector writes to — is `configured: false` and does NOT resolve
+        to the catalog union. `docs/EXPANSION_PACKS.md` says the same.
+
+        FAIL-ON: (a) if the read resolved the union whenever `configured` is
+        false, `namespaces` would be `None` and `venture` (a catalog pack that
+        ships but is deliberately not installed) would be in the set — the
+        surface's old "the full catalog applies over five packs" sentence would
+        then be TRUE, and this assertion reds for the right reason; (b) if the
+        payload dropped the records for an unconfigured graph, `packs` would be
+        empty and the dashboard's record-keyed copy (`packs.js`
+        `usesCatalogUnion`) would have nothing to key on.
+        """
+        tc, db_path = sel_client
+        org = "t-sel-seeded"
+        _seed_org(db_path, org)
+        _auth(tc, org)
+        import tortoise.hosted_api as ha
+        from tortoise.pack_state import ensure_tenant_packs, resolved_pack_set
+        tenant = ha._make_sdk(graph_name=f"org_{org}")
+        seeded = ensure_tenant_packs(tenant)
+        assert seeded, "the provisioning seed must install the starter set"
+        assert resolved_pack_set(tenant).configured is False, (
+            "seeding does NOT write the marker — the graph stays unconfigured")
+        r = tc.get(f"/v1/graphs/default/packs?org_id={org}")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["configured"] is False
+        assert body["packs"], (
+            "`configured: false` with records is a real payload shape")
+        assert "venture" not in {p["namespace"] for p in body["packs"]}
+        assert "venture" in {p["namespace"] for p in body["available"]}, (
+            "the pack it does not have is offered as ADDABLE, not as installed")
+        resolved = resolved_pack_set(tenant)
+        assert resolved.namespaces is not None, (
+            "records narrow the set; `namespaces=None` is only the RECORD-LESS "
+            "arm (#2714 indicator 3)")
+        assert "venture" not in resolved.namespaces, (
+            "the authority already excludes it — the surface must not claim "
+            "the catalog applies (the #9691 defect)")
+
     def test_get_offers_catalog_packs_the_graph_does_not_have(
             self, sel_client):
         """The Configured-packs view must be able to ADD a pack, which means
