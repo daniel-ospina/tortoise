@@ -7,7 +7,7 @@ created: 2026-10-21
 updated: 2026-10-21
 subjects.team: epistemic-team
 aboutSubjects: Tortoise memory graph
-aboutObjects: "epic #7879, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
+aboutObjects: "epic #7879, issue #9553, STORAGE-ARCHITECTURE.md §2.0, hosted deployments, Postgres record"
 ---
 
 # Hosted prerequisites — what standing Postgres up as the system of record still needs
@@ -99,7 +99,7 @@ the runs and their output are in **§G**.
 | `object` | `supabase/migrations/20261012000002_record_semantic.sql:21` | 2 — semantic |
 | `subject` | `…02_record_semantic.sql:68` | 2 — semantic |
 | `point` | `supabase/migrations/20261012000003_record_epistemic.sql:50` | 3 — epistemic |
-| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's envelope directive**: `CONTAINS` (`record_projection._ENVELOPE_RELATIONS` emits the `relation` row after the Point's `node_identity`). Everything else is R5's work: the point-property-derived families (`extractedFrom`, `mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
+| `relation` | `…03_record_epistemic.sql:166` | 3 — epistemic (**reified edges**). A row lands when a journaled record carries the edge — an **edge record**: `DirectEdgeCreated` (`IMPL`/`NAND` — nothing else is accepted, `sdk.py:19691`), `EntityLinked` (`about*`), and `DirectEdgeRepoint` on supersede; or, since #9553, a **node record's own carrier**: `CONTAINS` (the capture's ENVELOPE directive, `record_projection._ENVELOPE_RELATIONS`) and `extractedFrom` (the Point's PROPERTY, `record_projection._POINT_PROPERTY_RELATIONS` — declared for all four of the fold's point-materialisation types, because `apply()` re-derives it on its promote arms too and the record follows `apply()`, with the #5256 anchor in `relation.source_version`, written ON CREATE only, so the conflict path never touches the column) — both emitted after the Point's `node_identity`, because the endpoints are composite FKs into it. Everything else is R5's work: the rest of the point-property-derived families (`mitigated_by`, and `about*` **when no `EntityLinked` record exists** — the props copy alone lands no row), an operator's own `IMPL`/`NAND`/`INPUT` (an `OperatorAdded` snapshot is a `point`-row upsert), `references` (neither a point property nor journaled), and the structural predicates the edge lane emits no record for (`ownedBy`, `hasPart`, `dependsOn`, `wasDerivedFrom`, … — `projection/edges.py:735-745`) |
 | `session_narrative` | `supabase/migrations/20261023000001_record_session_narrative.sql:122` | — **NOT a node table** (no `node_identity` FK): §9.1's verbatim-narrative home, **#9555**/R7. Keyed `(org_id, graph_id, session_id)`, cascading from **`public.graphs`** — not from `public.session`, see R7's DECIDED block for why, and for what a live capture does and does not carry into it today (no journal carrier for `story_arc` yet ⇒ a `NULL` `narrative`) |
 | `record_event_stream`, `object_current_status`, `subject_current_status` | `supabase/migrations/20261012000004_record_procedural.sql` | 4 — procedural (**views, no table** — `Object.status` is a cache and is computed, never stored) |
 
@@ -286,6 +286,55 @@ edge while Postgres held the row. That harness now runs in CI on a projection-on
 **What it blocks:** the epic's own acceptance — *"the graph engine can be destroyed and rebuilt
 without data loss"*. NAND / IMPL / mitigation topology is the thing that would be lost, and §8 makes
 operator topology non-negotiable (a fused claim cannot be `NAND`ed).
+
+✅ **Partially closed by #9553 (R5 class 1) — `extractedFrom`.** The provenance family now lands
+one `relation` row per ref (`record_projection._POINT_PROPERTY_RELATIONS`), because that is the
+fan-out `_link_source` performs (many-to-many, `#3263`), and the `#5256` read-version anchor rides
+`relation.source_version` — the PRIMARY column the cache projection maps back to `r.sourceVersion`
+— from the Point's own `sourceVersionTransit` carrier. Three parity details are load-bearing: the
+target resolves to the SAME Source the fold picks — `resolve_source_key`'s canonical identity,
+matched on `url` **or** `canonical_url`, PREFERRING the canonical match and ordered by `node_key`
+within it — which is that resolver's own order (it queries `canonicalUrl` first and returns there;
+the raw spelling is the adopt-on-touch fallback) and its own tiebreak (`ORDER BY s.url LIMIT 1`),
+never the `EntityLinked` `id` fallback; that parity also required the projection to DERIVE
+`source.canonical_url`, because `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` lists `canonicalUrl` as writer-derived and
+no payload may carry it; the ref
+container and per-member gates mirror `_link_source`'s (a dict fans out to nothing, `#8171`); and
+the blank/NUL rule is the same `_writable_endpoint_id` the CONTAINS gate uses, justified by the
+same `#9599` indexed-key measurement (`:Source(url)` is indexed too).
+
+**Two residuals, stated so a green suite is not read as coverage of them.** (a) The Source's record
+must precede the Point's — the live order, since the capture materialises the session Source first
+(`sdk.py::_materialize_session_source`); replayed the other way the insert finds no `source` row and
+lands nothing, the `absent` verdict every relation already gives (a record-sourced rebuild is fed in
+journal order, `#9190`). (b) A ref naming a Source the record never saw — `_link_source` MINTS an
+**unjournaled** stub for one (`_mint_source_stub`, `#5024`) — has no `(Source, key)` identity for
+`relation.tgt_key`'s composite FK at all, so the record lands nothing by design: minting a node from
+an edge directive would materialise a Source no record created. Same absent verdict, same reason, as
+the CONTAINS envelope family (`#9594`). (c) **The fold's two routes disagree about which RECORDS
+carry the family, and the record follows `apply()`.** `apply()` materialises a Point from four arms
+and three of them reach `_upsert_point_edges` — `PointAdded`/`OperatorAdded` (`_upsert(p)`) and
+`PointPromoted`/`OperatorPromoted` (`_upsert(gated_promote_payload(…))` /
+`_upsert(_promotion_point_with_operator(…))`, neither payload wrapper dropping `extractedFrom`) —
+while `rebuild_all`'s pass 2 re-derives the family for the two CREATION types only. So
+`_POINT_PROPERTY_RELATIONS` declares all four, because declining the promote rows would leave the
+record POORER than the graph on the chronological engine `rebuild` / `recover_from_log` run, for
+exactly the `#2256` population whose promote IS the operator's only record. A full rebuild
+re-deriving no promote edge is the divergence that follows, and it is on the pass-2 side.
+
+**The `#5256` anchor is written ON CREATE ONLY**, as `_anchor_on_create` does: the INSERT carries
+it and the conflict path does not write the column at all, so a replay of the same edge (a
+re-emitted `PointAdded`, a promote snapshot, or a second ref of one Point resolving onto the same
+Source) keeps the first anchor on both routes. Every other relation attribute stays
+latest-record-wins — those are edge state the later record legitimately corrects, not a recorded
+read version.
+
+The other three class-1
+families stay open for reasons that are NOT this fix's to invent: `about*` needs
+`_create_about_edges`' live name→label cascade (`EntityLinked` already carries it when the capture
+resolved it); `mitigated_by` is written as a PAIR with the operator's `IMPL`/`INPUT`, so half of it
+would leave the record's edge census disagreeing with the journal's; `TAGGED` targets a `:Tag` node
+and the record has no `tag` table for `relation.tgt_key`'s composite FK to point at.
 **Decision needed:** none in principle; the `about*` stored-vs-derived ruling is already made (owner,
 2026-09-23: *"keep them for now, we optimise with users"*) and **KEEP** is the instruction — this item
 *implements* that ruling for the record, it does not revisit it.
