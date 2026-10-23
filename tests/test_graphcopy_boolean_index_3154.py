@@ -418,7 +418,10 @@ def test_audit_helper_repairs_a_corrupted_copy(db):
 
     graph_db, created = db
     src_name, dst_name = _name("audit_src"), _name("audit_dst")
-    created.append(src_name)
+    # Registered up front: a COPY that raises AFTER creating the destination
+    # would otherwise leave an orphan graph in the test DB (#5084's residue
+    # class). The fixture's delete tolerates a graph that was never created.
+    created += [src_name, dst_name]
 
     proj = FalkorProjection.from_uri(_uri(), graph_name=src_name)
     proj.g.query("MATCH (n) DETACH DELETE n")
@@ -435,20 +438,22 @@ def test_audit_helper_repairs_a_corrupted_copy(db):
         assert src_counts["eq_true"] == _N_TRUE, src_counts
         assert _belief_state(proj.g) == _SEED_BELIEF
         proj.g.copy(dst_name)
-        created.append(dst_name)
         victim_g, victim_name, victim_kind = (
             graph_db.select_graph(dst_name), dst_name, "GRAPH.COPY")
         corrupt = _predicate_counts(victim_g)
-        if corrupt["eq_false"] == corrupt["not"]:
+        # The DATA first: `eq_false == not == 0` is also what a copy that LOST
+        # the non-operator NODES reads, and that must never be mistaken for
+        # "this build no longer corrupts the index" below.
+        assert corrupt["not"] == _N_FALSE, corrupt
+        if corrupt["eq_false"] == _N_FALSE:
             pytest.skip(
                 "this FalkorDB build no longer corrupts the boolean index on "
                 "GRAPH.COPY — the compensation is not exercised here"
             )
         assert corrupt["eq_false"] == 0, corrupt
-        assert corrupt["not"] == _N_FALSE, corrupt
     else:
         # Poisoned IN PLACE (v6) — but only the `= false` form: the data and
-        # the absence-or-false predicate the live readers use are untouched.
+        # the absence-or-false predicate are untouched.
         assert src_counts["eq_false"] == 0, src_counts
         assert src_counts["not"] == _N_FALSE, src_counts
         assert src_counts["eq_true"] == _N_TRUE, src_counts
@@ -457,7 +462,12 @@ def test_audit_helper_repairs_a_corrupted_copy(db):
             "OR n.is_operator = false) RETURN count(n)"
         ).result_set[0][0]) == _N_FALSE, (
             "the absence-or-false predicate must survive the corrupt index — "
-            "it is what every live reader selects on (#3139/#3154/#9063)"
+            "it is the form the calibration gate and dream's anchor selection "
+            "use (#3139/#3154/#9063). The readers still on the bare form "
+            "(sdk/ingest/ranking/audit/taxonomy) are safe only because the "
+            "index never survives an open, which "
+            "test_open_heals_a_legacy_boolean_index pins — do not read this "
+            "as licence to drop that purge"
         )
         victim_g, victim_name, victim_kind = proj.g, src_name, "in place"
 
@@ -491,6 +501,11 @@ def test_open_heals_a_legacy_boolean_index(db):
     "is_operator", label="Point")` is True, `_schema_is_current()` is False, so
     the sweep that carries the purge is not skipped). This pins that a REOPEN
     of a legacy graph comes back healthy on any engine.
+
+    The catalogue half overlaps `test_divergence_conformance.py::
+    test_d7_boolean_index_purge` (same lane, same two rows). The unique evidence
+    here — the reason this test exists at all — is `_assert_healthy`: the
+    PREDICATE is healthy after the heal, which is the #9226 measurement.
     """
     from tortoise.index_catalogue import index_catalogue_has_field
     from tortoise.projection import FalkorProjection
@@ -516,16 +531,18 @@ def test_open_heals_a_legacy_boolean_index(db):
     reopened = FalkorProjection.from_uri(_uri(), graph_name=name)
     try:
         _assert_healthy(reopened.g, tag="after reopen")
-        fields = set()
-        for row in reopened.g.query("CALL db.indexes()").result_set:
-            if row and row[0] == "Point":
-                fields.update(str(f) for f in (row[1] or ()))
-        assert "is_operator" not in fields, (
+        # The ONE shared definition for both questions: `row[1]` can arrive as
+        # a stringified list on some engines, which a hand-rolled walk would
+        # iterate character-by-character (passing vacuously).
+        rows = reopened.g.query("CALL db.indexes()").result_set
+        assert not index_catalogue_has_field(
+            rows, "is_operator", label="Point"), (
             f"the #3154 purge must drop the legacy boolean index on open: "
-            f"{sorted(fields)}"
+            f"{rows}"
         )
-        assert "lastDreamedAt" in fields, (
-            f"the staleness index must survive the purge: {sorted(fields)}")
+        assert index_catalogue_has_field(
+            rows, "lastDreamedAt", label="Point"), (
+            f"the staleness index must survive the purge: {rows}")
     finally:
         reopened.close()
 
