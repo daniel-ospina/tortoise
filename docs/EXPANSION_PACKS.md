@@ -388,8 +388,12 @@ kindDefs:
   raw into the prompt; a colon, whitespace or punctuation is refused.
 - **The declaration reaches the extraction prompt.** `compile_value_brief()` carries a declared
   kind's `values` on its brief entry, and the S2/S4 master renders the kind as
-  `- <namespace>:<kind> — <description> [values: <field>(<kind>, <required|optional>), …]` (the
-  shape below is ILLUSTRATIVE — a two-field tenant kind, not a shipped one):
+  `- <namespace>:<kind>[ — <description>] [values: <field>(<kind>[, required][, many]), …]` —
+  the annotation is exactly what `tortoise/pack_values.py::value_field_annotations` emits: a
+  token is present only when it applies (`required` for a required field, `many` for
+  `cardinality: many`; there is no `optional` token — an optional field simply omits it), and
+  the `— <description>` gloss appears only when it disambiguates (`_needs_gloss`). The shape
+  below is ILLUSTRATIVE — a two-field tenant kind, not a shipped one:
   `- venture:fundingTranche — A tranche of a financing round [values: committedAmountMinor(money,
   required), trancheLabel(quantity, many)]`. The shared S2/S4 rule slot also states the policy:
   keep a declared value EXACT, use the declared name, and never invent a field or a value kind.

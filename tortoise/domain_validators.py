@@ -536,11 +536,16 @@ def validate_portfolio_shape(graph) -> list[dict]:
 
     declared = _portfolio_declared_statuses()
     if not declared:
-        # Fail-open but VISIBLE. With no readable `portfolio` pack there is
-        # nothing to grade, and a silent `{}` would make
-        # `validate_domain portfolio` return ok=True over an EMPTY rule set —
-        # a green light over nothing, which is the failure this rule exists to
-        # prevent. Name the degradation instead of returning quietly.
+        # Fail-open but NAMED — on the channel the CALLER reads, not only here.
+        # With no readable `portfolio` pack there is nothing for the
+        # undeclared-status rule to grade, and the verdict stays `ok=True`
+        # (there is no violation to report, only a rule that graded nothing).
+        # A `logger.warning` alone is not enough: a caller of
+        # `tortoise_validate_domain` (MCP or CLI) never sees the server log, so
+        # it would receive an unqualified CLEAN over an EMPTY rule set — a
+        # green light over nothing. `_drift_warnings` therefore adds a
+        # `portfolio_rules_unavailable` entry to the payload the caller
+        # receives, and this line is the operator-facing half of the same fact.
         logger.warning(
             "portfolio validator: no readable `portfolio` pack declarations — "
             "the undeclared-status rule graded nothing")
@@ -639,14 +644,40 @@ def validate_portfolio_shape(graph) -> list[dict]:
 
 
 def _drift_warnings(domain: str) -> list[dict]:
-    """Manifest chains declared for the domain with NO registered validator →
-    advisory drift warning (never fails a clean run — out-of-scope chains,
-    e.g. dev/marketing, must not gate)."""
+    """Advisory drift for the domain, in the CALLER's payload (never fails a
+    clean run — out-of-scope chains, e.g. dev/marketing, must not gate).
+
+    Two sources:
+
+      * a manifest chain declared for the domain with NO registered validator;
+      * the `portfolio` degradation: its rules read their whole vocabulary off
+        the pack, so an unreadable pack leaves them grading ZERO rules while
+        still returning `ok=True`. That verdict is honest (there is no
+        violation to report) but it is not evidence, and a server-side log line
+        is not a channel any MCP/CLI caller of `tortoise_validate_domain` can
+        see — so the degradation is named HERE, where it reaches the caller.
+    """
+    out: list[dict] = []
+    if domain == _PORTFOLIO_DOMAIN and not _portfolio_declared_statuses():
+        out.append({
+            "rule": "portfolio_rules_unavailable",
+            "kind": "domain",
+            "ref": _PORTFOLIO_DOMAIN,
+            "message": (
+                "no readable `portfolio` pack declarations — the "
+                "undeclared-status rule graded ZERO rules, so a clean "
+                "verdict for this domain is not evidence"
+            ),
+            "fix": (
+                "install or repair the `investment-portfolio-manager` pack "
+                "(tortoise pack validate) and re-run "
+                "tortoise_validate_domain"
+            ),
+        })
     spec = domain_chain_spec(domain)
     if not spec:
-        return []
+        return out
     registered = {s["chain_id"] for s in domain_validators(domain)}
-    out: list[dict] = []
     for chain_id, cspec in spec.items():  # noqa: B007
         if chain_id not in registered:
             out.append({

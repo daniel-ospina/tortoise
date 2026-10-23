@@ -852,6 +852,47 @@ class TestKindsAreMintable:
                             label="marks", semantics="related")
         assert sdk.validate_domain(NS)["ok"] is True
 
+    def test_an_unreadable_pack_is_named_in_the_callers_payload(
+            self, monkeypatch):
+        """A CLEAN verdict over ZERO graded rules must not reach the caller
+        unqualified.
+
+        Both rules read their whole vocabulary off the pack, so with no
+        readable `portfolio` pack there is nothing to grade and `ok` stays
+        `True` — honestly, since there is no violation to report. But the
+        server-side `logger.warning` is not a channel an MCP/CLI caller of
+        `tortoise_validate_domain` can read, so without this the caller gets an
+        unqualified green light over an EMPTY rule set — the exact failure
+        `test_validate_domain_has_teeth` guards from the other side. The
+        degradation is therefore carried in the advisory `drift` list, which
+        `validate_domain` returns in its payload.
+        """
+        from tortoise import domain_loader
+        from tortoise.domain_validators import run_domain_graph_validators
+
+        class _EmptyGraph:
+            """Empty result sets: with no pack nothing can be found, and a rule
+            that reached the graph would still find no rows."""
+
+            class g:  # noqa: N801 — stand-in for the FalkorDB client
+                @staticmethod
+                def query(*_a, **_k):
+                    return type("R", (), {"result_set": []})()
+
+        monkeypatch.setattr(domain_loader, "_get_registry", lambda: None)
+        violations, drift = run_domain_graph_validators(NS, _EmptyGraph())
+        assert violations == [], violations
+        rules = {d["rule"] for d in drift}
+        assert "portfolio_rules_unavailable" in rules, drift
+        entry = next(d for d in drift
+                     if d["rule"] == "portfolio_rules_unavailable")
+        assert {"rule", "kind", "ref", "message", "fix"} <= set(entry), entry
+        assert entry["ref"] == NS
+        # It is ADVISORY: it names the degradation without inventing a
+        # violation, so the verdict stays `ok` and the payload says why.
+        assert run_domain_graph_validators(
+            NS, _EmptyGraph(), include_drift=False)[1] == []
+
     @requires_db
     def test_a_mis_wired_mark_is_an_orphan(self, sdk):
         """A mark attached to the WRONG thing is as unusable as an unattached
