@@ -16893,8 +16893,9 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     422 field reasons incl. commit_id_mismatch + calibration_mismatch;
     retry-once semantics documented) → [2] L1 replay via :CommitRecord
     (fully_written → 200 duplicate:true, zero writes, zero write-ops) →
-    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract +
-    budget adjudication on the reconciled net-new delta (soft 15 → WARN
+    [3] L2 reconciliation IN MEMORY → [4] sessions presence contract,
+    org points ceiling, per-org ingest budget (#4051: 429 + Retry-After)
+    and budget adjudication on the reconciled net-new delta (soft 15 → WARN
     telemetry; >25 first-adjudication → held[], NOT written; >50 → 402) →
     [5] the four-node chain + entities + operators + supersede_point +
     Session counters → [6] metering (write_ops +1 non-duplicate;
@@ -16906,8 +16907,12 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
     401 bad/missing key (get_current_org) · 402 budget ceiling · 422 Layer-1
     (retry once; code calibration_mismatch / commit_id_mismatch) OR an
     inverted supersede window (code supersede_window_inverted — #5363, a
-    deterministic payload refusal, NOT retryable) · 429
-    dedicated 300/min/key bucket (R-13) · 500 fail-closed, redacted.
+    deterministic payload refusal, NOT retryable) · 429 in TWO shapes, told
+    apart by `detail.code`: the dedicated 300/min/key bucket (R-13), and the
+    per-org ingest budget (#4051) with `detail.code = "ingest_rate_limited"`,
+    `detail.scope`, and a `Retry-After` the client MUST honour and then retry —
+    that one is a throttle, not a refusal of the data · 500 fail-closed,
+    redacted.
     """
     # #1927: commit_session is a session-content write surface that needs NO
     # consent gate — session_recording is default-ON (ToS-covered) with an
@@ -17136,6 +17141,116 @@ async def commit_session(request: Request, org: dict = Depends(get_current_org_g
         # budget adjudication) is unchanged, so an idempotent re-POST is still
         # never gated.
         _check_org_limit(org, "points")
+
+        # [4c] #4051 §3.1 — the per-ORG ingest budget. The gates above bound the
+        # REQUEST (payload shape, #9425) and the org's ALREADY-COUNTED nodes
+        # (#5637). Neither bounds the growth this lane leaves behind: a
+        # `points: []` commit mints :Session + transcript :Source +
+        # AgentSession :Event, and `_count_resource("points")` matches none of
+        # those labels, so that count never moves and its gate can never trip.
+        # #4010 made sessions unlimited for every tier, which removed this
+        # lane's only TOTAL bound; the total bound itself is #4051 §4 and needs
+        # an owner ruling (#4495/#5331 decided the UNIT is MB/GB, not nodes) —
+        # this is the slice of #4051 that needs no ruling: a per-org, 60s
+        # BYTE allowance on what a tenant may ingest, refused with 429 +
+        # Retry-After. It is a throttle (rate), not a cap (total): a legitimate
+        # commit at any rate below the allowance is unaffected, and a plan that
+        # wants more speaks to us (#5425's posture — rate limit, not refusal of
+        # the customer's data).
+        #
+        # WHY HERE — the SAME site as the sessions/points gates above, i.e. after
+        # every replay return and BEFORE the budget adjudication. Before the
+        # adjudication is load-bearing, not cosmetic: the `held` outcome WRITES
+        # (it MERGEs the :Session node with its `value_nodes_held` counter, and
+        # for a fresh `session_id` that MERGE CREATES it) and the `fail`
+        # outcome still leaves the :CommitRecord merged above — so every request
+        # that gets past the replay returns writes at least one node, and a gate
+        # below the adjudication (i.e. below the `held` return, not below the
+        # replay returns) would leave the held band's :Session mint
+        # (one uncounted node per request, the very class this issue is about)
+        # completely uncharged. ⛔ Moving the gate ABOVE the replay returns is the
+        # opposite error and is forbidden: a replay writes no nodes and must
+        # never 402 (#1727, pinned by
+        # `test_replay_does_not_consume_the_budget`).
+        #
+        # SCOPE, stated precisely because overstating a gate is worse than the
+        # gap it leaves: the refusal is not COMPLETELY write-free, but it no
+        # longer changes anything the client can observe. `store.acquire(...)`
+        # above merges this attempt's `:CommitRecord` BEFORE any gate in this
+        # handler, and a leftover `status='partial'` record is not neutral —
+        # `plan_commit`/`is_first_adjudication` read ANY existing record as a
+        # previous attempt, so it would make the documented
+        # backoff-and-retry a RE-adjudication without the first-adjudication
+        # hard-25 band (measured: a 26-net-new payload holds 26 on a clean
+        # graph but WRITES all 26 after a 429 left the record). The refusal
+        # therefore discards the record it just created
+        # (`store.discard_attempt`, only while its status is `partial`,
+        # `write_ops_billed` is 0 and no value nodes were declared), so a 429
+        # leaves the graph exactly as it was and the retry is a genuine first
+        # attempt. What remains is bounded and uncharged either way: the
+        # refused charge is not appended to the window, and the per-key rate
+        # limit bounds the request itself.
+        #
+        # CHARGE = max(payload bytes, nodes it will mint × 1024). The payload
+        # term stops a `summary`/`story_arc` (uncapped by Layer-1) from adding
+        # megabytes for a few hundred bytes of node charge; the node floor
+        # stops the `points: []` loop from being cheap. Both are stated in
+        # `commit_schema.commit_ingest_charge_bytes`; the reason it is NOT
+        # `plan.reconcile.net_new` (the PL4 metered figure) is there too — that
+        # counts points+entities+operators only, so an events-only payload
+        # would meter 0 while minting a node per entry.
+        from tortoise.commit_schema import commit_ingest_charge_bytes
+        from tortoise.quota import commit_ingest_admit
+
+        admission = commit_ingest_admit(org.get("org_id"),
+                                       commit_ingest_charge_bytes(payload))
+        if not admission.allowed:
+            retry_after = max(1, math.ceil(admission.retry_after))
+            # #4051 — the refusal must not change the RETRY's adjudication.
+            # `store.acquire` above merged this attempt's `:CommitRecord`, and
+            # `plan_commit`/`is_first_adjudication` read ANY existing record as
+            # a previous attempt — so leaving it would make the client's
+            # documented backoff-and-retry a RE-adjudication, dropping the
+            # first-adjudication hard-25 band: measured, a 26-net-new payload
+            # holds 26 on a clean graph but WRITES all 26 after a 429 left the
+            # record. Delete only what THIS attempt created (`created`) and
+            # only while it is still write-free, so the retry is a genuine
+            # first attempt and a real mid-write `partial` is untouched.
+            if created:
+                store.discard_attempt(payload.client_commit_id)
+            # #5425's seam, not a hand-appended sentence: it terminates the
+            # prose and appends the ONE contact path. A throttle is not a
+            # ceiling to buy out of — it names its own next step ("retry
+            # shortly") and the header says how long. The SENTENCE follows
+            # `scope`: in the shared-overflow regime the caller's own `used`
+            # can be 0 (the instance's shared capacity is what is spent), so
+            # saying "by this team" would blame a tenant that wrote nothing.
+            message = (
+                "The shared ingest allowance for this instance is saturated "
+                "— retry shortly"
+                if admission.scope == "process" else
+                "Too much data is being written by this team right now — "
+                "retry shortly")
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "ingest_rate_limited",
+                    "message": with_limit_contact(message),
+                    # "org" = the caller's own allowance; "process" = the ONE
+                    # shared overflow bucket an instance falls back to when its
+                    # owned store is full of active orgs (bounded flood
+                    # regime). `used` is the caller's own spend in either case,
+                    # so `used: 0` with `scope: "process"` is a refusal about
+                    # the instance, never about the caller's traffic.
+                    "scope": admission.scope,
+                    "resource": "commit_ingest_bytes",
+                    "used": admission.used,
+                    "limit": admission.limit,
+                    "unit": "bytes/60s",
+                    "retry_after": retry_after,
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
 
         # [4b] Budget — the authoritative §6.1 semantics live in adjudicate_budget.
         if plan.budget.outcome == "fail":

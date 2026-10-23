@@ -3166,16 +3166,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.capture_session.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: documentation'
   lifecycle: active
   used_by: eval-harness, tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: documentation'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:check_structure
   method: check_structure
   family: null
