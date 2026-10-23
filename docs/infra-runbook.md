@@ -370,6 +370,195 @@ fly releases -a tortoise-y4mjjq
 fly deploy --image $(fly releases -a tortoise-y4mjjq --json | jq -r '.[1].ImageRef') -a tortoise-y4mjjq
 ```
 
+## 3.5 The record's backup, and the drill that proves it restores (#9557 / R9)
+
+**The Postgres record is the system of record**, so its durability is Postgres's own backup.
+`docs/durability-posture.md` owns the *posture*; this section is the *procedure*. The mechanism is
+`tortoise/record_backup.py` and its one trigger is the `record-backup` verb — the graph sweeps
+(`backup_sweep.py`, `hosted_backup.py`, `selfhost_backup.py`) copy the **graph** and are not this.
+
+```bash
+# backup only — dump -> encrypt -> upload to R2 under record-backups/.
+# The DSN comes from the ENVIRONMENT (`TORTOISE_RECORD_DSN`, and
+# `TORTOISE_RECORD_SCRATCH_DSN` for the drill). Prefer the env vars: an argument
+# is readable by every local user via `ps` and lands in shell history.
+python -m tortoise record-backup
+
+# backup + RESTORE DRILL — restore into a scratch record and compare per-table row counts
+TORTOISE_RECORD_SCRATCH_DSN=... python -m tortoise record-backup --reset-scratch
+```
+
+Exit codes (a scheduler's only signal):
+
+| code | meaning |
+|---|---|
+| `0` | backup published — and in drill mode, the restore **verified** against the source |
+| `1` | the run **could not be completed** (pg_dump/pg_restore non-zero, a transport failure). What that means depends on the **failure class**, not the mode: a failure **after** the artifact was published raises `RecordRestoreFailed` and names the artifact id — the record IS backed up and only the restore is **NOT proven**: retry, and if it keeps failing check preconditions 3-4 (the scratch target's schema and the tenancy rows its foreign keys reference): a missing parent row never clears on a retry. **Any other** exit-1 failure (a dump, encrypt or upload failure, in either mode) means **nothing was published** — the record is NOT backed up |
+| `2` | could not run: no/malformed DSN, R2 unavailable, psycopg2 absent, a **pooler** DSN (the source's or the drill's **scratch** one — both are refused before anything is dumped), a missing/malformed `TORTOISE_BACKUP_KEY`, a populated scratch target, an **empty** record to drill, an artifact whose **integrity, shape pin or decryption does not verify**, or a `--keep` below 1. No verdict was produced — never read as green, and never retry blindly: these are configuration faults. ⚠️ **A permanent fault found AFTER the upload (the likeliest: a stale scratch credential) still exits `2`, but the artifact is already durable** — the drill publishes before it resets and restores, so the verb names the published `backup_id` and says the record IS backed up, instead of claiming nothing was backed up |
+| `3` | the drill **ran** and the restored record disagrees with its source — an incident, with the tables named |
+
+Every configuration fault is `2`, deliberately: a pooler DSN, a missing `psycopg2` and a missing
+`TORTOISE_BACKUP_KEY` are fixed by editing a config, so a scheduler reading them as `1` would retry a
+permanent fault forever — minting a fresh artifact (and, on a keyless box, a fresh plaintext dump)
+on every attempt. `1` is reserved for "it was attempted and did not happen — try again".
+
+⚠️ **`1` in drill mode is not "the record has no backup".** The drill cuts and publishes the
+artifact *before* it restores, so a failure after that point leaves a complete, checksummed object
+in `record-backups/`: the record is backed up, the restore is unproven. The verb says which of the two
+it means on stderr, and the drill's own exit-1 class (`RecordRestoreFailed`) names the published
+`backup_id` — so an alert rule should read the sentence, not assume an outage.
+
+⚠️ **`2` in drill mode is not "the record has no backup" either.** The drill uploads before it
+resets and restores, so a permanent configuration fault found on the scratch side (a rotated
+credential is the usual one) exits `2` with a complete artifact already in `record-backups/`. The
+verb names that artifact's `backup_id` and says the record IS backed up — so, as with `1`, read the
+sentence rather than inferring an outage from the code. Do **not** re-run the dump to "replace" the
+artifact: fix the configuration the message names first.
+
+⚠️ **A `0` in backup-only mode is not a durability claim.** The verb prints
+`NOT PROVEN RESTORABLE` in that mode on purpose: the posture asks for *"a backup whose artifact is
+proven restorable"*, and only the drill mode proves it. Run the drill on a schedule of its own.
+
+### Preconditions (each one is a measured failure, not a preference)
+
+1. **The DIRECT connection string, not the pooler.** A transaction-mode pooler discards session
+   state between transactions; a dump through it can be silently short. The verb refuses a pooler
+   host or port 6543 (exit 2) rather than producing an artifact nobody can trust.
+2. **R2 + `TORTOISE_BACKUP_KEY`**, the same credentials the graph sweep uses — one bucket, one key,
+   so a deployment that backs up graphs needs nothing new.
+3. **The drill's scratch target carries the record's schema** (apply `supabase/migrations`). The
+   artifact is **data-only** on purpose: the schema's one home is the migrations, and a
+   schema-carrying artifact cannot restore into a migrated target at all (`pg_restore` refuses
+   `relation "node_identity" already exists` — measured 2026-10-22).
+4. **The scratch target carries the tenancy rows the record's foreign keys reference** —
+   `organizations(id)`, and `graphs(org_id, id)`. These are the control plane, not the record. A
+   target without them is refused by the FK, which is the correct direction: a record dangling from
+   missing tenancy is not a record. (Do **not** work around it with
+   `session_replication_role = replica`.)
+5. **The scratch target's record tables are EMPTY.** A restore into a populated record is refused —
+   it is not a drill, and `pg_restore` would either fail halfway on a duplicate key or overwrite
+   live data. A successful drill **leaves them populated**, so a *scheduled* drill needs
+   `--reset-scratch` (below); without it the first run succeeds and every later run is refused as
+   "the target record is NOT empty".
+
+### `--reset-scratch` — what makes a scheduled drill repeatable
+
+With `--reset-scratch`, the verb `TRUNCATE`s the record's **own ten tables** on the scratch DSN
+only, in one statement, **after the artifact has been downloaded and verified** (integrity, table
+set, column pin, decryption) and before `pg_restore`. It is
+opt-in because an automatic truncate would destroy the leftover state of a RED drill — the evidence
+an operator needs — with nothing to show for it; for the same reason every step that can refuse on
+the **artifact** (integrity, manifest shape, table set, column pin, decryption) runs before it, so a
+drill refused for a bad artifact leaves the last run's evidence in place. The **target** side is not
+covered by that guarantee: `restore_record_backup` re-counts the scratch and writes the payload file
+before `pg_restore` runs, and a failure there happens after the truncate — a narrow residual
+(one successful connect wide), named here rather than promised away. It
+can never touch the record itself: a scratch DSN equal to the source is refused first, and no
+`CASCADE` is used, so the tenancy rows the FKs need (`organizations`, `graphs`) are left alone.
+
+### What the comparison tolerates, and why
+
+The record is a **live** system of record, and it is not append-only: it takes rows in and it ages
+them out (`record_projection` emits `DELETE` for `delete`/`merge` journal ops, and the erasure RPC
+removes all ten tables). The artifact is cut from a snapshot taken after the manifest's row counts,
+so rows committed in that gap are legitimately in the artifact and not in the count. The drill
+therefore compares each table against the window `[min(before, after), max(before, cut, after)]`,
+where `before` is the pre-dump count, `cut` is a count taken immediately **before `pg_dump` starts**,
+and `after` is a re-count taken once the dump has finished: below the floor is **loss** (rows that
+existed before the dump did not come back), above the ceiling is a restore carrying rows no source
+read ever observed (duplication or a corrupt artifact). The ceiling is the **largest read the drill
+takes OUTSIDE the dump**, not one endpoint: rows can land after `before` and age out before `after`,
+so a healthy artifact may legitimately carry more than either endpoint shows — an endpoint ceiling
+refused that artifact with a sentence the run had already disproved by measuring the higher number.
+Comparing exactly against a pre-dump count — the earlier behaviour — red a perfectly healthy backup
+on any record with continuous writes, and a drill that reds every day on a healthy backup removes
+the one falsifier this exists for. The report names a table that moved with both bounds, e.g.
+`journal_event: source=512 restored=512 (source moved to 515 by the end of the dump)`.
+
+⚠️ **`cut` is not the artifact's snapshot count, and no arithmetic over these three reads is.** The
+artifact's snapshot instant falls *inside* the dump, between the `cut` read and the `after` read, so a
+row inserted in that gap and deleted before `after` is in the artifact and in none of the three reads:
+it lands above the ceiling and reds a healthy artifact with exit `3`. That is the one residual this
+bound cannot see; closing it needs the count read from the same snapshot `pg_dump` reads
+(`pg_export_snapshot` + `pg_dump --snapshot`), which is tracked in **#9795**, not implemented. So on a
+live record, read the table lines in the report before treating a single exit-3 run as an outage.
+
+The artifact's OWN `row_counts` are **never a baseline and never a bound**: the number is measured
+just before the dump, so it is the drill's own reading of the source, not an independent claim.
+Comparing it against a ceiling built from the same reading was a check that could never fire — the
+runbook used to list a refusal no run could produce — so it is gone. What decides the verdict is the
+comparison of the **restored** counts against the source reads; a manifest that inflates its own
+number neither refuses a healthy run nor rescues a short restore (the drill reds with the table
+named). Comparing the claim against the pre-dump count was a false incident on every live record
+(#9601 review cycle 2).
+
+### Retention
+
+A successful run prunes `record-backups/` to the newest **14** artifacts (`--keep`). The prune only
+removes objects whose manifest it could read and whose `format` it recognises; anything it cannot
+attribute is left alone, because a prune that guesses deletes the only copy of something it did not
+understand. It deletes under the **path the manifest was read at**, never under the `backup_id` the
+file declares about itself — a hand-edited or duplicated id would otherwise redirect the deletion
+onto the artifact the policy had just decided to keep. The prune runs **after** the artifact is durable and is best-effort: a failed listing or
+delete logs a warning and the run still exits `0` (the backup happened) — a prune failure must never
+be reported as "the record is NOT backed up". It runs on exit `0` only, so a persistently red drill
+also stops retention; `--reset-scratch` is what keeps the scheduled drill on the `0` path.
+
+⚠️ **The exit-`2` case is the one to watch, because it is the likeliest.** A drill publishes its
+artifact *before* it resets and restores, so any post-publish refusal — the commonest being a **populated scratch
+target because `--reset-scratch` was dropped from the cron line** — mints a new artifact and then
+returns without pruning. That grows `record-backups/` by one full encrypted dump per run, without
+bound, while the exit table reads as "no verdict" rather than as "retention has stopped". If the drill
+has been `2` for more than `--keep` runs, count what is there with the bucket tool you already have
+(`aws s3 ls --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" --region auto
+"s3://$R2_BUCKET/record-backups/"` — the endpoint is DERIVED from `R2_ACCOUNT_ID`, so without it
+the CLI addresses AWS and answers with an auth error that reads as "the bucket is empty"); the
+reset is the repair, and it returns the job to the pruning path.
+
+### Schedule — NOT YET DEPLOYED, and that is the current loss window
+
+The verb is the caller; no cron currently invokes it, so **the record has no automatic archive yet**
+and its loss window is whatever an operator's manual run makes it (i.e. unbounded). The line to add
+is one job, alongside the graph sweep's `registry-backup-cron.yml`:
+
+```cron
+17 3 * * *   python -m tortoise record-backup --reset-scratch
+```
+
+Both DSNs are read from the environment (`TORTOISE_RECORD_DSN`,
+`TORTOISE_RECORD_SCRATCH_DSN`), so the job's command line carries no password.
+
+Once that job exists the loss window is its cadence (one day, for a daily line); until it does, do not
+restate the record's loss window as anything smaller. The drill's own cadence can be slower than the
+backup's — a weekly drill is enough to keep the artifact proven.
+
+### Measured drill (2026-10-22) — what actually ran
+
+Executed end to end against a real `postgres:17`, a **real** `pg_dump`/`pg_restore`, the real
+`supabase/migrations` schema, and the real encrypt/upload/download/decrypt path (in-memory storage):
+
+```text
+verdict: RESTORED            row_total: 56
+node_identity 8/8   journal_event 40/40   source 1/1   event 1/1   session 1/1
+object 1/1   subject 1/1   point 1/1   relation 2/2
+```
+
+Falsifiers observed **red** in the same session (a green drill that cannot red proves nothing):
+
+| falsifier | observed |
+|---|---|
+| `journal_event` forced short | `the restored record does not match its source: journal_event (source 40 → restored 0)` |
+| one byte flipped in the stored artifact | `artifact integrity check failed (sha256 mismatch)` — **before** `pg_restore` ran |
+| restore target already populated | `the target record is NOT empty (event=1, journal_event=40, …)` |
+| drill over an EMPTY record | `the record is EMPTY — every count would match an empty scratch database` (exit `2`, no verdict: nothing ran) |
+| a schema-carrying dump restored into a migrated target | `pg_restore: error: … relation "node_identity" already exists` — the measured reason the artifact is data-only |
+| a target without the tenancy parents | `violates foreign key constraint "node_identity_org_id_fkey"` — the fail-closed direction |
+
+⚠️ **Not yet run against the hosted Supabase record.** That drill needs a scratch Supabase project
+and the project's direct DSN; it is the remaining operational step, and until it is done this row's
+claim is *"the artifact restores into Postgres, verified per table"*, not *"the hosted record has
+been restored"*.
+
 ## 4. Health Check
 
 ```bash

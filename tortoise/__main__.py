@@ -787,6 +787,250 @@ def _cmd_record_reconcile(args):
     return exit_code_for(result)
 
 
+def _cmd_record_backup(args):
+    """#9557 (R9) — the record's backup, and the drill that proves it restores.
+
+    The record (Postgres) is the system of record, so the durability obligation
+    is Postgres's own backup — and until this verb, **no module of ours held
+    it**: every archiving module in the tree copies the GRAPH. The mechanism is
+    ``tortoise/record_backup.py``; this verb is what gives it a caller that is
+    neither a test nor an evidence probe, and what a scheduler can run.
+
+    Two modes, one code path:
+
+    * **backup** (``--scratch-dsn`` absent) — dump → encrypt → upload to the
+      existing R2 bucket, then prune to ``--keep``.
+    * **drill** (``--scratch-dsn`` given) — the same backup, then download →
+      decrypt → restore into the SCRATCH record → compare per-table row counts
+      against the live source. This is the executed restore the posture
+      requires; a restore that has never been run is not a restore.
+
+    Exit codes, because a scheduler's only signal is the code:
+      ``0`` backup published (and, in drill mode, the restore VERIFIED)
+      ``1`` the run could not be completed (pg_dump/pg_restore non-zero, a
+          transport failure). What that means is decided by the FAILURE CLASS,
+          not by the mode — deciding it by mode made a drill-mode dump failure
+          (nothing published) print the sentence reserved for a post-publish
+          restore failure: a durability outage read as "backed up":
+          * a failure AFTER the artifact was published raises
+            ``RecordRestoreFailed`` and names the artifact id — the record IS
+            backed up and only the restore is NOT proven: retry, and if it
+            repeats check preconditions 3-4 (the scratch target's schema and
+            the tenancy rows its foreign keys reference): a missing parent row
+            never clears on a retry;
+          * any other ``RecordBackupError`` means NOTHING was published (the
+            dump, encrypt or upload leg failed, in either mode) — the record is
+            NOT backed up: retry
+      ``2`` could not run: no/malformed DSN, R2 not configured, psycopg2 absent,
+          a pooler DSN (the **source's** or the drill's **scratch** one — the
+          scratch side is checked before anything is dumped), `TORTOISE_BACKUP_KEY`
+          absent or malformed, a populated
+          scratch target, an empty record to drill, an artifact whose integrity,
+          shape pin or decryption does not verify (no verdict was produced — and
+          NOT a green one), or a ``--keep`` that would delete every artifact.
+          A permanent fault discovered AFTER the upload names the published
+          artifact instead of claiming nothing was backed up: in drill mode the
+          artifact is durable and only the drill did not run.
+      ``3`` the drill RAN and the restored record DISAGREES with its source
+
+    ``2`` is also the code for every PERMANENT configuration fault, deliberately:
+    the record's own preconditions (a direct DSN, `psycopg2`, the backup key) are
+    fixed by editing config, so a scheduler that read them as ``1`` would retry
+    them forever and mint a fresh artifact on each attempt. A transport failure
+    and a broken dump stay ``1`` — the one class where "try again" is the answer.
+
+    ``2`` also covers a USAGE error, exactly as ``record-reconcile`` documents:
+    argparse's own ``error()`` exits ``2``. The two are not separated on purpose
+    — a scheduler must read ``2`` as *no verdict*, never as a green one.
+    """
+    import json as _json
+    import os
+
+    from tortoise.record_backup import (
+        RECORD_BACKUP_KEEP,
+        RecordBackupError,
+        RecordBackupUnavailable,
+        RecordRestoreFailed,
+        RecordRestoreRefused,
+        RecordRestoreVerifyError,
+        create_record_backup,
+        prune_record_backups,
+        run_restore_drill,
+    )
+    from tortoise.record_writer import RecordWriteError, record_dsn
+
+    # The DSN is resolved by the module that DECLARES the arming surface —
+    # never re-spelled here, so this verb cannot drift from the writer's notion
+    # of "armed" and a non-Postgres value is reported as the MISCONFIGURATION it
+    # is rather than as an unreadable record (an outage).
+    try:
+        dsn = record_dsn(args.record_dsn)
+    except RecordWriteError as e:
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
+        return 2
+    # ⛔ argv is PUBLIC — every user on the box can read a process's arguments
+    # (`ps`), and an argument also lands in shell history and the scheduler's own
+    # command file. So the scratch DSN has an environment surface, mirroring
+    # `TORTOISE_RECORD_DSN` (#9601 review, P2): a documented cron line that passes
+    # the password as `--scratch-dsn "$VAR"` puts the system-of-record credential
+    # in argv, which is the one thing this verb's module docstring promises it
+    # never does. An explicit flag still wins (an injected value keeps the DB-free
+    # pin possible).
+    if args.scratch_dsn is None:
+        env_scratch = os.environ.get("TORTOISE_RECORD_SCRATCH_DSN")
+        if env_scratch is not None and not env_scratch.strip():
+            # ⛔ THE ENV SURFACE REFUSES A BLANK DRILL DSN TOO (#9601 review cycle 6,
+            # P3). The flag branch below already treats a supplied-but-empty value as
+            # an error; the env var is the surface the runbook PREFERS, and it still
+            # collapsed "unset" and "set to blank" into backup-only mode — exit 0,
+            # `published`, no drill. A blank value here used to reach the drill and be
+            # refused as a malformed DSN (exit 2), so this is also the return of a
+            # refusal the fix had accidentally widened away.
+            print("Error: TORTOISE_RECORD_SCRATCH_DSN is set but names nothing — a "
+                  "drill DSN that is empty cannot be run, and backup-only mode is "
+                  "not what this run said it would do. Nothing was backed up, and "
+                  "no verdict was produced.", file=sys.stderr)
+            return 2
+        args.scratch_dsn = env_scratch.strip() if env_scratch else None
+    elif not args.scratch_dsn.strip():
+        # ⛔ A BLANK `--scratch-dsn` IS NOT "backup only" (#9601 review cycle 5, P2).
+        # `--scratch-dsn "$SCRATCH"` with the variable unset is the exact shape a cron
+        # line takes when its environment is gone, and it used to fall into backup mode:
+        # exit 0, `published`, and NO drill — on a schedule whose exit table defines 0 in
+        # drill mode as "the restore verified". A run that said it would drill and then
+        # silently did not is worse than a red. An ABSENT flag still means backup-only.
+        print("Error: --scratch-dsn was passed but names nothing — a drill DSN that "
+              "is empty cannot be run, and backup-only mode is not what this run "
+              "said it would do. Nothing was backed up, and no verdict was "
+              "produced.", file=sys.stderr)
+        return 2
+    if not dsn:
+        print("Error: no record DSN — pass --record-dsn or set "
+              "TORTOISE_RECORD_DSN. Nothing was backed up, and no restore was "
+              "proven.", file=sys.stderr)
+        return 2
+
+    # The bucket is the SAME one the graph archives use: a deployment that can
+    # sweep graphs needs no new credential for the record.
+    from tortoise.hosted_backup import R2Storage
+
+    try:
+        storage = R2Storage()
+        storage.head_bucket()
+    except Exception as e:
+        print(f"Error: the backup bucket is unreachable or unconfigured ({e}) — "
+              f"the record was NOT backed up.", file=sys.stderr)
+        return 2
+
+    keep = args.keep if args.keep is not None else RECORD_BACKUP_KEEP
+    if args.reset_scratch and not args.scratch_dsn:
+        # A silent no-op is how an operator believes the scratch target was
+        # emptied and finds out from the next run's refusal instead.
+        print("Error: --reset-scratch only applies to drill mode — it empties "
+              "the --scratch-dsn target. Nothing was backed up.", file=sys.stderr)
+        return 2
+    if keep < 1:
+        # Validated BEFORE the run: the flag's own help says `--keep 0` is
+        # refused, and a refusal that reached the operator as a traceback after a
+        # successful upload would read as "the backup failed".
+        print(f"Error: --keep must be >= 1, got {keep} — a prune that keeps "
+              f"nothing is data loss. Nothing was backed up.", file=sys.stderr)
+        return 2
+    try:
+        if args.scratch_dsn:
+            report = run_restore_drill(dsn, storage, args.scratch_dsn,
+                                       workdir=args.workdir,
+                                       reset_scratch=args.reset_scratch)
+        else:
+            report = create_record_backup(dsn, storage, workdir=args.workdir)
+    except RecordRestoreVerifyError as e:
+        print(f"✗ RESTORE DRILL RED: {e}", file=sys.stderr)
+        if args.json:
+            print(_json.dumps({"verdict": "MISMATCH",
+                               "mismatches": e.mismatches}, indent=2))
+        return 3
+    except RecordRestoreRefused as e:
+        # Not a verdict: the drill did not run. `2` says so, and a scheduler
+        # must not read it as "the record is backed up".
+        print(f"Error: {e} — no verdict was produced.", file=sys.stderr)
+        return 2
+    except RecordBackupUnavailable as e:
+        # A PERMANENT configuration fault (pooler DSN, psycopg2 absent, missing
+        # key): `2` = unconfigured. `1` would tell a scheduler to retry a fault
+        # only a config edit can clear.
+        #
+        # ⛔ THE PUBLISH STATE DECIDES THE SENTENCE, NOT THE CLASS (#9601 review
+        # cycle 10, P2). A drill publishes before it resets and restores, so this
+        # class is ALSO what a stale scratch credential raises — after a complete,
+        # checksummed artifact is already durable in `record-backups/`. The flat
+        # sentence claimed "nothing was backed up" about that run: the false
+        # durability outage this verb spent three cycles removing, re-emitted for a
+        # likelier class. `backup_id` is set only when the fault landed after the
+        # upload, so it is what the wording branches on. Exit stays `2`: this is
+        # still a config fault, and re-running the dump mints another artifact for
+        # one that is already published.
+        if e.backup_id:
+            print(f"Error: the artifact {e.backup_id} WAS published before the "
+                  f"drill could run, so the record IS backed up but this restore "
+                  f"was NOT attempted and no verdict was produced ({e}). Fix the "
+                  f"configuration that message names — do not mint another "
+                  f"artifact for it.", file=sys.stderr)
+        else:
+            print(f"Error: {e} — nothing was backed up, and no verdict was produced.",
+                  file=sys.stderr)
+        return 2
+    except RecordRestoreFailed as e:
+        # #9601 review cycle 3 (P2): the DRILL publishes before it restores, so
+        # this failure class means the artifact is DURABLE and only the restore
+        # is unproven. Exit `1` says "the run did not complete" — which is true —
+        # but the old flat message turned it into "the record is NOT backed up"
+        # (a durability outage that does not exist, alerted on by any scheduler
+        # reading that sentence) plus an unconditional "retry" for the one
+        # scratch-target fault retrying can never clear. The sibling prune path
+        # above already refuses to make that claim; this is the same shape.
+        print(f"Error: {e} — the artifact {e.backup_id} WAS published before the "
+              f"restore was attempted, so the record IS backed up but this "
+              f"restore was NOT proven. Retry; if it keeps failing, check the "
+              f"scratch target's schema and the tenancy rows its foreign keys "
+              f"reference (runbook preconditions 3-4) — a missing parent row "
+              f"never clears on a retry.", file=sys.stderr)
+        return 1
+    except RecordBackupError as e:
+        print(f"Error: {e} — the record was NOT backed up.", file=sys.stderr)
+        return 1
+
+    # Retention is BEST-EFFORT and runs AFTER the artifact is durable. A prune
+    # failure (a listing error, a transient delete error) must never turn a
+    # published, verified backup into "the record is NOT backed up" — exit 1 is
+    # that claim, and it is false here.
+    deleted: list[str] = []
+    try:
+        deleted = prune_record_backups(storage, keep=keep)
+    except Exception as e:
+        print(f"Warning: the backup was published, but the retention prune "
+              f"failed ({e}) — nothing was deleted, and `record-backups/` will "
+              f"grow past --keep until the next successful run.", file=sys.stderr)
+    if args.json:
+        print(_json.dumps({**report, "pruned": deleted}, indent=2, sort_keys=True))
+        return 0
+    if args.scratch_dsn:
+        print(f"✓ RESTORED — record backup {report['backup_id']} restored into "
+              f"scratch and matched its source "
+              f"({report['row_total']} rows across {len(report['tables'])} table(s))")
+        for table, counts in report["tables"].items():
+            moved = ("" if counts.get("source_after", counts["source"]) == counts["source"]
+                     else f" (source moved to {counts['source_after']} by the end of the dump)")
+            print(f"  {table}: source={counts['source']} restored={counts['restored']}{moved}")
+    else:
+        total = sum(report.get("row_counts", {}).values())
+        print(f"✓ record backup {report['backup_id']} published "
+              f"({total} rows, {report['bytes']} bytes, "
+              f"{len(report['tables'])} table(s))")
+        print("  ⚠ NOT PROVEN RESTORABLE — a backup without a drill is a claim. "
+              "Run with --scratch-dsn to restore it and compare row counts.")
+    if deleted:
+        print(f"  pruned {len(deleted)} object(s), keeping {keep} artifact(s)")
+    return 0
 def _cmd_record_restore(args):
     """#9556 / R8 — the record-sourced RESTORE: rebuild a lost cache from the record.
 
@@ -11486,6 +11730,50 @@ def main(argv: list[str] | None = None) -> int:
                          "— it never returns a partial answer")
     rr.add_argument("--json", action="store_true",
                     help="Machine-readable JSON output")
+    # #9557 (R9): the RECORD's backup. Deliberately not `backup` (that verb
+    # copies a local embedded graph + its events.jsonl) and deliberately not on
+    # the capture turn: a scheduled, off-box artifact plus an executed restore.
+    rb = sp.add_parser(
+        "record-backup",
+        help="Dump the Postgres record, encrypt and upload it off-box; with "
+             "--scratch-dsn, restore it into a scratch record and prove the row "
+             "counts match. Exit 0 backed up+verified / 3 drill RED / 2 could "
+             "not run / 1 backup failed")
+    rb.add_argument("--record-dsn", default=None,
+                    help="Postgres record DSN (default: $TORTOISE_RECORD_DSN). "
+                         "Must be the DIRECT connection, not the pooler: a "
+                         "dump/restore session through a transaction pooler can "
+                         "be silently short, so a pooler DSN is refused (exit 2)")
+    rb.add_argument("--scratch-dsn", default=None,
+                    help="Drill mode: an EMPTY scratch Postgres DSN to restore "
+                         "the artifact into and compare row counts against the "
+                         "live record (default: $TORTOISE_RECORD_SCRATCH_DSN — "
+                         "prefer the env var: an argument is readable in `ps` "
+                         "and shell history). It must not be the record itself "
+                         "— a restore into a populated record is refused. "
+                         "Without this flag the verb backs up only, and says "
+                         "the artifact is NOT proven restorable")
+    rb.add_argument("--reset-scratch", action="store_true",
+                    help="Drill mode: TRUNCATE the record's tables on the "
+                         "--scratch-dsn target before restoring. A successful "
+                         "drill leaves the scratch target populated, and every "
+                         "restore refuses a populated target — so a scheduled "
+                         "drill needs this to be repeatable. It only ever "
+                         "touches the SCRATCH DSN (refused if equal to the "
+                         "record), and only the record's own tables")
+    rb.add_argument("--keep", type=int, default=None,
+                    help="Artifacts to retain after a successful run "
+                         "(default: 14). `--keep 0` is refused: a prune that "
+                         "keeps nothing is data loss")
+    rb.add_argument("--workdir", default=None,
+                    help="Directory for the plaintext dump while it is being "
+                         "encrypted/restored (default: the system temp dir). "
+                         "Each file is created inside a 0700 mkdtemp directory "
+                         "and removed on every path; the restored payload is "
+                         "written 0600, the backup dump inherits the process "
+                         "umask within that 0700 directory")
+    rb.add_argument("--json", action="store_true",
+                    help="Machine-readable JSON output")
     # #9556 / R8: the record → cache RESTORE. A sibling of `record-reconcile`
     # and deliberately NOT a `--from-record` flag on `rebuild`: `rebuild`'s
     # `--dir` is the journal the replay reads, so a flag that silently makes it
@@ -12117,6 +12405,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_reconcile(args)
     elif args.cmd == "record-reconcile":
         return _cmd_record_reconcile(args)
+    elif args.cmd == "record-backup":
+        return _cmd_record_backup(args)
     elif args.cmd == "record-restore":
         return _cmd_record_restore(args)
     elif args.cmd == "backfill":
