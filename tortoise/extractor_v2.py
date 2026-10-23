@@ -849,10 +849,11 @@ _PACK_TRIGGERS = {
     # so this is a recorded choice, not an omission.
     #
     # THE INVARIANT, made mechanical by that test: an entry is this namespace's
-    # own name, or an `investment `-prefixed phrase. Nothing else reaches this
-    # row — a per-phrase judgement call is exactly how a substring collision
-    # survives review (the first draft of this fix removed five and kept five of
-    # the same class).
+    # own name, or an `investment `-prefixed phrase (space OR hyphen —
+    # "investment-grade" is safe and `investment-grade` in prose cannot ride
+    # inside another word). Nothing else reaches this row — a per-phrase
+    # judgement call is exactly how a substring collision survives review (the
+    # first draft of this fix removed five and kept five of the same class).
     #
     # THE COST, stated accurately rather than waved away. `_select_pack_kinds`
     # falls back to ALL packs only when NOTHING matched in ANY namespace — and

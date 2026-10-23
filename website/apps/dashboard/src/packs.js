@@ -102,10 +102,17 @@ function asAvailable(body) {
 // (removal means absent from the list), while the server offers a graph's OWN
 // tombstones back in `available` with `status: 'removed'`, so the two together
 // are the record set. They cannot double-count: `_packs_payload` never lists a
-// tombstone in `packs`. The one shape they do not cover — a CATALOG-shipped
-// tombstone with no marker, offered by the catalog arm as `available` — is
-// unreachable: removal only happens through `set_graph_packs`, which writes the
-// `:PackSelection` marker, so that graph takes the `configured` branch instead.
+// tombstone in `packs`.
+// ⚠ ONE shape is not covered: a CATALOG-shipped tombstone, which the catalog
+// arm offers as `available` with `status: 'available'` (never `removed`), so it
+// counts as zero records. It is NOT unreachable: `:PackSelection` is missing
+// from the projection's `_config_classes()`, so a `rebuild_all` KEEPS the
+// tombstoned `:PackInstall` row and DROPS the marker — measured: before
+// `configured:true, revision:1`, after `configured:false, revision:0` with a
+// `removed` row, which reads here as the catalog union. (The other unwired
+// writer, `pack_manifest_store.delete_tenant_manifest`, has no caller — that
+// half is latent.) Enrolling the marker as a config class fixes both this
+// predicate and the silent re-admission; tracked in #9752.
 export function packRecordCount(body) {
   return asRows(body).length
     + asAvailable(body).filter((p) => p && p.status === 'removed').length
@@ -288,10 +295,15 @@ export function packCountLine(body) {
   // "the full catalog applies" — the same self-contradiction in a new shape,
   // so this arm reports no count at all.
   if (usesCatalogUnion(body)) {
-    // `catalog_ok: false` deliberately does NOT change this line: it means the
-    // catalog could not be READ (the add-list cannot enumerate it), not that a
-    // different set resolves. The degraded caveat belongs to
-    // `ADD_LIST_DEGRADED_LINE`, which renders beside it.
+    // `catalog_ok: false` means the catalog could not be READ, and on that path
+    // the registry is empty, so "the full catalog applies" is a claim about a
+    // catalog nobody could read. It must be dropped HERE rather than left to
+    // `ADD_LIST_DEGRADED_LINE`: this function's only render site is the Settings
+    // home (main.jsx:1077), which has no add-list, so no caveat would sit beside
+    // it. The neutral sentence is true in both states.
+    if (body.catalog_ok === false) {
+      return 'Not configured yet \u2014 this graph holds no packs. Saving pins the set.'
+    }
     return 'Not configured yet \u2014 this graph holds no packs, so the full catalog applies. Saving pins the set.'
   }
   return `Not configured yet \u2014 this graph uses the packs it already holds (${line}). Saving pins the set.`

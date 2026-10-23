@@ -536,23 +536,31 @@ customer-facing territory that owns per-graph permissions.
 > beside the catalog claim.
 > A catalog that could not be READ (`catalog_ok: false`) does NOT change which
 > set applies — the flag reports the add-list's enumeration, not the resolution —
-> so the copy is unchanged and the caveat rides on `ADD_LIST_DEGRADED_LINE`
-> beside it. The seeded arm states its narrowing POSITIVELY ("only the packs it
-> already holds apply") and never names the catalog at all: a comparative is
-> still an absolute the contract cannot keep, because `recorded ∪ data` may equal
-> the whole catalog.
+> but it DOES change what the count line may claim: it gets the state-neutral
+> line ("…holds no packs. Saving pins the set."), because `catalog_ok: false`
+> means the registry came back empty, so "the full catalog applies" would be a
+> claim about a catalog nobody could read — and that line's only render site
+> (the Settings home) has no add-list, so `ADD_LIST_DEGRADED_LINE` is NOT beside
+> it. The modal note stays resolution-keyed, because there the degraded caveat
+> does render.
 > `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
 > zero records (a tombstone counts; the catalog arm of `available` does not).
 > ⚠️ The predicate derives the record set from the two lists the payload carries
 > rather than from the resolved set itself, so it cannot see a tombstone the
-> catalog arm offers as `available` instead of `removed`. That shape is
-> unreachable TODAY and only by one writer: `get_tenant_packs` self-heals with
-> `active` records, `_apply_import_pack_config` and `upsert_tenant_manifest`
-> activate, `set_graph_packs` writes the marker — and the only writer that sets
-> `removed` without moving the marker, `pack_manifest_store.delete_tenant_manifest`,
-> has no caller and no route. If that function is ever bound to a delete surface,
-> the predicate silently mis-renders as the union; the exact fix then is to
-> surface the record count (or `namespaces is None` itself) on the payload.
+> catalog arm offers as `available` instead of `removed`. **That shape is
+> reachable today, and a REBUILD produces it:** `:PackSelection` is not enrolled
+> in the projection's `_config_classes()`, so `rebuild_all` keeps the
+> tombstoned `:PackInstall` row and drops the marker. Measured — before
+> `configured: true, revision: 1`; after `configured: false, revision: 0` with a
+> `removed` row, which reads as the catalog union while the resolved set is that
+> one removed namespace. The same marker loss silently RE-ADMITS a pack an admin
+> removed and resets `revision`. The durable fix is to enrol
+> `PACK_SELECTION_LABEL` as a config class (which fixes both the predicate and
+> the re-admission — #9752); surfacing the record count — or `namespaces is None` itself
+> — on the payload would make the client exact in the meantime. Separately,
+> `pack_manifest_store.delete_tenant_manifest` sets `removed` without moving the
+> marker and has no caller or route today — latent, and the same enrolment
+> covers it.
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 
