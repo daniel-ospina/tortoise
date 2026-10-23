@@ -849,11 +849,15 @@ _PACK_TRIGGERS = {
     # so this is a recorded choice, not an omission.
     #
     # THE INVARIANT, made mechanical by that test: an entry is this namespace's
-    # own name, or an `investment `-prefixed phrase (space OR hyphen —
-    # "investment-grade" is safe and `investment-grade` in prose cannot ride
-    # inside another word). Nothing else reaches this row — a per-phrase
-    # judgement call is exactly how a substring collision survives review (the
-    # first draft of this fix removed five and kept five of the same class).
+    # own name, or an `investment `-prefixed phrase (space form only). Nothing
+    # else reaches this row — a per-phrase judgement call is exactly how a
+    # substring collision survives review (the first draft of this fix removed
+    # five and kept five of the same class). A HYPHEN form is deliberately NOT
+    # admitted: measured, `investment-grade` in the row selects `portfolio:*`
+    # alone on "sub-investment-grade bonds widened the spread" and on
+    # "non-investment-grade credits were sold" — the same strip this row exists
+    # to prevent. If the manifest ever declares an `investment-*` compound, it
+    # belongs in `NON_TRIGGER_SYNONYMS` with that measurement.
     #
     # THE COST, stated accurately rather than waved away. `_select_pack_kinds`
     # falls back to ALL packs only when NOTHING matched in ANY namespace — and

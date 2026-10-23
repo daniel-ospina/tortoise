@@ -538,15 +538,17 @@ customer-facing territory that owns per-graph permissions.
 > reader could mistake for the enforced set, and it is omitted in the
 > record-less arm rather than printed as a structurally-0 "0 active packs"
 > beside the catalog claim.
-> A catalog that could not be READ (`catalog_ok: false`) does NOT change which
-> set applies — the flag reports the add-list's enumeration, not the resolution —
-> but it DOES change what the count line may claim: it gets the state-neutral
-> line ("…holds no packs. Saving pins the set."), because `catalog_ok: false`
-> means the registry came back empty, so "the full catalog applies" would be a
-> claim about a catalog nobody could read — and that line's only render site
-> (the Settings home) has no add-list, so `ADD_LIST_DEGRADED_LINE` is NOT beside
-> it. The modal note stays resolution-keyed, because there the degraded caveat
-> does render.
+> A catalog that could not be READ (`catalog_ok: false`) changes NOTHING about
+> this line, and that is deliberate. The resolution is derived from the RECORDS
+> and the marker (`resolved_pack_set`), never from the catalog read —
+> `_packs_payload` reads `resolved` first and `catalog_ok` from a separate
+> `_pack_catalog_rows()` — so the union is the union whether or not the catalog
+> could be enumerated. The degraded fact is about the ADD-LIST's enumeration, and
+> it surfaces there (`ADD_LIST_DEGRADED_LINE`, in the modal beside that list).
+> Suppressing a TRUE sentence on the home — which renders no degraded signal at
+> all — would leave a user concluding that no pack applies, which is the inverse
+> of the surprise #9691 exists to remove. `packs.test.js` pins the
+> state-independence directly.
 > `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
 > zero records (a tombstone counts; the catalog arm of `available` does not).
 > ⚠️ The predicate derives the record set from the two lists the payload carries
@@ -558,12 +560,16 @@ customer-facing territory that owns per-graph permissions.
 > `configured: true, revision: 1`; after `configured: false, revision: 0` with a
 > `removed` row, which reads as the catalog union while the resolved set is that
 > one removed namespace. The same marker loss silently RE-ADMITS a pack an admin
-> removed and resets `revision`. The durable fix is to enrol
-> `PACK_SELECTION_LABEL` as a config class (which fixes both the predicate and
-> the re-admission — #9752); surfacing the record count — or `namespaces is None` itself
-> — on the payload would make the client exact in the meantime. Separately,
+> removed and resets `revision`. Preserving the marker fixes both — #9752 — and
+> the SHAPE of that fix matters: `:PackSelection` is ONE node per graph with no
+> identity property, so it is a SECTION like `:TeamMeta`, NOT a
+> `_config_classes()` row. The registry keys on a single string identity property
+> and `_capture_config_snapshot` silently skips a class whose identity value is
+> not a string, so "enrol it as a config class" would capture nothing and leave
+> both defects in place. Surfacing the record count — or `namespaces is None`
+> itself — on the payload would make the client exact in the meantime. Separately,
 > `pack_manifest_store.delete_tenant_manifest` sets `removed` without moving the
-> marker and has no caller or route today — latent, and the same enrolment
+> marker and has no caller or route today — latent, and the same preservation
 > covers it.
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)

@@ -441,9 +441,10 @@ class TestClashRules:
     #:
     #: The row's own invariant (asserted in `test_compact_mode_can_gate_the_
     #: namespace_by_story`) is: an entry is the namespace name, or it STARTS
-    #: WITH `investment ` / `investment-` (the prefix, not a bare containment —
-    #: a bare `investment` collides in "the investment of effort"). Every ENGLISH
-    #: exclusion below fails that invariant for a
+    #: WITH `investment ` (the SPACE prefix, not a bare containment and not the
+    #: hyphen form — a bare `investment` collides in "the investment of effort",
+    #: and `investment-grade` collides in "sub-investment-grade bonds"). Every
+    #: ENGLISH exclusion below fails that invariant for a
     #: measured reason — each was run through the REAL `_select_pack_kinds`
     #: against the real catalog and selected `portfolio:*` on ordinary prose,
     #: dropping the other packs. `peso alvo` is excluded for a different reason
@@ -536,15 +537,15 @@ class TestClashRules:
 
         # THE INVARIANT, mechanically: a substring match over a phrase this
         # generic cannot be trusted to a judgement call, so an entry is the
-        # namespace's own name or an `investment`-PREFIXED phrase (space or
-        # hyphen). The prefix matters: a bare "investment" would satisfy a naked
+        # namespace's own name or an `investment `-prefixed phrase (SPACE form
+        # only). The prefix matters: a bare "investment" would satisfy a naked
         # containment test while colliding in "the investment of effort" and
-        # "disinvestment of the plant", and the HYPHEN form is included because
-        # `investment-grade` in prose can never ride inside another word.
+        # "disinvestment of the plant". The HYPHEN form is NOT admitted —
+        # measured, `investment-grade` selects `portfolio:*` alone on
+        # "sub-investment-grade bonds widened the spread".
         row = _PACK_TRIGGERS[f"{NS}:"]
-        prefixes = ("investment ", "investment-")
-        assert all(t == NS or t.startswith(prefixes) for t in row), [
-            t for t in row if not (t == NS or t.startswith(prefixes))]
+        assert all(t == NS or t.startswith("investment ") for t in row), [
+            t for t in row if not (t == NS or t.startswith("investment "))]
 
         # The REAL catalogue, so a sibling namespace collision (agent-ops's
         # "policy") is visible: a four-entry fixture hides exactly the failure

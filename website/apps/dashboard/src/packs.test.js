@@ -282,14 +282,12 @@ test('packCountLine: counts active, shows the off count, and names the unconfigu
   assert.match(union, /full catalog applies/)
   assert.match(union, /Saving pins the set/, 'the arm where a save changes most must say so')
   assert.doesNotMatch(union, /active pack/, 'no count where the count is structurally zero')
-  // `catalog_ok` reports the ADD-LIST read, not the resolution — but the count
-  // line renders where no add-list does, so the degraded state must drop the
-  // catalog claim itself. The claim is TRUE when the catalog is readable (this
-  // arm is the union) and unfounded when it is not.
-  const degraded = packCountLine({ configured: false, packs: [], catalog_ok: false })
-  assert.doesNotMatch(degraded, /catalog/, 'no catalog claim without a readable catalog')
-  assert.match(degraded, /holds no packs/)
-  assert.match(degraded, /Saving pins the set/)
+  // `catalog_ok` is the ADD-LIST read, not the resolution: the SAME sentence
+  // must render either way (the union is derived from records + marker), and
+  // the degraded caveat belongs to `ADD_LIST_DEGRADED_LINE` where that list
+  // renders. Withholding it here would leave the home claiming nothing while
+  // the modal one click away says the catalog applies.
+  assert.equal(packCountLine({ configured: false, packs: [], catalog_ok: false }), union)
   // …and the STARTER-SEEDED default graph — `configured: false` WITH five
   // records — must not claim it. `resolved_pack_set` is `recorded ∪ data` in
   // that arm, so `venture` is not in the set; the old line asserted the catalog

@@ -106,13 +106,16 @@ function asAvailable(body) {
 // ⚠ ONE shape is not covered: a CATALOG-shipped tombstone, which the catalog
 // arm offers as `available` with `status: 'available'` (never `removed`), so it
 // counts as zero records. It is NOT unreachable: `:PackSelection` is missing
-// from the projection's `_config_classes()`, so a `rebuild_all` KEEPS the
-// tombstoned `:PackInstall` row and DROPS the marker — measured: before
+// from the projection's config capture, so a `rebuild_all` KEEPS the tombstoned
+// `:PackInstall` row and DROPS the marker — measured: before
 // `configured:true, revision:1`, after `configured:false, revision:0` with a
 // `removed` row, which reads here as the catalog union. (The other unwired
 // writer, `pack_manifest_store.delete_tenant_manifest`, has no caller — that
-// half is latent.) Enrolling the marker as a config class fixes both this
-// predicate and the silent re-admission; tracked in #9752.
+// half is latent.) Preserving the marker fixes both this predicate and the
+// silent re-admission; #9752 carries it, and `:TeamMeta` is the precedent for
+// the shape that fix must take (a SECTION, not a `_config_classes()` row: the
+// registry keys on a single string identity property and `:PackSelection` has
+// none — it is one node per graph by construction).
 export function packRecordCount(body) {
   return asRows(body).length
     + asAvailable(body).filter((p) => p && p.status === 'removed').length
@@ -295,15 +298,15 @@ export function packCountLine(body) {
   // "the full catalog applies" — the same self-contradiction in a new shape,
   // so this arm reports no count at all.
   if (usesCatalogUnion(body)) {
-    // `catalog_ok: false` means the catalog could not be READ, and on that path
-    // the registry is empty, so "the full catalog applies" is a claim about a
-    // catalog nobody could read. It must be dropped HERE rather than left to
-    // `ADD_LIST_DEGRADED_LINE`: this function's only render site is the Settings
-    // home (main.jsx:1077), which has no add-list, so no caveat would sit beside
-    // it. The neutral sentence is true in both states.
-    if (body.catalog_ok === false) {
-      return 'Not configured yet \u2014 this graph holds no packs. Saving pins the set.'
-    }
+    // `catalog_ok` deliberately does NOT branch this sentence — the resolution
+    // is derived from the RECORDS and the marker (`resolved_pack_set`), never
+    // from the catalog read, so the union is the union whether or not the
+    // catalog could be enumerated. `_packs_payload` reads them separately:
+    // `resolved` first, `catalog_ok` from `_pack_catalog_rows()`. The degraded
+    // fact is about the ADD-LIST's enumeration, and it surfaces there
+    // (`ADD_LIST_DEGRADED_LINE`), in the same modal where that list renders.
+    // Withholding a true sentence from the home, where no degraded signal
+    // exists, would leave a user reasoning that no pack applies.
     return 'Not configured yet \u2014 this graph holds no packs, so the full catalog applies. Saving pins the set.'
   }
   return `Not configured yet \u2014 this graph uses the packs it already holds (${line}). Saving pins the set.`
