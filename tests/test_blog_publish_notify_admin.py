@@ -271,6 +271,19 @@ def test_v2e_the_row_select_actually_asks_for_the_hold_column():
     )
 
 
+def test_v2g_archived_is_not_live():
+    """Archived is terminal and never public. Without a case here, relaxing the
+    guard to `status !== "draft"` leaves the suite green while a terminal row's
+    URL is submitted."""
+    out = _run({
+        "row": {"slug": "agent-memory", "status": "archived"},
+        "body": {"slug": "agent-memory"},
+    })
+    assert out["status"] == 409
+    assert out["body"]["error"] == "not_live"
+    assert out["submissions"] == []
+
+
 def test_v2b_unknown_slug_is_404_and_never_submitted():
     out = _run({"row": None, "body": {"slug": "nope"}})
     assert out["status"] == 404

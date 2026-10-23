@@ -530,24 +530,19 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   }
   if (updated.length === 0) return err(409, "archived", "post was archived concurrently");
 
-  // #9680: IndexNow — submit the canonical URL when, and only when, THIS patch is
-  // the draft→published transition. The transition predicate IS the trigger: an
-  // edit that leaves the post published (both sides published), a draft write and
-  // an unpublish all fail it and submit nothing. The once-per-24h window that
-  // covers publish → unpublish → re-publish the same day lives in
-  // notifyPublished, backed by blog_posts.indexnow_submitted_at.
+  // #9680 + #9803: IndexNow — submit the canonical URL when THIS patch makes the
+  // row publicly readable, and only then. Two arms, one predicate (`becameLive`):
+  // a `status` transition to `published`, and a hold clear on a row that is
+  // already `published` (the status is unchanged but the URL stops answering 404 —
+  // reachable through the console's drafts-queue Publish, which publishes an
+  // agent's held draft without clearing the hold). Everything else submits
+  // nothing: a draft write, an unpublish, an edit that leaves a live row live.
+  // The once-per-24h window that covers publish → unpublish → re-publish the same
+  // day lives in notifyPublished, backed by blog_posts.indexnow_submitted_at.
   //
   // waitUntil, so the response does not wait on the vendor: the post is live
   // either way, a submission failure must not fail the publish, and there is no
   // retry in this path — the failure is logged with its status instead.
-  // BECAME LIVE, not "result is published". Clearing the hold on an
-  // ALREADY-published row changes no status but makes the URL stop 404ing, so it
-  // is a publish transition too — the same defect #9803 fixed on the console side
-  // (`clearHoldPost`), reachable here through the drafts-queue Publish, which
-  // publishes an agent's held draft without clearing the hold. Deliberately
-  // narrow: an edit that leaves a live post live (`status unchanged`,
-  // `hold_for_review` untouched) still submits nothing, as the window note above
-  // promises.
   const becameLive =
     resultStatus === "published" &&
     (post.status !== "published" ||
