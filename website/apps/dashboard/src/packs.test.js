@@ -26,6 +26,7 @@ import {
   kindCountLabel,
   packCountLine,
   packErrorState,
+  packRecordCount,
   packRows,
   packSaveBody,
   removeFromDraft,
@@ -33,9 +34,16 @@ import {
   selectorGraphs,
   sourceLabel,
   toggleDraftStatus,
+  unconfiguredConsequence,
+  usesCatalogUnion,
 } from './packs.js'
 
 const SRC = dirname(fileURLToPath(import.meta.url))
+
+// The five namespaces a hosted graph is seeded with at provisioning
+// (`DEFAULT_STARTER_PACKS`, #318). `venture` ships in the catalog and is
+// deliberately NOT installed — the measured `catalog - resolved` difference.
+const STARTERS = ['agent-ops', 'dev', 'marketing', 'pm', 'product-strategy']
 
 const ROW = (ns, status = 'active', extra = {}) => ({
   namespace: ns,
@@ -265,11 +273,62 @@ test('addablePacks: the read-only form is the draft form of the server set', () 
 test('packCountLine: counts active, shows the off count, and names the unconfigured caveat', () => {
   assert.equal(packCountLine(BODY()), '1 active pack · 1 off.')
   assert.equal(packCountLine({ configured: true, packs: [] }), '0 active packs.')
-  // FAIL-ON: an unconfigured graph resolves to the catalog union. A count line
-  // that read "5 active packs" would describe a state the graph does not have.
-  const un = packCountLine({ configured: false, packs: [ROW('dev')] })
-  assert.match(un, /Not configured yet/)
-  assert.match(un, /full catalog applies/)
+  // FAIL-ON (#9691): "unconfigured" is not one state. Only a RECORD-LESS graph
+  // resolves to the catalog union (#2714 indicator 3), so only that arm may say
+  // the catalog applies; it is also the arm where a count would be a
+  // structurally-0 "0 active packs" beside "the full catalog applies".
+  const union = packCountLine({ configured: false, packs: [] })
+  assert.match(union, /Not configured yet/)
+  assert.match(union, /full catalog applies/)
+  assert.doesNotMatch(union, /active pack/, 'no count where the count is structurally zero')
+  // …and the STARTER-SEEDED default graph — `configured: false` WITH five
+  // records — must not claim it. `resolved_pack_set` is `recorded ∪ data` in
+  // that arm, so `venture` is not in the set; the old line asserted the catalog
+  // applied while naming five active packs in the same sentence.
+  const seeded = packCountLine({ configured: false, packs: STARTERS.map((ns) => ROW(ns)) })
+  assert.doesNotMatch(seeded, /full (pack )?catalog/,
+    'five records narrow the set — the catalog does not apply')
+  assert.match(seeded, /uses the packs it already holds/)
+  assert.match(seeded, /5 active packs/)
+  assert.match(seeded, /Saving pins the set/)
+  // A TOMBSTONE is a record too. `packs` omits it (removal means absent from
+  // the list), so `available[].status === 'removed'` is the payload's only
+  // evidence it exists — and without a marker it still resolves into the set.
+  const tombstoned = packCountLine({
+    configured: false,
+    packs: [],
+    available: [{ namespace: 'dev', status: 'removed' }],
+  })
+  assert.equal(packRecordCount({ configured: false, packs: [], available: [{ status: 'removed' }] }), 1)
+  assert.doesNotMatch(tombstoned, /full (pack )?catalog/)
+  assert.match(tombstoned, /uses the packs it already holds/)
+})
+
+test('usesCatalogUnion: the RECORDS decide, never `configured` alone', () => {
+  assert.equal(usesCatalogUnion({ configured: false, packs: [] }), true)
+  assert.equal(usesCatalogUnion({ configured: false, packs: STARTERS.map((ns) => ROW(ns)) }), false)
+  assert.equal(usesCatalogUnion({ configured: false, packs: [], available: [{ status: 'removed' }] }), false)
+  // A configured graph is never the union: the marker already pinned the set,
+  // including the deliberate EMPTY one (`frozenset()` with `configured: true`).
+  assert.equal(usesCatalogUnion({ configured: true, packs: [] }), false)
+  assert.equal(usesCatalogUnion({ configured: true, packs: [ROW('dev')] }), false)
+  assert.equal(usesCatalogUnion(undefined), false)
+  // The catalog arm of `available` is NOT a record — every unconfigured payload
+  // carries it, so counting it would make the union arm unreachable.
+  assert.equal(packRecordCount({ configured: false, packs: [], available: [{ status: 'available' }] }), 0)
+})
+
+test('unconfiguredConsequence: the modal note is selected by the resolved set', () => {
+  assert.equal(unconfiguredConsequence({ configured: false, packs: [] }),
+    PACK_CONSEQUENCE.unconfigured)
+  assert.equal(unconfiguredConsequence({ configured: false, packs: STARTERS.map((ns) => ROW(ns)) }),
+    PACK_CONSEQUENCE.unconfiguredHolding)
+  // FAIL-ON: the seeded arm must not carry the catalog sentence at all.
+  assert.doesNotMatch(PACK_CONSEQUENCE.unconfiguredHolding, /full pack catalog/)
+  assert.match(PACK_CONSEQUENCE.unconfiguredHolding, /packs it already holds/)
+  // Both keep the promise that a SAVE is what pins the graph.
+  assert.match(PACK_CONSEQUENCE.unconfigured, /pins this graph to the set you save/)
+  assert.match(PACK_CONSEQUENCE.unconfiguredHolding, /pins this graph to the set you save/)
 })
 
 test('selectorGraphs: DEFAULT graph first, then by name', () => {
@@ -385,7 +444,7 @@ test('revisionMovedAfterSave: an out-of-band write is surfaced, not swallowed', 
 })
 
 test('consequence copy: one vocabulary, each verb names what happens to existing data', () => {
-  for (const k of ['enable', 'disable', 'remove', 'add', 'unconfigured']) {
+  for (const k of ['enable', 'disable', 'remove', 'add', 'unconfigured', 'unconfiguredHolding']) {
     assert.equal(typeof PACK_CONSEQUENCE[k], 'string', `${k} consequence copy`)
     assert.ok(PACK_CONSEQUENCE[k].length > 20, `${k} copy must be a real sentence`)
   }

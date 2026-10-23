@@ -423,11 +423,22 @@ unreachable before #2728.
 extraction-off; `removed` = a tombstone — absent from the introspection list,
 kept for audit. **Removal is expressed by omitting the namespace from the
 desired set**, never by a status the caller sends.
-- **Resolution contract** (`pack_state.resolved_pack_set`): no marker → the
-catalog union (the back-compat fallback — every pre-#318, self-hosted and
-restored graph, #2714 indicator 3); marker present → the `active` records **∪**
-the namespaces already in the graph's data. The data leg is what keeps
-historical points writable after a pack is disabled.
+- **Resolution contract** (`pack_state.resolved_pack_set`) — THREE arms, and
+  only the first is the catalog union:
+  - no marker **and no `:PackInstall` records** → the catalog union (the
+    back-compat fallback — every pre-#318, self-hosted and restored graph,
+    #2714 indicator 3);
+  - no marker **but records present** → `recorded(any status)` ∪ the namespaces
+    in the graph's data. This is the arm a **hosted default graph** lands in:
+    provisioning seeds the starter set (#318), so the graph is
+    `configured: false` and already NARROWED — a catalog pack that exists but is
+    not installed is not in the set (#9691);
+  - marker present → the `active` records **∪** the namespaces already in the
+    graph's data, `configured: true`. The data leg is what keeps historical
+    points writable after a pack is disabled.
+
+So `configured: false` is **not** a synonym for "the whole catalog applies" —
+the RECORDS are the predicate. Read it as "never explicitly configured".
 - **`set_graph_packs` is the only path that moves the revision.** Every seeding
 path (`get_tenant_packs`'s self-heal *and* `ensure_tenant_packs` — the
 provision retry, the Supabase control plane, and
@@ -500,11 +511,18 @@ customer-facing territory that owns per-graph permissions.
 > `src/packs.js` holds the status grouping, the add-list diff, the PUT body and
 > the per-failure classification, so the surface cannot drift from the route's
 > semantics (the server's `removed` is never sent as an input status — omission
-> is what removes). `configured: false` is stated in words, with the resolved
-> set's count qualified in parentheses beside them, because such a graph still
-> resolves to the whole catalog: "Not configured yet — the full catalog applies
-> (2 active packs · 1 off)" — the count describes the rows the payload carries,
-> never a bare number a reader could mistake for the enforced set.
+> is what removes). `configured: false` is stated in words, and WHICH words
+> depend on the **records**, never on the flag alone (#9691): only the
+> record-less graph resolves to the whole catalog, so only it is told so — "Not
+> configured yet — this graph holds no packs, so the full catalog applies." The
+> arm every starter-seeded default graph is in gets the other sentence — "Not
+> configured yet — this graph uses the packs it already holds (2 active packs ·
+> 1 off). Saving pins the set." The count in parentheses describes the rows the
+> payload carries, never a bare number a reader could mistake for the enforced
+> set, and it is omitted in the record-less arm rather than printed as a
+> structurally-0 "0 active packs" beside the catalog claim.
+> `packs.js::usesCatalogUnion` is that predicate — `configured: false` **and**
+> zero records (a tombstone counts; the catalog arm of `available` does not).
 
 ### The write-gate closure — which writes are gated, and which are not (#5475/#9068)
 
