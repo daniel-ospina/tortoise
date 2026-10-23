@@ -18133,6 +18133,17 @@ class TortoiseSDK:
         ``reify: true`` as an escape from a promotion that needed no anchor
         (#8623's residual class, #9173).
 
+        ⛔ CONSEQUENCE, stated so a future reader is not misled: after #9173 the
+        legs below that key on a **bundle-local point item** (the dedup-hit
+        guard and the by-name/declared-status point arms) are unreachable BY
+        CONSTRUCTION — a `points` ref makes the pair Point-bearing, so its
+        effective route is always ``operator``. They are retained, not deleted:
+        each is a prediction about ``create_direct_edge``, and narrowing the
+        endpoint-kind gate (#8499) is the only change that would make them live
+        again. The ENTITY legs are still reachable (an Object/Subject/Event pair
+        keeps the direct route), and that is what the direct-edge terminal
+        guard now governs.
+
         #7925: the label set is the SAME on the operator route
         (reify/mitigation/part-whole → create_operator) and the direct route,
         because #7902 widened BOTH write primitives to
@@ -18630,6 +18641,11 @@ class TortoiseSDK:
                                        f"are rejected (#2422)",
                         })
         # Bundle-local dedup-hit terminal guard (cycle-17/18) — Phase-1 ONLY.
+        # (#9173) Unreachable for bundle-local POINT refs: a `points` ref makes
+        # the pair Point-bearing, so `route` above is now the EFFECTIVE route
+        # (always 'operator' for such a pair) and this leg's `route != "direct"`
+        # guard skips it. Kept as the prediction of `create_direct_edge` it was
+        # written as — see `_check_endpoints`' docstring.
         for i, conn, route, vals in conns:  # noqa: B007
             if route != "direct":
                 continue

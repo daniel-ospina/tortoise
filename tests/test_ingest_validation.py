@@ -359,8 +359,6 @@ class TestPhase1Phase2Parity:
     def test_endpoint_classes_need_pre_seeded_graph(self, sdk):
         existing = sdk.create_point("statement", "pre-existing point",  # noqa: F841
                                     status="live")
-        terminal = sdk.create_point("statement", "terminal point",
-                                    status="superseded")
         src = sdk.create_source("https://pre.example/s1", "report")
         src_url = src.get("url") or src.get("id")
         # #9173: the two terminal legs below are spelled with OBJECTS. A plain
