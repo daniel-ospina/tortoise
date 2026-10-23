@@ -1312,6 +1312,134 @@ class TestCapabilityModel:
             "NON_SDK_READ_OPERATIONS entry 'get_tenant_packs' has no tool binding" in v
             for v in declared_set_violations(without))
 
+    def test_a_non_read_row_never_claims_read_only_in_its_description(self):
+        """#9575: the description is the OTHER string an agent reads before calling.
+
+        A tool that is not a read may not advertise itself as read-only.
+        `tortoise_packs_list` fronts `get_tenant_packs`, whose
+        `ensure_tenant_packs` MERGEs a missing starter `:PackInstall` activation.
+        PR #9573 (#4122) fixed that entry's HINT channel for exactly that reason
+        (it no longer declares `readOnlyHint: true`) but deliberately left the
+        description asserting "Read-only;" (#9575).  A hint a client
+        auto-approves on and the prose an agent reads must agree about whether the
+        call can write — and since #9573 landed, BOTH halves are checkable here:
+        the hint is `risk == read`, so the prose is held to the same axis.
+
+        The offender set is keyed on `risk != "read"` — the axis #9575's
+        acceptance clause names ("no entry whose `risk` is not `read` carries a
+        'Read-only;' claim in its description") — NOT on a derivation
+        (`writes or in READ_THROUGH_WRITE_METHODS`).  A derivation-keyed filter has
+        a real hole: post-#9573 the only class that is `risk != read` AND
+        `writes == False` is `maintenance`, and nothing pins
+        `maintenance ⊆ READ_THROUGH_WRITE_METHODS`, so a NEW `maintenance` row
+        outside both declared dicts would be skipped and could carry
+        "Read-only;" with every gate green (the exact defect #9575 exists to
+        prevent).  A probe row below pins that hole shut.
+
+        The declaration-derived set is still computed and asserted, but as a
+        COVERAGE cross-check rather than as the predicate: every declared
+        read-through writer must still resolve to a live tool (so a read-through
+        writer that gains a tool without a derivable binding fails loudly instead
+        of silently dropping out — `declared_set_violations` skips an op whose
+        binding is absent, which is how the #4035 shape disappears), and it must
+        land in the `risk != read` set.
+
+        Mutation: restore "Read-only;" to `tortoise_packs_list` and this goes red.
+        """
+        import re
+        from types import SimpleNamespace
+
+        import tool_surface_capabilities as tsc
+        from tool_surface_capabilities import served_registry
+
+        # A read-only CLAIM.  Negation-aware: `tortoise_get_source_reliability`
+        # says "so not read-only", which is the opposite claim.  There is
+        # deliberately NO attributive exemption (the form "a read-only key" is
+        # used only in docs and comments, never in a registry description), because
+        # a lookahead would exempt the whole occurrence — "safe for a read-only
+        # client" describes the TOOL and must be caught.  If a future row genuinely
+        # needs one, record it in a ledger with its exact phrasing, the way
+        # `tool_surface_capabilities.READ_THROUGH_WRITE_METHODS` records its
+        # decisions, rather than widening this pattern.
+        claim = re.compile(r"(?<!not )(?<!never )read[\s\-]?only", re.IGNORECASE)
+
+        def offenders_in(rows: dict) -> list[str]:
+            """Every non-read row whose description claims read-only (#9575)."""
+            return sorted(
+                f"{name}: {claim.search(e.description).group(0)!r} in a "
+                f"risk={e.risk!r} row"
+                for name, e in rows.items()
+                if e.risk != "read" and claim.search(e.description)
+            )
+
+        entries = {e.name: e for e in served_registry()}
+        by_method = {e.sdk_method: e.name for e in entries.values() if e.sdk_method}
+        unbound = set(tsc.READ_THROUGH_WRITE_METHODS) - set(by_method) - set(
+            tsc.NON_SDK_READ_BINDINGS)
+        assert unbound == set(), (
+            "a read-through writer has NO derivable tool binding, so the coverage "
+            f"cross-check below would silently skip it: {sorted(unbound)}")
+        self_heal_writers = {
+            by_method[method]
+            for method in tsc.READ_THROUGH_WRITE_METHODS
+            if method in by_method
+        } | {
+            tool
+            for operation, tool in tsc.NON_SDK_READ_BINDINGS.items()
+            if operation in tsc.READ_THROUGH_WRITE_METHODS
+        }
+
+        # Coverage cross-check: the declaration is live, and every declared
+        # read-through writer is in the risk-keyed set the predicate uses — so the
+        # two derivations cannot drift apart without this failing.
+        assert self_heal_writers <= set(entries), (
+            f"a declared read-through writer binds no live tool: "
+            f"{sorted(self_heal_writers - set(entries))}")
+        assert "tortoise_packs_list" in self_heal_writers
+        assert "tortoise_compute_confidence" in self_heal_writers
+        assert self_heal_writers <= {
+            name for name, e in entries.items() if e.risk != "read"}, (
+            "a declared read-through writer is classified as a READ, so the prose "
+            "lint would skip it: "
+            + str(sorted(n for n in self_heal_writers
+                         if entries[n].risk == "read")))
+
+        # Non-vacuous: the risk-keyed set is live and names the #4122/#9575 row.
+        assert "tortoise_packs_list" in {
+            name for name, e in entries.items() if e.risk != "read"}
+
+        # The predicate itself is falsifiable in both directions.
+        assert claim.search("Read-only; empty result when nothing is installed")
+        assert not claim.search("a write-through projection, so not read-only")
+        # ... and a claim about the TOOL is caught even when a client noun follows.
+        assert claim.search("safe for a read-only client — it refreshes a cache")
+
+        # ... and it is keyed on `risk`, not on a derivable writer set: a
+        # `maintenance` row that is in NEITHER declared dict (`writes=False`, no
+        # derivable binding) is still caught — the hole a derivation-keyed filter
+        # leaves open.
+        probe = dict(entries)
+        probe["tortoise_probe_maintenance"] = SimpleNamespace(
+            name="tortoise_probe_maintenance", risk="maintenance", writes=False,
+            description="Read-only; synthetic probe, declared in no ledger.")
+        assert not probe["tortoise_probe_maintenance"].writes
+        assert "tortoise_probe_maintenance" not in self_heal_writers
+        assert offenders_in(probe) == [
+            "tortoise_probe_maintenance: 'Read-only' in a risk='maintenance' row"]
+        # ... while a genuine READ row claiming read-only is not an offender.
+        probe["tortoise_probe_read"] = SimpleNamespace(
+            name="tortoise_probe_read", risk="read", writes=False,
+            description="Read-only; a pure read is allowed to say so.")
+        assert offenders_in(probe) == [
+            "tortoise_probe_maintenance: 'Read-only' in a risk='maintenance' row"]
+
+        offenders = offenders_in(entries)
+        assert offenders == [], (
+            "an entry whose `risk` is not `read` advertises itself as read-only — an "
+            "agent that reads the description (not the hint) will call it expecting "
+            "no writes:\n  "
+            + "\n  ".join(offenders))
+
     def test_read_through_non_sdk_op_is_not_a_resolution_exemption(self):
         """#4035 review (P1 consequence 2): `get_tenant_packs` must NOT stay in
         DANGLING_SDK_DECLARATIONS.  Its only declaration was blanked, so keeping

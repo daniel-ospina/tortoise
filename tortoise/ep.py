@@ -94,6 +94,55 @@ _EP_GUARD_MIN_GRAPH_CLAIMS = 500
 _EP_ANCHOR_BARRIER = "WITH * "
 
 
+def _non_operator(var: str) -> str:
+    """The absence-or-false non-operator predicate for a Cypher variable.
+
+    #9269: an operator-shaped node is not a CLAIM. EP's factor-INPUT arms (the
+    ``(o)-[:IMPL|NAND]->(c)`` selection and the two operator-mediated
+    affected-set hops) used to carry NO non-operator filter, so a node with
+    ``is_operator = true`` — or any out-of-contract spelling the calibration
+    gate's identical predicate does not match, e.g. the STRING ``'false'`` —
+    was consumed as a factor input and STAMPED with a posterior while the
+    #9063 gate saw nothing to demand a prior of (the #7478 class: an
+    uncalibrated EP run stamping a belief).
+
+    The form is ABSENCE-OR-FALSE, deliberately, and it is the SAME predicate
+    the gate's universe uses (``sdk._uncalibrated_ep_participants``), so the
+    two cannot disagree about who participates:
+
+    * ``is_operator`` ABSENT — a legacy plain Point (#3139/#3154) is a CLAIM
+      and stays admitted.
+    * ``is_operator = false`` — the modern plain Point AND the hybrid
+      ``create_point(op_type=...)`` shape (``is_operator = false`` WITH
+      ``op_type``) are CLAIMS and stay admitted. Adding an ``op_type IS NULL``
+      conjunct here (as the direct-edge arms carry) would exclude the hybrid
+      and REMOVE coverage the audit already had — a fail-open, the one
+      direction this filter must never move.
+    * ``is_operator = true`` — an operator. Excluded.
+    * any other value (the string ``'false'``, a numeric ``1``) — outside
+      ``is_operator = true`` AND unequal to the boolean ``false``, so it was
+      consumed but never demanded. Excluded here for the same reason: the
+      gate's predicate does not match it, so admitting it is a stamp with no
+      prior.
+
+    ⛔ WHERE IT APPLIES, precisely: the OPERATOR-MEDIATED selections — the two
+    operator-input arms of ``_affected_claims``, ``_live_neighbors_many`` and
+    ``_affected_factors`` Batch 2. The operator-less DIRECT-EDGE arms keep their
+    own, STRICTER spelling (``_non_op`` in ``_affected_factors`` Batch 3, plus the
+    inline copies in the direct-edge hops): this predicate AND ``op_type IS
+    NULL``, because a direct IMPL/NAND edge is a factor between two PLAIN points
+    (#888 W5) and a hybrid is not one. The two are deliberately NOT unified, and
+    that is also why the gate still DEMANDS a prior of the hybrid the direct-edge
+    arms exclude — see ``sdk._uncalibrated_ep_participants``.
+
+    Cypher-side at the AFFECTED-SET arms (a hop returns only ids, so there is no
+    information to lose), and deliberately NOT at Batch 2: that arm must SEE an
+    operator-shaped input to know an idx-0 SOURCE was stripped, or the first
+    surviving target gets renumbered into the source slot — see Batch 2's note.
+    """
+    return f"({var}.is_operator IS NULL OR {var}.is_operator = false)"
+
+
 try:  # redis-py is a hard dependency of the graph lane; guard anyway (#6211)
     from redis.exceptions import RedisError as _RedisError
     from redis.exceptions import ResponseError as _ResponseError
@@ -1182,13 +1231,45 @@ class TortoiseEP:
         otherwise `_update_claim_posterior` would recompute that node from
         empty natural parameters as `Beta(1,1)` and discard its persisted
         prior. This is the neutral-link rule (#5025, ONTOLOGY §3.9/§8).
+        #9269: an OPERATOR-SHAPED node is not a claim, so every
+        operator-mediated arm applies `_non_operator` to the far endpoint — the
+        same absence-or-false predicate the #9063 calibration gate's universe
+        uses. Without it, `is_operator = true` (and any out-of-contract
+        spelling such as the string `'false'`) was admitted, consumed as a
+        factor input and STAMPED with a posterior while the gate saw nothing to
+        demand a prior of (the #7478 class). The filter is absence-or-false,
+        NOT `op_type IS NULL`: the hybrid `op_type` shape and the legacy
+        property-absent Point are claims and stay admitted. The operator-less
+        DIRECT-EDGE arms are deliberately not unified with it — see
+        `_non_operator`.
         KNOWN EXCEPTION, not fixed here: a factor with fewer than 2
         PARTICIPATING inputs (draft/terminal inputs are stripped before
         `_update_factor`, and a unidirectional operator whose source was
         stripped is skipped entirely) no-ops, so an admitted input can still
         reach `_update_claim_posterior` with no message and be recomputed as
         `Beta(1,1)` — #5566's second half, owner-reserved (belief model,
-        DECISION-LEDGER §22).
+        DECISION-LEDGER §22). #9269 adds a new TRIGGER for that pre-existing
+        behaviour, named rather than left implicit: an operator whose only
+        other input was OPERATOR-SHAPED now has one participating input, so its
+        factor is SKIPPED — recorded as `degenerate`, or as `source_stripped`
+        when the shaped input held the NON-bidirectional source slot — and
+        reported through `_last_skipped_factors` (#6105). A bidirectional
+        operator that merely DEGRADES (3+ inputs → 2) leaves no record and no log
+        line: it still runs, on the surviving inputs.
+        ⚠️ What the surviving claim then reads is NOT necessarily Beta(1,1): a
+        skipped factor does not zero the messages a PREVIOUS run persisted on
+        its input edges, and `_load_cache` loads every `(o)-[r:IMPL|NAND]->(c)`
+        message whose `c` is affected whether or not that pair is still a
+        factor — so on a graph that already ran the pre-fix code, a stale
+        message keeps moving the surviving claim (measured: with a persisted
+        `msg_alpha 5.0` on the now-skipped edge, the claim reads posterior
+        7.01/2.11 = 0.769 instead of 2.22/2.22 = 0.500). That is PRE-EXISTING for
+        every stripped-input trigger (drafts #780, terminal #2422) and is filed
+        as its own residual rather than fixed here: zeroing an edge's messages
+        is a journaled write with its own invalidation semantics, not a
+        docstring. Likewise, posteriors a PRE-FIX run already stamped on an
+        operator-shaped node are not cleared by this filter — nothing consumes
+        those nodes any more, so nothing will ever recompute them.
         """
         live_c = _live_only("c.status", include_draft)
         live_o = _live_only("o.status", include_draft)
@@ -1245,7 +1326,7 @@ class TortoiseEP:
             # operator's inputs (the operator's factor). Draft operators and
             # draft target claims are excluded (#780). #7853: the input may
             # be any epistemic label.
-            conds = [epistemic_disjunction("c")]
+            conds = [epistemic_disjunction("c"), _non_operator("c")]
             if live_c:
                 conds.append(live_c)
             if live_o:
@@ -1370,6 +1451,7 @@ class TortoiseEP:
                         "-[r2:IMPL|NAND]->(m) "
                         "WHERE m.id <> n.id "
                         f"AND {epistemic_disjunction('m')} "
+                        f"AND {_non_operator('m')} "
                         "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
                         f"AND {_live_only('op.status', include_draft)} "
                         f"AND {_live_only('m.status', include_draft)} "
@@ -1715,6 +1797,9 @@ class TortoiseEP:
             "-[r2:IMPL|NAND]->(m) "
             "WHERE m.id <> n.id "
             f"AND {epistemic_disjunction('m')} "
+            # #9269: an operator-shaped far endpoint is not a claim — the SAME
+            # filter the direct-edge hops below already carry.
+            f"AND {_non_operator('m')} "
             "AND (op.is_operator = true OR op.op_type IS NOT NULL) "
             f"AND {_live_only('op.status', include_draft)} "
             f"AND {_live_only('m.status', include_draft)} "
@@ -1903,6 +1988,18 @@ class TortoiseEP:
         # source slot would invert directional semantics — and (b)
         # distinguish draft-caused degradation from genuinely unary
         # operators (pre-existing behavior: _update_factor no-ops <2 inputs).
+        # #9269: OPERATOR-SHAPED inputs are stripped the SAME way, in Python and
+        # for the same two reasons — `c.is_operator` is projected instead of
+        # being filtered in the WHERE clause. A Cypher-side filter drops the row
+        # BEFORE this loop, so an operator-shaped idx-0 SOURCE of a directional
+        # operator would vanish from `full_inputs`, `stripped` would stay 0, the
+        # `source_stripped` guard below could not fire, and the first surviving
+        # TARGET would be renumbered into the source slot (measured: an
+        # `IMPL(direction='->')` wired `[shaped, B, C]` became `[B, C]`, i.e.
+        # the message flowed B→C instead of shaped→{B, C}). It would also make
+        # a 2-input operator collapse to a silent unary factor with no
+        # `_last_skipped_factors` record (#6105's diagnostic is the only thing
+        # that tells a caller the operator contributed nothing).
         op_inputs: dict[str, list[str]] = {op_id: [] for op_id in op_info}
         op_input_live: dict[str, list[bool]] = {op_id: [] for op_id in op_info}
         # Raw input statuses for diagnostic surfacing (#992): when an operator
@@ -1921,12 +2018,16 @@ class TortoiseEP:
             "MATCH (o:Point)-[r:IMPL|NAND]->(c) "
             "WHERE o.id IN $ids "
             f"AND {epistemic_disjunction('c')} "
-            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false) "
+            # #9269: `c.is_operator` is PROJECTED, not filtered — the row must
+            # reach the loop below so a stripped idx-0 source can be detected
+            # (see the note above the input dicts).
+            "RETURN o.id, c.id, r.idx, c.status, coalesce(c.outdated, false), "
+            "       c.is_operator "
             "ORDER BY coalesce(r.idx, 0), c.id",
             {"ids": list(op_info.keys())}, hop=None,
             phase="factor_extraction", frontier_size=len(op_info),
         )
-        for op_id, claim_id, idx, status, outdated in rows:
+        for op_id, claim_id, idx, status, outdated, is_operator in rows:
             op_inputs[op_id].append(claim_id)
             # Participation is UNCONDITIONAL on status (#2422): a terminal
             # input (retracted / superseded / outdated / archived /
@@ -1937,15 +2038,29 @@ class TortoiseEP:
             # and NEVER participates — include_draft=True re-includes DRAFTS
             # only (the #780 escape hatch), never terminal points. A None
             # status = legacy live node.
+            # #9269: an OPERATOR-SHAPED input never participates, under BOTH
+            # modes (it is not a claim, so no escape hatch applies). The value
+            # test is IDENTITY against None/False, not truthiness: it must match
+            # the Cypher predicate `(is_operator IS NULL OR is_operator = false)`
+            # exactly, and `0 == False` in Python would wrongly admit a numeric
+            # spelling the engine excludes (`0 = false` is false in Cypher).
+            is_operator_shaped = not (is_operator is None or is_operator is False)
             is_terminal = status in TERMINAL_EXCLUDED_STATUSES or bool(outdated)
-            participates = not is_terminal and (status != "draft" or include_draft)
+            participates = (not is_terminal
+                            and (status != "draft" or include_draft)
+                            and not is_operator_shaped)
             op_input_live[op_id].append(participates)
             # Display: status + flag marker so the #992 diagnostic names a
             # flag-dead input accurately (status 'live' + outdated flag shows
-            # as "live(outdated)").
-            op_input_status[op_id].append(
-                f"{status or 'live'}(outdated)" if outdated else (status or 'live')
-            )
+            # as "live(outdated)"), and an operator-shaped one by its SHAPE —
+            # it is not dead by status, so a `live` label would misdirect
+            # whoever reads the skipped-factor record.
+            if is_operator_shaped:
+                op_input_status[op_id].append("operator-shaped")
+            else:
+                op_input_status[op_id].append(
+                    f"{status or 'live'}(outdated)" if outdated else (status or 'live')
+                )
             if idx is None:
                 op_idx_known[op_id] = False
 

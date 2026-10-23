@@ -918,6 +918,14 @@ def _validity_marker(h: dict) -> str:
         way would fabricate coverage, the exact hazard the 3-state end
         exists to prevent.
       - undated hits → NO validity marker (byte-identical rendering)
+      - a PRESENT but UNORDERABLE start (``valid_from="TBD"`` /
+        ``"not-a-date"``) → the start clause is OMITTED, never interpolated
+        (#9730): ``[valid]`` / ``[valid; end unknown]`` / ``[valid → <to>]``.
+        Under the #6140 owner ruling such a bound names no instant, i.e. no
+        start was recorded — which is exactly why
+        ``validity.effective_precision`` reports no precision for it
+        (#9201/#9244) — so ``[valid since TBD]`` asserted a bound the data
+        denies.
     ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
     full timestamps in the reader context; timestamps stay on the graph
     properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
@@ -932,30 +940,100 @@ def _validity_marker(h: dict) -> str:
              for s in supersedes if (s.get("content_snippet") or "").strip()]
     if snips:
         marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
-    vf = (h.get("valid_from") or "").strip()
+    # ``vf`` is the DISPLAY form (trimmed); the ORDERABILITY gate below runs on
+    # ``raw_vf``, the stored value — the same one ``validity.effective_precision``
+    # resolves the precision beside this marker from. Gating on the trimmed
+    # copy made the two disagree for a padded date (``"2024-06-01 "`` read as a
+    # start here, "no start recorded" beside it), which is the cross-surface
+    # drift ``window_read_fields`` passes the bounds RAW to prevent.
+    raw_vf = h.get("valid_from")
+    vf = (raw_vf or "").strip()
     vt = (h.get("valid_to") or "").strip()
     ex = (h.get("expired_at") or "").strip()
     if vf:
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
-        vfd = vf[:10] if len(vf) > 10 else vf
+        # #9730: a START that names no instant renders NO start clause. The
+        # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
+        # ``search_engine._created_sort_key(raw_vf)[0] == 0``, the one
+        # ``validity.effective_precision`` resolves precision behind), not a
+        # second notion of "parseable" — so a start clause this renders cannot
+        # disagree with the precision beside it. A FALSEY bound never reaches
+        # here (``""``, and a numeric ``0``/``False`` — see
+        # ``_bounds_an_instant``'s residual note); only truthy-but-unorderable
+        # values ever leaked.
+        vfd = (vf[:10] if len(vf) > 10 else vf) if _bounds_an_instant(raw_vf) \
+            else ""
+        since = f" since {vfd}" if vfd else ""
         if vt:
             vtd = vt[:10] if len(vt) > 10 else vt
+            # the both-ends form never carried "since" — a start it cannot
+            # name leaves only the arrow and the end.
+            lead = f"{vfd} " if vfd else ""
             if ex:
                 exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid {vfd} → {vtd}; expired {exd}]")
+                marks.append(f"[valid {lead}→ {vtd}; expired {exd}]")
             else:
-                marks.append(f"[valid {vfd} → {vtd}]")
+                marks.append(f"[valid {lead}→ {vtd}]")
         elif ((h.get("end_state") or "") == END_UNKNOWN
               or (h.get("valid_to_precision") or "") == PRECISION_UNKNOWN):
             # #2350: ENDED but un-datable — never relabel as still-true.
             if ex:
                 exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid since {vfd}; expired {exd}; end unknown]")
+                marks.append(f"[valid{since}; expired {exd}; end unknown]")
             else:
-                marks.append(f"[valid since {vfd}; end unknown]")
+                marks.append(f"[valid{since}; end unknown]")
         else:
-            marks.append(f"[valid since {vfd}]")
+            # No start recorded and an OPEN end: ``[valid]`` still states the
+            # open-end reading (still-true) without asserting a start, which
+            # is the half the data denies (#9730). Rendering nothing instead
+            # would hide that a window was written at all.
+            marks.append(f"[valid{since}]")
     return " ".join(marks)
+
+
+def _bounds_an_instant(value: object) -> bool:
+    """True when ``value`` NAMES an instant — i.e. it orders (#9730).
+
+    THE predicate is ``search_engine._created_sort_key(value)[0] == 0``, the
+    one the #6140/#9201/#9244 read gate resolves precision behind and
+    ``commit_schema.validate_validity_window`` orders with — so for every bound
+    the marker CONSULTS, the reader-facing marker and the precision beside it
+    cannot disagree about whether that bound names an instant. (The one bound it
+    does not consult is a FALSEY numeric — see the last paragraph.) That is why
+    ``_validity_marker`` hands this function the RAW stored bound, never its own
+    trimmed display copy (a padded date orders as nothing on every other
+    surface). Imported lazily inside the call for the same reason
+    ``validity.effective_precision`` does: ``retrieval`` sits in the import
+    graph ``search_engine`` is assembled from, and the eager edge is the cycle.
+
+    A NUMERIC bound (``int``/``float``, and so ``bool``) short-circuits to True
+    — mirroring ``validity.effective_precision``'s own short-circuit, which is
+    there so that an integer too large for ``float()`` cannot raise
+    ``OverflowError`` out of the ordering primitive (a read path must not
+    acquire a failure mode it never had). A numeric epoch ``0`` therefore IS an
+    instant here too (1970-01-01T00:00:00Z).
+
+    ⚠️ This branch is unreachable from ``_validity_marker`` twice over, and the
+    second way is a KNOWN residual, not a guarantee (#9741): a TRUTHY numeric
+    raises ``AttributeError`` at ``(raw_vf or "").strip()``, while a FALSEY one
+    (``0`` / ``0.0`` / ``False``) short-circuits on that ``or ""`` — so an epoch-``0``
+    start renders NO marker at all while ``valid_from_precision`` reads ``"day"``
+    (epoch 0 IS an instant). That truthiness trap is the same one
+    ``sdk._supersede_window_start`` records fixing; how a numeric bound is
+    WRITTEN and RENDERED is #9741's contract question, not this gate's. The
+    branch exists so that #9741 handing the raw bound through cannot turn the
+    parity above into an ``OverflowError`` on the read path — when it lands, the
+    marker starts consulting numerics and this docstring's scope widens back.
+    ``tests/test_2350_validity_precision.py``
+    ::test_an_epoch_zero_start_renders_no_window_is_recorded pins the residual
+    so that change cannot pass silently.
+    """
+    if isinstance(value, (int, float)):
+        return True
+    if not value:
+        return False
+    from .search_engine import _created_sort_key  # lazy — no import cycle
+    return _created_sort_key(value)[0] == 0
 
 
 #: A session identifier that may be interpolated into the reader-facing

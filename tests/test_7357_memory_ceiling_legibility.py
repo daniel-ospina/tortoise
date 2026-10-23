@@ -39,6 +39,7 @@ redis_exc = pytest.importorskip("redis.exceptions")
 from tortoise import cypher_guard  # noqa: E402
 from tortoise.retry import (  # noqa: E402
     _LEGIBLE_OPENER,
+    MEMORY_CEILING_OWNERSHIP_CONSTRAINT,
     explain_instance_unavailable,
     explain_memory_ceiling,
     graph_abort_family,
@@ -502,6 +503,359 @@ def test_a_ceiling_refusal_is_never_a_retryable_write():
     assert graph_abort_family(annotated) is False
 
 
+# ── the ceiling CLAIM needs the ceiling EVIDENCE ────────────────────────────
+# The classifier admits the exception CLASS, and the driver mints that class for
+# every reply beginning with `OOM` — so family membership establishes that the
+# instance ANSWERED with a memory refusal, never that a `maxmemory` exists or was
+# reached. These pin the split, in both directions.
+def test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read():
+    """#7357: `OOM failed to allocate 1GB` names no ceiling, so none is asserted.
+
+    Measured on `origin/main` 02e18e752 (issuecomment-6341756094): the note
+    reported *"it has reached its configured dataset limit (`maxmemory`)"* for
+    this message. Nothing in the exception carries that fact — and an instance
+    reporting `maxmemory 0` is a measured shape on this repo's shared container
+    and in the CI provisioner, where the prescribed remedy (raise the ceiling)
+    cannot be taken at all.
+
+    NON-VACUOUS: every "must not" assertion below fails on the pre-fix note.
+    """
+    exc = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    text = explain_memory_ceiling(exc) or ""
+    assert text.startswith("OOM failed to allocate 1GB"), (
+        "the driver sentence stays at position 0")
+    assert text.count(_LEGIBLE_OPENER) == 1
+    assert "it has reached its configured dataset limit" not in text, (
+        "the ceiling was never read — asserting it is the #7357 defect")
+    assert "nothing was applied" not in text.lower(), (
+        "`nothing was applied` was measured for the denyoom/maxmemory refusal, "
+        "not for an allocation failure — do not carry it across")
+    assert "rejected before it ran" not in text.lower(), (
+        "the pre-execution claim is the measured shape's, not this one's")
+    # What the message DOES establish is still stated: it is the legibility fix.
+    lowered = text.lower()
+    assert "answered" in lowered and "memory refusal" in lowered
+    assert "not evidence that the graph or its data was lost" in lowered
+    assert "not a dead or restarting instance" in lowered
+    # …and the ceiling appears only as a CONDITIONAL, read from the instance.
+    assert "info memory" in lowered, (
+        "the note must say how to establish whether a ceiling exists")
+    assert "`maxmemory 0`" in text
+    assert "if it reports a non-zero" in lowered
+    assert "within a small drift below" in lowered, (
+        "a real ceiling reads 3.5-56 KiB under the cap; an exact 'has "
+        "reached' withdraws the remedy there")
+    assert "above it" in lowered, (
+        "`used + drift >= cap` admits a reading ABOVE the cap — the ordinary "
+        "shape after the ceiling is lowered on a busy instance — so the note "
+        "must not leave that case with no next action")
+    assert "re-read while the refusal is repeating" in lowered
+    # The one-authority pin below holds for BOTH arms, not just the measured one.
+    assert MEMORY_CEILING_OWNERSHIP_CONSTRAINT in text
+    assert "#2981" in text
+    # Same contract as the established arm: type kept, idempotent, non-retryable.
+    annotated = redis_exc.OutOfMemoryError(text)
+    assert explain_memory_ceiling(annotated) is None, (
+        "a second suffix on an explained message is the double-note defect")
+    assert isinstance(annotated, redis_exc.OutOfMemoryError)
+    assert _classify_db_failure(annotated) == "db"
+    assert retryable_transient(annotated) is False
+    assert retryable_aborted_write(annotated, graph_exists=lambda: True) is False
+
+
+def test_an_empty_out_of_memory_is_hedged_not_asserted():
+    """The sharpest case: an `OutOfMemoryError` carrying NO text at all.
+
+    `is_memory_ceiling_refusal` is deliberately decided by CLASS even without
+    the measured sentence (:func:`test_the_family_is_decided_by_class_even_without_the_measured_text`),
+    so this is a family member whose ceiling evidence is the EMPTY string. A
+    note may therefore not name a ceiling here either — that is exactly the
+    over-claim this issue's last leg is about, in its purest form.
+    """
+    text = explain_memory_ceiling(redis_exc.OutOfMemoryError("")) or ""
+    assert text.startswith(_LEGIBLE_OPENER), (
+        "with no driver text, the note opens the message")
+    assert "it has reached its configured dataset limit" not in text
+    assert "`maxmemory 0`" in text
+    assert text.count(_LEGIBLE_OPENER) == 1
+
+
+def test_the_measured_ceiling_sentence_still_asserts_the_ceiling():
+    """The other direction: the engine's own sentence IS the evidence.
+
+    A hedge applied to the measured shape would be the same defect pointing the
+    other way — a caller at a real ceiling told "maybe there is no ceiling" and
+    sent to read `INFO memory` instead of raising it. This pins that the split
+    is EVIDENCE-driven, not a blanket softening.
+
+    NON-VACUOUS: making `explain_memory_ceiling` always take the hedge arm
+    reddens the first assertion.
+    """
+    text = explain_memory_ceiling(_ceiling_error()) or ""
+    assert "it has reached its configured dataset limit" in text
+    assert "`maxmemory 0`" not in text, (
+        "the measured sentence needs no no-ceiling hedge")
+    assert "nothing was applied" in text.lower(), (
+        "the denyoom rejection-before-execution claim was measured on THIS shape")
+
+
+def test_a_chain_that_names_the_ceiling_still_earns_the_ceiling_note():
+    """The evidence walk follows the chain, as the family predicate does.
+
+    A wrapper whose `__cause__` is the engine's ceiling refusal is a family
+    member by the cause (#9532 added the walk), so demoting it to the hedge
+    would under-report a ceiling that WAS named. The converse — a chain of
+    allocation failures with no ceiling sentence anywhere — stays hedged.
+    """
+    named = redis_exc.ResponseError("write failed")
+    named.__cause__ = _ceiling_error()
+    assert is_memory_ceiling_refusal(named) is True
+    assert "it has reached its configured dataset limit" in (
+        explain_memory_ceiling(named) or "")
+
+    unnamed = redis_exc.ResponseError("write failed")
+    unnamed.__cause__ = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    hedged = explain_memory_ceiling(unnamed) or ""
+    assert hedged.startswith("write failed")
+    assert "it has reached its configured dataset limit" not in hedged
+
+
+def test_both_arms_share_one_remedy_sentence():
+    """The remedy's two homes live in ONE copy (#2981's one-authority rule).
+
+    The hedge arm was written as its own prose, and both arms must send an
+    operator to the same two homes — the container's `REDIS_ARGS` and the
+    managed provider's console (#9532 cycle 2/3 P1). Two wordings of one remedy
+    is the drift #2981 rules out, one function apart, so both compose
+    `_CEILING_REMEDY_HOMES` and neither spells it out again.
+
+    NON-VACUOUS: inlining the sentence into either arm reddens the assertion
+    for that arm.
+    """
+    from pathlib import Path
+
+    import tortoise
+    from tortoise.retry import _CEILING_REMEDY_HOMES
+
+    src = (Path(tortoise.__file__).resolve().parent / "retry.py").read_text(
+        encoding="utf-8")
+    # Normalise before comparing: the repo splits message prose across adjacent
+    # literals, so the sentence is not contiguous in the SOURCE even when it is
+    # written once (the same trap `_ownership_constraint_holders` documents).
+    import re
+    squash = lambda text: re.sub(r"[\s\"'()\\`]+", "", text)  # noqa: E731
+    assert squash(src).count(squash(_CEILING_REMEDY_HOMES)) == 1, (
+        "the remedy sentence must exist once, as the constant")
+    assert _CEILING_REMEDY_HOMES in (explain_memory_ceiling(_ceiling_error()) or "")
+    assert _CEILING_REMEDY_HOMES in (
+        explain_memory_ceiling(redis_exc.OutOfMemoryError("OOM failed")) or "")
+
+
+def test_the_reached_decision_has_one_authority():
+    """Both messages decide "the ceiling was reached" with ONE tolerance.
+
+    #7357 review P2, and it was a live defect rather than a tidy-up: the SDK's
+    hedge told an operator to raise `maxmemory` only if `used_memory` "has
+    reached" it, while `_write_refusal_message` already knew — measured on
+    falkordb 4.20.6 — that a reading taken after the refusal sits **3.5-56 KiB
+    below** the cap and still counts. So the note withdrew the remedy at a
+    genuine ceiling, the same "advice that cannot be acted on" class the issue
+    is about, pointing the other way.
+
+    NON-VACUOUS: re-inlining the tolerance in either place reddens the
+    structural assertions; dropping the drift sentence from the note reddens
+    `test_a_class_only_refusal_is_not_told_it_reached_a_ceiling_it_never_read`
+    (this test does not read the note, so it cannot pin the note's prose).
+    """
+    from pathlib import Path
+
+    import tortoise
+    import tortoise.projection as projection
+    from tortoise.retry import ceiling_reading_drift
+
+    # The measured absolute floor, the 1 % heuristic, and its 1 MiB cap.
+    assert ceiling_reading_drift(16 << 20) == (16 << 20) // 100
+    assert ceiling_reading_drift(0) == 64 << 10
+    assert ceiling_reading_drift(1 << 40) == 1 << 20
+
+    root = Path(tortoise.__file__).resolve().parent
+    projection_src = (root / "projection" / "__init__.py").read_text(encoding="utf-8")
+    retry_src = (root / "retry.py").read_text(encoding="utf-8")
+
+    # ⚠️ IDENTITY, not a text scan (#7357 cycle-2 review P3). The first version
+    # counted one exact literal in each file, which a reflow, a renamed local or
+    # a rewritten equivalent (`max(65536, min(cap // 100, 1048576))`) all evade
+    # while the drift is genuinely duplicated — and which FALSE-REDS a faithful
+    # refactor of the function it was pinning. The property that matters is that
+    # the projection's code path resolves to the SAME callable object, and it is
+    # checked directly.
+    assert projection.ceiling_reading_drift is ceiling_reading_drift, (
+        "the projection must resolve the shared rule, not a local copy of it")
+    assert "ceiling_reading_drift(cap)" in projection_src, (
+        "the shared rule must still be what the branch calls")
+    assert retry_src.count("def ceiling_reading_drift") == 1, (
+        "one definition, whose values the behavioural assertions above pin")
+
+    # ⚠️ IDENTITY ALONE DOES NOT CATCH A *SECOND* DECISION SITE (#7357 cycle 3
+    # P2): a new branch in the projection doing the arithmetic inline leaves the
+    # import in place, the name resolving, and the `def` count at 1 — every
+    # assertion above green while two tolerances drive one decision, the exact
+    # drift this PR closes. So the DISTINCTIVE HALF of the expression is scanned,
+    # normalised, across the package: quotes, brackets and whitespace are
+    # squashed on both sides first, because this repo splits expressions across
+    # lines and a reflow must not evade the guard.
+    #
+    # It keys on `min(cap // 100, …)` rather than on the whole formula, because
+    # the whole-formula spelling is what a copy-paste DUPLICATE would keep while
+    # a re-typed variant (`max(65536, min(cap // 100, 1048576))`) would not —
+    # and the literal `1 << 20` alone is no use (four unrelated modules use it).
+    # It keys on `min(...)` and not on a bare `cap // 100`, which the tiny-cap
+    # guard below legitimately carries. Counted, not just file-matched, so a
+    # second copy inside `retry.py` itself is caught too.
+    import re
+    squash = lambda text: re.sub(r"[\s\"'()\\`]+", "", text)  # noqa: E731
+    needle = squash("min(cap // 100")
+    holders = [
+        str(p.relative_to(root)) for p in sorted(root.rglob("*.py"))
+        if needle in squash(p.read_text(encoding="utf-8"))
+    ]
+    assert holders == ["retry.py"], (
+        "the tolerance's 1% arm must have ONE implementation, inside "
+        f"ceiling_reading_drift — not a second decision site: {holders}")
+    assert squash(retry_src).count(needle) == 1, (
+        "a second copy of the 1% arm inside retry.py is still two tolerances")
+
+
+def test_the_evidence_walk_cannot_replace_the_exception_it_explains():
+    """A raising `__str__` in the chain must not lose the note (#7357 cycle 2).
+
+    `_chain_names_the_ceiling` stringifies EVERY link, so it can read a
+    caller-supplied `__str__` that raises — where the family predicate only
+    stringifies `ResponseError` links. Without a belt the raise escapes to
+    `cypher_guard._note_instance_outage`, whose own belt swallows it and hands
+    the caller the raw illegible message with NO note at all: #7357's defect, for
+    that one exception. The module's rule for `is_instance_unavailable` is that a
+    legibility predicate never REPLACES the error it explains, and the fail-safe
+    answer here is the hedge (which asserts no ceiling).
+
+    NON-VACUOUS: remove the `try` in `_chain_names_the_ceiling` and this raises.
+    """
+
+    class _Exploding(Exception):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    exc = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    exc.__cause__ = _Exploding()
+    text = explain_memory_ceiling(exc) or ""
+    assert text.startswith("OOM failed to allocate 1GB")
+    assert "it has reached its configured dataset limit" not in text, (
+        "an unreadable chain establishes nothing — the hedge is the safe arm")
+
+
+def test_an_unreadable_message_degrades_to_no_note_rather_than_a_raise():
+    """The MESSAGE-level belt, not just the chain one (#7357 cycle 3 P3).
+
+    `is_memory_ceiling_refusal` stringifies `ResponseError` links and
+    `str(exc)` reads the exception's own `__str__`, so a caller-defined
+    subclass can raise from either — before the chain belt is ever reached.
+    A legibility helper that replaced the error it explains is what the
+    module's `is_instance_unavailable` P1 forbids, so the public entry point is
+    belted: an unreadable MESSAGE returns ``None`` (the raw sentence, no note),
+    because there is nothing to append a note to.
+
+    NON-VACUOUS: remove the belt around `_explain_memory_ceiling` and this
+    raises `RuntimeError`.
+    """
+
+    class _ExplodingText(redis_exc.OutOfMemoryError):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    assert explain_memory_ceiling(_ExplodingText("anything")) is None
+
+    class _ExplodingResponse(redis_exc.ResponseError):
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    assert explain_memory_ceiling(_ExplodingResponse("anything")) is None
+
+
+def test_an_implicit_context_is_not_ceiling_evidence():
+    """A handled prior failure's sentence is not this failure's evidence.
+
+    #7357 cycle 4, measured: `OutOfMemoryError("OOM failed to allocate 1GB")`
+    raised inside an `except ResponseError("command not allowed when used memory
+    > 'maxmemory'")` block inherits that sentence through Python's IMPLICIT
+    `__context__` chaining. The ceiling there belongs to a different, already
+    handled failure — so asserting it is the same over-claim one level of
+    indirection out, in the arm whose whole job is to stop that.
+
+    `raise ... from` IS the author stating causality, so `__cause__` still
+    licenses the assertion; the FAMILY predicate keeps walking `__context__`
+    (there a wider walk is the safe direction — it only widens what is told to
+    the caller, not what is claimed about the instance).
+
+    NON-VACUOUS: walk `__context__` in `_chain_names_the_ceiling` and the first
+    assertion reddens (the ceiling sentence comes back).
+    """
+    prior = redis_exc.ResponseError(
+        "command not allowed when used memory > 'maxmemory'.")
+    failure = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    failure.__context__ = prior
+    assert failure.__suppress_context__ is False, (
+        "the fixture must be the IMPLICIT chain, not `from None`")
+    assert is_memory_ceiling_refusal(failure) is True, (
+        "still the family — but BY CLASS on the top link here; the CONTEXT half "
+        "of the family walk is pinned by "
+        "test_the_family_walk_follows_an_implicit_context_to_a_ceiling, below")
+    hedged = explain_memory_ceiling(failure) or ""
+    assert "it has reached its configured dataset limit" not in hedged
+
+    # …while an EXPLICIT cause still licenses it.
+    explicit = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    explicit.__cause__ = _ceiling_error()
+    assert "it has reached its configured dataset limit" in (
+        explain_memory_ceiling(explicit) or "")
+
+
+def test_the_family_walk_follows_an_implicit_context_to_a_ceiling():
+    """COVERAGE for the ``__context__`` half of the family walk.
+
+    Not a regression guard for this PR's hedge split — ``main`` already walked
+    ``__context__`` here. It is the shape nothing else in this file reaches:
+    every other use of the ceiling predicate is admitted by the TOP link (by
+    class, or through ``__cause__``), so narrowing the walk to ``__cause__``
+    alone would redden nothing, while the predicate's own docstring records the
+    wider walk as what closed #7357's measured shape.
+
+    NON-VACUOUS relative to that narrowing: delete the ``__context__`` fallback
+    in ``is_memory_ceiling_refusal`` and the first two assertions redden (both
+    cases below were run against exactly that mutation).
+    """
+    # (a) the context names the ceiling in its own TEXT; the top link is not
+    # the family at all, so nothing but the walk can admit it.
+    text_half = redis_exc.ResponseError("write failed")
+    text_half.__context__ = redis_exc.ResponseError(CEILING_SENTENCE)
+    assert text_half.__cause__ is None
+    assert text_half.__suppress_context__ is False, (
+        "the fixture must be the IMPLICIT chain, not `from None`")
+    assert is_memory_ceiling_refusal(text_half) is True
+
+    # (b) …and by its CLASS, which is the shape the driver itself mints.
+    class_half = redis_exc.ResponseError("write failed")
+    class_half.__context__ = redis_exc.OutOfMemoryError(
+        "OOM failed to allocate 1GB")
+    assert is_memory_ceiling_refusal(class_half) is True
+
+    # …while `raise ... from None` DETACHES the context: the author said this
+    # failure is not that one, so the walk stops and no note is owed.
+    detached = redis_exc.ResponseError("write failed")
+    detached.__context__ = redis_exc.ResponseError(CEILING_SENTENCE)
+    detached.__suppress_context__ = True
+    assert is_memory_ceiling_refusal(detached) is False
+
+
 # ── the wiring, through a real guarded client ───────────────────────────────
 #: The verbs the pinned engine actually refuses at the ceiling, MEASURED
 #: 2026-10-21 on `falkordb/falkordb-server:v4.20.6` (`maxmemory 5mb` <
@@ -601,6 +955,25 @@ def test_a_guarded_handle_query_carries_the_ceiling_note():
         "every caller text match reads from there")
     assert _LEGIBLE_OPENER in message
     assert "memory-ceiling" in message.lower()
+
+
+def test_a_guarded_handle_passes_the_hedge_for_a_class_only_refusal():
+    """The seam a caller hits: an `OOM` reply with no ceiling in its text.
+
+    The helper tests above prove `explain_memory_ceiling` branches; this proves
+    the BRANCH REACHES THE CALLER through the same guarded channel as the
+    measured shape, so the fix cannot be a helper nobody wires up. The assertion
+    on the absent ceiling sentence is the #7357 defect itself.
+    """
+    error = redis_exc.OutOfMemoryError("OOM failed to allocate 1GB")
+    _client, graph = _guarded(error)
+    with pytest.raises(redis_exc.OutOfMemoryError) as caught:
+        graph.query(WRITE_STATEMENT)
+    message = str(caught.value)
+    assert message.startswith("OOM failed to allocate 1GB")
+    assert "it has reached its configured dataset limit" not in message
+    assert "`maxmemory 0`" in message
+    assert message.count(_LEGIBLE_OPENER) == 1
 
 
 def test_a_guarded_read_gets_the_same_note_and_no_write_ambiguity():

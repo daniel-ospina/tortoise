@@ -284,6 +284,54 @@ def test_an_unflagged_claim_rendered_as_its_body_IS_live():
     assert (seen, rendered_live, flagged_flag) == (True, True, False)
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "[valid]",                        # #9730: open end, unorderable start
+        "[valid; end unknown]",           # #9730 + #2350: un-datable end
+        "[valid; expired 2026-10-19; end unknown]",
+        "[valid since 2023-03-02]",        # the orderable shapes, unchanged
+        "[valid 2023-03-02 → 2023-05-20]",
+        "[valid → 2023-05-20]",            # orderable END, absent start
+    ],
+)
+def test_every_rendered_window_shape_is_attributed_to_a_claim(marker):
+    """The attribution rule is *a distilled claim renders its WINDOW*, so it must
+    hold for EVERY window shape the renderer can emit — not just the ones that
+    happen to contain a space after ``valid``.
+
+    (1) FAILS pre-#9730-consumer-fix: ``_VALID_WINDOW_OPEN`` was ``r"\\[valid "``,
+        so the two no-space shapes were classified as raw turns and
+        ``_superseded_live_state`` skipped them — ``seen`` came back False
+        (an UNMEASURED claim, which the leg treats as a fail).
+    (2) REACHABLE: the strings are the renderer's own output (see
+        ``tests/test_2350_validity_precision.py`` and this file's sibling
+        cases), fed to the real ``_superseded_live_state``.
+    """
+    old = "I live in Lisbon."
+    block = f"[session s1] (session date 2023-03-02) [user] {marker} {old}"
+    seen, _rendered_live, flagged_flag = _superseded_live_state(block, old)
+    assert seen is True, f"{marker!r} was not attributed to a claim: {block!r}"
+    # A closed window is the product's "stopped being true here" flag; an OPEN
+    # window (which every start-less form above is) asserts still-true, so it is
+    # not a flag. The arrow alone decides, exactly as before.
+    assert flagged_flag == ("\u2192" in marker), marker
+
+
+def test_the_start_less_window_is_not_a_closed_window_flag():
+    """#9730: dropping an unorderable start must NOT read as "stopped being true".
+
+    ``[valid]`` says a window exists with no end asserted — the still-true
+    reading — so the D8 gate must count it as ``rendered_live``, not flagged.
+    (1) FAILS if the no-space form were folded into ``_FLAG_CLOSED_WINDOW``.
+    (2) REACHABLE: the marker is the renderer's own output for
+        ``validFrom`` present-but-unorderable and no ``valid_to``.
+    """
+    old = "I live in Lisbon."
+    block = f"[session s1] [user] [valid] {old}"
+    assert _superseded_live_state(block, old) == (True, True, False)
+
+
 # ── 4. one run, two arms, two numbers ────────────────────────────────────
 
 def test_distilled_leg_reports_both_arms_and_the_d8_gate_from_one_run(

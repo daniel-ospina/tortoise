@@ -93,163 +93,27 @@ def _load_input(args) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# #6671 — IDEMPOTENT OPERATOR WIRING
+# #6671 / #9631 — IDEMPOTENT OPERATOR WIRING, ONE IMPLEMENTATION
 #
-# `create_point` below is written with `dedup=True` (content hash), so the
-# POINTS converge across runs. `create_operator` is NOT idempotent — it mints a
-# fresh operator Point on every call — and this script used to key its
-# `created_ops` cache per run only, so a second run re-created the whole edge
-# set. Because `mitigate_operator` is idempotent PER OPERATOR, the two runs'
-# mitigations landed on different copies: run-1 edges damped, run-2 edges at
-# full weight, both read by EP. Measured on #6671 with a 2-edge decision:
-# 4 operators after two runs, option confidence 0.5736 → 0.5184 (14 → 19 EP
-# iterations). There is NO edge-delete API, so that pollution is irreversible.
-#
-# The identity used here is the graph's own operator shape, not a second model:
-# `create_operator` wires `(source)-[:INPUT {idx:0}]->(op)` and
-# `(op)-[op_type|hasPart {idx:n>0}]->(target)`, for ANY accepted op_type
-# (IMPL/NAND and the part/whole family, whose bridge is mirrored as `hasPart`).
-# `label` is part of the identity — two edges with different Layer-3 predicates
-# over the same triple are two claims. The endpoint labels are deliberately NOT
-# in the identity: the write door admits :Point/:Subject/:Object/:Event
-# endpoints (#7902), so anchoring on `:Point` would miss a Subject/Object
-# endpoint and duplicate the very edge this guards.
+# The lookup lives in `tortoise/decide_wiring.py` and BOTH entry points call it:
+# this script and `tortoise decide` (`tortoise/__main__.py::_cmd_decide`). The
+# CLI kept the per-run-only cache after #6671 fixed it here, so re-running a
+# decision through `tortoise decide` still duplicated every operator (#9631,
+# measured: 3 → 6 operators, 1 → 2 mitigations, opt:a 0.6592 → 0.6756). A third
+# hand-maintained copy is how that happened — there is now one writer.
 # ─────────────────────────────────────────────────────────────────────────────
+# The repo root is importable whether this file is run as a script or loaded
+# from the test suite (`--db`, `main()`'s own insert, comes too late for a
+# module-level import).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
-
-def _find_operators(proj, op_type: str, source_id: str, target_id: str,
-                    label: str | None, *,
-                    any_label: bool = False) -> list[dict]:
-    """Existing operators on this bridge, as dicts with the facts EP needs.
-
-    Each row is ``{"id", "status", "outdated", "label", "targets"}``.
-
-    Returns ALL matches, not just the first: a graph already polluted by an
-    earlier run of this script has duplicate copies of every edge, and a
-    relevance edge must damp every copy it finds — damping one leaves the other
-    at full weight, which is the asymmetry #6671 measured.
-
-    ``any_label=True`` drops the label arm of the identity (used to ask "what
-    sits on this triple at all?", which the relevance arm needs before deciding
-    what it may damp).
-
-    ``status``, the legacy ``outdated`` flag and the Layer-3 ``label`` come back
-    because the caller must know three things it cannot assume: whether EP reads
-    the bridge (`tortoise.live._live_only` = not draft AND not
-    terminal(status, outdated)), which claim it is (two labels over one triple
-    are two claims), and whether the operator IS this bridge (``targets`` > 1
-    means it also claims other pairs, so reusing it would widen this decision).
-    A status-less operator reads as `live`, the graph's own default.
-    """
-    label_arm = "" if any_label else \
-        "AND coalesce(op.label, '') = coalesce($label, '') "
-    rows = proj.g.query(
-        # Label-free endpoints: the write door admits :Point/:Subject/:Object/
-        # :Event endpoints (#7902), so a `:Point` anchor would miss a
-        # Subject/Object endpoint and duplicate the edge. The op node keeps
-        # `:Point` (an operator IS a Point, is_operator:true).
-        "MATCH (s {id:$sid})-[ri:INPUT]->(op:Point {is_operator:true})"
-        "-[ro]->(t {id:$tid}) "
-        "WHERE op.op_type = $op AND ri.idx = 0 AND ro.idx > 0 "
-        + label_arm +
-        "RETURN op.id, op.status, coalesce(op.outdated, false), "
-        "coalesce(op.label, '')",
-        params={"sid": source_id, "tid": target_id, "op": op_type,
-                "label": label},
-    ).result_set
-    if not rows:
-        return []
-    counts = dict(proj.g.query(
-        "MATCH (op:Point) WHERE op.id IN $ids MATCH (op)-[r]->() "
-        "WHERE r.idx > 0 RETURN op.id, count(r)",
-        params={"ids": [row[0] for row in rows]},
-    ).result_set)
-    return [{"id": row[0], "status": row[1] or "live",
-             "outdated": bool(row[2]), "label": row[3] or "",
-             "targets": int(counts.get(row[0], 0))} for row in rows]
-
-
-def _is_ranked(row: dict) -> bool:
-    """EP's own rule (`tortoise.live._live_only`): not draft, not terminal."""
-    from tortoise.live import is_draft_status, is_terminal_status
-
-    return (not is_draft_status(row["status"])
-            and not is_terminal_status(row["status"], row["outdated"]))
-
-
-def _status_note(row: dict) -> str | None:
-    """A TRUE one-line note about why this bridge is (or is not) ranked."""
-    from tortoise.live import is_draft_status, is_terminal_status
-
-    if row["outdated"]:
-        # `outdated=true` is server-managed (`invalidate_point`), and
-        # `update_point` refuses to clear it — so no promotion remedy is
-        # offered here, whatever the status says (#6699/#2422).
-        return (f"elected operator {row['id']}, outdated=true "
-                f"(status={row['status']}) — the legacy dead marker; EP "
-                "excludes it and update_point cannot clear it, so this bridge "
-                "stays out of the ranking; it is NOT duplicated (#6671)")
-    if is_draft_status(row["status"]):
-        return (f"elected operator {row['id']}, status=draft — EP excludes "
-                "draft operators (#780), so this bridge does not participate in "
-                "the ranking until it is promoted "
-                "(update_point(id, status='live')); it is NOT duplicated "
-                "(#6671)")
-    if is_terminal_status(row["status"], row["outdated"]):
-        return (f"elected operator {row['id']}, status={row['status']} — a "
-                "TERMINAL status; EP excludes it (#2422) and update_point "
-                "cannot resurrect it, so this bridge stays out of the ranking; "
-                "it is NOT duplicated (#6671)")
-    return None
-
-
-def _resolve_or_create_operator(sdk, proj, op_type: str, source_id: str,
-                                target_id: str, label: str | None,
-                                cache: dict[tuple[str, str, str, str], str],
-                                *, any_label: bool = False
-                                ) -> tuple[str, bool, str | None]:
-    """Write the edge idempotently — ONE operator per single-pair bridge.
-
-    Returns ``(operator_id, reused, note)``; ``note`` is a warning to print.
-
-    Idempotence is by the graph's own operator identity, and it is bounded by
-    TWO facts read from the graph, not assumed:
-
-    * a copy EP does not read (draft / terminal status / legacy
-      ``outdated=true``) is never preferred over one it does — and it is never
-      "fixed" by filing a live twin, which is the decision recorded on #6671's
-      scoping ("Creating a second operator instead would reintroduce the exact
-      duplication this issue is about"). A twin is not cosmetic:
-      ``update_point(draft_id, status="live")`` is a legitimate call, and after
-      a twin exists it leaves TWO live operators on one bridge (measured), which
-      EP reads twice — with no edge-delete API.
-    * an operator with ``targets > 1`` is NOT this bridge: it also claims other
-      pairs, so reusing it would silently widen the decision's claim (and a
-      relevance edge on the pair would damp the other pairs through it). A
-      single-pair bridge is written instead, which the next run then reuses.
-    """
-    key = (source_id, op_type, target_id, "" if any_label else (label or ""))
-    if key in cache:
-        return cache[key], True, None
-    matches = _find_operators(proj, op_type, source_id, target_id, label,
-                              any_label=any_label)
-    single = [row for row in matches if row["targets"] == 1]
-    if single:
-        # Prefer the copy EP reads; on a polluted bridge the copies are
-        # identical, so storage order is arbitrary.
-        elected = ([row for row in single if _is_ranked(row)] or single)[0]
-        cache[key] = elected["id"]
-        return elected["id"], True, _status_note(elected)
-    note = None
-    if matches:
-        multi = ", ".join(f"{row['id']} ({row['targets']} targets)"
-                          for row in matches)
-        note = (f"existing operator(s) {multi} on this triple also claim other "
-                "pairs — not reused (it would widen this decision's claim); a "
-                "single-pair bridge is created")
-    op = sdk.create_operator(op_type, source_id, [target_id], label=label)
-    cache[key] = op["id"]
-    return op["id"], False, note
+from tortoise.decide_wiring import (  # noqa: E402
+    damped_factor_ids,
+    resolve_or_create_operator,
+    select_damp_targets,
+)
 
 
 def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
@@ -310,7 +174,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         """Resolve-or-create the bridge and record it. Never creates a twin."""
         src, tgt = _resolve(src_key), _resolve(tgt_key)
         try:
-            op_id, reused, note = _resolve_or_create_operator(
+            op_id, reused, note = resolve_or_create_operator(
                 sdk, proj, op_type, src, tgt, label, created_ops,
                 any_label=any_label)
         except Exception as e:
@@ -367,59 +231,26 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         # tortoise/weights.py module docstring, #2315).
         strength = max(0.10, min(0.50, strength))
         label = re.get("label")
-        # A relevance edge is a mitigation, not a claim of its own, so it never
-        # mints a parallel operator. When the caller states a label, the label
-        # SCOPES the dampening (two labels over one triple are two claims —
-        # damping a `refutes` bridge on behalf of a `supports` mitigation would
-        # silently weaken a claim the caller did not name). Without a label the
-        # edge damps every bridge on the triple.
-        # A relevance edge is a MITIGATION, never a claim: it never writes an
-        # operator of its own. It damps the claim the caller named — the
-        # labelled bridges when a label is given, the unlabelled ones
-        # otherwise — and refuses to guess when the triple carries several
-        # distinct labels and the edge names none (damping a `refutes` bridge
-        # on behalf of an unlabelled mitigation would silently weaken a claim
-        # the caller did not name).
-        found = _find_operators(proj, op_type, _resolve(src), _resolve(tgt),
-                                label, any_label=label is None)
-        if not found:
-            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: no "
-                  f"{label + ' ' if label else ''}bridge on this triple — "
-                  "nothing damped (a relevance edge never mints a claim)")
-            continue
-        # #6671 review: a bridge with ``targets > 1`` also claims OTHER pairs,
-        # so damping it here would weaken claims this edge never named — the
-        # exact hazard ``_resolve_or_create_operator`` refuses to create. The
-        # two arms must state ONE rule, so the exclusion is applied here too
-        # instead of being asserted only in the ``edges`` arm's prose.
-        shared = [row for row in found if row["targets"] != 1]
-        if shared:
-            named = ", ".join(
-                f'{row["id"]} ({row["targets"]} targets)' for row in shared)
-            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {named} also "
-                  "claim other pairs — not damped (it would weaken claims "
-                  "this edge did not name)")
-        found = [row for row in found if row["targets"] == 1]
-        if not found:
-            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: every bridge "
-                  "on this triple is shared with other pairs — nothing damped")
-            continue
-        if label is not None:
-            targets = [row["id"] for row in found]
-        elif any(row["label"] == "" for row in found):
-            targets = [row["id"] for row in found if row["label"] == ""]
-        elif len({row["label"] for row in found}) == 1:
-            targets = [row["id"] for row in found]
-        else:
-            labels = sorted({row["label"] for row in found})
-            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: this triple "
-                  f"carries {len(labels)} distinct labels {labels} and the "
-                  "edge names none — nothing damped")
+        # A relevance edge is a MITIGATION, never a claim: the selection rule
+        # (one writer — `tortoise.decide_wiring.select_damp_targets`) damps every
+        # single-pair bridge on the triple, refuses the ones that also claim
+        # other pairs, and scopes by label when the caller names one. This script
+        # never mints a claim of its own here.
+        pick = select_damp_targets(proj, op_type, _resolve(src), _resolve(tgt),
+                                   label)
+        for note in pick["notes"]:
+            print(f"  ⚠ relevance {src} --{op_type}--> {tgt}: {note}")
+        targets = pick["targets"]
+        if not targets:
             continue
         # Record the damped bridges as this run's edges too (they are the
-        # bridges the ranking reads).
-        if targets[0] not in all_operator_ids:
-            all_operator_ids.append(targets[0])
+        # bridges the ranking reads). EVERY damped copy, via the rule both entry
+        # points share — the CLI appends all of them too (#9631 review: the two
+        # callers had forked this leg, so a polluted triple produced different
+        # factor lists per entry point).
+        for damped_id in damped_factor_ids(targets):
+            if damped_id not in all_operator_ids:
+                all_operator_ids.append(damped_id)
         operator_rows.append({
             "source": src, "op_type": op_type, "target": tgt,
             "label": label, "id": targets[0], "reused": True,
@@ -431,7 +262,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # ONE line, the shape every other decide writer prints: the
             # mitigation detail belongs to the relevance tick, not to a second
             # line (the pre-#6671 script printed it inline, and
-            # `tortoise/__main__.py::_cmd_decide` still does).
+            # `tortoise/__main__.py::_cmd_decide` used to).
             named = ", ".join(str(t) for t in targets)
             print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
                   f"(mitigated {strength:.2f}{extra}: {reason})")

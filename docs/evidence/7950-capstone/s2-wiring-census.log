@@ -1,9 +1,11 @@
-# #9189 — S2 wiring census: production call sites of the two-store chain
+# #9556 (#9189 follow-on) — S2 wiring census: production call sites of the two-store chain
 #   (reconciliation.reconcile / record_projection.replay /
 #   cache_projection.read_record_view / FalkorProjection.rebuild_from_record).
-# Measured at: feat/9189-tm@278e27460 on 2026-10-20 (re-cut for the #9196 P1 fix;
-#   the PRODUCTION section is byte-identical before and after that fix, while the
-#   `test population:` half had gone stale from this branch's OWN test additions)
+# Measured at: fix/9556-record-restore@b5768749e on 2026-10-22 (re-cut for R8: the
+#   record-sourced restore verb. `FalkorProjection.rebuild_from_record` moves 0 -> 1
+#   and `read_record_view` 1 -> 2, because `python -m tortoise record-restore` is now
+#   a production caller of both. The #9189 verdict this log feeds stays NOT-GREEN for
+#   `reconcile` (0 call sites) and for the lack of a SCHEDULED sweep.)
 # Command: uv run python docs/evidence/7950-capstone/probes/s2_wiring_census.py
 # Paste of the run as printed, BOTH populations. No expectation block: an expected-value
 #   header above a run's own transcript makes measured-vs-expected unverifiable.
@@ -15,28 +17,26 @@
 #   edit above the call and pinning it turned such edits into red CI (#9196 review).
 # The `test population:` counts are INFORMATIONAL and deliberately unpinned: they move
 #   whenever any test file mentions one of these names, which is not a claim about
-#   whether the product is wired. They have gone stale TWICE: between the origin/main
-#   merge and the first re-cut (#9196 review P2: replay read 1 vs a live 2,
-#   rebuild_from_record 6 vs 10), and again when this branch's own fix rounds added
-#   `read_record_view(...)` fixtures inside tests (2 vs a live 7). Both halves are
-#   re-cut from ONE run of the committed probe at the end of this branch.
+#   whether the product is wired. Re-cut from ONE run of the committed probe.
 # Population caveat: `scripts` is a committed symlink and `Path.rglob` does not descend
 #   symlinked directories, so that entry contributes 0 files in any checkout — the
-#   header's population claim covers `tortoise/` (241 files) and `tools/` (132) only.
+#   header's population claim covers `tortoise/` and `tools/` only.
 production population: ['tortoise', 'tools', 'scripts']/**/*.py
 
 == reconciliation.reconcile: 0 production call site(s) ==
 
 == record_projection.replay: 1 production call site(s) ==
-  tortoise/record_writer.py:375: report = record_projection.replay(
+  tortoise/record_writer.py:777: report = record_projection.replay(
 
-== cache_projection.read_record_view: 1 production call site(s) ==
-  tortoise/__main__.py:727: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+== cache_projection.read_record_view: 2 production call site(s) ==
+  tortoise/__main__.py:731: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+  tortoise/__main__.py:898: view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
 
-== FalkorProjection.rebuild_from_record: 0 production call site(s) ==
+== FalkorProjection.rebuild_from_record: 1 production call site(s) ==
+  tortoise/record_restore.py:354: result = project.rebuild_from_record(
 
 test population: tests/*.py
   reconciliation.reconcile: 12 test-file hit line(s)
-  record_projection.replay: 2 test-file hit line(s)
+  record_projection.replay: 4 test-file hit line(s)
   cache_projection.read_record_view: 7 test-file hit line(s)
-  FalkorProjection.rebuild_from_record: 10 test-file hit line(s)
+  FalkorProjection.rebuild_from_record: 11 test-file hit line(s)

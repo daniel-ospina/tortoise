@@ -140,6 +140,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 __all__ = [
     "JOURNAL_EVENT_TYPES",
@@ -200,6 +201,10 @@ RECORD_MIGRATIONS: tuple[str, ...] = (
     # the schema read and the placement pin still see one authoritative file
     # list — an unregistered migration is invisible to every reader.
     "20261022000001_record_session_capture_redactions_integer.sql",
+    # §9.1's narrative home (#9555, R7): a NEW table, not an ALTER, so the
+    # reader must see it or `_split_properties` would refuse every narrative
+    # column and the projection would write nothing while reporting success.
+    "20261023000001_record_session_narrative.sql",
 )
 
 #: Where the schema lives when this module is INSTALLED rather than checked out.
@@ -222,6 +227,11 @@ THE_RECORD_TABLES: tuple[str, ...] = (
     "subject",
     "point",
     "relation",
+    # NOT a node table: the §9.1 narrative home (#9555). It is here because
+    # `table_columns()` parses `CREATE TABLE` only for the tables this tuple
+    # names, and the narrative columns must be readable as COLUMNS (PRIMARY,
+    # §3) rather than pushed into a props tail the schema does not keep.
+    "session_narrative",
 )
 
 #: The per-layer node tables, and the canonical key column each one pins
@@ -1380,6 +1390,11 @@ def _endpoint_resolution(
     label: str,
     journal_id: str,
     alias: str,
+    *,
+    match: tuple[str, ...] | None = None,
+    values: Sequence[Any] | None = None,
+    order_by: str | None = None,
+    prefer: tuple[str, Any] | None = None,
 ) -> tuple[str, list[Any]]:
     """The node row an edge endpoint addresses, keyed by the label's key column.
 
@@ -1401,6 +1416,39 @@ def _endpoint_resolution(
     cascade uses (:data:`_ENTITY_MATCH_COLUMNS`), and the caller joins on the
     result: an endpoint with no row produces **no relation at all**, which is
     the fold's own `"absent"` verdict rather than a minted phantom.
+
+    *match* overrides the label's default predicate (:data:`_ENTITY_MATCH_COLUMNS`)
+    for a family whose fold matches ONE property. `extractedFrom` is that family
+    (#9553 class 1): `_link_source` writes
+    `MATCH (n:Point {id:…}), (s:Source {url:$url}) MERGE (n)-[:extractedFrom]->(s)`
+    — url ONLY — while the `Source` default is `id = %s OR url = %s`. Without the
+    override a point whose `extractedFrom` ref happens to be a Source's `id`
+    (a document reference: `create_document` keys the `url` but also stores the
+    `id`) would resolve onto that document row, where the fold would have minted
+    a stub `(s:Source {url:<ref>})` and attached the edge to the STUB: the record
+    would wire the edge to a different node than the graph did.
+
+    *values* binds one value per *match* column (defaults to *journal_id* for
+    every column). `extractedFrom` needs it because its two columns are matched
+    against TWO DIFFERENT values — the raw ref and its canonical form — to
+    mirror `source_identity.resolve_source_key`, which the fold calls before it
+    MERGEs (see `_point_property_relation_statements`).
+
+    *order_by* appends `ORDER BY <column> LIMIT 1`. A multi-column match can hit
+    more than one row (several Sources may share a canonical form), and
+    `resolve_source_key` picks the LOWEST `url` on ties — without the clause the
+    record would pick arbitrarily and could wire the edge to a different Source
+    than the graph did, on the same journal line.
+
+    *prefer* orders one matched COLUMN ahead of the rest: `ORDER BY CASE WHEN
+    <column> = %s THEN 0 ELSE 1 END[, <order_by>] LIMIT 1`. A `match` predicate
+    is a UNION, and a union has no precedence — but `resolve_source_key` does:
+    it queries `canonicalUrl` FIRST and returns there, considering the raw
+    spelling only afterwards (adopt-on-touch, then a second canonical query). A
+    plain `ORDER BY <key>` over the union therefore expresses a different rule,
+    and on a record holding two Sources for one identity it can wire the edge to
+    the node the fold would not have chosen — the same class of divergence the
+    `id`-fallback exclusion above exists to stop.
     """
     table = _LABEL_TABLES.get(label)
     if table is None:
@@ -1408,14 +1456,30 @@ def _endpoint_resolution(
             f"edge endpoint names label {label!r}, which is not a record node "
             f"label ({sorted(_LABEL_TABLES)})"
         )
-    match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
+    if match is None:
+        match = _ENTITY_MATCH_COLUMNS.get(table, ("node_key",))
     predicate = " OR ".join(f"{column} = %s" for column in match)
     if len(match) > 1:
         predicate = f"({predicate})"
+    ordering: list[str] = []
+    preferred: list[Any] = []
+    if prefer is not None:
+        preferred_column, preferred_value = prefer
+        ordering.append(f"CASE WHEN {preferred_column} = %s THEN 0 ELSE 1 END")
+        preferred.append(preferred_value)
+    if order_by:
+        ordering.append(order_by)
+    tail = f" ORDER BY {', '.join(ordering)} LIMIT 1" if ordering else ""
+    bound = list(values) if values is not None else [journal_id] * len(match)
+    if len(bound) != len(match):
+        raise RecordProjectionError(
+            f"endpoint {alias} binds {len(bound)} value(s) for "
+            f"{len(match)} match column(s) {match!r}"
+        )
     return (
         f"(SELECT node_key FROM public.{table} "
-        f"WHERE org_id = %s AND graph_id = %s AND {predicate}) {alias}",
-        [org_id, graph_id, *([journal_id] * len(match))],
+        f"WHERE org_id = %s AND graph_id = %s AND {predicate}{tail}) {alias}",
+        [org_id, graph_id, *bound, *preferred],
     )
 
 
@@ -1426,7 +1490,38 @@ def _relation_upsert_statement(
     payload: Mapping[str, Any],
     columns: Mapping[str, frozenset[str]],
     refused: Mapping[str, frozenset[str]],
+    *,
+    src_match: tuple[str, ...] | None = None,
+    tgt_match: tuple[str, ...] | None = None,
+    tgt_values: Sequence[Any] | None = None,
+    tgt_order_by: str | None = None,
+    tgt_prefer: tuple[str, Any] | None = None,
 ) -> list[Statement]:
+    """One `relation` row, with both endpoints RESOLVED from record rows.
+
+    *src_match* / *tgt_match* / *tgt_values* / *tgt_order_by* / *tgt_prefer* are
+    pass-throughs to :func:`_endpoint_resolution` for a family whose fold
+    addresses an endpoint by something other than the label's default predicate
+    (`extractedFrom` → the Source's canonical identity, #9553 class 1). All are
+    keyword-only with `None` defaults, so every pre-existing call site emits
+    byte-identical SQL.
+
+    ON CONFLICT is a REPLAY, not a re-link — with ONE exception.
+    `source_version` (the #5256 read-version anchor) is written by the fold
+    through `_anchor_on_create` (`ON CREATE SET r.sourceVersion = …`), whose rule
+    `_link_source` states: *"a re-link must not ADVANCE a recorded version"*.
+    Emitting `source_version = EXCLUDED.source_version` on the conflict path
+    would let a LATER record for the same edge (a re-emitted `PointAdded` —
+    `create_point` appends one before a DETACH DELETE and may append a second; a
+    promote snapshot; a second ref of one Point resolving onto the same Source)
+    overwrite an anchor the journal route keeps, and the two rebuild routes would
+    then disagree about the same journal. So the anchor is written ON CREATE
+    ONLY: `source_version` is dropped from the update list entirely, which is
+    the fold's own rule rather than an approximation of it. Every OTHER
+    attribute stays latest-record-wins (`direction`/`confidence`/`weight`/
+    `label`/`batch_id` are edge STATE the later record legitimately corrects,
+    not a recorded read version).
+    """
     rel_type, src_label, src, tgt_label, tgt, idx = _relation_coordinates(rel, payload)
     col_values, tail = _split_properties(
         "relation", {k: payload[k] for k in rel.attrs if k in payload},
@@ -1439,9 +1534,10 @@ def _relation_upsert_statement(
     # insert is a no-op — the fold's `"absent"` verdict, not a dropped edge
     # that still materializes a key.
     src_select, src_params = _endpoint_resolution(
-        org_id, graph_id, src_label, src, "src")
+        org_id, graph_id, src_label, src, "src", match=src_match)
     tgt_select, tgt_params = _endpoint_resolution(
-        org_id, graph_id, tgt_label, tgt, "tgt")
+        org_id, graph_id, tgt_label, tgt, "tgt", match=tgt_match,
+        values=tgt_values, order_by=tgt_order_by, prefer=tgt_prefer)
     columns_ = ["org_id", "graph_id", "rel_type", "src_label", "src_key",
                 "tgt_label", "tgt_key", "idx", *col_values, "props"]
     select_list = ", ".join([
@@ -1453,7 +1549,16 @@ def _relation_upsert_statement(
         *(_jsonb_or_scalar(c, v) for c, v in col_values.items()), json.dumps(tail),
         *src_params, *tgt_params,
     ]
-    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in [*col_values, "props"])
+    updates = ", ".join(
+        f"{column} = EXCLUDED.{column}"
+        for column in [*col_values, "props"]
+        # ON CREATE ONLY (#5256 / #5199): the anchor is written by the INSERT
+        # and never by the conflict path — see the docstring. Dropping it here
+        # (rather than filling a NULL) is literally `_anchor_on_create`: the
+        # fold does not touch `r.sourceVersion` on a re-link, so a row whose
+        # edge already existed keeps whatever it was created with.
+        if column != "source_version"
+    )
     return [Statement(
         f"INSERT INTO public.relation ({', '.join(columns_)}) "
         f"SELECT {select_list} FROM {src_select}, {tgt_select} "
@@ -1598,14 +1703,15 @@ def _nested_node_carrier(record: Mapping[str, Any],
 #: never wrote — the record richer than the graph, which is the one direction
 #: Interface A forbids.
 #:
-#: ⛔ NOT covered here, named so the next reader does not infer it: the other
-#: three R5 classes stay missing. Point-PROPERTY edges (`extractedFrom`,
-#: `about*`, `mitigated_by`, `tags`) are derived by the graph fold from the
-#: Point's snapshot and have no record carrier yet (class 1); operator
-#: `IMPL`/`NAND`/`INPUT` sit in `point.props` and are not journaled as edges
-#: (class 3); the structural predicates `ownedBy`/`hasPart`/`dependsOn`/
-#: `references` and friends have a working `DirectEdgeCreated` fold and NO
-#: producer (class 4 — a producer-side change, not a projection one).
+#: ⛔ NOT covered here, named so the next reader does not infer it. Point-PROPERTY
+#: edges are carried by their OWN declarations, not this one:
+#: `_POINT_PROPERTY_RELATIONS` (class 1, `extractedFrom`) and
+#: `_OPERATOR_RELATION_RECORDS` (class 3 — the operator's `IMPL`/`NAND`/`hasPart`,
+#: its reverse `INPUT`, and the canonical `mitigated_by` mirror). What stays
+#: missing is the rest of the point-property set (`about*`, `TAGGED`) and the
+#: structural predicates `ownedBy`/`hasPart`/`dependsOn`/`references` and
+#: friends, which have a working `DirectEdgeCreated` fold and NO producer
+#: (class 4 — a producer-side change in `sdk.py`, not a projection one).
 _ENVELOPE_RELATIONS: tuple[tuple[str, str, str, str, str], ...] = (
     ("PointAdded", "contains_session", "CONTAINS", "Session", "Point"),
     ("OperatorAdded", "contains_session", "CONTAINS", "Session", "Point"),
@@ -1723,6 +1829,759 @@ def _envelope_relation_statements(
     return statements
 
 
+#: R5 / #9553 **class 1** — the edges the graph fold derives from a Point's own
+#: PROPERTIES, keyed `(record type, prop, rel_type, target label)`.
+#:
+#: ⛔ WHY A DECLARATION AND NOT A SPECIAL CASE. `_upsert_point_edges`
+#: (`projection/entities.py`) is the fold's ONE edge writer. What it derives from
+#: the payload:
+#:
+#:   * `extractedFrom` → `(Point)-[:extractedFrom]->(Source)`, one edge per ref,
+#:     fanned out many-to-many (#3263) by `_link_source` — **carried HERE**;
+#:   * `contains_session` → CONTAINS — carried by the ENVELOPE directive above
+#:     (`_ENVELOPE_RELATIONS`, class 2, #9594);
+#:   * `p.operator` → `IMPL`/`NAND`/`hasPart` + the reverse `INPUT` + the
+#:     canonical `mitigated_by` reverse (`edges.py::_create_edges`) — **carried
+#:     by `_OPERATOR_RELATION_RECORDS`, class 3**: the carrier is the Point's own
+#:     descriptor, and the pair is emitted together there, so the record's edge
+#:     census agrees with the journal's for both halves. Its endpoints resolve
+#:     across FOUR labels (:Point/:Subject/:Object/:Event, #7902), which is why
+#:     that family builds its own row statement (labels as subselect columns);
+#:   * `aboutEntities` → `about*` — NOT carried here: `_create_about_edges`
+#:     resolves a NAME through a Subject→Object→Event→Source→Point cascade
+#:     against the LIVE graph, so the record would have to re-run that cascade
+#:     over its own tables to pick a label, and the `EntityLinked` record (#3664)
+#:     already carries the edge whenever the capture resolved it. The stored-vs-
+#:     derived ruling for `about*` is KEEP (owner, 2026-09-23), which is about
+#:     the STORE, not about inventing a second resolver here;
+#:   * `tags` → `TAGGED` — NOT carried here: the target is a `:Tag` node, and
+#:     `NODE_TABLES` has no `tag` table, so the record holds no `(Tag, key)`
+#:     identity for `relation.tgt_key`'s composite FK to point at. That family
+#:     needs a record-side `:Tag` node first, which is a schema decision, not a
+#:     projection one.
+#:
+#: The ONE family carried above (`extractedFrom`) covers the materialisation
+#: types below; the rest are named above and in `04-projection.md` §3 /
+#: `08-hosted-prerequisites.md` §R5 so the next reader meets the boundary
+#: instead of inferring it from a green suite.
+#:
+#: ⛔ FOUR TYPES, NOT TWO — AND THE FOLD'S TWO ROUTES DO NOT AGREE ABOUT THEM.
+#: `apply()` materialises a Point from FOUR arms, and three of them reach
+#: `_upsert_point_edges` (which reads `extractedFrom` off the payload with no
+#: type gate of its own):
+#:
+#:   * `PointAdded` / `OperatorAdded` → `self._upsert(p)`;
+#:   * `PointPromoted` → `self._upsert(gated_promote_payload(p, …))`;
+#:   * `OperatorPromoted` → `self._upsert(_promotion_point_with_operator(p))`.
+#:
+#: Neither wrapper drops `extractedFrom` (`gated_promote_payload` withholds
+#: `status` only; `_promotion_point_with_operator` only SYNTHESISES the nested
+#: `operator` key), and promote emitters journal the full `get_point(id)`
+#: property set (`sdk.promote_point`) — so a promote-only record (the #2256
+#: capture case, where the promote IS the operator's only durable record)
+#: re-derives the provenance edge on the `apply()` route. `_JOURNAL_POINT_
+#: MATERIALIZATION_TYPES` names exactly these four, and the record follows it:
+#: declining the two promote rows would leave the record POORER than the graph
+#: on the engine `rebuild` / `recover_from_log` actually run.
+#:
+#: The two rebuild routes genuinely diverge here — `rebuild_all`'s pass 2 gates
+#: on `PointAdded`/`OperatorAdded` only (`projection/__init__.py`, "Pass 2 edge
+#: wiring") — so on THAT route the promote-derived edge is not re-derived at all.
+#: The record follows `apply()` deliberately: it is the chronological, journal-
+#: order engine, and carrying the edge cannot be wrong when the record holds the
+#: payload that derives it (the row is FK-bound to a Point and a Source the
+#: record itself materialised — nothing is minted). The pass-2 gate is named in
+#: `04-projection.md` §3 so the narrower route is visible rather than inferred.
+#: A normal `PointAdded` → `PointPromoted` journal converges on ONE row: the
+#: relation's UNIQUE identity keys the upsert, and a promote snapshot carrying a
+#: NEW ref adds a second row exactly as the fold's `MERGE` adds a second edge.
+_POINT_PROPERTY_RELATIONS: tuple[tuple[str, str, str, str], ...] = (
+    ("PointAdded", "extractedFrom", "extractedFrom", "Source"),
+    ("OperatorAdded", "extractedFrom", "extractedFrom", "Source"),
+    ("PointPromoted", "extractedFrom", "extractedFrom", "Source"),
+    ("OperatorPromoted", "extractedFrom", "extractedFrom", "Source"),
+)
+
+
+#: ``tortoise/source_identity.py``'s canonicalisation constants, restated for the
+#: STANDALONE load (the PGlite harness `spec_from_file_location`s this module, so
+#: a package-relative import raises there). Pinned to the originals over a value
+#: table by `tests/test_record_projection.py::test_the_source_canonicaliser_is_the_folds_own`.
+_SOURCE_NETWORK_SCHEMES: frozenset = frozenset({"http", "https"})
+_SOURCE_DEFAULT_PORTS: dict[str, int] = {"http": 80, "https": 443}
+_SOURCE_TRACKING_PARAMS: frozenset = frozenset({
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "utm_id", "utm_name", "utm_reader", "utm_creative_format",
+    "utm_marketing_tactic", "utm_source_platform",
+    "fbclid", "gclid", "dclid", "gbraid", "wbraid", "msclkid",
+    "mc_cid", "mc_eid", "igshid", "mkt_tok", "_hsenc", "_hsmi",
+    "yclid", "twclid", "vero_id",
+})
+
+
+def _normalize_source_url(url: Any) -> Any:
+    """`source_identity.normalize_source_url` — the Source's canonical identity.
+
+    The fold does NOT address a ``:Source`` by the raw ``extractedFrom`` ref:
+    `_mint_source_stub` calls `resolve_source_key` FIRST, which canonicalises the
+    ref and returns the ``url`` of any Source already registered under that
+    canonical form, and only then MERGEs. So a point whose ref is a TRACKING-PARAM
+    or trailing-slash VARIANT of a registered Source lands its edge on the
+    REGISTERED node, not on the variant spelling.
+
+    A record that matched the raw ref alone would therefore resolve onto no row
+    and land NOTHING while the journal rebuild restored the edge — a silent
+    provenance loss on exactly the family this change carries (#9553 review P1).
+    This restates the canonicaliser so the record can mirror that resolution.
+
+    Restated rather than imported for the same STANDALONE reason as the sibling
+    helpers; pinned value-for-value to the original over a table that exercises
+    every branch (network/non-network, tracking params, query sort, default port,
+    IPv6, fragment, trailing slash, malformed) by
+    `test_the_source_canonicaliser_is_the_folds_own`.
+    """
+    if not isinstance(url, str) or not url:
+        return url
+    scheme_sep = url.find(":")
+    if scheme_sep <= 0:
+        return url
+    scheme = url[:scheme_sep].lower()
+    if scheme not in _SOURCE_NETWORK_SCHEMES:
+        return url
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if parts.scheme.lower() not in _SOURCE_NETWORK_SCHEMES:
+        return url
+    host = (parts.hostname or "").lower()
+    if not host:
+        return url
+    if ":" in host:  # IPv6 literal — urlsplit strips the brackets
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        return url
+    if port is not None and port != _SOURCE_DEFAULT_PORTS.get(scheme):
+        host = f"{host}:{port}"
+    path = parts.path or "/"
+    while "//" in path:
+        path = path.replace("//", "/")
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    if not path:
+        path = "/"
+    kept = [
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if k.lower() not in _SOURCE_TRACKING_PARAMS
+    ]
+    kept.sort()
+    return urlunsplit((scheme, host, path, urlencode(kept), ""))
+
+
+def _point_raw_refs(value: Any) -> list[Any]:
+    """`_point_source_refs`'s normalisation: the refs the fold would FAN OUT.
+
+    A bare `str` is ONE ref (never iterated character-wise), any other value is a
+    sequence, and falsy members are skipped. The CONTAINER gate is
+    `_link_source`'s: a `str` or a `list`/`tuple` is a ref collection, and
+    anything ELSE fans out to NOTHING (`#8171` review P1: a dict was
+    `list()`-ed into its KEYS and each key minted as its own `:Source` —
+    invented provenance). Restated rather than imported because this module is
+    loaded STANDALONE (`spec_from_file_location`, where a package-relative
+    import raises).
+    """
+    if isinstance(value, str):
+        refs = [value]
+    elif isinstance(value, (list, tuple)):
+        refs = list(value)
+    else:
+        return []
+    return [ref for ref in refs if ref]
+
+
+def _point_property_refs(value: Any) -> list[str]:
+    """The refs of a point PROPERTY that can land a `relation` row, per ref.
+
+    On top of :func:`_point_raw_refs`, `_link_source` skips a non-`str` member
+    and `_mint_source_stub` refuses an id `_writable_id` rejects (empty, NUL,
+    lone surrogate) and then MATCHes `(s:Source {url:$url})` with `None`, landing
+    no edge. Those refs land nothing on either route; `_writable_endpoint_id` is
+    that same predicate PLUS the blank refusal, and blank is the measured #9599
+    case: `:Source(url)` carries a range index (`_RANGE_INDEX_LABEL_PROPS`), so
+    an indexed equality filter does not match a whitespace-only key and the fold
+    writes no edge for one either.
+    """
+    return [ref for ref in _point_raw_refs(value)
+            if _writable_endpoint_id(ref)]
+
+
+def _point_source_versions(snapshot: Mapping[str, Any]) -> dict[str, str]:
+    """The `{raw ref: hash}` anchors the fold stamps on those edges (#5256).
+
+    `_link_source` writes `r.sourceVersion` from the Point's OWN
+    `sourceVersionTransit` carrier, through the shared `_point_source_transit`
+    selector, whose decision is FOUR rules and all four are restated here:
+
+    1. the carrier is accepted ALL-OR-NOTHING — one malformed pair (not a
+       2-element `[str, str]` with both members non-blank) and the payload
+       contributes NO anchor, rather than the well-formed half of one;
+    2. no `extractedFrom` ref at all ⇒ no anchor (the carrier is a transit for
+       an edge that will be written, so a stray carrier writes nothing);
+    3. a pair naming a ref this Point does NOT carry is dropped
+       (`kept = [[k, h] for k, h in pairs if any(k == r for r in refs)]`), so a
+       carrier whose every pair is foreign yields NO anchor;
+    4. a pair is keyed by the RAW ref spelling — the journal-stable key — and a
+       DUPLICATE keeps the LAST pair (both sides build their map by
+       comprehension over the same pair order).
+
+    Restated rather than imported for the same standalone reason as
+    :func:`_point_raw_refs`; the two are pinned equal over a value table by
+    `tests/test_record_projection.py::test_the_source_version_selector_is_the_folds_own`.
+    """
+    pairs = snapshot.get("sourceVersionTransit")
+    if not isinstance(pairs, (list, tuple)) or not pairs:
+        return {}
+    for pair in pairs:
+        if not (isinstance(pair, (list, tuple)) and len(pair) == 2
+                and isinstance(pair[0], str) and pair[0].strip()
+                and isinstance(pair[1], str) and pair[1].strip()):
+            return {}
+    refs = _point_raw_refs(snapshot.get("extractedFrom"))
+    if not refs:
+        return {}
+    return {pair[0]: pair[1] for pair in pairs if pair[0] in refs}
+
+
+def _point_property_relation_statements(
+    org_id: str,
+    graph_id: str,
+    record_type: Any,
+    snapshot: Mapping[str, Any] | None,
+    target_key: str,
+    columns: Mapping[str, frozenset[str]],
+    refused: Mapping[str, frozenset[str]],
+) -> list[Statement]:
+    """The `relation` rows a record's own POINT PROPERTIES derive (class 1).
+
+    Returned AFTER the node upsert by the caller — `relation`'s endpoints are
+    composite FKs into `node_identity` — and both endpoints are RESOLVED from the
+    record's own node rows, never minted.
+
+    The target is matched on the Source's canonical identity, mirroring
+    `_mint_source_stub` — never on the entity `id` fallback. The fold does not
+    address a `:Source` by the raw ref: `_mint_source_stub` calls
+    `resolve_source_key` first (canonicalise, then take the `url` of any Source
+    already registered under that canonical form) and only then MERGEs
+    `(s:Source {url:$url})`. So the record matches `node_key = <raw ref>` OR
+    `canonical_url = <normalised ref>`, PREFERRING the canonical match and
+    ordered by `node_key` within it — which is `resolve_source_key`'s own order
+    (it queries `canonicalUrl` first and returns there; the raw spelling is
+    consulted afterwards, adopt-on-touch) and its own tiebreak
+    (`ORDER BY s.url LIMIT 1`, and `chk_source_node_key_is_contract_key` forces
+    `node_key = url`). The ORDER BY is expressed rather than inherited: with two
+    Sources for one canonical identity the preference decides WHICH node the
+    edge lands on, and a plain `ORDER BY node_key` over the union would be free
+    to pick the node the fold would not have. Matching the raw ref ALONE
+    resolved a variant onto no row and landed NOTHING while the journal rebuild
+    restored the edge — a silent provenance loss on this very family (#9553
+    review P1). The `id` fallback is still excluded: it would attach the row to
+    a document row the fold never chose (see `_endpoint_resolution`'s `match`).
+
+    ⛔ TWO HONEST GAPS, stated rather than papered over — neither is the
+    variant case above, which is now RESOLVED to the fold's own answer. A THIRD
+    one, about which RECORDS carry this family at all, is named at the end.
+
+    (a) ORDERING. The row lands only when the Source's own record precedes the
+    Point's — the capture path materialises the session Source BEFORE extraction
+    (`sdk.py::_materialize_session_source`), and a document/link ref names a
+    Source journaled when it was created, so the live order holds. For a journal
+    that orders them the other way the record's insert finds no `source` row and
+    lands nothing, while `rebuild_all`'s pass 2 re-derives edges AFTER every node
+    is folded and would restore it. That is the `absent` verdict this projection
+    gives every relation rather than a fabricated endpoint, and a record-sourced
+    rebuild is expected to be fed in journal order (#9190).
+
+    (b) NO RECORD ROW AT ALL. A ref naming a Source the record never saw — the
+    fold's `_link_source` MINTS an UNJOURNALED stub for one (`_mint_source_stub`,
+    #5024) — has no `source` row and so no `(Source, key)` identity for
+    `relation.tgt_key`'s composite FK. The record lands no row, by design: minting
+    a node from an edge directive would materialise a Source no record created,
+    the record richer than the graph. Same absent verdict, same reason, as the
+    CONTAINS envelope family (#9594).
+
+    (c) THE FOLD'S TWO ROUTES DISAGREE ABOUT THE RECORD SET, and the record
+    follows `apply()`. `apply()` re-derives this family from FOUR point-
+    materialisation arms (`PointAdded`, `OperatorAdded`, `PointPromoted`,
+    `OperatorPromoted` — none of the payload wrappers drops `extractedFrom`),
+    while `rebuild_all`'s pass 2 re-derives it for the two CREATION types only
+    (`projection/__init__.py`, "Pass 2 edge wiring"). `_POINT_PROPERTY_RELATIONS`
+    declares all four: the record is a durable capture of the journal, so
+    declining the promote rows would make it POORER than the graph on the
+    chronological engine `rebuild` / `recover_from_log` run — the direction
+    Interface A forbids — for exactly the #2256 population whose promote IS the
+    operator's only record. The divergence that follows is on the pass-2 side
+    (a full rebuild re-derives no promote edge), named here and in
+    `04-projection.md` §3 rather than left to be discovered.
+
+    ⛔ AND ONE RULE THE RECORD NOW SHARES WITH `_anchor_on_create`: the anchor
+    is written ON CREATE ONLY — a replay of the same edge neither advances nor
+    fills `source_version` (`_relation_upsert_statement` omits it from the
+    update list, which is literally `ON CREATE SET`). For two refs of one Point
+    resolving onto the SAME Source with different hashes, the first ref's anchor
+    therefore wins on both routes, instead of the last INSERT winning.
+    """
+    if not isinstance(snapshot, Mapping):
+        return []
+    declared = [(prop, rel_type, tgt_label)
+                for type_of, prop, rel_type, tgt_label in _POINT_PROPERTY_RELATIONS
+                if type_of == record_type]
+    if not declared:
+        return []
+    statements: list[Statement] = []
+    for prop, rel_type, tgt_label in declared:
+        versions = _point_source_versions(snapshot)
+        for ref in _point_property_refs(snapshot.get(prop)):
+            # Mirror `resolve_source_key`: the raw ref, AND its canonical form,
+            # with the CANONICAL match preferred (that is the order it queries
+            # in: canonicalUrl first, return there; the raw spelling is the
+            # adopt-on-touch fallback). `node_key` is the tiebreak inside each
+            # tier, exactly as its `ORDER BY s.url LIMIT 1`.
+            canonical = _normalize_source_url(ref)
+            payload: dict[str, Any] = {
+                "edge_type": rel_type,
+                "src": target_key,
+                "tgt": ref,
+                "source_label": "Point",
+                "target_label": tgt_label,
+            }
+            # #5256: the read-version anchor the fold stamps ON CREATE — and the
+            # record writes through ON CONFLICT, so the anchor is the ONE
+            # attribute the upsert never rewrites (`_relation_upsert_statement`
+            # drops it from the update list). It is a PRIMARY column
+            # (`relation.source_version` → the cache projection's
+            # `sourceVersion` property, `cache_projection.placement_columns`),
+            # not a props key, and absent/empty means NO anchor on both routes.
+            anchor = versions.get(ref)
+            if anchor:
+                payload["source_version"] = anchor
+            statements.extend(_relation_upsert_statement(
+                org_id, graph_id, RelationUpsert(), payload,
+                columns=columns, refused=refused,
+                tgt_match=("node_key", "canonical_url"),
+                tgt_values=(ref, canonical),
+                tgt_order_by="node_key",
+                tgt_prefer=("canonical_url", canonical),
+            ))
+    return statements
+
+
+#: The epistemic label set, in the order the record's endpoint resolver tries it
+#: (#7902: an operator endpoint may carry ANY of these four, owner ruling
+#: #7813). Restated for the STANDALONE load and pinned to the original —
+#: `tortoise/live.py::EPISTEMIC_LABELS` — by
+#: `tests/test_record_projection.py::test_the_epistemic_label_order_is_the_folds_own`,
+#: because the ORDER decides which label a row is filed under when one id
+#: somehow exists in two tables and the fold's own probe is unordered.
+_EPISTEMIC_LABELS: tuple[str, ...] = ("Point", "Subject", "Object", "Event")
+
+#: #9553 **class 3** — the typed edge `_create_edges` derives from an operator's
+#: own `{op_type, inputs}` descriptor (`projection/edges.py`). The mapping is the
+#: fold's literal, restated: an op_type the fold does not know mints no typed
+#: edge at all, only the reverse `INPUT`.
+_OPERATOR_REL_TYPES: dict[str, str] = {
+    "NAND": "NAND",
+    "IMPL": "IMPL",
+    # The four composition spellings all land the ONE `hasPart` predicate.
+    "composedOf": "hasPart",
+    "decomposesInto": "hasPart",
+    "contains": "hasPart",
+    "wraps": "hasPart",
+}
+
+#: How the operator descriptor is read from a record's snapshot. `nested` is
+#: `snapshot["operator"]`; `synthesized` additionally mirrors
+#: `projection._promotion_point_with_operator`, which rebuilds the nested shape
+#: from FLAT props because promotion emitters journal `get_point` snapshots.
+_NESTED_OPERATOR = "nested"
+_SYNTHESIZED_OPERATOR = "synthesized"
+
+#: `(record type, how its operator descriptor is read)` — EXACTLY the records
+#: whose materialisation calls `_upsert_point_edges` → `_create_edges`.
+#:
+#: ⛔ WHY THESE FOUR. `apply()` reaches the edge writer from four
+#: point-materialisation arms (`projection/__init__.py:11563` for
+#: `PointAdded`/`OperatorAdded`, `:11643` for `PointPromoted`, `:11673` for
+#: `OperatorPromoted`), while `rebuild_all`'s pass 2 re-derives them for the two
+#: CREATION types only. The record follows `apply()` — the chronological engine
+#: `rebuild` / `recover_from_log` run — because declining a promote row would
+#: make the record POORER than the graph on the engine that folds in order, for
+#: exactly the #2256 population whose promote IS the operator's only record.
+#: The divergence that follows is on the pass-2 side (a full rebuild re-derives
+#: no promote edge) and is named in `04-projection.md` §3, not left to be found.
+#:
+#: ⚠️ `PointPromoted` is `nested`, NOT `synthesized`: `apply()` applies the
+#: promotion synthesis (`_promotion_point_with_operator`) to the
+#: `OperatorPromoted` arm ONLY, so a flat `PointPromoted` snapshot reaches
+#: `_create_edges` with no `operator` key and the fold writes no edge. Reading
+#: `op_type`/`inputs` there would mint a row the graph never wrote.
+_OPERATOR_RELATION_RECORDS: tuple[tuple[str, str], ...] = (
+    ("PointAdded", _NESTED_OPERATOR),
+    ("OperatorAdded", _NESTED_OPERATOR),
+    ("PointPromoted", _NESTED_OPERATOR),
+    ("OperatorPromoted", _SYNTHESIZED_OPERATOR),
+)
+
+
+def _operator_descriptor(
+    record_type: Any,
+    snapshot: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    """The `{op_type, inputs}` descriptor `_create_edges` would read, or None.
+
+    ⛔ BOTH gates are the fold's, and the second one is a `dict` test on purpose.
+    A truthy non-`dict` degrades to no edges there (`_create_edges`:
+    `if not isinstance(op, dict): return`) and to no rows here, so a custom
+    `Mapping` — which passes `isinstance(x, Mapping)` but is not a `dict` — must
+    NOT be accepted: the record would be richer than the graph.
+
+    The synthesis gate is KEY PRESENCE, not `None`-ness. `_upsert_point_edges`
+    reaches `_create_edges` only `if p.get("operator")` (so a falsy descriptor
+    withholds the call), and `_promotion_point_with_operator` refuses to
+    synthesize when the key EXISTS at all (`"operator" in p`). A snapshot
+    carrying `{"operator": None, "is_operator": True, "op_type": "IMPL"}` is
+    therefore edge-less on BOTH fold halves — reading `descriptor is None` here
+    would synthesize one and emit `IMPL`/`INPUT` rows the graph never wrote, a
+    silent topology change from a record the fold ignores.
+    """
+    how = dict(_OPERATOR_RELATION_RECORDS).get(record_type) \
+        if isinstance(record_type, str) else None
+    if how is None or not isinstance(snapshot, Mapping):
+        return None
+    descriptor = snapshot.get("operator")
+    # `_promotion_point_with_operator(p)`: `if p.get("is_operator") and
+    # p.get("op_type")` → `{"op_type": p["op_type"], "inputs": p.get("inputs")
+    # or []}`. Restated verbatim: the polarity and the `or []` both decide
+    # whether a real edge is restored.
+    if (how == _SYNTHESIZED_OPERATOR and "operator" not in snapshot
+            and snapshot.get("is_operator") and snapshot.get("op_type")):
+        descriptor = {"op_type": snapshot["op_type"],
+                      "inputs": snapshot.get("inputs") or []}
+    return descriptor if isinstance(descriptor, dict) else None
+
+
+def _writable_epistemic_id(value: Any) -> bool:
+    """True when the FOLD would key an operator input on `value`.
+
+    `projection._writable_id`, restated: a non-`str`, the EMPTY string, a NUL and
+    a lone surrogate are refused — and a WHITESPACE-ONLY value is deliberately
+    ADMITTED (#9599), which is the difference between this predicate and
+    :func:`_writable_endpoint_id`.
+
+    ⛔ WHY THE DIFFERENCE IS LOAD-BEARING, and why the Session family's rule
+    cannot be reused here. `_writable_container_id` refuses a blank key because
+    `_link_session` addresses the container with an INLINE property MATCH
+    (`(s:Session {id:$sid})`), which FalkorDB answers from the `:Session(id)`
+    range index, and an indexed equality filter does not match a
+    whitespace-only string (#9599). This family's probe is not that shape:
+    `_create_edges` addresses an input with a LABEL DISJUNCTION plus a `WHERE`
+    (`MATCH (o:Point {id:$oid}), (s) WHERE (s:Point OR … ) AND s.id = $sid`) —
+    a SCAN, where the ordinary string comparison applies. MEASURED on the fold
+    through this code path (review round 2): a blank input id gets a `:Point`
+    stub minted and BOTH edges landed (`IMPL`, `INPUT`), and the same holds when
+    a node already carries the blank key.
+
+    So refusing a blank input here would make the record POORER than the graph
+    on exactly the edge this change exists to carry — the direction Interface A
+    forbids — and would do it on a stated-but-false reason. The refusal set is
+    therefore `_writable_id`'s, value for value; pinned by
+    `test_the_operator_input_gate_is_the_folds_own_rule`.
+
+    The NUL / lone-surrogate refusals are not cosmetic on THIS side either:
+    Postgres refuses a NUL in `text` and the driver cannot encode a lone
+    surrogate, so admitting either would turn a fold skip into a failed replay.
+    A ≥20-character id bearing one is the case where the fold's own `else`
+    branch has no gate and its probe RAISES (measured: `ResponseError: Failed to
+    parse query parameter`); the record skips it instead, which is the fail-safe
+    half of the same verdict — no edge on either route, and no aborted write.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False  # lone surrogate
+    return True
+
+
+def _is_non_operator_snapshot(snapshot: Mapping[str, Any]) -> bool:
+    """`projection/entities.py::is_non_operator_payload`, restated.
+
+    The polarity is load-bearing: `not p.get("is_operator")` is ALSO true when
+    the key is ABSENT, and the EventAPI / extractor / ingest producer emits an
+    `OperatorAdded` with no flag at all — that form would authorise a
+    `mitigated_by` row for every generic IMPL operator on the main write path.
+    Pinned value-for-value against the fold by
+    `test_the_mitigation_gates_are_the_folds_own`.
+    """
+    return snapshot.get("is_operator") is False
+
+
+def _has_usable_mitigation_strength(snapshot: Mapping[str, Any]) -> bool:
+    """`projection/entities.py::has_usable_mitigation_strength`, restated.
+
+    `mitigate_operator`'s own accepted domain: a real `int`/`float` (a `bool`
+    included on purpose — the writer accepts one) inside `[0, 1]`. A map / list /
+    None is dropped by the writer's passthrough, a non-numeric value persists but
+    is unreadable, and an out-of-band value is refused by the writer's band
+    check — none of them is a mitigation a live call could have written, so none
+    of them may authorise the reconstructed dampening.
+
+    Refusal is TOTAL and fail-safe: `isinstance` admits an `int`/`float`
+    SUBCLASS whose comparison raises, and a hand-edited record must land NO row
+    rather than abort the record write after the engine has started replaying.
+    The band comparison IS the finiteness check (`10**400` fails it by
+    comparison, never by `OverflowError`), exactly as the fold states.
+    """
+    value = snapshot.get("mitigation_strength")
+    if not isinstance(value, (int, float)):
+        return False
+    try:
+        return bool(0 <= value <= 1)
+    except Exception:
+        return False
+
+
+def _epistemic_endpoint(
+    org_id: str,
+    graph_id: str,
+    journal_id: str,
+    alias: str,
+) -> tuple[str, list[Any]]:
+    """The `(label, node_key)` row an operator input addresses, resolved.
+
+    ⛔ WHY THIS IS NOT `_endpoint_resolution`. That helper takes the LABEL as an
+    argument, because every other edge family knows it: an `EntityLinked`
+    record names both labels, a `DirectEdgeCreated` descriptor defaults to
+    `Point`, and the class-1 target is a `Source`. An operator's input does NOT
+    come with one: `_create_edges`
+    probes `MATCH (s) WHERE (s:Point OR s:Subject OR s:Object OR s:Event) AND
+    s.id = $sid`, so the label is whatever the graph happened to hold. The
+    record therefore has to answer label AND key from one lookup, and
+    `relation.src_label`/`tgt_label` are bound as VALUES by
+    `_relation_upsert_statement` — hence a resolver that returns both, and a
+    statement built for it below.
+
+    The probe is the fold's, `s.id = $sid`, over the four tables; first label in
+    :data:`_EPISTEMIC_LABELS` order wins. The KEY is each label's canonical one
+    (`point.node_key` = the id; `subject`/`object` → `name`; `event` →
+    `node_key` = the `eventId`), because `relation.src_key`/`tgt_key` are
+    composite FKs into `node_identity` — writing the raw journal id for a
+    Subject would address a phantom identity the hard-delete cascade can never
+    reach (the same defect `_endpoint_resolution` exists to prevent).
+
+    ⛔ WHICH COLUMN carries `s.id` is per label, and it is NOT always the
+    table's `id` column — :data:`_ENTITY_MATCH_COLUMNS` is the one answer, and
+    this resolver DERIVES from it rather than restating it (a second spelling is
+    how this family drifted onto `event.id` in the first place). Every label here
+    agrees with it (`Point` → `node_key`, `Subject`/`Object` → `id`, `Event` →
+    `node_key`). `Event` is the label where the two DISAGREE and
+    where assuming `id` cost the record the edge: the schema pins
+    `event.node_key = event_id` ``NOT NULL`` (`chk_event_node_key_is_contract_key`)
+    while `event.id` is a plain nullable column, and the dominant
+    `EventRecorded` producers — `mining._make_event` (nested `{eventId: …}`, no
+    `id`) and `github_map.issue_to_event`/`pr_to_event` (`eventId` only) — never
+    fill it. The graph still keys such a node `id == eventId`
+    (`_upsert_event`'s unconditional `props["id"] = eid`, `eid = inner.get("id")
+    or inner.get("eventId")`), so the fold's `s.id = $sid` probe matched and
+    wrote both edges while an `id`-matching record write filed no `relation` row
+    at all: R5 class 3, silently open on the Event arm (`#9553` review).
+
+    ⚠️ RESIDUAL, named: a payload carrying BOTH `id` and a DIFFERENT `eventId`
+    would key the record row on the `eventId` while the fold's MERGE key is the
+    `id` — the record and the graph would then disagree about the node's
+    identity, which is upstream of this resolver and not something a match
+    column can repair. No producer emits that shape (both dominant producers
+    emit `eventId` alone), so it is stated, not handled.
+
+    ⚠️ BOUND, stated rather than discovered — and it is the record that is
+    POORER, not two arbitrary-but-equal choices. The fold's probe BINDS `s` to
+    every node holding that id (`_create_edges`' `MATCH … WHERE (s:Point OR
+    s:Subject OR s:Object OR s:Event) AND s.id = $sid` then `MERGE`), so a
+    duplicated id yields one typed/`INPUT` edge pair PER node, while this
+    resolver files the row under ONE label (`ORDER BY pref LIMIT 1`). Ids are
+    ULIDs minted per node, so two nodes share one only through a hand-written
+    graph. The row is absent-but-one rather than wrong; a one-row-per-candidate
+    -label form cannot express "every label that matched", so the bound is the
+    record's, not a choice the graph also makes.
+    """
+    selects: list[str] = []
+    params: list[Any] = []
+    for pref, label in enumerate(_EPISTEMIC_LABELS):
+        table = _LABEL_TABLES[label]
+        # Each label's CANONICAL key (`node_identity.key_property`, migration
+        # `20261012000001`): `Point`/`Event` → `node_key` (the id / the
+        # `eventId`), `Subject`/`Object` → `name`.
+        key_column = "node_key" if label in ("Point", "Event") else "name"
+        # The FOLD's match column is `s.id`, and WHICH record column carries it
+        # is `_ENTITY_MATCH_COLUMNS`' own answer — DERIVED here, never restated.
+        # A second spelling of that fact is exactly how the Event arm came to
+        # match `event.id`, the one column its dominant producers leave NULL, and
+        # silently filed no row (#9553 review). Matching the key also keeps the
+        # per-(label, id) index instead of a column no producer must fill.
+        # This family resolves ONE column per label: the row carries one journal
+        # id per endpoint, and the pair-per-input fan-out assumes the fixed
+        # parameter block. A multi-column entry is REFUSED rather than silently
+        # read as "first".
+        match_columns = _ENTITY_MATCH_COLUMNS[table]
+        if len(match_columns) != 1:
+            raise RecordProjectionError(
+                f"the {label} endpoint resolves on {len(match_columns)} columns "
+                f"{match_columns} — an operator input is ONE journal id, so "
+                "this family can match exactly one"
+            )
+        match_column = match_columns[0]
+        selects.append(
+            f"SELECT '{label}' AS node_label, {key_column} AS node_key, "
+            f"{pref} AS pref FROM public.{table} "
+            f"WHERE org_id = %s AND graph_id = %s AND {match_column} = %s"
+        )
+        params.extend([org_id, graph_id, journal_id])
+    return (
+        f"(SELECT node_label, node_key, pref FROM ({' UNION ALL '.join(selects)}) "
+        f"epistemic ORDER BY pref LIMIT 1) {alias}",
+        params,
+    )
+
+
+def _operator_relation_statement(
+    org_id: str,
+    graph_id: str,
+    rel_type: str,
+    src_id: str,
+    tgt_id: str,
+    idx: int,
+) -> Statement:
+    """One `relation` row whose endpoints carry their OWN labels.
+
+    The same shape `_relation_upsert_statement` emits, with two differences the
+    family forces:
+
+    * the labels come from the endpoint subselects, so they are COLUMNS of the
+      `SELECT` rather than parameters — an operator input's label is a fact the
+      graph holds, not one the record may assume;
+    * `ON CONFLICT … DO NOTHING`. These rows carry NO attribute: the fold writes
+      `{idx}` on the typed/reverse edges and nothing at all on `mitigated_by`
+      (`projection/edges.py::_create_edges`), and `idx` is part of the conflict
+      key — so a replay has nothing to correct, and `DO NOTHING` is exactly the
+      idempotent form. (`DO UPDATE SET props = EXCLUDED.props`, which the other
+      families use, is for rows whose attributes a later record legitimately
+      supersedes; it would be a no-op here and would misstate the contract.)
+    """
+    src_select, src_params = _epistemic_endpoint(org_id, graph_id, src_id, "src")
+    tgt_select, tgt_params = _epistemic_endpoint(org_id, graph_id, tgt_id, "tgt")
+    return Statement(
+        "INSERT INTO public.relation (org_id, graph_id, rel_type, src_label, "
+        "src_key, tgt_label, tgt_key, idx) "
+        "SELECT %s, %s, %s, src.node_label, src.node_key, tgt.node_label, "
+        "tgt.node_key, %s "
+        f"FROM {src_select}, {tgt_select} "
+        "ON CONFLICT (org_id, graph_id, rel_type, src_label, src_key, "
+        "tgt_label, tgt_key, idx) DO NOTHING",
+        (org_id, graph_id, rel_type, idx, *src_params, *tgt_params),
+    )
+
+
+def _operator_relation_statements(
+    org_id: str,
+    graph_id: str,
+    record_type: Any,
+    snapshot: Mapping[str, Any] | None,
+    target_key: str,
+) -> list[Statement]:
+    """The `relation` rows an OPERATOR's own descriptor derives (class 3).
+
+    ⛔ THE GAP THIS CLOSES (R5 / #9553, class 3). An operator's `IMPL`/`NAND`/
+    `hasPart` edge, its reverse `INPUT`, and (for a mitigation) the canonical
+    `mitigated_by` mirror exist ONLY as `_create_edges` Cypher, driven from the
+    `{op_type, inputs}` descriptor in the Point's snapshot. The record
+    materialised the operator's `point` row and emitted no `relation` row, so a
+    **journal** rebuild restored the epistemic topology while a
+    **record**-sourced rebuild restored the claims and none of their structure —
+    the loss the epic's "destroyed and rebuilt without data loss" acceptance is
+    about, since `compute_operator_weight` reads exactly these edges.
+
+    For each input, mirroring `_create_edges` VALUE FOR VALUE:
+
+    * a KNOWN `op_type` → `(operator)-[:<REL> {idx}]->(input)` AND
+      `(input)-[:INPUT {idx}]->(operator)`;
+    * an UNKNOWN `op_type` → the reverse `INPUT` only (`rel_type` is None);
+    * `IMPL` from a NON-operator Point carrying a usable
+      `mitigation_strength` → additionally `(input)-[:mitigated_by]->
+      (operator)`, the canonical reverse `mitigate_operator` writes (#5048,
+      #4937). Both gates are the fold's own, restated above.
+
+    ⚠️ Iteration mirrors `enumerate(op.get("inputs") or [])` verbatim, INCLUDING
+    its tolerance of a container the fold never guards: a dict iterates its keys
+    and a string its characters there, and the same members are read here. They
+    simply land no row, because the fold mints a STUB node for an input that does
+    not resolve and a stub has no record row to resolve from — the `absent`
+    verdict this projection gives every relation, never a minted endpoint.
+    """
+    descriptor = _operator_descriptor(record_type, snapshot)
+    if descriptor is None:
+        return []
+    try:
+        rel_type = _OPERATOR_REL_TYPES.get(descriptor.get("op_type"))
+    except TypeError:
+        # An unhashable `op_type` (a corrupt record) raises out of `dict.get`,
+        # and this function is reached from a fold declared TOTAL — a record
+        # write must never abort mid-replay after the engine has started. The
+        # fold raises on the same payload; the record fails SAFE instead (no
+        # typed edge, and the reverse `INPUT` below, which is what an unknown
+        # op_type gets there too).
+        rel_type = None
+    mitigation = (
+        rel_type == "IMPL"
+        and _is_non_operator_snapshot(snapshot)
+        and _has_usable_mitigation_strength(snapshot)
+    )
+    try:
+        members = list(enumerate(descriptor.get("inputs") or []))
+    except TypeError:
+        # A non-iterable `inputs` is a malformed record: the fold would raise on
+        # it, and a record write must never abort mid-replay after the engine has
+        # started — no rows, no invented endpoints (fail-safe, like every other
+        # refusal on this path).
+        return []
+    statements: list[Statement] = []
+    for idx, source in members:
+        # The fold's own member gate: a non-string member is malformed and
+        # skipped (`if not isinstance(src, str): continue`), and an unwritable
+        # id is skipped. The id predicate is `_writable_id`'s, NOT the
+        # blank-refusing container rule — see :func:`_writable_epistemic_id`:
+        # this family's probe is a label-disjunctive SCAN, so the fold really
+        # does land the edges for a blank key, and refusing it here would make
+        # the record poorer than the graph.
+        if not isinstance(source, str) or not _writable_epistemic_id(source):
+            continue
+        if rel_type is not None:
+            statements.append(_operator_relation_statement(
+                org_id, graph_id, rel_type, target_key, source, idx))
+            statements.append(_operator_relation_statement(
+                org_id, graph_id, "INPUT", source, target_key, idx))
+            if mitigation:
+                statements.append(_operator_relation_statement(
+                    org_id, graph_id, "mitigated_by", source, target_key, 0))
+        else:
+            statements.append(_operator_relation_statement(
+                org_id, graph_id, "INPUT", source, target_key, idx))
+    return statements
+
+
 def mutations_for(
     record: Mapping[str, Any],
     *,
@@ -1736,7 +2595,31 @@ def mutations_for(
     Raises :class:`UnknownJournalRecordType` for a record type the registry
     does not declare, and :class:`RefusedJournalOperation` for a declared
     refusal. Both are failures — neither is a skip.
+
+    The record's DECLARED mutation comes first; the §9.1 narrative home
+    (:func:`_narrative_statements`, #9555) is appended when THIS record
+    carries the narrative or the capture counts that home is keyed on. The
+    append is per-record and idempotent, so a replay in journal order builds
+    the same row the live path built.
     """
+    return [
+        *_declared_mutations(
+            record, org_id=org_id, graph_id=graph_id,
+            columns=columns, refused=refused,
+        ),
+        *_narrative_statements(record, org_id, graph_id),
+    ]
+
+
+def _declared_mutations(
+    record: Mapping[str, Any],
+    *,
+    org_id: str,
+    graph_id: str,
+    columns: Mapping[str, frozenset[str]] | None = None,
+    refused: Mapping[str, frozenset[str]] | None = None,
+) -> list[Statement]:
+    """The mutation :data:`RECORD_MUTATIONS` declares for ONE record."""
     columns = columns if columns is not None else table_columns()
     refused = refused if refused is not None else refused_props_names()
     record_type = record.get("type")
@@ -1805,6 +2688,35 @@ def mutations_for(
                                             refused=refused, drop=effect.drop)
         if node.key_column not in col_values:
             col_values[node.key_column] = key
+        # #9553 review P1: the Source's CANONICAL identity is a pure function of
+        # its MERGE key (`normalize_source_url(url)`), and the record's
+        # `canonical_url` column is fed by NO payload:
+        # `projection/entities.py::_EntityHandlers._SOURCE_HANDLED` puts
+        # `canonicalUrl` among the writer-DERIVED keys that `_persist_extra_props`
+        # drops, so no journal line can express it. Left unpopulated, the column
+        # is dead weight AND the class-1 resolver below cannot mirror
+        # `source_identity.resolve_source_key`, which is what makes a URL-VARIANT
+        # `extractedFrom` ref land on the registered Source in the graph.
+        # Deriving it here is the same rule the fold applies
+        # (`_mint_source_stub` sets `canonicalUrl = normalize(key)` on create,
+        # `coalesce`d on match), stated from the record's own key — so the two
+        # rebuild routes agree on the node's identity instead of only on its url.
+        #
+        # ⛔ DELIBERATE, PINNED DIVERGENCE — stated, not lurking. This applies to
+        # EVERY `source` row, including a `DocumentCreated` one, and the live
+        # `_upsert_document` fold writes no `canonicalUrl` at all: a RESTORED
+        # document `:Source` therefore carries a property live leaves unset until
+        # something touches it. The value is the pure canonical form of the row's
+        # own key, which `resolve_source_key`'s adopt-on-touch backfills on the
+        # FIRST touch anyway (including the touch that resolves a variant ref onto
+        # a document), so the two states converge on use; scoping the derive to
+        # the types whose fold writes it would instead LOSE the variant resolution
+        # for document targets — the silent provenance loss this whole path exists
+        # to avoid. Pinned by
+        # `test_a_document_source_row_derives_its_canonical_identity_too`.
+        if (node.table == "source"
+                and "canonical_url" in columns.get("source", frozenset())):
+            col_values.setdefault("canonical_url", _normalize_source_url(key))
         return [
             _identity_statement(org_id, graph_id, node, key),
             _upsert_statement(org_id, graph_id, node, key, col_values, tail),
@@ -1812,6 +2724,21 @@ def mutations_for(
             # be in `node_identity` or the composite FK refuses the insert.
             *_envelope_relation_statements(
                 org_id, graph_id, record, record_type, key, columns, refused),
+            # AND the edges this record's own PROPERTIES derive (R5 class 1).
+            # Same ordering rule for the same reason; the target Source row is
+            # resolved from the record, never minted.
+            *_point_property_relation_statements(
+                org_id, graph_id, record_type,
+                snapshot if isinstance(snapshot, Mapping) else None,
+                key, columns, refused),
+            # AND the epistemic topology this record's own OPERATOR descriptor
+            # derives (R5 class 3): the typed edge, its reverse INPUT, and the
+            # canonical mitigated_by mirror. Same ordering rule again, and the
+            # endpoints are resolved across the four epistemic labels — never
+            # minted, so an input the fold stubs lands no row.
+            *_operator_relation_statements(
+                org_id, graph_id, record_type,
+                snapshot if isinstance(snapshot, Mapping) else None, key),
         ]
     if isinstance(effect, NodePatch):
         node = effect.node
@@ -1848,6 +2775,236 @@ def mutations_for(
         f"{record_type!r} declares an effect this engine does not implement: "
         f"{type(effect).__name__}"
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# §9.1's narrative home (#9555, R7) — the SECONDARY projection
+# ════════════════════════════════════════════════════════════════════════════
+# The narrative is NOT a node (§9.1: "not in the graph, not a `Document` node,
+# not a `Point`") so it has no `node_identity` row and no `NodeSnapshot` — that
+# effect emits an identity row first, by design. It is keyed on the SESSION
+# instead, and it is built by TWO different records: the narrative-carrying
+# `:Source`/`:Event` record owns the text, and the capture's `SessionRecorded`
+# owns the counts. The one rule that makes those two idempotent in either order
+# is that each upsert names only ITS OWN columns in the `DO UPDATE SET`.
+
+#: The record's narrative table (§9.1 / migration 20261023000001).
+NARRATIVE_TABLE = "session_narrative"
+
+#: The payload keys naming the session a narrative/count record belongs to.
+#: Both spellings are live: `sessionId` on the hosted commit's `:Source`/`:Event`
+#: records (hosted_api's §4.1 derived path), `session_id` on the capture's own.
+_SESSION_COORDINATE_KEYS: tuple[str, ...] = ("sessionId", "session_id")
+
+#: The payload key carrying §9.1's narrative — the commit's own name for the
+#: "connected prose form of a captured session", written onto the transcript
+#: `:Source`/`:Event` by the layer-1 commit.
+_NARRATIVE_KEY = "story_arc"
+
+#: The INTEGER fields the narrative home reproduces beside the text.
+_NARRATIVE_INT_KEYS: tuple[str, ...] = ("capture_redactions", "turn_count")
+
+#: The largest value the record's `integer` columns accept. A count above it
+#: fits the carrier's own `jsonb` column and would raise `integer out of range`
+#: INSIDE the carrier's transaction — see the projection's guard.
+_INT4_MAX = 2**31 - 1
+
+
+def _session_coordinate(record: Mapping[str, Any]) -> str | None:
+    """The session this record is a narrative/count carrier for, if any.
+
+    Two spellings, because two producers name it differently: `sessionId` on
+    the commit's `:Source`/`:Event` records, `session_id` on the capture's own.
+    A record whose DECLARED node IS the Session (`SessionRecorded`) names it by
+    `id` — read from the registry rather than guessed, so an ordinary Point
+    (whose `id` is a point) can never be mistaken for a session.
+    """
+    for key in _SESSION_COORDINATE_KEYS:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    mutation = RECORD_MUTATIONS.get(record.get("type"))
+    node = getattr(mutation.effect, "node", None) if mutation else None
+    if isinstance(node, Node) and node.table == "session":
+        value = record.get("id")
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _narrative_upsert_statement(
+    org_id: str,
+    graph_id: str,
+    session_id: str,
+    values: Mapping[str, Any],
+    resets: Sequence[str] = (),
+) -> Statement:
+    """Upsert the narrative row, touching ONLY the columns this record owns.
+
+    THE SET LIST IS THE POINT. If either carrier wrote the whole column set
+    (NULLs for the fields it does not carry), the second record to arrive
+    would ERASE the first one's half — an order-dependent record, i.e. a
+    replay that is not idempotent and a live/rebuild divergence.
+
+    ``resets`` are columns THIS record carries but cannot represent (a count the
+    INTEGER refuses). They are written NULL on conflict rather than left alone:
+    the count is this carrier's own column, rebuilt by every capture, so
+    "carried but unrepresentable" must read as *no count stated* — leaving the
+    previous capture's number in place would serve a value the latest record
+    contradicts, which is the same false claim as writing 0.
+
+    ⛔ THAT RESET APPLIES ONLY WHEN THE SAME RECORD ALSO CARRIES A REPRESENTABLE
+    VALUE. `_narrative_statements` returns `[]` when a record's whole payload
+    falls outside this home, so a COUNTS-ONLY record (the shape
+    `{"type": "SessionRecorded", "id": …, "capture_redactions": {"total": 7}}`)
+    emits no statement at all and an existing row keeps the previous capture's
+    number. That is a deliberate refusal, not the unconditional rule the rest of
+    this paragraph would otherwise promise, and the reason is the row: emitting
+    the reset without a value means an INSERT with no payload column, which on a
+    FRESH session is exactly the all-NULL row this home refuses to invent — it
+    reads as "session known, no text", a claim no record made. The cost is
+    bounded and unreachable from today's producers: `turn_count` is
+    `len(windowed)` and `capture_redactions` a summed span count (both far inside
+    `[0, _INT4_MAX]`), `session.capture_redactions` has been `integer` since
+    `20261022000001`, and a count is meaningful only beside the text whose
+    carrier writes it — that carrier carries a representable value, so the reset
+    fires there.
+    """
+    columns = ["org_id", "graph_id", "session_id", *values, "props"]
+    params: list[Any] = [
+        org_id, graph_id, session_id,
+        *(_jsonb_or_scalar(c, v) for c, v in values.items()),
+        json.dumps({}),
+    ]
+    placeholders = ", ".join(["%s"] * len(columns))
+    updates = ", ".join(
+        [f"{c} = EXCLUDED.{c}" for c in values] + [f"{c} = NULL" for c in resets]
+    )
+    sql = (
+        f"INSERT INTO public.{NARRATIVE_TABLE} ({', '.join(columns)}) "
+        f"VALUES ({placeholders}) "
+        f"ON CONFLICT (org_id, graph_id, session_id) DO UPDATE SET "
+        f"{updates}, "
+        f"props = public.{NARRATIVE_TABLE}.props || EXCLUDED.props"
+    )
+    return Statement(sql, tuple(params))
+
+
+def _narrative_statements(
+    record: Mapping[str, Any],
+    org_id: str,
+    graph_id: str,
+) -> list[Statement]:
+    """The §9.1 narrative-home upsert a record contributes, if it carries one.
+
+    KEYED ON THE SHAPE, NOT ON THE RECORD TYPE. Several producers write a
+    narrative onto a record (`SourceCreated`, `DocumentCreated`, the layer-1
+    commit's `:Event` record) and a fourth would arrive from a producer nobody
+    listed; a type whitelist misses exactly that one, and a missed narrative is
+    the silent gap #9555 exists to close. So the carrier contract IS the shape:
+    a record that names its session AND carries a field this table holds.
+
+    Returns `[]` for the overwhelming majority of records (an ordinary Point, a
+    relation, a session with no narrative yet), which is why appending it to
+    every record's batch is free.
+
+    THE ENVELOPE MAY NEST. `ConversationMiner` emits
+    `{type: "EventRecorded", event: {…}}` and the declared mutation already
+    accepts that shape (`_nested_node_carrier`), so the shape rule must read it
+    too — a carrier this projection cannot see is the silent drop it exists to
+    prevent.
+    """
+    carrier: Mapping[str, Any] = record
+    if _session_coordinate(record) is None:
+        nested = _nested_node_carrier(record, "eventId")
+        if nested is None:
+            return []
+        carrier = nested
+    session_id = _session_coordinate(carrier)
+    if session_id is None:
+        return []
+
+    # A DELETED SESSION TAKES ITS NARRATIVE WITH IT. The record's own delete path
+    # (`hosted_api._delete_session_sync`) emits, in one journal segment, one
+    # `EntityMutated` (`op=delete`) per removed turn Point PLUS one
+    # `SessionDeleted`; `SessionDeleted`'s declared mutation removes the session
+    # row and the `session:` Source stub (the turns go with their own records,
+    # `delete_ops={"delete"}`). This table is not a node table (no
+    # `node_identity` parent), so it cannot ride `companion_deletes` and carries
+    # its own statement — attached to `SessionDeleted` because that is the
+    # record that means "this session no longer exists". Without it
+    # §9.4's verbatim path would serve the text of a session the graph no longer
+    # has, and a same-id re-capture would inherit the deleted incarnation's
+    # narrative. Journal order still decides: a narrative record arriving AFTER
+    # the delete re-creates the row, which is the graph fold's own semantics.
+    if record.get("type") == "SessionDeleted":
+        return [Statement(
+            f"DELETE FROM public.{NARRATIVE_TABLE} "
+            "WHERE org_id = %s AND graph_id = %s AND session_id = %s",
+            (org_id, graph_id, session_id),
+        )]
+
+    values: dict[str, Any] = {}
+    # THE SAME RULE AS THE COUNTS BELOW: project what the column can hold, never
+    # coerce, and never fail the carrier. ⚠️ The primary path does NOT refuse a
+    # non-string `story_arc` — `_jsonb_or_scalar` serialises a list/dict into the
+    # text column, so `public.source.story_arc` can itself hold a non-prose value
+    # (a pre-existing defect of the carrier, filed separately). This home simply
+    # refuses to propagate a non-string as §9.1 prose, and refuses to raise: a
+    # value the column cannot hold faithfully is an ABSENCE here.
+    narrative = carrier.get(_NARRATIVE_KEY)
+    if isinstance(narrative, str) and narrative.strip():
+        values["narrative"] = narrative
+
+    # ⛔ `summary` is projected ONLY from a record that ALSO carries the
+    # narrative. The capture's own session `:Source` sets `summary` to the
+    # transcript's first substantive utterance (`sdk._session_source_metadata`),
+    # which is NOT the S1 narrative — projecting it unconditionally would let an
+    # order-independent row hold a prose snippet in the narrative's companion
+    # column, and would make `SessionText.verbatim_available` true for a session
+    # whose narrative is unknown. One carrier owns both columns, so they cannot
+    # mean different things.
+    if "narrative" in values:
+        summary = carrier.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            values["summary"] = summary
+
+    resets: list[str] = []
+    for key in _NARRATIVE_INT_KEYS:
+        value = carrier.get(key)
+        # PROJECTED ONLY WHEN THE VALUE FITS THE COLUMN — and never coerced.
+        # The secondary home must not be able to FAIL the carrier's own write:
+        # `session.capture_redactions` is jsonb and accepts shapes AND an
+        # unbounded integer (`[2**31, inf)`), both of which this table's INTEGER
+        # refuses (`#9264`/R4 is the shape half, one table over), so raising or
+        # overflowing here would turn an additive projection into a NEW way for
+        # a live capture to fail — the INSERT raises `integer out of range`
+        # inside the carrier's own transaction, taking the row and the journal
+        # position with it. A value the column cannot hold is therefore an
+        # ABSENCE in this home — the column reads NULL and the reader returns
+        # None — never a 0 (a false claim about the capture) and never a coerced
+        # value (which would hide the disagreement). The field's authority
+        # remains the carrier's own column.
+        if (isinstance(value, int) and not isinstance(value, bool)
+                and 0 <= value <= _INT4_MAX):
+            values[key] = value
+        elif value is not None:
+            # CARRIED, BUT UNREPRESENTABLE. On a FRESH row an omitted column is
+            # already NULL; on a RE-CAPTURE the previous value would survive in
+            # the `DO UPDATE` branch's untouched column, so the reset is what
+            # makes "no count stated" true in both orders.
+            resets.append(key)
+
+    # A record whose whole content this home cannot represent contributes NO row:
+    # a carrier whose only payload is an unrepresentable count is not a narrative,
+    # and inserting an all-NULL row would turn an honest absence into a row that
+    # reads as "session known, no text". `turn_count`/`capture_redactions` are
+    # only meaningful beside the text they belong to, and the carrier that
+    # rebuilds them carries that text.
+    if not values:
+        return []
+    return [_narrative_upsert_statement(org_id, graph_id, session_id, values,
+                                        resets)]
 
 
 # ════════════════════════════════════════════════════════════════════════════

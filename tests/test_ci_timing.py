@@ -5725,7 +5725,7 @@ def test_the_refresh_refuses_a_sampled_run_that_is_not_a_push_to_main(
     assert "ran" not in called, "a refused refresh must not reach the writer"
 
     # The override is explicit, and then the same run is accepted.
-    monkeypatch.setattr(sys, "argv", base_argv + ["--allow-non-push-run"])
+    monkeypatch.setattr(sys, "argv", [*base_argv, "--allow-non-push-run"])
     assert ci_timing.main() == 0
     assert called.get("ran") is True
 

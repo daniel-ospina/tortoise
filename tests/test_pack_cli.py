@@ -227,6 +227,165 @@ class TestPackValidate:
         assert rels[0]["write_paths"] == []
         assert payload["relation_verdicts"]["counts"] == {"declaration-only": 1}
 
+    def test_a_broken_pack_whose_dir_is_not_its_namespace_is_not_a_false_green(
+            self, tmp_path):
+        """The verdict filter keyed on the DIRECTORY name, and the registry keys
+        a diagnostic on the MANIFEST's namespace — two shipped packs differ
+        (`packs/project-management` → `pm`, `packs/investment-portfolio-manager`
+        → `portfolio`), so a broken manifest in such a pack printed
+        `✓ Clean — pack(s) validate` and exited 0 while the registry had
+        already ISOLATED it.
+
+        FAIL-ON: `ns == target.name` / `(packs_dir / ns / "manifest.yaml")`
+        against a directory spelled differently from the namespace. REACHABLE:
+        the same pack under its OWN directory name exits 1, so the difference
+        is the spelling and not the manifest.
+        """
+        manifest = _scaffold("mydomain", tmp_path)
+        # Same manifest, a directory name that is NOT the namespace.
+        renamed = manifest.parent.parent / "my-domain-overlay"
+        manifest.parent.rename(renamed)
+        manifest = renamed / "manifest.yaml"
+        # A CROSS-PACK typo, not a schema error: the registry keys a cross-pack
+        # diagnostic by the MANIFEST's namespace, which is what makes the
+        # directory-name filter lose it. (A schema error is keyed by directory,
+        # so it would be found either way.)
+        manifest.write_text(
+            manifest.read_text()
+            .replace("  objectKinds: []", "  objectKinds: [contract]")
+            .replace("  kindDefs: {}",
+                     "  kindDefs:\n    contract:\n      nearMisses: [gadget]"))
+
+        r = _run_cli("pack", "validate", str(renamed))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1, out
+        assert "Clean" not in out
+        assert "nearMisses target 'gadget'" in out, out
+
+        # The `--json` machine contract must not read clean either.
+        rj = _run_cli("pack", "validate", str(renamed), "--json")
+        assert rj.returncode == 1, rj.stdout + rj.stderr
+        import json
+        payload = json.loads(rj.stdout)
+        assert payload["ok"] is False
+        assert "mydomain" in payload["errors"]
+
+        # CONTROL: a clean pack beside it exits 0, so exit 1 above is the
+        # broken manifest and not the command.
+        clean = _scaffold("otherdomain", tmp_path)
+        ok = _run_cli("pack", "validate", str(clean.parent))
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+
+    def test_a_broken_pack_is_reported_when_the_PACKS_DIR_is_the_target(
+            self, tmp_path):
+        """The same false green one level up: passing the `packs/` DIRECTORY
+        ran the identical per-directory-name filter over every namespace, so a
+        broken `portfolio`-style pack was silently absent from a
+        whole-catalog run — the one mode a CI gate would use."""
+        manifest = _scaffold("mydomain", tmp_path)
+        renamed = manifest.parent.parent / "my-domain-overlay"
+        manifest.parent.rename(renamed)
+        broken = renamed / "manifest.yaml"
+        broken.write_text(
+            broken.read_text()
+            .replace("  objectKinds: []", "  objectKinds: [contract]")
+            .replace("  kindDefs: {}",
+                     "  kindDefs:\n    contract:\n      nearMisses: [gadget]"))
+
+        r = _run_cli("pack", "validate", str(tmp_path / "packs"))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1, out
+        assert "Clean" not in out
+        assert "nearMisses target 'gadget'" in out, out
+
+    def test_a_missing_declared_dependency_is_not_a_false_green(self, tmp_path):
+        """The SECOND fail-open path in the same verdict: it read `reg.errors`
+        only, and a declared-but-absent `depends_on` lands in the other bucket,
+        `reg.unresolved_refs` (#2781). A pack whose base pack is not installed
+        printed `✓ Clean — pack(s) validate` and exited 0 while the dependency
+        AND every reference into it did not resolve — the same tree the hosted
+        install path refuses, so the local and hosted gates disagreed in the
+        fail-open direction.
+
+        FAIL-ON: `ok = not errors`. REACHABLE: the same tree now prints the
+        `⚠ unresolved references` section, names the missing pack and exits 1;
+        the CONTROL run without the declared dependency exits 0.
+        """
+        manifest = _scaffold("mydomain", tmp_path)
+        text = manifest.read_text()
+        assert "depends_on: []" in text, "template shape changed"
+        manifest.write_text(text.replace("depends_on: []",
+                                         "depends_on: [ghost]"))
+
+        r = _run_cli("pack", "validate", str(manifest.parent))
+        out = r.stdout + r.stderr
+        assert r.returncode == 1, out
+        assert "Clean" not in out
+        assert "unresolved references" in out, out
+        assert "declared dependency 'ghost'" in out, out
+        assert "unresolved reference(s)" in out, out
+
+        # `--json` carries the same bucket, so a machine caller cannot read
+        # `ok: true` off a tree whose dependency is absent.
+        rj = _run_cli("pack", "validate", str(manifest.parent), "--json")
+        assert rj.returncode == 1, rj.stdout + rj.stderr
+        import json
+        payload = json.loads(rj.stdout)
+        assert payload["ok"] is False
+        assert payload["errors"] == {}
+        assert "mydomain" in payload["unresolved_refs"]
+
+        # CONTROL: the same pack without the unmet declaration is clean again,
+        # so the failure is the absent dependency and not a broken command.
+        manifest.write_text(text)
+        ok = _run_cli("pack", "validate", str(manifest.parent))
+        assert ok.returncode == 0, ok.stdout + ok.stderr
+        assert "Clean" in ok.stdout
+
+    def test_a_SIBLING_s_unresolved_gap_is_not_this_pack_s_verdict(self, tmp_path):
+        """A single-pack target is scoped to THAT pack.
+
+        The scoping filter admitted every sibling whose directory name equals
+        its namespace (`(packs_dir / ns / "manifest.yaml").exists()`), so
+        `pack validate packs/alpha` reported — and once the missing-peer bucket
+        reached the exit code, FAILED on — a sibling's missing dependency, while
+        a sibling keyed by a different namespace was silently dropped: two
+        identical gaps, two answers.
+
+        FAIL-ON: the directory-existence clause. REACHABLE: `alpha` is clean and
+        `beta` is not, in the SAME tree — so `0` vs `1` is the scoping, not the
+        catalog.
+        """
+        alpha_manifest = _scaffold("alpha", tmp_path)
+        beta_dir = tmp_path / "packs" / "beta"
+        beta_dir.mkdir()
+        (beta_dir / "manifest.yaml").write_text(
+            alpha_manifest.read_text()
+            .replace("namespace: alpha", "namespace: beta")
+            .replace("name: Alpha Pack", "name: Beta Pack")
+            .replace("depends_on: []", "depends_on: [ghost]"))
+        # A third sibling whose DIRECTORY is not its namespace: the filter must
+        # match on the namespace too, never admit it by path.
+        gamma_dir = tmp_path / "packs" / "gamma-dir"
+        gamma_dir.mkdir()
+        (gamma_dir / "manifest.yaml").write_text(
+            alpha_manifest.read_text()
+            .replace("namespace: alpha", "namespace: gam")
+            .replace("name: Alpha Pack", "name: Gam Pack")
+            .replace("depends_on: []", "depends_on: [ghost]"))
+
+        clean = _run_cli("pack", "validate", str(alpha_manifest.parent))
+        assert clean.returncode == 0, clean.stdout + clean.stderr
+        assert "Clean" in clean.stdout
+
+        for broken_dir, ns in ((beta_dir, "beta"), (gamma_dir, "gam")):
+            r = _run_cli("pack", "validate", str(broken_dir))
+            out = r.stdout + r.stderr
+            assert r.returncode == 1, out
+            assert "Clean" not in out
+            assert "unresolved references" in out, out
+            assert ns in out, out
+
 
 # ── Install→mine→mint round-trip (E2E-3 extraction minting) ────────────────
 
