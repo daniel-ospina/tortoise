@@ -266,10 +266,13 @@ TENANT_GUC_SQL = f"SELECT set_config('{TENANT_GUC}', %s, true)"
 #:    `postgres` DSN in R1's documented pre-change shape was rejected — it is
 #:    the owner of every record table (`THE_RECORD_TABLES` — ten, since #9555).
 #:
-#: `current_setting(...)` keeps the GUC read-back in the SAME statement, so the
-#: seam still executes exactly one statement outside the plan and a caller that
-#: filters on `current_setting` keeps seeing every non-plan statement. The org
-#: id and the table names travel as bind parameters.
+#: `current_setting(...)` keeps the GUC read-back and the role posture in ONE
+#: statement rather than two round trips, so the seam executes exactly TWO
+#: statements outside the plan: the `set_config` prologue (`TENANT_GUC_SQL`) and
+#: this verify (`TENANT_SCOPE_SQL`). Both are tenant-context statements, not
+#: record mutations, and a caller that filters on `current_setting` keeps seeing
+#: every non-plan statement the seam issues. The org id and the table names
+#: travel as bind parameters.
 TENANT_SCOPE_SQL = (
     f"SELECT current_setting('{TENANT_GUC}', true) AS tenant, "
     "       r.rolsuper OR r.rolbypassrls "

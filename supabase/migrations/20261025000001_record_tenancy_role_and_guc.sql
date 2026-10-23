@@ -142,7 +142,22 @@ GRANT USAGE ON SCHEMA public TO tortoise_record_app;
 -- impossible. Every privilege below is bounded by the policy in section 3 — a
 -- table grant is never the boundary on its own (RLS runs after privileges).
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.node_identity  TO tortoise_record_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.journal_event  TO tortoise_record_app;
+-- `journal_event` gets SELECT and INSERT ONLY, and that asymmetry is the point.
+-- The projection never updates or deletes a journal row — its one journal
+-- statement is an INSERT (`record_projection._journal_statement`), and the four
+-- `DELETE`s in the plan are on `node_identity`, `relation`, the node tables and
+-- `session_narrative`. Erasing a tenant goes through `purge_org_record`, which is
+-- SECURITY DEFINER and owned by the applier, so it does not need this role's
+-- DELETE either.
+-- Granting DELETE here would not be inert: `journal_event_is_append_only`
+-- (20261012000001) admits DELETE when `app.record_journal_purge` is `on`, and
+-- ANY role may `set_config` that GUC transaction-locally. A DELETE/UPDATE grant
+-- would therefore let the application role erase its own tenant's journal
+-- history, which is exactly what the table COMMENT promises is impossible
+-- ("APPEND-ONLY is enforced (trigger), not merely documented") and what
+-- `derived = replay(journal)` depends on. The append-only invariant is only a
+-- boundary if the boundary role cannot reach the escape hatch.
+GRANT SELECT, INSERT ON public.journal_event  TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.source         TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.event          TO tortoise_record_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.session        TO tortoise_record_app;
@@ -274,7 +289,17 @@ CREATE POLICY relation_app_tenant ON public.relation
 --     ⚠️ It does NOT close that gate: the remaining pair is both already on
 --     `main`, so the leg stays RED until the IndexNow file is renumbered
 --     (`e6e91394d` does that on its own lane, to `20261024000001`). This file's
---     prefix, `20261025000001`, is claimed by no other migration.
+--     prefix, `20261025000001`, is claimed by no other migration;
+--   * ⛔ and it is where the ORDERING CORRECTION of record lives, because
+--     `20261023000001`'s own header still states the opposite — that R6 sorts
+--     BEFORE it "but is not in this tree yet". That prose is now stale, and it is
+--     deliberately NOT edited: migrations are append-only (#1095,
+--     `.github/scripts/check-migration-append-only diff`), so a merged file's
+--     comments are as immutable as its SQL. Read the paragraphs above as the
+--     correction of that header, not as a duplicate of it. The narrower truth
+--     about its guarded block is in that block's own comment: it fires only
+--     where `tortoise_record_app` already existed when that migration applied,
+--     and it cannot fire on a fresh database.
 -- Unconditional here, exactly like the nine above: the table is guaranteed to
 -- exist by this migration's own position in the sequence, so a guard would only
 -- hide a reordering mistake instead of failing on it.

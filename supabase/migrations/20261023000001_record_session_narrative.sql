@@ -57,38 +57,28 @@
 -- TENANCY. Same posture as the other record tables (`#7968`): RLS enabled, an
 -- `authenticated` read policy on `app.current_org_id`, a `service_role` policy
 -- for the write path, and — per R6's RECORDED decision (#9554, decision
--- comment 2026-10-22) — an app-role policy with BOTH `USING` and `WITH CHECK`
--- so the hosted application path (`tortoise_record_app`, NOBYPASSRLS) is scoped
--- to the GUC tenant rather than bypassing the boundary.
---
--- WHO OWNS THAT BLOCK, stated as what actually happens rather than as intent.
--- R6's migration is `20261025000001_record_tenancy_role_and_guc.sql` (#9554's
--- decision, PR #9600) and it sorts AFTER this file (20261025 > 20261023), not
--- before it. So on a FRESH database the sequence is:
---   1. this migration runs with `tortoise_record_app` **not yet existing**, so
---      the guarded block below is a NO-OP — it grants nothing and creates no
---      policy;
---   2. `20261025000001` then creates the role, the grants and the tenant policy
---      for every table in `THE_RECORD_TABLES` — including THIS one (its §4b).
--- So on a fresh apply R6's §4b is the ONLY thing that grants and policies this
--- table. What the guarded block below adds is narrower, and it is stated here
--- rather than implied: it fires when `tortoise_record_app` already exists at the
--- moment THIS migration applies — a database where the role was created out of
--- band before this file ran. It can never fire in the fresh path (the role does
--- not exist yet) and it cannot fire for a database that has already applied this
--- migration (an applied migration is not re-run; §4b covers that one). It can
--- only ADD a policy where the role exists, never widen one.
--- ⛔ Do not re-add the assumption that R6 sorts first — it does not, and a
--- maintainer who believes it will read §4b as duplication. Deleting §4b leaves a
--- fresh database with no app-role policy on this table: the app role then reads
--- zero rows silently and every narrative write raises 42501, aborting the replay
--- transaction. R6 also asserts a policy for every table in `THE_RECORD_TABLES`,
--- so that gap is visible on that suite rather than silent.
--- `supabase/tests/20261012000001_record_schema.sql` pins this table's app policy
--- as an EQUALITY against the role's own count, so the line reads `1 = 1` once R6
--- is applied and reds if the policy appears without the role or the role without
--- the policy. (Its separate nine-table policy count is an unconditional
--- assertion about the layer-1 tables and does not involve this one.)
+-- comment 2026-10-22, implemented by migration 20261022000001) — an app-role
+-- policy with BOTH `USING` and `WITH CHECK` so the hosted application path
+-- (`tortoise_record_app`, NOBYPASSRLS) is scoped to the GUC tenant rather than
+-- bypassing the boundary. That block is GUARDED on the role existing: R6's
+-- migration (`20261022000001_record_tenancy_role_and_guc.sql`, recorded by
+-- #9554's decision, PR #9600) creates the role and sorts BEFORE this one —
+-- but it is **not in this tree yet**, so state the requirement as a DEPENDENCY
+-- rather than as fact:
+--   * R6 lands first (a fresh database): the role exists, this branch creates
+--     the policy, and the ordering holds;
+--   * a database upgraded INCREMENTALLY never re-runs an applied migration, so
+--     whichever of the two lands second must add what the other could not. R6's
+--     own test asserts a policy for every table in `THE_RECORD_TABLES`, which
+--     this migration extends — so R6 reds until it covers this table, i.e. the
+--     gap is visible on R6's suite rather than silent. If R6 ever lands with a
+--     LATER timestamp, R6 must create this table's policy explicitly.
+-- The guard can only ever ADD a policy for a role another migration created; it
+-- cannot widen one, and where the role is absent nothing is granted.
+-- The three-policy assertion in `supabase/tests/20261012000001_record_
+-- schema.sql` is written the same way R6 writes it: the app policy is asserted
+-- only where the role exists (and in today's harness, where it does not, the
+-- assertion is `0 = 0` BY DESIGN — it becomes meaningful the moment R6 lands).
 --
 -- ERASURE. Two paths, and they are different on purpose.
 --   * TENANT erasure: `purge_org_record` (20261012000005) deletes the
@@ -189,13 +179,11 @@ GRANT SELECT ON public.session_narrative TO authenticated;
 CREATE INDEX IF NOT EXISTS idx_session_narrative_scope
     ON public.session_narrative (org_id, graph_id);
 
--- R6's app role (#9554). GUARDED on the role's existence, which is the ONLY
--- state in which it can act: it fires where `tortoise_record_app` already
--- exists at the moment THIS migration applies. It cannot fire on a fresh
--- apply, where R6 (`20261025000001`, which sorts AFTER this file) has not run
--- yet — there §4b of that migration owns this table's grant and policy. See the
--- header: the ordering is stated there, and it is the opposite of "R6 sorts
--- first".
+-- R6's app role (#9554). GUARDED on the role's existence — R6's migration
+-- sorts first, so where R6 is applied this branch runs and the third policy is
+-- created; where it is not, the role does not exist and there is nothing for
+-- the branch to grant. See the header for why the guard cannot weaken the
+-- boundary.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tortoise_record_app') THEN

@@ -148,7 +148,7 @@ SELECT tests.assert(
               JOIN pg_roles granted ON granted.oid = m.roleid
               JOIN pg_roles member  ON member.oid  = m.member
               WHERE member.rolname = 'tortoise_record_app'
-                AND granted.rolname IN ('service_role','postgres','supabase_admin')),
+                AND (granted.rolbypassrls OR granted.rolsuper)),
   'R6: the app role is not a member of a BYPASSRLS role (membership would silently re-open the bypass)');
 
 -- ── 2. The posture: one tenant policy per table, with BOTH clauses ─────────
@@ -174,15 +174,40 @@ SELECT tests.assert(
   'R6: every record table has exactly the three policies the decision explains');
 
 -- ── 3. The posture: effective privileges, not the statements that made them ─
+-- SELECT + INSERT on all ten: every record write reads back what it wrote, and
+-- a refusal is inserted as a `journal_event` row (`record_projection` composes
+-- the plan's statements from the same DSN the replay uses).
 SELECT tests.assert(
   (SELECT count(*) FROM unnest(ARRAY['node_identity','journal_event','source','event',
                                      'session','object','subject','point','relation',
                                      'session_narrative']) AS t
    WHERE has_table_privilege('tortoise_record_app', 'public.' || t, 'SELECT')
-     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'INSERT')
-     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'UPDATE')
-     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'DELETE')) = 10,
-  'R6: the app role can read and write every record table (the write path needs all four)');
+     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'INSERT')) = 10,
+  'R6: the app role can read and write every record table (SELECT + INSERT on all ten)');
+
+-- …and UPDATE + DELETE on the NINE that are not the journal: the plan upserts
+-- (`ON CONFLICT … DO UPDATE`) the node tables, `node_identity` and
+-- `session_narrative`, and composes `DELETE` for those nine.
+SELECT tests.assert(
+  (SELECT count(*) FROM unnest(ARRAY['node_identity','source','event','session',
+                                     'object','subject','point','relation',
+                                     'session_narrative']) AS t
+   WHERE has_table_privilege('tortoise_record_app', 'public.' || t, 'UPDATE')
+     AND has_table_privilege('tortoise_record_app', 'public.' || t, 'DELETE')) = 9,
+  'R6: the nine non-journal record tables also carry UPDATE and DELETE (the plan upserts and deletes there)');
+
+-- `journal_event` is the ONE table where all four is the wrong grant, and the
+-- suite pins the narrow version so a "make it uniform" tidy-up reddens here.
+-- `journal_event_is_append_only` (20261012000001) admits DELETE when
+-- `app.record_journal_purge` is `on`, and any role may `set_config` that GUC
+-- transaction-locally — so a DELETE grant would hand the boundary role the
+-- escape hatch from its own audit trail, and `derived = replay(journal)` would
+-- lose the row that proves it. Nothing in the plan updates a journal row either
+-- (its one journal statement is an INSERT … ON CONFLICT DO NOTHING).
+SELECT tests.assert(
+  NOT has_table_privilege('tortoise_record_app', 'public.journal_event', 'UPDATE')
+  AND NOT has_table_privilege('tortoise_record_app', 'public.journal_event', 'DELETE'),
+  'R6: the app role can neither UPDATE nor DELETE journal rows — append-only is the boundary''s own invariant, not a trigger the boundary role can talk past');
 
 SELECT tests.assert(
   NOT EXISTS (SELECT 1 FROM unnest(ARRAY['node_identity','journal_event','source','event',

@@ -9,10 +9,14 @@ sentence in a design doc:
    (``record_projection.TENANT_GUC_SQL``, one statement, R6) followed by
    ``record_projection.replay_plan(records, …)``. That equality is also the
    duplication pin: a second, hand-written Postgres writer would drift from the
-   fold, and it would show up here as an extra or missing statement. The
-   prologue is the ONE statement outside the plan, it is named rather than
-   tolerated, and it is the reason RLS can be the record's tenancy boundary at
-   all (see ``test_record_tenancy_guc.py`` for its own pins).
+   fold, and it would show up here as an extra or missing statement. The seam
+   issues TWO statements outside the plan — the prologue, and the
+   ``TENANT_SCOPE_SQL`` verify that reads the GUC back and the connecting role's
+   posture; ``FakeConnection.statements()`` filters the latter because it is a
+   ``current_setting`` query, while ``executed`` holds both (hence ``_context =
+   2`` in the count assertion). The prologue is named rather than tolerated, and
+   it is the reason RLS can be the record's tenancy boundary at all (see
+   ``test_record_tenancy_guc.py`` for its own pins).
 2. **Idempotent.** Replaying the same records twice emits the same statement
    set, and the second run adds no ``journal_event`` row for an already-applied
    position (``#5285``'s rule, moved to the record).
@@ -167,11 +171,15 @@ def _plan(records: list[dict[str, Any]] | None = None, *,
 
 
 def _tenant_statement(org: str = ORG) -> tuple[str, list[Any]]:
-    """The seam's ONE statement outside the plan: the transaction-local GUC.
+    """The seam's PROLOGUE — the first of its two statements outside the plan.
 
-    Named rather than filtered out of the log, so "the seam adds exactly one
-    statement of its own, and it is the tenant" is the assertion instead of
-    "the seam's statements minus whatever it happens to add".
+    The second is ``TENANT_SCOPE_SQL`` (the read-back plus the role posture),
+    which ``FakeConnection.statements()`` filters out as a ``current_setting``
+    query while ``executed`` keeps it.
+
+    Named rather than filtered out of the log, so "the seam adds exactly these
+    statements of its own, and the first is the tenant" is the assertion instead
+    of "the seam's statements minus whatever it happens to add".
     """
     return (rp.TENANT_GUC_SQL, [org])
 
@@ -205,7 +213,9 @@ def test_the_seam_emits_exactly_the_record_plan() -> None:
 
     An extra statement here is a second fold; a missing one is a record the
     boundary silently drops. The assertion is equality over the WHOLE set — the
-    tenant prologue first (R6), then the plan, nothing else.
+    tenant prologue first (R6), then the plan, nothing else. (The seam's second
+    context statement, the ``TENANT_SCOPE_SQL`` verify, is absent from
+    ``statements()`` by the ``current_setting`` filter, not by omission.)
     """
     conn = FakeConnection()
     result = _armed(conn).write(RECORDS, org_id=ORG, graph_id=GRAPH)

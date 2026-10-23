@@ -544,12 +544,23 @@ def test_the_migration_covers_every_record_table() -> None:
     # assertion passed with the grant block removed). The grant itself is
     # asserted now, per table and per privilege, against the exact statement the
     # migration writes.
-    _PRIVS = "SELECT, INSERT, UPDATE, DELETE"
+    #
+    # #9600 review cycle 2 (P2): `journal_event` is the ONE table whose grant is
+    # deliberately narrower — `SELECT, INSERT` only. The journal is append-only
+    # by trigger, and that trigger's single escape is a GUC
+    # (`app.record_journal_purge`) any role may `set_config`, so a DELETE grant
+    # would let the boundary role erase its own audit trail. Asserting the
+    # narrow grant in BOTH directions (present here, absent the wider one) means
+    # a "make the grants uniform" tidy-up reddens rather than silently widening
+    # the boundary.
+    _APPEND_ONLY = "journal_event"
+    _WRITE_PRIVS = "SELECT, INSERT, UPDATE, DELETE"
+    _NARROW_PRIVS = "SELECT, INSERT"
     missing_grants = [
         t for t in rp.THE_RECORD_TABLES
         if not re.search(
-            rf"GRANT\s+{_PRIVS}\s+ON\s+public\.{re.escape(t)}\s+"
-            rf"TO\s+tortoise_record_app\s*;", text)
+            rf"GRANT\s+{_NARROW_PRIVS if t == _APPEND_ONLY else _WRITE_PRIVS}"
+            rf"\s+ON\s+public\.{re.escape(t)}\s+TO\s+tortoise_record_app\s*;", text)
     ]
     missing_policies = [
         t for t in rp.THE_RECORD_TABLES
@@ -558,6 +569,13 @@ def test_the_migration_covers_every_record_table() -> None:
 
     assert not missing_grants, (
         f"the tenancy migration grants the app role no privilege on {missing_grants}"
+    )
+    assert not re.search(
+        rf"GRANT\s+{_WRITE_PRIVS}\s+ON\s+public\.{_APPEND_ONLY}\s+"
+        rf"TO\s+tortoise_record_app\s*;", text), (
+        f"{_APPEND_ONLY} is granted UPDATE/DELETE — the append-only trigger's "
+        "one escape is a GUC any role may set, so that grant hands the boundary "
+        "role the erasure path it is supposed to be bounded by"
     )
     assert not missing_policies, (
         f"the tenancy migration adds no tenant policy for {missing_policies} — "
