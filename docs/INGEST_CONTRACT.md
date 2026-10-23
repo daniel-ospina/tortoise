@@ -478,9 +478,13 @@ the `{error}`-only shape whose retry action is different.
   that does not clean up after itself, see #9826 — that record is preserved and
   the retry is adjudicated against it: a re-submission is not re-adjudicated
   against the 25-item first-adjudication band, only against the 50 ceiling, so
-  it writes what a first pass would have held. A `fully_written` record is the
-  one case that never reaches a gate at all: the replay check returns
-  `duplicate: true` with zero writes before any limit is consulted.)
+  it writes what a first pass would have held. A `fully_written` record never
+  reaches an ORG-LIMIT or ingest-budget gate: the replay check returns
+  `duplicate: true` with zero writes before either limit is consulted. (The
+  request-level checks still run first — the per-key rate limiter in
+  middleware, then Layer-1 shape validation — so a re-POST of a written id with
+  a changed non-canonical field can still be refused 429 or 422 before the
+  replay.)
   (The repo's bundled SDK does not
   yet auto-retry a 429 — see #9799 — so a client driving the endpoint directly
   should honour `Retry-After` itself.) It exists because the removal of the
